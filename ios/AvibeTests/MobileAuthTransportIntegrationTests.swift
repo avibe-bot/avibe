@@ -14,6 +14,25 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         WebKitReadiness.webContentLaunch.components.seconds
     )
 
+    /// For a test about what happens after the control-plane document is
+    /// ready (a redirect the request must not follow): its readiness may
+    /// take as long as WebKit's web content launch, so a slow launch is not
+    /// mistaken for the network error the test expects. Requests keep the
+    /// App's own deadlines. The readiness deadline itself is tested by the
+    /// deadline tests, which keep theirs.
+    private static let readyAfterWebContentLaunch = MobileAuthTransportDeadlines(
+        readinessMilliseconds: Int(WebKitReadiness.webContentLaunch.components.seconds) * 1_000,
+        requestMilliseconds: MobileAuthTransportDeadlines.standard.requestMilliseconds,
+        logoutMilliseconds: MobileAuthTransportDeadlines.standard.logoutMilliseconds
+    )
+
+    /// How long an operation under `readyAfterWebContentLaunch` may take
+    /// before the transport itself ends it, plus a few seconds.
+    private static let readyAfterWebContentLaunchOperationTimeout = TimeInterval(
+        readyAfterWebContentLaunch.readinessMilliseconds
+            + readyAfterWebContentLaunch.requestMilliseconds
+    ) / 1_000 + 5
+
     func testFailureMappingIsStageAccurateForEveryOperation() {
         struct MappingCase {
             let name: String
@@ -34,6 +53,9 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             .verifySecondFactor: [.secondFactor, .session],
             .logout: [.logout],
             .pushManagement: [.request],
+            .providerStart: [.start],
+            .providerExchange: [.exchange, .session],
+            .primaryPasskey: [.passkeyOptions, .passkeyVerify, .session],
         ]
         XCTAssertEqual(
             Set(stagesByOperation.keys),
@@ -139,6 +161,18 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 expectedCode: "network",
                 expectedRetryAfter: nil
             ),
+            // avibe.bot answers 503 for a transient auth failure: unknown,
+            // never the signed-out answer (only 401 is).
+            MappingCase(
+                name: "session temporarily unavailable",
+                operation: .fetchSession,
+                response: [
+                    "stage": MobileAuthTransportStage.session.rawValue,
+                    "status": 503,
+                ],
+                expectedCode: "network",
+                expectedRetryAfter: nil
+            ),
             MappingCase(
                 name: "logout failure",
                 operation: .logout,
@@ -186,6 +220,53 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             ("password session failure", .session, 503, nil, nil, "network"),
             ("password session throttle", .session, 429, nil, 9, "network"),
         ]
+        // Google, GitHub and Apple: only the agreed answers mean anything (contract:
+        // avibe-bot-backend's mobile provider exchange); every other answer is `network`.
+        let providerCases: [(String, MobileAuthTransportOperation, MobileAuthTransportStage, Int, String?, Int?, String)] = [
+            ("provider off", .providerStart, .start, 404, "provider_unavailable", nil, "provider_unavailable"),
+            ("unknown 404", .providerStart, .start, 404, "other", nil, "network"),
+            ("start throttle", .providerStart, .start, 429, "rate_limited", 30, "rate_limited"),
+            ("active account cookie", .providerStart, .start, 409, "session_conflict", nil, "network"),
+            ("malformed start", .providerStart, .start, 400, "invalid_request", nil, "network"),
+            ("start origin", .providerStart, .start, 403, "forbidden", nil, "network"),
+            ("start dependency", .providerStart, .start, 503, "unavailable", nil, "network"),
+            ("exchange mismatch", .providerExchange, .exchange, 400, "invalid_or_expired", nil, "invalid_or_expired"),
+            ("exchange malformed", .providerExchange, .exchange, 400, "invalid_request", nil, "network"),
+            ("provider email", .providerExchange, .exchange, 403, "provider_email_unverified", nil, "provider_email_unverified"),
+            ("exchange origin", .providerExchange, .exchange, 403, "forbidden", nil, "network"),
+            ("exchange conflict", .providerExchange, .exchange, 409, "session_conflict", nil, "network"),
+            ("exchange throttle", .providerExchange, .exchange, 429, "rate_limited", 12, "rate_limited"),
+            ("exchange dependency", .providerExchange, .exchange, 503, "unavailable", nil, "network"),
+            ("exchanged session signed out", .providerExchange, .session, 401, nil, nil, "invalid_or_expired"),
+            ("passkey sign-in off", .primaryPasskey, .passkeyOptions, 503, "unavailable", nil, "provider_unavailable"),
+            // 403 is avibe.bot's HTTP boundary refusing the request, not an audience answer.
+            ("passkey sign-in boundary refusal", .primaryPasskey, .passkeyOptions, 403, "forbidden", nil, "network"),
+            ("passkey verify boundary refusal", .primaryPasskey, .passkeyVerify, 403, "forbidden", nil, "network"),
+            ("passkey sign-in throttle", .primaryPasskey, .passkeyOptions, 429, "rate_limited", 9, "rate_limited"),
+            ("passkey rejected", .primaryPasskey, .passkeyVerify, 400, "verification_failed", nil, "invalid"),
+            ("passkey flow ended", .primaryPasskey, .passkeyVerify, 409, "flow_cancelled", nil, "passkey_cancelled"),
+            ("passkey flow expired", .primaryPasskey, .passkeyVerify, 410, "flow_expired", nil, "passkey_cancelled"),
+            ("passkey malformed", .primaryPasskey, .passkeyVerify, 400, "invalid_request", nil, "network"),
+            ("exchanged session failure", .providerExchange, .session, 500, nil, nil, "network"),
+            ("exchanged session throttle", .providerExchange, .session, 429, nil, 9, "network"),
+        ]
+        for (name, operation, stage, status, code, retryAfter, expectedCode) in providerCases {
+            var response: [String: Any] = [
+                "stage": stage.rawValue,
+                "status": status,
+            ]
+            response["code"] = code
+            response["retryAfter"] = retryAfter
+            cases.append(
+                MappingCase(
+                    name: name,
+                    operation: operation,
+                    response: response,
+                    expectedCode: expectedCode,
+                    expectedRetryAfter: expectedCode == "rate_limited" ? retryAfter : nil
+                )
+            )
+        }
         for (name, stage, status, code, retryAfter, expectedCode) in passwordCases {
             var response: [String: Any] = [
                 "stage": stage.rawValue,
@@ -952,6 +1033,239 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         )
     }
 
+    // Contract: avibe-bot-backend's mobile provider exchange. The fixed scripts post exactly the
+    // agreed JSON from the control plane's origin, the 204 sets the account cookie in this
+    // store, the session read then decides, and `Avibe-Account-Created: 1` comes back as one bit.
+    func testProviderStartAndExchangesPostTheAgreedJSONAndReadTheSessionInThisStore() async throws {
+        let state = HTTPFixtureState()
+        let sessionJSON = Self.sessionJSON
+        let configs = HTTPFixtureState()
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            let cookies = request.headers["cookie"] ?? ""
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                configs.record(request)
+                // 1: readiness. 2: the list. 3: no list. 4: not an array. 5: unavailable.
+                switch configs.requests().count {
+                case 3:
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon"}"#)
+                case 4:
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":"google"}"#)
+                case 5:
+                    return LocalHTTPResponse(status: 503, headers: [("Content-Type", "application/json")], body: Data("{}".utf8))
+                default:
+                    return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon","mobile_providers":["apple","google","bogus","google",7],"passkey_login_enabled":true}"#)
+                }
+            case ("POST", "/api/mobile/auth/start"):
+                let body = (try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]) ?? [:]
+                if body["provider"] as? String == "apple" {
+                    return .json(#"{"transaction_id":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE","nonce":"NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNI"}"#)
+                }
+                if body["state"] as? String == "state-short" {
+                    return .json(#"{"transaction_id":"short","browser_url":"\#(state.baseURL!.absoluteString)/api/mobile/auth/browser?launch=x"}"#)
+                }
+                if body["provider"] as? String == "github" {
+                    return LocalHTTPResponse(
+                        status: 404,
+                        headers: [("Content-Type", "application/json")],
+                        body: Data(#"{"error":"provider_unavailable"}"#.utf8)
+                    )
+                }
+                return .json(
+                    #"{"transaction_id":"GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA","browser_url":"\#(state.baseURL!.absoluteString)/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"}"#
+                )
+            case ("POST", "/api/mobile/auth/exchange"):
+                return LocalHTTPResponse(
+                    status: 204,
+                    headers: [
+                        ("Set-Cookie", "avibe_session=google; Path=/; HttpOnly"),
+                        ("Avibe-Account-Created", "1"),
+                    ],
+                    body: Data()
+                )
+            case ("POST", "/api/mobile/auth/apple"):
+                return LocalHTTPResponse(
+                    status: 204,
+                    headers: [("Set-Cookie", "avibe_session=apple; Path=/; HttpOnly")],
+                    body: Data()
+                )
+            case ("GET", "/api/mobile/session"):
+                guard cookies.contains("avibe_session=") else {
+                    return .status(401)
+                }
+                return .json(sessionJSON)
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let dataStore = WKWebsiteDataStore.nonPersistent()
+        let transport = MobileAuthTransport(controlPlaneURL: baseURL, websiteDataStore: dataStore)
+
+        // Known names once each, in the App's order; anything else is dropped.
+        let advertised = await transport.signInMethods()
+        XCTAssertEqual(advertised, MobileSignInMethods(providers: [.google, .apple], passkey: true))
+
+        let google = try await transport.providerStart(provider: .google, challenge: "challenge-g", state: "state-g")
+        XCTAssertEqual(
+            google,
+            .browser(
+                transactionID: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA",
+                url: URL(string: "\(baseURL.absoluteString)/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+        )
+        do {
+            _ = try await transport.providerStart(provider: .github, challenge: "challenge-h", state: "state-h")
+            XCTFail("Expected provider_unavailable")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .providerUnavailable)
+        }
+        do {
+            _ = try await transport.providerStart(provider: .google, challenge: "challenge-s", state: "state-short")
+            XCTFail("Expected a non-canonical transaction id to be refused")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .network)
+        }
+        let apple = try await transport.providerStart(provider: .apple, challenge: "challenge-a", state: "state-a")
+        XCTAssertEqual(apple, .apple(transactionID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE", nonce: "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNI"))
+
+        let exchanged = try await transport.providerExchange(
+            transactionID: "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA",
+            code: "one-time",
+            verifier: "verifier-g"
+        )
+        XCTAssertTrue(exchanged.accountCreated)
+        guard case .signedIn(let snapshot) = exchanged.discovery else {
+            return XCTFail("Expected a signed-in session, got \(exchanged.discovery)")
+        }
+        XCTAssertEqual(snapshot.account.email, "alex@example.com")
+        let googleCookies = await allCookies(in: dataStore.httpCookieStore)
+        XCTAssertEqual(googleCookies.first(where: { $0.name == "avibe_session" })?.value, "google")
+
+        // With an account cookie in the store, the list is still read without it; a missing or
+        // malformed list is none (and no passkey switch is off), and an unreadable config is
+        // `nil`, which leaves the answer without a list: email alone.
+        let withoutList = await transport.signInMethods()
+        XCTAssertEqual(withoutList, MobileSignInMethods(providers: [], passkey: false))
+        let malformed = await transport.signInMethods()
+        XCTAssertEqual(malformed, MobileSignInMethods(providers: [], passkey: false))
+        let unavailable = await transport.signInMethods()
+        XCTAssertNil(unavailable)
+        let listReads = configs.requests().dropFirst()
+        XCTAssertEqual(listReads.count, 4)
+        for read in listReads {
+            XCTAssertNil(read.headers["cookie"])
+        }
+
+        let appleExchanged = try await transport.appleExchange(
+            transactionID: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+            identityToken: "id-token",
+            authorizationCode: "auth-code",
+            verifier: "verifier-a"
+        )
+        XCTAssertFalse(appleExchanged.accountCreated)
+
+        let origin = WebOrigin(url: baseURL, requiresHTTPS: false)?.serialized
+        let posts = state.requests().filter { $0.method == "POST" }
+        XCTAssertEqual(posts.map(\.path), [
+            "/api/mobile/auth/start", "/api/mobile/auth/start", "/api/mobile/auth/start", "/api/mobile/auth/start",
+            "/api/mobile/auth/exchange", "/api/mobile/auth/apple",
+        ])
+        for post in posts {
+            XCTAssertEqual(post.headers["origin"], origin, post.path)
+            XCTAssertEqual(post.headers["content-type"], "application/json", post.path)
+        }
+        let bodies = try posts.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any]) as NSDictionary
+        }
+        XCTAssertEqual(bodies[0], ["provider": "google", "code_challenge": "challenge-g", "state": "state-g"])
+        XCTAssertEqual(bodies[3], ["provider": "apple", "code_challenge": "challenge-a", "state": "state-a"])
+        XCTAssertEqual(bodies[4], ["transaction_id": "GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGA", "code": "one-time", "code_verifier": "verifier-g"])
+        XCTAssertEqual(bodies[5], [
+            "transaction_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE",
+            "identity_token": "id-token",
+            "authorization_code": "auth-code",
+            "code_verifier": "verifier-a",
+        ])
+    }
+
+    // AUTH-SETUP-185: the fixed passkey sign-in scripts, run by WebKit against avibe.bot's wire
+    // (backend 884a13c): exact Accept, same-origin, the binding cookie kept in this store for
+    // verify, verify's session cookie in the same store for the separate session read, and
+    // cancel's exact body.
+    func testPasskeySignInScriptsKeepTheBindingAndTheSessionInThisStore() async throws {
+        let state = HTTPFixtureState()
+        let sessionJSON = Self.sessionJSON
+        let server = try LocalHTTPServer { request in
+            state.record(request)
+            let cookies = request.headers["cookie"] ?? ""
+            switch (request.method, request.path) {
+            case ("GET", "/api/config/auth"):
+                return .json(#"{"supabase_url":"http://127.0.0.1:1","supabase_anon_key":"fixture-anon"}"#)
+            case ("POST", "/api/passkey-primary/options"):
+                return .json(
+                    #"{"ok":true,"flow":"flow-1","expiresAt":"2026-11-18T10:00:00Z","options":{"challenge":"Y2hhbGxlbmdl","rpId":"avibe.bot","timeout":120000,"userVerification":"required","allowCredentials":[{"type":"public-key","id":"c29tZQ"}]}}"#,
+                    headers: [("Set-Cookie", "avibe_passkey_primary=binding; Path=/; HttpOnly; SameSite=Lax")]
+                )
+            case ("POST", "/api/passkey-primary/verify"):
+                guard cookies.contains("avibe_passkey_primary=binding") else {
+                    return LocalHTTPResponse(status: 403, headers: [("Content-Type", "application/json")], body: Data(#"{"ok":false,"error":"forbidden"}"#.utf8))
+                }
+                return .json(#"{"ok":true,"next":"/app"}"#, headers: [("Set-Cookie", "avibe_session=passkey; Path=/; HttpOnly")])
+            case ("POST", "/api/passkey-primary/cancel"):
+                return .json(#"{"ok":true}"#)
+            case ("GET", "/api/mobile/session"):
+                guard cookies.contains("avibe_session=passkey") else {
+                    return .status(401)
+                }
+                return .json(sessionJSON)
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        state.baseURL = baseURL
+        addTeardownBlock {
+            server.stop()
+        }
+        let transport = MobileAuthTransport(controlPlaneURL: baseURL, websiteDataStore: .nonPersistent())
+
+        let start = try await transport.primaryPasskeyStart()
+        XCTAssertEqual(start.flow, "flow-1")
+        XCTAssertTrue(start.request.allowedCredentialIDs.isEmpty, "discoverable: the allow-list is dropped")
+        try await transport.primaryPasskeyVerify(flow: "flow-1", response: ["id": "cred", "type": "public-key"])
+        let discovery = try await transport.fetchSession()
+        guard case .signedIn(let snapshot)? = discovery else {
+            return XCTFail("Expected the session the verify set, got \(String(describing: discovery))")
+        }
+        XCTAssertEqual(snapshot.account.email, "alex@example.com")
+        await transport.primaryPasskeyCancel(flow: "flow-1")
+
+        let origin = WebOrigin(url: baseURL, requiresHTTPS: false)?.serialized
+        let posts = state.requests().filter { $0.method == "POST" }
+        XCTAssertEqual(posts.map(\.path), [
+            "/api/passkey-primary/options", "/api/passkey-primary/verify", "/api/passkey-primary/cancel",
+        ])
+        for post in posts {
+            XCTAssertEqual(post.headers["accept"], "application/json", post.path)
+            XCTAssertEqual(post.headers["content-type"], "application/json", post.path)
+            XCTAssertEqual(post.headers["origin"], origin, post.path)
+            XCTAssertNil(post.headers["authorization"], post.path)
+        }
+        let bodies = try posts.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: $0.body) as? [String: Any]) as NSDictionary
+        }
+        let context: NSDictionary = ["continuation": NSNull(), "next": NSNull(), "lang": NSNull()]
+        XCTAssertEqual(bodies[0], ["context": context])
+        XCTAssertEqual(bodies[1], ["flow": "flow-1", "response": ["id": "cred", "type": "public-key"], "context": context])
+        XCTAssertEqual(bodies[2], ["flow": "flow-1"])
+    }
+
     func testControlPlaneCookiesDoNotFollowACrossOriginRedirect() async throws {
         let state = HTTPFixtureState()
         let captureState = HTTPFixtureState()
@@ -1070,7 +1384,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
-            websiteDataStore: .nonPersistent()
+            websiteDataStore: .nonPersistent(),
+            deadlines: Self.readyAfterWebContentLaunch
         )
 
         let request = Task {
@@ -1079,12 +1394,16 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 code: "123456"
             )
         }
-        await assertNetworkError(from: request)
+        await assertNetworkError(
+            from: request,
+            timeout: Self.readyAfterWebContentLaunchOperationTimeout
+        )
 
         let callback = try XCTUnwrap(
             state.requests().last(where: {
                 $0.method == "POST" && $0.path == "/auth/callback"
-            })
+            }),
+            "The request ended before its callback; \(server.requests.summary())"
         )
         let callbackBody = try XCTUnwrap(
             String(data: callback.body, encoding: .utf8)
@@ -1500,7 +1819,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
-            websiteDataStore: .nonPersistent()
+            websiteDataStore: .nonPersistent(),
+            deadlines: Self.readyAfterWebContentLaunch
         )
 
         let request = Task {
@@ -1509,12 +1829,16 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
                 password: password
             )
         }
-        await assertNetworkError(from: request)
+        await assertNetworkError(
+            from: request,
+            timeout: Self.readyAfterWebContentLaunchOperationTimeout
+        )
 
         XCTAssertTrue(
             state.requests().contains(where: {
                 $0.method == "POST" && $0.path == "/auth/v1/token"
-            })
+            }),
+            "The sign-in ended before its grant; \(server.requests.summary())"
         )
         XCTAssertFalse(
             state.requests().contains(where: { $0.path == "/auth/callback" })
@@ -1729,6 +2053,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
     private func assertNetworkError<T>(
         from task: Task<T, Error>,
+        timeout: TimeInterval? = nil,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async {
@@ -1740,7 +2065,7 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         }
         await fulfillment(
             of: [completed],
-            timeout: Self.fixtureEventTimeout
+            timeout: timeout ?? Self.fixtureEventTimeout
         )
         guard let result else {
             task.cancel()

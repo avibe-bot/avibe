@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { AlertTriangle, ChevronRight, Copy, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
+import { AlertTriangle, ChevronRight, ExternalLink, Eye, Globe, History, KeyRound, Link2, Loader2, Lock, MoreHorizontal, Pencil, Plus, Puzzle, RefreshCw, Search, Settings, ShieldCheck, Tag, Trash2, Wallet, WalletCards, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
@@ -36,6 +36,7 @@ import {
 } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
 import { KeyAddressList } from '../ui/btc-address-row';
+import { VaultHandoffDone } from '../ui/vault-handoff-done';
 import { VaultPendingRequests } from '../ui/vault-pending-requests';
 import { VaultGeneratedOriginBadge } from '../ui/vault-generated-origin';
 import { VaultSecretDialog } from '../ui/vault-secret-dialog';
@@ -43,7 +44,10 @@ import { VaultSettingsDialog } from '../ui/vault-settings-dialog';
 import { useProtectedVault, useVaultSandboxWarm } from '../../lib/useProtectedVault';
 import {
   openVaultsInBrowser,
+  readDesktopVaultHandoff,
   readVaultBrowserStep,
+  isVaultPasskeyFallback,
+  useVaultPasskeyHandoff,
   withoutVaultBrowserStep,
 } from '../../lib/vaultBrowserHandoff';
 import { isReviewableVaultRequest } from '../../lib/vaultPendingRequests';
@@ -62,6 +66,9 @@ const MAX_BROWSER_TIMEOUT_MS = 2_147_483_647;
 // at most half a minute old.
 const PREPARED_REVEAL = { maxAgeMs: 30_000, refreshMs: 20_000, latestOnly: false };
 const revealContextIssued = (reply: VaultRevealContextResult) => Boolean(reply?.ok && reply.context);
+type RevealKey = { name: string; fields: string[]; version: string };
+type RevealContexts = { ok: true; replies: VaultRevealContextResult[] } | { ok: false; failed: VaultRevealContextResult };
+const revealContextsIssued = (reply: RevealContexts) => reply.ok;
 
 const messageFromError = (t: TFunction, err: unknown) => vaultErrorMessage(t, err, err instanceof Error ? err.message : String(err));
 /** All allowed proxy-fetch hosts on a secret (for the `proxy · <host> +N` badge). */
@@ -87,9 +94,8 @@ const SecretRow: React.FC<{
   onToggleTag: (tag: string) => void;
   onEdit: (secret: VaultSecret) => void;
   onDelete: (secret: VaultSecret) => void;
-  onReveal: (secret: VaultSecret, field: string) => void;
-  revealField: string | null;
-  onRevealFieldChange: (field: string) => void;
+  /** Opens the secure window showing every field of a protected static secret. */
+  onReveal: (secret: VaultSecret) => void;
   canManage: boolean;
   canUse: boolean;
   /** Opens a seed-phrase wallet's accounts. */
@@ -98,7 +104,7 @@ const SecretRow: React.FC<{
   onMenuOpenChange: (open: boolean) => void;
   /** The open menu's reveal context or sandbox client is not ready yet. */
   revealPreparing: boolean;
-}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, revealField, onRevealFieldChange, canManage, canUse, onOpenWallet, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
+}> = ({ secret: s, terms, now, selected, onToggleTag, onEdit, onDelete, onReveal, canManage, canUse, onOpenWallet, menuOpen, onMenuOpenChange: setMenuOpen, revealPreparing }) => {
   const { t } = useTranslation();
   const isKeypair = s.kind === 'keypair';
   const isWallet = isHdWallet(s);
@@ -110,11 +116,7 @@ const SecretRow: React.FC<{
   // shown in-sandbox. Standard values aren't sandbox-sealed, and a keypair has no plaintext value.
   const canReveal = canUse && isProtected && !isKeypair;
   const fields = vaultFieldNames(s);
-  const selectedField = revealField === null
-    ? vaultDefaultField(s)
-    : fields.includes(revealField) ? revealField : null;
-  const staleRevealField = canReveal && selectedField === null;
-  // The sandbox reveal needs its authorization window, which only a browser can pair with.
+  // The sandbox reveal needs its authorization window; a desktop app that cannot host it sends it to the browser.
   const entryIssue = canReveal ? vaultEntryIssue() : null;
   const revealInBrowser = entryIssue === 'desktop';
   const revealBlocked = !!entryIssue && !revealInBrowser;
@@ -194,75 +196,38 @@ const SecretRow: React.FC<{
           </PopoverTrigger>
           <PopoverContent align="end" className={cn(revealBlocked ? 'w-80 max-w-[calc(100vw-2rem)]' : 'w-52', 'max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-1')} role="menu">
             {revealBlocked && <VaultEntryNotice issue={entryIssue} />}
-            {canReveal && fields.length > 1 ? (
-              <label className="flex flex-col gap-1 px-2.5 py-2 text-xs text-muted">
-                {t('vaults.fields.revealField')}
-                <select
-                  aria-label={t('vaults.fields.revealField')}
-                  value={selectedField ?? ''}
-                  onChange={(event) => onRevealFieldChange(event.target.value)}
-                  className="rounded-md border border-field-edge px-2 py-1 font-mono text-foreground bg-field"
-                >
-                  {fields.map((field) => <option key={field} value={field}>{field}</option>)}
-                </select>
-              </label>
-            ) : null}
-            {staleRevealField ? (
-              <p role="alert" className="px-2.5 py-2 text-xs text-destructive-ink">{t('vaults.reveal.errors.staleField')}</p>
-            ) : null}
-            {!staleRevealField && revealInBrowser ? (
-              <>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    if (!selectedField) return;
-                    setMenuOpen(false);
-                    openVaultsInBrowser({ kind: 'reveal', secretName: s.name, field: selectedField });
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash"
-                >
-                  <ExternalLink className="size-4 text-muted" />
-                  {t('vaults.reveal.showInBrowser')}
-                </button>
-              </>
-            ) : !staleRevealField && canReveal ? (
-              <>
-                {/* Reveal opens the value inside the sandbox frame; the plaintext is never returned
-                    to Avibe. "Copy value" leads to the same sandbox card, where copying is the
-                    sandbox's own explicit action (protocol v2 §7.4). */}
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={revealPreparing || revealBlocked}
-                  onClick={() => {
-                    if (!selectedField) return;
-                    setMenuOpen(false);
-                    onReveal(s, selectedField);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
-                >
-                  {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Eye className="size-4 text-muted" />}
-                  {t('vaults.reveal.show')}
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  disabled={revealPreparing || revealBlocked}
-                  onClick={() => {
-                    if (!selectedField) return;
-                    setMenuOpen(false);
-                    onReveal(s, selectedField);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
-                >
-                  {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Copy className="size-4 text-muted" />}
-                  {t('vaults.reveal.copy')}
-                </button>
-              </>
+            {revealInBrowser ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  openVaultsInBrowser({ kind: 'reveal', secretName: s.name });
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash"
+              >
+                <ExternalLink className="size-4 text-muted" />
+                {t('vaults.reveal.viewInBrowser')}
+              </button>
+            ) : canReveal ? (
+              // One entry for the whole secret (owner, 2026-11-16): the secure window shows every field,
+              // each with its own Show and Copy. No value, masked or not, is ever drawn on this page.
+              <button
+                type="button"
+                role="menuitem"
+                disabled={revealPreparing || revealBlocked}
+                onClick={() => {
+                  setMenuOpen(false);
+                  onReveal(s);
+                }}
+                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-wash disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+              >
+                {revealPreparing ? <Loader2 className="size-4 animate-spin text-muted" /> : <Eye className="size-4 text-muted" />}
+                {t('vaults.reveal.view')}
+              </button>
             ) : null}
             {canManage ? <>
-            {canReveal && !staleRevealField ? <div className="my-1 h-px bg-border" /> : null}
+            {canReveal ? <div className="my-1 h-px bg-border" /> : null}
             <button
               type="button"
               role="menuitem"
@@ -409,7 +374,7 @@ const GrantChip: React.FC<{ grant: VaultGrant; now: number; onRevoke?: (grant: V
  * blank the rest of the hub.
  */
 const PendingRequestsSection: React.FC<{
-  onResolved: () => void;
+  onResolved: (requestId: string) => void;
   focusRequestId?: string | null;
   /** Open a focused provision request on the Protected tier (the desktop app's handoff). */
   focusStartProtected?: boolean;
@@ -450,7 +415,7 @@ const PendingRequestsSection: React.FC<{
   const onSettled = useCallback((requestId: string) => {
     setRequests((prev) => prev.filter((r) => r.id !== requestId));
     void load();
-    onResolved();
+    onResolved(requestId);
   }, [load, onResolved]);
 
   return (
@@ -475,6 +440,9 @@ export const VaultsPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
   const vault = useProtectedVault();
+  // Rows read the entry issue as they render; this re-renders them when an in-app passkey step
+  // fails and the desktop app moves to the browser hand-off.
+  const passkeyHandoff = useVaultPasskeyHandoff();
   const { capabilities } = useInstanceAuthorization();
   const canManageVaultSecrets = capabilities.can_manage_instance;
   const canUseVaultSecrets = capabilities.can_use_vault_secrets;
@@ -489,7 +457,7 @@ export const VaultsPage: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // The Add dialog while open: a new secret, or one resumed from the desktop app's handoff.
-  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean } | null>(null);
+  const [adding, setAdding] = useState<{ name?: string; startProtected: boolean; desktopHandoff?: boolean } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
   const [audit, setAudit] = useState<VaultAuditEvent[]>([]);
@@ -521,9 +489,12 @@ export const VaultsPage: React.FC = () => {
   // A request linked from IM, or a step the desktop app handed to this browser (`openVaultsInBrowser`),
   // resumed below; each drops the step from the URL once resumed so a reload doesn't resume it again.
   const step = useMemo(() => readVaultBrowserStep(searchParams), [searchParams]);
+  // The step the desktop app handed to this tab, read once on arrival: the URL drops it once resumed.
+  const [desktopHandoff] = useState(() => readDesktopVaultHandoff(searchParams));
+  const [desktopHandoffDone, setDesktopHandoffDone] = useState(false);
+  const handoffRequestId = desktopHandoff?.step.kind === 'request' ? desktopHandoff.step.requestId : null;
   // The secret whose row menu is open; a reveal handed off from the desktop app reopens it.
   const [menuSecret, setMenuSecret] = useState<string | null>(null);
-  const [menuField, setMenuField] = useState<string | null>(null);
 
   const clearStep = useCallback(() => {
     setSearchParams((prev) => withoutVaultBrowserStep(prev), { replace: true });
@@ -531,7 +502,7 @@ export const VaultsPage: React.FC = () => {
 
   useEffect(() => {
     if (!canUseVaultSecrets || step?.kind !== 'add') return;
-    setAdding({ name: step.name, startProtected: true });
+    setAdding({ name: step.name, startProtected: true, desktopHandoff: true });
     clearStep();
   }, [canUseVaultSecrets, step, clearStep]);
 
@@ -567,6 +538,11 @@ export const VaultsPage: React.FC = () => {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const onRequestResolved = useCallback((requestId: string) => {
+    if (requestId === handoffRequestId) setDesktopHandoffDone(true);
+    refresh();
+  }, [handoffRequestId, refresh]);
 
   useEffect(() => {
     return api.connectWorkbenchEvents({
@@ -681,8 +657,8 @@ export const VaultsPage: React.FC = () => {
     if (!secret) return;
     const hidden = !visibleSecrets.some((entry) => entry.name === secret.name);
     if (step.kind === 'reveal') {
+      // A link naming one field (older handoffs) opens the same menu: the window shows every field.
       setMenuSecret(secret.name);
-      setMenuField(step.field ?? null);
     } else if (canManageVaultSecrets) {
       setEditTarget(secret);
     }
@@ -729,48 +705,55 @@ export const VaultsPage: React.FC = () => {
   // locked/Strict), which this click opens before any await. Nothing that window needs may wait on
   // the daemon after the click (`usePreparedRequest`), so the open row menu keeps the context and the
   // sandbox client ready, and the click claims them.
+  // One signed context per field (the existing endpoint): the window shows the whole secret.
   const requestRevealContext = useCallback(
-    ({ name, field }: { name: string; field: string; version: string }) => api.createVaultRevealContext(name, { session_label: t('vaults.title'), field }),
+    async ({ name, fields }: RevealKey): Promise<RevealContexts> => {
+      const replies = await Promise.all(fields.map((field) => api.createVaultRevealContext(name, { session_label: t('vaults.title'), field })));
+      const failed = replies.find((reply) => !revealContextIssued(reply));
+      return failed ? { ok: false, failed } : { ok: true, replies };
+    },
     [api, t],
   );
   const menuRevealKey = useMemo(() => {
     if (!canUseVaultSecrets || vaultEntryIssue()) return null;
     const secret = secrets.find((entry) => entry.name === menuSecret);
     if (secret?.protection !== 'protected' || secret.kind === 'keypair') return null;
-    if (menuField !== null && !vaultFieldNames(secret).includes(menuField)) return null;
-    return {
-      name: secret.name,
-      field: menuField ?? vaultDefaultField(secret),
-      version: vaultFieldFingerprint(secret),
-    };
-  }, [canUseVaultSecrets, secrets, menuSecret, menuField]);
-  const revealContext = usePreparedRequest(menuRevealKey, requestRevealContext, revealContextIssued, PREPARED_REVEAL);
+    return { name: secret.name, fields: vaultFieldNames(secret), version: vaultFieldFingerprint(secret) };
+  }, [canUseVaultSecrets, secrets, menuSecret, passkeyHandoff]);
+  const revealContext = usePreparedRequest(menuRevealKey, requestRevealContext, revealContextsIssued, PREPARED_REVEAL);
   const revealSandboxReady = useVaultSandboxWarm(menuRevealKey !== null);
   // Show and Copy wait for both, so their click never waits on either.
   const revealPreparing = !revealSandboxReady || revealContext.pending;
   const revealSecret = useCallback(
-    async (secret: VaultSecret, field: string) => {
+    async (secret: VaultSecret) => {
       let authorizationWindow: VaultAuthorizationWindow | null = null;
       try {
         authorizationWindow = openVaultAuthorizationWindow();
-        const res = await revealContext.claim({ name: secret.name, field, version: vaultFieldFingerprint(secret) });
-        if (!res?.ok || !res.context) {
-          const message = vaultErrorMessage(t, res, t('vaults.reveal.errors.contextFailed'));
-          const code = typeof res === 'object' && res !== null && 'code' in res && typeof res.code === 'string' ? res.code : null;
+        const fields = vaultFieldNames(secret);
+        const defaultField = vaultDefaultField(secret);
+        const res = await revealContext.claim({ name: secret.name, fields, version: vaultFieldFingerprint(secret) });
+        if (!res.ok) {
+          const failed = res.failed;
+          const message = vaultErrorMessage(t, failed, t('vaults.reveal.errors.contextFailed'));
+          const code = typeof failed === 'object' && failed !== null && 'code' in failed && typeof failed.code === 'string' ? failed.code : null;
           throw Object.assign(new Error(message), code ? { code } : {});
         }
-        // The sandbox needs the sealed record to open it. The daemon returns it alongside the signed
-        // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
-        if (!res.envelope) throw new Error(t('vaults.reveal.errors.unavailable'));
-        const wrapMeta =
-          typeof res.envelope.wrap_meta === 'string' ? res.envelope.wrap_meta : JSON.stringify(res.envelope.wrap_meta);
-        await vault.revealProtectedValue(
-          { name: vaultRecordName(secret.name, field, vaultDefaultField(secret)), kind: 'static', envelope: { ciphertext: res.envelope.ciphertext, nonce: res.envelope.nonce, wrap_meta: wrapMeta } },
-          res.context,
-          authorizationWindow?.id,
-        );
+        const items = res.replies.map((reply, index) => {
+          // The sandbox needs each sealed record to open it. The daemon returns it alongside the signed
+          // reveal context; if it's absent, surface a clear message rather than a cryptic sandbox error.
+          if (!reply?.context || !reply.envelope) throw new Error(t('vaults.reveal.errors.unavailable'));
+          const wrapMeta = typeof reply.envelope.wrap_meta === 'string' ? reply.envelope.wrap_meta : JSON.stringify(reply.envelope.wrap_meta);
+          return {
+            material: { name: vaultRecordName(secret.name, fields[index], defaultField), kind: 'static' as const, envelope: { ciphertext: reply.envelope.ciphertext, nonce: reply.envelope.nonce, wrap_meta: wrapMeta } },
+            context: reply.context,
+          };
+        });
+        await vault.revealProtectedSecret(items, defaultField, authorizationWindow?.id);
       } catch (err: unknown) {
-        showToast(vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
+        // This attempt moved the app to the browser hand-off: the row's menu now offers View in browser.
+        showToast(isVaultPasskeyFallback(err)
+          ? t('vaults.reveal.browserFallback')
+          : vaultErrorMessage(t, err, t('vaults.reveal.errors.contextFailed')), 'warning');
       } finally {
         authorizationWindow?.close();
       }
@@ -867,10 +850,11 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
+      {desktopHandoffDone ? <VaultHandoffDone session={desktopHandoff?.session ?? null} /> : null}
       {canReadVaultState ? <AvaultAuthorizationNotice /> : null}
       {canUseVaultSecrets ? (
         <PendingRequestsSection
-          onResolved={refresh}
+          onResolved={onRequestResolved}
           focusRequestId={step?.kind === 'request' ? step.requestId : null}
           focusStartProtected={step?.kind === 'request' && step.startProtected}
           onFocusRequestOpened={clearStep}
@@ -960,17 +944,12 @@ export const VaultsPage: React.FC = () => {
               onEdit={onEdit}
               onDelete={onDelete}
               onReveal={revealSecret}
-              revealField={s.name === menuSecret ? menuField : null}
-              onRevealFieldChange={setMenuField}
               canManage={canManageVaultSecrets}
               canUse={canUseVaultSecrets}
               onOpenWallet={(secret) => setWalletName(secret.name)}
               menuOpen={s.name === menuSecret}
               revealPreparing={s.name === menuRevealKey?.name && revealPreparing}
-              onMenuOpenChange={(open) => {
-                setMenuSecret(open ? s.name : null);
-                setMenuField(null);
-              }}
+              onMenuOpenChange={(open) => setMenuSecret(open ? s.name : null)}
             />
           ))}
         </ul>
@@ -1002,6 +981,7 @@ export const VaultsPage: React.FC = () => {
           if (!o) setAdding(null);
         }}
         onCreated={(name, reason) => {
+          if (adding?.desktopHandoff) setDesktopHandoffDone(true);
           setAdding(null);
           // Only an Add for a name an agent asked for treats an existing secret as provided.
           if (reason !== 'already_exists') showToast(t('vaults.created', { name }), 'success');
@@ -1017,6 +997,7 @@ export const VaultsPage: React.FC = () => {
         onCancel={() => setEditTarget(null)}
         onCreated={() => setEditTarget(null)}
         onSaved={(name) => {
+          if (desktopHandoff?.step.kind === 'edit' && desktopHandoff.step.secretName === name) setDesktopHandoffDone(true);
           setEditTarget(null);
           showToast(t('vaults.saved', { name }), 'success');
           refresh();

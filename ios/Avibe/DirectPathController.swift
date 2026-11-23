@@ -23,15 +23,80 @@ struct DirectPathStatus: Equatable, Sendable {
     /// How many times the App closed connections for this host because
     /// their path was lost. Never decreases.
     let closure: Int
+    /// For diagnosis only, and only for the selected instance's host: the
+    /// path the App's own direct connection runs on, and its last attempts.
+    /// Families and counts, never an address. Nil when there is nothing.
+    var diagnostics: DirectPathDiagnostics? = nil
+    /// The kind of path the App's own direct connection runs on while
+    /// `preferred` is `direct` for this host: through the relay, or straight
+    /// to an IPv4 or IPv6 address. Nil when not direct, or not known. A
+    /// change of it advances `sequence`.
+    var path: DirectPathKind? = nil
+    /// For display, with `path`: whether the path's far end is on a local
+    /// network, and its round-trip time. Read when the status is asked for;
+    /// a change of it is not a change of the status.
+    var selected: DirectSelectedPath? = nil
+    /// For diagnosis: how often the transport checked its path again, and
+    /// why, since the instance was selected. Counts only.
+    var counts: DirectPathCounts = .zero
+    /// For diagnosis: the last few CONNECTs' races, oldest first.
+    var races: [DirectRaceRecord] = []
+    /// For diagnosis: the last few times committed direct relays were closed
+    /// because their path was lost, oldest first.
+    var losses: [DirectLossRecord] = []
 
     static let initial = DirectPathStatus(preferred: .tunnel, sequence: 0, closure: 0)
 
-    var jsonObject: [String: Any] {
-        [
+    /// Diagnostics are not part of what a status says: two statuses with
+    /// the same preference, path, sequence, and closure are the same.
+    static func == (lhs: DirectPathStatus, rhs: DirectPathStatus) -> Bool {
+        lhs.preferred == rhs.preferred && lhs.sequence == rhs.sequence
+            && lhs.closure == rhs.closure && lhs.path == rhs.path
+    }
+
+    /// What `direct.transportChanged` carries: the status, with `path` when
+    /// it is known, and no diagnostics.
+    var eventObject: [String: Any] {
+        var object: [String: Any] = [
             "preferred": preferred.rawValue,
             "sequence": sequence,
             "closure": closure,
         ]
+        if let path {
+            object["path"] = path.rawValue
+        }
+        return object
+    }
+
+    /// What `direct.status()` answers: the status, the selected path's class
+    /// (`path_scope`, `local` or `global`) and round-trip time (`rtt_ms`)
+    /// when known, and the diagnostics if any.
+    var jsonObject: [String: Any] {
+        var object = eventObject
+        if let path, let selected, selected.kind == path {
+            if let local = selected.local {
+                object["path_scope"] = local ? "local" : "global"
+            }
+            if let rttMs = selected.rttMs {
+                object["rtt_ms"] = rttMs
+            }
+        }
+        if let diagnostics {
+            if path == nil {
+                object["path"] = NSNull()
+            }
+            object["attempts"] = diagnostics.attempts.map(\.jsonObject)
+        }
+        if counts != .zero {
+            object["counts"] = counts.jsonObject
+        }
+        if !races.isEmpty {
+            object["connections"] = races.map(\.jsonObject)
+        }
+        if !losses.isEmpty {
+            object["losses"] = losses.map(\.jsonObject)
+        }
+        return object
     }
 
     /// The script that delivers `direct.transportChanged` to a document.
@@ -43,7 +108,7 @@ struct DirectPathStatus: Equatable, Sendable {
             let data = try? JSONSerialization.data(
                 withJSONObject: [
                     "origin": origin.serialized,
-                    "detail": jsonObject,
+                    "detail": eventObject,
                 ],
                 options: [.sortedKeys]
             ),
@@ -69,6 +134,42 @@ struct DirectPathStatus: Equatable, Sendable {
 typealias DirectStatusProvider = @MainActor (
     WebOrigin,
     @escaping @MainActor (DirectPathStatus?) -> Void
+) -> Void
+
+/// How a page's request to move to the direct path ended
+/// (`direct.handover`).
+enum DirectHandoverOutcome: Equatable, Sendable {
+    /// The quiet public relays for the page's host were closed; busy ones
+    /// were kept.
+    case done(closed: Int, kept: Int)
+    /// Nothing was closed.
+    case skipped(DirectHandoverSkip)
+
+    var jsonObject: [String: Any] {
+        switch self {
+        case .done(let closed, let kept):
+            return ["closed": closed, "kept": kept]
+        case .skipped(let reason):
+            return ["closed": 0, "kept": 0, "skipped": reason.rawValue]
+        }
+    }
+}
+
+enum DirectHandoverSkip: String, Equatable, Sendable {
+    /// The App's direct path is not usable for this host now.
+    case notUsable = "not_usable"
+    /// Another live document of the same store has this host loaded, or
+    /// the App cannot tell.
+    case otherDocuments = "other_documents"
+}
+
+/// Answers `direct.handover` for an instance origin. `soleDocument` is
+/// whether the calling WebView is the only live document of its data store
+/// with that host loaded: `nil` when the App cannot tell.
+typealias DirectHandoverProvider = @MainActor (
+    WebOrigin,
+    _ soleDocument: Bool?,
+    @escaping @MainActor (DirectHandoverOutcome) -> Void
 ) -> Void
 
 /// The only writer of `proxyConfigurations`. A store's route lists exact
@@ -323,6 +424,21 @@ final class DirectPathController {
     /// The transport reported the accepted generation usable, and nothing
     /// has suspended that since.
     private var isUsable = false
+    /// The kind of path the usable transport's connection runs on, as last
+    /// reported; nil when none is usable or the transport cannot tell.
+    private var currentPath: DirectPathKind?
+    /// A sticky plan's direct candidate missed its bound: plans hedge again
+    /// until a direct candidate wins, or the path changes.
+    private var stickyDropped = false
+    /// Counts the drops of stickiness. A direct win restores stickiness only
+    /// if its plan was made after the last drop, so a result that arrives
+    /// late cannot undo a newer one.
+    private var stickyDropSerial = 0
+    /// The last few CONNECTs' races, oldest first; for diagnosis.
+    private var races: [DirectRaceRecord] = []
+    static let raceLimit = 5
+    /// The last few closes of committed direct relays for a lost path.
+    private var losses: [DirectLossRecord] = []
     private var pathGeneration = 0
     private var accountEpoch = 0
     private var isInBackground: Bool
@@ -419,12 +535,84 @@ final class DirectPathController {
     /// What `direct.status()` answers for `origin` now. `preferred` is
     /// `direct` only for the selected instance's host.
     func currentStatus(for origin: WebOrigin) -> DirectPathStatus {
-        DirectPathStatus(
-            preferred: preferred == .direct && origin.host == target?.authority.host
-                ? .direct : .tunnel,
+        let selected = origin.host == target?.authority.host
+        var diagnostics: DirectPathDiagnostics?
+        var selectedPath: DirectSelectedPath?
+        var counts = DirectPathCounts.zero
+        if selected {
+            let read = transport.pathDiagnostics
+            selectedPath = read.selected
+            counts = transport.pathCounts
+            // The current path only while new connections prefer it.
+            let shown = DirectPathDiagnostics(
+                current: preferred == .direct ? currentPath : nil,
+                attempts: read.attempts
+            )
+            diagnostics = shown == .empty ? nil : shown
+        }
+        return DirectPathStatus(
+            preferred: preferred == .direct && selected ? .direct : .tunnel,
             sequence: sequence,
-            closure: closures[origin.host] ?? 0
+            closure: closures[origin.host] ?? 0,
+            diagnostics: diagnostics,
+            path: preferred == .direct && selected ? currentPath : nil,
+            selected: preferred == .direct && selected ? selectedPath : nil,
+            counts: counts,
+            races: selected ? races : [],
+            losses: selected ? losses : []
         )
+    }
+
+    /// Quiet time after which a public relay counts as idle for a hand-over.
+    static let handoverQuietSeconds: TimeInterval = 1
+    /// How long a hand-over waits for the host's public relays to go quiet.
+    static let handoverWaitSeconds: TimeInterval = 3
+
+    /// A page asks to move its new connections to the direct path
+    /// (`direct.handover`): while the path is usable for `origin`'s host, the
+    /// committed public relays for that host that carried nothing for
+    /// `handoverQuietSeconds` (waiting up to `handoverWaitSeconds` for them to
+    /// get there) are closed, so WebKit's next connection takes
+    /// the route to the direct backend. Busy relays are kept; nothing is
+    /// replayed. Only when the caller is the sole live document of the store
+    /// with that host loaded (`soleDocument == true`): a relay of another
+    /// document's connection is never closed for this one.
+    func handover(
+        for origin: WebOrigin,
+        soleDocument: Bool?,
+        reply: @escaping @MainActor (DirectHandoverOutcome) -> Void
+    ) {
+        settleRecordedFault()
+        guard
+            !isResuming,
+            preferred == .direct,
+            let target,
+            origin.host == target.authority.host,
+            directAuthorized(for: target.authority),
+            let listener
+        else {
+            reply(.skipped(.notUsable))
+            return
+        }
+        guard soleDocument == true else {
+            reply(.skipped(.otherDocuments))
+            return
+        }
+        let host = origin.host
+        Task {
+            let result = await listener.closeQuietRelays(
+                host: host,
+                backend: .publicOrigin,
+                quietSeconds: Self.handoverQuietSeconds,
+                waitSeconds: Self.handoverWaitSeconds
+            )
+            Self.logger.info(
+                "Direct hand-over: closed \(result.closed, privacy: .public), kept \(result.kept, privacy: .public) public relays"
+            )
+            await MainActor.run {
+                reply(.done(closed: result.closed, kept: result.kept))
+            }
+        }
     }
 
     /// Answers `direct.status()` for `origin`. While the App returns from the
@@ -582,8 +770,17 @@ final class DirectPathController {
     /// including the watchdog's deadline passing, closes the gate before
     /// its delivery reaches this actor.
     func loadGate(for runtime: MobileRuntimeContext) -> DirectLoadGate {
+        loadGate(forInstanceURL: runtime.instance.url)
+    }
+
+    /// The same gate for a load to `url`'s host on the current store, for a
+    /// caller that has no runtime: the gate depends only on whether that
+    /// host has a route on this store, and on the listener. A host that was
+    /// routed stays routed after its runtime closed, so its loads still go
+    /// through the listener.
+    func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
         guard
-            let authority = DirectAuthority(instanceURL: runtime.instance.url),
+            let authority = DirectAuthority(instanceURL: url),
             routeOwner.routes(authority.host, store: websiteDataStore.identifier)
         else {
             return .open
@@ -670,8 +867,17 @@ final class DirectPathController {
         }
     }
 
-    private func deselect(stoppingTransport: Bool = true) {
+    /// `keepingDiagnostics`: the background ends the selection too, but the
+    /// same instance is selected again on the return, and what was recorded
+    /// before is what a diagnosis after the return needs.
+    private func deselect(stoppingTransport: Bool = true, keepingDiagnostics: Bool = false) {
         isUsable = false
+        currentPath = nil
+        stickyDropped = false
+        if !keepingDiagnostics {
+            races.removeAll()
+            losses.removeAll()
+        }
         acceptedGeneration = nil
         replacedGenerations.removeAll()
         guard target != nil else {
@@ -702,23 +908,51 @@ final class DirectPathController {
                 // A new instance endpoint key or address set.
                 replacedGenerations.insert(accepted)
                 advanceGeneration()
-                closeRelays(.direct, countsAsClosure: true)
+                closeRelays(.direct, countsAsClosure: true, loss: (.generationReplaced, currentPath))
             }
             acceptedGeneration = generation
             isUsable = true
+            let previous = currentPath
+            currentPath = transport.pathDiagnostics.current
+            stickyDropped = false
+            let wasDirect = preferred == .direct
+            updatePreference()
+            // The same preference on another kind of path is a change too.
+            if wasDirect, preferred == .direct, previous != currentPath {
+                sequence += 1
+                notify()
+            }
+            return
+        case .pathChanged(let kind):
+            // The connection moved between the relay and a direct address.
+            // Nothing is closed; the page is told, so it can move its stream
+            // onto a direct path, and plans may stay on it (section 6).
+            guard isUsable, kind != currentPath else {
+                return
+            }
+            currentPath = kind
+            stickyDropped = false
+            if preferred == .direct {
+                sequence += 1
+                notify()
+            }
+            return
         case .verifying:
             // A network callback is not proof of loss: only the preference
             // changes until the transport validates the path again.
             isUsable = false
+            currentPath = nil
             advanceGeneration()
         case .lost:
             isUsable = false
+            let pathAtLoss = currentPath
+            currentPath = nil
             advanceGeneration()
             // The preference is published before the closure, which is now
             // published in this turn: no status says `direct` for a path
             // that is gone.
             updatePreference()
-            closeRelays(.direct, countsAsClosure: true)
+            closeRelays(.direct, countsAsClosure: true, loss: (.lost, pathAtLoss))
         case .lostToBackground:
             // The transport heard the background first. It is this App's
             // background: entered here now, as the background observer
@@ -736,6 +970,9 @@ final class DirectPathController {
         guard tag.target == target, tag.pathGeneration == pathGeneration else {
             return
         }
+        // At once, not when the race it lost has finished: the next plans
+        // hedge again while the transport probes the path.
+        dropStickiness()
         transport.pathDidFail(for: tag)
     }
 
@@ -765,7 +1002,15 @@ final class DirectPathController {
         // A plan with a direct candidate also needs the lease to be current
         // at its commit point; a public-only plan needs only the fence.
         let lease = directTag?.target.runtime
-        return DirectConnectPlan(
+        // Sticky: the App's own path is a direct address, and no sticky
+        // attempt has missed since. The direct candidate then runs alone for
+        // its bound instead of racing the public origin from the hedge on.
+        let sticky = directTag != nil
+            && (currentPath == .ipv4 || currentPath == .ipv6)
+            && !stickyDropped
+        let generation = pathGeneration
+        let dropSerial = stickyDropSerial
+        var plan = DirectConnectPlan(
             scope: scope,
             generation: pathGeneration,
             openDirect: openDirect,
@@ -784,6 +1029,79 @@ final class DirectPathController {
                 }
             }
         )
+        plan.sticky = sticky
+        plan.path = directTag == nil ? nil : currentPath
+        plan.stickyMissed = { [weak self] in
+            Task { @MainActor in
+                self?.stickyAttemptMissed(generation: generation, selection: fence.selection)
+            }
+        }
+        plan.recordRace = { [weak self] record in
+            Task { @MainActor in
+                self?.raceDidFinish(
+                    record,
+                    generation: generation,
+                    selection: fence.selection,
+                    dropSerial: dropSerial
+                )
+            }
+        }
+        return plan
+    }
+
+    /// A sticky direct attempt did not answer within its bound. Plans hedge
+    /// again, at once. The path is not reported as failed: no probe is
+    /// started and nothing it carries is closed, so a request already
+    /// running on it ends only when the transport itself reports the path
+    /// lost (section 7).
+    private func stickyAttemptMissed(generation: Int, selection raced: Int) {
+        guard raced == selection, generation == pathGeneration else {
+            return
+        }
+        dropStickiness()
+    }
+
+    private func dropStickiness() {
+        stickyDropped = true
+        stickyDropSerial += 1
+    }
+
+    /// One CONNECT's race ended. Kept for diagnosis; and a direct candidate
+    /// that won restores stickiness, if its plan was made after the last
+    /// drop. A race ends only when both candidates have settled, so its
+    /// record can arrive long after a miss or a failure was acted on
+    /// (`stickyAttemptMissed`, `directCandidateFailed`): the record itself
+    /// never drops stickiness.
+    private func raceDidFinish(
+        _ record: DirectRaceRecord,
+        generation: Int,
+        selection raced: Int,
+        dropSerial: Int
+    ) {
+        guard raced == selection else {
+            return
+        }
+        races.append(record)
+        if races.count > Self.raceLimit {
+            races.removeFirst(races.count - Self.raceLimit)
+        }
+        let directLeg = String(describing: record.direct.jsonValue)
+        let publicLeg = String(describing: record.publicOrigin.jsonValue)
+        let winner = record.winner == .direct ? "direct" : record.winner == .publicOrigin ? "public" : "none"
+        let path = record.path?.rawValue ?? "none"
+        let sticky = record.sticky
+        Self.logger.info(
+            """
+            Direct connection: direct \(directLeg, privacy: .public) public \(publicLeg, privacy: .public) \
+            winner \(winner, privacy: .public) path \(path, privacy: .public) sticky \(sticky, privacy: .public)
+            """
+        )
+        guard generation == pathGeneration else {
+            return
+        }
+        if record.winner == .direct, dropSerial == stickyDropSerial {
+            stickyDropped = false
+        }
     }
 
     /// The selection and account new plans are made under.
@@ -886,6 +1204,7 @@ final class DirectPathController {
     private func closeRelays(
         _ backend: DirectRelayBackend?,
         countsAsClosure: Bool,
+        loss: (cause: DirectLossRecord.Cause, path: DirectPathKind?)? = nil,
         then: (@MainActor () -> Void)? = nil
     ) {
         guard let listener else {
@@ -907,13 +1226,53 @@ final class DirectPathController {
         // is not confirmed: the closure it publishes is for connections
         // that have been told to end.
         closesInFlight += 1
+        // A close of direct relays for a path that is gone is recorded, with
+        // its cause and the path the relays ran on.
+        let cause = loss?.cause
+        let pathAtClose = loss?.path
+        let epoch = accountEpoch
         Task { [weak self] in
-            _ = await listener.closeRelays(backend: backend, before: generation)
+            let result = await listener.closeRelaysTimed(backend: backend, before: generation)
             await MainActor.run {
                 self?.closeDidIssue()
+                if let cause {
+                    self?.recordLoss(result.quietMs, cause: cause, path: pathAtClose, accountEpoch: epoch)
+                }
                 then?()
             }
         }
+    }
+
+    /// Committed direct relays were closed for a lost path: kept for
+    /// diagnosis and logged once. Nothing is recorded when none was open.
+    private func recordLoss(
+        _ quietMs: [Int],
+        cause: DirectLossRecord.Cause,
+        path: DirectPathKind?,
+        accountEpoch epoch: Int
+    ) {
+        guard !quietMs.isEmpty, epoch == accountEpoch else {
+            return
+        }
+        let record = DirectLossRecord(
+            cause: cause,
+            relays: quietMs.count,
+            quietMs: Array(quietMs.prefix(DirectLossRecord.quietLimit)),
+            path: path
+        )
+        losses.append(record)
+        if losses.count > Self.raceLimit {
+            losses.removeFirst(losses.count - Self.raceLimit)
+        }
+        let shortest = record.quietMs.first ?? 0
+        let kind = path?.rawValue ?? "none"
+        let reason = cause.rawValue
+        Self.logger.info(
+            """
+            Direct relays closed (\(reason, privacy: .public)): \(record.relays, privacy: .public) relays, \
+            shortest time since a byte \(shortest, privacy: .public) ms, path \(kind, privacy: .public)
+            """
+        )
     }
 
     /// A close was issued. With none left, a kept completion is handled
@@ -1269,7 +1628,8 @@ final class DirectPathController {
         // The relays are closed and counted before the transport is told to
         // stop, which closes its streams: a relay whose stream ended first
         // would no longer be there to count.
-        deselect(stoppingTransport: false)
+        let pathAtBackground = currentPath
+        deselect(stoppingTransport: false, keepingDiagnostics: true)
         advanceGeneration()
         // Out of service now, before any close runs, and on purpose: what a
         // bind under way reports after this is not a failure. A serving
@@ -1296,7 +1656,7 @@ final class DirectPathController {
             completionAwaitingCloses = nil
             rebindDidComplete(kept)
         }
-        closeRelays(.direct, countsAsClosure: true) { [weak self] in
+        closeRelays(.direct, countsAsClosure: true, loss: (.background, pathAtBackground)) { [weak self] in
             // Unless a new selection was made meanwhile: selecting already
             // stops the transport's work for the previous target.
             guard let self, self.target == nil else {
@@ -1586,5 +1946,63 @@ struct DirectRebindAttempts: Equatable {
     /// The return was settled another way (a failure, a retirement).
     mutating func abandon() {
         current = nil
+    }
+}
+
+/// Every WKWebView the App makes, held weakly, so a hand-over can tell
+/// whether another live document of the same data store has a host loaded
+/// (`direct.handover`). A WebView is listed from creation until it is
+/// deallocated, whether or not it is on screen: one that still exists may
+/// still hold connections.
+@MainActor
+final class DirectWebViewRegistry {
+    static let shared = DirectWebViewRegistry()
+
+    private final class Entry {
+        weak var webView: WKWebView?
+
+        init(_ webView: WKWebView) {
+            self.webView = webView
+        }
+    }
+
+    private var entries: [Entry] = []
+
+    func register(_ webView: WKWebView) {
+        entries.removeAll { $0.webView == nil }
+        guard !entries.contains(where: { $0.webView === webView }) else {
+            return
+        }
+        entries.append(Entry(webView))
+    }
+
+    /// Whether `webView` is the only live WebView of its data store with
+    /// `host` loaded or loading. `nil` when that cannot be told: the caller
+    /// is not registered, or another WebView of the store has no URL yet.
+    func isSoleDocument(_ webView: WKWebView, host: String) -> Bool? {
+        entries.removeAll { $0.webView == nil }
+        guard entries.contains(where: { $0.webView === webView }) else {
+            return nil
+        }
+        let store = webView.configuration.websiteDataStore
+        for entry in entries {
+            guard let other = entry.webView, other !== webView else {
+                continue
+            }
+            // Two objects can name one persistent store.
+            let otherStore = other.configuration.websiteDataStore
+            let sameStore = otherStore === store
+                || (store.identifier != nil && otherStore.identifier == store.identifier)
+            guard sameStore else {
+                continue
+            }
+            guard let url = other.url else {
+                return nil
+            }
+            if url.host?.lowercased() == host.lowercased() {
+                return false
+            }
+        }
+        return true
     }
 }

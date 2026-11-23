@@ -17,9 +17,11 @@ import {
 import type { SettingsMenuPlacement } from '../../lib/settingsMenuPlacement';
 import type { TranslationKey } from '../../i18n/types';
 import { useDesktopPetSettings } from '../../lib/useDesktopPetSettings';
+import { AppLockSetting } from './AppLockSetting';
 import { DesktopRemoteUpdateSetting } from './DesktopRemoteUpdateSetting';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { useHomePreferences } from '../home/useHomePreferences';
+import { VoiceInputSetting } from '../voice/VoiceConsent';
 
 // The 88px miniature is a drawing OF a theme, not a preview rendered IN one:
 // the Light card has to look light while the app is dark. Source Q8zxF1 builds
@@ -303,6 +305,12 @@ export const SettingsGeneralPage: React.FC = () => {
 
         {/* The home's tip of the day (ui/design: home/home/*), for whoever has the home. */}
         {capabilities.can_chat && <HomeTipsSetting />}
+
+        {/* This account's answer to voice input's question (ui/design: composer/voice-consent/*). */}
+        {capabilities.can_chat && <VoiceInputSetting />}
+
+        {/* This device's App Lock, when its shell owns one (ui/design: app-lock/settings/*). */}
+        <AppLockSetting />
 
         {pet.supported && (
           <SettingsPanel

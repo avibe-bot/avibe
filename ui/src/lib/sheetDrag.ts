@@ -114,7 +114,7 @@ export function useSheetDrag(sheet: HTMLElement | null, { enabled, onDismiss }: 
       if (gesture || event.touches.length !== 1 || !(event.target instanceof Element)) return;
       const allowance = dragAllowance(event.target, sheet);
       if (allowance === 'none') return;
-      const touch = event.touches[0];
+      const touch = event.touches[0]!;
       settle?.cancel();
       settle = null;
       gesture = { id: touch.identifier, startX: touch.clientX, startY: touch.clientY, allowance, dragging: false, offset: 0, samples: [] };

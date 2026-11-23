@@ -98,11 +98,13 @@ async def test_unmarked_and_unknown_capabilities_keep_real_traces(engine, sessio
 
 
 @pytest.mark.no_sqlite_template
-async def test_projection_reader_compatible_opens_epoch_two_without_traces_or_startup_writes(engine, session):
+@pytest.mark.parametrize("epoch", [2, 3])
+async def test_projection_reader_compatible_opens_supported_epochs_without_traces_or_startup_writes(engine, session, epoch):
     """The reader floor must understand epoch 2 before any writer activates it.
 
     This is synthetic future state, not a substitute for the published-wheel
-    contract. The activated current writer and this older-reader shape use 2.
+    contract. Exercise both projection-aware epochs independently of the current
+    checkout's migration head.
     """
     from storage import importer, migrations
     from storage.db import create_sqlite_engine
@@ -113,18 +115,18 @@ async def test_projection_reader_compatible_opens_epoch_two_without_traces_or_st
     response = await store.append_response(SESSION, assistant("", calls=(ToolCallBlock("call", "read", {"path": "/work/a.py"}),)), final=False, metadata=_mark())
     await store.append_tool_result(SESSION, ToolResultMessage("call", "read", (text("done"),)), details={})
     with engine.connect() as conn:
-        assert conn.exec_driver_sql("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").scalar() == "2"
         assert conn.execute(select(agent_events.c.id).where(agent_events.c.event_type == "tool_call")).first() is None
     path = Path(engine.url.database)
     engine.dispose()
-    _future(path, epoch="2")
+    _future(path, epoch=str(epoch))
     before = _snapshot(path)
     decision = migrations.preflight_database(path)
-    assert decision.compatible_open and decision.compatibility_epoch == 2
+    assert decision.compatible_open and decision.compatibility_epoch == epoch
     importer.ensure_sqlite_state(db_path=path, state_dir=path.parent)
     reopened = create_sqlite_engine(path)
     try:
         with reopened.connect() as conn:
+            assert conn.exec_driver_sql("SELECT value_json FROM state_meta WHERE key='compatibility_epoch'").scalar() == str(epoch)
             [row] = _rows(conn)
             assert row["id"] == f"tool:{response.row_id}:call"
             assert row["text"] == '🔧 `read` `{"path":"a.py"}`'
@@ -278,7 +280,7 @@ async def test_retained_window_and_query_plans_bound_canonical_reads(engine, ses
     assert any("SEARCH agent_events" in plan and "context_seq" in plan for plan in plans), plans
 
 
-@pytest.mark.parametrize("proof", [1, 2])
+@pytest.mark.parametrize("proof", [1, 2, 3])
 @pytest.mark.parametrize("platform,background,enabled", [("avibe", False, True), ("avibe", True, True), ("avibe", False, False), ("telegram", False, True)])
 async def test_real_adapter_links_compatibility_writes_and_publishes_canonical_steps(engine, session, tmp_path, published, monkeypatch, platform, background, enabled, proof):
     """The producer marks its own rows, preserves IM/old-reader writes and Web gates.
@@ -301,7 +303,7 @@ async def test_real_adapter_links_compatibility_writes_and_publishes_canonical_s
         [step] = [row for row in _rows(conn) if row["kind"] == "tool_call"]
         response_id = step["id"].split(":")[1]
         response = conn.execute(select(messages).where(messages.c.id == response_id)).mappings().one()
-        assert len(traces) == (1 if proof == 1 else 0)
+        assert len(traces) == (0 if proof == 3 else 1)
         if traces:
             assert json.loads(traces[0]["metadata_json"])["tool_call_source"]["response_id"] == response_id
             assert step["text"] == traces[0]["content_text"]

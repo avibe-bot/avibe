@@ -1,4 +1,10 @@
 fn main() {
+    // Packaging cannot enable the native authentication test peer, including a
+    // release profile that happens to retain debug assertions.
+    if std::env::var_os("CARGO_FEATURE_APP_LOCK_E2E").is_some() && std::env::var("PROFILE").as_deref() == Ok("release")
+    {
+        panic!("app-lock-e2e authentication substitutes must never ship in release builds");
+    }
     println!("cargo:rerun-if-env-changed=AVIBE_DESKTOP_UPDATER_PUBLIC_KEY");
     // Application commands are ungated by default in Tauri v2: any page loaded in
     // any window could invoke them. Declaring them here makes `tauri-build`
@@ -7,9 +13,15 @@ fn main() {
     // commands only to the shell's own local page, `pet.json` gives the pet
     // commands only to the pet window, `main-pet-bind.json` gives the
     // Workbench `pet_bind` alone, and `main-computer-use.json` gives it the
-    // two Computer Use guide actions on macOS.
+    // two Computer Use guide actions on macOS, `main-window-focus.json`
+    // lets it bring its own window forward, `update-popover.json` lets the
+    // update popup fit its own height, and `show-share.json` gives the
+    // Workbench and Show app windows the one Show share command.
     let manifest = tauri_build::AppManifest::new().commands(&[
+        "app_lock_status",
+        "app_lock_set_policy",
         "desktop_client_request",
+        "update_popover_fit",
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",
@@ -32,17 +44,23 @@ fn main() {
         "pet_reset_voice_shortcut",
         "desktop_notifications_state",
         "desktop_notifications_set_enabled",
+        "desktop_notifications_authorization",
+        "desktop_notifications_open_settings",
         "desktop_update_remote_decline",
         "pet_ready",
         "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
+        "pet_frame_drawn",
+        "pet_pointer",
         "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
         "pet_bind",
         "pet_unbind",
         "pet_open",
+        "focus_main_window",
+        "desktop_show_share",
     ]);
     let mut attributes = tauri_build::Attributes::new().app_manifest(manifest);
     // tauri-build embeds its Windows application manifest, which binds Common

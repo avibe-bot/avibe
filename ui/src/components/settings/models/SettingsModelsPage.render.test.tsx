@@ -7,17 +7,19 @@ import { I18nextProvider } from 'react-i18next';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { BotsContext, type BotsState } from '@/context/BotsContext';
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
+import type { Bot } from '@/lib/bots';
 import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
-import { OWNER_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
+import { OWNER_INSTANCE_CAPABILITIES, type InstanceCapabilities } from '@/lib/sessionInfo';
+import { capabilitiesFor } from '@/lib/testing/instanceRoleCapabilities';
 import { MANAGE_COMMIT_ACTIONS } from './manage';
-import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
 import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SUBSCRIPTION_VENDORS } from './subscriptionOptions';
-import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
+import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type ResetCard, type ResetCardLock, type ResetCardUseResult, type Source, type UsageReport } from './types';
 
 // The page navigates to Agents when the user clicks an Agent that needs
 // attention, so it needs a router in scope. Every render site wants the same
@@ -273,6 +275,8 @@ const renderPage = (
   agents?: AgentSupply[],
   runtimeValue: RuntimeDependency = runtime,
   toolsValue: HostedToolsStatus = hostedToolsStatus,
+  /** The reader's capabilities; absent, the context's own default (nothing granted). */
+  capabilities?: InstanceCapabilities,
 ) => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
   vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(agents ?? [
@@ -287,19 +291,22 @@ const renderPage = (
   vi.spyOn(modelsApi, 'getQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'refreshQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(toolsValue);
-  return render(
+  const page = (
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
         <SettingsModelsPage />
       </I18nextProvider>
-    </ToastProvider>,
+    </ToastProvider>
   );
+  return render(capabilities
+    ? <InstanceAuthorizationContext.Provider value={{ remote: true, instanceKind: null, instanceRole: null, capabilities }}>{page}</InstanceAuthorizationContext.Provider>
+    : page);
 };
 
 const switchFirstGatewayAgentToDirect = async () => {
   await userEvent.click((await screen.findAllByRole('button', { name: /Runtime mode:|运行模式[:：]/i }))[0]);
   const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
-  await userEvent.click(within(modeGroup).getByRole('button', { name: /Use own login|改为 Agent 管理|Retry|重试/i }));
+  await userEvent.click(within(modeGroup).getByRole('button', { name: /Use own login|改为自己登录|Retry|重试/i }));
 };
 
 const closeSourceDetails = async () => {
@@ -317,27 +324,6 @@ afterEach(() => {
 });
 
 describe('SettingsModelsPage surface branches', () => {
-  // DirectHome is a separate render path from gateway cards; its neutral tile
-  // and API order previously hid backend identity even when the cards were right.
-  it('keeps direct-only backends in Settings order and colors', async () => {
-    renderPage([], [directAgent('opencode'), directAgent('codex'), directAgent('claude')]);
-    await screen.findByText('Claude Code');
-    const rows = [...document.querySelectorAll('.model-hub-direct-row--backend')];
-    expect.soft(rows.map((row) => row.querySelector('.model-hub-direct-backend-name')?.textContent))
-      .toEqual(['Claude Code', 'Codex', 'OpenCode']);
-    for (const [label, tile, ink, glyph] of [
-      ['Claude Code', 'bg-cyan-soft', 'text-cyan-ink', 'lucide-sparkles'],
-      ['Codex', 'bg-gold', 'text-gold-foreground', 'lucide-bot'],
-      ['OpenCode', 'bg-violet-soft', 'text-violet-ink', 'lucide-terminal'],
-    ]) {
-      const row = screen.getByText(label).closest('.model-hub-direct-row--backend')!;
-      const svg = row.querySelector('svg')!;
-      expect.soft(svg.parentElement?.classList.contains(tile)).toBe(true);
-      expect.soft(svg.classList.contains(ink)).toBe(true);
-      expect(svg.classList.contains(glyph)).toBe(true);
-    }
-  });
-
   it.each([
     ['right away', false],
     ['after a refused takeover', true],
@@ -350,7 +336,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /Let Model Hub manage|交给模型网关管理/i }));
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByRole('checkbox', { name: /Claude native login/ })).toBeTruthy();
-    expect(within(dialog).getByText(/migration does not test keys online|迁移时不联网校验 Key/)).toBeTruthy();
+    expect(within(dialog).getByText(/Import authentication saved in configuration files|导入配置文件、Shell 启动文件/)).toBeTruthy();
     expect(setMode).not.toHaveBeenCalled();
     if (refused) {
       await userEvent.click(within(dialog).getByRole('button', { name: /Start migration|开始迁移/i }));
@@ -390,11 +376,11 @@ describe('SettingsModelsPage surface branches', () => {
 
   // A refused switch to the gateway used to leave the Direct row exactly as it
   // was: the failure was recorded, then pruned by the next read because the
-  // backend was still Direct, and no Direct surface rendered it anyway.
+  // backend was still Direct.
   it.each([
-    ['the direct-only screen', []],
-    ['a gateway card', [retainedSource]],
-  ] as const)('MH-MIG-010 reports a refused switch to the gateway on %s and retries in place', async (_, sources) => {
+    ['with no provider', []],
+    ['with a provider', [retainedSource]],
+  ] as const)('MH-MIG-010 reports a refused switch to the gateway on a gateway card %s and retries in place', async (_, sources) => {
     vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [] });
     const setMode = vi.spyOn(modelsApi, 'setAgentMode')
       .mockRejectedValueOnce(new ApiCallError('mode_switch_blocked'))
@@ -542,6 +528,113 @@ describe('SettingsModelsPage surface branches', () => {
     }
   });
 
+  // Owner report 11-16: Codex switched off in Settings · Backends still drew a
+  // live card with wires, and providers still named it as a user.
+  it('draws a switched-off backend as one off row: no wires, no attribution, a way to turn it on', async () => {
+    const shared: Source = {
+      ...retainedSource,
+      id: 'src_head',
+      display_name: 'Shared relay',
+      adopted_by: [{ backend: 'codex', menu_model: 'gpt-5.6-sol' }, { backend: 'vibey', menu_model: 'gpt-5.6-sol' }],
+    };
+    const vibeyModel: BackendModel = {
+      id: 'gpt-5.6-sol', display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    };
+    const vibey: AgentSupply = { ...takeoverAgent, backend: 'vibey', cli_present: false, catalog_models: [vibeyModel] };
+    const codexOff: AgentSupply = { ...takeoverAgent, backend_enabled: false };
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([shared]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([codexOff, vibey]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const LocationProbe = () => {
+      const location = useLocation();
+      return <output data-testid="location">{location.pathname}</output>;
+    };
+    const view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <MemoryRouter initialEntries={['/settings/models']}>
+            <SettingsModelsRoute />
+            <LocationProbe />
+          </MemoryRouter>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const offRow = await waitFor(() => {
+      const row = view.container.querySelector<HTMLElement>('[data-agent-backend-off="codex"]');
+      expect(row).not.toBeNull();
+      return row as HTMLElement;
+    });
+    expect(view.container.querySelector('[data-agent-backend="codex"]')).toBeNull();
+    expect(view.container.querySelector('[data-agent-backend="vibey"]')).not.toBeNull();
+    expect(within(offRow).queryByRole('button', { name: /^Manage models$|^管理模型$/i })).toBeNull();
+    const sourceRow = (await screen.findByText('Shared relay')).closest('[data-source-id]') as HTMLElement;
+    expect(sourceRow.textContent).toMatch(/Vibey/);
+    expect(sourceRow.textContent).not.toMatch(/Codex/);
+
+    await userEvent.click(within(offRow).getByRole('button', { name: /Turn on Codex in Settings › Backends|去启用 Codex（设置 › 后端）/ }));
+    expect(screen.getByTestId('location').textContent).toBe('/settings/backends/codex');
+  });
+
+  it('names under each model who uses it: a Bot by its own name, any other Agent by its Agent name', async () => {
+    const model = (id: string): BackendModel => ({
+      id, display_name: null, origin: 'manual', models_dev_id: null,
+      context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
+      supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true,
+    });
+    const uses = (modelId: string, ...names: string[]) => names.map((name) => ({ name, effective_model_id: modelId, supply_status: 'ok' as const, route_reason: null }));
+    const vibey: AgentSupply = {
+      ...emptyVibeyAgent,
+      sources: { order: [retainedSource.id], eligibility: [] },
+      catalog_models: [model('opus'), model('trio'), model('sonnet'), model('haiku')],
+      // The unmapped Agent comes first, the Bot's Agent second: Bots read first.
+      named_agents: [
+        ...uses('opus', 'reviewer', 'main'),
+        ...uses('trio', 't1', 't2', 't3'),
+        ...uses('sonnet', 'a1', 'a2', 'a3', 'a4', 'a5'),
+        { name: 'unset', effective_model_id: null, supply_status: null, route_reason: null },
+      ],
+    };
+    const weibi: Bot = { handle: 'main', display_name: '歪比', avatar: null, role: '', agent_name: 'main', session_id: 'ses_main', builtin: true, hide_details: true };
+    const bots = { botForAgent: (name: string | null | undefined) => (name === weibi.agent_name ? weibi : undefined), displayName: (bot: Bot) => bot.display_name } as unknown as BotsState;
+    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([retainedSource]);
+    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([vibey]);
+    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
+    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
+    vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+    vi.spyOn(modelsApi, 'getAgentChains').mockResolvedValue([]);
+    const view = render(
+      <ToastProvider>
+        <I18nextProvider i18n={i18n}>
+          <BotsContext.Provider value={bots}>
+            <SettingsModelsPage />
+          </BotsContext.Provider>
+        </I18nextProvider>
+      </ToastProvider>,
+    );
+
+    const row = (modelId: string) => view.container.querySelector<HTMLElement>(`[data-route-model="${modelId}"]`);
+    // What the line shows, and what the row's button reads out (every name, none counted).
+    const users = (modelId: string) => row(modelId)?.querySelector('[data-model-users] > [aria-hidden="true"]:not(svg)')?.textContent ?? null;
+    const described = (modelId: string) => {
+      const id = row(modelId)?.querySelector('button')?.getAttribute('aria-describedby');
+      return id ? document.getElementById(id)?.textContent ?? null : null;
+    };
+    await waitFor(() => expect(users('opus')).not.toBeNull());
+    expect(users('opus')).toMatch(/^(?:歪比、reviewer 在用|Used by 歪比, reviewer)$/);
+    expect(users('trio')).toMatch(/^(?:t1、t2、t3 在用|Used by t1, t2, t3)$/);
+    expect(users('sonnet')).toMatch(/^(?:a1、a2 等 5 个在用|Used by a1, a2 and 3 more)$/);
+    expect(described('sonnet')).toMatch(/^(?:a1、a2、a3、a4、a5 在用|Used by a1, a2, a3, a4, a5)$/);
+    expect(users('haiku')).toBeNull();
+    expect(row('haiku')?.querySelector('button')?.hasAttribute('aria-describedby')).toBe(false);
+    expect(row('opus')?.querySelector('[data-model-users] button')).toBeNull();
+  });
+
   it('acknowledges a catalog save and reveals a new model beyond the collapsed limit', async () => {
     const ids = Array.from({ length: 6 }, (_, index) => `catalog-model-${index + 1}`);
     const addedId = 'catalog-model-added';
@@ -586,7 +679,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Manage models$|^管理模型$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Add models$|^添加模型$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Add custom model…$|^添加自定义模型…$/i }));
-    await userEvent.type(await screen.findByLabelText(/^Model$|^模型$/i), addedId);
+    await userEvent.type(await screen.findByLabelText(/^Model ID$|^模型 ID$/i), addedId);
     await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 
@@ -692,42 +785,6 @@ describe('SettingsModelsPage surface branches', () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
 
-  it('renders Frame 09 as the sources tab when every backend is direct and no source exists', async () => {
-    renderPage([], [directAgent('claude'), directAgent('codex'), directAgent('opencode')]);
-
-    expect(await screen.findByText(/^Currently: own login$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
-    expect(screen.getByText(/^Switch to Model Hub and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeTruthy();
-    // Frame 09 is what the `sources` tab shows here — not what the Hub shows
-    // instead of its tabs. It is still Frame 09's body: none of the gateway
-    // overview leaks in beside it.
-    expect(screen.getAllByRole('tab')).toHaveLength(5);
-    expect(screen.queryByText(/^Recent switches$|^最近切换$/i)).toBeNull();
-  });
-
-  it('renders the no-backend state when every authoritative CLI is absent', async () => {
-    vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
-    vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
-      { ...directAgent('claude'), cli_present: false },
-      { ...directAgent('codex'), cli_present: false },
-      { ...directAgent('opencode'), cli_present: false },
-    ]);
-    vi.spyOn(modelsApi, 'getRuntimeStatus').mockResolvedValue(runtime);
-    vi.spyOn(modelsApi, 'listEvents').mockResolvedValue([]);
-
-    render(
-      <ToastProvider>
-        <I18nextProvider i18n={i18n}>
-          <SettingsModelsPage />
-        </I18nextProvider>
-      </ToastProvider>,
-    );
-
-    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeNull();
-    expect(screen.queryByText(/backends are direct|个后端均为直连/i)).toBeNull();
-  });
-
   it('publishes a newly discovered backend into the already-open page', async () => {
     const unavailable = [
       { ...directAgent('claude'), cli_present: false },
@@ -756,7 +813,6 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toBeTruthy();
-    expect(screen.queryByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeNull();
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledOnce();
   });
 
@@ -790,9 +846,9 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/No agent backend was found|没有找到 Agent 后端/i)).toBeTruthy();
     const retry = await screen.findByRole('button', { name: /Detect Agent backends again|重新检测 Agent 后端/i });
     await waitFor(() => expect((retry as HTMLButtonElement).disabled).toBe(false));
+    expect(document.querySelector('[data-agent-backend]')).toBeNull();
     const user = userEvent.setup();
     await user.click(retry);
 
@@ -800,7 +856,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(modelsApi.refreshAgentPresence).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps an unread runtime visible on the direct-only surface', async () => {
+  it('keeps an unread runtime visible when every backend uses its own login', async () => {
     vi.spyOn(modelsApi, 'listSources').mockResolvedValue([]);
     vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
       directAgent('claude'),
@@ -819,7 +875,6 @@ describe('SettingsModelsPage surface branches', () => {
     );
 
     expect(await screen.findByText(/^Model Hub status unavailable$|^模型网关状态不可用$/i)).toBeTruthy();
-    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
   });
 
   it('recovers a previously disabled runtime without exposing an on/off switch', async () => {
@@ -845,7 +900,6 @@ describe('SettingsModelsPage surface branches', () => {
     expect(await screen.findByRole('heading', { name: /^Model Hub is unavailable$|^模型网关暂不可用$/i })).toBeTruthy();
     expect(screen.queryByRole('switch')).toBeNull();
     expect(screen.queryAllByRole('tab')).toHaveLength(0);
-    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
 
     await userEvent.click(screen.getByRole('button', { name: /^Retry$|^重试$/i }));
 
@@ -917,8 +971,9 @@ describe('SettingsModelsPage surface branches', () => {
     expect(within(document.querySelector('.model-hub-shell-head') as HTMLElement).queryByRole('button', { name: /^Retry$|^重试$/i })).toBeNull();
   });
 
-  // The in-process catalog remains configurable with or without models.
-  it.each([false, true])('MH-VIBEY-003 keeps Avibe catalog management available: %s', async (configured) => {
+  // Before any provider, Vibey offers 管理模型 only when its catalog already lists a
+  // model; an empty catalog stays manageable once a provider exists (AgentCard.test).
+  it.each([false, true])('MH-VIBEY-003 before any provider, Vibey offers 管理模型 only with a listed model: %s', async (configured) => {
     const catalogModel: BackendModel = {
       id: 'menu-alias', display_name: null, origin: 'manual', models_dev_id: null,
       context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [],
@@ -929,13 +984,13 @@ describe('SettingsModelsPage surface branches', () => {
       { ...emptyVibeyAgent, catalog_models: configured ? [catalogModel] : [] },
     ]);
     const vibeyCard = (await screen.findByText('Vibey')).closest('[data-agent-backend]') as HTMLElement;
-    expect(within(vibeyCard).getAllByRole('button', { name: /^Manage models$|^管理模型$/i }).length).toBeGreaterThan(0);
+    // Before any provider, an empty catalog offers nothing to manage; a listed model can still be managed.
+    expect(within(vibeyCard).queryAllByRole('button', { name: /^Manage models$|^管理模型$/i })).toHaveLength(configured ? 1 : 0);
     await userEvent.click(within(vibeyCard).getByRole('button', { name: /Runtime mode:|运行模式[:：]/i }));
     const modeGroup = await screen.findByRole('group', { name: /Runtime mode|运行模式/i });
-    expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为 Agent 管理/i })).toBeNull();
+    expect(within(modeGroup).queryByRole('button', { name: /Use own login|改为自己登录/i })).toBeNull();
     await userEvent.click(within(modeGroup).getByRole('button', { pressed: true }));
     expect(screen.queryByRole('switch')).toBeNull();
-    expect(screen.queryByText(/^All 3 backends are direct$|^3 个后端均为直连$/i)).toBeNull();
     if (!configured) {
       expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     }
@@ -946,7 +1001,6 @@ describe('SettingsModelsPage surface branches', () => {
 
     expect(await screen.findByText('Retained source')).toBeTruthy();
     expect(screen.getAllByRole('tab')).toHaveLength(5);
-    expect(screen.queryByText(/^Switch to Model Hub and you gain three things$|^切换到模型网关，有三大益处$/i)).toBeNull();
   });
 
   it('keeps manual-model draft Escape local to the provider dialog', async () => {
@@ -1282,8 +1336,7 @@ describe('SettingsModelsPage surface branches', () => {
       </ToastProvider>,
     );
 
-    expect(await screen.findByText(/^Currently: own login$|^当前:直连$/i)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
+    expect(await screen.findAllByRole('button', { name: /^Let Model Hub manage$|^交给模型网关管理$/i })).toHaveLength(3);
     expect(events).not.toHaveBeenCalled();
   });
 
@@ -1352,7 +1405,8 @@ describe('SettingsModelsPage surface branches', () => {
     }));
     await waitFor(() => expect(exactRead).toHaveBeenCalledOnce());
     expect(exactRead).toHaveBeenCalledWith('codex', 'gpt-5.6-sol');
-    expect(screen.getByText(/Changes to default routing do not overwrite|默认路由的调整不会覆盖/i)).toBeTruthy();
+    // The exact read is what the dialog draws: this model's own route, not the overview's row.
+    expect((await screen.findByRole('radio', { name: /^Set separately$|^单独设置$/ })).getAttribute('aria-checked')).toBe('true');
   });
 
   it('keeps a failed event read distinct from an empty history and retries it', async () => {
@@ -1850,14 +1904,14 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Save$/i }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     await userEvent.click(await screen.findByRole('button', { name: /^Retry$/i }));
-    expect(await screen.findByText(/^Currently: own login$/i)).toBeTruthy();
+    expect(await screen.findByRole('button', { name: /^Let Model Hub manage$/i })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /^Retry$/i })).toBeNull();
     expect(modelsApi.listSources).toHaveBeenCalledTimes(2);
     await flushRouteFocus();
     expect(document.activeElement?.closest('.model-hub-shell')).toBeTruthy();
     await act(async () => { sources.resolve([]); });
     await flushRouteFocus();
-    expect(screen.getByText(/^Currently: own login$/i)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^Let Model Hub manage$/i })).toBeTruthy();
     expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
   });
 
@@ -2124,7 +2178,6 @@ describe('SettingsModelsPage surface branches', () => {
 
     const retry = screen.getByRole('button', { name: /^Retry$/i }) as HTMLButtonElement;
     expect(retry.disabled).toBe(false);
-    expect(screen.queryByText(/^Currently: own login$/i)).toBeNull();
     if (!empty) expect(screen.getByText('Refreshed source')).toBeTruthy();
     expect(modelsApi.getAgentChains).toHaveBeenCalledTimes(chainReads);
     const agentsBeforeRetry = vi.mocked(modelsApi.listAgents).mock.calls.length;
@@ -2135,7 +2188,7 @@ describe('SettingsModelsPage surface branches', () => {
     expect(modelsApi.listSources).toHaveBeenCalledTimes(sourcesBeforeRetry + 1);
     expect(modelsApi.putAgentChain).toHaveBeenCalledTimes(1);
     if (empty) {
-      expect(await screen.findByText(/^Currently: own login$/i)).toBeTruthy();
+      expect(await screen.findByRole('button', { name: /^Let Model Hub manage$/i })).toBeTruthy();
     } else {
       // M6 settlement releases its backend again; an unrelated ready read must
       // not leave the backend silently excluded from all future chain probes.
@@ -2159,8 +2212,7 @@ describe('SettingsModelsPage surface branches', () => {
     ], [agent]);
     const opener = await screen.findByRole('button', { name: /Open gpt-5\.6-sol route chain|打开 gpt-5\.6-sol 的路由链/i });
     await userEvent.click(opener);
-    await userEvent.click(await screen.findByRole('button', { name: /^Model actions$|^模型操作$/i }));
-    await userEvent.click(await screen.findByRole('menuitem', { name: /^Edit model$|^编辑模型$/i }));
+    await userEvent.click(await screen.findByRole('button', { name: /^Edit model$|^编辑模型$/i }));
     await waitFor(() => expect(document.querySelector('.model-hub-route-head')).toBeNull());
     // Edit opens the model editor over the catalog; leave both by keyboard.
     for (let open = 0; open < 3 && screen.queryAllByRole('dialog').length; open += 1) {
@@ -2471,13 +2523,13 @@ describe('SettingsModelsPage usage region', () => {
   // to read what it cost, and a user reading the report may not be thrown off it
   // by their own deletion.
   it('MH-USAGE-022: reaches the report from every landing the Hub can draw', async () => {
-    // Keyed by the landing itself: a `Record<ModelsSurfaceKind, …>` cannot omit
-    // one, so a landing added later fails to compile here rather than quietly
-    // shipping without a route. The loop stays inside one case because a row's
-    // evidence has to be a case the catalog can resolve by name.
-    const landings: Record<ModelsSurfaceKind, Source[]> = {
-      direct_empty: [],
-      gateway: [retainedSource],
+    // With no provider left and with one: the gateway page is the only landing,
+    // and deleting the last provider may not take the route away. The loop stays
+    // inside one case because a row's evidence has to be a case the catalog can
+    // resolve by name.
+    const landings: Record<string, Source[]> = {
+      'no provider': [],
+      'a provider': [retainedSource],
     };
 
     for (const [landing, sources] of Object.entries(landings)) {
@@ -2604,12 +2656,46 @@ describe('SettingsModelsPage quota region', () => {
     await act(async () => { (poll![0] as () => void)(); });
     await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
 
+    // The forced read can resume a paused account, so the providers are read again behind it.
+    const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
     await userEvent.click(await screen.findByRole('button', { name: /^Refresh now$|^立即刷新$/ }));
     await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(providerReads));
 
     const clear = vi.spyOn(window, 'clearInterval');
     await userEvent.click(screen.getByRole('tab', { name: /^Providers & routing$|^供应商与路由$/ }));
     expect(clear).toHaveBeenCalled();
+  });
+
+  // The detail's refresh is pressed with the quota tab hidden behind the dialog, so
+  // a failed read is said where the user is, and the providers are still read again.
+  it('MH-QUOTA-035: a paused account\'s refresh forces the quota read, reads providers again, and says when the read failed', async () => {
+    const pausedAccount: Source = {
+      ...retainedSource,
+      id: 'src_paused_account',
+      kind: 'subscription',
+      display_name: 'Paused account',
+      billing: 'monthly',
+      state: { status: 'cooldown', retry_at: null, detail_key: 'models.source.cooldown.quota_exhausted' },
+    };
+    renderPage([pausedAccount]);
+    const user = userEvent.setup();
+    await user.click((await screen.findByText('Paused account')).closest('button') as HTMLButtonElement);
+    const detail = await screen.findByRole('dialog', { name: 'Paused account' });
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const providerReads = () => vi.mocked(modelsApi.listSources).mock.calls.length;
+
+    let before = providerReads();
+    await user.click(within(detail).getByRole('button', { name: /^Refresh quota$|^刷新额度$/ }));
+    await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(providerReads()).toBeGreaterThan(before));
+    expect(screen.queryByText(/^Couldn't refresh, please retry$|^刷新失败，请重试$/)).toBeNull();
+
+    force.mockRejectedValueOnce(new Error('offline'));
+    before = providerReads();
+    await user.click(await within(detail).findByRole('button', { name: /^Refresh quota$|^刷新额度$/ }));
+    expect(await screen.findByText(/^Couldn't refresh, please retry$|^刷新失败，请重试$/)).toBeTruthy();
+    await waitFor(() => expect(providerReads()).toBeGreaterThan(before));
   });
 
   // A vendor slower than the page deadline must not read as a failure for a whole
@@ -2803,6 +2889,344 @@ describe('SettingsModelsPage quota region', () => {
   });
 });
 
+// Using a reset card from the quota card (ui/design: models/quota-reset-cards/*): only the user's
+// confirmed press sends a use, exactly once; the server's lock holds the account on every page;
+// and what the answer leaves on screen is the server's own reading. What each state says is
+// `ResetCards.test.tsx`'s subject.
+describe('SettingsModelsPage reset cards', () => {
+  const openQuota = () => userEvent.click(screen.getByRole('tab', { name: /^Subscription quota$|^订阅额度$/ }));
+  const account = () => screen.getByRole('article', { name: 'Claude Max' });
+  const cardUseButton = (kind: 'Fable' | 'Full') => within(account()).getByRole('button', {
+    name: kind === 'Fable' ? /^Use Fable reset$|^使用 Fable 重置卡$/ : /^Use Full reset$|^使用 全部额度重置卡$/,
+  }) as HTMLButtonElement;
+  const confirmButton = () => within(account()).getByRole('button', { name: /^Use it$|^确认使用$/ });
+  const cancelButton = () => within(account()).getByRole('button', { name: /^Cancel$|^取消$/ });
+  const refreshButton = (name: string) => within(screen.getByRole('article', { name })).getByRole('button', { name: /^Refresh this account$|^刷新这个账号$/ }) as HTMLButtonElement;
+  const card = (over: Partial<ResetCard> & Pick<ResetCard, 'kind'>): ResetCard => ({
+    count: 1, expires_at: '2026-11-28T09:00:00Z', stated: true, usable: true, blocked: null, blocked_until: null, ...over,
+  });
+  const quotaWith = ({ fable = 3, lock = null, used = 100, id = 'src_claude' }: { fable?: number; lock?: ResetCardLock | null; used?: number; id?: string } = {}): QuotaSummary => ({
+    refresh_interval_seconds: 300,
+    sources: [
+      {
+        source_id: id, vendor: 'anthropic', display_name: 'Claude Max', account_label: null, plan: 'max',
+        fetched_at: new Date().toISOString(), state: 'ok',
+        windows: [{ id: 'five_hour', kind: 'session', label: 'five_hour', used_pct: used, window_seconds: 18_000, resets_at: new Date(Date.now() + 3_600_000).toISOString() }],
+        reset_cards: { state: 'ok', lock, cards: [card({ kind: 'all' }), ...(fable ? [card({ kind: 'fable', count: fable })] : [])] },
+      },
+      {
+        source_id: 'src_chatgpt', vendor: 'openai', display_name: 'ChatGPT Pro', account_label: null, plan: 'pro',
+        fetched_at: new Date().toISOString(), state: 'ok', windows: [],
+        reset_cards: { state: 'ok', lock: null, cards: [card({ kind: 'account', stated: false })] },
+      },
+    ],
+  });
+  const openWith = async (quota: QuotaSummary, capabilities = OWNER_INSTANCE_CAPABILITIES) => {
+    renderPage([retainedSource], undefined, runtime, hostedToolsStatus, capabilities);
+    await screen.findByText('Retained source');
+    vi.mocked(modelsApi.getQuota).mockResolvedValue(quota);
+    vi.mocked(modelsApi.refreshQuota).mockResolvedValue(quota);
+    await openQuota();
+    await screen.findByRole('article', { name: 'Claude Max' });
+  };
+
+  it('MH-QUOTA-084: 「使用」 only asks, 取消 sends nothing, and 确认使用 sends exactly one use whose answer is the reading shown', async () => {
+    await openWith(quotaWith());
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
+    const answer = deferred<ResetCardUseResult>();
+    redeem.mockReturnValue(answer.promise);
+    const user = userEvent.setup();
+
+    await user.click(cardUseButton('Fable'));
+    expect(redeem).not.toHaveBeenCalled();
+    expect(within(account()).getByText(/^Spends 1\. It can’t be undone\.$|^用掉 1 张，不能撤销。$/)).toBeTruthy();
+    // Focus lands on the safe choice, so a second Enter cannot spend a card.
+    expect(document.activeElement).toBe(cancelButton());
+    await user.keyboard('{Enter}');
+    expect(redeem).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(cardUseButton('Fable'));
+
+    await user.click(cardUseButton('Fable'));
+    const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
+    await user.dblClick(confirmButton());
+    expect(redeem).toHaveBeenCalledTimes(1);
+    expect(redeem).toHaveBeenCalledWith('src_claude', 'fable', 3);
+    // The pressed button is gone; focus stays in the block rather than falling to the page.
+    expect(document.activeElement).toBe(within(account()).getByRole('region', { name: /^Limit resets$|^重置卡$/ }));
+    expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(cardUseButton('Full').disabled).toBe(true);
+
+    answer.resolve({
+      quota: quotaWith({ fable: 2, used: 0 }),
+      use: { kind: 'fable', outcome: 'used', reason: null, cleared: ['five_hour', 'seven_day_overage_included'] },
+    });
+    expect((await within(account()).findByRole('status')).textContent).toMatch(/^1 used\. The weekly usage spent on Fable|^用了 1 张。本周用在 Fable 上的额度已退回/);
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    expect(within(account()).getByRole('meter').getAttribute('aria-valuenow')).toBe('0');
+    expect(cardUseButton('Fable').disabled).toBe(false);
+    // A use can resume an account paused for quota: the providers are read behind it.
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(providerReads));
+    expect(redeem).toHaveBeenCalledTimes(1);
+  });
+
+  it('MH-QUOTA-085: a lock the server holds disables 「使用」 on a freshly opened page and again after a remount', async () => {
+    const quota = quotaWith({ lock: { reason: 'in_flight', kind: 'fable', since: new Date().toISOString() } });
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
+    const check = () => {
+      expect((within(account()).getByRole('button', { name: /^Using…$|^使用中…$/ }) as HTMLButtonElement).disabled).toBe(true);
+      expect(cardUseButton('Full').disabled).toBe(true);
+      // Another account's cards are its own.
+      expect((within(screen.getByRole('article', { name: 'ChatGPT Pro' })).getByRole('button', { name: /^Use Limit reset$|^使用 重置卡$/ }) as HTMLButtonElement).disabled).toBe(false);
+    };
+    await openWith(quota);
+    check();
+    cleanup();
+    await openWith(quota);
+    check();
+    expect(redeem).not.toHaveBeenCalled();
+  });
+
+  it('MH-QUOTA-086: says not used only when the server does; a lost answer holds the account until its refresh lands', async () => {
+    await openWith(quotaWith());
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
+    const user = userEvent.setup();
+    const use = async () => {
+      await user.click(cardUseButton('Fable'));
+      await user.click(confirmButton());
+    };
+
+    redeem.mockResolvedValueOnce({ quota: quotaWith(), use: { kind: 'fable', outcome: 'not_used', reason: 'cooldown', cleared: [] } });
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^Not used: one was used recently|^没有用掉：刚用过一张/);
+
+    // The server refused before asking the vendor: the account was busy, or holds no usable card.
+    const reads = () => vi.mocked(modelsApi.getQuota).mock.calls.length;
+    // Its refusal carries the fresh reading, drawn as it is.
+    let before = reads();
+    const locked = new ApiCallError('reset_card_locked', undefined, true, [], [], [], 409);
+    locked.quota = quotaWith({ fable: 2 });
+    redeem.mockRejectedValueOnce(locked);
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^Not used: this account can’t use this kind|^没有用掉：这个账号现在不能用这种卡/);
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    expect(reads()).toBe(before);
+
+    // No answer, or a server failure that names no outcome: the card may be spent. Nothing is
+    // retried, the quota is read again for the server's lock, and the account's own refresh
+    // landing a current reading frees the cards again.
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const failures = [
+      new ApiCallError('bad_response', 'Request deadline exceeded', false),
+      new ApiCallError('internal_error', undefined, true, [], [], [], 500),
+    ];
+    for (const [index, failure] of failures.entries()) {
+      before = reads();
+      redeem.mockRejectedValueOnce(failure);
+      await use();
+      expect((await within(account()).findByRole('alert')).textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+      await waitFor(() => expect(reads()).toBeGreaterThan(before));
+      expect(cardUseButton('Fable').disabled).toBe(true);
+      expect(cardUseButton('Full').disabled).toBe(true);
+      expect(redeem).toHaveBeenCalledTimes(3 + index);
+
+      // A refresh that is not yet this account's own reading (still being read, or its cards
+      // unread) leaves the doubt in place.
+      const stillReading = { ...quotaWith(), pending: ['src_claude'] };
+      const cardsUnread = quotaWith();
+      cardsUnread.sources[0] = { ...cardsUnread.sources[0], reset_cards: { state: 'unread', lock: null, cards: [] } };
+      for (const early of [stillReading, cardsUnread]) {
+        force.mockResolvedValueOnce(early);
+        await user.click(refreshButton('Claude Max'));
+        await waitFor(() => expect(refreshButton('Claude Max').disabled).toBe(false));
+        expect(within(account()).getByRole('alert').textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+      }
+      expect(force).toHaveBeenCalledTimes(2 + 3 * index);
+
+      force.mockResolvedValueOnce(quotaWith({ fable: 2, used: 0 }));
+      await user.click(refreshButton('Claude Max'));
+      await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
+      expect(force).toHaveBeenCalledTimes(3 + 3 * index);
+      expect(within(account()).getByText('×2')).toBeTruthy();
+      expect(cardUseButton('Fable').disabled).toBe(false);
+    }
+    expect(redeem).toHaveBeenCalledTimes(4);
+
+    // A refresh still being read when it answers is settled by the reading that completes it.
+    const timeouts = vi.spyOn(window, 'setTimeout');
+    redeem.mockRejectedValueOnce(new ApiCallError('bad_response', 'Request deadline exceeded', false));
+    await use();
+    expect((await within(account()).findByRole('alert')).textContent).toMatch(/^The provider’s answer didn’t arrive|^没收到供应商的结果/);
+    force.mockResolvedValueOnce({ ...quotaWith(), pending: ['src_claude'] });
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(refreshButton('Claude Max').disabled).toBe(false));
+    expect(within(account()).getByRole('alert')).toBeTruthy();
+    const reread = () => timeouts.mock.calls.filter(([, delay]) => delay === QUOTA_PENDING_REREAD_MS).at(-1);
+    await waitFor(() => expect(reread()).toBeTruthy());
+    vi.mocked(modelsApi.getQuota).mockResolvedValue(quotaWith({ fable: 4 }));
+    await act(async () => { (reread()![0] as () => void)(); });
+    await waitFor(() => expect(within(account()).queryByRole('alert')).toBeNull());
+    expect(within(account()).getByText('×4')).toBeTruthy();
+    expect(cardUseButton('Fable').disabled).toBe(false);
+  });
+
+  it('MH-QUOTA-090: a count that changed since it was shown is refused and redrawn from the server\'s reading, with no second request', async () => {
+    await openWith(quotaWith());
+    const redeem = vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
+    const refusal = new ApiCallError('reset_card_count_changed', undefined, true, [], [], [], 409);
+    refusal.quota = quotaWith({ fable: 2 });
+    redeem.mockRejectedValueOnce(refusal);
+    const reads = vi.mocked(modelsApi.getQuota).mock.calls.length;
+    const user = userEvent.setup();
+
+    await user.click(cardUseButton('Fable'));
+    await user.click(confirmButton());
+    expect(redeem).toHaveBeenCalledTimes(1);
+    expect(redeem).toHaveBeenCalledWith('src_claude', 'fable', 3);
+    expect((await within(account()).findByRole('status')).textContent).toMatch(/^The count changed; refreshed\.$|^张数变了，已刷新。$/);
+    expect(within(account()).getByText('×2')).toBeTruthy();
+    // Not a failure, and not a held account: the confirm step is left, and the next press is the user's.
+    expect(within(account()).queryByRole('alert')).toBeNull();
+    expect(within(account()).queryByRole('button', { name: /^Use it$|^确认使用$/ })).toBeNull();
+    expect(cardUseButton('Fable').disabled).toBe(false);
+    expect(vi.mocked(modelsApi.getQuota).mock.calls.length).toBe(reads);
+
+    redeem.mockResolvedValueOnce({ quota: quotaWith({ fable: 1 }), use: { kind: 'fable', outcome: 'used', reason: null, cleared: [] } });
+    await user.click(cardUseButton('Fable'));
+    await user.click(confirmButton());
+    expect(redeem).toHaveBeenLastCalledWith('src_claude', 'fable', 2);
+    expect(redeem).toHaveBeenCalledTimes(2);
+  });
+
+  it('MH-QUOTA-091: a confirm step whose card a later reading no longer offers, or whose account it shows locked, is dropped for good', async () => {
+    await openWith(quotaWith());
+    vi.spyOn(modelsApi, 'redeemResetCard').mockRejectedValue(new Error('no use expected here'));
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const user = userEvent.setup();
+
+    // The kind is gone from the next reading: no question is left without its 取消, and the other kinds are free.
+    await user.click(cardUseButton('Fable'));
+    force.mockResolvedValueOnce(quotaWith({ fable: 0 }));
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(within(account()).queryByRole('button', { name: /^Use it$|^确认使用$/ })).toBeNull());
+    expect(within(account()).queryByText(/^Spends 1\.|^用掉 1 张/)).toBeNull();
+    await waitFor(() => expect(cardUseButton('Full').disabled).toBe(false));
+
+    // Another page's use locks the account, then ends: the old question does not come back.
+    force.mockResolvedValueOnce(quotaWith());
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(cardUseButton('Fable').disabled).toBe(false));
+    await user.click(cardUseButton('Fable'));
+    force.mockResolvedValueOnce(quotaWith({ lock: { reason: 'in_flight', kind: 'all', since: new Date().toISOString() } }));
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(cardUseButton('Fable').disabled).toBe(true));
+    force.mockResolvedValueOnce(quotaWith());
+    await user.click(refreshButton('Claude Max'));
+    await waitFor(() => expect(cardUseButton('Fable').disabled).toBe(false));
+    expect(within(account()).queryByRole('button', { name: /^Use it$|^确认使用$/ })).toBeNull();
+    expect(within(account()).queryByText(/^Spends 1\.|^用掉 1 张/)).toBeNull();
+  });
+
+  it('MH-QUOTA-092: a press sends one POST of {kind, count} to the encoded Source, and each answer reads as what it says', async () => {
+    const id = 'src claude/1';
+    const unconfirmed = /^The provider’s answer didn’t arrive|^没收到供应商的结果/;
+    const notUsed = /^Not used\.$|^没有用掉。$/;
+    const held = /^Not used: this account can’t use this kind|^没有用掉：这个账号现在不能用这种卡/;
+    const rows: Array<{ answer: () => Response; line: RegExp; role: 'status' | 'alert'; reread: boolean }> = [
+      {
+        answer: () => Response.json({
+          ok: true, contract_version: 23, quota: quotaWith({ id, fable: 2 }),
+          use: { kind: 'fable', outcome: 'used', reason: null, cleared: ['five_hour', 'seven_day_overage_included'] },
+        }),
+        line: /^1 used\. The weekly usage spent on Fable|^用了 1 张。本周用在 Fable 上的额度已退回/, role: 'status', reread: false,
+      },
+      { answer: () => Response.json({ ok: false, error: 'invalid_parameter', detail: 'modelHub.errors.invalid_parameter' }, { status: 400 }), line: notUsed, role: 'alert', reread: true },
+      { answer: () => Response.json({ ok: false, error: 'forbidden' }, { status: 403 }), line: notUsed, role: 'alert', reread: true },
+      {
+        answer: () => Response.json({ ok: false, error: 'reset_card_unavailable', detail: 'modelHub.errors.reset_card_unavailable', quota: quotaWith({ id, fable: 2 }) }, { status: 409 }),
+        line: held, role: 'alert', reread: false,
+      },
+      { answer: () => Response.json({ ok: false, error: 'reset_card_locked' }, { status: 409 }), line: held, role: 'alert', reread: true },
+      { answer: () => Response.json({ ok: false, error: 'internal_error' }, { status: 500 }), line: unconfirmed, role: 'alert', reread: true },
+      { answer: () => Response.json({ ok: false, error: 'teapot' }, { status: 418 }), line: unconfirmed, role: 'alert', reread: true },
+      { answer: () => new Response('<html>bad gateway</html>', { status: 502 }), line: unconfirmed, role: 'alert', reread: true },
+    ];
+    for (const row of rows) {
+      const uses: Array<{ url: string; init?: RequestInit }> = [];
+      vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === '/api/csrf-token') return Response.json({ csrf_token: 'csrf' });
+        if (!url.includes('/reset-cards/')) return Response.json({ ok: false, error: 'not_stubbed' }, { status: 404 });
+        uses.push({ url, init });
+        return row.answer();
+      }));
+      await openWith(quotaWith({ id }));
+      const reads = vi.mocked(modelsApi.getQuota).mock.calls.length;
+      const user = userEvent.setup();
+      await user.click(cardUseButton('Fable'));
+      await user.click(confirmButton());
+
+      expect((await within(account()).findByRole(row.role)).textContent).toMatch(row.line);
+      expect(uses).toHaveLength(1);
+      expect(uses[0].url).toBe('/api/models/sources/src%20claude%2F1/reset-cards/use');
+      expect(uses[0].init?.method).toBe('POST');
+      expect(JSON.parse(String(uses[0].init?.body))).toEqual({ kind: 'fable', count: 3 });
+      if (row.reread) await waitFor(() => expect(vi.mocked(modelsApi.getQuota).mock.calls.length).toBeGreaterThan(reads));
+      else expect(vi.mocked(modelsApi.getQuota).mock.calls.length).toBe(reads);
+      if (!row.reread) expect(within(account()).getByText('×2')).toBeTruthy();
+
+      cleanup();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+      vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
+      vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
+    }
+  });
+
+  it('MH-QUOTA-089: only a reader the server lets spend cards is offered 「使用」; everyone else keeps the list and the refresh', async () => {
+    for (const capabilities of [capabilitiesFor('member'), capabilitiesFor('editor'), { ...OWNER_INSTANCE_CAPABILITIES, can_use_model_hub_reset_cards: false }]) {
+      await openWith(quotaWith(), capabilities);
+      const cards = within(account()).getByRole('region', { name: /^Limit resets$|^重置卡$/ });
+      expect(within(cards).getAllByRole('listitem')).toHaveLength(2);
+      expect(within(cards).queryAllByRole('button')).toHaveLength(0);
+      const force = vi.mocked(modelsApi.refreshQuota);
+      await userEvent.click(refreshButton('Claude Max'));
+      await waitFor(() => expect(force).toHaveBeenCalledTimes(1));
+      cleanup();
+      vi.restoreAllMocks();
+      vi.spyOn(modelsApi, 'getAgentProvenance').mockResolvedValue(null);
+      vi.spyOn(modelsApi, 'refreshAgentPresence').mockReturnValue(new Promise(() => {}));
+    }
+    // The Owner's page offers it.
+    await openWith(quotaWith());
+    expect(cardUseButton('Fable').disabled).toBe(false);
+  });
+
+  it('MH-QUOTA-087: an account\'s own refresh forces one read of every account and spins only on that account', async () => {
+    await openWith(quotaWith());
+    const force = vi.mocked(modelsApi.refreshQuota);
+    const read = deferred<QuotaSummary>();
+    force.mockReturnValueOnce(read.promise);
+    const providerReads = vi.mocked(modelsApi.listSources).mock.calls.length;
+    await userEvent.click(refreshButton('Claude Max'));
+    expect(force).toHaveBeenCalledTimes(1);
+    const spins = (name: string) => refreshButton(name).querySelector('svg')!.getAttribute('class')!.includes('animate-spin');
+    expect(spins('Claude Max')).toBe(true);
+    expect(spins('ChatGPT Pro')).toBe(false);
+    expect(refreshButton('Claude Max').disabled).toBe(true);
+    expect(refreshButton('ChatGPT Pro').disabled).toBe(true);
+    // The page's own refresh is held, and does not claim the read as its own.
+    const pageRefresh = screen.getByRole('button', { name: /^Refresh now$|^立即刷新$/ }) as HTMLButtonElement;
+    expect(pageRefresh.disabled).toBe(true);
+
+    await act(async () => { read.resolve(quotaWith()); });
+    await waitFor(() => expect(refreshButton('Claude Max').disabled).toBe(false));
+    expect(spins('Claude Max')).toBe(false);
+    expect(pageRefresh.disabled).toBe(false);
+    await waitFor(() => expect(vi.mocked(modelsApi.listSources).mock.calls.length).toBeGreaterThan(providerReads));
+    expect(force).toHaveBeenCalledTimes(1);
+  });
+});
+
 // How the Tools tab is READ. What it says once read is `ToolsTab.test.tsx`'s
 // subject; here the read is the tab's own, off the landing's first paint.
 describe('SettingsModelsPage tools region', () => {
@@ -2811,7 +3235,7 @@ describe('SettingsModelsPage tools region', () => {
   it('connects active Tools service details to settings and the ordinary model Source key management', async () => {
     const put = vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue({ tools: [ACTIVE_SEARCH] });
     renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
-    await screen.findByRole('button', { name: 'Add provider' });
+    await screen.findByRole('button', { name: 'Add API key' });
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     const opener = await screen.findByRole('button', { name: 'DeepSeek' });
     await userEvent.click(opener);
@@ -2827,9 +3251,21 @@ describe('SettingsModelsPage tools region', () => {
     expect(await screen.findByRole('dialog', { name: 'Add search service' })).toBeTruthy();
   });
 
+  it('treats search services as no model provider: the routes offer no add-model step yet', async () => {
+    renderPage(SEARCH_SOURCES.filter((source) => source.protocol === 'search'), [emptyVibeyAgent], runtime, { tools: [ACTIVE_SEARCH] });
+    expect(await screen.findByText(/^Add a model provider and its models will be listed here\.$|^添加模型供应商后，这里会列出它提供的模型。$/)).toBeTruthy();
+    expect(screen.queryByText(/^This backend's model list is empty$|^这个后端的模型列表是空的$/)).toBeNull();
+  });
+
+  it('offers the add-model step once a model provider exists', async () => {
+    renderPage([retainedSource], [emptyVibeyAgent]);
+    expect(await screen.findByText(/^This backend's model list is empty$|^这个后端的模型列表是空的$/)).toBeTruthy();
+    expect(screen.queryByText(/^Add a model provider and its models will be listed here\.$|^添加模型供应商后，这里会列出它提供的模型。$/)).toBeNull();
+  });
+
   it('MH-USAGE-038: leaves a service detail for the Usage tab, whose window the detail read never moved', async () => {
     renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
-    await screen.findByRole('button', { name: 'Add provider' });
+    await screen.findByRole('button', { name: 'Add API key' });
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Exa' }));
     await userEvent.click(await screen.findByRole('button', { name: 'View usage' }));

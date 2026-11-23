@@ -11,22 +11,22 @@ extend a previously received permission past its independent expiry timer.
 ## Present product behavior
 
 The production binary resolver consumes only a verified installation matching
-Avibe's packaged published release pin. The pin still ships **pending**, so no
-product binary is available yet. There is no environment variable or
-configuration field for an arbitrary executable, and no automatic installation.
-`vibe remote direct install [--offline] [--json]` is an Owner-only, explicit
-installation command; it does not change the setting or pairing. An already
-opted-in owner can start the installed binary after its ordinary gates pass.
+Avibe's packaged published release pin. An opted-in, paired instance with a
+managed hostname installs a missing pin through the same verified installer as
+`vibe remote direct install [--offline] [--json]`. That explicit command remains
+available and does not change the setting or pairing. There is no configuration
+or environment override for the executable. Only normal resolution of the pin,
+including any trial compatibility check, can authorize the next lifecycle step.
 See [managed runtime preparation](remote-direct-managed-runtime.md) for the
 manifest and the gated regression handoff.
 
-With the setting off, observation does not inspect a binary, bind a socket,
-spawn a child, call the certificate client or create direct certificate files.
-With it on and the pin pending or the matching binary absent, a managed paired
-instance reports `transport-not-installed`: **it orders no certificate and
-starts neither ingress nor supervisor**. Tests use inert archives and injected
-transports. Native installation, the settings page and real iroh/Incus acceptance
-remain separate operational work.
+With the setting off, observation does not inspect or install a binary, bind a
+socket, spawn a child, call the certificate client or create direct certificate
+files. During installation the owner reports `installing`; failure reports
+`error` / `transport_install_failed`, with exponential retry from 30 seconds up
+to 15 minutes. A pending manifest or failed integrity check cannot start direct.
+At most one install worker runs. An install admitted before opt-out can finish
+on disk, but cannot authorize a certificate, ingress, child or publication.
 
 ## Single owner and ordering
 
@@ -164,7 +164,7 @@ never grants a nonexistent local owner permission to order.
 ## Status and platform limits
 
 The closed state set is `disabled`, `waiting-permission`, `waiting-certificate`,
-`transport-not-installed`, `starting`, `running`, `stopping`, `error`. The safe
+`transport-not-installed`, `installing`, `starting`, `running`, `stopping`, `error`. The safe
 projection contains only the setting, state/reason, certificate expiry,
 transport-running flag and current permission boolean. It contains no address,
 endpoint ID/key, token, or private-key file path. Transport running means the

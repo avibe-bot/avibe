@@ -351,7 +351,7 @@ impl RuntimeState {
         if self.lifecycle.recovering() {
             let visible = self
                 .app
-                .get_webview_window("main")
+                .get_window(crate::MAIN_WINDOW)
                 .is_some_and(|window| window.is_visible().unwrap_or(false));
             let directive = self.lifecycle.retry_recovery(
                 self.capabilities.current(),

@@ -10,6 +10,9 @@ export type PetIntent = 'listen' | 'show' | 'release';
 export type PetLayout = {
   panel_side: 'left' | 'right';
   panel_edge: 'top' | 'bottom';
+  /** How far (CSS px) the column moves right (negative: left) of its place
+   * centred on Vibey, so a pet near a display's side opens it whole there. */
+  column_offset: number;
 };
 
 /** The shell's binding, and the revision it was at. */
@@ -35,6 +38,9 @@ export const PET_BOUND_EVENT = 'avibe:pet-bound';
 export const PET_HOVER_EVENT = 'avibe:pet-hover';
 /** The shell's layout snapshot `{ revision, layout }`: the page draws it. */
 export const PET_LAYOUT_EVENT = 'avibe:pet-layout';
+/** The shell resized the window while hiding it, `{ token, height }`: the page
+ *  answers once it has drawn at that height, and the shell shows it again. */
+export const PET_FRAME_EVENT = 'avibe:pet-frame';
 
 /** A window-local rect that takes the mouse; `hover` marks Vibey's hover zone. */
 export type PetHitRect = { x: number; y: number; width: number; height: number; hover?: boolean };
@@ -42,7 +48,7 @@ export type PetHitRect = { x: number; y: number; width: number; height: number; 
 // Outside the shell, `{ binding, revision }` as JSON: the dev stand-in for
 // `pet.json` and the shell's revision counter.
 const DEV_BINDING_KEY = 'avibe.pet.devBinding';
-const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
+const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom', column_offset: 0 };
 
 type TauriInternals = { invoke: (command: string, args?: Record<string, unknown>) => Promise<unknown> };
 
@@ -59,6 +65,8 @@ const parseLayout = (value: unknown): PetLayout => {
   return {
     panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
     panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
+    // Older shells send none: the column stays centred on Vibey.
+    column_offset: typeof layout?.column_offset === 'number' && Number.isFinite(layout.column_offset) ? Math.round(layout.column_offset) : 0,
   };
 };
 
@@ -177,14 +185,26 @@ export const petBridge = {
    * the pet (resolves once the drop is placed; its layout arrives as a
    * snapshot), else with the window's own `start_dragging`.
    */
-  drag: async (): Promise<void> => {
+  /** Where the pointer is in this window and whether the primary button is
+   * down, as the shell sees it; `null` from a shell that cannot say. */
+  pointer: async (): Promise<{ x: number; y: number; down: boolean | null } | null> => {
+    const invoke = shellInvoke();
+    if (!invoke) return null;
+    const value = await invoke('pet_pointer') as { x?: unknown; y?: unknown; down?: unknown } | null;
+    if (!value || typeof value.x !== 'number' || typeof value.y !== 'number') return null;
+    return { x: value.x, y: value.y, down: typeof value.down === 'boolean' ? value.down : null };
+  },
+
+  /** `press`: where the press was, in the window's CSS px; the shell keeps
+   * that point of Vibey under the pointer for the whole drag. */
+  drag: async (press?: { x: number; y: number }): Promise<void> => {
     const invoke = shellInvoke();
     if (!invoke) return;
     if (!petBridge.shellDrags()) {
       void invoke('plugin:window|start_dragging');
       return;
     }
-    await invoke('pet_drag');
+    await invoke('pet_drag', press ? { x: press.x, y: press.y } : undefined);
   },
 
   /**
@@ -226,6 +246,34 @@ export const onPetHover = (handler: (hover: boolean) => void): (() => void) => {
   const listener = (event: Event) => handler((event as CustomEvent<{ hover?: unknown }>).detail?.hover === true);
   window.addEventListener(PET_HOVER_EVENT, listener);
   return () => window.removeEventListener(PET_HOVER_EVENT, listener);
+};
+
+/** Answer each resize once a frame has been drawn at its height: two
+ *  animation frames after the viewport reached it (the first may still paint
+ *  the old size). Returns the unsubscribe function. */
+export const answerPetResizes = (): (() => void) => {
+  let pending: { token: number; height: number } | null = null;
+  const drawn = (token: number) => requestAnimationFrame(() => requestAnimationFrame(() => {
+    void shellInvoke()?.('pet_frame_drawn', { token }).catch(() => undefined);
+  }));
+  const check = () => {
+    if (!pending || Math.abs(window.innerHeight - pending.height) >= 1) return;
+    const { token } = pending;
+    pending = null;
+    drawn(token);
+  };
+  const frame = (event: Event) => {
+    const detail = (event as CustomEvent<{ token?: unknown; height?: unknown }>).detail;
+    if (typeof detail?.token !== 'number' || typeof detail?.height !== 'number') return;
+    pending = { token: detail.token, height: detail.height };
+    check();
+  };
+  window.addEventListener(PET_FRAME_EVENT, frame);
+  window.addEventListener('resize', check);
+  return () => {
+    window.removeEventListener(PET_FRAME_EVENT, frame);
+    window.removeEventListener('resize', check);
+  };
 };
 
 /** Subscribe to shell events; returns the unsubscribe function. */

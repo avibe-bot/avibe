@@ -6,11 +6,8 @@ import {
   type UpgradeResult,
 } from '../context/ApiContext';
 import { AlertCircle, GitCommitHorizontal } from 'lucide-react';
-import {
-  badgeVariants,
-  interactiveBadgeTriggerClassName,
-  mobileHeaderPopoverClassName,
-} from './ui/badge-variants';
+import { mobileHeaderPopoverClassName } from './ui/badge-variants';
+import { VersionChip } from './VersionChip';
 import { cn } from '@/lib/utils';
 import { setConfigField } from '@/lib/configMutations';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
@@ -23,6 +20,7 @@ import {
   type DesktopUpdateState,
 } from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
+import { DESKTOP_CLIENT_STATE_EVENT, hasDesktopClient, isClientProjection, isNewerClientState, type DesktopClientProjection } from '../desktop/bridge';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import type { PanelModels, UpdatePanelActions } from './update/UpdatePanel';
@@ -30,6 +28,9 @@ import { lazyPage } from '../lib/lazyPage';
 import type { UpdatePanelModel } from './update/updatePanelModel';
 import { normalizeVersion, remoteRequestSettled } from './update/versions';
 import { useAcceptedInstall } from './update/useAcceptedInstall';
+import { useFollowInstall, useReadOnReturn } from './update/useFollowInstall';
+import { useDesktopClientProjection, usePresentDesktopClient } from '../desktop/useDesktopClient';
+import { InstanceVersionChip } from '../desktop/InstanceVersionChip';
 
 
 // Its own chunk: the first screen draws only the badge (scripts/check-first-load-budget.mjs).
@@ -53,14 +54,27 @@ const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
 // A check or setting change the host has not answered by then is reported from its receipt as it stands.
 const CONTROL_REQUEST_TIMEOUT_MS = 2 * 60_000;
 
-export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = false }) => {
+function ShownInstanceVersion({ name, appUpdate, size }: { name: string; appUpdate: boolean; size: 'chip' | 'row' }) {
+  const present = usePresentDesktopClient();
+  return <InstanceVersionChip name={name} appUpdate={appUpdate} size={size} onPresent={() => present('updates')} />;
+}
+
+/** The version of the Avibe this page belongs to, and its update panel. Inside the desktop app on another
+ *  computer's instance the page shows that instance's version and leaves the panel to the shell, which draws
+ *  it for the instance and for this computer's app together (ui/design: update/instance-and-app). */
+export const VersionBadge: React.FC<{
+  openUpward?: boolean;
+  /** `row`: in the desktop app's bottom row (`VersionChip`'s `row`). */
+  size?: 'chip' | 'row';
+}> = ({ openUpward = false, size = 'chip' }) => {
+  const client = useDesktopClientProjection();
   const { t } = useTranslation();
   const api = useApi();
   const { capabilities } = useInstanceAuthorization();
   const inDesktopShell = isDesktopShell();
   const isDesktop = useIsDesktop();
   const shellActions = React.useMemo(() => desktopUpdateShellActions(), []);
-  const [desktopActions, setDesktopActions] = React.useState<DesktopUpdateShellActions | null>(shellActions);
+  const [desktopActions, setDesktopActions] = React.useState<DesktopUpdateShellActions | null>(null);
   const [desktopUpdaterStatus, setDesktopUpdaterStatus] = React.useState<'pending' | 'available' | 'unavailable'>(
     shellActions ? 'pending' : 'unavailable',
   );
@@ -262,29 +276,93 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     };
   }, [api, followedControlId]);
 
-  const readDesktopUpdateState = async (): Promise<DesktopUpdateState | null> => {
-    const actions = desktopActions;
-    if (!actions) return null;
-    try {
-      const state = await actions.getState();
-      setDesktopUpdateState(state);
-      if (state.remoteRequest?.phase === 'awaiting_host') setIsPopupOpen(true);
-      setDesktopUpdaterStatus('available');
-      return state;
-    } catch (error) {
-      // A newer Workbench can be adopted by an older shell whose generic
-      // Tauri IPC exists but does not know the desktop updater commands.
-      // Treat the command rejection as the compatibility boundary and fall
-      // back to the legacy deep link plus Runtime version reads.
-      setDesktopActions(null);
-      setDesktopUpdaterStatus('unavailable');
-      setDesktopUpdateState(null);
-      throw error;
-    }
-  };
+  const probeOwner = React.useRef<{
+    active: boolean; local: boolean; admitted: boolean; sequence: number;
+    pending: Promise<DesktopUpdateState | null> | null; followup: boolean;
+    projection: DesktopClientProjection | null;
+  }>({ active: false, local: true, admitted: false, sequence: 0, pending: null, followup: false, projection: null });
+  // Keep the stable IPC facade after a candidate/old-shell refusal. Only a new
+  // successful native read restores actions; client projections are wakeups.
+  const readDesktopUpdateState = React.useCallback(function probe(): Promise<DesktopUpdateState | null> {
+    const owner = probeOwner.current;
+    if (!shellActions || !owner.active || !owner.local) return Promise.resolve(null);
+    if (owner.pending) return owner.pending;
+    const sequence = ++owner.sequence;
+    const current = () => owner.active && owner.local && owner.sequence === sequence;
+    const request = (async () => {
+      try {
+        const state = await shellActions.getState();
+        if (!current()) return null;
+        owner.admitted = true;
+        setDesktopActions(shellActions);
+        setDesktopUpdateState(state);
+        if (state.remoteRequest?.phase === 'awaiting_host') setIsPopupOpen(true);
+        setDesktopUpdaterStatus('available');
+        return state;
+      } catch (error) {
+        if (!current()) return null;
+        // Unknown commands retain the legacy fallback. Admission refusal can
+        // recover on a later local completion without remounting or polling.
+        owner.admitted = false;
+        setDesktopActions(null);
+        setDesktopUpdaterStatus('unavailable');
+        setDesktopUpdateState(null);
+        throw error;
+      } finally {
+        if (owner.sequence === sequence) {
+          owner.pending = null;
+          if (owner.followup && owner.active && owner.local) {
+            owner.followup = false;
+            void probe().catch(() => undefined);
+          }
+        }
+      }
+    })();
+    owner.pending = request;
+    return request;
+  }, [shellActions]);
+
+  // Register before the initial timed probe: publication can follow React mount
+  // while the first request is still waiting for native admission.
+  React.useEffect(() => {
+    const owner = probeOwner.current;
+    owner.active = true;
+    const initial = hasDesktopClient() ? window.__AVIBE_DESKTOP_CLIENT_STATE__ : null;
+    owner.projection = isClientProjection(initial) ? initial : null;
+    owner.local = !owner.projection || owner.projection.connection.committed.kind === 'local';
+    const update = (event: Event) => {
+      const next: unknown = (event as CustomEvent).detail;
+      if (!hasDesktopClient() || !isClientProjection(next) || !isNewerClientState(next, owner.projection)) return;
+      const retired = owner.projection !== null && next.generation !== owner.projection.generation;
+      owner.projection = next;
+      owner.local = next.connection.committed.kind === 'local';
+      if (!owner.local || retired) {
+        owner.admitted = false;
+        owner.sequence += 1;
+        owner.pending = null;
+        owner.followup = false;
+        setDesktopActions(null);
+        setDesktopUpdateState(null);
+        setDesktopUpdaterStatus(owner.local ? 'pending' : 'unavailable');
+        setIsPopupOpen(false);
+        if (!owner.local) return;
+      }
+      if (owner.pending) owner.followup = true;
+      else void readDesktopUpdateState().catch(() => undefined);
+    };
+    window.addEventListener(DESKTOP_CLIENT_STATE_EVENT, update);
+    return () => {
+      window.removeEventListener(DESKTOP_CLIENT_STATE_EVENT, update);
+      owner.active = false;
+      owner.admitted = false;
+      owner.sequence += 1;
+      owner.pending = null;
+      owner.followup = false;
+    };
+  }, [readDesktopUpdateState]);
 
   const waitForDesktopUpdate = async (): Promise<DesktopUpdateState | null> => {
-    if (!desktopActions) return null;
+    if (!shellActions) return null;
     while (true) {
       const state = await readDesktopUpdateState();
       if (!state || !['checking', 'downloading', 'installing'].includes(state.phase)) {
@@ -299,7 +377,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   // just finished shows at once.
   const checkVersion = async (fresh = false) => {
     setChecking(true);
-    const actions = desktopActions;
+    const actions = fresh ? desktopActions : shellActions;
     const rereadVersion = fresh || Boolean(actions);
     let nativeStateAvailable = false;
     try {
@@ -335,18 +413,19 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   React.useEffect(() => {
     if (!inDesktopShell) return;
     const handleOpenUpdates = (event: Event) => {
-      if (!desktopActions || desktopUpdaterStatus !== 'available') return;
+      if (!probeOwner.current.active || !probeOwner.current.local || !probeOwner.current.admitted || !desktopActions || desktopUpdaterStatus !== 'available') return;
       window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
       event.preventDefault();
       setIsPopupOpen(true);
       void readDesktopUpdateState().then((state) => {
-        if (!state?.remoteRequest || TERMINAL_REMOTE_PHASES.includes(state.remoteRequest.phase)) {
+        if (!state || !probeOwner.current.admitted || !probeOwner.current.local) return;
+        if (!state.remoteRequest || TERMINAL_REMOTE_PHASES.includes(state.remoteRequest.phase)) {
           void checkVersion(true);
         }
       }).catch(() => undefined);
     };
     window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
-    if (desktopActions && desktopUpdaterStatus === 'available') {
+    if (probeOwner.current.admitted && desktopActions && desktopUpdaterStatus === 'available') {
       // Page load is earlier than listener readiness. This notification cannot
       // create an open request; it only lets the shell deliver one it retained.
       // Older shells lack the command and keep the existing event-only path.
@@ -362,7 +441,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     let active = true;
     let unlisten: (() => Promise<void>) | null = null;
     void listenDesktopUpdateState((state) => {
-      if (!active) return;
+      if (!active || !probeOwner.current.active || !probeOwner.current.local || !probeOwner.current.admitted) return;
       setDesktopUpdateState(state);
       if (state.remoteRequest?.phase === 'awaiting_host') setIsPopupOpen(true);
       setChecking(state.phase === 'checking');
@@ -548,6 +627,16 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
+  // A standalone Runtime's install this page did not start (another page, the CLI, the automatic update):
+  // shown as running, and followed to its end.
+  const { running: followingInstall, receive: receiveVersion } = useFollowInstall(versionInfo, setVersionInfo, !isDesktopManaged && !upgrading && !restarting);
+  // An install may have started since this page last read the version: it reads again, quietly, when its
+  // window comes back to the front.
+  const standalone = Boolean(versionInfo) && !isDesktopManaged;
+  useReadOnReturn(standalone && !upgrading && !restarting, React.useCallback(() => {
+    void api.getVersion({ cache: false, background: true }).then(receiveVersion).catch(() => undefined);
+  }, [api, receiveVersion]));
+
   const requestSettled = remoteRequestSettled(remoteRequest, versionInfo?.current ?? '');
   const remoteRequestId = remoteDesktopWeb && !requestSettled ? remoteRequest?.request_id : undefined;
   React.useEffect(() => {
@@ -667,9 +756,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   };
   const manager = capabilities.can_manage_instance;
   const settingsBusy = savingPrereleases || savingAutoUpdate || checking || upgrading || restarting
-    || Boolean(followedControlId);
+    || followingInstall || Boolean(followedControlId);
   const panelActions: UpdatePanelActions = { close: () => setIsPopupOpen(false), settingsBusy };
-  const checkDisabled = checking || restarting || refreshBlockedByRemoteRequest || Boolean(followedControlId);
+  const checkDisabled = checking || restarting || followingInstall || refreshBlockedByRemoteRequest || Boolean(followedControlId);
   if (nativeModel) {
     // The desktop app's own updater, over its IPC.
     const actions = desktopUpdateState.hostActions;
@@ -706,10 +795,18 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     // A standalone Runtime checks live and keeps both settings in its own config.
     panelActions.check = { run: refresh, disabled: checkDisabled };
     if (manager && !isSourceBuild) {
-      panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading };
+      panelActions.update = { run: () => void handleUpgrade(), disabled: upgrading || followingInstall };
       if (prereleases !== null) panelActions.setPrereleases = (enabled) => void handlePrereleasesToggle(enabled);
       if (autoUpdate !== null) panelActions.setAutoUpdate = (enabled) => void handleAutoUpdateToggle(enabled);
     }
+  }
+
+  // On another computer's instance the shell owns the panel; this page keeps no popover and no updater IPC.
+  if (client?.connection.committed.kind === 'remote') {
+    // At desktop width the bottom row carries that chip; a badge kept mounted but hidden there (the Settings
+    // header's) would only read the version a second time.
+    if (isDesktop) return null;
+    return <ShownInstanceVersion name={client.connection.committed.name} appUpdate={client.desktop.update.phase === 'available'} size={size} />;
   }
 
   return (
@@ -717,27 +814,21 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
         <PopoverTrigger asChild>
-          <button
-            type="button"
+          <VersionChip
+            size={size}
             onClick={handleBadgeClick}
             // Fetch the panel's chunk as the pointer or focus arrives, before the click opens it.
             onPointerEnter={() => void UpdatePanel.preload()}
             onFocus={() => void UpdatePanel.preload()}
-            className={cn(
-              badgeVariants({ variant: hasUpdate || hasVersionSkew ? 'warning' : 'secondary' }),
-              interactiveBadgeTriggerClassName,
-              'relative rounded-md font-medium tracking-normal hover:brightness-110 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
-            )}
+            attention={hasUpdate || hasVersionSkew}
+            updateDot={hasUpdate}
             title={badgeTitle}
             aria-controls={popupId}
           >
             {hasVersionSkew && <AlertCircle size={12} aria-hidden="true" />}
             {isSourceBuild ? <GitCommitHorizontal size={12} /> : t('dashboard.versionPrefix')}
             {displayVersion}
-            {hasUpdate && (
-              <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold animate-pulse" />
-            )}
-          </button>
+          </VersionChip>
         </PopoverTrigger>
 
         {/* Popup */}

@@ -13,7 +13,9 @@ Welcome → email → six-digit email OTP → instance selection. Preserve the s
 account, instance ownership/sharing, availability and recovery semantics. A uses
 Avibe's high-resolution cloud mascot, subtle mint/cyan/violet background, raised
 rounded surfaces and pill actions. Every approved design exists in Chinese and English,
-and light and dark. No Apple/Google/GitHub choices or browser-login instructions.
+and light and dark. The original contract had no Apple/Google/GitHub choices or
+browser-login instructions; the owner reversed that on 2026-11-18 (see Sign-in
+providers below). There are still no browser-login instructions.
 
 Acceptance invariants:
 
@@ -33,6 +35,39 @@ Acceptance invariants:
 - Scope is `ui/design/` only. No new tokens, dependencies, production components,
   authentication/native/backend behavior, runtime/config changes or plans edits.
 
+## Sign-in providers (approved, 2026-11-18)
+
+Owner decisions 2026-11-18: the App signs in with Google, GitHub and Sign in
+with Apple as well as email. Google and GitHub run in the system sign-in
+window (`ASWebAuthenticationSession`), Apple in its native sheet; the bundled
+page only starts them. The owner picked layout B at 13:12:
+
+- Welcome keeps email as the one primary action, 「使用邮箱继续」 /
+  "Continue with email", and the large Vibey illustration. Below avibe.bot's
+  divider 「或」 / "or" one row holds three round marks in avibe.bot's login
+  card order, then Apple: Google, GitHub, Apple. Each mark is 48 pt and is
+  labelled for VoiceOver with the full wording: 「使用 Google 继续」,
+  「使用 GitHub 继续」, and Apple's own Simplified Chinese title
+  「通过 Apple 继续」 / "Continue with Apple".
+- Google and GitHub use Google's light sign-in button theme in both
+  appearances (`provider-button` tokens): `#FFFFFF` fill, `#747775` outline,
+  `#1F1F1F` mark; Google allows its light, dark or neutral theme on any
+  background. Apple keeps its HIG styles (`apple-sign-in` tokens): white with
+  a black outline on light, white on dark. So in dark mode all three are
+  white circles of equal weight (Product, 2026-11-18).
+- A mark appears only while avibe.bot advertises its provider for the App
+  (`mobile_providers`); with none, Welcome is email alone, as before.
+- Unlike the avibe.bot card, where the providers come first, email stays
+  first here because the App expects most people to use it (owner: hierarchy
+  by expected use).
+- A provider sign-in that did not finish says so in one line above the email
+  button (`welcome/providers-row-error`); closing the window or sheet says
+  nothing.
+- An account a provider sign-in in the App just created, with no instances,
+  shows one small grey line right after the install hint, ending in a text
+  link 「退出登录」 (`empty/new-account`). No card and no button: most people
+  there are new, and the install choices stay the main path.
+
 ## Frame inventory
 
 Prefix IDs with `mobile-app/`; append `-zh` or `-en` to approved states. Existing
@@ -41,16 +76,15 @@ flow, and `account/long-email` verifies the account wrapping policy.
 
 | File / surface | States |
 | --- | --- |
-| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `success`, `code-small` |
-| `instances` | `own`, `mixed`, `current`, `offline`, `offline-tapped`, `loading`, `error`, `pulling`, `refreshing`, `long-small` |
-| `empty` | `default` (desktop + CLI choices), `cli` |
+| `welcome` | `intro`, `default` (email entry), `email-invalid`, `sending`, `email-rate-limited`, `email-network-error`, `code-sent` (blank), `code-partial`, `code-ready`, `verifying`, `code-invalid`, `code-expired`, `rate-limited`, `network-error`, `resending`, `resend-success` (60s), `resend-failed` (15s), `code-small`, `providers-row`, `providers-row-error` |
+| `empty` | `default` (desktop + CLI choices), `cli`, `new-account` |
 | `account` | `default`, `no-instance`, `long-email` |
 | `native` | `instance-error`, `window-topbar` |
 | `alignment` — shipped references, no locale suffix | `account-reference`, `error-reference` |
 
-**72 approved frames / 144 theme captures**, plus 2 shipped references / 4
-captures. `welcome/success` immediately presents the existing picker composition;
-there is no invented success detour. Frames normally use 390 × 844. Long email
+**50 approved frames / 100 theme captures**, plus 2 shipped references / 4
+captures. The instance list after sign-in is the instance sheet's full page
+(`switcher/first-run`). Frames normally use 390 × 844. Long email
 and long instance names also use 375 × 667. `compact` is a fixture for the small
 OTP composition: smaller illustration and tighter header spacing make room for
 the full email; implementation adapts to available height and keyboard insets.
@@ -66,8 +100,7 @@ All A drafts live in `ui/design/kit/mobile-app.tsx`; no competing direction kit.
 | `WelcomePage` | Mascot-led welcome with a friendly invitation | Existing `assets/mascot/cloud-tuanzi-v2.png` at `size-52` inside `size-64`; `shadow-mint-card-lg`, `mint`, `surface`, `rounded-full` |
 | `WelcomeIntro`, `CodeInput` | Email form and six-cell OTP state display | Existing `vibey-message.png`; Input/Label; `rounded-3xl`, `p-6`, `shadow-mint-card`; cells `grid-cols-6 gap-2 aspect-square rounded-2xl text-2xl`; ring uses `mint`, invalid uses `destructive` / `destructive-ink` |
 | `Primary` | Full-width primary action | Brand Button, `size=lg`, `rounded-full`, `shadow-mint-card-sm` |
-| `InstanceRow`, `InstancePicker` | Identity, host, ownership, availability and current selection | Button composition; shipped Badge success/secondary/info/outline; `p-5`, `gap-3`, `size-11`, `rounded-3xl`, `border-border`, `bg-surface/80`, `shadow-mint-card-sm` |
-| `InstanceSkeleton` | Same row footprint before data arrives, static here | Shipped Skeleton; text/icon/badge geometry matches the instance card; shipped SkeletonShimmer and handover tokens are the implementation source |
+| `InstanceRow` (inside `AccountPage`) | Identity, host, ownership, availability and current selection | Button composition; shipped Badge success/secondary/info/outline; `p-5`, `gap-3`, `size-11`, `rounded-3xl`, `border-border`, `bg-surface/80`, `shadow-mint-card-sm` |
 | `EmptyInstancesPage` | Desktop and CLI installation/pairing guidance | Existing icons, raised surface, Button, `surface-2`, `font-mono` only for actual commands |
 | `AccountPage` | Actual account/sign-out component, wrapping override, current instance, full-row switch | MoreAccountSection, InstanceRow, outline Button, existing radius/shadow tokens |
 | `NativeInstanceError` | Instance failure and retry/switch recovery | Existing AlertTriangle, `gold-ink`, raised identity card, brand/outline Button |
@@ -325,9 +358,15 @@ need a visible offer of their source code (`packaging/iroh-apple`, #3551). The
 App's own surface is Account, so its new About section opens 开源许可 /
 Open-source licenses. The page reuses the A composition (`CloudScreen`,
 `Brand`, `PageTitle`, the raised card) and adds no tokens or assets.
-The entry and page body are the shipped `LicensesEntry` and `LicensesContent`
+The entry and page body are the shipped `AboutSection` and `LicensesContent`
 (`ui/src/mobile/LicensesPage.tsx`); `LicensesScreen` and Account's `licenses`
-flag in `ui/design/kit/mobile-app.tsx` place them in the A screen. The App
+flag in `ui/design/kit/mobile-app.tsx` place them in the A screen. Above
+About, Account has one row, 账号与数据 / Account and data, which pushes a page
+(`switcher/account-data`) holding 隐私政策 / Privacy policy and, as one plain
+red line at the very bottom, 删除账号 / Delete account (owner, 2026-11-17:
+not on Account's first screen; red text only, no card, icon or hint). Both open avibe.bot
+pages inside the App (`app.openPage`); deletion uses the App's sign-in and
+returns to Welcome once the session reads signed out. The App
 reads `licenses.json`, generated by `ios/scripts/app_licenses.py` from the
 notices of the JavaScript the bundle ships and, once the iroh pin is published,
 the published native notices; the frame fixture is illustrative.
@@ -362,14 +401,16 @@ versions and attribution), and reflowing never merges a heading underline
 ## Instance sheet — approved
 
 Status: **approved** by the owner on 2026-11-14 at 13:23 Asia/Shanghai: variant
-A now, variant B with Runtime 3.2.7. It replaces the switching use of
-`instances/current` and the instance half of `account/*`; those frames are
-removed when the sheet ships. The avatar on an instance's header opens a native sheet over the
+A now, variant B with Runtime 3.2.7. It replaced the instance list frames
+(`instances/*` and `welcome/success`, removed). The avatar on an instance's header opens a native sheet over the
 live instance: where you are, the other instances by recent use, Add, and the
 account as its last row (a page pushed inside the sheet). Drag down, ✕ or the
-current instance return. First use keeps a full page with the same rows. Plan,
+current instance return. The full page (first use, or an instance selected
+but none open) draws the same list: with a selection it shows the current
+block and the others by recent use under the sheet's title, and the current
+block opens that instance again (`switcher/page-switching`, `page-switching-stale`). Plan,
 variants A/B, desktop consistency and build notes:
-`docs/plans/2026-11-13-ios-instance-pages.md`. The frames `switcher/*` (20
+`docs/plans/2026-11-13-ios-instance-pages.md`. The frames `switcher/*` (23
 states × zh/en, light and dark) draw the shipped pages; the kit
 `ui/design/kit/mobile-instance-sheet.tsx` keeps only what the web cannot render:
 the native sheet, the gestures, and the native failure screen.

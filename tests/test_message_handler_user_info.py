@@ -88,7 +88,7 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
         metadata = await handler.prepare_input_metadata(context, human=True)
         result = metadata.render("hello", types.SimpleNamespace(include_time_info=False))
 
-        self.assertEqual(result, "[Alex<U0E0FM3QT>]\nhello")
+        self.assertEqual(result, "[Alex<U0E0FM3QT>]\n[Source: unknown]\nhello")
 
     async def test_prepend_user_info_uses_display_name_when_present(self):
         handler = MessageHandler(_StubController({"display_name": "Alex Chen", "real_name": "Alex", "name": "cyh"}))
@@ -97,7 +97,7 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
         metadata = await handler.prepare_input_metadata(context, human=True)
         result = metadata.render("hello", types.SimpleNamespace(include_time_info=False))
 
-        self.assertEqual(result, "[Alex Chen<U0E0FM3QT>]\nhello")
+        self.assertEqual(result, "[Alex Chen<U0E0FM3QT>]\n[Source: unknown]\nhello")
 
     async def test_prepend_message_metadata_includes_time_above_user_info(self):
         handler = MessageHandler(_StubController({"display_name": "", "real_name": "Alex", "name": "cyh"}))
@@ -108,7 +108,7 @@ class MessageHandlerUserInfoTests(unittest.IsolatedAsyncioTestCase):
         metadata = await handler.prepare_input_metadata(context, human=True)
         result = metadata.render("hello", handler.config, now=datetime(2026, 5, 13, 11, 42, 8, tzinfo=timezone(timedelta(hours=8))))
 
-        self.assertEqual(result, "[Now: 2026-05-13 11:42:08 UTC+08:00]\n[Alex<U0E0FM3QT>]\nhello")
+        self.assertEqual(result, "[Now: 2026-05-13 11:42:08 UTC+08:00]\n[Alex<U0E0FM3QT>]\n[Source: unknown]\nhello")
 
     async def test_prepend_message_metadata_can_include_time_without_user_info(self):
         handler = MessageHandler(_StubController({"display_name": "", "real_name": "Alex", "name": "cyh"}))

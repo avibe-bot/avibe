@@ -34,7 +34,7 @@ export const quickReplyOptions = (message: WorkbenchMessage): string[] => {
 
 export const quickReplyChosen = (message: WorkbenchMessage): string | null => {
   const chosen = (message.content as { quick_reply_chosen?: unknown } | null | undefined)?.quick_reply_chosen;
-  return typeof chosen === 'string' && chosen ? chosen : null;
+  return typeof chosen === 'string' ? chosen : null;
 };
 
 const isAgentResult = (message: WorkbenchMessage): boolean =>
@@ -88,7 +88,7 @@ export const openQuickReplies = (messages: WorkbenchMessage[]): { message: Workb
     const message = messages[index];
     if (isUserInput(message)) return null;
     if (!isAgentResult(message)) continue;
-    if (quickReplyChosen(message)) return null;
+    if (quickReplyChosen(message) !== null) return null;
     const options = quickReplyOptions(message);
     return options.length > 0 ? { message, options } : null;
   }

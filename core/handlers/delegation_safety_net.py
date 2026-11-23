@@ -14,7 +14,7 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.background import enqueue_run_in_connection, run_update_event_transaction
 from storage.models import agent_sessions, session_delegations
 from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
-from storage.session_delegations import IDLE_NOTICE_ACTOR_PREFIX, candidate_query, eligible_pair, latest_reply
+from storage.session_delegations import IDLE_NOTICE_ACTOR_PREFIX, candidate_query, dispatched_turn_reply, eligible_pair
 
 if TYPE_CHECKING:
     from core.scheduled_tasks import ScheduledTaskService
@@ -23,19 +23,22 @@ if TYPE_CHECKING:
 def notice_message(session_id: str, reply: str) -> str:
     """Build the durable receipt using the same 30,000-character Avibe result cap.
 
-    The last reply is useful information now that successful callbacks are gone. Keep
-    its formatting, and give the sender a read-only query escape hatch when the stored
-    reply exceeds the inline cap.
+    ``reply`` is the dispatched Turn's own last reply. Keep its formatting, and give
+    the sender a read-only query escape hatch when it exceeds the inline cap.
     """
     from core.agent_input import _address
 
-    header = (
-        "[It handled your message without writing back; its last reply is below. "
-        f"Follow up with {_address(session_id)[1]} only if you were waiting on it.]"
-    )
+    address = _address(session_id)[1]
     body = str(reply or "")
     if not body:
-        return header
+        return (
+            "[The dispatched Turn ended without writing back. "
+            f"Follow up with {address} only if you were waiting on it.]"
+        )
+    header = (
+        "[The dispatched Turn ended without writing back; its last reply is below. "
+        f"Follow up with {address} only if you were waiting on it.]"
+    )
     pointer = f"\n\n[Reply truncated; use `vibe data query` to read #{session_id}'s transcript in full.]"
     if len(body) > DEFAULT_RESULT_MAX_CHARS:
         body = body[:DEFAULT_RESULT_MAX_CHARS] + pointer
@@ -85,11 +88,11 @@ class DelegationSafetyNet:
             pair = self._eligible(conn, observation)
             if pair is None:
                 return False
-            if pair.get("unavailable"):
+            if pair.get("unavailable") or pair.get("answered"):
                 conn.execute(update(session_delegations).where(
                     session_delegations.c.sender_session_id == pair["sender_session_id"],
                     session_delegations.c.recipient_session_id == pair["recipient_session_id"],
-                ).values(state="unavailable"))
+                ).values(state="answered" if pair.get("answered") else "unavailable"))
                 return False
             if target is None:
                 return False
@@ -112,7 +115,7 @@ class DelegationSafetyNet:
                 "session_id": target.session_id, "legacy_session_key": target.session_key.to_key(),
                 "agent_id": target.agent_id, "agent_name": target.agent_name, "agent_backend": target.agent_backend,
                 "model": target.model, "reasoning_effort": target.reasoning_effort,
-                "prompt": notice_message(recipient, latest_reply(conn, recipient)),
+                "prompt": notice_message(recipient, dispatched_turn_reply(conn, str(pair["run_id"]))),
                 "metadata_json": json.dumps(metadata), "created_at": now, "updated_at": now,
             })
             # Once and outbox commit together. The queued notice now wakes A;

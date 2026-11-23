@@ -64,16 +64,28 @@ export const Field: React.FC<{
   mono?: boolean;
   icon?: React.ComponentType<{ className?: string }>;
   hint?: React.ReactNode;
+  /** Drawn right after the label, on its line and outside it: an info control
+   *  about the field. */
+  aside?: React.ReactNode;
   className?: string;
   labelClassName?: string;
   hintClassName?: string;
-}> = ({ label, children, mono, icon, hint, className, labelClassName, hintClassName }) => {
+}> = ({ label, children, mono, icon, hint, aside, className, labelClassName, hintClassName }) => {
   const id = React.useId();
   return (
     <div className={cn('flex flex-col gap-2', className)}>
-      <FieldLabel htmlFor={id} mono={mono} className={labelClassName}>
-        {label}
-      </FieldLabel>
+      {aside ? (
+        <span className="flex items-center gap-1.5">
+          <FieldLabel htmlFor={id} mono={mono} className={labelClassName}>
+            {label}
+          </FieldLabel>
+          {aside}
+        </span>
+      ) : (
+        <FieldLabel htmlFor={id} mono={mono} className={labelClassName}>
+          {label}
+        </FieldLabel>
+      )}
       {icon ? <IconField icon={icon}>{children(id)}</IconField> : children(id)}
       {hint ? <p className={cn('text-[12px] leading-relaxed text-muted', hintClassName)}>{hint}</p> : null}
     </div>

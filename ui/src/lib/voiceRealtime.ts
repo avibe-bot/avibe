@@ -5,6 +5,7 @@ import {
   type AvibeWebSocketConnection,
 } from './avibeFetch';
 import { resolveVoiceContext, type VoiceContextSource } from './voiceContext';
+import { voiceSendAllowed } from './voiceConsent';
 
 export const VOICE_REALTIME_PATH = '/api/cloud/voice/realtime';
 export const VOICE_REALTIME_PROTOCOL = 'avibe-asr-v1';
@@ -247,6 +248,12 @@ export class VoiceRealtimeSession {
 
   sendPcm(samples: Int16Array<ArrayBuffer>): boolean {
     if (this.finished || this.aborted || this.terminalError) {
+      return false;
+    }
+    // A yes taken back mid-take, here or on another device (lib/voiceConsent): the socket closes
+    // and nothing more is sent.
+    if (!voiceSendAllowed()) {
+      this.fail(asError('realtime_consent_withdrawn'));
       return false;
     }
     const audio = encodeVoiceRealtimePcm(samples);

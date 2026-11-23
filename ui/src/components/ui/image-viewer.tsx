@@ -9,6 +9,7 @@ import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '@/components/u
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 import { cn } from '@/lib/utils';
+import { readMotionMs, releaseVelocity, trackGesture, useMotionPreference, type GestureSample } from '@/lib/motion';
 import { ImageViewerContext, type ImageViewerOpenOptions } from './image-viewer-context';
 
 // A session-scoped image lightbox. ChatPage computes the ordered list of media-
@@ -76,6 +77,106 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // close hit-test must also require the click to be inside the visible stage.
   const stageRef = React.useRef<HTMLDivElement>(null);
 
+  const [gestureSurface, setGestureSurface] = React.useState<HTMLDivElement | null>(null);
+  const backdropRef = React.useRef<HTMLDivElement>(null);
+  const { reduced } = useMotionPreference();
+
+  // The approved image-preview gesture (docs/plans/2026-11-17-ios-interactions.md).
+  // Capture outside the zoom wrapper: its own touchmove otherwise pans first.
+  // Never take a pinch, a zoomed pan, a control press, or an iOS edge gesture.
+  React.useEffect(() => {
+    const stage = stageRef.current;
+    const backdrop = backdropRef.current;
+    if (!gestureSurface || !stage || !backdrop || !src || !routeSurfaceActive) return;
+    const chrome = gestureSurface.querySelectorAll<HTMLElement>('[data-viewer-chrome]');
+    let gesture: { x: number; y: number; dy: number; axis: 'pending' | 'vertical' | 'yielded'; samples: GestureSample[] } | null = null;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const returnMs = readMotionMs('--motion-spring-snappy-duration') || 290;
+    const chromeMs = readMotionMs('--motion-duration-fast') || 160;
+    const easing = 'var(--motion-ease-move, cubic-bezier(0.32, 0.72, 0, 1))';
+    const paint = (dy: number, returning = false) => {
+      const progress = Math.min(1, Math.max(0, dy) / (window.innerHeight * 0.2));
+      stage.style.transition = returning && !reduced ? `translate ${returnMs}ms ${easing}, scale ${returnMs}ms ${easing}` : 'none';
+      stage.style.translate = `0px ${dy}px`;
+      stage.style.scale = String(reduced ? 1 : 1 - 0.15 * progress);
+      stage.style.opacity = '1';
+      backdrop.style.transition = returning && !reduced ? `opacity ${returnMs}ms linear` : 'none';
+      backdrop.style.opacity = String(1 - 0.85 * progress);
+      chrome.forEach((node) => {
+        node.style.transition = `opacity ${chromeMs}ms linear`;
+        node.style.opacity = dy > 8 ? '0' : '1';
+      });
+    };
+    const cancel = () => {
+      gesture = null;
+      paint(0, true);
+    };
+    const atFit = () => transformRef.current?.instance.state.scale === 1;
+    const start = (event: TouchEvent) => {
+      if (exitTimer !== undefined) return;
+      if (event.touches.length !== 1) {
+        // Once a second finger joins, this sequence belongs to pinch until all
+        // fingers lift. Do not turn its final one-finger tail into a dismissal.
+        interactedRef.current = true;
+        cancel();
+        return;
+      }
+      if (!atFit() || (event.target instanceof Element && event.target.closest('button, a'))) return;
+      const point = event.touches[0];
+      const edge = point.clientX <= 20 || point.clientX >= window.innerWidth - 20;
+      gesture = { x: point.clientX, y: point.clientY, dy: 0, axis: edge ? 'yielded' : 'pending', samples: [{ t: event.timeStamp, at: point.clientY }] };
+    };
+    const move = (event: TouchEvent) => {
+      if (!gesture) return;
+      if (event.touches.length !== 1 || !atFit()) { cancel(); return; }
+      const point = event.touches[0];
+      const dx = point.clientX - gesture.x;
+      const dy = point.clientY - gesture.y;
+      if (Math.hypot(dx, dy) >= 6) interactedRef.current = true;
+      if (gesture.axis === 'yielded') return;
+      trackGesture(gesture.samples, { t: event.timeStamp, at: point.clientY });
+      if (gesture.axis === 'pending') {
+        if (Math.hypot(dx, dy) < 6) return;
+        if (Math.abs(dy) <= Math.abs(dx) * 1.2) { gesture.axis = 'yielded'; return; }
+        gesture.axis = 'vertical';
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      gesture.dy = dy >= 0 ? dy : -24 * (1 - Math.exp(dy / 80));
+      paint(gesture.dy);
+    };
+    const end = (event: TouchEvent) => {
+      if (!gesture) return;
+      const ended = gesture;
+      gesture = null;
+      const velocity = releaseVelocity(ended.samples, event.timeStamp);
+      const dismiss = ended.axis === 'vertical' && ended.dy > 0 &&
+        (ended.dy >= window.innerHeight * 0.2 || velocity >= 0.5);
+      if (!dismiss) { paint(0, true); return; }
+      const duration = reduced ? 140 : Math.min(320, Math.max(140, velocity > 0 ? (window.innerHeight - ended.dy) / velocity : 320));
+      stage.style.transition = reduced ? `opacity ${duration}ms linear` : `translate ${duration}ms ${easing}, opacity ${duration}ms linear`;
+      if (!reduced) stage.style.translate = `0px ${window.innerHeight}px`;
+      stage.style.opacity = '0';
+      backdrop.style.transition = `opacity ${duration}ms linear`;
+      backdrop.style.opacity = '0';
+      chrome.forEach((node) => { node.style.opacity = '0'; });
+      exitTimer = setTimeout(close, duration);
+    };
+    paint(0);
+    gestureSurface.addEventListener('touchstart', start, { capture: true, passive: true });
+    gestureSurface.addEventListener('touchmove', move, { capture: true, passive: false });
+    gestureSurface.addEventListener('touchend', end, true);
+    gestureSurface.addEventListener('touchcancel', cancel, true);
+    return () => {
+      clearTimeout(exitTimer);
+      paint(0);
+      gestureSurface.removeEventListener('touchstart', start, true);
+      gestureSurface.removeEventListener('touchmove', move, true);
+      gestureSurface.removeEventListener('touchend', end, true);
+      gestureSurface.removeEventListener('touchcancel', cancel, true);
+    };
+  }, [gestureSurface, src, routeSurfaceActive, reduced, close]);
+
   // Everything about paging reads from this one set: the arrows, the counter and
   // the keyboard handler below share the single condition it produces. A
   // one-image set (what ``isolated`` opens as) is therefore not pageable by any
@@ -131,8 +232,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
           <DialogPortal forceMount>
             {/* The viewer is dark in every theme and says so, so the iOS status bar
                 above it turns light. */}
-            {routeSurfaceActive && <DialogOverlay className="bg-black/80 backdrop-blur-sm scheme-dark" />}
+            {routeSurfaceActive && <DialogOverlay ref={backdropRef} className="bg-black/80 backdrop-blur-sm scheme-dark" />}
             <DialogPrimitive.Content
+              ref={setGestureSurface}
               forceMount
               aria-describedby={undefined}
               aria-hidden={!routeSurfaceActive || undefined}
@@ -183,7 +285,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               }}
             >
               <DialogTitle className="sr-only">{t('chat.media.preview')}</DialogTitle>
-          <div className="absolute right-4 top-[calc(1rem+env(safe-area-inset-top))] z-10 flex items-center gap-2">
+          <div data-viewer-chrome className="absolute right-4 top-[calc(1rem+env(safe-area-inset-top))] z-10 flex items-center gap-2">
             {/* Zoom buttons: a pointer-device affordance (touch zooms by pinch).
                 stopPropagation so clicking a control doesn't also close the viewer. */}
             <Button
@@ -247,6 +349,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
                   e.stopPropagation();
                   step(-1);
                 }}
+                data-viewer-chrome
                 aria-label={t('chat.viewer.previous')}
                 className={`absolute left-4 top-1/2 z-10 -translate-y-1/2 rounded-full ${OVERLAY_BTN}`}
               >
@@ -259,6 +362,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
                   e.stopPropagation();
                   step(1);
                 }}
+                data-viewer-chrome
                 aria-label={t('chat.viewer.next')}
                 className={`absolute right-4 top-1/2 z-10 -translate-y-1/2 rounded-full ${OVERLAY_BTN}`}
               >
@@ -304,7 +408,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
             </TransformWrapper>
           </div>
           {pageable && (
-            <span className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] text-white">
+            <span data-viewer-chrome className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] text-white">
               {index + 1} / {gallery.length}
             </span>
           )}

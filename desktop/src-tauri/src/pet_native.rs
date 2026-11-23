@@ -49,59 +49,101 @@ pub fn set_frame(window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
     let _ = window.set_position(tauri::LogicalPosition::new(origin.0, origin.1));
 }
 
-/// Starts the native window drag from where the pointer is now. On macOS the
-/// drag keeps the press's offset measured from the window's bottom edge, so a
-/// press that came before a resize would drag the window by the change in
-/// height; the shell gives AppKit a press measured in the current frame.
-pub fn start_drag(window: &WebviewWindow) -> Result<(), String> {
+/// Hides (0) or shows (1) the whole window without ordering it out, so its
+/// page keeps drawing. macOS only; elsewhere the window stays as it is.
+pub fn set_alpha(window: &WebviewWindow, alpha: f64) {
     #[cfg(target_os = "macos")]
-    if start_drag_macos(window) {
-        return Ok(());
+    if let Some(native) = native_window(window) {
+        native.setAlphaValue(alpha);
     }
-    window.start_dragging().map_err(|error| error.to_string())
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, alpha);
+}
+
+/// How the shell drags the window once it has shrunk to the drag strip.
+pub enum Drag {
+    /// The platform's own window drag runs until the button is released.
+    Native,
+    /// The shell moves the window itself, keeping this point of the window
+    /// under the pointer (`follow_pointer`, on every poll of the button).
+    /// macOS only; elsewhere the platform drags.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Follow(PointerOffset),
+}
+
+/// A point of the window, in its points from its top-left corner, that the
+/// drag keeps under the pointer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointerOffset {
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Starts dragging the window from where the pointer is now.
+///
+/// On macOS the shell moves the window itself rather than handing the drag to
+/// AppKit (`performWindowDragWithEvent`): a system window drag takes part in
+/// the window manager's edge tiling, so a pointer that reaches a display's
+/// side, the Dock or the menu bar has the system move the pet away on release
+/// (to a whole-window place, or to the middle of the display) before the shell
+/// can place it. Elsewhere the platform drags the window.
+///
+/// `hold` is the point of the window to keep under the pointer: where the
+/// press was, so the window does not jump by however far the pointer moved
+/// before the drag reached the shell. Without it, the pointer's place now.
+pub fn start_drag(window: &WebviewWindow, hold: Option<PointerOffset>) -> Result<Drag, String> {
+    #[cfg(target_os = "macos")]
+    if let Some(offset) = hold.or_else(|| pointer_offset_macos(window)) {
+        return Ok(Drag::Follow(offset));
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = hold;
+    window.start_dragging().map_err(|error| error.to_string())?;
+    Ok(Drag::Native)
+}
+
+/// Moves the window so the pointer keeps `offset` in it. The window's own
+/// frame setter, not a system drag: no tiling, and no constraint below the
+/// menu bar while dragging (the drop is placed by the shell).
+pub fn follow_pointer(window: &WebviewWindow, offset: PointerOffset) {
+    #[cfg(target_os = "macos")]
+    follow_pointer_macos(window, offset);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, offset);
 }
 
 #[cfg(target_os = "macos")]
-fn start_drag_macos(window: &WebviewWindow) -> bool {
-    use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
-    use objc2::{msg_send, ClassType, MainThreadMarker};
-    use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSWindow};
-    use objc2_foundation::NSPoint;
-
-    let (Some(mtm), Ok(pointer)) = (MainThreadMarker::new(), window.ns_window()) else {
-        return false;
+fn native_window(window: &WebviewWindow) -> Option<objc2::rc::Retained<objc2_app_kit::NSWindow>> {
+    let (Some(_mtm), Ok(pointer)) = (objc2::MainThreadMarker::new(), window.ns_window()) else {
+        return None;
     };
     // SAFETY: as in `set_frame_macos`.
-    let Some(native) = (unsafe { Retained::retain(pointer.cast::<NSWindow>()) }) else {
-        return false;
-    };
-    let mouse = NSEvent::mouseLocation();
+    unsafe { objc2::rc::Retained::retain(pointer.cast::<objc2_app_kit::NSWindow>()) }
+}
+
+#[cfg(target_os = "macos")]
+fn pointer_offset_macos(window: &WebviewWindow) -> Option<PointerOffset> {
+    let native = native_window(window)?;
+    let mouse = objc2_app_kit::NSEvent::mouseLocation();
     let frame = native.frame();
-    let current = NSApplication::sharedApplication(mtm).currentEvent();
-    let (flags, timestamp) = current.map_or((NSEventModifierFlags::empty(), 0.0), |event| {
-        (event.modifierFlags(), event.timestamp())
-    });
-    // SAFETY: the documented NSEvent constructor, with a nil graphics context.
-    let press: Option<Retained<NSEvent>> = unsafe {
-        msg_send![
-            NSEvent::class(),
-            mouseEventWithType: NSEventType::LeftMouseDown,
-            location: NSPoint::new(mouse.x - frame.origin.x, mouse.y - frame.origin.y),
-            modifierFlags: flags,
-            timestamp: timestamp,
-            windowNumber: native.windowNumber(),
-            context: std::ptr::null_mut::<AnyObject>(),
-            eventNumber: 0isize,
-            clickCount: 1isize,
-            pressure: 1.0f32
-        ]
+    // AppKit measures y up from the bottom; the offset is from the top.
+    Some(PointerOffset {
+        x: mouse.x - frame.origin.x,
+        y: frame.origin.y + frame.size.height - mouse.y,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn follow_pointer_macos(window: &WebviewWindow, offset: PointerOffset) {
+    let Some(native) = native_window(window) else {
+        return;
     };
-    let Some(press) = press else {
-        return false;
-    };
-    native.performWindowDragWithEvent(&press);
-    true
+    let mouse = objc2_app_kit::NSEvent::mouseLocation();
+    let height = native.frame().size.height;
+    let origin = objc2_foundation::NSPoint::new(mouse.x - offset.x, mouse.y + offset.y - height);
+    if native.frame().origin != origin {
+        native.setFrameOrigin(origin);
+    }
 }
 
 #[cfg(target_os = "macos")]

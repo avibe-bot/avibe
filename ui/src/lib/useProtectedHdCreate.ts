@@ -8,11 +8,12 @@
 // and blocked from funding until a complete match, and nothing is retried, re-created or deleted.
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 
-import { useApi, type VaultCreatePayload, type VaultWebAuthnRegistrationPayload } from '@/context/ApiContext';
+import { useApi, type BitcoinAddressType, type VaultCreatePayload, type VaultSecret, type VaultWebAuthnRegistrationPayload } from '@/context/ApiContext';
 
 import { ProtectedHdDesignState } from './protectedHdDesign';
 import { blockHdWallet, isHdWalletBlocked, unblockHdWallet } from './vaultHdQuarantine';
 import { openVaultAuthorizationWindow, VaultSandboxError } from './vaultSandboxClient';
+import { isVaultPasskeyFallback, vaultPasskeyNeedsBrowser } from './vaultBrowserHandoff';
 import {
   parseProtectedHdReconciliation,
   protectedHdMatches,
@@ -39,7 +40,9 @@ export type ProtectedHdPhase =
   /** Refused because another key has the name: this wallet was not saved (the sealed result is bound
    *  to the name, so it can't be saved under another one). The name is editable again. */
   | { kind: 'nameTaken'; mode: 'create' | 'import' }
-  | { kind: 'done'; name: string; account0: ProtectedHdAccount0 };
+  /** `bitcoinTypes`: account #0's server-listed Bitcoin types from the save answer; absent when the
+   *  match came from a later read, which carries none (the done screen then shows Taproot only). */
+  | { kind: 'done'; name: string; account0: ProtectedHdAccount0; bitcoinTypes?: BitcoinAddressType[] };
 
 /** Whether the page must stay as it is: the window is open, or a save may already be in Avibe. */
 export const protectedHdBusy = (phase: ProtectedHdPhase) =>
@@ -93,6 +96,15 @@ const refusalOf = (result: { code?: string; message?: string } | null | undefine
   return text ? { code, text } : null;
 };
 
+/** Account #0's server-listed Bitcoin types in a save answer for this name. The list only narrows what
+ *  the done screen offers of the window's own confirmed addresses; it never supplies an address. */
+const savedBitcoinTypes = (secret: VaultSecret | undefined, name: string): BitcoinAddressType[] | undefined => {
+  if (secret?.name !== name) return undefined;
+  const types = secret.accounts?.find((account) => account.account === 0)?.bitcoin_address_types;
+  // Taproot is always offered; a list without it is not one this screen narrows to.
+  return Array.isArray(types) && types.includes('p2tr') ? types : undefined;
+};
+
 /** Whether two #0 address sets are the same wallet's (every listed chain's address equal). */
 const sameAccount0 = (a: Record<string, string>, b: Record<string, string>) => {
   const keys = Object.keys(a);
@@ -121,14 +133,14 @@ export function useProtectedHdCreate() {
     };
   }, []);
 
-  const confirmWith = useCallback((snapshot: unknown): 'match' | 'mismatch' | 'unknown' => {
+  const confirmWith = useCallback((snapshot: unknown, bitcoinTypes?: BitcoinAddressType[]): 'match' | 'mismatch' | 'unknown' => {
     const op = operation.current;
     const parsed = parseProtectedHdReconciliation(snapshot);
     if (!op || !parsed) return 'unknown';
     if (!protectedHdMatches(parsed, op, knownId.current)) return 'mismatch';
     knownId.current = parsed.secret_id;
     unblockHdWallet(op.name);
-    setPhase({ kind: 'done', name: op.name, account0: op.expectedAccount0 });
+    setPhase({ kind: 'done', name: op.name, account0: op.expectedAccount0, ...(bitcoinTypes ? { bitcoinTypes } : {}) });
     onSavedRef.current();
     return 'match';
   }, []);
@@ -155,7 +167,9 @@ export function useProtectedHdCreate() {
   const start = useCallback((input: ProtectedHdStart) => {
     const authorization = openVaultAuthorizationWindow();
     if (!authorization) {
-      setPhase({ kind: 'failed', reason: 'blocked' });
+      // A desktop app that refused the window moved this page to the browser, whose hand-off now
+      // says so; the browser's pop-up advice would be wrong there.
+      setPhase(vaultPasskeyNeedsBrowser() ? { kind: 'idle' } : { kind: 'failed', reason: 'blocked' });
       return Promise.resolve();
     }
     operation.current = null;
@@ -176,7 +190,8 @@ export function useProtectedHdCreate() {
       try {
         sealed = await input.seal(input.name, input.mode, authorization.id);
       } catch (error) {
-        setPhase({ kind: 'failed', reason: launchFailure(error) });
+        // Nothing was saved. When this failure moved the app to the browser, its hand-off says so.
+        setPhase(isVaultPasskeyFallback(error) ? { kind: 'idle' } : { kind: 'failed', reason: launchFailure(error) });
         return;
       } finally {
         authorization.close();
@@ -213,7 +228,7 @@ export function useProtectedHdCreate() {
         // seen may learn one, and only after a complete match). Nothing else in it is trusted.
         const seenId = (created.reconciliation as { secret_id?: unknown } | null | undefined)?.secret_id;
         if (typeof seenId === 'string' && seenId) knownId.current = seenId;
-        const outcome = confirmWith(created.reconciliation);
+        const outcome = confirmWith(created.reconciliation, savedBitcoinTypes(created.secret, input.name));
         if (outcome === 'match') return;
         if (outcome === 'mismatch') {
           // The saved record is not the wallet the window made: blocked here and on the list, never deleted.

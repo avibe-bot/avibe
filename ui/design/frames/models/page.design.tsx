@@ -39,8 +39,6 @@ const unsuppliedAgents: AgentSpec[] = [
   { backend: 'codex', routes: { 'gpt-6-astra': { hops: [] }, 'gpt-5.6-sol': { hops: [] }, 'gpt-5.5': { hops: [] } } },
 ];
 
-const directAgents: AgentSpec[] = [{ backend: 'claude', mode: 'direct' }, { backend: 'codex', mode: 'direct' }, { backend: 'opencode', mode: 'direct' }];
-
 const designFrames = frames([
   {
     name: 'overview',
@@ -61,17 +59,6 @@ const designFrames = frames([
     route,
     fixtures: settingsFixtures(hubApi({ agents: demoAgents })),
     click: ['role=button[name="{t:settings.models.upstream.addSubscription}"]'],
-    render: page,
-  },
-  {
-    name: 'add-provider-menu',
-    title: '模型网关 · 添加供应商 · 选择方式',
-    width: 1440,
-    height: 1200,
-    status: 'shipped',
-    route,
-    fixtures: settingsFixtures(hubApi({ agents: demoAgents })),
-    click: ['role=button[name="{t:settings.models.searchServices.addProvider}"]'],
     render: page,
   },
   {
@@ -123,22 +110,6 @@ const designFrames = frames([
     status: 'shipped',
     route,
     fixtures: settingsFixtures(hubApi({ sources: [], agents: unsuppliedAgents })),
-    render: page,
-  },
-  {
-    name: 'direct',
-    title: '模型网关 · 全部直连（升级后第一屏）',
-    width: 1440,
-    height: 760,
-    status: 'shipped',
-    route,
-    fixtures: settingsFixtures(
-      hubApi({
-        sources: [],
-        agents: directAgents,
-        migration: [{ id: 'mig_claude', backend: 'claude', kind: 'oauth_native', masked_detail: 'Claude 本机登录', proposed_action: 'import', selected: true, notes_key: null, vendor: 'anthropic', display_name: 'Anthropic' }],
-      }),
-    ),
     render: page,
   },
   {

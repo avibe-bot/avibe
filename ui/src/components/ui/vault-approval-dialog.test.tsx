@@ -18,7 +18,7 @@ const api = vi.hoisted(() => ({ getVaultRequest: vi.fn() }));
 const shell = vi.hoisted(() => ({ desktop: false, opened: [] as unknown[] }));
 vi.mock('@/context/ApiContext', async (original) => ({ ...await original<typeof import('@/context/ApiContext')>(), useApi: () => api }));
 vi.mock('@/lib/vaultBrowserHandoff', () => ({
-  vaultPasskeyNeedsBrowser: () => shell.desktop,
+  useVaultPasskeyHandoff: () => (shell.desktop ? 'desktop' : null),
   openVaultsInBrowser: (step: unknown) => { shell.opened.push(step); },
 }));
 vi.mock('./vault-approval-card', () => ({

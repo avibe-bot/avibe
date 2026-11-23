@@ -1,4 +1,4 @@
-import { ChevronRight, ExternalLink, ScrollText } from 'lucide-react';
+import { ChevronRight, ExternalLink, type LucideIcon, ScrollText, ShieldCheck } from 'lucide-react';
 import type { MouseEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -11,31 +11,84 @@ const raised = 'rounded-3xl border border-edge bg-surface/80 p-5 shadow-elevatio
 const textLink =
   'inline-flex min-h-11 items-center gap-1 text-sm font-medium text-foreground underline underline-offset-4';
 
-/** Account's About section: the App's own information, not the instance's. Design: mobile-app/licenses/entry. */
-export function LicensesEntry({ disabled, onOpen }: { disabled?: boolean; onOpen?: () => void }) {
+type AccountLinkRowProps = { icon: LucideIcon; label: string; disabled?: boolean; onClick?: () => void };
+
+/** One row on Account and its pages that opens another page. */
+export function AccountLinkRow({ icon: Icon, label, disabled, onClick }: AccountLinkRowProps) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      className={cn(
+        raised,
+        'flex w-full items-center gap-3 text-left transition-transform duration-(--motion-duration-instant) active:scale-(--motion-scale-press) disabled:opacity-60',
+      )}
+      onClick={onClick}
+    >
+      <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft">
+        <Icon className="size-5 text-mint-ink" aria-hidden="true" />
+      </span>
+      <span className="min-w-0 flex-1 text-base font-semibold">{label}</span>
+      <ChevronRight className="size-4 shrink-0 text-muted" aria-hidden="true" />
+    </button>
+  );
+}
+
+/**
+ * Account's About section: the App's own information, not the instance's. Shown once the license
+ * notices have loaded. Design: mobile-app/licenses/entry.
+ */
+export function AboutSection({
+  disabled,
+  licenses,
+  onLicenses,
+}: {
+  disabled?: boolean;
+  licenses: boolean;
+  onLicenses?: () => void;
+}) {
   const { t } = useTranslation();
+  if (!licenses) return null;
   return (
     <section className="mt-8">
       <h2 className="mb-4 text-sm font-semibold">{t('mobileApp.licenses.about')}</h2>
-      <button
-        type="button"
-        disabled={disabled}
-        className={cn(
-          raised,
-          'flex w-full items-center gap-3 text-left transition-transform duration-(--motion-duration-instant) active:scale-(--motion-scale-press) disabled:opacity-60',
-        )}
-        onClick={onOpen}
-      >
-        <span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft">
-          <ScrollText className="size-5 text-mint-ink" aria-hidden="true" />
-        </span>
-        <span className="min-w-0 flex-1 text-base font-semibold">{t('mobileApp.licenses.title')}</span>
-        <ChevronRight className="size-4 shrink-0 text-muted" aria-hidden="true" />
-      </button>
+      <AccountLinkRow icon={ScrollText} label={t('mobileApp.licenses.title')} disabled={disabled} onClick={onLicenses} />
     </section>
   );
 }
 
+/**
+ * Account and data, one page below Account: the privacy policy, and at the very bottom deleting
+ * the account as one plain red line, so it is not tapped by mistake yet reads as a warning
+ * (owner, 2026-11-17). Deletion
+ * opens avibe.bot's page over this page with the App's sign-in. Design: mobile-app/switcher/account-data, mobile-app/account/data.
+ */
+export function AccountDataContent({
+  disabled,
+  onPrivacy,
+  onDelete,
+}: {
+  disabled?: boolean;
+  onPrivacy: () => void;
+  onDelete: () => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <AccountLinkRow icon={ShieldCheck} label={t('mobileApp.account.privacy')} disabled={disabled} onClick={onPrivacy} />
+      <div className="mt-auto pt-9 pb-3">
+        <button
+          type="button"
+          disabled={disabled}
+          className="min-h-11 text-sm text-destructive-ink disabled:opacity-60"
+          onClick={onDelete}
+        >
+          {t('mobileApp.account.delete')}
+        </button>
+      </div>
+    </>
+  );
+}
 
 /**
  * The Open-source licenses page below its title: the MPL-2.0 source offer

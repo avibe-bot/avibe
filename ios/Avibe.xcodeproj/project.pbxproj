@@ -7,8 +7,19 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		8D1000000000000000000001 /* AppLock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000011 /* AppLock.swift */; };
+		8D1000000000000000000002 /* AppLockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000012 /* AppLockView.swift */; };
+		8D1000000000000000000003 /* AppLockBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000013 /* AppLockBridge.swift */; };
+		8D1000000000000000000004 /* AppLockBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000013 /* AppLockBridge.swift */; };
+		8D1000000000000000000005 /* AppLockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D1000000000000000000014 /* AppLockTests.swift */; };
+		8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000013 /* ShowShareForegroundTests.swift */; };
+		8C1000000000000000000001 /* ShowShareCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000011 /* ShowShareCoordinator.swift */; };
+		8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000011 /* ShowShareCoordinator.swift */; };
+		8C1000000000000000000003 /* ShowShareTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8C1000000000000000000012 /* ShowShareTests.swift */; };
 		100000000000000000000001 /* AvibeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* AvibeApp.swift */; };
 		100000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* AppModel.swift */; };
+		1000000000000000000000E8 /* AppShortcuts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E8 /* AppShortcuts.swift */; };
+		1000000000000000000000E9 /* AppShortcuts.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E9 /* AppShortcuts.xcstrings */; };
 		1000000000000000000000F0 /* DirectConnectListener.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F0 /* DirectConnectListener.swift */; };
 		1000000000000000000000F1 /* DirectPathController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F1 /* DirectPathController.swift */; };
 		1000000000000000000000F2 /* DirectTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F2 /* DirectTransport.swift */; };
@@ -17,9 +28,14 @@
 		1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F5 /* DirectPathAppTests.swift */; };
 		1000000000000000000000F6 /* DirectPublicBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F6 /* DirectPublicBackend.swift */; };
 		1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000F7 /* DirectPublicBackendTests.swift */; };
+		1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000FA /* DeviceDescriptionTests.swift */; };
+		1000000000000000000001F1 /* NativeScreenCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000001F1 /* NativeScreenCaptureTests.swift */; };
 		100000000000000000000003 /* NavigationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		100000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* RootView.swift */; };
 		100000000000000000000005 /* WebOrigin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
+		3C0000000000000000000001 /* RuntimePageCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C0000000000000000000002 /* RuntimePageCache.swift */; };
+		3D0000000000000000000001 /* DirectPathPreference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D0000000000000000000002 /* DirectPathPreference.swift */; };
+		3E0000000000000000000001 /* DepartedInstanceData.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E0000000000000000000002 /* DepartedInstanceData.swift */; };
 		100000000000000000000006 /* WebViewContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000006 /* WebViewContainer.swift */; };
 		100000000000000000000007 /* WebViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000007 /* WebViewController.swift */; };
 		100000000000000000000008 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000009 /* Localizable.xcstrings */; };
@@ -30,18 +46,22 @@
 		10000000000000000000000D /* NativeBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
 		1000000000000000000000D0 /* NativeBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D1 /* NativeBadgeTests.swift */; };
+		100000000000000000000145 /* SystemSchedule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000145 /* SystemSchedule.swift */; };
 		1000000000000000000000D2 /* SessionNotifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D2 /* SessionNotifications.swift */; };
 		1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D3 /* SessionNotificationTests.swift */; };
+		100000000000000000000146 /* SystemScheduleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000146 /* SystemScheduleTests.swift */; };
 		1000000000000000000000E1 /* WebKitReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E1 /* WebKitReadiness.swift */; };
 		10000000000000000000000E /* MobileAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		10000000000000000000000F /* MobileAuthTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
+		100000000000000000000151 /* AvibePage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000151 /* AvibePage.swift */; };
 		100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
 		100000000000000000000012 /* MobileApp in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		100000000000000000000013 /* MobileOnboardingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000016 /* MobileOnboardingTests.swift */; };
 		100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */; };
 		1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C0 /* NativePushCoordinatorTests.swift */; };
 		100000000000000000000015 /* MobilePasskey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		100000000000000000000152 /* MobileProviderSignIn.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000152 /* MobileProviderSignIn.swift */; };
 		100000000000000000000120 /* DirectIrohByteStream.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000120 /* DirectIrohByteStream.swift */; };
 		100000000000000000000121 /* DirectIrohEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000121 /* DirectIrohEngine.swift */; };
 		100000000000000000000122 /* DirectIrohTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000122 /* DirectIrohTransport.swift */; };
@@ -71,6 +91,7 @@
 		1000000000000000000000A7 /* PushCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A3 /* PushCrypto.swift */; };
 		1000000000000000000000A8 /* PushKeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000A4 /* PushKeychainStore.swift */; };
 		1000000000000000000000A9 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B2 /* Localizable.strings */; };
+		100000000000000000000150 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000150 /* PrivacyInfo.xcprivacy */; };
 		1000000000000000000000AA /* PushNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B3 /* PushNotificationTests.swift */; };
 		1000000000000000000000AB /* relay-apns-envelope.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B4 /* relay-apns-envelope.json */; };
 		1000000000000000000000AC /* instance-webpush-receiver.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000B5 /* instance-webpush-receiver.json */; };
@@ -80,23 +101,70 @@
 			1000000000000000000000C1 /* native-subscription-key.json in Resources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000C1 /* native-subscription-key.json */; };
 		910000000000000000000001 /* SheetFixtureApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000001 /* SheetFixtureApp.swift */; };
 		910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000002 /* FixtureKeyboardViewport.swift */; };
+		910000000000000000000155 /* FixtureHoldPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000007 /* FixtureHoldPage.swift */; };
+		910000000000000000000156 /* HoldTouchUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000004 /* HoldTouchUITests.swift */; };
 		910000000000000000000003 /* MobileAccount.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
 		910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000013 /* MobileOnboardingBridge.swift */; };
+		910000000000000000000151 /* AvibePage.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000151 /* AvibePage.swift */; };
 		91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000014 /* MobileOnboardingContainer.swift */; };
 		910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000018 /* MobilePasskey.swift */; };
+		910000000000000000000152 /* MobileProviderSignIn.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000152 /* MobileProviderSignIn.swift */; };
 		910000000000000000000007 /* WebOrigin.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* WebOrigin.swift */; };
 		910000000000000000000008 /* FixtureMobile in Resources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000003 /* FixtureMobile */; };
 		91000000000000000000000D /* NativeBridge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000010 /* NativeBridge.swift */; };
+		910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000034 /* NativeHoldCapture.swift */; };
+		910000000000000000000154 /* NavigationPolicy.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* NavigationPolicy.swift */; };
 		91000000000000000000000F /* NativeBadge.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D0 /* NativeBadge.swift */; };
 		91000000000000000000000A /* MobileApp in Fixture Resources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000015 /* MobileApp */; };
 		91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 920000000000000000000006 /* FixtureNativeBridgeSupport.swift */; };
+		3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */ = {isa = PBXBuildFile; fileRef = 3D0000000000000000000002 /* DirectPathPreference.swift */; };
 		91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000003 /* RealBundleCaptureUITests.swift */; };
 		910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 930000000000000000000001 /* InstanceSheetGestureUITests.swift */; };
 		100000000000000000000141 /* DirectIrohInteropWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000141 /* DirectIrohInteropWire.swift */; };
 		100000000000000000000142 /* DirectIrohInteropEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000142 /* DirectIrohInteropEngine.swift */; };
 		100000000000000000000143 /* DirectIrohInteropTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000143 /* DirectIrohInteropTests.swift */; };
 		100000000000000000000144 /* DirectIrohInteropProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */; };
+		16000000000000000000000001 /* VoiceCaptureActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000001 /* VoiceCaptureActivity.swift */; };
+		16000000000000000000000002 /* VoiceCaptureIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000002 /* VoiceCaptureIntent.swift */; };
+		16000000000000000000000003 /* VoiceCaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000003 /* VoiceCaptureController.swift */; };
+		16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */; };
+		16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000005 /* VoiceCaptureRecorder.swift */; };
+		1B0000000000000000000034 /* NativeHoldCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000034 /* NativeHoldCapture.swift */; };
+		1B0000000000000000000036 /* VoiceCaptureOutbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000036 /* VoiceCaptureOutbox.swift */; };
+		16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
+		16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000001 /* VoiceCaptureActivity.swift */; };
+		16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000012 /* Localizable.xcstrings */; };
+		16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000013 /* PrivacyInfo.xcprivacy */; };
+		16000000000000000000000020 /* AvibeLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000020 /* AvibeLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000014 /* AvibeLiveActivityBundle.swift */; };
+		16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */; };
+		16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000015 /* VoiceCapture.xcstrings */; };
+		16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
+		16000000000000000000000019 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000018 /* Assets.xcassets */; };
+		16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000030 /* VoiceCaptureTests.swift */; };
+		1B0000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000035 /* NativeHoldCaptureTests.swift */; };
+		1B0000000000000000000037 /* VoiceCaptureOutboxTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2B0000000000000000000037 /* VoiceCaptureOutboxTests.swift */; };
+		16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000031 /* VoiceCaptureAlert.swift */; };
+		1A0000000000000000000000 /* HealthDataReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000000 /* HealthDataReader.swift */; };
+		1A0000000000000000000001 /* HealthDeviceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000001 /* HealthDeviceStore.swift */; };
+		1A0000000000000000000002 /* HealthDeviceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000002 /* HealthDeviceClient.swift */; };
+		1A0000000000000000000003 /* HealthSyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000003 /* HealthSyncCoordinator.swift */; };
+		1A0000000000000000000004 /* HealthConsentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000004 /* HealthConsentView.swift */; };
+		1A0000000000000000000005 /* HealthDataReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000005 /* HealthDataReaderTests.swift */; };
+		1A0000000000000000000006 /* HealthSyncTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A0000000000000000000006 /* HealthSyncTests.swift */; };
+		16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */; };
+		16000000000000000000000033 /* VoiceCaptureBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26000000000000000000000033 /* VoiceCaptureBanner.swift */; };
+		A15B00000000000000000011 /* TurnActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000001 /* TurnActivityAttributes.swift */; };
+		A15B00000000000000000012 /* TurnActivityCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000002 /* TurnActivityCoordinator.swift */; };
+		A15B00000000000000000013 /* TurnLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* TurnLiveActivity.swift */; };
+		A15B00000000000000000014 /* TurnActivityAttributes.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000001 /* TurnActivityAttributes.swift */; };
+		A15B00000000000000000015 /* TurnLiveActivity.swift in Live Activity Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000003 /* TurnLiveActivity.swift */; };
+		A15B00000000000000000016 /* TurnActivity.xcstrings in Live Activity Resources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000004 /* TurnActivity.xcstrings */; };
+		A15B00000000000000000017 /* TurnActivity.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000004 /* TurnActivity.xcstrings */; };
+		A15B00000000000000000018 /* TurnActivityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000005 /* TurnActivityTests.swift */; };
+		A15B00000000000000000019 /* contract_vectors.json in Resources */ = {isa = PBXBuildFile; fileRef = A15A00000000000000000006 /* contract_vectors.json */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -135,9 +203,23 @@
 			remoteGlobalIDString = 500000000000000000000005;
 			remoteInfo = AvibeSheetFixture;
 		};
+		36000000000000000000000001 /* AvibeLiveActivity dependency proxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 400000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 56000000000000000000000001;
+			remoteInfo = AvibeLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		8D1000000000000000000011 /* AppLock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLock.swift; sourceTree = "<group>"; };
+		8D1000000000000000000012 /* AppLockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockView.swift; sourceTree = "<group>"; };
+		8D1000000000000000000013 /* AppLockBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockBridge.swift; sourceTree = "<group>"; };
+		8D1000000000000000000014 /* AppLockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLockTests.swift; sourceTree = "<group>"; };
+		8C1000000000000000000013 /* ShowShareForegroundTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareForegroundTests.swift; sourceTree = "<group>"; };
+		8C1000000000000000000011 /* ShowShareCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareCoordinator.swift; sourceTree = "<group>"; };
+		8C1000000000000000000012 /* ShowShareTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShowShareTests.swift; sourceTree = "<group>"; };
 		200000000000000000000001 /* AvibeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeApp.swift; sourceTree = "<group>"; };
 		200000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		2000000000000000000000F0 /* DirectConnectListener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectConnectListener.swift; sourceTree = "<group>"; };
@@ -148,13 +230,20 @@
 		2000000000000000000000F5 /* DirectPathAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathAppTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000F6 /* DirectPublicBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackend.swift; sourceTree = "<group>"; };
 		2000000000000000000000F7 /* DirectPublicBackendTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPublicBackendTests.swift; sourceTree = "<group>"; };
+		2000000000000000000000FA /* DeviceDescriptionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDescriptionTests.swift; sourceTree = "<group>"; };
+		2000000000000000000001F1 /* NativeScreenCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeScreenCaptureTests.swift; sourceTree = "<group>"; };
 		200000000000000000000003 /* NavigationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicy.swift; sourceTree = "<group>"; };
 		200000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
 		200000000000000000000005 /* WebOrigin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebOrigin.swift; sourceTree = "<group>"; };
+		3C0000000000000000000002 /* RuntimePageCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimePageCache.swift; sourceTree = "<group>"; };
+		3D0000000000000000000002 /* DirectPathPreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectPathPreference.swift; sourceTree = "<group>"; };
+		3E0000000000000000000002 /* DepartedInstanceData.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepartedInstanceData.swift; sourceTree = "<group>"; };
 		200000000000000000000006 /* WebViewContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewContainer.swift; sourceTree = "<group>"; };
 		200000000000000000000007 /* WebViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebViewController.swift; sourceTree = "<group>"; };
 		200000000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		200000000000000000000009 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		2000000000000000000000E8 /* AppShortcuts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppShortcuts.swift; sourceTree = "<group>"; };
+		2000000000000000000000E9 /* AppShortcuts.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = AppShortcuts.xcstrings; sourceTree = "<group>"; };
 		20000000000000000000000A /* InfoPlist.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = InfoPlist.xcstrings; sourceTree = "<group>"; };
 		20000000000000000000000B /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		20000000000000000000000C /* NavigationPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationPolicyTests.swift; sourceTree = "<group>"; };
@@ -164,18 +253,22 @@
 		200000000000000000000010 /* NativeBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBridge.swift; sourceTree = "<group>"; };
 		2000000000000000000000D0 /* NativeBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBadge.swift; sourceTree = "<group>"; };
 		2000000000000000000000D1 /* NativeBadgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeBadgeTests.swift; sourceTree = "<group>"; };
+		200000000000000000000145 /* SystemSchedule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemSchedule.swift; sourceTree = "<group>"; };
 		2000000000000000000000D2 /* SessionNotifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotifications.swift; sourceTree = "<group>"; };
 		2000000000000000000000D3 /* SessionNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotificationTests.swift; sourceTree = "<group>"; };
+		200000000000000000000146 /* SystemScheduleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemScheduleTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000E1 /* WebKitReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebKitReadiness.swift; sourceTree = "<group>"; };
 		200000000000000000000011 /* MobileAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccount.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* MobileAuthTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransport.swift; sourceTree = "<group>"; };
 		200000000000000000000013 /* MobileOnboardingBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingBridge.swift; sourceTree = "<group>"; };
+		200000000000000000000151 /* AvibePage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibePage.swift; sourceTree = "<group>"; };
 		200000000000000000000014 /* MobileOnboardingContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingContainer.swift; sourceTree = "<group>"; };
 		200000000000000000000015 /* MobileApp */ = {isa = PBXFileReference; lastKnownFileType = folder; path = MobileApp; sourceTree = "<group>"; };
 		200000000000000000000016 /* MobileOnboardingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileOnboardingTests.swift; sourceTree = "<group>"; };
 		200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransportIntegrationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000C0 /* NativePushCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePushCoordinatorTests.swift; sourceTree = "<group>"; };
 		200000000000000000000018 /* MobilePasskey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobilePasskey.swift; sourceTree = "<group>"; };
+		200000000000000000000152 /* MobileProviderSignIn.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileProviderSignIn.swift; sourceTree = "<group>"; };
 		200000000000000000000120 /* DirectIrohByteStream.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohByteStream.swift; sourceTree = "<group>"; };
 		200000000000000000000121 /* DirectIrohEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohEngine.swift; sourceTree = "<group>"; };
 		200000000000000000000122 /* DirectIrohTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohTransport.swift; sourceTree = "<group>"; };
@@ -201,6 +294,7 @@
 		2000000000000000000000B1 /* PushNotificationProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ../Avibe/PushNotificationProcessor.swift; sourceTree = "<group>"; };
 		920000000000000000000006 /* FixtureNativeBridgeSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureNativeBridgeSupport.swift; sourceTree = "<group>"; };
 		2000000000000000000000B2 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = Localizable.strings; sourceTree = "<group>"; };
+		200000000000000000000150 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		2000000000000000000000B3 /* PushNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushNotificationTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000B4 /* relay-apns-envelope.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = relay-apns-envelope.json; sourceTree = "<group>"; };
 		2000000000000000000000B5 /* instance-webpush-receiver.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = instance-webpush-receiver.json; sourceTree = "<group>"; };
@@ -210,6 +304,8 @@
 			2000000000000000000000C1 /* native-subscription-key.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = native-subscription-key.json; sourceTree = "<group>"; };
 		920000000000000000000001 /* SheetFixtureApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SheetFixtureApp.swift; sourceTree = "<group>"; };
 		920000000000000000000002 /* FixtureKeyboardViewport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureKeyboardViewport.swift; sourceTree = "<group>"; };
+		920000000000000000000007 /* FixtureHoldPage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureHoldPage.swift; sourceTree = "<group>"; };
+		930000000000000000000004 /* HoldTouchUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HoldTouchUITests.swift; sourceTree = "<group>"; };
 		920000000000000000000003 /* FixtureMobile */ = {isa = PBXFileReference; lastKnownFileType = folder; path = FixtureMobile; sourceTree = "<group>"; };
 		920000000000000000000004 /* AvibeSheetFixture.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AvibeSheetFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		920000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -220,6 +316,40 @@
 		200000000000000000000142 /* DirectIrohInteropEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropEngine.swift; sourceTree = "<group>"; };
 		200000000000000000000143 /* DirectIrohInteropTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropTests.swift; sourceTree = "<group>"; };
 		200000000000000000000144 /* DirectIrohInteropProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DirectIrohInteropProtocolTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000001 /* VoiceCaptureActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureActivity.swift; sourceTree = "<group>"; };
+		26000000000000000000000002 /* VoiceCaptureIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureIntent.swift; sourceTree = "<group>"; };
+		26000000000000000000000003 /* VoiceCaptureController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureController.swift; sourceTree = "<group>"; };
+		26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureInstanceClient.swift; sourceTree = "<group>"; };
+		26000000000000000000000005 /* VoiceCaptureRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureRecorder.swift; sourceTree = "<group>"; };
+		2B0000000000000000000034 /* NativeHoldCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCapture.swift; sourceTree = "<group>"; };
+		2B0000000000000000000036 /* VoiceCaptureOutbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureOutbox.swift; sourceTree = "<group>"; };
+		26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureLiveActivity.swift; sourceTree = "<group>"; };
+		26000000000000000000000011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		26000000000000000000000012 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		26000000000000000000000013 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		26000000000000000000000020 /* AvibeLiveActivity.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = AvibeLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		26000000000000000000000014 /* AvibeLiveActivityBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvibeLiveActivityBundle.swift; sourceTree = "<group>"; };
+		26000000000000000000000015 /* VoiceCapture.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = VoiceCapture.xcstrings; sourceTree = "<group>"; };
+		26000000000000000000000018 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		26000000000000000000000030 /* VoiceCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureTests.swift; sourceTree = "<group>"; };
+		2B0000000000000000000035 /* NativeHoldCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeHoldCaptureTests.swift; sourceTree = "<group>"; };
+		2B0000000000000000000037 /* VoiceCaptureOutboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureOutboxTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000031 /* VoiceCaptureAlert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureAlert.swift; sourceTree = "<group>"; };
+		2A0000000000000000000000 /* HealthDataReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataReader.swift; sourceTree = "<group>"; };
+		2A0000000000000000000001 /* HealthDeviceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDeviceStore.swift; sourceTree = "<group>"; };
+		2A0000000000000000000002 /* HealthDeviceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDeviceClient.swift; sourceTree = "<group>"; };
+		2A0000000000000000000003 /* HealthSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSyncCoordinator.swift; sourceTree = "<group>"; };
+		2A0000000000000000000004 /* HealthConsentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthConsentView.swift; sourceTree = "<group>"; };
+		2A0000000000000000000005 /* HealthDataReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthDataReaderTests.swift; sourceTree = "<group>"; };
+		2A0000000000000000000006 /* HealthSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSyncTests.swift; sourceTree = "<group>"; };
+		26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureFailureNotification.swift; sourceTree = "<group>"; };
+		26000000000000000000000033 /* VoiceCaptureBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceCaptureBanner.swift; sourceTree = "<group>"; };
+		A15A00000000000000000001 /* TurnActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityAttributes.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000002 /* TurnActivityCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityCoordinator.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000003 /* TurnLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnLiveActivity.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000004 /* TurnActivity.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = "TurnActivity.xcstrings"; sourceTree = "<group>"; };
+		A15A00000000000000000005 /* TurnActivityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "TurnActivityTests.swift"; sourceTree = "<group>"; };
+		A15A00000000000000000006 /* contract_vectors.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = "../tests/fixtures/live_activity/contract_vectors.json"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -272,6 +402,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		66000000000000000000000001 /* Live Activity Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -279,9 +416,11 @@
 			isa = PBXGroup;
 			children = (
 				700000000000000000000002 /* Avibe */,
+				A15A00000000000000000006 /* contract_vectors.json */,
 				700000000000000000000009 /* AvibeSheetFixture */,
 				70000000000000000000000A /* AvibeSheetFixtureTests */,
 				700000000000000000000004 /* AvibeTests */,
+				76000000000000000000000001 /* AvibeLiveActivity */,
 				700000000000000000000006 /* NotificationService */,
 				700000000000000000000007 /* PushFixtures */,
 				700000000000000000000005 /* Products */,
@@ -291,8 +430,14 @@
 		700000000000000000000002 /* Avibe */ = {
 			isa = PBXGroup;
 			children = (
+				2A0000000000000000000004 /* HealthConsentView.swift */,
+				2A0000000000000000000003 /* HealthSyncCoordinator.swift */,
+				2A0000000000000000000002 /* HealthDeviceClient.swift */,
+				2A0000000000000000000001 /* HealthDeviceStore.swift */,
+				2A0000000000000000000000 /* HealthDataReader.swift */,
 				200000000000000000000001 /* AvibeApp.swift */,
 				200000000000000000000002 /* AppModel.swift */,
+				2000000000000000000000E8 /* AppShortcuts.swift */,
 				200000000000000000000019 /* Avibe.entitlements */,
 				2000000000000000000000F0 /* DirectConnectListener.swift */,
 				2000000000000000000000F1 /* DirectPathController.swift */,
@@ -302,19 +447,41 @@
 				200000000000000000000011 /* MobileAccount.swift */,
 				200000000000000000000012 /* MobileAuthTransport.swift */,
 				200000000000000000000013 /* MobileOnboardingBridge.swift */,
+				200000000000000000000151 /* AvibePage.swift */,
 				200000000000000000000014 /* MobileOnboardingContainer.swift */,
 				200000000000000000000018 /* MobilePasskey.swift */,
+				200000000000000000000152 /* MobileProviderSignIn.swift */,
 				2000000000000000000000D0 /* NativeBadge.swift */,
 				2000000000000000000000D2 /* SessionNotifications.swift */,
+				200000000000000000000145 /* SystemSchedule.swift */,
 				200000000000000000000010 /* NativeBridge.swift */,
+				8C1000000000000000000011 /* ShowShareCoordinator.swift */,
+				8D1000000000000000000011 /* AppLock.swift */,
+				8D1000000000000000000012 /* AppLockView.swift */,
+				8D1000000000000000000013 /* AppLockBridge.swift */,
 				2000000000000000000000A2 /* NativePushCoordinator.swift */,
 				200000000000000000000003 /* NavigationPolicy.swift */,
 				2000000000000000000000A3 /* PushCrypto.swift */,
 				2000000000000000000000A4 /* PushKeychainStore.swift */,
 				200000000000000000000004 /* RootView.swift */,
+				3C0000000000000000000002 /* RuntimePageCache.swift */,
+				3D0000000000000000000002 /* DirectPathPreference.swift */,
+				3E0000000000000000000002 /* DepartedInstanceData.swift */,
 				200000000000000000000005 /* WebOrigin.swift */,
 				200000000000000000000006 /* WebViewContainer.swift */,
 				200000000000000000000007 /* WebViewController.swift */,
+				26000000000000000000000001 /* VoiceCaptureActivity.swift */,
+				A15A00000000000000000002 /* TurnActivityCoordinator.swift */,
+				A15A00000000000000000001 /* TurnActivityAttributes.swift */,
+				26000000000000000000000002 /* VoiceCaptureIntent.swift */,
+				26000000000000000000000003 /* VoiceCaptureController.swift */,
+				26000000000000000000000004 /* VoiceCaptureInstanceClient.swift */,
+				26000000000000000000000005 /* VoiceCaptureRecorder.swift */,
+				2B0000000000000000000034 /* NativeHoldCapture.swift */,
+				2B0000000000000000000036 /* VoiceCaptureOutbox.swift */,
+				26000000000000000000000031 /* VoiceCaptureAlert.swift */,
+				26000000000000000000000032 /* VoiceCaptureFailureNotification.swift */,
+				26000000000000000000000033 /* VoiceCaptureBanner.swift */,
 				200000000000000000000120 /* DirectIrohByteStream.swift */,
 				200000000000000000000121 /* DirectIrohEngine.swift */,
 				200000000000000000000136 /* DirectIrohBinding.swift */,
@@ -330,6 +497,7 @@
 		700000000000000000000003 /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				2000000000000000000000E9 /* AppShortcuts.xcstrings */,
 				20000000000000000000000F /* Assets.xcassets */,
 				200000000000000000000015 /* MobileApp */,
 				200000000000000000000008 /* Info.plist */,
@@ -343,15 +511,27 @@
 		700000000000000000000004 /* AvibeTests */ = {
 			isa = PBXGroup;
 			children = (
+				2A0000000000000000000006 /* HealthSyncTests.swift */,
+				2A0000000000000000000005 /* HealthDataReaderTests.swift */,
 				2000000000000000000000F3 /* DirectConnectListenerTests.swift */,
 				2000000000000000000000F5 /* DirectPathAppTests.swift */,
 				2000000000000000000000F4 /* DirectPathControllerTests.swift */,
 				2000000000000000000000F7 /* DirectPublicBackendTests.swift */,
+				2000000000000000000000FA /* DeviceDescriptionTests.swift */,
+				2000000000000000000001F1 /* NativeScreenCaptureTests.swift */,
 				20000000000000000000000C /* NavigationPolicyTests.swift */,
 				200000000000000000000016 /* MobileOnboardingTests.swift */,
 				200000000000000000000017 /* MobileAuthTransportIntegrationTests.swift */,
 				2000000000000000000000D1 /* NativeBadgeTests.swift */,
+				26000000000000000000000030 /* VoiceCaptureTests.swift */,
+				A15A00000000000000000005 /* TurnActivityTests.swift */,
+				2B0000000000000000000035 /* NativeHoldCaptureTests.swift */,
+				2B0000000000000000000037 /* VoiceCaptureOutboxTests.swift */,
+				8C1000000000000000000012 /* ShowShareTests.swift */,
+				8D1000000000000000000014 /* AppLockTests.swift */,
+				8C1000000000000000000013 /* ShowShareForegroundTests.swift */,
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
+				200000000000000000000146 /* SystemScheduleTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
@@ -376,6 +556,7 @@
 				2000000000000000000000B2 /* Localizable.strings */,
 				2000000000000000000000B7 /* NotificationService.entitlements */,
 				2000000000000000000000B0 /* NotificationService.swift */,
+				200000000000000000000150 /* PrivacyInfo.xcprivacy */,
 				2000000000000000000000B1 /* PushNotificationProcessor.swift */,
 			);
 			path = NotificationService;
@@ -406,6 +587,7 @@
 				20000000000000000000000D /* Avibe.app */,
 				20000000000000000000000E /* AvibeTests.xctest */,
 				2000000000000000000000B6 /* NotificationService.appex */,
+				26000000000000000000000020 /* AvibeLiveActivity.appex */,
 				200000000000000000000132 /* libIrohLib.a */,
 				920000000000000000000004 /* AvibeSheetFixture.app */,
 				930000000000000000000002 /* AvibeSheetFixtureTests.xctest */,
@@ -418,6 +600,7 @@
 			children = (
 				920000000000000000000001 /* SheetFixtureApp.swift */,
 				920000000000000000000002 /* FixtureKeyboardViewport.swift */,
+				920000000000000000000007 /* FixtureHoldPage.swift */,
 				920000000000000000000006 /* FixtureNativeBridgeSupport.swift */,
 				920000000000000000000003 /* FixtureMobile */,
 				920000000000000000000005 /* Info.plist */,
@@ -428,10 +611,27 @@
 		70000000000000000000000A /* AvibeSheetFixtureTests */ = {
 			isa = PBXGroup;
 			children = (
+				930000000000000000000004 /* HoldTouchUITests.swift */,
 				930000000000000000000001 /* InstanceSheetGestureUITests.swift */,
 				930000000000000000000003 /* RealBundleCaptureUITests.swift */,
 			);
 			path = AvibeSheetFixtureTests;
+			sourceTree = "<group>";
+		};
+		76000000000000000000000001 /* AvibeLiveActivity */ = {
+			isa = PBXGroup;
+			children = (
+				26000000000000000000000011 /* Info.plist */,
+				26000000000000000000000014 /* AvibeLiveActivityBundle.swift */,
+				26000000000000000000000018 /* Assets.xcassets */,
+				26000000000000000000000012 /* Localizable.xcstrings */,
+				26000000000000000000000013 /* PrivacyInfo.xcprivacy */,
+				26000000000000000000000015 /* VoiceCapture.xcstrings */,
+				26000000000000000000000010 /* VoiceCaptureLiveActivity.swift */,
+				A15A00000000000000000004 /* TurnActivity.xcstrings */,
+				A15A00000000000000000003 /* TurnLiveActivity.swift */,
+			);
+			path = AvibeLiveActivity;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -452,6 +652,7 @@
 			);
 			dependencies = (
 				B00000000000000000000002 /* NotificationService dependency */,
+				B6000000000000000000000001 /* AvibeLiveActivity dependency */,
 				B00000000000000000000003 /* IrohLib dependency */,
 			);
 			name = Avibe;
@@ -547,6 +748,23 @@
 			productReference = 930000000000000000000002 /* AvibeSheetFixtureTests.xctest */;
 			productType = "com.apple.product-type.bundle.ui-testing";
 		};
+		56000000000000000000000001 /* AvibeLiveActivity */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 86000000000000000000000001 /* Build configuration list for PBXNativeTarget "AvibeLiveActivity" */;
+			buildPhases = (
+				96000000000000000000000001 /* Live Activity Sources */,
+				66000000000000000000000001 /* Live Activity Frameworks */,
+				A6000000000000000000000001 /* Live Activity Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AvibeLiveActivity;
+			productName = AvibeLiveActivity;
+			productReference = 26000000000000000000000020 /* AvibeLiveActivity.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -565,6 +783,9 @@
 						TestTargetID = 500000000000000000000001;
 					};
 					500000000000000000000003 = {
+						CreatedOnToolsVersion = 26.6;
+					};
+					56000000000000000000000001 = {
 						CreatedOnToolsVersion = 26.6;
 					};
 					500000000000000000000005 = {
@@ -594,6 +815,7 @@
 				500000000000000000000002 /* AvibeTests */,
 				500000000000000000000003 /* NotificationService */,
 				500000000000000000000004 /* IrohLib */,
+				56000000000000000000000001 /* AvibeLiveActivity */,
 				500000000000000000000005 /* AvibeSheetFixture */,
 				500000000000000000000006 /* AvibeSheetFixtureTests */,
 			);
@@ -605,9 +827,13 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1000000000000000000000E9 /* AppShortcuts.xcstrings in Resources */,
 				10000000000000000000000C /* Assets.xcassets in Resources */,
 				100000000000000000000009 /* InfoPlist.xcstrings in Resources */,
 				100000000000000000000008 /* Localizable.xcstrings in Resources */,
+				16000000000000000000000017 /* VoiceCapture.xcstrings in Resources */,
+				16000000000000000000000019 /* Assets.xcassets in Resources */,
+				A15B00000000000000000017 /* TurnActivity.xcstrings in Resources */,
 				10000000000000000000000A /* PrivacyInfo.xcprivacy in Resources */,
 				100000000000000000000012 /* MobileApp in Resources */,
 			);
@@ -619,6 +845,7 @@
 			files = (
 					1000000000000000000000C1 /* native-subscription-key.json in Resources */,
 				1000000000000000000000AB /* relay-apns-envelope.json in Resources */,
+				A15B00000000000000000019 /* contract_vectors.json in Resources */,
 				1000000000000000000000AC /* instance-webpush-receiver.json in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -628,6 +855,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				1000000000000000000000A9 /* Localizable.strings in Resources */,
+				100000000000000000000150 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -647,6 +875,18 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A6000000000000000000000001 /* Live Activity Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				16000000000000000000000012 /* Localizable.xcstrings in Live Activity Resources */,
+				16000000000000000000000013 /* PrivacyInfo.xcprivacy in Live Activity Resources */,
+				16000000000000000000000015 /* VoiceCapture.xcstrings in Live Activity Resources */,
+				16000000000000000000000018 /* Assets.xcassets in Live Activity Resources */,
+				A15B00000000000000000016 /* TurnActivity.xcstrings in Live Activity Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -657,6 +897,7 @@
 			dstSubfolderSpec = 13;
 			files = (
 				1000000000000000000000AD /* NotificationService.appex in Embed Foundation Extensions */,
+				16000000000000000000000020 /* AvibeLiveActivity.appex in Embed Foundation Extensions */,
 			);
 			name = "Embed Foundation Extensions";
 			runOnlyForDeploymentPostprocessing = 0;
@@ -777,7 +1018,13 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1A0000000000000000000004 /* HealthConsentView.swift in Sources */,
+				1A0000000000000000000003 /* HealthSyncCoordinator.swift in Sources */,
+				1A0000000000000000000002 /* HealthDeviceClient.swift in Sources */,
+				1A0000000000000000000001 /* HealthDeviceStore.swift in Sources */,
+				1A0000000000000000000000 /* HealthDataReader.swift in Sources */,
 				100000000000000000000002 /* AppModel.swift in Sources */,
+				1000000000000000000000E8 /* AppShortcuts.swift in Sources */,
 				100000000000000000000001 /* AvibeApp.swift in Sources */,
 				1000000000000000000000F0 /* DirectConnectListener.swift in Sources */,
 				1000000000000000000000F1 /* DirectPathController.swift in Sources */,
@@ -787,11 +1034,18 @@
 				10000000000000000000000E /* MobileAccount.swift in Sources */,
 				10000000000000000000000F /* MobileAuthTransport.swift in Sources */,
 				100000000000000000000010 /* MobileOnboardingBridge.swift in Sources */,
+				100000000000000000000151 /* AvibePage.swift in Sources */,
 				100000000000000000000011 /* MobileOnboardingContainer.swift in Sources */,
 				100000000000000000000015 /* MobilePasskey.swift in Sources */,
+				100000000000000000000152 /* MobileProviderSignIn.swift in Sources */,
 				1000000000000000000000D0 /* NativeBadge.swift in Sources */,
 				1000000000000000000000D2 /* SessionNotifications.swift in Sources */,
+				100000000000000000000145 /* SystemSchedule.swift in Sources */,
 				10000000000000000000000D /* NativeBridge.swift in Sources */,
+				8C1000000000000000000001 /* ShowShareCoordinator.swift in Sources */,
+				8D1000000000000000000001 /* AppLock.swift in Sources */,
+				8D1000000000000000000002 /* AppLockView.swift in Sources */,
+				8D1000000000000000000003 /* AppLockBridge.swift in Sources */,
 				1000000000000000000000A2 /* NativePushCoordinator.swift in Sources */,
 				100000000000000000000003 /* NavigationPolicy.swift in Sources */,
 				1000000000000000000000A3 /* PushCrypto.swift in Sources */,
@@ -799,9 +1053,26 @@
 				1000000000000000000000AE /* NotificationService.swift in Sources */,
 				1000000000000000000000AF /* PushNotificationProcessor.swift in Sources */,
 				100000000000000000000004 /* RootView.swift in Sources */,
+				3C0000000000000000000001 /* RuntimePageCache.swift in Sources */,
+				3D0000000000000000000001 /* DirectPathPreference.swift in Sources */,
+				3E0000000000000000000001 /* DepartedInstanceData.swift in Sources */,
 				100000000000000000000005 /* WebOrigin.swift in Sources */,
 				100000000000000000000006 /* WebViewContainer.swift in Sources */,
 				100000000000000000000007 /* WebViewController.swift in Sources */,
+				16000000000000000000000001 /* VoiceCaptureActivity.swift in Sources */,
+				A15B00000000000000000012 /* TurnActivityCoordinator.swift in Sources */,
+				A15B00000000000000000011 /* TurnActivityAttributes.swift in Sources */,
+				16000000000000000000000002 /* VoiceCaptureIntent.swift in Sources */,
+				16000000000000000000000003 /* VoiceCaptureController.swift in Sources */,
+				16000000000000000000000004 /* VoiceCaptureInstanceClient.swift in Sources */,
+				16000000000000000000000005 /* VoiceCaptureRecorder.swift in Sources */,
+				1B0000000000000000000034 /* NativeHoldCapture.swift in Sources */,
+				1B0000000000000000000036 /* VoiceCaptureOutbox.swift in Sources */,
+				16000000000000000000000031 /* VoiceCaptureAlert.swift in Sources */,
+				16000000000000000000000032 /* VoiceCaptureFailureNotification.swift in Sources */,
+				16000000000000000000000033 /* VoiceCaptureBanner.swift in Sources */,
+				16000000000000000000000016 /* VoiceCaptureLiveActivity.swift in Sources */,
+				A15B00000000000000000013 /* TurnLiveActivity.swift in Sources */,
 				100000000000000000000120 /* DirectIrohByteStream.swift in Sources */,
 				100000000000000000000121 /* DirectIrohEngine.swift in Sources */,
 				100000000000000000000136 /* DirectIrohBinding.swift in Sources */,
@@ -815,15 +1086,27 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1A0000000000000000000006 /* HealthSyncTests.swift in Sources */,
+				1A0000000000000000000005 /* HealthDataReaderTests.swift in Sources */,
 				1000000000000000000000F3 /* DirectConnectListenerTests.swift in Sources */,
 				1000000000000000000000F5 /* DirectPathAppTests.swift in Sources */,
 				1000000000000000000000F4 /* DirectPathControllerTests.swift in Sources */,
 				1000000000000000000000F7 /* DirectPublicBackendTests.swift in Sources */,
+				1000000000000000000000FA /* DeviceDescriptionTests.swift in Sources */,
+				1000000000000000000001F1 /* NativeScreenCaptureTests.swift in Sources */,
 				10000000000000000000000B /* NavigationPolicyTests.swift in Sources */,
 				100000000000000000000013 /* MobileOnboardingTests.swift in Sources */,
 				100000000000000000000014 /* MobileAuthTransportIntegrationTests.swift in Sources */,
 				1000000000000000000000D1 /* NativeBadgeTests.swift in Sources */,
+				16000000000000000000000030 /* VoiceCaptureTests.swift in Sources */,
+				A15B00000000000000000018 /* TurnActivityTests.swift in Sources */,
+				1B0000000000000000000035 /* NativeHoldCaptureTests.swift in Sources */,
+				1B0000000000000000000037 /* VoiceCaptureOutboxTests.swift in Sources */,
+				8C1000000000000000000003 /* ShowShareTests.swift in Sources */,
+				8D1000000000000000000005 /* AppLockTests.swift in Sources */,
+				8C1000000000000000000004 /* ShowShareForegroundTests.swift in Sources */,
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
+				100000000000000000000146 /* SystemScheduleTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,
@@ -865,14 +1148,22 @@
 			files = (
 				910000000000000000000001 /* SheetFixtureApp.swift in Sources */,
 				91000000000000000000000D /* NativeBridge.swift in Fixture Sources */,
+				910000000000000000000153 /* NativeHoldCapture.swift in Fixture Sources */,
+				910000000000000000000154 /* NavigationPolicy.swift in Fixture Sources */,
+				8C1000000000000000000002 /* ShowShareCoordinator.swift in Fixture Sources */,
+				8D1000000000000000000004 /* AppLockBridge.swift in Fixture Sources */,
 				91000000000000000000000F /* NativeBadge.swift in Fixture Sources */,
 				91000000000000000000000E /* FixtureNativeBridgeSupport.swift in Fixture Sources */,
+				3D0000000000000000000003 /* DirectPathPreference.swift in Fixture Sources */,
 				910000000000000000000002 /* FixtureKeyboardViewport.swift in Sources */,
+				910000000000000000000155 /* FixtureHoldPage.swift in Sources */,
 				910000000000000000000003 /* MobileAccount.swift in Fixture Sources */,
 				910000000000000000000004 /* MobileAuthTransport.swift in Fixture Sources */,
 				910000000000000000000005 /* MobileOnboardingBridge.swift in Fixture Sources */,
+				910000000000000000000151 /* AvibePage.swift in Fixture Sources */,
 				91000000000000000000000B /* MobileOnboardingContainer.swift in Fixture Sources */,
 				910000000000000000000006 /* MobilePasskey.swift in Fixture Sources */,
+				910000000000000000000152 /* MobileProviderSignIn.swift in Fixture Sources */,
 				910000000000000000000007 /* WebOrigin.swift in Fixture Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -881,8 +1172,21 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				910000000000000000000156 /* HoldTouchUITests.swift in Sources */,
 				910000000000000000000009 /* InstanceSheetGestureUITests.swift in Sources */,
 				91000000000000000000000C /* RealBundleCaptureUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		96000000000000000000000001 /* Live Activity Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				16000000000000000000000011 /* VoiceCaptureActivity.swift in Live Activity Sources */,
+				A15B00000000000000000014 /* TurnActivityAttributes.swift in Live Activity Sources */,
+				16000000000000000000000010 /* VoiceCaptureLiveActivity.swift in Live Activity Sources */,
+				A15B00000000000000000015 /* TurnLiveActivity.swift in Live Activity Sources */,
+				16000000000000000000000014 /* AvibeLiveActivityBundle.swift in Live Activity Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -913,6 +1217,11 @@
 			isa = PBXTargetDependency;
 			target = 500000000000000000000005 /* AvibeSheetFixture */;
 			targetProxy = 300000000000000000000005 /* AvibeSheetFixture UI test host proxy */;
+		};
+		B6000000000000000000000001 /* AvibeLiveActivity dependency */ = {
+			isa = PBXTargetDependency;
+			target = 56000000000000000000000001 /* AvibeLiveActivity */;
+			targetProxy = 36000000000000000000000001 /* AvibeLiveActivity dependency proxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -1029,6 +1338,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -1039,12 +1349,12 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1061,6 +1371,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -1071,12 +1382,12 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Avibe/Resources/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.1.0;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "$(APP_PROVISIONING_PROFILE_SPECIFIER)";
@@ -1096,7 +1407,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1113,7 +1424,7 @@
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1133,8 +1444,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.1.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1153,8 +1464,8 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = NotificationService/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 0.1.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.notification-service;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "$(NOTIFICATION_SERVICE_PROFILE_SPECIFIER)";
@@ -1172,7 +1483,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AvibeSheetFixture/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1190,7 +1501,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AvibeSheetFixture/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -1206,7 +1517,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1222,7 +1533,7 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.sheet-fixture.tests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = iphoneos;
@@ -1238,7 +1549,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MACH_O_TYPE = staticlib;
 				PRODUCT_MODULE_NAME = IrohLib;
 				PRODUCT_NAME = IrohLib;
@@ -1255,7 +1566,7 @@
 			buildSettings = {
 				CLANG_ENABLE_MODULES = YES;
 				DEFINES_MODULE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
 				MACH_O_TYPE = staticlib;
 				PRODUCT_MODULE_NAME = IrohLib;
 				PRODUCT_NAME = IrohLib;
@@ -1264,6 +1575,61 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		C6000000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AvibeLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.live-activity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) AVIBE_LIVE_ACTIVITY_EXTENSION";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		C6000000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = AvibeLiveActivity/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.4;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = bot.avibe.ios.live-activity;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(LIVE_ACTIVITY_PROFILE_SPECIFIER)";
+				SDKROOT = iphoneos;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) AVIBE_LIVE_ACTIVITY_EXTENSION";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Release;
 		};
@@ -1329,6 +1695,15 @@
 			buildConfigurations = (
 				C0000000000000000000000D /* Fixture UI Test Debug */,
 				C0000000000000000000000E /* Fixture UI Test Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		86000000000000000000000001 /* Build configuration list for PBXNativeTarget "AvibeLiveActivity" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C6000000000000000000000001 /* Debug */,
+				C6000000000000000000000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

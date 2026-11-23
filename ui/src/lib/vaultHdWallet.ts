@@ -233,3 +233,9 @@ export function makeQuiz(words: string[], random: () => number = Math.random): H
 
 /** Whether every question has its answer picked. */
 export const quizPassed = (quiz: HdQuestion[], chosen: Record<number, string>) => quiz.every((q) => chosen[q.position] === q.answer);
+
+/** Whether the passphrase's second box is judged yet: once it holds something and the person is
+ *  done with it — they left it (and haven't come back), or it is as long as the first. Never while it
+ *  is empty or still being typed. */
+export const passphraseJudged = (value: string, confirm: string, confirmLeft: boolean) =>
+  confirm !== '' && (confirmLeft || confirm.length >= value.length);

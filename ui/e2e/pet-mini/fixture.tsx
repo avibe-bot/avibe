@@ -32,7 +32,7 @@ declare global {
   interface Window {
     petLayoutHitRegions: Parameters<typeof petBridge.setHitRegions>[0];
     petHitReports: number;
-    petFixtureLayout: (revision: number, edge: 'top' | 'bottom') => void;
+    petFixtureLayout: (revision: number, edge: 'top' | 'bottom', columnOffset?: number) => void;
     setPetLayoutVisible: (visible: boolean) => void;
     petFixtureSends: { sessionId: string; payload: unknown }[];
     petFixtureOpens: string[];
@@ -58,7 +58,7 @@ window.petLayoutHitRegions = [];
 window.petHitReports = 0;
 petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects; window.petHitReports += 1; };
 // Apply a layout snapshot the way the shell's event does.
-window.petFixtureLayout = (revision, edge) => { petPanel.applySnapshot({ revision, layout: { panel_side: 'left', panel_edge: edge } }); };
+window.petFixtureLayout = (revision, edge, columnOffset = 0) => { petPanel.applySnapshot({ revision, layout: { panel_side: 'left', panel_edge: edge, column_offset: columnOffset } }); };
 window.petFixtureSends = [];
 window.petFixtureOpens = [];
 window.petFixtureStops = [];
@@ -68,11 +68,14 @@ if (params.has('pendingExpansion')) {
   const expanded = new Promise<void>((resolve) => { window.petFixtureReleaseExpansion = resolve; });
   petBridge.setExpanded = async (next) => {
     if (next) await expanded;
-    return { panel_side: 'left', panel_edge: 'bottom' };
+    return { panel_side: 'left', panel_edge: 'bottom', column_offset: 0 };
   };
 }
-// `edge=top`: the layout a shell chooses near the top of the display (§9.1).
-if (params.get('edge') === 'top') petPanel.applySnapshot({ revision: 1, layout: { panel_side: 'left', panel_edge: 'top' } });
+// `edge=top`: the layout a shell chooses near the top of the display (§9.1);
+// `offset=<px>`: the column moved off Vibey's centre near a display's side.
+if (params.get('edge') === 'top' || params.has('offset')) {
+  petPanel.applySnapshot({ revision: 1, layout: { panel_side: 'left', panel_edge: params.get('edge') === 'top' ? 'top' : 'bottom', column_offset: Number(params.get('offset') ?? 0) } });
+}
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';

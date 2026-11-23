@@ -49,6 +49,7 @@ import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { blockHdWallet, unblockHdWallet } from '@/lib/vaultHdQuarantine';
 import {
   checkPhrase, deriveAccounts, makeQuiz, newPhrase, quizPassed, wordsToSeed, type HdAccountAddresses, type HdQuestion, type PhraseCheck,
+  passphraseJudged,
 } from '@/lib/vaultHdWallet';
 import { useProtectedHdSupported, useProtectedVault, useVaultSandboxWarm } from '@/lib/useProtectedVault';
 import { protectedHdBusy, protectedHdSubmitted, useProtectedHdCreate } from '@/lib/useProtectedHdCreate';
@@ -58,7 +59,7 @@ import { askTurnOffNoteShown, useAskTurnOff } from '@/lib/useAskTurnOff';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { DEFAULT_PASSWORD_RECIPE, recipeFromSpec, type GenerateRecipe } from '@/lib/vaultGenerate';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
 import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
@@ -84,7 +85,7 @@ import { VaultProtectedKeyFields } from './vault-protected-key-fields';
 import {
   HdAvaultOld, HdBackupStep, HdCheckStep, HdCreatePassphrase, HdDoneStep, HdImportFields, HdMismatchBlock, HdNotice, HdStepFooter, HdStepper,
 } from './vault-hd-wallet-steps';
-import { ProtectedHdDone, ProtectedHdLaunchButton, ProtectedHdLaunchNotice, ProtectedHdTierNote } from './vault-protected-hd-create';
+import { ProtectedHdDone, ProtectedHdLaunchButton, ProtectedHdLaunchNotice, ProtectedHdTierNote, ProtectedHdWindowLine } from './vault-protected-hd-create';
 import { AskTurnOffNote } from './vault-ask-turn-off-note';
 import { VaultProtectedUnlock } from './vault-protected-unlock';
 import { VaultSecretFieldsEditor, type VaultFieldsCommit } from './vault-secret-fields-editor';
@@ -257,6 +258,7 @@ export const VaultSecretForm: React.FC<{
   // Creating a wallet: an optional passphrase, typed twice. Kept apart from the import's own.
   const [hdNewPassphrase, setHdNewPassphrase] = useState('');
   const [hdNewPassphraseAgain, setHdNewPassphraseAgain] = useState('');
+  const [hdPassphraseAgainLeft, setHdPassphraseAgainLeft] = useState(false);
   // Whether the wallet just saved used one, for the done screen's recovery line.
   const [hdSavedWithPassphrase, setHdSavedWithPassphrase] = useState(false);
   const [hdAsk, setHdAsk] = useState(false);
@@ -303,7 +305,9 @@ export const VaultSecretForm: React.FC<{
     requestSpec?.protection ?? (plainAdd ? rememberedAddTier() ?? defaultProtection : defaultProtection),
   );
   // Whether the typed name is free (checked on leaving the field and again before anything is made).
-  const [nameIssue, setNameIssue] = useState<{ name: string; issue: NameIssue; afterSave?: 'standard-hd' } | null>(null);
+  // `refused`: the server itself refused this name at save; a later list read (possibly cached) that
+  // misses it does not clear that.
+  const [nameIssue, setNameIssue] = useState<{ name: string; issue: NameIssue; afterSave?: 'standard-hd'; refused?: boolean } | null>(null);
   const nameCheckSeq = useRef(0);
   // A submit that awaited the name check must not go on to save once the dialog has closed.
   const mounted = useRef(true);
@@ -390,6 +394,8 @@ export const VaultSecretForm: React.FC<{
   }, [api]);
 
   const protectedVault = useProtectedVault();
+  // Re-render when a failed in-app passkey step moves the desktop app to the browser hand-off.
+  useVaultPasskeyHandoff();
   const entryIssue = vaultEntryIssue();
   // Protected seed-phrase wallets (contract rev0.7): made in the sandbox window, saved, then confirmed.
   const protectedHd = useProtectedHdCreate();
@@ -467,7 +473,9 @@ export const VaultSecretForm: React.FC<{
     try {
       const listed = await api.listVaultSecrets(fresh ? { cache: false } : undefined);
       const issue = nameIssueAmong(candidate, (listed?.secrets ?? []).map((secret) => secret.name));
-      if (seq === nameCheckSeq.current) setNameIssue(issue ? { name: candidate, issue } : null);
+      if (seq === nameCheckSeq.current) {
+        setNameIssue((prev) => issue ? { name: candidate, issue } : prev?.refused && prev.name === candidate ? prev : null);
+      }
       return issue;
     } catch {
       return null;
@@ -619,6 +627,13 @@ export const VaultSecretForm: React.FC<{
         if (fieldRows) return fieldRowsNamed && fieldRows.some((field) => !field.value) ? t('vaults.dialog.createNeedsValue') : null;
         return staticSource === 'text' && !value ? t('vaults.dialog.createNeedsValue') : null;
       }
+      if (isHd && signingSource === 'generate') {
+        // The passphrase's second box not yet judged (empty, or still being typed): say what is
+        // left to do. Once judged, its own mismatch line speaks.
+        return hdNewPassphrase !== hdNewPassphraseAgain && !passphraseJudged(hdNewPassphrase, hdNewPassphraseAgain, hdPassphraseAgainLeft)
+          ? t('vaults.dialog.createNeedsPassphraseAgain')
+          : null;
+      }
       if (isHd) return signingSource === 'import' && !hdImport.trim() ? t('vaults.dialog.createNeedsWords') : null;
       return (isSolanaKey ? solanaImport : importHex).trim() ? null : t('vaults.dialog.createNeedsKey');
     }
@@ -713,6 +728,7 @@ export const VaultSecretForm: React.FC<{
     setHdPassphrase('');
     setHdNewPassphrase('');
     setHdNewPassphraseAgain('');
+    setHdPassphraseAgainLeft(false);
     setHdMismatch(false);
     setHdMismatchNotSaved(false);
   };
@@ -776,6 +792,7 @@ export const VaultSecretForm: React.FC<{
       setHdPassphrase('');
       setHdNewPassphrase('');
       setHdNewPassphraseAgain('');
+    setHdPassphraseAgainLeft(false);
       setHdQuiz([]);
       setHdChosen({});
       setHdMismatchNotSaved(true);
@@ -792,7 +809,7 @@ export const VaultSecretForm: React.FC<{
       if ((created.code === 'secret_exists' || created.code === 'secret_name_case_conflict') && !treatExistingAsFulfilled) {
         // Another key holds the name: nothing was saved, and the words are still here. Back to the
         // first step with them, so only the name changes (owner, 2026-11-15).
-        setNameIssue({ name, issue: { kind: 'taken' }, afterSave: 'standard-hd' });
+        setNameIssue({ name, issue: { kind: 'taken' }, afterSave: 'standard-hd', refused: true });
         setHdStep('setup');
         return;
       }
@@ -812,6 +829,7 @@ export const VaultSecretForm: React.FC<{
     setHdPassphrase('');
     setHdNewPassphrase('');
     setHdNewPassphraseAgain('');
+    setHdPassphraseAgainLeft(false);
     setHdQuiz([]);
     setHdChosen({});
     const stored = created.secret?.accounts?.find((account) => account.account === 0);
@@ -930,7 +948,7 @@ export const VaultSecretForm: React.FC<{
         onSaved: protectedVault.afterCreated,
         // Checked again with the window reserved but before anything is made in it.
         precheck: async () => !(await checkName(secretName, true)),
-        onNameTaken: () => setNameIssue({ name: secretName, issue: { kind: 'taken' } }),
+        onNameTaken: () => setNameIssue({ name: secretName, issue: { kind: 'taken' }, refused: true }),
       });
       return;
     }
@@ -1851,10 +1869,10 @@ export const VaultSecretForm: React.FC<{
 
   // ---- Seed-phrase wallet steps after setup — ui/design: vault/mnemonic/create/* -------
   if (isProtectedHd && protectedHd.phase.kind === 'done') {
-    const { name: savedName, account0 } = protectedHd.phase;
+    const { name: savedName, account0, bitcoinTypes } = protectedHd.phase;
     return (
       <div className={cn('flex min-w-0 flex-col gap-4', className)}>
-        <ProtectedHdDone name={savedName} account0={account0} onFinish={() => onCreated(savedName, 'created')} />
+        <ProtectedHdDone name={savedName} account0={account0} bitcoinTypes={bitcoinTypes} onFinish={() => onCreated(savedName, 'created')} />
       </div>
     );
   }
@@ -2029,10 +2047,14 @@ export const VaultSecretForm: React.FC<{
           />
           {protection === 'protected' ? (
             // Words, passphrase and the three-word check live only in the sandbox window.
-            <HintLine
-              text={t(signingSource === 'generate' ? 'vaults.hd.protected.generateHint' : 'vaults.hd.protected.importHint')}
-              info={t('vaults.hd.protected.info')}
-            />
+            <>
+              <HintLine
+                text={t(signingSource === 'generate' ? 'vaults.hd.protected.generateHint' : 'vaults.hd.protected.importHint')}
+                info={t('vaults.hd.protected.info')}
+              />
+              {/* Why a separate window, said before it opens (owner, 2026-11-16). */}
+              {protectedHdSupported !== false ? <ProtectedHdWindowLine /> : null}
+            </>
           ) : signingSource === 'generate' ? (
             <>
               <HintLine text={t('vaults.hd.generateHint')} info={t('vaults.hd.generateInfo')} />
@@ -2041,8 +2063,10 @@ export const VaultSecretForm: React.FC<{
                 <HdCreatePassphrase
                   value={hdNewPassphrase}
                   confirm={hdNewPassphraseAgain}
+                  confirmLeft={hdPassphraseAgainLeft}
                   onChange={setHdNewPassphrase}
                   onConfirmChange={setHdNewPassphraseAgain}
+                  onConfirmLeftChange={setHdPassphraseAgainLeft}
                   disabled={formBusy}
                 />
               ) : null}

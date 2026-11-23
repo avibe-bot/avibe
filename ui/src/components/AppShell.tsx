@@ -1,3 +1,5 @@
+import { DesktopCompose } from '../desktop/DesktopCompose';
+import { NativeAppLaunchFallback } from './apps/NativeAppLaunchFallback';
 import { DesktopAccountRow } from '../desktop/DesktopAccountRow';
 import { DesktopClientPresentation } from '../desktop/useDesktopClient';
 import { hasDesktopClient } from '../desktop/bridge';
@@ -19,8 +21,12 @@ import { useWorkbenchInbox } from '../context/WorkbenchInboxContext';
 import { PendingVaultRequestsContext, usePendingVaultRequestsSource } from '../context/PendingVaultRequestsContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { VersionBadge } from './VersionBadge';
+import { RunningStatus, SidebarStatusRow } from './SidebarStatusRow';
 import { WorkbenchSidebar } from './workbench/WorkbenchSidebar';
-import { BotProfileDialogHost } from './workbench/bots/BotProfileDialog';
+import { lazyPage } from '../lib/lazyPage';
+import { useBots } from '../context/BotsContext';
+import { closeVoiceConsent, useVoiceConsentAsking } from '../lib/voiceConsent';
+import { LazyDialog } from './ui/lazy-dialog';
 import { SidebarResizer } from './SidebarResizer';
 import { AppsLauncher } from './AppsLauncher';
 import { ErrorBoundary } from './ui/error-boundary';
@@ -54,9 +60,13 @@ import {
 } from '../lib/settingsOverlay';
 import { isStandaloneSettingsMenu, useSettingsMenuPlacement } from '../lib/settingsMenuPlacement';
 import { SettingsOverlayNavigationBoundary } from './settings/SettingsOverlayNavigationBoundary';
+import { DesktopShowChatCommand } from './DesktopShowChatCommand';
 import { DesktopSettingsCommand } from './DesktopSettingsCommand';
+import { VaultHandoffReturn } from './VaultHandoffReturn';
 import { prefetchRoutePages } from '../routePages';
 import { WebPushReconciler } from './workbench/WebPushReconciler';
+import { NativeDeviceReporter } from './workbench/NativeDeviceReporter';
+import { SystemScheduleForwarder } from './workbench/SystemScheduleForwarder';
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
 const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
@@ -160,10 +170,15 @@ const ConfigRecoveryNotice: React.FC<{ config: ConfigRecoveryProjection | null }
   );
 };
 
-/** The real sidebar footer layout, shared with design consumers. */
-export function AppShellFooter({ tools, children }: { tools: React.ReactNode; children: React.ReactNode }) {
+/** The real sidebar footer layout, shared with design consumers. `divided`: the desktop app's line between
+ *  the tools and the bottom row, across the whole sidebar, from its left edge to its right one, through the
+ *  sidebar's `px-4` (Max, 2026-11-22 13:00). It has twice the space above it that it has below, the room
+ *  the 28 px bottom row's 32 px slot leaves around its buttons, so the text sits as far below the line as
+ *  the Apps button sits above it. */
+export function AppShellFooter({ tools, divided = false, children }: { tools: React.ReactNode; divided?: boolean; children: React.ReactNode }) {
   return <div data-sidebar-footer className="relative flex shrink-0 flex-col gap-2">
     <div className="flex h-[39px] items-stretch gap-2">{tools}</div>
+    {divided && <div data-sidebar-footer-divider aria-hidden className="-mx-4 mt-2 border-t border-border" />}
     {children}
   </div>;
 }
@@ -172,6 +187,31 @@ export type AppShellProps = {
   /** Replace the footer view while retaining the real Apps/Settings controls. */
   footer?: (slots: { tools: React.ReactNode; defaultView: React.ReactNode }) => React.ReactNode;
 };
+
+// The Bots add/edit dialog's code loads with the first request to open it; after that it stays
+// mounted, so its close animation and the next opening behave as before.
+const BotProfileDialogHost = lazyPage(() => import('./workbench/bots/BotProfileDialog').then((module) => module.BotProfileDialogHost));
+
+function BotProfileDialogSlot() {
+  const { profileRequest, closeProfile } = useBots();
+  const [requested, setRequested] = useState(false);
+  if (profileRequest && !requested) setRequested(true);
+  if (!requested) return null;
+  return (
+    <LazyDialog onFailed={() => { setRequested(false); closeProfile(); }}>
+      <BotProfileDialogHost />
+    </LazyDialog>
+  );
+}
+
+// The question's code loads when it is first put up; nothing on the first screen draws it.
+const VoiceConsentHost = lazyPage(() => import('./voice/VoiceConsent').then((module) => module.VoiceConsentHost));
+
+function VoiceConsentSlot() {
+  const asking = useVoiceConsentAsking();
+  if (!asking) return null;
+  return <LazyDialog onFailed={closeVoiceConsent}><VoiceConsentHost /></LazyDialog>;
+}
 
 export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
   useNativeOuterScrollLock();
@@ -296,7 +336,13 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
       // Through the language operation, not straight at i18n: a language change
       // gives this effect a new `api` and so a second read, which must not undo
       // the pick that caused it — nor may a first read that answers late.
-      adoptPersistedLanguage(i18n, c.language);
+      // A fresh instance stores a default language nobody chose. While setup is
+      // still pending the page keeps its reader's language; finishing setup
+      // saves that language as the instance's own (Wizard), and from then on
+      // the saved one wins.
+      if (c?.setup_state?.needs_setup !== true) {
+        adoptPersistedLanguage(i18n, c.language);
+      }
     }).catch(() => {});
   }, [api, capabilities.can_manage_instance, i18n]);
 
@@ -403,12 +449,17 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     return (
       <ShellSidebarContext.Provider value={shellDrawsSidebar}>
         <WebPushReconciler />
+        <SystemScheduleForwarder />
+        <NativeDeviceReporter />
         <ConfigRecoveryNotice config={config} />
         <SettingsOverlayNavigationBoundary desktop={isDesktop}>
           <DesktopSettingsCommand />
+          <DesktopShowChatCommand />
           <DesktopClientPresentation />
           <Outlet />
         </SettingsOverlayNavigationBoundary>
+        {/* Settings › General is reachable over setup too, and its Voice input switch asks. */}
+        <VoiceConsentSlot />
       </ShellSidebarContext.Provider>
     );
   }
@@ -470,14 +521,20 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
     <PendingVaultRequestsContext.Provider value={pendingVaultRequests}>
     <ShellSidebarContext.Provider value={shellDrawsSidebar}>
     <WebPushReconciler />
+    <SystemScheduleForwarder />
+    <NativeDeviceReporter />
     <SettingsOverlayNavigationBoundary desktop={isDesktop}>
     <DesktopSettingsCommand />
+    <DesktopShowChatCommand />
     <DesktopClientPresentation />
+    <VaultHandoffReturn />
     <SettingsFocusHandoffContext.Provider value={settingsFocusHandoffRef}>
     <WindowManagerProvider standalone={standaloneAppTab} onWindowForeground={leaveSettingsForWindow}>
     <StandaloneAppTabContext.Provider value={standaloneAppTab}>
+    {!standaloneAppTab && <DesktopCompose />}
     <DockProvider enabled={canUseApps}>
     <ShowPageDragProvider>
+    {canUseApps && <RouteSurfaceActivityBoundary active={!settingsOpen}><NativeAppLaunchFallback /></RouteSurfaceActivityBoundary>}
     <DesktopWindowChrome enabled={windowChrome} hidden={settingsOpen}>
     {/* Chromeless (single-app tab): the locked full-viewport column applies on DESKTOP too —
         the app fills the browser area exactly, with nothing to scroll around it. */}
@@ -490,7 +547,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
       <ConfigRecoveryNotice config={config} />
       {/* Windows cover the sidebar (z-10 < z-20). AppsLauncher portals its button and Dock
           above the window layer so app switching remains reachable even when maximized. */}
-      {/* Sidebar (ui/design: workbench/home/desktop) — 248 wide by default, 16px horizontal/bottom padding,
+      {/* Sidebar (ui/design: workbench/home/desktop) — 248 wide by default, 16px horizontal and 8px bottom padding,
           a 16px native brand inset and the original 10px web inset. The top group and bottom
           cluster pushed apart. The brand row, navigation and projects are one unit
           inside WorkbenchSidebar; this frame owns only the column and the bottom.
@@ -503,7 +560,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
         aria-hidden={settingsCoversSidebar || undefined}
         inert={settingsCoversSidebar || undefined}
         className={clsx(
-          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 bg-[var(--sidebar-background)] px-4 pb-4 md:flex',
+          'fixed inset-y-0 left-0 z-10 hidden w-[var(--app-sidebar-w)] flex-col justify-between gap-6 bg-[var(--sidebar-background)] px-4 pb-2 md:flex',
           desktopDragRegion() === undefined && 'border-r border-border',
           desktopDragRegion() !== undefined
             ? 'pt-[calc(1rem+var(--shell-titlebar-inset))]'
@@ -521,7 +578,7 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
         </div>
 
         {/* Bottom cluster: Apps fills the row beside the compact Settings icon,
-            then version on the left and the live service status on the right.
+            then the shared bottom row: status on the left, version on the right.
             AppsLauncher keeps its layout slot here while its interactive surface
             floats above app windows. */}
         {(() => {
@@ -566,20 +623,14 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
                 <Settings className="size-[18px] text-muted group-hover:text-foreground" />
               </Link>
             )}</>;
+          // One bottom row on every surface (ui/design: chrome/bottom-row).
           const defaultView = hasDesktopClient() ? <DesktopAccountRow /> : (
-          <div className="flex items-center justify-between gap-2 px-1 py-0.5">
-            {capabilities.can_read_instance ? <VersionBadge openUpward /> : <span />}
-            <span className="flex items-center gap-1.5 text-[10px] text-muted">
-              {isRunning ? t('common.running') : t('common.stopped')}
-              <span
-                className={clsx(
-                  'size-[9px] shrink-0 rounded-full',
-                  isRunning ? 'bg-mint shadow-glow-dot-mint' : 'bg-muted'
-                )}
-              />
-            </span>
-          </div>);
-          return footer ? footer({ tools, defaultView }) : <AppShellFooter tools={tools}>{defaultView}</AppShellFooter>;
+            <SidebarStatusRow
+              status={<RunningStatus running={isRunning} />}
+              version={capabilities.can_read_instance ? <VersionBadge openUpward /> : null}
+            />
+          );
+          return footer ? footer({ tools, defaultView }) : <AppShellFooter tools={tools} divided={hasDesktopClient()}>{defaultView}</AppShellFooter>;
         })()}
 
         {/* Out of flow, so it neither joins the column nor takes any of its gap.
@@ -653,6 +704,8 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
               : isWorkbenchHome
                 ? 'flex min-h-full flex-col px-4 md:min-h-screen md:px-10 md:py-8'
             : 'mx-auto px-4 pt-4 pb-5 md:px-10 md:py-8',
+          !chromeless && !isSettings && !isFullScreenMobile && desktopDragRegion() !== undefined
+            && 'md:pt-[calc(var(--shell-titlebar-inset)+0.25rem)]',
         )}>
           {/* A crashing page only replaces the content area — the sidebar + chrome stay usable, and
               navigating elsewhere clears the error without a manual retry. Key on location.key (not
@@ -692,8 +745,12 @@ export const AppShell: React.FC<AppShellProps> = ({ footer }) => {
           shell, so any Settings placement suspends it with its form intact (the
           model picker's Add model exit opens Settings over it). */}
       <RouteSurfaceActivityBoundary active={!settingsOpen}>
-        <BotProfileDialogHost />
+        <BotProfileDialogSlot />
       </RouteSurfaceActivityBoundary>
+
+      {/* Voice input's question (ui/design: composer/voice-consent/*): put up by any voice
+          control, and by Settings › General, so it stays live over Settings too. */}
+      <VoiceConsentSlot />
 
       {/* ⌘K message-search palette. Mounted shell-wide; the sidebar field is the
           Workbench entry point. */}

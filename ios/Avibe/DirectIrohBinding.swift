@@ -13,11 +13,15 @@ struct DirectIrohBinding: DirectIrohEngine {
         return DirectIrohLaunchKey(secret: key.toBytes(), endpointID: endpointID)
     }
 
-    func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
+    func bind(secretKey: Data, relayURLs: [String]) async throws -> any DirectIrohEndpoint {
+        // The minimal preset adds no address lookup: no n0 DNS or pkarr
+        // lookup and no publishing. Only the given relays, or none.
         let options = IrohLib.EndpointOptions(
             preset: IrohLib.presetMinimal(),
             secretKey: secretKey,
-            relayMode: IrohLib.RelayMode.disabled()
+            relayMode: relayURLs.isEmpty
+                ? IrohLib.RelayMode.disabled()
+                : IrohLib.RelayMode.custom(map: try IrohLib.RelayMap.fromUrls(urls: relayURLs))
         )
         return Bound(endpoint: try await IrohLib.Endpoint.bind(options: options))
     }
@@ -32,11 +36,12 @@ struct DirectIrohBinding: DirectIrohEngine {
         func connect(
             to endpointID: DirectEndpointID,
             addresses: [String],
+            relayURL: String?,
             alpn: Data
         ) async throws -> any DirectIrohConnection {
             let address = IrohLib.EndpointAddr(
                 id: try IrohLib.EndpointId.fromBytes(bytes: endpointID.bytes),
-                relayUrl: nil,
+                relayUrl: relayURL,
                 addresses: addresses
             )
             return Live(connection: try await endpoint.connect(addr: address, alpn: alpn))
@@ -44,6 +49,10 @@ struct DirectIrohBinding: DirectIrohEngine {
 
         func close() async {
             try? await endpoint.close()
+        }
+
+        var localFamilies: DirectAddressFamilies? {
+            DirectAddressFamilies(socketAddresses: endpoint.addr().directAddresses())
         }
     }
 
@@ -72,6 +81,65 @@ struct DirectIrohBinding: DirectIrohEngine {
 
         func close() {
             try? connection.close(errorCode: 0, reason: Data())
+        }
+
+        var selectedPath: DirectPathKind? {
+            Self.kind(of: connection.paths())
+        }
+
+        var selectedPathDetail: DirectSelectedPath? {
+            guard let path = connection.paths().first(where: \.isSelected) else {
+                return nil
+            }
+            return DirectSelectedPath(
+                isRelay: path.isRelay,
+                isIp: path.isIp,
+                remoteAddress: path.remoteAddr,
+                rttMs: path.rttMs
+            )
+        }
+
+        func watchSelectedPath(
+            _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+        ) -> (any DirectPathWatch)? {
+            Watch(handle: connection.watchPaths(callback: PathCallback(handler: onChange)))
+        }
+
+        static func kind(of paths: [IrohLib.PathSnapshot]) -> DirectPathKind? {
+            guard let path = paths.first(where: \.isSelected) else {
+                return nil
+            }
+            if path.isRelay {
+                return .relay
+            }
+            return path.isIp ? DirectPathKind.family(ofSocketAddress: path.remoteAddr) : nil
+        }
+    }
+
+    private final class PathCallback: IrohLib.PathChangeCallback, @unchecked Sendable {
+        private let handler: @Sendable (DirectPathKind?) -> Void
+
+        init(handler: @escaping @Sendable (DirectPathKind?) -> Void) {
+            self.handler = handler
+        }
+
+        func onChange(paths: [IrohLib.PathSnapshot]) async throws {
+            handler(Live.kind(of: paths))
+        }
+    }
+
+    private final class Watch: DirectPathWatch, @unchecked Sendable {
+        private let handle: IrohLib.WatchHandle
+
+        init(handle: IrohLib.WatchHandle) {
+            self.handle = handle
+        }
+
+        func stop() {
+            let handle = handle
+            Task {
+                await handle.stop()
+            }
         }
     }
 

@@ -1,3 +1,4 @@
+import { useAppLaunch } from './apps/useAppLaunch';
 import {
   createBrowserRouter,
   createRoutesFromElements,
@@ -34,6 +35,7 @@ import {
   SettingsLayout,
   SettingsLogsPage,
   SettingsMessagingPage,
+  SettingsMicrophonePage,
   SettingsNotificationsPage,
   SettingsOpencodeProviderPage,
   SettingsPlatformsPage,
@@ -43,6 +45,7 @@ import {
   UserList,
   VaultsPage,
   Wizard,
+  StandaloneAppRoute,
 } from './routePages';
 import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
 import { StatusProvider } from './context/StatusProvider';
@@ -52,7 +55,6 @@ import { InstanceAuthorizationProvider } from './context/InstanceAuthorizationPr
 import { BootSkeleton } from './components/BootSkeleton';
 import { BotsProvider } from './context/BotsProvider';
 import { BotHoldProvider } from './components/workbench/bots/BotHold';
-import { useWindowManager } from './context/WindowManagerContext';
 import { ToastProvider } from './context/ToastProvider';
 import { ThemeProvider } from './context/ThemeProvider';
 import { VaultSandboxAppearanceBridge } from './components/VaultSandboxAppearanceBridge';
@@ -83,6 +85,7 @@ import { onPageReactivated } from './lib/pageActivity';
 // Apps layer pages are lazy: they share their chunk with the windowed app bodies
 // (registry.tsx) instead of being pulled into the main entry by these routes, so
 // the file browser / xterm code loads only when an app actually opens.
+const HealthLandingPage = lazy(() => import('./components/health/HealthRequest'));
 const AppsFileBrowserPage = lazy(() =>
   import('./components/workbench/AppsFileBrowserPage').then((m) => ({ default: m.AppsFileBrowserPage })),
 );
@@ -127,11 +130,13 @@ import {
     takeResumedWebPushLaunchPath,
 } from './lib/webPushLaunch';
 import { applyAppTitle } from './lib/documentTitle';
+import { isNativeAppWindow } from './lib/desktopShell';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
 import { installNavigationMotion } from './lib/navigationMotion';
+import { VoiceInputFallbackNotice } from './components/voice/VoiceInputFallbackNotice';
 
 const LegacySettingsRedirectRoute = ({ to }: { to: string }) => {
   const { hash } = useLocation();
@@ -306,6 +311,22 @@ const WebPushNotificationNavigator = () => {
     return null;
 };
 
+/** The App's first recheck after an unreachable instance, doubling up to
+ * the last value: each failed read can put up an error toast. */
+const UNREACHABLE_RECHECK_MS = [15_000, 30_000, 60_000, 120_000];
+
+/** A session read that could not reach the instance, as opposed to an
+ * answer from it: a network failure, a timeout, or a 5xx (a down tunnel
+ * answers 530). */
+function isUnreachable(failure: unknown): boolean {
+    if (failure instanceof TypeError) return true;
+    if (failure instanceof Error && (failure.name === 'AbortError' || failure.name === 'TimeoutError')) {
+        return true;
+    }
+    const status = (failure as { status?: unknown } | null)?.status;
+    return typeof status === 'number' && status >= 500;
+}
+
 // Wrapper to check if setup is needed.
 //
 // Validation is global (auth session + setup state), so we only run it
@@ -325,6 +346,11 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     // waits for the server as it always has.
     const [bootSession] = useState(() => readBootSession());
     const provisionalRef = useRef(bootSession !== null);
+    // The App's session check could not reach the instance: it runs again
+    // when the network or the page comes back.
+    const [awaitingReconnect, setAwaitingReconnect] = useState(false);
+    // Consecutive unreachable checks, for the recheck's backoff.
+    const unreachableChecksRef = useRef(0);
     const [provisional, setProvisional] = useState(bootSession !== null);
     // Bumped by every terminal authorization signal (revoked, login required).
     // A check that started before one can still answer ``ready``; it must not
@@ -359,6 +385,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
     useEffect(() => {
         // A terminal signal settles the guard as surely as a check does.
         const settleOnTerminalSignal = () => {
+            setAwaitingReconnect(false);
             terminalSignalRef.current += 1;
             provisionalRef.current = false;
             setProvisional(false);
@@ -432,6 +459,10 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // that check is what confirms the shell, so it runs behind it.
         if (!provisionalRef.current) setGuardStatus('loading');
         setSetupModelHubAllowed(false);
+        setAwaitingReconnect(false);
+        // Whether this check runs behind the replayed shell (it clears the
+        // flag as soon as the session answers, before the setup check).
+        const behindReplay = provisionalRef.current;
 
         checkRemoteAuthForPath(location.pathname, getAuthSession).then(({ session, loginRequired, checkSetup }) => {
             if (superseded()) return;
@@ -469,6 +500,7 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 && !session.capabilities.can_manage_instance
             ) {
                 recordBootSession(session, Date.now(), bootGeneration);
+                unreachableChecksRef.current = 0;
                 setGuardStatus('ready');
                 return null;
             }
@@ -488,14 +520,38 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                     return;
                 }
                 recordBootSession(session, Date.now(), bootGeneration);
+                unreachableChecksRef.current = 0;
                 setGuardStatus('ready');
             });
         }).catch(async (error) => {
             if (superseded()) return;
+            // In the App the shell may be the instance's last page from the
+            // App's cache. While it is the replayed (provisional) shell, a
+            // check that could not reach the instance (no network, a timeout,
+            // a 5xx such as a down tunnel's 530) is no answer: the shell stays
+            // and the check runs again (see `awaitingReconnect`). Setup and
+            // every gate follow only from an answer.
+            const keepsReplayWhenUnreachable = behindReplay && isNativeShell();
             // The replay stays provisional through the retry: until it answers,
             // nothing has confirmed or replaced the replayed capabilities.
-            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession).catch(() => null);
+            let retryFailure: unknown = null;
+            const authCheck = await checkRemoteAuthForPath(location.pathname, getAuthSession)
+                .catch((failure: unknown) => { retryFailure = failure; return null; });
             if (superseded()) return;
+            if (
+                !authCheck
+                && keepsReplayWhenUnreachable
+                // Both the first failure and the retry: an answer already
+                // received (a refusal, a missing config) is never overridden.
+                && isUnreachable(error)
+                && isUnreachable(retryFailure)
+            ) {
+                // The session-success path may have settled it already.
+                provisionalRef.current = true;
+                setProvisional(true);
+                setAwaitingReconnect(true);
+                return;
+            }
             provisionalRef.current = false;
             setProvisional(false);
             if (authCheck?.session) setAuthorizationSession(authCheck.session);
@@ -527,6 +583,15 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
                 setGuardStatus('ready');
                 return;
             }
+            if (keepsReplayWhenUnreachable && authCheck?.checkSetup && isUnreachable(error)) {
+                // The session answered on the retry, but the setup check
+                // that failed (its session or config read) never reached the
+                // instance: still no setup answer.
+                provisionalRef.current = true;
+                setProvisional(true);
+                setAwaitingReconnect(true);
+                return;
+            }
             // Blocked or needs setup: a gate either way.
             forgetBootSession();
             const blocked = accessBlockedCode(error);
@@ -555,6 +620,29 @@ export const AuthGuard = ({ children }: { children: ReactNode }) => {
         // sidebar navigation never re-runs (which would re-mount the
         // shell behind the Loading state).
     }, [authCheckVersion, bypassSetupGuard, setupRedirectExempt, isSetupRoute, getConfig, getAuthSession]);
+
+    // In the App, a check that could not reach the instance runs again when
+    // the network or the page comes back (see the check above).
+    useEffect(() => {
+        if (!awaitingReconnect) return undefined;
+        const recheck = () => {
+            setAwaitingReconnect(false);
+            setAuthCheckVersion((version) => version + 1);
+        };
+        window.addEventListener('online', recheck);
+        const stopReactivation = onPageReactivated(recheck);
+        // A down tunnel never fires `online`: also once more after a while.
+        const delay = UNREACHABLE_RECHECK_MS[
+            Math.min(unreachableChecksRef.current, UNREACHABLE_RECHECK_MS.length - 1)
+        ];
+        unreachableChecksRef.current += 1;
+        const timer = window.setTimeout(recheck, delay);
+        return () => {
+            window.removeEventListener('online', recheck);
+            stopReactivation();
+            window.clearTimeout(timer);
+        };
+    }, [awaitingReconnect]);
 
     // A route exempt from the setup redirect still needs a session: without one
     // its capabilities would read as denied. When the first probe found none
@@ -663,7 +751,7 @@ const AppsRouteFallback = () => {
 // render the Library body full-screen (the same component, its page shell).
 const LibraryRoute = () => {
   const isDesktop = useIsDesktop();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('library');
   const navigate = useNavigate();
   const location = useLocation();
   const handledRef = useRef(false);
@@ -679,19 +767,8 @@ const LibraryRoute = () => {
   useEffect(() => {
     if (!isDesktop || handledRef.current) return;
     handledRef.current = true;
-    const own = wm.windows.filter((w) => w.appId === 'library');
-    const target = own.find((w) => !w.minimized) ?? own[0];
-    if (target) {
-      if (target.minimized) wm.restore(target.id);
-      else wm.focus(target.id);
-      // Honor the requested tab on an already-open window (its LibraryApp reads
-      // navKey/navTab), so an old /admin/show-pages link still lands on Show Pages.
-      if (initialTab) wm.setParams(target.id, { navTab: initialTab, navKey: location.key });
-    } else {
-      wm.openApp('library', { params: { initialTab } });
-    }
-    navigate('/', { replace: true });
-  }, [isDesktop, wm, navigate, initialTab, location.key]);
+    void launchApp({ appId: 'library', params: { initialTab } }).then((outcome) => { if (outcome !== 'stale' && outcome !== 'unknown') navigate('/', { replace: true }); });
+  }, [isDesktop, launchApp, navigate, initialTab, location.key]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   return (
@@ -709,6 +786,8 @@ const LibraryRoute = () => {
 const DocumentTitle = () => {
   const { getConfig } = useApi();
   useEffect(() => {
+    // A native App window's title is the shell's window title; its page names it.
+    if (isNativeAppWindow()) return;
     let cancelled = false;
     getConfig()
       .then((config) => {
@@ -797,6 +876,7 @@ const settingsRoute = () => (
     <Route path="account" element={<Navigate to="/settings/replies" replace />} />
     <Route path="notifications" element={<SettingsNotificationsPage />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />
+    <Route path="microphone" element={<SettingsMicrophonePage />} />
     <Route path="computer-use" element={<SettingsComputerUsePage />} />
     <Route path="service" element={<SettingsServicePage />} />
     <Route path="platforms" element={<SettingsPlatformsPage />} />
@@ -857,7 +937,7 @@ const WorkbenchRouteSurface = () => {
       path="/apps/files"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <AppsFileBrowserPage />
+          <StandaloneAppRoute appId="files"><AppsFileBrowserPage /></StandaloneAppRoute>
         </Suspense>
       }
     />
@@ -865,7 +945,7 @@ const WorkbenchRouteSurface = () => {
       path="/apps/terminal"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <AppsTerminalPage />
+          <StandaloneAppRoute appId="terminal"><AppsTerminalPage /></StandaloneAppRoute>
         </Suspense>
       }
     />
@@ -873,20 +953,36 @@ const WorkbenchRouteSurface = () => {
       path="/apps/editor"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <AppsEditorPage />
+          <StandaloneAppRoute appId="editor"><AppsEditorPage /></StandaloneAppRoute>
         </Suspense>
       }
     />
-    <Route path="/apps/library" element={<LibraryRoute />} />
+    <Route
+      path="/apps/library"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <StandaloneAppRoute appId="library"><LibraryRoute /></StandaloneAppRoute>
+        </Suspense>
+      }
+    />
+    <Route
+      path="/apps/preview"
+      element={
+        <Suspense fallback={<AppsRouteFallback />}>
+          <StandaloneAppRoute appId="preview" />
+        </Suspense>
+      }
+    />
     <Route
       path="/apps/show/:sessionId"
       element={
         <Suspense fallback={<AppsRouteFallback />}>
-          <ShowPageRoute />
+          <StandaloneAppRoute appId="showpage"><ShowPageRoute /></StandaloneAppRoute>
         </Suspense>
       }
     />
     <Route path="/chat/:sessionId" element={<ChatPage />} />
+    <Route path="/mobile/health/:requestId" element={<HealthLandingPage />} />
 
     {settingsRoute()}
 
@@ -958,6 +1054,7 @@ function App() {
       <VaultSandboxAppearanceBridge />
       <StatusProvider>
         <ToastProvider>
+          <VoiceInputFallbackNotice />
           <ApiProvider>
             <NotificationPreferencesProvider>
             <BotRosterProvider>

@@ -1,5 +1,5 @@
 // Settings · Computer Use: let an Agent see and operate this Mac, with the macOS permissions it needs,
-// or a Windows PC in Preview, with the switch alone. The host comes from the server's `host_platform`.
+// or a Windows PC, with the switch alone. The host comes from the server's `host_platform`.
 import { SettingsComputerUsePage } from '@/components/settings/SettingsComputerUsePage';
 
 import { frames } from '../../frame';

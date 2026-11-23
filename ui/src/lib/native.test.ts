@@ -4,15 +4,24 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   hasNativeCapability,
+  hasNativeShare,
+  hasNativeShareExport,
+  hasNativeVoiceHold,
   isNativeShell,
   nativeAppInfo,
   nativeHapticImpact,
   nativePushStatusOutcome,
   nativePushSubscribe,
   nativePushUnsubscribeOutcome,
+  nativeSharePresent,
   nativeShowAccount,
+  nativeSystemScheduleKinds,
+  nativeVoiceHoldAdopt,
+  nativeVoiceHoldReject,
+  nativeVoiceHoldSurfaces,
   nativeVoicePermission,
   onNativePushOpened,
+  onNativeVoiceHold,
   openNativeExternal,
   NATIVE_RECONCILE_MAX_SESSIONS,
   reconcileNativeNotifications,
@@ -335,5 +344,271 @@ describe('native shell bridge', () => {
 
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith('/chat/ses_1?from=push#latest');
+  });
+});
+
+// The App recognises a hold on the surfaces the page names (ios/Avibe/NativeHoldCapture.swift).
+describe("the iOS App's own hold recognition", () => {
+  const capabilities = { voice: 1, voiceCapture: 1, voiceHold: 2 };
+  const surface = { id: 'composer', x: 0, y: 700, width: 390, height: 60 };
+
+  it('is there only in an App that both recognises holds and records them', () => {
+    expect(hasNativeVoiceHold()).toBe(false);
+    installBridge({ capabilities: { voice: 1, voiceHold: 2 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    installBridge({ capabilities: { voice: 1, voiceCapture: 1 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    installBridge({ capabilities });
+    expect(hasNativeVoiceHold()).toBe(true);
+    installBridge({ capabilities: { ...capabilities, voiceHold: 3 } });
+    expect(hasNativeVoiceHold()).toBe(true);
+  });
+
+  // The one build that announced version 1 (TestFlight 50.1) could give a tap the hold's cue:
+  // for it the page names nothing, and the App follows nothing.
+  it('asks the first build of it (version 1) for nothing', async () => {
+    const call = installBridge({ capabilities: { ...capabilities, voiceHold: 1 } });
+    expect(hasNativeVoiceHold()).toBe(false);
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('failed');
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('names surfaces with the threshold, takes them back with an empty list, and reads why the App does not follow', async () => {
+    const call = installBridge({ capabilities });
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('ok');
+    expect(call).toHaveBeenLastCalledWith('voice.holdSurfaces', { surfaces: [surface], holdMs: 200 });
+    await expect(nativeVoiceHoldSurfaces([], 0)).resolves.toBe('ok');
+    // No threshold with no surface: the App takes `holdMs` from 100 to 500 only.
+    expect(call).toHaveBeenLastCalledWith('voice.holdSurfaces', { surfaces: [] });
+
+    for (const [error, answer] of [
+      [{ code: 'failed', message: 'consent' }, 'consent'],
+      [{ code: 'failed', message: 'unwatched' }, 'unwatched'],
+      [{ code: 'failed', message: 'superseded' }, 'superseded'],
+      [{ code: 'failed', message: 'anything' }, 'failed'],
+      [{ code: 'invalid_argument', message: 'consent' }, 'failed'],
+      [new Error('gone'), 'failed'],
+    ] as const) {
+      call.mockRejectedValueOnce(error);
+      await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe(answer);
+    }
+  });
+
+  it('asks an App without it for nothing', async () => {
+    const call = installBridge();
+    await expect(nativeVoiceHoldSurfaces([surface], 200)).resolves.toBe('failed');
+    await nativeVoiceHoldReject('n1');
+    await expect(nativeVoiceHoldAdopt('n1')).rejects.toMatchObject({ code: 'unavailable' });
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('takes a take, refuses one, and passes on a refusal to take', async () => {
+    const call = installBridge({ capabilities });
+    call.mockResolvedValueOnce({ sampleRate: 16_000, timings: { variant: 'early', liveAt: 61 } });
+    await expect(nativeVoiceHoldAdopt('n1')).resolves.toEqual({ sampleRate: 16_000, timings: { variant: 'early', liveAt: 61 } });
+    expect(call).toHaveBeenLastCalledWith('voice.holdAdopt', { take: 'n1' });
+    call.mockRejectedValueOnce({ code: 'failed', message: 'gone' });
+    await expect(nativeVoiceHoldAdopt('n2')).rejects.toEqual({ code: 'failed', message: 'gone' });
+    call.mockRejectedValueOnce(new Error('bridge'));
+    await expect(nativeVoiceHoldReject('n3')).resolves.toBeUndefined();
+    expect(call).toHaveBeenLastCalledWith('voice.holdReject', { take: 'n3' });
+  });
+
+  it("hears the App's word about a press, and nothing that is not one", () => {
+    let emit!: (payload: unknown) => void;
+    const on = vi.fn((_event: string, handler: (payload: unknown) => void) => {
+      emit = handler;
+      return () => undefined;
+    });
+    installBridge({ capabilities, on });
+    const handler = vi.fn();
+    expect(onNativeVoiceHold(handler)).toBeTypeOf('function');
+    expect(on).toHaveBeenCalledWith('voice.hold', expect.any(Function));
+
+    emit({ phase: 'recognised', take: 'n1', surface: 'composer' });
+    emit({ phase: 'failed', take: 'n2', surface: 'composer', step: 'engine:1' });
+    emit({ phase: 'timings', take: 'n1', timings: { liveAt: 61 }, extra: true });
+    for (const malformed of [null, 'recognised', { phase: 'recognised' }, { phase: 'other', take: 'n1' }, { phase: 'recognised', take: 7 }]) {
+      emit(malformed);
+    }
+    expect(handler.mock.calls.map(([event]) => event)).toEqual([
+      { phase: 'recognised', take: 'n1', surface: 'composer' },
+      { phase: 'failed', take: 'n2', surface: 'composer', step: 'engine:1' },
+      { phase: 'timings', take: 'n1', timings: { liveAt: 61 } },
+    ]);
+  });
+});
+
+describe('native Show sharing', () => {
+  const capabilities = {
+    version: 1,
+    inbound_kinds: [],
+    outbound_kinds: ['link', 'pdf', 'image'],
+    max_bytes: { pdf: 52428800, image: 52428800, link: 32768 },
+    max_total_bytes: 52428800,
+    max_attachments: 1,
+    supports_pending: false,
+  };
+  const shareBridge = (
+    present: (params: Record<string, unknown>) => unknown,
+    probe: () => unknown = () => capabilities,
+    shareDraft = 1,
+  ) => installBridge({
+    capabilities: { app: 1, 'c1.share_draft': shareDraft },
+    call: vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'share.capabilities') return probe();
+      if (method === 'share.present') return present(params ?? {});
+      return null;
+    }) as NonNullable<Window['avibeNative']>['call'],
+  });
+
+  it('accepts only an answer to the same operation and kind', async () => {
+    const echo = (extra: Record<string, unknown>) => (params: Record<string, unknown>) => ({ ...params, ...extra });
+    const cases: [(params: Record<string, unknown>) => unknown, object][] = [
+      [echo({ status: 'completed' }), { kind: 'pdf', status: 'completed' }],
+      [echo({ status: 'cancelled', error: { code: 'ignored' } }), { kind: 'pdf', status: 'cancelled' }],
+      [echo({ status: 'expired' }), { status: 'expired', error: { code: 'expired' } }],
+      [echo({ status: 'failed', error: { code: 'not_visible' } }), { status: 'failed', error: { code: 'not_visible' } }],
+      [echo({ operationId: 'another', status: 'completed' }), { status: 'failed', error: { code: 'invalid_response' } }],
+      [echo({ kind: 'image', status: 'completed' }), { status: 'failed', error: { code: 'invalid_response' } }],
+      [() => null, { status: 'failed', error: { code: 'invalid_response' } }],
+      [() => { throw { code: 'busy', message: 'busy' }; }, { status: 'failed', error: { code: 'busy' } }],
+    ];
+    for (const [present, expected] of cases) {
+      shareBridge(present);
+      const result = await nativeSharePresent('pdf', 'ses-1');
+      expect(result).toMatchObject(expected);
+      if (result.status === 'completed' || result.status === 'cancelled') expect(result.error).toBeUndefined();
+    }
+  });
+
+  it('never presents without the capability, a matching probe, or a bounded Session', async () => {
+    const refusals: [() => ReturnType<typeof installBridge>, string, string][] = [
+      [() => installBridge(), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => capabilities, 0), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => ({ ...capabilities, version: 2 })), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => ({ ...capabilities, outbound_kinds: ['link'] })), 'ses-1', 'capability_mismatch'],
+      [() => shareBridge(() => null, () => { throw new Error('gone'); }), 'ses-1', 'unavailable'],
+      [() => shareBridge(() => null), '', 'invalid_request'],
+      [() => shareBridge(() => null), 'x'.repeat(201), 'invalid_request'],
+    ];
+    for (const [install, sessionId, code] of refusals) {
+      const call = install();
+      await expect(nativeSharePresent('image', sessionId)).resolves.toMatchObject({
+        kind: 'image',
+        status: 'failed',
+        error: { code },
+      });
+      expect(call).not.toHaveBeenCalledWith('share.present', expect.anything());
+    }
+  });
+});
+
+
+describe('system schedule supported kinds', () => {
+  it.each([['alarm'], ['reminder'], []])('returns the native kinds %j', async (...kinds) => {
+    installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockResolvedValue({ contract: 1, supportedKinds: kinds }) });
+    expect(await nativeSystemScheduleKinds()).toEqual(kinds);
+  });
+
+  it.each([null, { contract: 1 }, { contract: 2, supportedKinds: ['alarm'] }, { contract: 1, supportedKinds: ['calendar'] }])(
+    'allows only bound recovery when capabilities are unknown: %j', async (result) => {
+      installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockResolvedValue(result) });
+      expect(await nativeSystemScheduleKinds()).toEqual([]);
+    },
+  );
+
+  it('preserves bound recovery when the capability probe is unavailable', async () => {
+    installBridge({ capabilities: { systemSchedule: 1 }, call: vi.fn().mockRejectedValue(new Error('bridge unavailable')) });
+    expect(await nativeSystemScheduleKinds()).toEqual([]);
+  });
+});
+
+describe('desktop Show sharing', () => {
+  const capabilities = {
+    version: 1,
+    inbound_kinds: [],
+    outbound_kinds: ['link', 'pdf', 'image'],
+    max_bytes: { pdf: 52428800, image: 52428800, link: 32768 },
+    max_total_bytes: 52428800,
+    max_attachments: 1,
+    supports_pending: false,
+  };
+  const define = (name: string, value: unknown) =>
+    Object.defineProperty(window, name, { configurable: true, value });
+  const installDesktop = (marker: unknown = 1, present = (params: Record<string, unknown>) => ({ ...params, status: 'cancelled' })) => {
+    const invoke = vi.fn(async (command: string, args?: { request?: Record<string, unknown> }) => {
+      if (command !== 'desktop_show_share') throw new Error('unexpected command');
+      const { method, ...params } = args?.request ?? {};
+      if (method === 'share.capabilities') return capabilities;
+      if (method === 'share.present') return present(params);
+      return null;
+    });
+    define('__AVIBE_DESKTOP_SHELL__', true);
+    define('__AVIBE_DESKTOP_SHOW_SHARE__', marker);
+    define('__TAURI_INTERNALS__', { invoke });
+    return invoke;
+  };
+  afterEach(() => {
+    for (const name of ['__AVIBE_DESKTOP_SHELL__', '__AVIBE_DESKTOP_SHOW_SHARE__', '__TAURI_INTERNALS__']) {
+      Reflect.deleteProperty(window, name);
+    }
+  });
+
+  it('sends the same requests through the one desktop share command', async () => {
+    const invoke = installDesktop();
+    expect(hasNativeShare()).toBe(true);
+    const result = await nativeSharePresent('image', 'ses-1');
+    expect(result).toMatchObject({ kind: 'image', status: 'cancelled' });
+    expect(invoke).toHaveBeenNthCalledWith(1, 'desktop_show_share', { request: { method: 'share.capabilities' } });
+    expect(invoke).toHaveBeenNthCalledWith(2, 'desktop_show_share', {
+      request: { method: 'share.present', operationId: result.operationId, kind: 'image', sessionId: 'ses-1' },
+    });
+  });
+
+  it('offers nothing without the shell marker, and fails without its command channel', async () => {
+    for (const marker of [null, true, 2]) {
+      const invoke = installDesktop(marker);
+      expect(hasNativeShare()).toBe(false);
+      await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'failed', error: { code: 'capability_mismatch' } });
+      expect(invoke).not.toHaveBeenCalled();
+    }
+    // The marker is what the page shows; a share without the command channel fails, untried.
+    installDesktop();
+    define('__TAURI_INTERNALS__', {});
+    expect(hasNativeShare()).toBe(true);
+    await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'failed', error: { code: 'unavailable' } });
+  });
+
+  it('recognises a native Show window, which carries the app-window marker instead of the shell marker', async () => {
+    const invoke = installDesktop();
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    expect(hasNativeShare()).toBe(false);
+    define('__AVIBE_NATIVE_APP_WINDOW__', true);
+    expect(hasNativeShare()).toBe(true);
+    await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'cancelled' });
+    expect(invoke).toHaveBeenCalledWith('desktop_show_share', expect.anything());
+    Reflect.deleteProperty(window, '__AVIBE_NATIVE_APP_WINDOW__');
+  });
+
+  it('exports only from a native Show window, never from the Workbench', () => {
+    installDesktop();
+    expect(hasNativeShareExport()).toBe(false);
+    define('__AVIBE_DESKTOP_SHOW_EXPORT__', 1);
+    expect(hasNativeShareExport()).toBe(true);
+    Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHOW_EXPORT__');
+  });
+
+  it('keeps the phone bridge first when both are present', async () => {
+    const invoke = installDesktop();
+    const call = vi.fn(async (method: string, params?: Record<string, unknown>) =>
+      method === 'share.capabilities' ? capabilities : { ...params, status: 'completed' });
+    installBridge({
+      capabilities: { app: 1, 'c1.share_draft': 1 },
+      call: call as NonNullable<Window['avibeNative']>['call'],
+    });
+    await expect(nativeSharePresent('link', 'ses-1')).resolves.toMatchObject({ status: 'completed' });
+    expect(call).toHaveBeenCalledWith('share.present', expect.objectContaining({ kind: 'link' }));
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

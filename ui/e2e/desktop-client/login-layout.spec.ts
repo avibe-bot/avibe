@@ -17,7 +17,8 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await page.addInitScript((lng) => localStorage.setItem('i18nextLng', lng), lang);
     await installBridge(page, clientState());
     await page.goto(`${ACCOUNT}?theme=${theme}`);
-    await expect(page.locator('#desktop-auth-field')).toBeVisible();
+    const start = page.getByRole('button', { name: lang === 'en' ? 'Continue with email' : '使用邮箱继续' });
+    await expect(start).toBeVisible();
     const card = page.locator('main > div');
     const initial = (await card.boundingBox())!;
     await page.screenshot({ animations: 'disabled', path: info.outputPath('login-1200.png') });
@@ -34,41 +35,45 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     expect(Math.abs(centered.top - centered.bottom)).toBeLessThanOrEqual(2);
     await page.setViewportSize({ width: 880, height: 600 });
     await page.getByRole('button', { name: lang === 'en' ? 'Continue on this Mac' : '继续使用本机' }).scrollIntoViewIfNeeded();
-    await expect(page.locator('#desktop-auth-field')).toBeInViewport();
+    await expect(start).toBeInViewport();
     await page.screenshot({ animations: 'disabled', path: info.outputPath('login-880.png') });
     expect(await page.locator('main').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
     expect(denied).toEqual([]);
   });
 
-  test(`AUTH-SETUP-178 account menu affordances and stable press ${lang} ${theme}`, async ({ page }, info) => {
+  test(`AUTH-SETUP-178 direct footer entry and stable press ${lang} ${theme}`, async ({ page }, info) => {
     await page.setViewportSize({ width: 880, height: 600 });
     const denied = await serveProduct(page, lang);
     const state = clientState(); signIn(state);
     await installBridge(page, state, { projection: true });
     await page.goto(`/?theme=${theme}`);
     const trigger = page.locator('[data-account-trigger]');
-    const arrow = page.locator('[data-account-chevron]');
     await expect(trigger).toBeVisible();
-    const closed = await arrow.evaluate((node) => getComputedStyle(node).rotate);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await trigger.hover(); await page.mouse.down();
-    await trigger.evaluate(async (node) => {
-      await Promise.all(node.getAnimations().map((animation) => animation.finished));
-    });
-    await expect(trigger).toHaveCSS('scale', '1');
+    await trigger.evaluate(async (node) => { await Promise.all(node.getAnimations().map((animation) => animation.finished)); });
+    // A press does not scale it, as it does not scale the Settings button.
+    await expect(trigger).toHaveCSS('scale', 'none');
     await page.mouse.up();
-    await expect(trigger).toHaveAttribute('aria-expanded', 'true');
-    await expect.poll(() => arrow.evaluate((node) => getComputedStyle(node).rotate)).not.toBe(closed);
-    const menu = page.locator('[data-instance-menu]');
-    await expect(menu).toHaveCSS('opacity', '1');
-    const action = menu.getByRole('button', { name: lang === 'en' ? 'Switch instance' : '切换实例' });
-    expect(await action.evaluate((node) => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
-    const status = menu.getByText(lang === 'en' ? 'Remote access to this Mac' : '本机远程访问', { exact: true });
-    expect(await status.evaluate((node) => node.closest('button, a, [role="button"]') === null)).toBe(true);
-    await page.screenshot({ animations: 'disabled', path: info.outputPath('account-menu.png') });
-    await page.keyboard.press('Escape');
-    await expect(trigger).toBeFocused();
-    await expect.poll(() => arrow.evaluate((node) => getComputedStyle(node).rotate)).toBe(closed);
+    // No fill at rest, and the Settings button's wash under the pointer (Max, 2026-11-22 12:05). No hover
+    // tip (Max, 2026-11-20).
+    const settings = page.locator('[data-settings-toggle]');
+    // Read once the colour transition has ended.
+    const fill = (locator: typeof trigger) => locator.evaluate(async (node) => {
+      await Promise.all(node.getAnimations().map((animation) => animation.finished));
+      return getComputedStyle(node).backgroundColor;
+    });
+    await page.mouse.move(0, 0);
+    expect(await fill(trigger)).toBe('rgba(0, 0, 0, 0)');
+    await settings.hover();
+    const settingsHover = await fill(settings);
+    await trigger.hover();
+    expect(await fill(trigger)).toBe(settingsHover);
+    await expect(trigger).not.toHaveAttribute('title');
+    await expect(trigger).not.toHaveAttribute('aria-expanded');
+    await expect(page.locator('[data-account-chevron]')).toHaveCount(0);
+    await expect(page.locator('[data-instance-menu]')).toHaveCount(0);
+    await page.screenshot({ animations: 'disabled', path: info.outputPath('account-entry.png') });
     expect(denied).toEqual([]);
   });
 }

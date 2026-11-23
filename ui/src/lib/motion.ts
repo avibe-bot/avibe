@@ -69,7 +69,8 @@ export function useDisclosure(open: boolean): { present: boolean; closing: boole
 export function timeToProgress(timing: MotionTiming, progress: number): number {
   const curve = /^cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)$/.exec(timing.easing.trim());
   if (!curve) return timing.duration * progress;
-  const [x1, y1, x2, y2] = curve.slice(1).map(Number);
+  // A successful match contains exactly four required captures.
+  const [x1, y1, x2, y2] = curve.slice(1).map(Number) as [number, number, number, number];
   const at = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3;
   // The curve's own parameter where its progress first reaches the target, then the time there.
   let lo = 0;
@@ -90,7 +91,8 @@ export function timeToProgress(timing: MotionTiming, progress: number): number {
 export function curveOf(easing: string): (x: number) => number {
   const curve = /^cubic-bezier\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)$/.exec(easing.trim());
   if (!curve) return (x) => Math.min(1, Math.max(0, x));
-  const [x1, y1, x2, y2] = curve.slice(1).map(Number);
+  // A successful match contains exactly four required captures.
+  const [x1, y1, x2, y2] = curve.slice(1).map(Number) as [number, number, number, number];
   const at = (t: number, a: number, b: number) => 3 * (1 - t) ** 2 * t * a + 3 * (1 - t) * t ** 2 * b + t ** 3;
   return (x) => {
     if (x <= 0) return 0;
@@ -155,7 +157,7 @@ export const RELEASE_WINDOW_MS = 100;
 /** Keeps a gesture's track short: the samples of the last `RELEASE_WINDOW_MS`, and the one before them. */
 export function trackGesture(samples: GestureSample[], sample: GestureSample): void {
   samples.push(sample);
-  while (samples.length > 2 && samples[1].t <= sample.t - RELEASE_WINDOW_MS) samples.shift();
+  while (samples.length > 2 && samples[1]!.t <= sample.t - RELEASE_WINDOW_MS) samples.shift();
 }
 
 /**
@@ -165,9 +167,9 @@ export function trackGesture(samples: GestureSample[], sample: GestureSample): v
  */
 export function releaseVelocity(samples: readonly GestureSample[], releasedAt: number): number {
   if (samples.length === 0) return 0;
-  let from = samples[0];
+  let from = samples[0]!;
   for (const sample of samples) if (sample.t <= releasedAt - RELEASE_WINDOW_MS) from = sample;
-  const last = samples[samples.length - 1];
+  const last = samples[samples.length - 1]!;
   const elapsed = releasedAt - from.t;
   return elapsed > 0 ? (last.at - from.at) / elapsed : 0;
 }

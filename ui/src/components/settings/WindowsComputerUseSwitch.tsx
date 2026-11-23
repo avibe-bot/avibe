@@ -15,7 +15,7 @@ const noteClass = 'flex max-w-2xl items-start gap-1.5 text-[12px] leading-relaxe
 
 /**
  * Windows Computer Use on/off (ui/design: settings/computer-use/windows-*):
- * the switch for the Preview card's header and the note, if any, for its body.
+ * the switch for the Windows card's header and the note, if any, for its body.
  *
  * The switch shows the opt-in the server reports (`enabled`), never one
  * inferred from the readiness status, and is absent while that is unknown. A

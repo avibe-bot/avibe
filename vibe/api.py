@@ -93,6 +93,8 @@ from vibe.upgrade import (
     activation_block_reason,
     activate_upgrade_candidate,
     atomic_upgrade_lock,
+    get_install_status,
+    record_install_locked,
     build_upgrade_plan,
     defer_upgrade_activation,
     discard_atomic_uv_install_generation,
@@ -1236,6 +1238,17 @@ def save_config(
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        # This settings writer does not change relay consent. Ordinary host file
+        # and shell access can still modify local config, including via Web Terminal.
+        # Compare against the locked base, not a prior read or the request's role.
+        if generic_remote_access and config.remote_access.vibe_cloud.direct != bool(
+            base_config and base_config.remote_access.vibe_cloud.direct
+        ):
+            raise ValueError("Direct consent must be changed through connection settings")
+        if config.remote_access.vibe_cloud.public_relay_trial != bool(
+            base_config and base_config.remote_access.vibe_cloud.public_relay_trial
+        ):
+            raise ValueError("Public relay trial consent must be changed from the instance host shell or connection settings")
         if base_config is not None:
             # A recovered base section must reach the file as stored, never as
             # the defaults merged in above. Refuse before any side effect below.
@@ -1271,6 +1284,20 @@ def save_config(
                     and remote_access_runtime_changed(base_config, config)
                 ),
             )
+        if generic_remote_access and base_config is not None:
+            # The address has one writer: the journaled change in
+            # ``vibe.instance_address`` (and pairing). A stale client or a script
+            # writing a former name back here would have this Avibe serve content
+            # on a name in its waiting period. Nothing sets them here from empty
+            # either; clearing them (turning the pairing off) stays possible.
+            for field in ("public_url", "redirect_uri", "client_id"):
+                before = str(getattr(base_config.remote_access.vibe_cloud, field) or "")
+                after = str(getattr(config.remote_access.vibe_cloud, field) or "")
+                if after and before != after:
+                    raise ValueError(
+                        f"Config 'remote_access.vibe_cloud.{field}' is changed by pairing "
+                        "or through '/api/instance-address', not by a settings save"
+                    )
         _validate_enabled_platform_runtime_credentials(config, payload, base_config)
         from vibe import remote_access
 
@@ -2409,6 +2436,42 @@ def _agent_reference_rewrite_error(exc: AgentReferenceRewriteError) -> dict:
     }
 
 
+def deleted_bot_session_id(agent: Any) -> Optional[str]:
+    """The Session a deleted Agent's removed Bot left, which no Bot can reconnect to any more, else None.
+
+    Deleting the Agent (``vibe agent remove``, the Web) then archives it through the Session's own archive
+    lifecycle, which authorizes the caller and tears down what the Session holds (``docs/plans/bots.md`` D1).
+    """
+    from core.vibe_agents import BOT_METADATA_KEY
+    from storage.agent_session_rows import BOT_SESSION_ID_PREFIX
+
+    record = (getattr(agent, "metadata", None) or {}).get(BOT_METADATA_KEY)
+    handle = str(record.get("handle") or "").strip() if isinstance(record, dict) else ""
+    return f"{BOT_SESSION_ID_PREFIX}{handle}" if handle else None
+
+
+def session_is_archived(session_id: str) -> Optional[bool]:
+    """Whether ``session_id`` is archived as stored, the answer after an archive whose reply was lost; None if unread."""
+    from sqlalchemy import select
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    try:
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                status = conn.execute(
+                    select(agent_sessions.c.status).where(agent_sessions.c.id == str(session_id))
+                ).scalar_one_or_none()
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001 - the caller reports the outcome as unknown
+        logger.warning("Could not read whether Session %s is archived", session_id, exc_info=True)
+        return None
+    return status == "archived"
+
+
 def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
     store = VibeAgentStore()
     try:
@@ -2436,6 +2499,7 @@ def remove_vibe_agent(name: str, *, user_context: Any = None) -> dict:
             return {"ok": False, "code": "agent_not_found", "message": f"agent '{name}' not found"}
         return {
             "ok": True,
+            "bot_session_id": deleted_bot_session_id(archived.agent),
             "removed_agent": archived.original_name,
             "archived_agent": _vibe_agent_payload(archived.agent, brief=True),
             "references": archived.references,
@@ -3650,7 +3714,7 @@ def _attach_signed_sign_operation_context(
             if new_bitcoin:
                 vault_service.validate_sign_request(
                     conn, request_id, name=persisted_name, scheme=persisted_scheme,
-                    digest=persisted_digest, signing_context=signing_context,
+                    digest=persisted_digest, signing_context=signing_context, derivation=delivery.get("derivation"),
                 )
                 release["signingKey"] = delivery["signing_key"]
                 release["sandboxCohort"] = {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")}
@@ -6126,7 +6190,7 @@ def vault_sign(payload: dict) -> dict:
     Standard-tier local keypairs are relayed to ``avault sign``. Protected-tier keypairs
     are browser-signed; the daemon accepts and audits the public signature object only.
     """
-    from storage import vault_crypto, vault_service
+    from storage import vault_bitcoin, vault_crypto, vault_service
 
     if not isinstance(payload, dict):
         raise VaultApiError("payload must be an object", code="invalid_payload")
@@ -6202,6 +6266,9 @@ def vault_sign(payload: dict) -> dict:
             )
             vault_service.validate_bitcoin_signing_context(
                 signing_context, digest=digest, scheme=scheme, signing_key=signing_public_key,
+                return_scripts=vault_service.protected_hd_bitcoin_return_scripts(
+                    vault_service.require_secret_access(conn, name), derivation,
+                ) if vault_bitcoin.needs_ecdsa_preflight(signing_context) else None,
             )
             if scheme == "schnorr-secp256k1-bip341-keypath":
                 vault_service.require_compressed_signing_public_key(signing_public_key)
@@ -6260,12 +6327,13 @@ def vault_sign(payload: dict) -> dict:
                             status=409,
                         )
                     if vault_service._is_new_bitcoin_delivery(delivery):
-                        from storage import vault_bitcoin
-
                         try:
                             reviewed = vault_bitcoin.validate_ecdsa_context(
                                 persisted_context, expected_digest=persisted_digest,
                                 public_key=delivery["signing_key"]["public_key"],
+                                return_scripts=vault_service.protected_hd_bitcoin_return_scripts(
+                                    vault_service.require_secret_access(conn, name), derivation,
+                                ),
                             )
                             signature = vault_bitcoin.verify_ecdsa_result(reviewed, signature).signature
                         except vault_bitcoin.BitcoinContextError as exc:
@@ -6301,6 +6369,9 @@ def vault_sign(payload: dict) -> dict:
                         "secret_name": request.get("secret_name"),
                     }
                     protected_response = {"ok": True, "signature": signature, "request": request}
+                    result_fields = _hd_bitcoin_signing_result_fields(delivery.get("derivation"), delivery.get("signing_key"))
+                    if result_fields:
+                        protected_response.update(derivation=delivery["derivation"], **result_fields)
             else:
                 if ed25519_unavailable is not None:
                     raise _vault_api_error_from_avault(ed25519_unavailable, prefix="avault sign failed")
@@ -7771,6 +7842,8 @@ def get_version_info() -> dict:
             "managed_by": "desktop" | None
         }
 
+    A standalone Runtime also reports ``install``: null when idle, otherwise
+    the phase, target version (if known), and UTC start of the install.
     A desktop-managed Runtime reports the desktop app's last completed check
     (``vibe/desktop_update_status.py``), with its phase, version, channel and
     time, and never queries PyPI.
@@ -7791,6 +7864,7 @@ def get_version_info() -> dict:
     if managed_by:
         result["managed_by"] = managed_by
     else:
+        result["install"] = get_install_status()
         result["prereleases"] = prerelease_updates_enabled()
         try:
             auto_update = bool(V2Config.load().update.auto_update)
@@ -7890,6 +7964,7 @@ def do_upgrade(auto_restart: bool = True) -> dict:
                     "activation_notice": None,
                     "restarting": False,
                 }
+            record_install_locked(version_info.get("latest"))
             result = execute_upgrade_plan(
                 plan,
                 run=subprocess.run,
@@ -15862,51 +15937,48 @@ def auto_bind_wechat_user(user_id: str) -> dict:
 # active WebSocket connection exists.  During the setup wizard we start a
 # temporary WS client so the user can configure event subscriptions.
 
+class _TempWsEvents:
+    """The temporary connection handles nothing.
+
+    Feishu gives each event to one of an app's connections. Refusing an event
+    that lands here makes Feishu send it again, so a running adapter still gets
+    it; acknowledging it would swallow it.
+    """
+
+    def _do_without_validation(self, payload: bytes) -> None:
+        raise RuntimeError("the temporary Feishu connection does not handle events")
+
+    do_without_validation = _do_without_validation
+
+
 _temp_ws_lock = __import__("threading").Lock()
-_temp_ws_client = None
-_temp_ws_thread = None
+_temp_ws_connection = None
 
 
 def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> dict:
     """Start a temporary WebSocket connection so the Feishu console shows the long-connection option."""
-    global _temp_ws_client, _temp_ws_thread
+    global _temp_ws_connection
 
     app_id = app_id or _stored_platform_field("lark", "app_id")
     app_secret = app_secret or _stored_platform_secret("lark", "app_secret")
     domain = domain or _stored_platform_field("lark", "domain", "feishu")
     with _temp_ws_lock:
         # Stop any existing temp connection first
-        _stop_temp_ws_internal()
+        if not _stop_temp_ws_internal():
+            return {"ok": False, "code": _TEMP_WS_STILL_CLOSING}
 
         try:
-            import lark_oapi as lark
+            from modules.im.feishu_sdk_ws import SdkLongConnection
 
-            sdk_domain = lark.LARK_DOMAIN if domain == "lark" else lark.FEISHU_DOMAIN
-
-            # Minimal event handler (does nothing, just keeps the connection alive)
-            handler = lark.EventDispatcherHandler.builder("", "").build()
-
-            client = lark.ws.Client(
+            connection = SdkLongConnection(
                 app_id=app_id,
                 app_secret=app_secret,
-                event_handler=handler,
-                log_level=lark.LogLevel.INFO,
-                domain=sdk_domain,
+                domain=_lark_api_base(domain),
+                event_handler=_TempWsEvents(),
+                thread_name="lark-temp-ws",
             )
-
-            import threading
-
-            def _run():
-                try:
-                    client.start()
-                except Exception:
-                    pass  # Thread exits silently on stop
-
-            t = threading.Thread(target=_run, daemon=True, name="lark-temp-ws")
-            t.start()
-
-            _temp_ws_client = client
-            _temp_ws_thread = t
+            connection.start()
+            _temp_ws_connection = connection
 
             return {"ok": True, "message": "Temporary WebSocket connection started"}
         except Exception as exc:
@@ -15916,24 +15988,28 @@ def lark_temp_ws_start(app_id: str, app_secret: str, domain: str = "feishu") -> 
 def lark_temp_ws_stop() -> dict:
     """Stop the temporary WebSocket connection."""
     with _temp_ws_lock:
-        _stop_temp_ws_internal()
+        if not _stop_temp_ws_internal():
+            return {"ok": False, "code": _TEMP_WS_STILL_CLOSING}
     return {"ok": True}
 
 
-def _stop_temp_ws_internal():
-    """Internal helper to stop temp WS (caller must hold _temp_ws_lock)."""
-    global _temp_ws_client, _temp_ws_thread
-    if _temp_ws_client is not None:
-        try:
-            # Prevent auto-reconnect and close the underlying connection
-            _temp_ws_client._auto_reconnect = False
-            from lark_oapi.ws.client import loop as ws_loop
+# A code, not a sentence: the wizard does not show it, and backend text for users goes through vibe/i18n.
+_TEMP_WS_STILL_CLOSING = "temp_ws_still_closing"
 
-            ws_loop.call_soon_threadsafe(ws_loop.create_task, _temp_ws_client._disconnect())
-        except Exception:
-            pass
-        _temp_ws_client = None
-        _temp_ws_thread = None
+
+def _stop_temp_ws_internal() -> bool:
+    """Stop the temp connection (caller must hold _temp_ws_lock); it is kept until it is really gone."""
+    global _temp_ws_connection
+    connection = _temp_ws_connection
+    if connection is None:
+        return True
+    try:
+        stopped = connection.stop(timeout=5.0)
+    except Exception:
+        stopped = False
+    if stopped:
+        _temp_ws_connection = None
+    return stopped
 
 
 # --- Agent Skills (askill CLI shell) --------------------------------------

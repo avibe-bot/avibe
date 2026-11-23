@@ -11,14 +11,18 @@ use async_trait::async_trait;
 use reqwest::Method;
 
 use super::{
-    account::{AccountFlow, Passkeys, CONTROL_PLANE},
+    account::{AccountFlow, Passkeys, ProviderAttempt, SystemBrowser, CONTROL_PLANE},
     enrollment::EnrollmentFlow,
+    loopback::CallbackCopy,
     protocol::*,
     selection::Selection,
     storage::{ConnectionRecord, ConnectionStore, Credentials, InstanceRecency},
     transport::{Epoch, NativeSession, Transport},
 };
+mod updates;
+use super::instance_update::InstanceUpdate;
 use crate::LoopbackOrigin;
+use updates::CommittedUpdate;
 
 #[async_trait]
 pub trait ClientView: Send + Sync {
@@ -28,13 +32,29 @@ pub trait ClientView: Send + Sync {
     fn desktop_update(&self, _action: ClientAction, _epoch: Epoch) -> Result<(), ClientError> {
         Err(ClientError::new("invalid_action"))
     }
+    /// The committed instance's cookies as its WebView holds them, for exactly
+    /// `origin`. Read only to recover the shell's own instance requests after
+    /// the instance rotated or renewed its sign-in through the page.
+    fn instance_cookies(&self, _epoch: &Epoch, _origin: &url::Url) -> Option<Vec<cookie::Cookie<'static>>> {
+        None
+    }
     /// Immediately invalidate all pending window/cookie/download callbacks.
     fn invalidate(&self, generation: u64);
     /// Local lifecycle invalidation may interrupt a physical store replacement.
     /// Restore that staged presentation without displacing a committed remote.
     fn local_rebound(&self, _epoch: Epoch) {}
     /// A staged view now matches the published committed identity.
-    fn committed(&self, _epoch: Epoch) {}
+    fn committed(&self, epoch: Epoch) -> Result<(), ClientError> {
+        epoch.check()
+    }
+    /// Whether this exact operation crossed irreversible native retirement.
+    fn terminal_commit(&self, _epoch: &Epoch) -> bool {
+        false
+    }
+    /// Retire an unpublished candidate without restoring a retired document.
+    async fn abort_commit(&self, _epoch: Epoch) -> Result<(), ClientError> {
+        Ok(())
+    }
     /// Stage a fresh disposable store; check the epoch before every UI callback.
     async fn commit(
         &self,
@@ -43,9 +63,13 @@ pub trait ClientView: Send + Sync {
         cookies: Vec<cookie::Cookie<'static>>,
     ) -> Result<(), ClientError>;
     /// Cancel presentation and restore the last committed route, without auth.
-    async fn restore(&self, epoch: Epoch, target: ClientTarget) -> Result<(), ClientError>;
+    async fn restore(&self, epoch: Epoch, target: ClientTarget, preserve_document: bool) -> Result<(), ClientError>;
     /// Erase and destroy every Desktop-owned instance store, including offline.
-    async fn signed_out(&self, epoch: Epoch, local: ClientTarget) -> Result<(), ClientError>;
+    async fn signed_out(&self, epoch: Epoch, local: ClientTarget, cleanup_failed: bool) -> Result<(), ClientError>;
+    /// Presentation only, after the cleanup error is readable by get_state.
+    async fn signout_failed(&self, _epoch: Epoch) -> Result<(), ClientError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -55,10 +79,12 @@ struct Inner {
     local: Option<NativeSession>,
     enrollment: EnrollmentFlow,
     selection: Option<Selection>,
+    update_session: Option<Arc<CommittedUpdate>>,
     record: ConnectionRecord,
     recency: InstanceRecency,
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
+    display_account: Option<String>,
 }
 
 pub struct Coordinator {
@@ -69,11 +95,28 @@ pub struct Coordinator {
     credential_io: tokio::sync::Mutex<CredentialWrites>,
     signing_out: AtomicBool,
     restore_started: AtomicBool,
+    /// Public sign-in switch reads: the last one started, and the newest one
+    /// shown. A read never waits on or for the account; only its own order counts.
+    sign_in_reads: AtomicU64,
+    sign_in_shown: AtomicU64,
     transport: Arc<dyn Transport>,
     credentials: Arc<dyn Credentials>,
     store: ConnectionStore,
     passkeys: Arc<dyn Passkeys>,
+    browser: Arc<dyn SystemBrowser>,
     view: Arc<dyn ClientView>,
+}
+
+/// A build with no system browser offers no provider sign-in.
+struct NoBrowser;
+impl SystemBrowser for NoBrowser {
+    fn open(&self, _url: &url::Url) -> Result<(), ClientError> {
+        Err(ClientError::new("provider_unavailable"))
+    }
+    /// Never shown: with no browser the attempt ends before any redirect.
+    fn callback_copy(&self, _locale: UiLocale) -> CallbackCopy {
+        CallbackCopy::default()
+    }
 }
 
 struct CredentialWrites {
@@ -98,14 +141,16 @@ impl Coordinator {
         Self {
             inner: Mutex::new(Inner {
                 state,
-                account: AccountFlow::new(transport.clone()),
+                account: AccountFlow::new(transport.clone(), passkeys.supported()),
                 local: None,
                 enrollment: EnrollmentFlow::default(),
                 selection: None,
+                update_session: None,
                 record,
                 recency,
                 restore_allowed: true,
                 committed_view_generation: None,
+                display_account: None,
             }),
             generation,
             action_generation,
@@ -116,12 +161,160 @@ impl Coordinator {
             }),
             signing_out: AtomicBool::new(false),
             restore_started: AtomicBool::new(false),
+            sign_in_reads: AtomicU64::new(0),
+            sign_in_shown: AtomicU64::new(0),
             transport,
             credentials,
             store,
             passkeys,
+            browser: Arc::new(NoBrowser),
             view,
         }
+    }
+
+    /// The person's default browser for provider sign-in.
+    pub fn with_browser(mut self, browser: Arc<dyn SystemBrowser>) -> Self {
+        self.browser = browser;
+        self
+    }
+
+    /// Ends an unfinished sign-in in place: a running first factor (a browser or
+    /// passkey wait), an email code waiting, or an owed second factor ("sign in
+    /// with a different account"). The window stays; the attempt's session is
+    /// dropped. A stored account that never finished signing in (restored at
+    /// launch, owing its second factor) is forgotten as the iPhone signs out:
+    /// its record first, then its keychain entry, so a restart cannot bring it
+    /// back. A signed-in account cannot be ended this way; the waiting call
+    /// sees its generation move and drops whatever arrives.
+    async fn abort_sign_in(&self) -> Result<(), ClientError> {
+        let (epoch, forget) = {
+            let mut inner = self.inner.lock().expect("client state");
+            if inner.state.account.status == AccountStatus::SignedIn {
+                return Err(ClientError::new("invalid_action"));
+            }
+            let epoch = self.advance_locked(&mut inner, None, false)?;
+            inner.account = AccountFlow::new(self.transport.clone(), self.passkeys.supported());
+            inner.state.account = AccountState {
+                status: AccountStatus::SignedOut,
+                identity: None,
+                email: None,
+                gate: None,
+                methods: vec![],
+            };
+            let forget = inner.record.account_id.take().map(|id| (id, inner.record.clone()));
+            (epoch, forget)
+        };
+        self.view.invalidate(epoch.value);
+        self.view.changed(&self.state());
+        let Some((id, record)) = forget else {
+            return Ok(());
+        };
+        // The credential owner sign-out uses: a write in flight finishes first.
+        let mut owned = self.credential_io.lock().await;
+        let credentials = self.credentials.clone();
+        let store = self.store.clone();
+        let erased_id = id.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            let saved = store.save(&record);
+            let erased = credentials.erase(&erased_id);
+            saved.and(erased)
+        })
+        .await
+        .map_err(|_| ClientError::new("credentials_unavailable"))
+        .and_then(|result| result);
+        // On failure the record no longer names the account in memory, so no
+        // later sign-in is written under its key, and the key stays owned for
+        // a sign-out to erase. The error is the reply: nothing reports success.
+        if cleanup.is_ok() {
+            owned.ids.remove(&id);
+        }
+        cleanup
+    }
+
+    /// Reads avibe.bot's public sign-in switches into the published state.
+    /// Public data from the fixed control plane: it takes no operation lock,
+    /// touches no account, and no account change fences it. Reads publish in
+    /// the order they started, so a slow earlier read never replaces a newer one.
+    async fn refresh_sign_in_methods(&self) -> Result<(), ClientError> {
+        let read = self.sign_in_reads.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut methods = AccountFlow::read_sign_in_methods(self.transport.clone()).await?;
+        // Passkey sign-in needs this OS's passkey sheet as well as avibe.bot's switch.
+        methods.passkey = methods.passkey && self.passkeys.supported();
+        let state = {
+            let mut inner = self.inner.lock().expect("client state");
+            if read < self.sign_in_shown.load(Ordering::SeqCst) {
+                return Ok(());
+            }
+            self.sign_in_shown.store(read, Ordering::SeqCst);
+            if inner.state.sign_in == methods {
+                return Ok(());
+            }
+            inner.state.sign_in = methods;
+            inner.state.revision += 1;
+            inner.state.clone()
+        };
+        self.view.changed(&state);
+        Ok(())
+    }
+
+    /// Provider sign-in's start and browser round trip (#3946). The operation
+    /// lock is held only to start the attempt; the wait holds none, so runtime
+    /// monitoring and updates keep running, and the code is committed later
+    /// under the lock. Starting advances the generation, which retires any
+    /// earlier attempt; a newer one in turn ends this wait.
+    async fn browse_provider(
+        &self,
+        provider: SignInProvider,
+        locale: UiLocale,
+        expected: u64,
+        restoring: bool,
+    ) -> Result<(Epoch, ProviderAttempt, String), ClientError> {
+        let (epoch, mut attempt) = {
+            if self.signing_out.load(Ordering::SeqCst) {
+                return Err(ClientError::new("busy"));
+            }
+            let Ok(_operation) = self.operation.try_lock() else {
+                return Err(ClientError::new("busy"));
+            };
+            if let Some(error) = self.credential_io.lock().await.cleanup_error.clone() {
+                return Err(error);
+            }
+            if self.state().account.status == AccountStatus::SignedIn {
+                return Err(ClientError::new("invalid_action"));
+            }
+            let epoch = self.advance(Some(expected), restoring)?;
+            let copy = self.browser.callback_copy(locale);
+            match AccountFlow::start_provider_sign_in(provider, self.transport.clone(), epoch.clone(), &copy).await {
+                Ok(attempt) => (epoch, attempt),
+                Err(error) => {
+                    self.end_provider_attempt(&epoch);
+                    return Err(error);
+                }
+            }
+        };
+        match attempt.browse(self.browser.as_ref(), &epoch).await {
+            Ok(code) => Ok((epoch, attempt, code)),
+            Err(error) => {
+                self.end_provider_attempt(&epoch);
+                Err(error)
+            }
+        }
+    }
+
+    /// An attempt that ended without a code changes nothing of the account, as
+    /// any failed first factor: the previous attempt and its code stay. It
+    /// publishes the generation it advanced to, unless something newer owns
+    /// the account now.
+    fn end_provider_attempt(&self, epoch: &Epoch) {
+        let state = {
+            let mut inner = self.inner.lock().expect("client state");
+            if epoch.check().is_err() {
+                return;
+            }
+            inner.state.revision += 1;
+            inner.state.clone()
+        };
+        self.view.changed(&state);
     }
     pub fn state(&self) -> ClientState {
         self.inner.lock().expect("client state").state.clone()
@@ -147,6 +340,18 @@ impl Coordinator {
         self.inner.lock().expect("client state").committed_view_generation
     }
 
+    /// Actual physical destruction retires presentation authority immediately.
+    /// A subsequent shell recreation uses the existing safe-local escape owner.
+    pub fn window_destroyed(&self) -> u64 {
+        let epoch = self.advance(None, false).expect("unconditional window retirement");
+        let mut inner = self.inner.lock().expect("client state");
+        inner.selection = None;
+        inner.state.consent = None;
+        inner.state.connection.pending = None;
+        inner.state.connection.status = committed_status(&inner.state);
+        epoch.value
+    }
+
     /// Local lifecycle supplies only its validated loopback origin. Rebinding
     /// cannot overwrite a committed remote target or reuse the old local jar.
     pub fn local_origin(&self, origin: Option<LoopbackOrigin>) {
@@ -161,6 +366,9 @@ impl Coordinator {
         inner.state.consent = None;
         inner.state.connection.pending = None;
         inner.state.connection.status = committed_status(&inner.state);
+        inner.state.local.instance_id = None;
+        inner.state.local.slug = None;
+        inner.state.local.remote_access_url = None;
         inner.local = url.map(|url| NativeSession::new(url, self.transport.clone()));
         if inner.local.is_none() {
             inner.state.local.remote_access = RemoteAccessState::Unavailable;
@@ -173,6 +381,9 @@ impl Coordinator {
         self.view.local_rebound(Epoch::new(self.generation.clone(), value));
     }
     pub async fn refresh_local(&self) {
+        // Share transaction ownership with account/enrollment publication.
+        // Otherwise an older account clone can resurrect invalidated proof.
+        let _operation = self.operation.lock().await;
         let mut working = self.inner.lock().expect("client state").clone();
         let epoch = Epoch::new(self.generation.clone(), working.state.generation);
         let Some(local) = &mut working.local else {
@@ -192,8 +403,13 @@ impl Coordinator {
                         current.state.connection.committed = working.state.connection.committed;
                     }
                 }
-                Err(_) => current.state.local.remote_access = RemoteAccessState::Unavailable,
+                Err(_) => {
+                    current.state.local.remote_access = RemoteAccessState::Unavailable;
+                    current.state.local.instance_id = None;
+                    current.state.local.remote_access_url = None;
+                }
             }
+            refresh_display(&mut current);
             current.state.revision += 1;
             current.state.clone()
         };
@@ -264,22 +480,62 @@ impl Coordinator {
             return self.reply(request.request_id, Err(ClientError::new("invalid_request")));
         }
         if matches!(request.action, ClientAction::GetState) {
-            return self.reply(request.request_id, Ok(None));
+            let error = self.credential_io.lock().await.cleanup_error.clone();
+            return self.reply(request.request_id, error.map_or(Ok(None), Err));
         }
         // Escape always fences old work. It can never restore old credentials.
         if matches!(
             request.action,
-            ClientAction::Cancel | ClientAction::ReturnLocal | ClientAction::SignOut
+            ClientAction::Cancel | ClientAction::ReturnLocal | ClientAction::SignOut { .. }
         ) {
-            let expected = matches!(request.action, ClientAction::SignOut).then_some(request.expected_generation);
+            let expected =
+                matches!(request.action, ClientAction::SignOut { .. }).then_some(request.expected_generation);
             let result = self.escape(request.action, expected, None).await.map(|_| None);
             return self.reply(request.request_id, result);
+        }
+        // Like an escape, it never waits for the operation it ends.
+        if matches!(request.action, ClientAction::AbortSignIn) {
+            let result = self.abort_sign_in().await.map(|_| None);
+            return self.reply(request.request_id, result);
+        }
+        if matches!(request.action, ClientAction::RefreshSignInMethods) {
+            let result = self.refresh_sign_in_methods().await.map(|_| None);
+            return self.reply(request.request_id, result);
+        }
+        // An OS or build with no passkey sheet refuses before anything starts:
+        // no generation move, no request, no system class touched.
+        if matches!(request.action, ClientAction::SignInWithPasskey) && !self.passkeys.supported() {
+            return self.reply(request.request_id, Err(ClientError::new("passkey_unavailable")));
+        }
+        let mut provider = None;
+        if let ClientAction::SignInWithProvider {
+            provider: which,
+            locale,
+        } = &request.action
+        {
+            match self
+                .browse_provider(*which, *locale, request.expected_generation, restoring)
+                .await
+            {
+                Ok(found) => provider = Some(found),
+                Err(error) => return self.reply(request.request_id, Err(error)),
+            }
         }
         if self.signing_out.load(Ordering::SeqCst) {
             return self.reply(request.request_id, Err(ClientError::new("busy")));
         }
-        let Ok(_operation) = self.operation.try_lock() else {
-            return self.reply(request.request_id, Err(ClientError::new("busy")));
+        if request.action.is_instance_update() {
+            let result = self.instance_action(request.expected_generation, request.action).await;
+            return self.reply(request.request_id, result.map(|_| None));
+        }
+        let _operation = if provider.is_some() {
+            // The person finished in the browser: wait for short work rather than refuse.
+            self.operation.lock().await
+        } else {
+            let Ok(operation) = self.operation.try_lock() else {
+                return self.reply(request.request_id, Err(ClientError::new("busy")));
+            };
+            operation
         };
         if request.action.is_desktop_update() {
             let epoch = Epoch::new(self.generation.clone(), request.expected_generation);
@@ -295,9 +551,14 @@ impl Coordinator {
         if let Some(error) = self.credential_io.lock().await.cleanup_error.clone() {
             return self.reply(request.request_id, Err(error));
         }
+        // A provider attempt already advanced the generation; it commits only if
+        // nothing newer has since.
+        let expected = provider
+            .as_ref()
+            .map_or(request.expected_generation, |(epoch, ..)| epoch.value);
         {
             let mut inner = self.inner.lock().expect("client state");
-            if request.expected_generation != inner.state.generation || (restoring && !inner.restore_allowed) {
+            if expected != inner.state.generation || (restoring && !inner.restore_allowed) {
                 drop(inner);
                 return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
             }
@@ -305,9 +566,18 @@ impl Coordinator {
                 inner.restore_allowed = false;
             }
         }
-        let epoch = if matches!(
+        let (epoch, provider) = match provider {
+            Some((epoch, attempt, code)) => (Some(epoch), Some((attempt, code))),
+            None => (None, None),
+        };
+        let epoch = if let Some(epoch) = epoch {
+            epoch
+        } else if matches!(
             request.action,
-            ClientAction::RequestOtp { .. } | ClientAction::SelectInstance { .. }
+            ClientAction::RequestOtp { .. }
+                | ClientAction::SignInPassword { .. }
+                | ClientAction::SignInWithPasskey
+                | ClientAction::SelectInstance { .. }
         ) {
             match self.advance(Some(request.expected_generation), restoring) {
                 Ok(epoch) => epoch,
@@ -324,34 +594,66 @@ impl Coordinator {
         if let Some(selection) = &mut working.selection {
             selection.session.fence(epoch.clone());
         }
-        let result = self.execute(&mut working, request.action, &epoch).await;
-        if epoch.check().is_err() {
-            return self.reply(request.request_id, Err(ClientError::new("stale_generation")));
+        let return_after_auth = !restoring
+            && matches!(
+                request.action,
+                ClientAction::SignInPassword { .. }
+                    | ClientAction::SignInWithProvider { .. }
+                    | ClientAction::SignInWithPasskey
+                    | ClientAction::VerifyOtp { .. }
+                    | ClientAction::VerifySecondFactor { .. }
+                    | ClientAction::VerifyPasskey
+                    | ClientAction::FinishTotpEnrollment { .. }
+                    | ClientAction::RetryEnrollment
+            );
+        let owner = self.presentation_owner();
+        let result = self.execute(&mut working, request.action, &epoch, provider).await;
+        if epoch.check().is_err() || (result.is_err() && self.view.terminal_commit(&epoch)) {
+            let error = result.err().unwrap_or_else(|| ClientError::new("stale_generation"));
+            self.recover_commit(&epoch, owner, &error).await;
+            return self.reply(request.request_id, Err(error));
         }
         if result
             .as_ref()
             .err()
             .is_some_and(|error| matches!(error.code.as_str(), "signed_out" | "account_changed"))
         {
-            let cleanup = self.escape(ClientAction::SignOut, None, None).await;
+            let cleanup = self.escape(ClientAction::SignOut { intent_id: None }, None, None).await;
             return self.reply(request.request_id, cleanup.and(result));
         }
-        if result.is_err() {
+        if let Err(error) = &result {
+            self.recover_commit(&epoch, owner, error).await;
             working.selection = None;
             working.state.consent = None;
             working.state.connection.pending = None;
             working.state.connection.status = committed_status(&working.state);
         }
         let persistence = self.persist(&mut working, &epoch).await;
-        if epoch.check().is_err() {
-            return self.reply(
-                request.request_id,
-                Err(persistence
-                    .err()
-                    .unwrap_or_else(|| ClientError::new("stale_generation"))),
-            );
+        if persistence.is_err() || epoch.check().is_err() {
+            let error = persistence
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| ClientError::new("stale_generation"));
+            self.recover_commit(&epoch, owner, &error).await;
+        } else if return_after_auth
+            && result.is_ok()
+            && !matches!(&result,
+            Ok(Some(DirectResult::TotpEnrolled { recovery_codes: Some(codes), .. })) if !codes.is_empty())
+        {
+            let state = self.state();
+            if state.account.status == AccountStatus::SignedIn
+                && state.enrollment.status == EnrollmentStatus::PairedThisAccount
+                && state.enrollment.error_code.is_none()
+                && self.presentation_epoch(owner).is_ok()
+            {
+                // Native initiation owns this return; no late UI reply can
+                // issue an unconditional Cancel against a successor.
+                if let Err(error) = self.escape(ClientAction::Cancel, Some(epoch.value), Some(owner)).await {
+                    return self.reply(request.request_id, Err(error));
+                }
+            }
         }
-        self.view.committed(epoch);
         self.view.changed(&self.state());
         self.reply(
             request.request_id,
@@ -369,6 +671,7 @@ impl Coordinator {
         working: &mut Inner,
         action: ClientAction,
         epoch: &Epoch,
+        provider: Option<(ProviderAttempt, String)>,
     ) -> Result<Option<DirectResult>, ClientError> {
         let mut direct = None;
         let mut authenticated = false;
@@ -379,8 +682,30 @@ impl Coordinator {
                     .request_otp(email, epoch.clone(), &mut working.state)
                     .await?
             }
+            ClientAction::SignInPassword { email, password } => {
+                working
+                    .account
+                    .sign_in_password(email, password, epoch.clone(), &mut working.state)
+                    .await?;
+                authenticated = true;
+            }
             ClientAction::VerifyOtp { code } => {
                 working.account.verify_otp(code, &mut working.state).await?;
+                authenticated = true;
+            }
+            ClientAction::SignInWithProvider { .. } => {
+                let (attempt, code) = provider.ok_or_else(|| ClientError::new("invalid_action"))?;
+                working
+                    .account
+                    .finish_provider_sign_in(attempt, code, epoch.clone(), &mut working.state)
+                    .await?;
+                authenticated = true;
+            }
+            ClientAction::SignInWithPasskey => {
+                working
+                    .account
+                    .sign_in_with_passkey(self.passkeys.as_ref(), epoch.clone(), &mut working.state)
+                    .await?;
                 authenticated = true;
             }
             ClientAction::VerifySecondFactor { method, code } => {
@@ -501,6 +826,15 @@ impl Coordinator {
             };
             working.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
             working.committed_view_generation = Some(epoch.value);
+            working.state.current_instance = Some(selection.instance.clone());
+            working.state.instance_update = Some(InstanceUpdate::loading(selection.instance.id.clone()));
+            working.update_session = Some(Arc::new(CommittedUpdate::new(selection.session.clone())));
+            working.display_account = working
+                .state
+                .account
+                .identity
+                .as_ref()
+                .map(|account| account.id.clone());
             working.selection = None;
         }
         Ok(())
@@ -512,7 +846,9 @@ impl Coordinator {
         if let Some(error) = &owned.cleanup_error {
             return Err(error.clone());
         }
-        if working.state.account.status == AccountStatus::SignedIn {
+        let signed_in = working.state.account.status == AccountStatus::SignedIn;
+        let stored = working.record.account_id.clone();
+        if signed_in {
             let account = working
                 .state
                 .account
@@ -520,9 +856,27 @@ impl Coordinator {
                 .as_ref()
                 .ok_or_else(|| ClientError::new("authentication_required"))?;
             working.record.account_id = Some(account.id.clone());
+            working.account.resumes = Some(account.id.clone());
         }
+        // The key this commit writes: the signed-in account's, or the stored
+        // account's when this unfinished sign-in continues it. Another
+        // unfinished sign-in writes no key and leaves the stored record as is.
+        let written_id = if signed_in || working.record.account_id == working.account.resumes {
+            working.record.account_id.clone()
+        } else {
+            None
+        };
+        // A different account that signed in retires the stored one, in three
+        // phases under credential_io: (1) its key and record are written,
+        // touching nothing of the old account; (2) the final epoch check and
+        // the in-memory commit are the one linearization point; (3) only once
+        // (2) committed is the old key erased. Every failure before (2) rolls
+        // back with the old account untouched; a failure in (3) never
+        // restores the old record or undoes the committed account.
+        let retired_id = stored.filter(|old| signed_in && working.record.account_id.as_ref() != Some(old));
+        let committed_id = working.record.account_id.clone();
         working.record.last_committed = working.state.connection.committed.clone();
-        if let Some(id) = &working.record.account_id {
+        if let Some(id) = &written_id {
             // Own the key before the blocking write starts. Sign-out waits for
             // this lock and erases even a write whose public commit was fenced.
             owned.ids.insert(id.clone());
@@ -532,9 +886,12 @@ impl Coordinator {
         let credentials = self.credentials.clone();
         let store = self.store.clone();
         let checked = epoch.clone();
-        let (saved, previous) = tokio::task::spawn_blocking(move || {
-            let previous = match &record.account_id {
-                Some(id) => match credentials.read(id) {
+        let write_id = written_id.clone();
+        // (1) A task that never returns (a panic) is a failure before (2):
+        // it rolls back like any other, with what it may have written unknown.
+        let (mut saved, previous) = tokio::task::spawn_blocking(move || {
+            let mut previous = match &write_id {
+                Some(id) => match credentials.begin_write(id) {
                     Ok(previous) => Some(previous),
                     Err(error) => return (Err(error), None),
                 },
@@ -542,8 +899,8 @@ impl Coordinator {
             };
             let result = (|| {
                 checked.check()?;
-                if let Some(id) = &record.account_id {
-                    credentials.write(id, &bytes)?;
+                if let Some(write) = previous.as_mut() {
+                    write.publish(&bytes)?;
                 }
                 checked.check()?;
                 store.save(&record)
@@ -551,17 +908,37 @@ impl Coordinator {
             (result, previous)
         })
         .await
-        .map_err(|_| ClientError::new("credentials_unavailable"))?;
+        .unwrap_or_else(|_| (Err(ClientError::new("credentials_unavailable")), None));
         let mut recency = None;
         let rollback_record = {
             let mut current = self.inner.lock().expect("client state");
-            if epoch.check().is_err() {
-                Some(current.record.clone())
-            } else {
-                if let Err(error) = &saved {
+            let opened = working.committed_view_generation != current.committed_view_generation;
+            if !opened {
+                working.state.instance_update.clone_from(&current.state.instance_update);
+                working.update_session.clone_from(&current.update_session);
+            }
+            if saved.is_ok() && epoch.check().is_ok() && opened {
+                saved = self.view.committed(epoch.clone());
+            }
+            if epoch.check().is_err() || saved.is_err() {
+                let error = saved
+                    .as_ref()
+                    .err()
+                    .cloned()
+                    .unwrap_or_else(|| ClientError::new("stale_generation"));
+                let record = current.record.clone();
+                // First-factor/one-time-result state stays readable on a
+                // storage error. A failed target selection never publishes.
+                if epoch.check().is_ok() && !opened {
                     working.state.enrollment.error_code = Some(error.code.clone());
+                    working.record = record.clone();
+                    working.state.sign_in = current.state.sign_in.clone();
+                    working.state.revision = current.state.revision + 1;
+                    refresh_display(working);
+                    *current = working.clone();
                 }
-                // Lifecycle facts may change during the network/storage wait.
+                Some((record, error))
+            } else {
                 working.local = current.local.as_ref().map(|local| {
                     if working.local.as_ref().is_some_and(|old| old.origin == local.origin) {
                         working.local.clone().expect("matched local")
@@ -570,10 +947,10 @@ impl Coordinator {
                     }
                 });
                 working.state.desktop = current.state.desktop.clone();
+                // The public switches are not the account's: a read that
+                // landed during this operation stays.
+                working.state.sign_in = current.state.sign_in.clone();
                 working.state.revision = current.state.revision + 1;
-                // The committed-view receipt changes only when this action
-                // published a new remote selection: the one moment it opens.
-                let opened = working.committed_view_generation != current.committed_view_generation;
                 if opened {
                     if let (Some(account), ClientTarget::Remote { instance_id, .. }) =
                         (&working.state.account.identity, &working.state.connection.committed)
@@ -582,33 +959,59 @@ impl Coordinator {
                         recency = Some(working.recency.clone());
                     }
                 }
+                refresh_display(working);
                 order_catalog(working);
+                // (2) The linearization point.
                 *current = working.clone();
                 None
             }
         };
+        let mut previous = previous;
+        if rollback_record.is_none() {
+            // Another account's erase may take the same native store lock.
+            drop(previous.take());
+            if let Some(old) = retired_id {
+                // (3) Still under credential_io: no sign-out, forget or other
+                // persist can touch a key until this ends.
+                let credentials = self.credentials.clone();
+                let erase_id = old.clone();
+                let erased = tokio::task::spawn_blocking(move || credentials.erase(&erase_id))
+                    .await
+                    .unwrap_or_else(|_| Err(ClientError::new("credentials_unavailable")));
+                match erased {
+                    Ok(()) => {
+                        owned.ids.remove(&old);
+                    }
+                    // The old key stays owned for a sign-out to erase. The
+                    // error shows only while the committed account is still
+                    // the one signed in; a sign-out in between has already
+                    // replaced that state and must not inherit it.
+                    Err(error) => {
+                        let mut current = self.inner.lock().expect("client state");
+                        let still_committed = current.state.account.status == AccountStatus::SignedIn
+                            && current.state.account.identity.as_ref().map(|account| &account.id)
+                                == committed_id.as_ref();
+                        if still_committed {
+                            current.state.enrollment.error_code = Some(error.code.clone());
+                            current.state.revision += 1;
+                        }
+                    }
+                }
+            }
+        }
         if let Some(recency) = recency {
             // Order is a local preference: a failed write keeps this run's
             // order in memory and never fails the committed selection.
             let store = self.store.clone();
             let _ = tokio::task::spawn_blocking(move || store.save_recency(&recency)).await;
         }
-        if let Some(record) = rollback_record {
+        if let Some((record, error)) = rollback_record {
             // Keep credential_io through public commit or rollback. Escape
             // waits on this lock; cancellation cannot leave an unpublished
             // first credential or overwrite an existing committed jar.
-            let id = working.record.account_id.clone();
-            let credentials = self.credentials.clone();
             let store = self.store.clone();
             let rollback = tokio::task::spawn_blocking(move || {
-                let erased = if let (Some(id), Some(previous)) = (id, previous) {
-                    match previous {
-                        Some(bytes) => credentials.write(&id, &bytes),
-                        None => credentials.erase(&id),
-                    }
-                } else {
-                    Ok(())
-                };
+                let erased = previous.map_or(Ok(()), |write| write.rollback());
                 // Restore metadata even when credential rollback fails.
                 store.save(&record).and(erased)
             })
@@ -626,9 +1029,42 @@ impl Coordinator {
                 self.view.changed(&state);
                 return Err(error);
             }
-            return Err(ClientError::new("stale_generation"));
+            return Err(error);
         }
         saved
+    }
+
+    async fn recover_commit(&self, epoch: &Epoch, owner: u64, error: &ClientError) {
+        let terminal = self.view.terminal_commit(epoch);
+        let cleanup = self.view.abort_commit(epoch.clone()).await;
+        if let Err(cleanup) = &cleanup {
+            self.credential_io.lock().await.cleanup_error = Some(cleanup.clone());
+        }
+        if !terminal || self.presentation_epoch(owner).is_err() {
+            return;
+        }
+        let Ok((recovery_owner, recovery)) = self
+            .escape_outcome(ClientAction::ReturnLocal, Some(epoch.value), Some(owner))
+            .await
+        else {
+            return;
+        };
+        if self.presentation_epoch(recovery_owner).is_err() {
+            return;
+        }
+        if let Err(recovery) = recovery {
+            self.credential_io.lock().await.cleanup_error = Some(recovery);
+        }
+        {
+            let mut inner = self.inner.lock().expect("client state");
+            if self.action_generation.load(Ordering::SeqCst) != recovery_owner {
+                return;
+            }
+            inner.state.enrollment.error_code = Some(error.code.clone());
+            inner.state.revision += 1;
+        }
+        let _ = self.view.signout_failed(self.epoch()).await;
+        self.view.changed(&self.state());
     }
 
     async fn escape(
@@ -637,7 +1073,17 @@ impl Coordinator {
         expected: Option<u64>,
         native_owner: Option<u64>,
     ) -> Result<u64, ClientError> {
-        let signing_out = matches!(action, ClientAction::SignOut);
+        let (owner, result) = self.escape_outcome(action, expected, native_owner).await?;
+        result.map(|()| owner)
+    }
+
+    async fn escape_outcome(
+        &self,
+        action: ClientAction,
+        expected: Option<u64>,
+        native_owner: Option<u64>,
+    ) -> Result<(u64, Result<(), ClientError>), ClientError> {
+        let signing_out = matches!(action, ClientAction::SignOut { .. });
         if signing_out && self.signing_out.swap(true, Ordering::SeqCst) {
             return Err(ClientError::new("busy"));
         }
@@ -671,7 +1117,7 @@ impl Coordinator {
             inner.account.clear_transient();
             let old_session = inner.account.session.clone();
             if signing_out {
-                inner.account = AccountFlow::new(self.transport.clone());
+                inner.account = AccountFlow::new(self.transport.clone(), self.passkeys.supported());
                 inner.state.account = AccountState {
                     status: AccountStatus::SignedOut,
                     identity: None,
@@ -685,7 +1131,7 @@ impl Coordinator {
                 };
                 inner.record.account_id = None;
             } else if inner.state.account.status != AccountStatus::SignedIn {
-                inner.account = AccountFlow::new(self.transport.clone());
+                inner.account = AccountFlow::new(self.transport.clone(), self.passkeys.supported());
                 inner.state.account = AccountState {
                     status: AccountStatus::SignedOut,
                     identity: None,
@@ -695,6 +1141,8 @@ impl Coordinator {
                 };
             }
             if signing_out || matches!(action, ClientAction::ReturnLocal) {
+                inner.update_session = None;
+                inner.state.instance_update = None;
                 inner.state.connection.committed = ClientTarget::Local {
                     name: inner.state.local.name.clone(),
                     instance_id: inner.state.enrollment.instance_id.clone(),
@@ -712,6 +1160,7 @@ impl Coordinator {
                 RemoteAuxiliary::DisabledIncomplete
             };
             inner.record.last_committed = target.clone();
+            refresh_display(&mut inner);
             (epoch, target, inner.record.clone(), old_session)
         };
         self.view.invalidate(epoch.value);
@@ -762,10 +1211,12 @@ impl Coordinator {
         }
         drop(owned);
         let view_result = if signing_out {
-            self.view.signed_out(epoch.clone(), target).await
+            self.view.signed_out(epoch.clone(), target, cleanup.is_err()).await
         } else {
             self.presentation_epoch(epoch.value)?;
-            self.view.restore(epoch.clone(), target).await
+            self.view
+                .restore(epoch.clone(), target, matches!(action, ClientAction::Cancel))
+                .await
         };
         if signing_out {
             // Device-local best effort revocation never delays local erasure.
@@ -780,6 +1231,11 @@ impl Coordinator {
             // as credential erasure. Only a successful sign-out retry clears
             // that obligation; no new account work can pass a failed owner.
             self.credential_io.lock().await.cleanup_error = result.as_ref().err().cloned();
+            if result.is_err() && self.presentation_epoch(epoch.value).is_ok() {
+                // A newly loaded receiver can immediately get_state. Store the
+                // error first; never rely on a later projection-only event.
+                let _ = self.view.signout_failed(epoch.clone()).await;
+            }
         }
         let state = {
             let mut inner = self.inner.lock().expect("client state");
@@ -790,7 +1246,7 @@ impl Coordinator {
             inner.state.clone()
         };
         self.view.changed(&state);
-        result.map(|()| epoch.value)
+        Ok((epoch.value, result))
     }
 
     /// Called once at native initialization; cached URLs never authorize restore.
@@ -846,10 +1302,12 @@ impl Coordinator {
             self.transport.clone(),
             &bytes,
         )?;
+        working.account.resumes = Some(id.clone());
         working.account.fence(epoch.clone());
         if let Err(error) = working.account.discover(&mut working.state).await {
             if matches!(error.code.as_str(), "signed_out" | "account_changed") {
-                self.escape(ClientAction::SignOut, None, None).await?;
+                self.escape(ClientAction::SignOut { intent_id: None }, None, None)
+                    .await?;
             }
             return Err(error);
         }
@@ -861,7 +1319,8 @@ impl Coordinator {
                 .as_ref()
                 .is_none_or(|account| account.id != id)
         {
-            self.escape(ClientAction::SignOut, None, None).await?;
+            self.escape(ClientAction::SignOut { intent_id: None }, None, None)
+                .await?;
             return Err(ClientError::new("account_changed"));
         }
         self.persist(&mut working, &epoch).await?;
@@ -942,5 +1401,57 @@ fn committed_status(state: &ClientState) -> ConnectionStatus {
         ConnectionStatus::Local
     } else {
         ConnectionStatus::RemoteConnected
+    }
+}
+
+/// Display metadata has no connection authority and is never persisted.
+fn refresh_display(inner: &mut Inner) {
+    let account = inner
+        .state
+        .account
+        .identity
+        .as_ref()
+        .filter(|_| inner.state.account.status == AccountStatus::SignedIn)
+        .map(|identity| identity.id.clone());
+    inner.state.local.slug = account.as_ref().and_then(|_| {
+        let id = inner.state.local.instance_id.as_ref()?;
+        inner
+            .state
+            .catalog
+            .instances
+            .iter()
+            .find(|instance| &instance.id == id)
+            .map(|instance| instance.name.clone())
+    });
+    if account.is_none() || account != inner.display_account {
+        inner.state.current_instance = None;
+    }
+    inner.display_account = account.clone();
+    let ClientTarget::Remote {
+        instance_id,
+        canonical_origin,
+        ..
+    } = &inner.state.connection.committed
+    else {
+        inner.state.current_instance = None;
+        return;
+    };
+    let matches = |instance: &Instance| {
+        instance.id == *instance_id
+            && instance_origin(instance).is_ok_and(|origin| origin.origin().ascii_serialization() == *canonical_origin)
+    };
+    if account.is_none() {
+        return;
+    }
+    if let Some(instance) = inner
+        .state
+        .catalog
+        .instances
+        .iter()
+        .find(|instance| instance.id == *instance_id)
+    {
+        inner.state.current_instance = matches(instance).then(|| instance.clone());
+    } else if !inner.state.current_instance.as_ref().is_some_and(matches) {
+        inner.state.current_instance = None;
     }
 }

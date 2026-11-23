@@ -238,6 +238,69 @@ Use `POST /api/config`:
 
 Do not overwrite scope-level `custom_cwd` entries.
 
+### Turn the iPhone App's own hold-to-talk recognition off or on
+
+In the iPhone App, the App itself recognises a hold on the composer or the main Bot and records
+every voice take. If hold-to-talk or tap-to-talk misbehaves there (taps that do not focus the
+input, holds that do not record), turn that off with `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold": false
+  }
+}
+```
+
+The page then recognises holds and records as it did before, in the same App build. No restart
+is needed: it takes effect the next time the user opens a conversation or the App. Send
+`"app_hold": true` to turn it on again. Voice input itself stays on either way; this is not
+`audio_asr.enabled`.
+
+### Make a tap on the main Bot open no microphone in the iPhone App
+
+In the iPhone App, a touch on the main Bot's button in the tab bar opens the microphone at
+once, as a touch on the composer does, so a hold there loses no first word. A plain tap on that
+button therefore opens the microphone for a moment (nothing of it is kept or sent). To have that
+one button open the microphone only when the hold is recognised, use `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold_main_at_touch": false
+  }
+}
+```
+
+No restart and no new App build are needed: it takes effect the next time the user opens a
+conversation or the App. The composer is not changed by it. Send `"app_hold_main_at_touch": true`
+to go back. It needs the iPhone App from TestFlight 51.1 on. What it costs: a hold on that button
+then records from the cue, so what is said in the first moment of the press is not in the take.
+
+### Set when a hold's microphone may start in the iPhone App
+
+From TestFlight 52.1, the iPhone App prepares the microphone when a finger comes down on the
+composer or the main Bot, and starts it only if the finger is still down at a set moment: 50 ms
+after touch-down by default. A tap that has lifted by then never opens the microphone (no orange
+dot); a longer moment spares longer taps, and a hold records from that moment on. To set it, in
+whole ms from 0 to 500, use `POST /api/config`:
+
+```json
+{
+  "audio_asr": {
+    "app_hold_start_ms": 80
+  }
+}
+```
+
+Send `null` to go back to the App's own default. If the orange dot shows on plain taps, raise
+`app_hold_start_ms` first: the dot comes with the microphone's start, and a tap that has lifted by
+the start opens nothing. `"app_hold_prepare_at_touch": false` is only a safety valve, in case
+preparing the microphone at touch-down ever shows the indicator by itself on some device (it does
+not on an iPhone 17 Pro with iOS 27.2.1): the App then prepares nothing before the start, and
+every hold starts a little later. No restart and no new App build are needed for either: it
+takes effect the next time the user opens a conversation or the App.
+
 ### Switch primary platform
 
 Use `POST /api/config` and keep `platforms.enabled` complete:

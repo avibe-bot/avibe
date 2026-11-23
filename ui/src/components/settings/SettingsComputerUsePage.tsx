@@ -52,15 +52,6 @@ const WINDOWS_NOTES: { testId: string; icon: LucideIcon; text: TranslationKey }[
   { testId: 'computer-use-windows-stop', icon: CircleStop, text: 'settings.computerUse.windows.stop' },
 ];
 
-const PreviewBadge: FC = () => {
-  const { t } = useTranslation();
-  return (
-    <Badge variant="warning" data-testid="computer-use-preview-badge">
-      {t('settings.computerUse.windows.previewBadge')}
-    </Badge>
-  );
-};
-
 const STEP_STATE_LABEL: Record<ComputerUseGuideStepState, TranslationKey> = {
   complete: 'settings.computerUse.stepState.complete',
   current: 'settings.computerUse.stepState.current',
@@ -248,9 +239,8 @@ export const SettingsComputerUsePage: FC = () => {
           <div className="flex items-start gap-3" data-testid="computer-use-unsupported">
             <Monitor className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden="true" />
             <div className="flex min-w-0 flex-col gap-1">
-              <p className="flex items-center gap-2 text-[14px] font-semibold text-foreground">
+              <p className="text-[14px] font-semibold text-foreground">
                 {t('settings.computerUse.unsupportedTitle')}
-                {windows && <PreviewBadge />}
               </p>
               <p className="text-[12px] leading-relaxed text-muted">
                 {windows
@@ -299,13 +289,8 @@ export const SettingsComputerUsePage: FC = () => {
 
       {windows && (
         <SettingsPanel
-          title={(
-            <span className="flex items-center gap-2">
-              {t('settings.computerUse.windows.title')}
-              <PreviewBadge />
-            </span>
-          )}
-          description={t('settings.computerUse.windows.previewDetail')}
+          title={t('settings.computerUse.windows.title')}
+          description={t('settings.computerUse.windows.limitations')}
           actions={windowsSwitch.control}
         >
           {windowsSwitch.notice && <div className="px-5 pt-4">{windowsSwitch.notice}</div>}

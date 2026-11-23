@@ -1,5 +1,6 @@
 import type { ApiContextType } from '@/context/ApiContext';
 import { isIosDevice, isStandalonePwa } from './platform';
+import { nativeDeviceLabel } from './deviceReport';
 import {
   hasNativeCapability,
   nativePushStatus,
@@ -815,7 +816,7 @@ async function postNativePushRegistration(
         endpoint: registration.endpoint,
         keys: registration.keys,
       },
-      'iPhone App',
+      await nativeDeviceLabel(),
       undefined,
       registration.previousEndpoints,
       recoverOnly,
@@ -1292,19 +1293,29 @@ async function reconcileWebPushOnce(
         return { support, status: 'disabled' };
       }
       if (nativeState.state !== 'on') {
-        const rememberedEndpoints = await getRememberedWebPushEndpoints();
-        const rememberedEndpoint = rememberedEndpoints[0];
-        if (!rememberedEndpoint) {
-          return { support, status: 'disabled' };
-        }
-        const rememberedStatus = await api.getWebPushStatus({
-          endpoint: rememberedEndpoint,
-        });
-        if (
-          !rememberedStatus.current_subscription_enabled
-          && !rememberedStatus.current_subscription_repairable
-        ) {
-          return { support, status: 'disabled' };
+        // No choice of "off" is stored for this instance (a sign-in starts
+        // from a fresh account store) and iOS already allows Avibe's
+        // notifications: turn them on, as the user had them. Never when
+        // permission is not yet asked, so the system prompt never appears
+        // on its own.
+        const restoresByDefault = nativeState.permission === 'granted'
+          && intentState.userIntent !== 'disabled';
+        if (!restoresByDefault) {
+          // Otherwise only a remembered subscription the instance still
+          // knows is turned back on.
+          const rememberedEndpoint = (await getRememberedWebPushEndpoints())[0];
+          if (!rememberedEndpoint) {
+            return { support, status: 'disabled' };
+          }
+          const rememberedStatus = await api.getWebPushStatus({
+            endpoint: rememberedEndpoint,
+          });
+          if (
+            !rememberedStatus.current_subscription_enabled
+            && !rememberedStatus.current_subscription_repairable
+          ) {
+            return { support, status: 'disabled' };
+          }
         }
         await runIntentOperation(() => enableNativeWebPush(
           api,
@@ -1346,7 +1357,7 @@ async function reconcileWebPushOnce(
       const serverStatus = await api.getWebPushStatus({
         endpoint: nativeState.endpoint,
         subscription: nativeSubscription,
-        device_label: 'iPhone App',
+        device_label: await nativeDeviceLabel(),
         previous_endpoints: previousEndpoints,
       });
       if (serverStatus.current_subscription_enabled) {
@@ -1380,7 +1391,7 @@ async function reconcileWebPushOnce(
                 endpoint: repaired.endpoint,
                 keys: repaired.keys,
               },
-              device_label: 'iPhone App',
+              device_label: await nativeDeviceLabel(),
               previous_endpoints: previousEndpoints,
             });
             if (repairedStatus.current_subscription_enabled) {

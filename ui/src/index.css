@@ -103,6 +103,34 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
   --chat-message-max-w: min(92%, 860px);
 }
 
+/* Approved Health card and notification landing geometry. */
+:root {
+  --health-card-copy-basis: 180px;
+  --health-landing-max-w: 420px;
+  --health-landing-min-h: 76dvh;
+}
+@theme {
+  --text-health-metric: 13px;
+}
+/* The Dynamic Island is the hardware's black cut-out in either theme; the iOS Live Activity frames
+   draw it and what sits on it (ui/design: ios/live-activity/island). */
+@theme {
+  --color-island: #000000;
+  --color-island-foreground: #ffffff;
+}
+
+/* macOS window chrome, as a design frame draws it standing in for the system
+   (ui/design: show-pages/desktop-native-entry/*): the traffic lights' colours,
+   the title bar's side inset, its title size and its toolbar symbol size. */
+@theme {
+  --color-traffic-close: #ff5f57;
+  --color-traffic-minimize: #febc2e;
+  --color-traffic-zoom: #28c840;
+  --spacing-titlebar-inset: 9px;
+  --spacing-titlebar-symbol: 14px;
+  --text-titlebar: 13px;
+}
+
 /* Motion (docs/plans/web-ui-motion.md §4; ui/design: motion/tokens/sheet). A
    moment picks one duration and one curve from here; nothing animates on a
    literal. Durations: `instant` answers a press, `fast` moves small things
@@ -246,6 +274,15 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
      asks for more contrast, and its edge is the fill plus `shadow-elevation-0`.
      Every value is a runtime variable re-anchored per palette, like `--card-wash`. */
   --color-edge: var(--edge-border);
+  /* Sign in with Apple keeps Apple's styles (HIG): white with a black outline on light,
+     white on dark, so it weighs the same as the other sign-in buttons. */
+  /* Google and GitHub marks: Google's sign-in button colours, as on avibe.bot's login card. */
+  --color-provider-button: var(--provider-button);
+  --color-provider-button-foreground: var(--provider-button-foreground);
+  --color-provider-button-border: var(--provider-button-border);
+  --color-apple-sign-in: var(--apple-sign-in);
+  --color-apple-sign-in-foreground: var(--apple-sign-in-foreground);
+  --color-apple-sign-in-border: var(--apple-sign-in-border);
   --color-field: var(--field);
   --color-field-hover: var(--field-hover);
   --color-field-edge: var(--field-border);
@@ -579,15 +616,25 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
 
   /* Elevation and edges (see the @theme entries). Dark separates layers by
      surface lightness: a white hairline and a top highlight, light from above,
-     with black shadows that only read below a floating layer. */
+     with black shadows that only read below a floating layer. The highlight sits on
+     the ring, outside the box (`0 -1px 0`), so a surface's transparent border never
+     opens a gap between them: one edge at the top as on the sides. */
+  /* Google's light theme on dark too (its guidelines allow the light, dark or neutral fill on
+     any background), so the three marks weigh the same beside Apple's white. */
+  --provider-button: #ffffff;
+  --provider-button-foreground: #1f1f1f;
+  --provider-button-border: #747775;
+  --apple-sign-in: #ffffff;
+  --apple-sign-in-foreground: #000000;
+  --apple-sign-in-border: transparent;
   --edge-border: transparent;
   --field-border: transparent;
   --field: rgba(255, 255, 255, 0.05);
   --field-hover: rgba(255, 255, 255, 0.075);
-  --elevation-0: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.06);
-  --elevation-1: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.45);
-  --elevation-2: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 6px -2px rgba(0, 0, 0, 0.5), 0 12px 32px -8px rgba(0, 0, 0, 0.6);
-  --elevation-3: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 4px 12px -4px rgba(0, 0, 0, 0.5), 0 24px 64px -12px rgba(0, 0, 0, 0.7);
+  --elevation-0: 0 -1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.06);
+  --elevation-1: 0 -1px 0 rgba(255, 255, 255, 0.05), 0 0 0 1px rgba(255, 255, 255, 0.06), 0 1px 2px rgba(0, 0, 0, 0.45);
+  --elevation-2: 0 -1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 2px 6px -2px rgba(0, 0, 0, 0.5), 0 12px 32px -8px rgba(0, 0, 0, 0.6);
+  --elevation-3: 0 -1px 0 rgba(255, 255, 255, 0.07), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 4px 12px -4px rgba(0, 0, 0, 0.5), 0 24px 64px -12px rgba(0, 0, 0, 0.7);
   --elevation-3-up: inset 0 1px 0 rgba(255, 255, 255, 0.07), 0 -2px 8px -4px rgba(0, 0, 0, 0.4), 0 -16px 40px -12px rgba(0, 0, 0, 0.6);
   /* The composer (`composer-edge`): its own edge at rest, mint when focused or
      while an Agent works. */
@@ -782,6 +829,12 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
 
     /* Elevation and edges (see the @theme entries). Light shadows take the
        brand's deep teal, rgb(10 52 44), instead of grey, under an ink ring. */
+    --provider-button: #ffffff;
+    --provider-button-foreground: #1f1f1f;
+    --provider-button-border: #747775;
+    --apple-sign-in: #ffffff;
+    --apple-sign-in-foreground: #000000;
+    --apple-sign-in-border: #000000;
     --edge-border: transparent;
     --field-border: transparent;
     --field: rgba(8, 8, 18, 0.045);
@@ -937,6 +990,12 @@ body:has([data-tab-bar-sheet]) [data-mobile-tab-bar] {
 
   /* Elevation and edges (see the @theme entries). Light shadows take the
      brand's deep teal, rgb(10 52 44), instead of grey, under an ink ring. */
+  --provider-button: #ffffff;
+  --provider-button-foreground: #1f1f1f;
+  --provider-button-border: #747775;
+  --apple-sign-in: #ffffff;
+  --apple-sign-in-foreground: #000000;
+  --apple-sign-in-border: #000000;
   --edge-border: transparent;
   --field-border: transparent;
   --field: rgba(8, 8, 18, 0.045);
@@ -1876,6 +1935,14 @@ pre,
     @media (prefers-reduced-motion: no-preference) {
       scale: var(--press-scale, var(--motion-scale-press-control));
     }
+  }
+}
+/* The anchor of a glyph set on a text line (`LineGlyph`): a zero-height box raised to half the cap
+   height, where ideographs centre. Without the `cap` unit it falls back to the x-height middle. */
+@utility align-cap-middle {
+  vertical-align: middle;
+  @supports (height: 1cap) {
+    vertical-align: calc(1cap / 2);
   }
 }
 @utility press-surface {

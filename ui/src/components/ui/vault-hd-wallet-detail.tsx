@@ -72,8 +72,9 @@ function LastSigned({ account }: { account: VaultHdAccount }) {
     <span className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-muted">
       <Clock3 className="size-3 shrink-0" />
       <span className="truncate">
+        {/* The record names the chain, not which Bitcoin type signed: BTC, never a guessed type. */}
         {chain
-          ? t('vaults.hd.wallet.lastSignedChain', { chain: t(chain === 'evm' ? 'vaults.addresses.eth' : chain === 'bitcoin' ? 'vaults.addresses.btcTaproot' : 'vaults.addresses.solana'), when, session })
+          ? t('vaults.hd.wallet.lastSignedChain', { chain: t(chain === 'evm' ? 'vaults.addresses.eth' : chain === 'bitcoin' ? 'vaults.addresses.btc' : 'vaults.addresses.solana'), when, session })
           : t('vaults.hd.wallet.lastSigned', { when, session })}
       </span>
     </span>
@@ -127,6 +128,8 @@ function AccountCard({ wallet, account, fresh, canManage, protectedWallet = fals
             <InlineNameInput
               initial={account.name ?? ''}
               placeholder={t('vaults.hd.wallet.namePlaceholder')}
+              // A label, not a file: clicking away keeps what was typed (owner, 2026-11-16).
+              commitOnBlur
               onCommit={(value) => {
                 setRenaming(false);
                 const next = value.trim() || null;
@@ -271,7 +274,7 @@ export function VaultHdWalletDialog({ secret, open, onOpenChange, onChanged }: {
               {t('vaults.hd.wallet.agentUsage')}
             </span>
             <div className="flex min-w-0 items-center gap-2">
-              <code className="block min-w-0 flex-1 break-words rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">{t('vaults.hd.signCommand', { name: secret.name, account: usage })}</code>
+              <code className="block min-w-0 break-words rounded-md bg-surface-2 px-2.5 py-1.5 font-mono text-[11.5px] text-foreground">{t('vaults.hd.signCommand', { name: secret.name, account: usage })}</code>
               <CopyButton value={command} label={null} variant="ghost" />
             </div>
           </div>

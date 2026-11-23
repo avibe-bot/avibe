@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 import { expect, test } from '@playwright/test';
 
-import { type Agent, remoteAuthRefusal, type Source, surfaceKind } from './support/api';
+import { remoteAuthRefusal } from './support/api';
 
 const E2E_DIR = dirname(fileURLToPath(import.meta.url));
 const SUPPORT_DIR = join(E2E_DIR, 'support');
@@ -52,11 +52,6 @@ const SPEC_RULES: Rule[] = [
     needle: 'api.startRuntime(',
     owner: 'withRuntimeRestored',
     why: 'a restoration written beside the stop is a boundary that opens after the request has already gone',
-  },
-  {
-    needle: "mode === 'direct'",
-    owner: 'surfaceKind',
-    why: 'every-backend-direct is only the OUTER of the two tests the product makes, so alone it admits an instance whose page is a different shape',
   },
   {
     needle: /\.not\.(toContainText|toHaveText)\(/,
@@ -105,27 +100,6 @@ test('the suite asks support/ its closed questions', () => {
   ];
 
   expect(offences, offences.join('\n')).toEqual([]);
-});
-
-const agent = (mode: 'hub' | 'direct', cliPresent: boolean): Agent =>
-  ({ backend: 'claude', mode, cli_present: cliPresent });
-
-test('surfaceKind separates the two direct surfaces, not just direct from gateway', () => {
-  const noSources: Source[] = [];
-  const oneSource = [{ display_name: 'anything' } as Source];
-
-  // The pair the rule above exists for: identical on the outer test, different
-  // pages. The second renders `.model-hub-direct-empty` — no backend card, no
-  // way out of Direct mode — so a spec asserting the card there fails on an
-  // instance that is merely bare, which is a documented skip.
-  expect(surfaceKind([agent('direct', true)], noSources)).toBe('direct-home');
-  expect(surfaceKind([agent('direct', false)], noSources)).toBe('direct-no-backend');
-
-  // And the outer test itself, from either side.
-  expect(surfaceKind([agent('hub', true)], noSources)).toBe('gateway');
-  expect(surfaceKind([agent('direct', true)], oneSource)).toBe('gateway');
-  // An instance with no agents at all is bare, not a gateway.
-  expect(surfaceKind([], noSources)).toBe('direct-no-backend');
 });
 
 test('a remote-access refusal is answered with what to do, not with a status', () => {

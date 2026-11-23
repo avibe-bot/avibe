@@ -4,7 +4,13 @@ import asyncio
 
 import pytest
 
-from config.v2_config import ModelHubBackendModelConfig, ModelHubModelConfig, ModelHubSourceStateConfig
+from config.v2_config import (
+    ModelHubBackendModelConfig,
+    ModelHubModelConfig,
+    ModelHubRouteConfig,
+    ModelHubRouteHopConfig,
+    ModelHubSourceStateConfig,
+)
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
 from core.handlers.model_hub.service import ModelHubError
 from tests.test_model_hub_resolution import _service, _source
@@ -53,7 +59,7 @@ def _gate_method(owner, name, *, call_number=1):
 @pytest.mark.parametrize("change", ["target", "source", "empty", "no_defaults"])
 def test_demand_snapshot_is_revalidated_before_transport_and_observer(tmp_path, probe, change):
     async def run():
-        source = _source("src_race0001", ())
+        source = _source("src_race0001", (MODEL,))
         service, store, adapter = _service(tmp_path, _sparse_config(source))
         entered, release = _gate_method(service, "_prepare_engine_for_demand")
         observations = []
@@ -102,7 +108,7 @@ def test_demand_snapshot_is_revalidated_before_transport_and_observer(tmp_path, 
 @pytest.mark.parametrize("probe", [False, True])
 def test_refresh_retry_never_uses_a_removed_exact_target(tmp_path, probe):
     async def run():
-        source = _source("src_refresh01", ())
+        source = _source("src_refresh01", (MODEL,))
         service, _, adapter = _service(tmp_path, _sparse_config(source))
         adapter.refreshable_credential_refs.add(source.credential_ref)
         adapter.outcomes.extend([_outcome(source, status=401), _outcome(source, "new-target")])
@@ -130,7 +136,7 @@ def test_refresh_retry_never_uses_a_removed_exact_target(tmp_path, probe):
 
 def test_fallback_replans_unattempted_hops_but_keeps_failed_source_excluded(tmp_path):
     async def run():
-        first, second = _source("src_failed001", ()), _source("src_second001", ())
+        first, second = _source("src_failed001", (MODEL,)), _source("src_second001", (MODEL,))
         service, store, adapter = _service(tmp_path, _sparse_config(first, second))
         adapter.outcomes.extend([_outcome(first, status=503), _outcome(second, "new-target")])
         entered, release = _gate_method(service, "_invoke_admitted", call_number=2)
@@ -160,7 +166,11 @@ def test_fallback_replans_unattempted_hops_but_keeps_failed_source_excluded(tmp_
 def test_same_target_source_configuration_change_rebuilds_exact_request(tmp_path):
     async def run():
         source = _source("src_capability", ())
-        service, store, adapter = _service(tmp_path, _sparse_config(source))
+        config = _sparse_config(source)
+        config.agents["claude"].routes[MODEL] = ModelHubRouteConfig(
+            hops=(ModelHubRouteHopConfig(source.id, MODEL),),
+        )
+        service, store, adapter = _service(tmp_path, config)
         entered, release = _gate_method(service, "_prepare_engine_for_demand")
         adapter.outcomes.append(_outcome(source))
         observations = []
@@ -204,6 +214,9 @@ async def _transport_service(tmp_path, adapter, binding):
     agent.mode = "hub"
     agent.models = [ModelHubBackendModelConfig(id="unknown", native_protocol="openai_chat")]
     agent.sources.order = [source.id]
+    agent.routes["unknown"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "unknown"),),
+    )
     service, _, _ = _service(tmp_path / "service", config, adapter)
     adapter.state_store.sync_sources(service._bindings(config))
     service._engine_synced = True
@@ -296,13 +309,14 @@ def test_adapter_pre_network_failures_do_not_leak_leases_or_service_exclusion(tm
             def observer(*_args):
                 raise ValueError("fixture callback failure")
 
-            with pytest.raises(ModelHubError):
+            with pytest.raises(ModelHubError) as raised:
                 await service.resolve(
                     backend="opencode",
                     model_id="unknown",
                     request={},
                     attempt_observer=observer,
                 )
+            assert raised.value.code != "mapping_target_unavailable"
             assert not service._mutation_lock.locked()
             assert not adapter._routing_lock.locked()
             assert adapter._active_transports == 0

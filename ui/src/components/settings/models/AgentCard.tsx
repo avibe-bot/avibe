@@ -1,6 +1,7 @@
 import * as React from 'react';
-import { ArrowDownUp, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Plus, Power, RefreshCw, Route, TriangleAlert } from 'lucide-react';
+import { ArrowDownUp, ArrowRight, Check, ChevronDown, ChevronRight, ChevronUp, ListChecks, PlugZap, Plus, Power, RefreshCw, Route, TriangleAlert, UsersRound } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import { Badge } from '@/components/ui/badge';
 import { RouteOriginBadge } from './RouteOriginBadge';
@@ -9,14 +10,16 @@ import { Button } from '@/components/ui/button';
 import { ResponsiveMenu } from '@/components/ui/responsive-menu';
 import { cn } from '@/lib/utils';
 import { catalogModelIds } from './backendCatalog';
-import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, modelChainKey, modelSupplyState, type ModelChainIndex, type ModelChainRead } from './modelRows';
+import { COLLAPSED_MODEL_LIMIT, collapsedModelRows, modelChainKey, modelSupplyState, modelUsers, type ModelChainIndex, type ModelChainRead } from './modelRows';
 import { foldRegionRead, regionFailed } from './regionRead';
 import { gatewayRouteStatus } from './supply';
 import { agentHasLiveChainProjection, type FreshRuntimeProjection } from './runtimeLifecycle';
 import { currentChainLink, isTakeoverChain } from './takeover';
 import { backendDisplayOrder, getBackendUiMeta } from '@/lib/agentBackends';
+import { useBots } from '@/context/BotsContext';
 import type { AgentSupply, Source } from './types';
 
+const NO_USERS: readonly string[] = [];
 const sourceName = (sources: Source[], id: string): string => sources.find((source) => source.id === id)?.display_name ?? id;
 const currentLink = (read: ModelChainRead | undefined) => {
   const chain = read ? foldRegionRead(read, {
@@ -68,17 +71,53 @@ const AddModelButton: React.FC<{ disabled: boolean; onClick: () => void; classNa
   );
 };
 
+/** Names a model's users line spells out before it counts the rest. */
+const USERS_NAMED = 2;
+
+/** Where the names go in the sentence, so only they shorten when the line runs out of room. */
+const NAMES_SLOT = '\u0000';
+
+/** One quiet line under a model: who uses it. Nothing when nobody does. Long
+ *  names shorten; the rest of the sentence, with its count, always shows.
+ *  ui/design: models/model-users/phone */
+const ModelUsers: React.FC<{ names: readonly string[]; id: string }> = ({ names, id }) => {
+  const { t } = useTranslation();
+  if (names.length === 0) return null;
+  const separator = t('settings.models.gateway.row.usersSeparator') as string;
+  const counted = names.length > USERS_NAMED + 1;
+  const shown = (counted ? names.slice(0, USERS_NAMED) : names).join(separator);
+  const sentence = (counted
+    ? t('settings.models.gateway.row.usedByMore', { names: NAMES_SLOT, count: names.length - USERS_NAMED, total: names.length })
+    : t('settings.models.gateway.row.usedBy', { names: NAMES_SLOT })) as string;
+  const [before, after = ''] = sentence.split(NAMES_SLOT);
+  // The row's button reads every name, including those the line shortens or counts.
+  const everyone = t('settings.models.gateway.row.usedBy', { names: names.join(separator) }) as string;
+  return (
+    <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-muted" data-model-users>
+      <span id={id} className="sr-only">{everyone}</span>
+      <UsersRound className="size-3 shrink-0" aria-hidden="true" />
+      <span className="flex min-w-0 whitespace-pre" aria-hidden="true">
+        {before && <span className="shrink-0">{before}</span>}
+        <span className="min-w-0 truncate">{shown}</span>
+        {after && <span className="shrink-0">{after}</span>}
+      </span>
+    </span>
+  );
+};
+
 const ModelRow: React.FC<{
   agent: AgentSupply;
   modelId: string;
   sources: Source[];
+  users: readonly string[];
   read: ModelChainRead | undefined;
   originHelpOpen: boolean;
   onOriginHelpChange: (key: string, open: boolean) => void;
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
-}> = ({ agent, modelId, sources, read, originHelpOpen, onOriginHelpChange, onOpenRoute }) => {
+}> = ({ agent, modelId, sources, users, read, originHelpOpen, onOriginHelpChange, onOpenRoute }) => {
   const { t } = useTranslation();
   const helpKey = modelChainKey(agent.backend, modelId);
+  const usersId = React.useId();
   const onHelpOpenChange = React.useCallback((open: boolean) => onOriginHelpChange(helpKey, open), [helpKey, onOriginHelpChange]);
   const current = currentLink(read);
   const takeover = isTakeoverRead(read);
@@ -104,9 +143,9 @@ const ModelRow: React.FC<{
     <div
       data-route-backend={agent.backend}
       data-route-model={modelId}
-      className="model-hub-model-row relative flex h-[52px] w-full min-w-0 items-center gap-2.5 rounded-md border border-edge px-3 text-left shadow-elevation-0"
+      className={cn('model-hub-model-row relative flex w-full min-w-0 items-center gap-2.5 rounded-md border border-edge px-3 text-left shadow-elevation-0', users.length > 0 ? 'min-h-[52px] py-2' : 'h-[52px]')}
     >
-      <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
+      <button type="button" className="model-hub-model-open absolute inset-0 rounded-[inherit]" aria-label={openRouteLabel} aria-describedby={users.length > 0 ? usersId : undefined} onClick={(event) => onOpenRoute(agent, modelId, event.currentTarget)} />
       <span className="pointer-events-none flex min-w-0 flex-1 flex-col justify-center gap-0.5 pr-1">
         <span className="min-w-0 truncate font-mono text-[12px] font-medium text-foreground" title={modelId}>{modelId}</span>
         {hasCurrentMapping ? (
@@ -120,8 +159,11 @@ const ModelRow: React.FC<{
         ) : (
           <span className={cn('model-hub-model-current min-w-0 truncate text-left text-[10.5px]', supplyState === 'paused' && 'model-hub-ink-gold')} title={currentCopy}>{currentCopy}</span>
         )}
+        <ModelUsers names={users} id={usersId} />
       </span>
-      <span className="relative flex shrink-0 items-center"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>
+      {/* A model nothing supplies says so in its own line; a badge naming the absent
+          route would only repeat it. */}
+      {!(supplyState === 'unconfigured' && routeOrigin === null) && <span className="relative flex shrink-0 items-center"><RouteOriginBadge origin={routeOrigin} backend={agent.backend} open={originHelpOpen} onOpenChange={onHelpOpenChange} /></span>}
       <ChevronRight className="model-hub-overview-chevron pointer-events-none size-[15px] shrink-0" aria-hidden="true" />
     </div>
   );
@@ -209,10 +251,16 @@ const AgentModelCard: React.FC<{
   onOpenRoute: (agent: AgentSupply, modelId: string, opener: HTMLElement) => void;
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
-}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent }) => {
+  noProviders?: boolean;
+}> = ({ agent, runtime, sources, chains, pending, connecting, switchFailed, activeOriginHelp, onOriginHelpChange, onConnectHub, onSwitchDirect, onOpenModels, onAddModels, onOpenOrder, onOpenRoute, onProbeSettled, onOpenAgent, noProviders = false }) => {
   const { t } = useTranslation();
+  const { botForAgent, displayName } = useBots();
   const { Icon, tileCls, iconCls, label } = getBackendUiMeta(agent.backend);
   const [expanded, setExpanded] = React.useState(false);
+  const users = React.useMemo(() => modelUsers(agent, (name) => {
+    const bot = botForAgent(name);
+    return bot ? displayName(bot) : undefined;
+  }), [agent, botForAgent, displayName]);
   const [modeMenuOpen, setModeMenuOpen] = React.useState(false);
   const allModels = React.useMemo(() => catalogModelIds(agent), [agent]);
   const previousModelsRef = React.useRef(allModels);
@@ -336,22 +384,60 @@ const AgentModelCard: React.FC<{
               ? t('settings.models.takeover.chip')
               : t('settings.models.gateway.modelCount', { count: allModels.length })}</span>
           </Badge>
-          {agent.mode === 'hub' ? (
+          {agent.mode === 'hub' ? (noProviders && allModels.length === 0 ? null : (
             <div className="model-hub-agent-head-actions">
               <ManageModelsButton className="model-hub-agent-head-action" disabled={pending} onClick={() => onOpenModels(agent)} />
-              <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>
+              {/* Default routing orders providers; with none yet there is nothing to order. */}
+              {!noProviders && <Button variant="outline" size="xs" className="model-hub-agent-head-action rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onOpenOrder(agent)} disabled={pending}><ArrowDownUp aria-hidden="true" />{t('settings.models.gateway.sourceOrder')}</Button>}
             </div>
-          ) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToGateway')}</Button>}
+          )) : <Button variant="default" size="xs" className="model-hub-agent-head-action shrink-0 rounded-md px-2.5 text-[11px] font-semibold" onClick={() => onConnectHub(agent)} disabled={connecting}><PlugZap aria-hidden="true" />{t(switchFailed ? 'settings.models.gateway.retry' : 'settings.models.gateway.switchToGateway')}</Button>}
         </div>
       </div>
-      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5"><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}<AddModelButton disabled={pending} onClick={() => onAddModels(agent)} /></div>)}
-      {agent.mode === 'hub' && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
+      {agent.mode === 'hub' && (models.length === 0 ? <div className="flex flex-col items-center gap-3 px-4 py-10 text-center sm:px-5">{noProviders ? <p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyNoProviders')}</p> : <><p className="text-[12.5px] text-muted">{t('settings.models.gateway.group.emptyModels')}</p><AddModelButton className="w-auto px-4" disabled={pending} onClick={() => onAddModels(agent)} /></>}</div> : <div className="space-y-2 p-2">{noUsableSource && <p className="px-3 py-1 text-[11px] font-semibold text-muted">{t('settings.models.gateway.supply.none')}</p>}{models.map((modelId) => <ModelRow key={modelId} agent={agent} modelId={modelId} sources={sources} users={users.get(modelId) ?? NO_USERS} read={chainProjectionLive ? chains[modelChainKey(agent.backend, modelId)] : undefined} originHelpOpen={activeOriginHelp === modelChainKey(agent.backend, modelId)} onOriginHelpChange={onOriginHelpChange} onOpenRoute={onOpenRoute} />)}{(canCollapse || needsChainRepair) && <div className="flex h-6 w-full items-center">{canCollapse && <button type="button" onClick={toggleCollapsed} className="model-hub-model-collapse flex h-6 flex-1 items-center gap-1.5 hover:text-foreground">{expanded ? <ChevronUp /> : <ChevronDown />}{expanded ? t('settings.models.gateway.collapse') : t('settings.models.gateway.moreModels', { count: collapsed.hidden.length })}</button>}{needsChainRepair && <button type="button" onClick={retryChains} className="model-hub-model-collapse model-hub-model-collapse--repair flex h-6 items-center gap-1.5 hover:text-foreground"><RefreshCw />{t('settings.models.gateway.retry')}</button>}</div>}{!noProviders && <AddModelButton disabled={pending} onClick={() => onAddModels(agent)} />}</div>)}
+      {/* With no provider yet, every Agent lacks a model by construction: the one way
+          forward is the Providers card's add button, not a warning or an add here.
+          ui/design: models/first-provider/fresh */}
+      {agent.mode === 'hub' && !noProviders && <AgentSupplyIssues agent={agent} onOpenAgent={onOpenAgent} />}
+    </section>
+  );
+};
+
+/**
+ * A backend that is installed but switched off in Settings · Backends: one row,
+ * after the backends that are on. It holds no models and no actions, and it is
+ * not a wire endpoint (no `data-agent-backend`), so nothing reads as routed to it.
+ * ui/design: models/backend-off/owners-case
+ */
+const SwitchedOffBackendRow: React.FC<{ agent: AgentSupply }> = ({ agent }) => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { Icon, tileCls, iconCls, label, settingsRoute } = getBackendUiMeta(agent.backend);
+  return (
+    <section
+      className="model-hub-agent-off flex min-w-0 items-center gap-[9px] rounded-lg border border-edge bg-surface px-3.5 py-2.5 shadow-elevation-0"
+      data-agent-backend-off={agent.backend}
+    >
+      <span className={cn('flex size-[30px] shrink-0 items-center justify-center rounded-[9px] opacity-60 grayscale', tileCls)}><Icon className={cn('size-[15px]', iconCls)} /></span>
+      <h2 className="min-w-0 truncate text-[14px] font-bold leading-[17px] text-muted">{label}</h2>
+      <span className="model-hub-pill model-hub-fill-0a shrink-0 border border-edge text-muted">{t('settings.models.gateway.off.status')}</span>
+      <Button
+        variant="outline"
+        size="xs"
+        className="ml-auto shrink-0 rounded-md px-2.5 text-[11px] font-semibold"
+        aria-label={t('settings.models.gateway.off.enableLabel', { backend: label }) as string}
+        onClick={() => navigate(settingsRoute)}
+      >
+        {t('settings.models.gateway.off.enable')}
+        <ArrowRight aria-hidden="true" />
+      </Button>
     </section>
   );
 };
 
 export const AgentCard: React.FC<{
   agents: AgentSupply[];
+  /** Installed backends switched off in Settings · Backends, drawn as folded rows after the rest. */
+  switchedOff?: AgentSupply[];
   runtime: FreshRuntimeProjection | null;
   sources: Source[];
   chains: ModelChainIndex;
@@ -366,12 +452,15 @@ export const AgentCard: React.FC<{
   onProbeSettled: (agent: AgentSupply) => void;
   onOpenAgent?: (name: string) => void;
   connectingBackend: string | null;
-}> = ({ agents, pendingBackends, switchFailures, connectingBackend, ...props }) => {
+  /** No model provider has been added yet (search services do not count). */
+  noProviders?: boolean;
+}> = ({ agents, switchedOff = [], pendingBackends, switchFailures, connectingBackend, ...props }) => {
   const [activeOriginHelp, setActiveOriginHelp] = React.useState<string | null>(null);
   const onOriginHelpChange = React.useCallback((key: string, open: boolean) => {
     // Late blur, leave timers and row cleanup can dismiss only their own help.
     setActiveOriginHelp((current) => open ? key : current === key ? null : current);
   }, []);
   const orderedAgents = [...agents].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
-  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}</div>;
+  const orderedOff = [...switchedOff].sort((left, right) => backendDisplayOrder(left.backend) - backendDisplayOrder(right.backend));
+  return <div className="flex flex-col gap-2.5">{orderedAgents.map((agent) => <AgentModelCard key={agent.backend} agent={agent} {...props} activeOriginHelp={activeOriginHelp} onOriginHelpChange={onOriginHelpChange} pending={pendingBackends.has(agent.backend)} switchFailed={switchFailures.has(agent.backend)} connecting={connectingBackend === agent.backend} />)}{orderedOff.map((agent) => <SwitchedOffBackendRow key={agent.backend} agent={agent} />)}</div>;
 };

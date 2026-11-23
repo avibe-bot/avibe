@@ -1,12 +1,13 @@
 mod admission;
 mod handshake_limit;
+mod path_report;
 
 use admission::Admissions;
 use handshake_limit::{HandshakeLimit, HandshakePermit};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode, Watcher,
+    Endpoint, EndpointAddr, NetReportConfig, RelayMap, RelayMode, RelayUrl, Watcher,
     endpoint::{Incoming, IncomingAddr, PortmapperConfig, QuicTransportConfig, VarInt, presets},
 };
 use serde::{Deserialize, Serialize};
@@ -61,17 +62,45 @@ enum Command {
         token: String,
         max_connections: u32,
         max_streams_per_connection: u32,
+        relay: Option<RelayOffer>,
     },
+    #[serde(rename = "observe_paths_v1")]
+    ObservePaths,
+    #[serde(rename = "observe_paths_v2")]
+    ObserveDevicePaths,
     #[serde(rename = "admission")]
     Admission {
         endpoint_id: String,
         ttl_seconds: u64,
+        #[serde(default)]
+        epoch: u64,
     },
     #[serde(rename = "stop")]
     Stop,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RelayOffer {
+    policy: TrialPolicy,
+}
+
+#[derive(Deserialize)]
+enum TrialPolicy {
+    #[serde(rename = "public-trial-v1")]
+    PublicTrialV1,
+}
+
+impl RelayOffer {
+    fn map(self) -> RelayMap {
+        match self.policy {
+            TrialPolicy::PublicTrialV1 => iroh::defaults::prod::default_relay_map(),
+        }
+    }
+}
+
 struct StartConfig {
+    relay: Option<RelayMap>,
     stream_addr: SocketAddr,
     token: String,
     max_connections: u32,
@@ -81,14 +110,23 @@ struct StartConfig {
 #[derive(Serialize)]
 #[serde(tag = "type")]
 enum Message<'a> {
+    #[serde(rename = "path_report")]
+    PathReport {
+        #[serde(flatten)]
+        report: path_report::Report,
+    },
     #[serde(rename = "ready")]
     Ready {
+        path_reports_v1: bool,
+        path_reports_v2: bool,
         protocol: u32,
         endpoint_id: String,
         addresses: Vec<String>,
     },
     #[serde(rename = "addresses")]
     Addresses { addresses: Vec<String> },
+    #[serde(rename = "relay_status")]
+    RelayStatus { url: Option<&'a str> },
     #[serde(rename = "peer_closed")]
     PeerClosed {
         endpoint_id: &'a str,
@@ -100,6 +138,7 @@ enum Message<'a> {
 
 #[derive(Clone)]
 struct Control {
+    observe: Arc<std::sync::atomic::AtomicU8>,
     stdout: Arc<Mutex<tokio::io::Stdout>>,
     admissions: Admissions,
     stop: StopSignal,
@@ -109,6 +148,7 @@ struct Control {
 impl Control {
     fn new() -> Self {
         Self {
+            observe: Default::default(),
             stdout: Arc::new(Mutex::new(tokio::io::stdout())),
             admissions: Admissions::new(),
             stop: StopSignal::new(),
@@ -177,6 +217,7 @@ fn parse_start(command: Command) -> Result<StartConfig> {
         token,
         max_connections,
         max_streams_per_connection,
+        relay,
     } = command
     else {
         return Err(SidecarError("start_required"));
@@ -197,6 +238,7 @@ fn parse_start(command: Command) -> Result<StartConfig> {
         return Err(SidecarError("invalid_limits"));
     }
     Ok(StartConfig {
+        relay: relay.map(RelayOffer::map),
         stream_addr,
         token: token.to_ascii_lowercase(),
         max_connections,
@@ -235,13 +277,20 @@ async fn run_control_reader<R: AsyncRead + Unpin>(mut reader: R, control: Contro
             Ok(Some(Command::Admission {
                 endpoint_id,
                 ttl_seconds,
+                epoch,
             })) => {
                 if !valid_endpoint_id(&endpoint_id) {
                     control.fail(SidecarError("invalid_endpoint_id")).await;
                     return;
                 }
-                control.admissions.update(endpoint_id, ttl_seconds);
+                control.admissions.update(endpoint_id, ttl_seconds, epoch);
             }
+            Ok(Some(Command::ObservePaths)) => control
+                .observe
+                .store(1, std::sync::atomic::Ordering::Relaxed),
+            Ok(Some(Command::ObserveDevicePaths)) => control
+                .observe
+                .store(2, std::sync::atomic::Ordering::Relaxed),
             Ok(None) | Ok(Some(Command::Stop)) => {
                 control.stop.stop();
                 return;
@@ -348,6 +397,7 @@ async fn handle_connection(
     incoming: Incoming,
     handshake_permit: HandshakePermit,
     control: Control,
+    reports: tokio::sync::mpsc::Sender<path_report::Queued>,
     _connection_permit: tokio::sync::OwnedSemaphorePermit,
     config: Arc<StartConfig>,
 ) {
@@ -357,24 +407,46 @@ async fn handle_connection(
     };
     drop(handshake_permit);
     let endpoint_id = connection.remote_id().to_string();
-    if !control.admissions.allows_connection(&connection) {
+    let Some(epoch) = control.admissions.connection_epoch(&connection) else {
         connection.close(close_code(), b"admission ended");
         control.peer_closed(&endpoint_id, "admission_ended").await;
         return;
-    }
+    };
     connection.set_max_concurrent_bi_streams(VarInt::from_u32(config.max_streams_per_connection));
     let stream_permits = Arc::new(Semaphore::new(config.max_streams_per_connection as usize));
     let mut stream_tasks = JoinSet::new();
     let no_stream = time::sleep(NO_STREAM_TIMEOUT);
     tokio::pin!(no_stream);
+    let mode = control.observe.load(std::sync::atomic::Ordering::Relaxed);
+    let mut output = path_report::Output::default();
+    let mut observer =
+        (mode != 0).then(|| path_report::Observer::new(&connection, (mode == 2).then_some(epoch)));
+    let mut changed = false;
+    let mut last_report = Instant::now();
+    if let Some(obs) = &mut observer {
+        obs.report(&connection, "open", &reports, &mut output);
+    }
     let mut reason = "connection_closed";
     loop {
         tokio::select! {
             _ = control.stop.wait() => { reason = "stopped"; break; }
             _ = &mut no_stream, if stream_tasks.is_empty() => { reason = "idle_timeout"; break; }
+            event = async { match &mut observer { Some(obs) => obs.next().await, None => std::future::pending().await } } => {
+                if let Some(event) = event {
+                    let obs = observer.as_mut().unwrap();
+                    obs.update(event);
+                    changed = true;
+                } else { break; }
+            }
+            _ = time::sleep_until(last_report + Duration::from_secs(if changed { 1 } else { 5 })),
+                if observer.is_some() && (changed || mode == 2) => {
+                if let Some(obs) = &mut observer { obs.report(&connection, "change", &reports, &mut output); }
+                changed = false;
+                last_report = Instant::now();
+            }
             incoming_stream = connection.accept_bi() => {
                 let Ok((mut send, mut recv)) = incoming_stream else { break; };
-                if !control.admissions.allows_connection(&connection) {
+                if control.admissions.connection_epoch(&connection).is_none() {
                     reset_stream(&mut send, &mut recv);
                     reason = "admission_ended";
                     break;
@@ -392,21 +464,19 @@ async fn handle_connection(
             }
         }
     }
-    if reason == "connection_closed" && !control.admissions.allows_connection(&connection) {
+    if reason == "connection_closed" && control.admissions.connection_epoch(&connection).is_none() {
         reason = "admission_ended";
     }
     connection.close(close_code(), reason.as_bytes());
     stream_tasks.abort_all();
     while stream_tasks.join_next().await.is_some() {}
+    if let Some(obs) = observer {
+        output.finish(obs.finish().await);
+    }
     control.peer_closed(&endpoint_id, reason).await;
 }
 
-async fn run(control: &Control) -> Result<()> {
-    let mut stdin = BufReader::new(tokio::io::stdin());
-    let first = read_command(&mut stdin)
-        .await?
-        .ok_or(SidecarError("start_required"))?;
-    let config = Arc::new(parse_start(first)?);
+fn endpoint_builder(relay: Option<&RelayMap>, admissions: Admissions) -> iroh::endpoint::Builder {
     let transport_config = QuicTransportConfig::builder()
         .max_concurrent_bidi_streams(VarInt::from_u32(0))
         .max_concurrent_uni_streams(VarInt::from_u32(0))
@@ -420,14 +490,69 @@ async fn run(control: &Control) -> Result<()> {
         .keep_alive_interval(TRANSPORT_KEEP_ALIVE)
         .default_path_keep_alive_interval(TRANSPORT_KEEP_ALIVE)
         // Stock iroh ignores values below eight: zero does NOT disable it.
+        .send_observed_address_reports(false)
+        .receive_observed_address_reports(false)
         .max_remote_nat_traversal_addresses(8)
         .build();
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Disabled)
+    let mut report = NetReportConfig::minimal();
+    report.https_probes = relay.is_some();
+    Endpoint::builder(presets::Minimal)
+        .relay_mode(match relay {
+            None => RelayMode::Disabled,
+            Some(map) => RelayMode::Custom(map.clone()),
+        })
+        .net_report_config(report)
         .portmapper_config(PortmapperConfig::Disabled)
         .transport_config(transport_config)
-        .hooks(control.admissions.clone())
+        .hooks(admissions)
         .alpns(vec![ALPN.as_bytes().to_vec()])
+}
+
+async fn relay_updates(
+    initial: Option<RelayUrl>,
+    mut next: impl AsyncFnMut() -> Result<Option<RelayUrl>>,
+    mut emit: impl AsyncFnMut(Option<RelayUrl>) -> Result<()>,
+) -> Result<()> {
+    let mut previous = None;
+    let mut observed = initial;
+    loop {
+        if observed != previous {
+            emit(observed.clone()).await?;
+            previous = observed;
+        }
+        observed = next().await?;
+    }
+}
+
+#[cfg(test)]
+type TestRelay = (
+    RelayMap,
+    fn(iroh::endpoint::Builder) -> iroh::endpoint::Builder,
+);
+
+async fn run(control: &Control, #[cfg(test)] fixture: Option<TestRelay>) -> Result<()> {
+    let mut stdin = BufReader::new(tokio::io::stdin());
+    let first = read_command(&mut stdin)
+        .await?
+        .ok_or(SidecarError("start_required"))?;
+    let config = parse_start(first)?;
+    #[cfg(test)]
+    let config = match (&fixture, config.relay.is_some()) {
+        (Some((map, _)), true) => StartConfig {
+            relay: Some(map.clone()),
+            ..config
+        },
+        (Some(_), false) => return Err(SidecarError("trial_required")),
+        (None, _) => config,
+    };
+    let config = Arc::new(config);
+    let builder = endpoint_builder(config.relay.as_ref(), control.admissions.clone());
+    #[cfg(test)]
+    let builder = match fixture {
+        Some((_, trust)) => trust(builder),
+        None => builder,
+    };
+    let endpoint = builder
         .bind()
         .await
         .map_err(|_| SidecarError("endpoint_bind_failed"))?;
@@ -436,6 +561,8 @@ async fn run(control: &Control) -> Result<()> {
     let ready_address = endpoint_watcher.get();
     if let Err(error) = control
         .emit(&Message::Ready {
+            path_reports_v1: true,
+            path_reports_v2: true,
             protocol: 1,
             endpoint_id: endpoint.id().to_string(),
             addresses: endpoint_addresses(&ready_address),
@@ -445,6 +572,39 @@ async fn run(control: &Control) -> Result<()> {
         let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
         return Err(error);
     }
+    // Endpoint readiness does not imply a connected home relay.
+    let relay_events = async {
+        let Some(map) = config.relay.clone() else {
+            return std::future::pending::<()>().await;
+        };
+        let mut status = endpoint.home_relay_status().map(move |snapshot| {
+            snapshot
+                .iter()
+                .filter(|r| r.is_connected() && map.contains(r.url()))
+                .map(|r| r.url().clone())
+                .min()
+        });
+        let updates = relay_updates(
+            status.get(),
+            async || {
+                status
+                    .updated()
+                    .await
+                    .map_err(|_| SidecarError("relay_watcher_closed"))
+            },
+            async |url| {
+                control
+                    .emit(&Message::RelayStatus {
+                        url: url.as_ref().map(|url| url.as_str()),
+                    })
+                    .await
+            },
+        );
+        if let Err(error) = updates.await {
+            control.fail(error).await;
+        }
+    };
+    tokio::pin!(relay_events);
     let address_task = tokio::spawn(watch_addresses(
         endpoint_watcher,
         ready_address,
@@ -456,11 +616,25 @@ async fn run(control: &Control) -> Result<()> {
     let control_task = tokio::spawn(run_control_reader(stdin, control.clone()));
     let handshake_limit = HandshakeLimit::new();
     let connection_limit = Arc::new(Semaphore::new(config.max_connections as usize));
+    let (report_tx, mut report_rx) = path_report::queue(config.max_connections as usize);
+    let report_writer = tokio::spawn(async move {
+        let mut sink = tokio::io::stderr();
+        while let Some(queued) = report_rx.recv().await {
+            let report = queued.take();
+            let mut line =
+                serde_json::to_vec(&Message::PathReport { report }).expect("numeric report");
+            line.push(b'\n');
+            if sink.write_all(&line).await.is_err() || sink.flush().await.is_err() {
+                break;
+            }
+        }
+    });
     let mut connection_tasks = JoinSet::new();
     loop {
         tokio::select! {
             biased;
             _ = control.stop.wait() => break,
+            _ = &mut relay_events => break,
             // Drain finished tasks before more arrivals, so an inbound flood
             // cannot retain an unbounded backlog of completed JoinSet entries.
             _ = connection_tasks.join_next(), if !connection_tasks.is_empty() => {},
@@ -476,9 +650,14 @@ async fn run(control: &Control) -> Result<()> {
                     continue;
                 }
                 let Ok(permit) = connection_limit.clone().try_acquire_owned() else { incoming.ignore(); continue; };
-                let IncomingAddr::Ip(source) = incoming.remote_addr() else { incoming.ignore(); continue; };
-                let Some(handshake_permit) = handshake_limit.acquire(source.ip()) else { incoming.ignore(); continue; };
-                connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), permit, Arc::clone(&config)));
+                let source = match incoming.remote_addr() {
+                    IncomingAddr::Ip(source) => Some(source.ip()),
+                    IncomingAddr::Relay { url, endpoint_id } if config.relay.as_ref().is_some_and(|map| map.contains(&url))
+                        && control.admissions.contains(&endpoint_id.to_string()) => None,
+                    _ => { incoming.ignore(); continue; }
+                };
+                let Some(handshake_permit) = handshake_limit.acquire_source(source) else { incoming.ignore(); continue; };
+                connection_tasks.spawn(handle_connection(incoming, handshake_permit, control.clone(), report_tx.clone(), permit, Arc::clone(&config)));
             }
         }
     }
@@ -491,6 +670,11 @@ async fn run(control: &Control) -> Result<()> {
     .await;
     connection_tasks.abort_all();
     while connection_tasks.join_next().await.is_some() {}
+    drop(report_tx);
+    let mut writer = report_writer;
+    if time::timeout(IO_TIMEOUT, &mut writer).await.is_err() {
+        writer.abort();
+    }
     let _ = time::timeout(IO_TIMEOUT, endpoint.close()).await;
     address_task.abort();
     expiry_task.abort();
@@ -504,14 +688,78 @@ async fn run(control: &Control) -> Result<()> {
     }
 }
 
+#[cfg(test)]
+mod relay_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn delivered_withdrawal_precedes_reconnect_to_same_relay() {
+        let a: RelayUrl = "https://relay.invalid/".parse().unwrap();
+        let mut delivered = [None, Some(a.clone())].into_iter();
+        let mut emitted = Vec::new();
+        let result = relay_updates(
+            Some(a.clone()),
+            async || delivered.next().ok_or(SidecarError("done")),
+            async |url| {
+                emitted.push(url);
+                Ok(())
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err().0, "done");
+        assert_eq!(emitted, [Some(a.clone()), None, Some(a)]);
+    }
+
+    #[tokio::test]
+    async fn only_the_pinned_trial_policy_selects_relays() {
+        let offer: RelayOffer = serde_json::from_str(r#"{"policy":"public-trial-v1"}"#).unwrap();
+        let map = offer.map();
+        let dns_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = endpoint_builder(Some(&map), Admissions::new())
+            .dns_resolver(iroh::dns::DnsResolver::with_nameserver(
+                dns_socket.local_addr().unwrap(),
+            ))
+            .bind()
+            .await
+            .unwrap();
+        assert!(endpoint.address_lookup().unwrap().is_empty());
+        let urls: Vec<RelayUrl> = map.urls();
+        assert_eq!(urls.len(), 4);
+        for region in ["use1", "usw1", "euc1", "aps1"] {
+            assert!(
+                urls.iter()
+                    .any(|url| url.as_str() == format!("https://{region}-1.relay.n0.iroh.link./"))
+            );
+        }
+        for url in urls {
+            assert!(endpoint.remove_relay(&url).await.is_some());
+        }
+        endpoint.close().await;
+        for invalid in [
+            r#"{"policy":"unknown"}"#,
+            r#"{"url":"https://other.invalid"}"#,
+            r#"{"policy":"public-trial-v1","url":"https://other.invalid"}"#,
+        ] {
+            assert!(serde_json::from_str::<RelayOffer>(invalid).is_err());
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
     let control = Control::new();
-    let status = match run(&control).await {
+    let status = match run(
+        &control,
+        #[cfg(test)]
+        None,
+    )
+    .await
+    {
         Ok(()) => 0,
         Err(error) => {
+            // Fatal is already reported on stdout. Stderr may be a full,
+            // undrained diagnostics pipe; do not write to it on the exit path.
             control.fatal(error).await;
-            eprintln!("fatal: {}", error.0);
             1
         }
     };

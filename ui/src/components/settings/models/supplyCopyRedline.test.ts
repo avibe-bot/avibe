@@ -21,8 +21,8 @@ import { SUPPLY_WARNINGS } from './sufficiency';
 
 const BUNDLES = { zh, en } as const;
 
-// Direct mode reads as a backend's own login (Agent 管理) since 2026-11-12.
-const DIRECT = /直连|Agent 管理|\bdirect\b|\bown login\b/i;
+// Direct mode reads as a backend's own login (自己登录) since 2026-11-17.
+const DIRECT = /直连|Agent 管理|自己登录|\bdirect\b|\bown login\b/i;
 /** Verbs that turn a mention of Direct into a claim about falling back to it. */
 const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert|switch(?:es|ed)? back|stays? on/i;
 
@@ -33,7 +33,6 @@ const FALLBACK = /回退|切回|退回|改用|回到|继续用|fall ?back|revert
  * and rewriting that sentence into a promise should re-trip the check.
  */
 const CLASSIFIED: Record<string, string> = {
-  'direct.note.perBackend': 'The user is choosing one backend at a time on the all-direct screen.',
   'gateway.fail.switchToDirect': 'Reports a failed user-triggered switch; it does not promise an automatic fallback.',
 };
 

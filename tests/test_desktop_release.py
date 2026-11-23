@@ -997,8 +997,40 @@ def test_workflow_signs_every_macos_layer_before_recording():
     signing = step("Sign macOS app")["run"]
     assert "macos_signing.py sign-app" in signing and "macos_signing.py notarize" in signing
     assert "release builds must be Developer ID signed" in signing
-    # The manual no-credential branch keeps the ad-hoc, inside-out seal.
+    # The manual no-credential branch keeps the ad-hoc, inside-out seal, and
+    # with it the profile-free entitlements Tauri sealed the bundle with.
     assert signing.count("--preserve-metadata=identifier,entitlements,flags,runtime") == 2
+    remainder = signing.split("release builds must be Developer ID signed", 1)[1]
+    assert "\nfi\n" in remainder
+    adhoc_branch = remainder.split("\nfi\n", 1)[0]
+    assert "codesign --force --sign -" in adhoc_branch and "Signature=adhoc" in adhoc_branch
+    assert "--entitlements" not in adhoc_branch and "provisionprofile" not in adhoc_branch
+    assert "driver_packaged_cdhash" not in adhoc_branch
+    # The profile entitlements reach a signature only through the Developer ID
+    # signer; workflows name them only through the shared runner control.
+    control_script = "scripts/check-restricted-entitlement-refusal.sh"
+    for name in ("desktop-package.yml", "desktop-shell.yml"):
+        assert "app-developer-id" not in (ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+    script = (ROOT / "desktop" / control_script).read_text(encoding="utf-8")
+    assert '--entitlements "$desktop/entitlements/app-developer-id.plist"' in script
+    assert '[ "$status" -ne 137 ]' in script and "exit 1" in script
+    # On a signed build the smoke test first proves this runner kills a program
+    # claiming those entitlements without a profile, then launches the app.
+    smoke = step("Smoke-test macOS app launch")["run"]
+    control = smoke.split('if [ "${apple_signing:-absent}" = "enabled" ]; then', 1)[1].split("\nfi\n", 1)[0]
+    assert control.strip() == f"sh {control_script}"
+    assert smoke.index(control_script) < smoke.index('"$binary" >"$launch_log"')
+    # Pull request CI runs the same control, with no credentials, on the
+    # hosted image Apple silicon releases build on.
+    shell = workflow("desktop-shell.yml")["jobs"]["shell"]
+    assert "macos-26" in [entry["os"] for entry in shell["strategy"]["matrix"]["include"]]
+    assert build["runs-on"].count('"aarch64-apple-darwin":"macos-26"') == 1
+    pr_control = next(item for item in shell["steps"] if control_script in item.get("run", ""))
+    # Nothing may soften it, such as continue-on-error.
+    assert set(pr_control) == {"name", "if", "run"}
+    assert pr_control["if"] == "runner.os == 'macOS'"
+    assert pr_control["run"].strip() == f"sh {control_script}"
+    assert "environment" not in shell and secret_references(shell) == set()
     assert "--deep --sign" not in signing
     assert "Contents/Helpers/cua-driver" in signing
     assert "Contents/MacOS/cua-driver" in signing
@@ -1094,6 +1126,23 @@ def test_driver_workflows_parse_and_install_yaml_before_driver_validation():
     assert "-ProductionEvidencePath" in windows_step["run"]
 
 
+def test_package_job_pins_python_before_any_host_python_runs():
+    """A runner image's own `python` moves ahead of what the release's scripts and pinned wheels
+    support (macos-26 moved to 3.15, where PyYAML 6.0.3 has no wheel). Every package step that
+    runs Python must run on the pinned interpreter, so a tag build is never the first run of
+    signing or packaging on a new one."""
+    steps = workflow("desktop-package.yml")["jobs"]["package"]["steps"]
+    pinned = [index for index, item in enumerate(steps) if "actions/setup-python@" in item.get("uses", "")]
+    assert pinned, "the package job pins no Python"
+    assert steps[pinned[0]]["with"]["python-version"] == "3.12"
+    uses_python = [
+        index for index, item in enumerate(steps)
+        if re.search(r"(?<![\w./-])python3?(?![\w.-])", item.get("run", ""))
+    ]
+    assert uses_python, "no package step runs Python"
+    assert pinned[0] < uses_python[0], steps[uses_python[0]].get("name")
+
+
 @pytest.mark.parametrize(("value", "names"), [
     ("${{ secrets.tauri_signing_private_key }}", {"TAURI_SIGNING_PRIVATE_KEY"}),
     ("a ${{secrets.APPLE_API_KEY}} b ${{ Secrets.APPLE_API_ISSUER }}", {"APPLE_API_KEY", "APPLE_API_ISSUER"}),
@@ -1116,7 +1165,7 @@ def test_apple_secrets_reach_only_the_identity_import_and_never_tauri():
     updater = {"TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"}
     apple = {
         "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_TEAM_ID",
-        "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_PRIVATE_KEY",
+        "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_PRIVATE_KEY", "APPLE_PROVISIONING_PROFILE",
     }
     by_step = {}
     for job in package["jobs"].values():

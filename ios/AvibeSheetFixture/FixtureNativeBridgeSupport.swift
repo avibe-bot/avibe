@@ -1,5 +1,6 @@
 import CoreFoundation
 import Foundation
+import WebKit
 
 // Fixture-only dependencies required to compile the production NativeBridge
 // source. The capture routes do not exercise push, notification reconciliation,
@@ -19,6 +20,43 @@ typealias DirectStatusProvider = @MainActor (
     WebOrigin,
     @escaping @MainActor (DirectPathStatus?) -> Void
 ) -> Void
+
+enum DirectHandoverSkip: String, Equatable, Sendable {
+    case notUsable = "not_usable"
+    case otherDocuments = "other_documents"
+}
+
+enum DirectHandoverOutcome: Equatable, Sendable {
+    case done(closed: Int, kept: Int)
+    case skipped(DirectHandoverSkip)
+
+    var jsonObject: [String: Any] {
+        switch self {
+        case .done(let closed, let kept):
+            return ["closed": closed, "kept": kept]
+        case .skipped(let reason):
+            return ["closed": 0, "kept": 0, "skipped": reason.rawValue]
+        }
+    }
+}
+
+typealias DirectHandoverProvider = @MainActor (
+    WebOrigin,
+    _ soleDocument: Bool?,
+    @escaping @MainActor (DirectHandoverOutcome) -> Void
+) -> Void
+
+/// The fixture has no direct transport: no WebView is ever the sole document.
+@MainActor
+final class DirectWebViewRegistry {
+    static let shared = DirectWebViewRegistry()
+
+    func register(_ webView: WKWebView) {}
+
+    func isSoleDocument(_ webView: WKWebView, host: String) -> Bool? {
+        nil
+    }
+}
 
 enum NativePushError: Error, Equatable {
     case unavailable
@@ -46,6 +84,20 @@ enum NativePushError: Error, Equatable {
         case .generationExhausted:
             return "The push generation limit has been reached on this installation."
         }
+    }
+}
+
+enum SystemScheduleAdmission {}
+
+struct SystemScheduleRequest {
+    static func parse(_ params: [String: Any]) -> SystemScheduleRequest? {
+        nil
+    }
+}
+
+struct SystemScheduleCancelRequest {
+    static func parse(_ params: [String: Any]) -> SystemScheduleCancelRequest? {
+        nil
     }
 }
 
@@ -84,4 +136,10 @@ struct NotificationReconcile: Equatable {
             asOf: Date(timeIntervalSince1970: milliseconds / 1000)
         )
     }
+}
+
+/// NativeHoldCapture's check for an Action Button take, which the fixture
+/// never records.
+enum VoiceCaptureAudioState {
+    nonisolated(unsafe) static var active = false
 }

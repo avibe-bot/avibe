@@ -8,7 +8,7 @@ import { canCreateLocalProject } from '../../lib/sessionInfo';
 import { useNewSession } from '../../lib/useNewSession';
 import { AgentRoutePicker } from '../workbench/AgentRoutePicker';
 import { Composer, type ComposerAttachment, type ComposerHandle } from '../workbench/Composer';
-import { NewProjectDialog } from '../workbench/NewProjectDialog';
+import { LazyNewProjectDialog } from '../workbench/LazyNewProjectDialog';
 import { ProjectPicker } from '../workbench/ProjectPicker';
 import { HomeAsks } from './HomeAsks';
 import { useHomeAsks } from './homeCopy';
@@ -125,7 +125,7 @@ export function MemberHome() {
         </div>
       </HomeLayout>
       {newProjectOpen && canCreateProject && (
-        <NewProjectDialog
+        <LazyNewProjectDialog
           initialPath={ns.target?.folder_path}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project) => {

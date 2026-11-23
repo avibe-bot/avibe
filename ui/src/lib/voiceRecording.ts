@@ -448,7 +448,7 @@ const acquireAudioContext = async (): Promise<{
  *  no sound at all from the microphone. */
 export type VoiceCaptureState = 'live' | 'recorder' | 'no_sound';
 
-type VoicePcmCaptureHandlers = {
+export type VoicePcmCaptureHandlers = {
   onSamples: (samples: Int16Array<ArrayBuffer>) => void;
   /** The input's loudness (RMS, 0–1) every `VOICE_LEVEL_INTERVAL_MS`. */
   onLevel?: (rms: number) => void;
@@ -461,12 +461,12 @@ type VoicePcmCaptureHandlers = {
   onError: (error: unknown) => void;
 };
 
-type VoicePcmCapture = {
+export type VoicePcmCapture = {
   start: () => Promise<void>;
   stop: () => void;
 };
 
-type VoicePcmCaptureFactory = (
+export type VoicePcmCaptureFactory = (
   stream: MediaStream,
   sampleRate: number,
   segmentSamples: number,

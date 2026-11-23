@@ -18,12 +18,29 @@ export type MobileSecondFactorMethod = 'passkey' | 'totp';
 export type MobileSessionState =
   | {
       status: 'signedOut';
+      /**
+       * The sign-ins avibe.bot offers the App (`mobile_providers` in its auth config): read now when
+       * that answers in time, otherwise the last list it advertised. Absent means none was ever
+       * read, and the page keeps what it had.
+       */
+      providers?: ('google' | 'github' | 'apple')[];
+      /**
+       * Passkey sign-in with no email first: avibe.bot's `passkey_login_enabled`, from the same read
+       * as `providers` and kept with it (every iOS the App runs on has the passkey sheet). Not
+       * `true` is off.
+       */
+      passkey?: boolean;
     }
   | {
       status: 'signedIn';
       account: MobileAccount;
       instances: MobileInstance[];
       selected_instance_id: string | null;
+      /**
+       * This account was just created by a Google, GitHub or Apple sign-in in the App, as the backend
+       * attested; native keeps it for this account generation only. A hint for the empty state.
+       */
+      new_account?: true;
     }
   | {
       /** The email code passed; this session still owes avibe.bot's second factor. */
@@ -125,6 +142,39 @@ export const signInMobileWithPassword = (
 ): Promise<MobilePasswordSignInResult> =>
   call('auth.signInWithPassword', { email, password });
 
+/**
+ * Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the backend's
+ * one-time exchange, natively.
+ * Resolves like `verifyMobileOtp`. Errors: `provider_cancelled` (show nothing),
+ * `provider_unavailable`, `provider_email_unverified`, `invalid_or_expired`, `rate_limited`
+ * (with `retry_after_seconds`), and `network`.
+ */
+/**
+ * The sign-ins avibe.bot offers the App: read now when that answers within a few seconds,
+ * otherwise the last it advertised. `passkey` (passkey sign-in on) comes from the same read and
+ * travels with the list. Without `providers`, none was ever read.
+ */
+export const readMobileProviders = (): Promise<{
+  providers?: ('google' | 'github' | 'apple')[];
+  passkey?: boolean;
+}> =>
+  call('auth.providers');
+
+export const signInMobileWithProvider = (
+  provider: 'google' | 'github' | 'apple',
+): Promise<MobileSessionState> =>
+  call('auth.signInWithProvider', { provider });
+
+/**
+ * Passkey sign-in with no email first (avibe.bot's primary passkey), natively; not the second
+ * factor's `verifyMobilePasskey`. Resolves like `verifyMobileOtp`. Errors: `passkey_cancelled`,
+ * `passkey_unavailable`, `invalid` (avibe.bot did not accept the passkey), `provider_unavailable`
+ * (passkey sign-in is off), `rate_limited`, and `network`. The page offers it only when a
+ * signed-out answer carries `passkey: true`; these errors do not decide that.
+ */
+export const signInMobileWithPasskey = (): Promise<MobileSessionState> =>
+  call('auth.signInWithPasskey');
+
 export const refreshMobileSession = (): Promise<MobileSessionState> =>
   call('session.refresh');
 
@@ -153,6 +203,17 @@ export const logoutMobileSession = (): Promise<MobileSessionState> =>
 export const openMobileExternal = (url: string): Promise<{ opened: boolean }> =>
   call('app.openExternal', { url });
 
+/** The avibe.bot pages the App shows over this page. Each has one fixed address, set natively. */
+export type MobilePage = 'accountDeletion' | 'privacyPolicy';
+
+/**
+ * Shows one of the App's avibe.bot pages and resolves once it closes. The account deletion page
+ * uses the App's sign-in; `completed` is true when it reported the account deleted. Whether the
+ * account is still there is the session's answer, which the caller reads next.
+ */
+export const openMobilePage = (page: MobilePage): Promise<{ completed: boolean }> =>
+  call('app.openPage', { page });
+
 /**
  * Closes an account page that native opened over a live instance
  * (`#runtime-account`) and shows that instance again, unchanged. Rejects with
@@ -178,8 +239,4 @@ export const SHEET_ACCOUNT_HASH = '#sheet-account';
 export const isSheetHash = (hash: string): boolean =>
   hash === SHEET_HASH || hash === SHEET_INSTANCES_HASH || hash === SHEET_ACCOUNT_HASH;
 
-/**
- * avibe.bot's Account security page: where an account turns on two-step
- * verification and sets or changes its password.
- */
-export const ACCOUNT_SECURITY_URL = 'https://avibe.bot/app/account/security';
+export { ACCOUNT_SECURITY_URL } from '@/sign-in/links';

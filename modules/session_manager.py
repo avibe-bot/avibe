@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Union, Any
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Any
 from datetime import datetime
-from modules.claude_sdk_compat import ClaudeSDKClient
+
+if TYPE_CHECKING:
+    from modules.claude_sdk_compat import ClaudeSDKClient
 
 
 logger = logging.getLogger(__name__)

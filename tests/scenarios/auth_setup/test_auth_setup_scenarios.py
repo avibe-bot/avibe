@@ -57,6 +57,7 @@ from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, CliComma
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from tests.test_desktop_local_instance import desktop_host as desktop_host
+from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser
 from tests.test_pairing_recovery import pairing_host as pairing_host
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
@@ -108,6 +109,195 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     # Keep the existing no-process guard. Supply command evidence only at the
     # shared probe transport seam; production parsing/readiness remain real.
     CliCommandObservations().bind(monkeypatch)
+
+
+def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_browser, monkeypatch):
+    """AUTH-SETUP-914: browser return, subject acceptance, key redemption and local publication.
+
+    The owner's browser may be on this machine or another computer on an admitted home network."""
+    import hashlib
+    import base64
+    import time
+    from tests.test_personal_claims import _assert_bad_return, _start, callback_proof
+    from vibe import remote_access, ui_server
+    from config.v2_config import V2Config
+
+    monitored = []
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: monitored.append(V2Config.load().remote_access.vibe_cloud.instance_id))
+    origin, environ = owner_browser
+    client = app.test_client()
+    start = _start(client, origin, environ)
+    assert start.status_code == 201 and start.headers["Cache-Control"] == "no-store"
+    response = start.get_json()
+    ident = response["claim_id"]
+    peer_start = claim_peer.calls[0][1]
+    form = response["form"]
+    assert form["action"] == "https://avibe.bot/api/v1/claims/redirect-entry"
+    assert form["method"] == "POST" and form["referrer_policy"] == "strict-origin"
+    state = form["fields"]["redirect_state"]
+    assert base64.urlsafe_b64encode(hashlib.sha256(state.encode()).digest()).decode().rstrip("=") == peer_start["redirect_state_challenge"]
+    assert peer_start["return_origin"] == origin and peer_start["code_challenge"] != peer_start["redirect_state_challenge"]
+    assert not claim_peer.decisions
+    url = f"/remote/claim/callback?claim_id={ident}&state={callback_proof(response)}"
+    callback = client.get(url, base_url=origin, environ_base=environ)
+    assert callback.status_code == 303 and callback.headers["Location"] == "/settings/remote-access"
+    assert callback.headers["Referrer-Policy"] == "no-referrer"
+    _assert_bad_return(client.get(url, base_url=origin, environ_base=environ))
+    end = time.monotonic() + 8
+    while time.monotonic() < end:
+        outcome = client.get("/api/remote-access/claims/" + ident, base_url=origin, environ_base=environ).get_json()
+        if outcome["state"] in ("error", "bound"):
+            break
+        time.sleep(.02)
+    assert outcome["state"] == "bound", outcome
+    assert monitored == ["inst_A"]
+    assert outcome["account"] == {"email": "actual@fixture.test"} and outcome["hostname"] == "fixture.avibe.bot"
+    assert claim_peer.decisions == ["owner-id"]
+    cloud = V2Config.load().remote_access.vibe_cloud
+    assert cloud.instance_id == "inst_A" and cloud.enabled and cloud.is_runtime_paired()
+    assert cloud.session_secret and cloud.tunnel_token and cloud.instance_secret
+    assert remote_access._read_pending_pairing_record() == (None, None)
+    assert all(s not in str(outcome) for s in (state, claim_peer.key, claim_peer.calls[-1][1]["code_verifier"], cloud.session_secret))
+
+
+@pytest.mark.parametrize("instance_kind", ["personal", "organization"])
+def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypatch, tmp_path, instance_kind):
+    """AUTH-SETUP-186: real producers/consumers; fake phone, policy and push only.
+
+    Personal and shared organization instances follow the same closed loop: who may reach
+    the instance is the owner's own access setting, not a Health eligibility rule."""
+    from sqlalchemy import select
+    from core import web_push
+    from core.handlers import mobile_health
+    from storage import mobile_store, web_push_service
+    from storage.db import get_cached_sqlite_engine
+    from storage.models import agent_sessions, messages
+    from storage.settings_service import upsert_scope
+    from tests.test_mobile_health import IDENTITY, upload_payload
+    from vibe import cli_mobile, permissions
+
+    now = datetime(2026, 11, 18, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(mobile_store, "_now", lambda: now.isoformat())
+    config = _save_config(tmp_path, paired=True, instance_kind=instance_kind)
+    config.language = "zh"
+    config.save()
+    organization = instance_kind == "organization"
+    projection = {
+        "instance": {"id": IDENTITY["id"], "name": IDENTITY["name"], "access_mode": "allowlist",
+                     "organization": {"id": "org_synthetic", "name": "Synthetic org"} if organization else None},
+        "access": {"owner": {"email": IDENTITY["owner"]}, "entries": [
+            {"kind": "email", "value": "colleague@example.test", "role": "member"},
+        ] if organization else []},
+    }
+    monkeypatch.setattr(permissions, "get_current_permissions", lambda *_a: SimpleNamespace(
+        source="live", projection=projection,
+    ))
+    remote_access_authorization_service.upsert_scoped(
+        reference=None, instance_id=IDENTITY["id"], subject="synthetic-owner",
+        email=IDENTITY["owner"], scope_kind="instance", scope_ref=IDENTITY["id"],
+        authorization_state="current", last_checked_at=int(now.timestamp()), updated_at=int(now.timestamp()),
+        claims={"sub": "synthetic-owner", "email": IDENTITY["owner"],
+                "vibe_instance_id": IDENTITY["id"], "vibe_instance_role": "owner",
+                "vibe_instance_access_source": "owner", "vibe_instance_kind": instance_kind},
+    )
+    engine = get_cached_sqlite_engine()
+    session_id = "ses_mobile_synthetic"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project",
+                                native_id="proj_mobile_synthetic", now=now.isoformat())
+        conn.execute(agent_sessions.insert().values(
+            id=session_id, scope_id=scope_id, agent_backend="codex", agent_variant="default",
+            session_anchor="anchor_mobile", native_session_id="", status="active", metadata_json="{}",
+            created_at=now.isoformat(), updated_at=now.isoformat(), last_active_at=now.isoformat(),
+        ))
+        web_push_service.upsert_subscription(
+            conn, user_key="remote:synthetic-owner", device_id="synthetic-phone",
+            payload={"endpoint": "https://avibe.bot/api/push/apns/" + "a" * 43,
+                     "keys": {"p256dh": "fake-key", "auth": "fake-auth"}},
+        )
+    sent = []
+    monkeypatch.setattr(web_push, "send_web_push", lambda **kwargs: sent.append(kwargs["payload"]))
+    monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+    monkeypatch.setenv("AVIBE_CALLER_REMOTE", "1")
+    monkeypatch.setenv("AVIBE_AGENT_NAME", "伙伴")
+    store = mobile_store.MobileStore()
+    client = app.test_client()
+    ui_server._auth_ratelimit.clear()
+    harness = SimpleNamespace(request=None, auth=None, claim=None)
+    runner = ScenarioRunner(harness)
+
+    def connect(h):
+        args = cli.build_parser().parse_args(["mobile", "health", "connect", "--no-callback"])
+        h.request = cli_mobile.execute(args)["request"]
+        with engine.connect() as conn:
+            row = conn.execute(select(messages).where(messages.c.session_id == session_id)).mappings().one()
+        metadata = json.loads(row["metadata_json"])
+        assert metadata["mobile_request"] == mobile_health.request_metadata(h.request)
+        assert row["type"] == "notify" and row["author"] == "harness"
+        assert len(sent) == 1 and sent[0]["kind"] == "health.request"
+        assert sent[0]["request_id"] == h.request["id"]
+        assert sent[0]["url"] == f"/mobile/health/{h.request['id']}"
+        assert "伙伴" in sent[0]["title"] and "987654321" not in json.dumps(sent)
+
+    def pair(h):
+        code = client.post("/api/mobile/pairings", json={"request_id": h.request["id"]},
+                           headers=csrf_headers(client))
+        assert code.status_code == 200
+        response = client.post("/api/mobile/device/v1/pair", json={
+            "pairing_code": code.get_json()["pairing_code"], "device_name": "合成 iPhone",
+            "platform": "ios", "app_version": "1", "metrics": ["steps", "sleep"],
+            "installation_id": "synthetic-install",
+        })
+        assert response.status_code == 200
+        assert response.get_json()["instance"]["id"] == config.remote_access.vibe_cloud.instance_id
+        h.auth = {"Authorization": "Bearer " + response.get_json()["credential"]}
+        response = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
+                               json={"wait_seconds": 0, "max": 1, "request_id": h.request["id"]})
+        assert response.status_code == 200
+        h.claim = response.get_json()["requests"][0]
+        assert h.claim["id"] == h.request["id"]
+
+    def upload_and_complete(h):
+        response = client.put("/api/mobile/device/v1/health/days",
+                              headers=h.auth, json=upload_payload())
+        assert response.status_code == 200
+        response = client.post(f"/api/mobile/device/v1/requests/{h.request['id']}/result",
+                              headers=h.auth, json={
+                                  "claim_token": h.claim["claim_token"], "outcome": "succeeded",
+                                  "result": {"metrics": {"steps": "ok", "sleep": "ok"}},
+                              })
+        assert response.status_code == 200
+        status = client.get(f"/api/mobile/requests/{h.request['id']}").get_json()
+        assert status["state"] == "succeeded" and "987654321" not in json.dumps(status)
+
+    def read_and_revoke(h):
+        args = cli.build_parser().parse_args([
+            "mobile", "health", "read", "--metric", "steps,sleep",
+            "--from", "2026-11-18", "--to", "2026-11-18",
+        ])
+        data = cli_mobile.execute(args)["metrics"]
+        assert data["steps"]["items"][0]["value"]["count"] == 987654321
+        assert data["sleep"]["items"][0]["value"]["in_bed_minutes"] is None
+        assert cli_mobile.execute(cli.build_parser().parse_args(["mobile", "health", "revoke"]))["purged"]
+        response = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
+                               json={"wait_seconds": 0, "max": 1})
+        assert response.status_code == 403 and response.get_json()["code"] == "device_revoked"
+        assert b"987654321" not in store.path.read_bytes()
+        with store.transaction() as conn:
+            accesses = [dict(row) for row in conn.execute("SELECT * FROM accesses")]
+        assert any(row["caller"] == "伙伴" and row["session_id"] == session_id for row in accesses)
+        assert "987654321" not in json.dumps(accesses)
+
+    asyncio.run(runner.run(
+        ScenarioStep("connect-and-persist-card", connect),
+        ScenarioStep("pair-and-claim-same-request", pair),
+        ScenarioStep("upload-before-status-result", upload_and_complete),
+        ScenarioStep("local-agent-read-and-revoke", read_and_revoke),
+    ))
+    ScenarioExpect.step_history(runner, [
+        "connect-and-persist-card", "pair-and-claim-same-request",
+        "upload-before-status-result", "local-agent-read-and-revoke",
+    ])
 
 
 def test_selected_cli_health_refusal_recovers_through_setup_http(monkeypatch, tmp_path):
@@ -1370,7 +1560,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path,
         monkeypatch.setenv("PATH", "")
         monkeypatch.setattr("vibe.cli_paths.Path.home", lambda: tmp_path)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
-    monkeypatch.setattr(auth_module, "CLAUDE_SDK_AVAILABLE", True)
+    monkeypatch.setattr("modules.claude_sdk_compat.CLAUDE_SDK_AVAILABLE", True)
 
     harness = SimpleNamespace(launches=[], control_requests=[], disconnects=0)
 
@@ -1396,7 +1586,7 @@ def test_web_claude_oauth_launches_the_persisted_cli_path(monkeypatch, tmp_path,
     # re-reads persisted config and has no IM session handler.
     service = AgentAuthService(vibe_api._WebControllerStub())
     monkeypatch.setattr(vibe_api, "_get_oauth_service", lambda: service)
-    monkeypatch.setattr(auth_module, "ClaudeSDKClient", FakeClaudeSDKClient)
+    monkeypatch.setattr("modules.claude_sdk_compat.ClaudeSDKClient", FakeClaudeSDKClient)
     runner = ScenarioRunner(harness)
 
     def save_cli_selector(current):
@@ -1657,6 +1847,85 @@ def test_organization_remote_session_idles_out_renews_daily_and_ends_at_the_cap(
     """Scenario: AUTH-SETUP-145."""
 
     _remote_session_lifetime_scenario(monkeypatch, tmp_path, "organization", 7 * 24 * 60 * 60)
+
+
+@pytest.mark.parametrize('caller_source', ['owner', 'email'])
+def test_device_account_signout_from_verified_exchange(monkeypatch, tmp_path, caller_source):
+    """Scenario: AUTH-SETUP-915. The exchange, nonce, enrollment, routes and worker are real."""
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from tests.test_device_account_signout import fake_issuer
+    from vibe import account_signout_worker
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    cfg = _save_remote_session_authorization_config('personal')
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.issuer, cloud.token_endpoint, cloud.jwks_uri = 'https://issuer.invalid', 'https://issuer.invalid/token', 'https://issuer.invalid/keys'
+    cfg.save()
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(remote_access, 'PyJWKClient', lambda _: SimpleNamespace(
+        get_signing_key_from_jwt=lambda _: SimpleNamespace(key=key.public_key())))
+    a, b = app.test_client(), app.test_client()
+    origin = cloud.public_url
+    ref_a, ref_b = 'asr1_' + 'a' * 43, 'asr1_' + 'b' * 43
+    def callback(client, ref, *, wrong_nonce=False, source='owner'):
+        authorize = httpx.URL(client.get('/auth/login?next=/inbox', base_url=origin).headers['Location'])
+        claims = {**_REMOTE_SESSION_OWNER_CLAIMS, 'iss': cloud.issuer, 'aud': cloud.client_id,
+                  'sub':'owner-1', 'email':'owner@example.com', 'email_verified':True,
+                  'nonce':'not-the-handshake' if wrong_nonce else authorize.params['nonce'],
+                  'exp': int(time.time()) + 300, 'avibe_account_session_ref':ref, 'vibe_instance_access_source':source}
+        token = jwt.encode(claims, key, algorithm='RS256')
+        monkeypatch.setattr(remote_access.requests, 'post', lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {'id_token': token}))
+        return client.get('/auth/callback', base_url=origin, params={'code':'fixture','state':authorize.params['state']})
+    bad = callback(app.test_client(), ref_a, wrong_nonce=True)
+    assert bad.status_code == 400 and _remote_session_set_cookie(bad) is None
+    for client, ref in ((a, ref_a), (b, ref_b)):
+        response = callback(client, ref, source=caller_source if client is b else 'owner')
+        assert response.status_code == 302 and ref not in _remote_session_set_cookie(response)[0]
+    def view():
+        return b.get('/api/devices', base_url=origin).get_json()
+    target = next(row['id'] for row in view()['mine'] if row['kind'] != 'host' and not row['current'])
+    calls = fake_issuer(monkeypatch, 204)
+    result = b.post('/api/devices/' + target + '/sign-out', base_url=origin, headers=csrf_headers(b, origin), json={}).get_json()
+    receipt, = result['sign_out_results']
+    assert result['revoked_sessions'] == 1 and not calls
+    assert a.get('/api/session', base_url=origin).get_json()['authenticated'] is False
+    if caller_source != 'owner':
+        # The same subject, role and eligible target as the positive case; only the actor's source differs.
+        assert receipt['account_results'] == [{'status':'not_applicable', 'reason':'not_eligible', 'count':1}]
+        assert not account_signout_worker.run_once(V2Config.load) and not calls
+        assert callback(a, ref_a).status_code == 302  # No account fence either.
+        return
+
+    assert receipt['account_results'][0]['status'] == 'pending'
+    from vibe import direct_lifecycle
+    monkeypatch.setattr(remote_access, 'reconcile', lambda: {'ok': True})
+    monkeypatch.setattr(ui_server, '_ensure_remote_access_monitoring', lambda *_: None)
+    monkeypatch.setattr(direct_lifecycle, 'notify_config_changed', lambda *_: None)
+    host = app.test_client()
+    def settings(enabled):
+        response = host.post('/api/config', base_url='http://localhost', headers=csrf_headers(host),
+                             json={'remote_access': {'vibe_cloud': {'enabled': enabled}}})
+        assert response.status_code == 200, response.text
+        current = V2Config.load().remote_access.vibe_cloud
+        assert current.enabled is enabled and current.instance_secret == cloud.instance_secret
+        return current
+    assert settings(False).session_secret != cloud.session_secret
+    assert not account_signout_worker.run_once(V2Config.load) and not calls
+    settings(True)
+    assert callback(b, ref_b).status_code == 302  # The old B cookie was rotated by Settings.
+    pending, = view()['recent_sign_outs']
+    assert pending == receipt
+    fenced = callback(app.test_client(), ref_a)
+    assert fenced.status_code == 403 and _remote_session_set_cookie(fenced) is None
+    assert ref_a not in fenced.text and 'account_session_signed_out' in fenced.text
+    assert account_signout_worker.run_once(V2Config.load)
+    assert [call[2] for call in calls] == [{'account_session_ref':ref_a}]
+    history, = view()['recent_sign_outs']
+    assert history['operation_id'] == receipt['operation_id'] and history['account_results'][0]['status'] == 'accepted'
+    assert b.get('/api/session', base_url=origin).get_json()['authenticated'] is True
 
 
 def _remote_session_lifetime_scenario(monkeypatch, tmp_path, instance_kind, idle_seconds):
@@ -2166,7 +2435,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=clear_oauth,
             ),
             patch("vibe.api.restart_backend", side_effect=restart_backend),
-            patch("core.agent_auth_service.ClaudeSDKClient", FakeClaudeSDKClient),
+            patch("modules.claude_sdk_compat.ClaudeSDKClient", FakeClaudeSDKClient),
         ):
             config = V2Config(
                 mode="self_host",
@@ -4445,7 +4714,7 @@ def test_api_key_setup_does_not_schedule_a_model(
     service, store, adapter = _service(tmp_path)
     # Keep engine lifecycle simulated; exercise real credential custody, HTTP
     # observation, inventory discovery, and Source admission together.
-    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models"):
+    for method in ("provision_credential", "provision_transient_credential", "revoke_credential", "observe_source", "discover_models", "check_api_key_models"):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
     async def scenario():
@@ -4550,10 +4819,9 @@ def test_api_key_setup_does_not_schedule_a_model(
                     })
                 before = len(requests)
                 await service.create_source({"kind": "api_key", **draft, "save_unverified": True})
-                # The explicit save observes nothing. Its one request is the
-                # best-effort inventory, which fills the Source without
-                # answering the credential question the listing left open.
-                assert requests[before:] == [("GET", listing_path, None)]
+                # Save reuses the models witness, without a model-less POST or
+                # an inference call. A public catalogue still cannot verify it.
+                assert requests[before:] == [("GET", listing_path, None)] * 2
             assert len(store.config.sources) == 1
             h.source = store.config.sources[0].to_payload()
             assert h.source["protocol"] == protocol
@@ -4605,10 +4873,9 @@ def test_api_key_setup_does_not_schedule_a_model(
 def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-164
 
-    The wizard's key, carried through real credential custody and real model
-    listing: saved unverified, checked and refused with the provider's 401,
-    replaced by another refused key without losing the stored one, replaced by
-    the right key, checked again, and removed.
+    The service refuses a known-bad key at save, permits an offline pending save,
+    later names its refusal, preserves it on a rejected replacement, then accepts
+    the right replacement and removes the Source.
     """
     from tests.test_model_hub_api import _service
     from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
@@ -4621,7 +4888,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
     # Engine lifecycle stays simulated; custody, listing and replacement are real.
     for method in (
         "provision_credential", "credential_auth_scheme", "revoke_credential",
-        "revoke_api_key_credential", "discover_models",
+        "revoke_api_key_credential", "discover_models", "check_api_key_models",
     ):
         monkeypatch.setattr(adapter, method, getattr(transport, method))
 
@@ -4629,10 +4896,13 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
 
     async def scenario():
         presented = []
+        listing_available = True
 
         async def models(request):
             supplied = request.headers.get("Authorization", "").removeprefix("Bearer ")
             presented.append(supplied)
+            if not listing_available:
+                return web.Response(status=503)
             if supplied != right_key:
                 return web.json_response({"error": {
                     "code": "invalid_api_key", "message": "This key cannot list models.",
@@ -4653,12 +4923,27 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             [source] = store.config.sources
             return state_store.read_api_key(source.credential_ref)
 
+        draft = {
+            "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
+            "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
+        }
+
+        async def refuse_known_wrong_key(h):
+            with pytest.raises(ModelHubError) as refused:
+                await service.create_source(draft)
+            assert refused.value.status == 422
+            assert refused.value.detail == "modelHub.errors.authentication_failed"
+            assert not store.config.sources
+
         async def save_wrong_key(h):
-            # What the wizard's key form sends: saved without verification.
-            created = (await service.create_source({
-                "kind": "api_key", "vendor": "custom", "protocol": "openai_chat",
-                "base_url": f"http://127.0.0.1:{port}", "key": wrong_key, "save_unverified": True,
-            }))["source"]
+            # An unavailable listing cannot reject a key; the saved Source stays
+            # pending until a later check or real invocation can answer it.
+            nonlocal listing_available
+            listing_available = False
+            try:
+                created = (await service.create_source(draft))["source"]
+            finally:
+                listing_available = True
             h.source_id = created["id"]
             assert created["state"]["status"] == "standby"
             assert created["verification_pending"]
@@ -4676,13 +4961,15 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             with pytest.raises(ModelHubError) as refused:
                 await service.replace_credential(h.source_id, {"key": other_wrong_key})
             assert refused.value.detail == "modelHub.errors.authentication_failed"
-            assert refused.value.data == {"upstream_status": 401, "upstream_detail": "This key cannot list models."}
+            assert refused.value.status == 422
+            assert refused.value.data == {}
             assert stored_key(h) == wrong_key
 
         async def right_replacement_lists_models(h):
             replaced = (await service.replace_credential(h.source_id, {"key": right_key}))["source"]
             assert [model["id"] for model in replaced["models"]] == ["relay-model-a", "relay-model-b"]
             assert replaced["state"]["status"] == "standby"
+            assert "verification_pending" not in replaced
             assert stored_key(h) == right_key
 
         async def check_passes(h):
@@ -4702,6 +4989,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
             assert store.config.sources == []
 
         steps = [
+            ("refuse_known_wrong_key", refuse_known_wrong_key),
             ("save_wrong_key", save_wrong_key),
             ("check_names_the_refusal", check_names_the_refusal),
             ("refused_replacement_keeps_the_key", refused_replacement_keeps_the_key),
@@ -4712,7 +5000,7 @@ def test_setup_key_check_names_a_rejected_key_and_replaces_it_closed_loop(monkey
         try:
             await runner.run(*(ScenarioStep(name, action) for name, action in steps))
             ScenarioExpect.step_history(runner, [name for name, _ in steps])
-            assert set(presented) == {wrong_key, other_wrong_key, right_key}
+            assert set(presented) == {wrong_key, other_wrong_key, right_key, ""}
         finally:
             await web_runner.cleanup()
 
@@ -5815,13 +6103,15 @@ def test_cli_assistant_default_model_pick_makes_its_agent_runnable_and_completes
                                       "reasoning_efforts": []}),
     ],
 )
-def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_path, model_id, origin, row):
-    """AUTH-SETUP-166: unlisted pick -> catalog write with no supplier promise -> Agent model -> runnable route -> completion.
+def test_setup_cannot_finish_on_a_model_no_provider_lists(monkeypatch, tmp_path, model_id, origin, row):
+    """AUTH-SETUP-166: setup offers no model that no provider lists, so it cannot finish on one.
 
-    The setup picker also offers what no provider lists: a catalog model, or the ID the
-    user typed. Neither showed a supplier, so the catalog write states no expectation for
-    it; the API-key provider receives the ID as it is, which makes the built-in Agent
-    runnable and lets setup finish on it. Every step is the HTTP route the picker calls.
+    Setup's picker offers only supplied candidates: never a catalog model or a typed ID
+    that no Source lists (the picker case the row cites). This is the server half. The
+    candidates read setup draws from gives neither ID a supplier, and an Agent made to
+    select one anyway (the Settings write path) keeps the model but has an unconfigured,
+    interrupted named route, which the entry gate refuses. Nothing forwards the ID
+    without an explicit manual route.
     """
     from core.vibe_agents import VibeAgentStore
     from tests.test_model_hub_api import _service
@@ -5856,8 +6146,11 @@ def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_pa
         listed = client.get("/api/agents").get_json()
         vibey = next(row for row in listed["agents"] if row["backend"] == "vibey" and row["bot"] is None)
         candidates = client.get("/api/models/agents/vibey/models/candidates").get_json()["candidates"]
-        offered = {row["id"] for group in candidates.values() for row in group}
-        assert model_id not in offered
+        rows = [row for group in candidates.values() for row in group]
+        # Setup offers the supplied rows: the Source's models, never the unlisted ID.
+        supplied = {row["id"] for row in rows if row["suppliers"]}
+        assert {"mock-large", "mock-mini"} <= supplied
+        assert model_id not in {row["id"] for row in rows}
 
         def vibey_supply():
             rows = client.get("/api/models/agents").get_json()["agents"]
@@ -5871,22 +6164,14 @@ def test_setup_picks_a_model_no_provider_lists_and_completes(monkeypatch, tmp_pa
             headers=headers,
         )
         assert written.status_code == 200, written.get_json()
-        saved = next(row for row in vibey_supply()["catalog_models"] if row["id"] == model_id)
-        assert saved["origin"] == origin
-        assert saved["context_window"] == row["context_window"]
-
         named = client.patch(f"/api/agents/{vibey['name']}", json={"model": model_id}, headers=headers)
         assert named.status_code == 200, named.get_json()
         route = next(row for row in vibey_supply()["named_agents"] if row["name"] == vibey["name"])
+        # The selection stands, but no inventory match supplies it: nothing to enter on.
         assert route["effective_model_id"] == model_id
-        assert route["supply_status"] in {"ok", "degraded"}
-        assert route["route_reason"] != "route_unconfigured"
-
-        chosen = client.post("/api/agents/default", json={"name": vibey["name"]}, headers=headers)
-        assert chosen.status_code == 200, chosen.get_json()
-        completed = client.post("/api/config", json={"setup_completed": True}, headers=headers)
-        assert completed.status_code == 200, completed.get_json()
-        assert V2Config.load().setup_completed
+        assert route["supply_status"] == "interrupted"
+        assert route["route_reason"] == "route_unconfigured"
+        assert model_id not in store.config.agents["vibey"].routes
     finally:
         agents.close()
 

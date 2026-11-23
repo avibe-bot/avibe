@@ -1,3 +1,5 @@
+import { desktopVoiceLock } from './desktopVoiceLock';
+import { nativeCaptureAllowed } from './nativeVoiceCapture';
 import {
   ShowPageVoiceDictation,
   type ShowPageVoiceDictationInput,
@@ -90,6 +92,9 @@ export type ShowPageVoiceHostDependencies = {
   /** Where a take's words go if this page is gone before they land (lib/voiceTakeStore): the
    *  take is kept on the device until then. */
   keep?: () => VoiceTakeKeep | null;
+  /** Whether this reader allowed voice input (lib/voiceConsent). Asked at each start; a start
+   *  without it records nothing and is refused as `unavailable` (the host asks the reader). */
+  allowed?: () => boolean;
 };
 
 type StartingVoiceSession = {
@@ -100,6 +105,11 @@ type StartingVoiceSession = {
 };
 
 type ActiveVoiceSession = {
+  settled: boolean;
+  retrying: boolean;
+  detachAfterRetry?: boolean;
+  retainedText?: string;
+  retryError?: ShowPageVoiceErrorCode;
   requestId: string;
   captureClaim: VoiceCaptureClaim;
   session: ShowPageVoiceSession;
@@ -163,13 +173,30 @@ export class ShowPageVoiceHost {
   private active: ActiveVoiceSession | null = null;
   private starting: StartingVoiceSession | null = null;
   private disposed = false;
+  private readonly stopWatchingLock: () => void;
+  private readonly stopWatchingUnlock: () => void;
 
   constructor(dependencies: ShowPageVoiceHostDependencies) {
+    this.stopWatchingLock = desktopVoiceLock.onInvalidate(() => {
+      const pending = this.starting;
+      const active = this.active;
+      this.starting = null;
+      this.active = active?.settled ? active : null;
+      if (pending) { pending.cancelled = true; pending.session?.abort(); pending.captureClaim.release(); }
+      if (active) { if (!active.settled) active.session.abort(); active.captureClaim.release(); }
+      const id = (active?.settled ? undefined : active?.requestId) ?? pending?.requestId;
+      if (id) this.postError(id, 'cancelled', false);
+    });
+    this.stopWatchingUnlock = desktopVoiceLock.onUnlock(() => {
+      const active = this.active;
+      if (active?.settled && !active.retrying) this.postError(active.requestId, active.retryError ?? 'failed', true);
+    });
     this.dependencies = {
       ...dependencies,
       createSession: dependencies.createSession
         ?? ((input) => new ShowPageVoiceDictation(input)),
       keep: dependencies.keep ?? (() => null),
+      allowed: dependencies.allowed ?? (() => true),
     };
   }
 
@@ -183,7 +210,7 @@ export class ShowPageVoiceHost {
     } else if (request.action === 'stop') {
       if (this.active?.requestId === request.requestId) this.active.session.finish();
     } else if (request.action === 'retry') {
-      if (this.active?.requestId === request.requestId) void this.retry(this.active, request);
+      if (desktopVoiceLock.allowed() && this.active?.requestId === request.requestId) void this.retry(this.active, request);
     } else {
       if (this.starting?.requestId === request.requestId) {
         this.starting.cancelled = true;
@@ -200,16 +227,26 @@ export class ShowPageVoiceHost {
 
   dispose(): void {
     this.disposed = true;
+    this.stopWatchingLock();
+    this.stopWatchingUnlock();
     if (this.starting) {
       this.starting.cancelled = true;
       this.starting.captureClaim.release();
     }
     this.starting = null;
     // The page is gone, not the speech: a take it was recording or transcribing is kept.
-    if (this.active?.session.detach) this.active.session.detach();
-    else this.active?.session.abort();
-    this.active?.captureClaim.release();
+    const active = this.active;
     this.active = null;
+    // Keep the persisted take live until its already-admitted retry ends, so
+    // a new pending-items owner cannot transcribe the same audio concurrently.
+    if (active?.retrying) active.detachAfterRetry = true;
+    else if (active) this.detach(active);
+  }
+
+  private detach(active: ActiveVoiceSession): void {
+    if (active.session.detach) active.session.detach();
+    else active.session.abort();
+    active.captureClaim.release();
   }
 
   private async replyAvailability(requestId: string): Promise<void> {
@@ -236,7 +273,7 @@ export class ShowPageVoiceHost {
   }
 
   private async start(request: Extract<ShowPageVoiceRequest, { action: 'start' }>): Promise<void> {
-    if (this.active || this.starting) {
+    if (!desktopVoiceLock.allowed() || this.active || this.starting) {
       this.postError(request.requestId, 'failed', false);
       return;
     }
@@ -251,15 +288,19 @@ export class ShowPageVoiceHost {
     try {
       const availability = await this.dependencies.availability();
       if (this.disposed || pending.cancelled || this.starting !== pending) return;
-      if (!availability.available) {
+      if (!availability.available || !this.dependencies.allowed()) {
         this.postError(request.requestId, 'unavailable', false);
         return;
       }
+      // In the iOS App the App records the take (lib/nativeVoiceCapture), not the page.
+      const nativeCapture = await nativeCaptureAllowed().catch(() => false);
+      if (this.disposed || pending.cancelled || this.starting !== pending) return;
       const keep = this.dependencies.keep?.() ?? null;
       const session = this.dependencies.createSession({
         before: request.before,
         after: request.after,
         captureClaim,
+        ...(nativeCapture ? { nativeCapture: true } : {}),
         maxFileBytes: availability.maxFileBytes,
         ...(keep ? { keep } : {}),
         onPreview: (text) => {
@@ -273,7 +314,7 @@ export class ShowPageVoiceHost {
         },
       });
       pending.session = session;
-      const active = { requestId: request.requestId, captureClaim, session };
+      const active = { requestId: request.requestId, captureClaim, session, settled: false, retrying: false };
       this.starting = null;
       this.active = active;
       try {
@@ -326,11 +367,26 @@ export class ShowPageVoiceHost {
     active: ActiveVoiceSession,
     request: Extract<ShowPageVoiceRequest, { action: 'retry' }>,
   ): Promise<void> {
+    if (!desktopVoiceLock.allowed() || active.retrying || this.disposed || this.active !== active) return;
+    if (active.retainedText !== undefined) {
+      this.postResult(active, active.retainedText);
+      return;
+    }
+    const token = desktopVoiceLock.token();
+    active.retrying = true;
     try {
       const text = await active.session.retry({ before: request.before, after: request.after });
-      this.postResult(active, text);
+      if (this.disposed || this.active !== active) return;
+      if (desktopVoiceLock.current(token)) this.postResult(active, text);
+      else {
+        active.retainedText = text;
+        if (desktopVoiceLock.allowed()) this.postError(active.requestId, active.retryError ?? 'failed', true);
+      }
     } catch (error) {
       this.postSessionError(active, error);
+    } finally {
+      active.retrying = false;
+      if (active.detachAfterRetry) this.detach(active);
     }
   }
 
@@ -356,7 +412,9 @@ export class ShowPageVoiceHost {
   ): void {
     if (this.disposed || this.active !== active) return;
     active.captureClaim.release();
+    active.settled = true;
     const code = voiceErrorCode(error);
+    active.retryError = code;
     // An empty transcript of a take that held speech-loud sound is a recognition that failed:
     // its recording stays, to be retried.
     const retryable = code !== 'cancelled'
@@ -367,7 +425,7 @@ export class ShowPageVoiceHost {
       // Nothing to send again: nothing to keep.
       active.session.abort();
     }
-    this.postError(active.requestId, code, retryable);
+    if (desktopVoiceLock.allowed()) this.postError(active.requestId, code, retryable);
   }
 
   private postError(requestId: string, code: ShowPageVoiceErrorCode, retryable: boolean): void {

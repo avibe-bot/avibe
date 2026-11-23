@@ -4,6 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState } f
 
 import { useApi, type VaultSecret } from '@/context/ApiContext';
 import { getVaultSandboxClient, openVaultAuthorizationWindow } from './vaultSandboxClient';
+import { useVaultPasskeyHandoff } from './vaultBrowserHandoff';
 import { setupVaultDurably } from './useProtectedVault';
 import { POLICY_DOWNGRADE_OP, policyFailureFromSandbox, turnOffAskBeforeSigning, type PolicyTurnOffFailure } from './vaultSigningPolicy';
 
@@ -60,6 +61,9 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
     return () => { ref.live = false; };
   }, []);
   const attempt = stored?.key === key ? stored : null;
+  // A desktop app that hands passkey steps to the browser can't turn this off here, as before the
+  // app could run them; that includes one whose in-app step failed while this switch was shown.
+  const handoff = useVaultPasskeyHandoff();
 
   useEffect(() => {
     if (!enabled || override) return;
@@ -72,7 +76,7 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
   }, [enabled, override]);
 
   const turnOff = useCallback(() => {
-    if (override) return;
+    if (override || handoff) return;
     const ref = current.current;
     const id = ++ref.id;
     const started = key;
@@ -96,7 +100,7 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
         setAttempt({ key: started, id, phase: 'done', failure: outcome.reason === 'unavailable' ? undefined : outcome.reason });
       })
       .finally(() => authorizationWindow.close());
-  }, [api, name, account, key, onDone, override]);
+  }, [api, name, account, key, onDone, override, handoff]);
 
   // Only offered after the server said this instance never set one up. The sandbox shows its own
   // setup card; on success the Passkey is committed, and turning the switch off is asked again.
@@ -119,7 +123,7 @@ export function useAskTurnOff(target: { name: string; account?: number }, enable
 
   let state: AskTurnOffState;
   if (override) state = override;
-  else if (!enabled || supported === false) state = { phase: 'unavailable' };
+  else if (!enabled || supported === false || handoff) state = { phase: 'unavailable' };
   else if (supported === null) state = { phase: 'checking' };
   else if (attempt?.phase === 'working') state = { phase: 'working', settingUp: attempt.settingUp };
   else state = { phase: 'ready', failure: attempt?.phase === 'done' ? attempt.failure : undefined, setup: attempt?.phase === 'done' ? attempt.setup : undefined };

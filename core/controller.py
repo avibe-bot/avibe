@@ -1349,6 +1349,24 @@ class Controller:
             logger.error("Failed to start Vibey's model supply seed: %s", e, exc_info=True)
 
         try:
+            # A notice the database update left (no backup kept on a nearly full
+            # disk). Only the service delivers it, and only once.
+            if current_process_owns_service_instance() and getattr(self, "storage_notice_task", None) is None:
+                from core.storage_notices import deliver_storage_notices
+
+                self.storage_notice_task = asyncio.create_task(deliver_storage_notices(self._t))
+        except Exception as e:
+            logger.error("Failed to start the storage notice delivery: %s", e, exc_info=True)
+
+        try:
+            if current_process_owns_service_instance():
+                from core.live_activities import controller_service
+
+                controller_service(self).start()
+        except Exception as e:
+            logger.error("Failed to start Live Activity publishing: %s", e, exc_info=True)
+
+        try:
             if self.cleanup_task is None or self.cleanup_task.done():
                 self.cleanup_task = asyncio.create_task(self.periodic_cleanup())
         except Exception as e:
@@ -1777,7 +1795,7 @@ class Controller:
         """Archive one Workbench session through its serialized lifecycle."""
 
         from core.services import sessions as workbench_sessions_service
-        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, is_bot_session, is_bot_session_id
+        from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, is_bot_session_id, is_reserved_bot_session
         from storage.db import create_sqlite_engine
 
         if (
@@ -1794,7 +1812,7 @@ class Controller:
                 engine = create_sqlite_engine()
                 try:
                     with engine.connect() as conn:
-                        return is_bot_session(conn, raw_session_id)
+                        return is_reserved_bot_session(conn, raw_session_id)
                 finally:
                     engine.dispose()
 
@@ -2422,6 +2440,13 @@ class Controller:
         # Skill privacy retention remains active when collection/tool retention
         # is disabled; both policies share this bounded maintenance worker.
         engine = get_cached_sqlite_engine()
+        from storage import device_activity, device_health_registry
+        for cleanup in (device_activity.prune, device_health_registry.maintain):
+            try:
+                cleanup(engine, int(time.time()), cancel_event)
+            except Exception:
+                # Independent maintenance: do not suppress skill or agent event retention.
+                logger.warning("Device maintenance deferred")
         agent_events_retention.run_skill_retention(engine, cancel_event=cancel_event)
         config = self._agent_events_retention_config()
         if config is None:
@@ -2763,6 +2788,9 @@ class Controller:
         except Exception as e:
             logger.debug(f"Internal dispatch server status write skipped: {e}")
 
+        live_activity_service = getattr(self, "live_activity_service", None)
+        if live_activity_service is not None:
+            _stop_loop_coroutine(live_activity_service.close(), "Live Activity publisher", timeout=None)
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(_cancel_vibey_model_supply_task(), "Vibey model supply seed")
         _stop_loop_coroutine(_cancel_mcp_discovery_task(), "MCP Hub discovery")
@@ -3095,6 +3123,13 @@ class Controller:
             # complete worker-produced snapshot here.
             return cli_presence.get(backend, False)
 
+        def backend_enabled(backend: str) -> bool:
+            # The applied runtime config: Claude keeps a config with its
+            # enabled flag, Codex and OpenCode have none while switched off.
+            # In memory, so payload assembly on the loop reads no file.
+            runtime_config = getattr(self.config, backend, None)
+            return runtime_config is not None and getattr(runtime_config, "enabled", True) is not False
+
         def refresh_cli_presence(
             include_npm_global: bool,
             backends: tuple[str, ...] | None = None,
@@ -3166,6 +3201,7 @@ class Controller:
             named_agents_override=named_vibe_agents,
             builtin_agent_models_override=self._builtin_agent_models,
             cli_present_override=cli_present,
+            backend_enabled_override=backend_enabled,
             cli_presence_refresh=refresh_cli_presence,
             backend_catalog_changed=self._model_hub_catalog_changed,
             repair_model_selections=repair_model_selections,

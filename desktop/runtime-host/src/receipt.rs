@@ -2,9 +2,11 @@
 
 use std::io::{self, Read};
 use std::process::ChildStdout;
-use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::sync::Notify;
+use tokio::time::Instant;
 
 use serde::Deserialize;
 
@@ -28,6 +30,10 @@ pub enum StartupReceiptReason {
     HandoverFailed,
     RuntimeClaimRefused,
     RuntimeNotReady,
+    /// The database update ran out of disk and rolled back (verified).
+    DatabaseDiskFull,
+    /// The database update ran out of disk; the rollback could not be verified.
+    DatabaseDiskFullUnconfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -48,47 +54,39 @@ pub enum ReceiptEvent {
     TransportError,
 }
 
-const EXIT_DRAIN: Duration = Duration::from_millis(100);
+pub(crate) const EXIT_DRAIN: Duration = Duration::from_millis(100);
 
-// At most three messages: one verdict, EOF after a verdict, and helper exit.
-enum TransportEvent {
-    Verdict(ReceiptEvent),
-    Exited(Instant),
+#[derive(Default)]
+struct ReceiptState {
+    terminal: OnceLock<ReceiptEvent>,
+    exited: OnceLock<Instant>,
+    changed: Notify,
 }
 
-#[derive(Clone)]
-pub struct StartupReceiptStream {
-    sender: mpsc::SyncSender<TransportEvent>,
-    receiver: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
-    terminal: Arc<OnceLock<ReceiptEvent>>,
-    exited: Arc<OnceLock<Instant>>,
-}
-
-impl Default for StartupReceiptStream {
-    fn default() -> Self {
-        let (sender, receiver) = mpsc::sync_channel(3);
-        Self {
-            sender,
-            receiver: Arc::new(Mutex::new(receiver)),
-            terminal: Arc::new(OnceLock::new()),
-            exited: Arc::new(OnceLock::new()),
-        }
-    }
-}
+#[derive(Clone, Default)]
+pub struct StartupReceiptStream(Arc<ReceiptState>);
 
 impl StartupReceiptStream {
+    /// Publish once at the producer. An observer's timeout must never take a
+    /// receiver or a wakeup away from the next Retry on this same helper.
+    pub(crate) fn deliver(&self, event: ReceiptEvent) {
+        if self.0.terminal.set(event).is_ok() {
+            self.0.changed.notify_waiters();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_events(events: impl IntoIterator<Item = ReceiptEvent>) -> Self {
         let stream = Self::default();
         for event in events {
-            stream.sender.try_send(TransportEvent::Verdict(event)).unwrap();
+            stream.deliver(event);
         }
         stream
     }
 
     pub fn spawn(mut stdout: ChildStdout, log: BootstrapLog) -> Self {
         let stream = Self::default();
-        let sender = stream.sender.clone();
+        let writer = stream.clone();
         thread::spawn(move || {
             let event = read_receipts(&mut stdout);
             let drain = matches!(event, ReceiptEvent::Receipt(_));
@@ -98,77 +96,45 @@ impl StartupReceiptStream {
                     &[("outcome", format!("{:?}", receipt.outcome))],
                 );
             }
-            let _ = sender.try_send(TransportEvent::Verdict(event));
+            writer.deliver(event);
             // Keep ordinary post-commit output from breaking the helper's pipe.
             // The consumer has one terminal verdict and ignores later messages.
             // A future descendant inheriting stdout can keep only this detached
             // reader blocked; it cannot extend the admission deadline.
             if drain {
-                let event = match io::copy(&mut stdout, &mut io::sink()) {
-                    Ok(_) => ReceiptEvent::Eof,
-                    Err(_) => ReceiptEvent::TransportError,
-                };
-                let _ = sender.try_send(TransportEvent::Verdict(event));
+                let _ = io::copy(&mut stdout, &mut io::sink());
             }
         });
         stream
     }
 
-    fn record(&self, event: TransportEvent) {
-        match event {
-            TransportEvent::Verdict(verdict) => {
-                let _ = self.terminal.set(verdict);
-            }
-            TransportEvent::Exited(at) => {
-                let _ = self.exited.set(at);
-            }
-        }
-    }
-
     pub fn try_next(&self) -> Option<ReceiptEvent> {
-        if self.terminal.get().is_none() {
-            // Another observer may be waiting on this retained attempt. Never
-            // block the async admission thread on its channel lock.
-            if let Ok(receiver) = self.receiver.try_lock() {
-                while let Ok(event) = receiver.try_recv() {
-                    self.record(event);
-                }
-            }
-            if self.exited.get().is_some_and(|at| at.elapsed() >= EXIT_DRAIN) {
-                let _ = self.terminal.set(ReceiptEvent::Eof);
-            }
+        if self.0.exited.get().is_some_and(|at| at.elapsed() >= EXIT_DRAIN) {
+            self.deliver(ReceiptEvent::Eof);
         }
-        self.terminal.get().cloned()
+        self.0.terminal.get().cloned()
     }
 
     pub fn finish(&self) {
-        let _ = self.sender.try_send(TransportEvent::Exited(Instant::now()));
-    }
-
-    pub fn cancel(&self) {
-        let _ = self.terminal.set(ReceiptEvent::TransportError);
+        if self.0.exited.set(Instant::now()).is_ok() {
+            self.0.changed.notify_waiters();
+        }
     }
 
     pub async fn changed(&self, remaining: Duration) {
-        let stream = self.clone();
-        // Include time queued for the blocking pool/channel mutex in the same
-        // budget. The GUI thread never performs a blocking pipe or channel read.
+        // Register before reading state: a concurrent publication either shows
+        // up below or notifies this future. Dropping the wait leaves no worker.
+        let changed = self.0.changed.notified();
+        if self.0.terminal.get().is_some() {
+            return;
+        }
         let deadline = Instant::now() + remaining;
-        let _ = tokio::task::spawn_blocking(move || {
-            if stream.terminal.get().is_some() {
-                return;
-            }
-            if let Ok(receiver) = stream.receiver.lock() {
-                let deadline = stream
-                    .exited
-                    .get()
-                    .map_or(deadline, |at| deadline.min(*at + EXIT_DRAIN));
-                if let Ok(event) = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                    stream.record(event);
-                }
-            }
-        })
-        .await;
+        let deadline = self
+            .0
+            .exited
+            .get()
+            .map_or(deadline, |at| deadline.min(*at + EXIT_DRAIN));
+        let _ = tokio::time::timeout_at(deadline, changed).await;
     }
 }
 
@@ -261,6 +227,25 @@ mod tests {
     }
 
     #[test]
+    fn database_update_failures_reach_the_shell_as_their_own_reasons() {
+        for (reason, expected) in [
+            ("database_disk_full", StartupReceiptReason::DatabaseDiskFull),
+            (
+                "database_disk_full_unconfirmed",
+                StartupReceiptReason::DatabaseDiskFullUnconfirmed,
+            ),
+        ] {
+            let frame = format!(
+                "{START_RECEIPT_PREFIX}{{\"schema_version\":1,\"outcome\":\"failed\",\"origin\":\"http://127.0.0.1:5123\",\"reason\":\"{reason}\"}}\n"
+            );
+            let receipt = parse_frame(frame.as_bytes()).expect("valid failed frame");
+            assert_eq!(receipt.reason, Some(expected.clone()));
+            let code = crate::bootstrap::receipt_failure_notice(Some(expected));
+            assert_eq!(serde_json::to_value(code).expect("code serializes"), reason);
+        }
+    }
+
+    #[test]
     fn requires_a_reason_for_failed_and_rejects_unknown_fields() {
         for payload in [
             r#"{"schema_version":1,"outcome":"failed","origin":"http://127.0.0.1:5123"}"#,
@@ -304,6 +289,29 @@ mod tests {
         ] {
             assert_eq!(read_receipts(Cursor::new(bytes)), ReceiptEvent::Invalid,);
         }
+    }
+
+    /// Retry is already waiting when the previous observation is cancelled.
+    /// A verdict must make it ready without another event or a timer tick.
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_an_observer_does_not_take_the_retrys_wakeup() {
+        use std::future::Future;
+        use std::task::{Context, Waker};
+
+        let stream = StartupReceiptStream::default();
+        let mut previous = Box::pin(stream.changed(Duration::from_secs(1)));
+        let mut retry = std::pin::pin!(stream.changed(Duration::from_secs(1)));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(previous.as_mut().poll(&mut cx).is_pending());
+        assert!(retry.as_mut().poll(&mut cx).is_pending());
+        drop(previous);
+
+        stream.deliver(ReceiptEvent::Invalid);
+        assert!(
+            retry.as_mut().poll(&mut cx).is_ready(),
+            "Retry is notified by the verdict"
+        );
+        assert_eq!(stream.try_next(), Some(ReceiptEvent::Invalid));
     }
 
     #[test]
@@ -385,87 +393,67 @@ mod tests {
         std::fs::remove_dir_all(scratch).ok();
     }
 
+    // Exercise the actual ChildStdout and reader thread. Python startup isn't
+    // part of the parser's budget: signal only after the one write is flushed,
+    // then keep stdout open until the parent has observed the verdict.
+    fn assert_invalid_on_open_stdout(bytes: &str) {
+        let scratch = tempfile::tempdir().unwrap();
+        let written = scratch.path().join("written");
+        let script = "import sys; sys.stdout.buffer.write(sys.argv[1].encode('ascii')); \
+                      sys.stdout.buffer.flush(); open(sys.argv[2], 'xb').close(); sys.stdin.buffer.read()";
+        let spawn = |python| {
+            Command::new(python)
+                .args(["-c", script, bytes])
+                .arg(&written)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+        };
+        let python = std::env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
+        let mut child = spawn(python)
+            .or_else(|_| spawn("python".into()))
+            .expect("a Python interpreter is available");
+        let stream = StartupReceiptStream::spawn(child.stdout.take().unwrap(), BootstrapLog::disabled());
+        let setup_deadline = Instant::now() + Duration::from_secs(15);
+        while !written.exists() {
+            if let Some(status) = child.try_wait().unwrap() {
+                panic!("receipt writer exited before flushing stdout: {status}");
+            }
+            if Instant::now() >= setup_deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("receipt writer did not flush stdout");
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut event = None;
+        while Instant::now() < deadline {
+            if let Some(next) = stream.try_next() {
+                event = Some(next);
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        let still_running = child.try_wait().unwrap().is_none();
+        // Child::wait closes stdin, releasing the writer even on a bad verdict.
+        let status = child.wait().unwrap();
+        assert_eq!(event, Some(ReceiptEvent::Invalid));
+        assert!(still_running, "invalid must precede writer exit");
+        assert!(status.success(), "receipt writer exited {status}");
+    }
+
     #[test]
     fn real_stdout_batch_rejects_a_second_receipt_before_acceptance() {
         let frame = format!(
             "{START_RECEIPT_PREFIX}{{\"schema_version\":1,\"outcome\":\"ready\",\"origin\":\"http://127.0.0.1:5123\"}}\n"
         );
-        let python = std::env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
-        let mut child = Command::new(&python)
-            .arg("-c")
-            .arg(format!(
-                "import sys; sys.stdout.write({frame:?} + {frame:?}); sys.stdout.flush()"
-            ))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .or_else(|_| {
-                Command::new("python")
-                    .arg("-c")
-                    .arg(format!(
-                        "import sys; sys.stdout.write({frame:?} + {frame:?}); sys.stdout.flush()"
-                    ))
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-            })
-            .expect("a Python interpreter is available");
-        let stdout = child.stdout.take().expect("receipt stdout pipe");
-        let stream = StartupReceiptStream::spawn(stdout, BootstrapLog::disabled());
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut event = None;
-        while Instant::now() < deadline {
-            if let Some(next) = stream.try_next() {
-                event = Some(next);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(event, Some(ReceiptEvent::Invalid));
-        assert!(child.wait().expect("Python producer exits").success());
+        assert_invalid_on_open_stdout(&frame.repeat(2));
     }
 
     #[test]
     fn real_stdout_reports_an_oversized_prefixed_frame_without_waiting_for_newline() {
-        let python = std::env::var_os("PYTHON").unwrap_or_else(|| "python3".into());
-        let script = format!(
-            "import sys,time; sys.stdout.write({prefix:?} + 'x' * 4096); sys.stdout.flush(); time.sleep(1)",
-            prefix = START_RECEIPT_PREFIX,
-        );
-        let mut child = Command::new(&python)
-            .arg("-c")
-            .arg(&script)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .or_else(|_| {
-                Command::new("python")
-                    .arg("-c")
-                    .arg(&script)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-            })
-            .expect("a Python interpreter is available");
-        let stdout = child.stdout.take().expect("receipt stdout pipe");
-        let stream = StartupReceiptStream::spawn(stdout, BootstrapLog::disabled());
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let mut event = None;
-        while Instant::now() < deadline {
-            if let Some(next) = stream.try_next() {
-                event = Some(next);
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        assert_eq!(event, Some(ReceiptEvent::Invalid));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "oversize is terminal before newline or child exit"
-        );
-        let _ = child.kill();
-        let _ = child.wait();
+        assert_invalid_on_open_stdout(&format!("{START_RECEIPT_PREFIX}{}", "x".repeat(4096)));
     }
 }

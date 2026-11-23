@@ -1848,6 +1848,7 @@ def test_config_generation_is_private_and_never_logs_secrets(
     assert stat.S_IMODE(store.auth_dir.stat().st_mode) == 0o700
     # The engine's own log stays beside its config, owner-private and bounded, and carries no bodies.
     assert payload["logging-to-file"] is True and payload["logs-max-total-size-mb"] > 0
+    assert payload["debug"] is False  # /api-call transport errors can name an organization-specific URL in debug logs.
     assert payload["commercial-mode"] is True and payload["request-log"] is False
     assert stat.S_IMODE((instance_dir / "logs").stat().st_mode) == 0o700
     credential_path = next((store.root / "credentials").iterdir())
@@ -9385,17 +9386,18 @@ _GEMINI_SIGNATURE_REFUSAL = "Function call is missing a thought_signature in fun
 
 
 @pytest.mark.parametrize(
-    ("body", "surfaced"),
+    "body",
     [
         # Gemini's OpenAI-compatible endpoint, relayed as is by the engine.
-        ([{"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}], True),
-        ({"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}, True),
-        # Only a Google RPC envelope's integer code names its class.
-        ({"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL}}, False),
+        [{"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}],
+        {"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}},
+        # An integer without a Google RPC status is not a recognized machine
+        # code, but an opaque HTTP 400 is still request-scoped.
+        {"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL}},
     ],
     ids=["google-array", "google-object", "integer-code-only"],
 )
-def test_engine_google_rpc_http_error_is_a_request_refusal_with_its_detail(body: object, surfaced: bool) -> None:
+def test_engine_google_rpc_http_error_is_a_request_refusal_with_its_detail(body: object) -> None:
     """A Google 400 relayed on a Chat Source names the rejected request, not an unknown Source failure."""
 
     from aiohttp import web
@@ -9440,10 +9442,7 @@ def test_engine_google_rpc_http_error_is_a_request_refusal_with_its_detail(body:
 
     assert outcome.http_status == 400
     assert outcome.upstream_detail == _GEMINI_SIGNATURE_REFUSAL
-    if surfaced:
-        assert (decision.action, decision.error_code) == ("surface", "upstream_request_invalid")
-    else:
-        assert (decision.action, decision.reason) == ("fallback", "unclassified_error")
+    assert (decision.action, decision.error_code) == ("surface", "upstream_request_invalid")
 
 
 @pytest.mark.parametrize(

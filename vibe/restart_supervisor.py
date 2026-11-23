@@ -43,6 +43,7 @@ from vibe.upgrade import (
     get_restart_environment,
     get_restart_invocation_command,
     get_safe_cwd,
+    record_install_restart_locked,
     is_desktop_managed_runtime,
 )
 
@@ -338,8 +339,12 @@ def _start_runtime_processes(
     if runtime.pid_alive(service_pid):
         runtime.write_status("starting", "waiting for service to finish starting", service_pid, ui_pid)
     else:
-        runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
-        raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
+        failure = runtime.service_start_failure(service_pid)
+        runtime.write_status("error", runtime.service_exited_detail(service_pid), service_pid, ui_pid)
+        raise RuntimeError(
+            failure["detail"] if failure
+            else f"Vibe service process pid={service_pid} exited before acquiring the service lock"
+        )
 
     return StartedRuntime(service_pid, ui_pid)
 
@@ -548,7 +553,11 @@ def _run_restart_job(
             new_pid = _service_pid_from_status(_read_starting_service_status())
             service_status = runtime.read_status()
         if not new_pid or not runtime.pid_alive(new_pid):
-            return fail("start runtime completed but service pid is not alive", 3, started_at=restart_started_at)
+            failure = runtime.service_start_failure(new_pid) if new_pid else None
+            return fail(
+                failure["detail"] if failure else "start runtime completed but service pid is not alive",
+                3, started_at=restart_started_at,
+            )
         if not runtime.service_pid_recorded(new_pid):
             write(f"start runtime returned while service pid={new_pid} is still acquiring its lock")
         wait_lock_started_at = time.monotonic()
@@ -573,7 +582,11 @@ def _run_restart_job(
         if resolved_pid is None:
             mark_duration("wait_service_lock_seconds", wait_lock_started_at)
             error = f"service pid {new_pid} did not finish starting"
-            if runtime.pid_alive(new_pid) and runtime.service_instance_migrating(new_pid):
+            failure = runtime.service_start_failure(new_pid)
+            if failure is not None and not runtime.pid_alive(new_pid):
+                error = failure["detail"]
+                runtime.write_status("error", error, new_pid, _live_ui_pid(ui_pid))
+            elif runtime.pid_alive(new_pid) and runtime.service_instance_migrating(new_pid):
                 error = (
                     f"service pid {new_pid} is still migrating after the "
                     f"{runtime.SERVICE_MIGRATION_TIMEOUT_SECONDS:.0f}-second startup hard cap"
@@ -762,6 +775,10 @@ def schedule_restart(
             # serialized by this lock, which it therefore does not take.
             handed_over = _hand_over_to_service(arguments)
             if handed_over is not None:
+                # A released service can seed the job without writing our new
+                # display metadata. The caller still holds activation here.
+                if trigger == "upgrade" and isinstance(handed_over.get("job_id"), str):
+                    record_install_restart_locked(job_id=handed_over["job_id"])
                 return handed_over
             print(OUTSIDE_DESKTOP_SESSION_WARNING, file=sys.stderr)
         return _schedule_restart_locked(
@@ -878,6 +895,8 @@ def _schedule_restart_locked(
         "error": None,
         "created_at": _now_iso(),
     }
+    if trigger == "upgrade":
+        record_install_restart_locked(job_id=job_id)
     _write_status(payload)
     try:
         with log_path.open("a", encoding="utf-8") as log:

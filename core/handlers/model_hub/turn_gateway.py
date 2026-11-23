@@ -46,7 +46,7 @@ from .provenance import (
     project_turn_outcome_copy,
     render_turn_outcome_copy,
 )
-from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILABLE_CODE
+from .hosted_admission import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, PIN_UNAVAILABLE_CODE, THREAD_CALLS_HEADER, read_thread_calls, thread_mode
 from .hosted_images import IMAGE_CALL_MAX_BYTES
 from .hosted_turn import IMAGE_TOOL, TurnHostedTools
 from .request import ModelHubRequest, forwarded_caller_headers
@@ -1105,7 +1105,10 @@ class ModelHubTurnGateway:
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         try:
-            payload = await request.json(loads=json.loads)
+            # ``request.json`` without its decode and parse on the loop: a turn's
+            # body is up to tens of MB. Read limits and errors are unchanged.
+            raw = await request.read()
+            payload = await run_owned_in_thread(lambda: json.loads(raw.decode(request.charset or "utf-8")))
         except web.HTTPRequestEntityTooLarge:
             terminalizer.fail("invalid_parameter")
             return self._terminal_error_response(
@@ -1172,6 +1175,19 @@ class ModelHubTurnGateway:
                 code="invalid_request_error",
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
+        thread_calls = frozenset()
+        if pin_source_id and endpoint == "messages" and thread_mode(payload) == "continue":
+            try:
+                thread_calls = read_thread_calls(request.headers.get(THREAD_CALLS_HEADER, ""))
+            except (ValueError, RecursionError):
+                terminalizer.fail("invalid_parameter")
+                return self._terminal_error_response(
+                    execution,
+                    terminalizer,
+                    status=400,
+                    code="invalid_request_error",
+                    turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
+                )
         resolution_model = terminalizer.resolution_model(model_id)
         if resolution_model is None:
             terminalizer.fail("protocol_error")
@@ -1254,6 +1270,7 @@ class ModelHubTurnGateway:
                         payload,
                         protocol=protocol,
                         headers=caller_headers,
+                        thread_calls=thread_calls,
                         primary_origin=terminalizer.primary_origin,
                         pinned_hop=(
                             terminalizer.pinned_hop(pin_source_id, pin_model_id) if pin_source_id else None

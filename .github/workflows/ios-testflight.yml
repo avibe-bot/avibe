@@ -14,12 +14,14 @@ permissions:
   contents: read
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  # GitHub's hosted `xcode-27` image (macOS 27): Xcode 27.2, the stable
+  # release; its default is 27.1. Apple requires the iOS 27 SDK from April 2027.
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
 
 jobs:
   testflight:
     if: github.ref == 'refs/heads/master'
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 120
     env:
       # Unique for every run and attempt of this workflow, and increasing.
@@ -30,16 +32,21 @@ jobs:
       - name: Report pinned Apple toolchain
         run: |
           set -euo pipefail
+          # The image's installed Xcodes, so the pinned path is confirmed at run time.
+          ls -d /Applications/Xcode*.app
           [ -d "$DEVELOPER_DIR" ] || {
             echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
             exit 1
           }
           xcodebuild -version
-          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
-            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
+          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 27.2" ] || {
+            echo "Expected Xcode 27.2 from $DEVELOPER_DIR" >&2
             exit 1
           }
-          xcrun --sdk iphoneos --show-sdk-version
+          [ "$(xcrun --sdk iphoneos --show-sdk-version)" = "27.2" ] || {
+            echo "Expected the iOS 27.2 SDK" >&2
+            exit 1
+          }
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -72,6 +79,7 @@ jobs:
           IOS_DISTRIBUTION_P12_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
           IOS_APP_STORE_PROFILE_BASE64: ${{ secrets.IOS_APP_STORE_PROFILE_BASE64 }}
           IOS_NOTIFICATION_SERVICE_PROFILE_BASE64: ${{ secrets.IOS_NOTIFICATION_SERVICE_PROFILE_BASE64 }}
+          IOS_LIVE_ACTIVITY_PROFILE_BASE64: ${{ secrets.IOS_LIVE_ACTIVITY_PROFILE_BASE64 }}
           IOS_APPLE_TEAM_ID: ${{ secrets.IOS_APPLE_TEAM_ID }}
           IOS_APP_STORE_CONNECT_KEY_ID: ${{ secrets.IOS_APP_STORE_CONNECT_KEY_ID }}
           IOS_APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.IOS_APP_STORE_CONNECT_ISSUER_ID }}
@@ -92,6 +100,7 @@ jobs:
             CODE_SIGN_IDENTITY="Apple Distribution" \
             APP_PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME" \
             NOTIFICATION_SERVICE_PROFILE_SPECIFIER="$IOS_NOTIFICATION_SERVICE_PROFILE_NAME" \
+            LIVE_ACTIVITY_PROFILE_SPECIFIER="$IOS_LIVE_ACTIVITY_PROFILE_NAME" \
             OTHER_CODE_SIGN_FLAGS="--keychain $IOS_SIGNING_KEYCHAIN" \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
             archive

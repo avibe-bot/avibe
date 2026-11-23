@@ -41,7 +41,6 @@ final class NavigationPolicyTests: XCTestCase {
             policy.destination(for: URL(string: "https://auth.avibe.bot/auth/v1/callback?code=1")!),
             .authentication
         )
-        XCTAssertEqual(policy.destination(for: URL(string: "https://github.com/login/oauth/authorize")!), .authentication)
         XCTAssertEqual(policy.destination(for: URL(string: "https://evil.avibe.bot/login")!), .external)
     }
 
@@ -187,11 +186,88 @@ final class NavigationPolicyTests: XCTestCase {
 
     func testGoogleAuthorizationOriginIsIntercepted() {
         let policy = NavigationPolicy(instanceOrigins: [instance])
+        let url = URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
 
+        XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.google))
         XCTAssertEqual(
-            policy.destination(for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!),
-            .googleAuthentication
+            policy.disposition(for: url, context: .primaryMainFrame),
+            .thirdPartySignIn(.google)
         )
+        XCTAssertEqual(
+            policy.disposition(for: url, context: .popupMainFrame),
+            .thirdPartySignIn(.google)
+        )
+    }
+
+    // The App signs in only with avibe.bot's own accounts (App Review 4.8),
+    // so GitHub authorization for avibe.bot's sign-in is intercepted in every
+    // browsing context, as Google's is. GitHub sign-in for anything else and
+    // the rest of github.com are an ordinary site.
+    // avibe.bot's login card also offers Sign in with Apple (owner, 2026-11-18). Inside the App,
+    // the App's own sign-in screen offers it natively, so the web authorization for avibe.bot's
+    // sign-in is intercepted like Google's and GitHub's; Apple's other pages are ordinary sites.
+    func testAppleWebAuthorizationForAvibeIsInterceptedAndTheRestOfAppleIsExternal() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+        let intercepted = URL(string: "https://appleid.apple.com/auth/authorize?client_id=bot.avibe.web&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback&response_mode=form_post")!
+        XCTAssertEqual(policy.destination(for: intercepted), .thirdPartySignIn(.apple))
+        XCTAssertEqual(policy.disposition(for: intercepted, context: .primaryMainFrame), .thirdPartySignIn(.apple))
+        XCTAssertEqual(policy.disposition(for: intercepted, context: .popupMainFrame), .thirdPartySignIn(.apple))
+        XCTAssertEqual(policy.newWindowDisposition(for: intercepted), .thirdPartySignIn(.apple))
+        for raw in [
+            "https://appleid.apple.com/auth/authorize?client_id=other&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback",
+            "https://appleid.apple.com/auth/authorize?client_id=other",
+            "https://appleid.apple.com/account/manage",
+            "https://support.apple.com/en-us/105078",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .external, raw)
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView, raw)
+        }
+    }
+
+    func testGitHubAuthorizationIsInterceptedAndTheRestOfGitHubIsExternal() {
+        let policy = NavigationPolicy(instanceOrigins: [instance])
+
+        for raw in [
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback&scope=user%3Aemail",
+            "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fmctppyrqmrjotgkrwdse.supabase.co%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/select_account?redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://GitHub.com/Login/OAuth/authorize?redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .thirdPartySignIn(.github), raw)
+            XCTAssertEqual(
+                policy.disposition(for: url, context: .primaryMainFrame),
+                .thirdPartySignIn(.github),
+                raw
+            )
+            XCTAssertEqual(
+                policy.disposition(for: url, context: .popupMainFrame),
+                .thirdPartySignIn(.github),
+                raw
+            )
+        }
+
+        for raw in [
+            // The device-code page an instance's Copilot sign-in opens.
+            "https://github.com/login/device",
+            // GitHub sign-in for something else, such as an MCP server an
+            // instance connects to, or one that names no callback.
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Fmcp.example.com%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Falice-app.avibe.bot%2Foauth%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=mcp&redirect_uri=https%3A%2F%2Fevil.avibe.bot%2Fauth%2Fv1%2Fcallback",
+            "https://github.com/login/oauth/authorize?client_id=abc",
+            "https://github.com/login",
+            "https://github.com/login/oauthx",
+            "https://github.com/avibe-bot/avibe",
+            "https://gist.github.com/login/oauth/authorize",
+        ] {
+            let url = URL(string: raw)!
+            XCTAssertEqual(policy.destination(for: url), .external, raw)
+            XCTAssertEqual(policy.disposition(for: url, context: .primaryMainFrame), .external, raw)
+            XCTAssertEqual(policy.disposition(for: url, context: .popupMainFrame), .allow, raw)
+            XCTAssertEqual(policy.newWindowDisposition(for: url), .childWebView, raw)
+        }
     }
 
     func testOtherWebOriginsOpenExternallyAndApplicationSchemesLeaveWebKit() {
@@ -260,7 +336,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         for url in [
             URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://github.com/login/device")!,
             URL(string: "https://sandbox.avibe.bot/v/pinned/index.html")!,
             URL(string: "https://example.com/docs")!,
         ] {
@@ -283,7 +359,13 @@ final class NavigationPolicyTests: XCTestCase {
             policy.newWindowDisposition(
                 for: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!
             ),
-            .googleAuthentication
+            .thirdPartySignIn(.google)
+        )
+        XCTAssertEqual(
+            policy.newWindowDisposition(
+                for: URL(string: "https://github.com/login/oauth/authorize?client_id=abc&redirect_uri=https%3A%2F%2Fauth.avibe.bot%2Fauth%2Fv1%2Fcallback")!
+            ),
+            .thirdPartySignIn(.github)
         )
     }
 
@@ -292,7 +374,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         for url in [
             URL(string: "https://alice-app.avibe.bot/show/ses_1/")!,
-            URL(string: "https://github.com/login/oauth/authorize")!,
+            URL(string: "https://github.com/login/device")!,
             URL(string: "about:blank")!,
             URL(string: "https://example.com/docs")!,
         ] {
@@ -624,6 +706,46 @@ final class NavigationPolicyTests: XCTestCase {
     }
 
     @MainActor
+    func testATapPendingDuringBootstrapOpensBeforeHealthRestorationFinishes()
+        async throws
+    {
+        // Health restoration is held at its manifest for the whole test.
+        let healthDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NavigationHealth.\(UUID().uuidString)", isDirectory: true)
+        // Paired with instance-1 at the origin the account lists for it.
+        let health = HealthCoordinatorFixture(
+            directory: healthDirectory, savedIdentity: true, origin: "https://instance-one.example"
+        )
+        health.client.claims = []
+        health.client.holdManifest = true
+        // Once released, restoration never waits on an unacknowledged upload.
+        health.uploader.autoAcknowledge = true
+        let (appModel, _) = try await makeFixtureAppModel(healthSync: health.coordinator) { appModel in
+            health.credentials.identity?.websiteDataStoreID = appModel.websiteDataStore.identifier
+            // Arrives before bootstrap completes, so it is held as pending.
+            appModel.pushCoordinator.handleNotificationTap(
+                userInfo: [
+                    "account_id": "account-1",
+                    "instance_origin": "https://instance-one.example",
+                    "url": "/chat/pending",
+                ]
+            )
+        }
+        // Registered after the fixture so it runs first: the held restoration keeps
+        // bootstrap (which holds the App) running until Health is released.
+        addTeardownBlock { @MainActor in
+            health.client.holdManifest = false
+            health.client.releasePending()
+            await health.coordinator.logout()
+            try? FileManager.default.removeItem(at: healthDirectory)
+        }
+        _ = try await waitForPushRuntime(appModel, instanceID: "instance-1")
+        try await waitUntil("Health restoration holds its manifest") {
+            health.client.manifestContinuation != nil
+        }
+    }
+
+    @MainActor
     func testPendingPushTapRedeliversAcrossNavigationUntilMatchingAck()
         async throws
     {
@@ -815,7 +937,18 @@ final class NavigationPolicyTests: XCTestCase {
     @MainActor
     func testSignedInFixtureRejectsBootstrapFailureOnThePickerRoute() async throws {
         do {
-            _ = try await makePushTapAppModel(sessionResponse: .status(503))
+            // What `makePushTapAppModel` does, without recording the
+            // rejection this test expects as a failure.
+            let (appModel, requests) = try await makeFixtureAppModel(
+                sessionResponse: .status(503)
+            )
+            try await WebKitReadiness.waitForSignedInFixture(
+                appModel,
+                accountID: "account-1",
+                instanceIDs: ["instance-1", "instance-2"],
+                requests: requests,
+                recordsFailure: false
+            )
             XCTFail("A failed bootstrap must not admit a signed-in fixture")
         } catch let error as FixtureReadinessError {
             // A readiness timeout must not satisfy this regression: prove the
@@ -879,6 +1012,342 @@ final class NavigationPolicyTests: XCTestCase {
         appModel.didFinishRuntimeLoading()
         try await Task.sleep(for: .milliseconds(50))
         XCTAssertEqual(ackCount, 0)
+    }
+
+    /// The sheets over an instance take its page's scheme; a new runtime has
+    /// reported none yet, so they follow the system again until it does.
+    @MainActor
+    func testANewRuntimeForgetsThePreviousPagesColorScheme() async throws {
+        let (appModel, _) = try await makeFixtureAppModel(
+            storedSelection: Self.instanceOneSelection
+        )
+        try await waitUntil("The restored open") {
+            appModel.runtimeIdentity == 1
+        }
+        appModel.runtimePageColorScheme = .dark
+        appModel.openSelectedInstance(path: "/")
+        try await waitUntil("The second open") {
+            appModel.runtimeIdentity == 2
+        }
+        XCTAssertNil(appModel.runtimePageColorScheme)
+    }
+
+    /// Settings > Action Button > Shortcut > Avibe runs `OpenMainBotIntent`.
+    /// Launched by it, the App gets the request before its bootstrap
+    /// restores the selected instance; that instance then opens again, and
+    /// its page receives the main Bot's conversation through `push.opened`.
+    @MainActor
+    func testMainBotShortcutOpensTheSelectedInstanceAtTheMainBotConversation()
+        async throws
+    {
+        let (appModel, _) = try await makeFixtureAppModel(
+            storedSelection: Self.instanceOneSelection
+        ) { appModel in
+            // What `AvibeApp` attaches for its own model. This replaces the
+            // test host's handler for the rest of the process; no other test
+            // runs a shortcut.
+            InstancePathRequests.shared.attach { [weak appModel] path in
+                appModel?.openSelectedInstance(path: path)
+            }
+            _ = try await OpenMainBotIntent().perform()
+        }
+        // The restored open, then the shortcut's.
+        try await waitUntil("The shortcut's open") {
+            appModel.runtimeIdentity == 2
+        }
+        let runtime = try await waitForPushRuntime(
+            appModel,
+            instanceID: "instance-1"
+        )
+        var acknowledgements: [Bool] = []
+        let (controller, webView, window) = try makePushRuntimeController(
+            appModel: appModel,
+            runtime: runtime,
+            origin: WebOrigin.parseConfigured(
+                "https://instance-one.example"
+            )!
+        ) { id, origin in
+            let accepted = appModel.acknowledgePushOpened(
+                id: id,
+                origin: origin
+            )
+            acknowledgements.append(accepted)
+            return accepted
+        }
+        defer {
+            window.rootViewController = nil
+            window.isHidden = true
+        }
+        let probe = WebViewLoadProbe()
+        webView.navigationDelegate = probe
+        try await probe.loadHTML(
+            """
+            <!doctype html>
+            <script>
+              window.receivedPushOpened = [];
+              window.avibeNative.on("push.opened", (payload) => {
+                window.receivedPushOpened.push(payload.url);
+              });
+            </script>
+            """,
+            baseURL: runtime.instance.url,
+            in: webView
+        )
+        appModel.didFinishRuntimeLoading()
+        try await waitUntil { acknowledgements == [true] }
+        let received = try await webView.evaluateJavaScript(
+            "window.receivedPushOpened"
+        )
+        // `from=notification`: a reader who is not the instance Owner has
+        // no Bots, and the Web UI sends that 404 to the Inbox.
+        XCTAssertEqual(
+            received as? [String],
+            ["/chat/ses_main?from=notification"]
+        )
+        XCTAssertTrue(OpenMainBotIntent.openAppWhenRun)
+        _ = controller
+    }
+
+    /// Signed out, with no instance selected, or with the selected instance
+    /// unavailable, the shortcut leaves the App on the screen it shows
+    /// anyway: no runtime opens and nothing is presented, whether the
+    /// request arrives before the bootstrap settles or after.
+    @MainActor
+    func testMainBotShortcutKeepsTheCurrentScreenWhenNothingCanOpen()
+        async throws
+    {
+        let cases: [(
+            name: String,
+            session: LocalHTTPResponse?,
+            instanceOneAvailable: Bool,
+            selection: String?
+        )] = [
+            ("signed out", .status(401), true, nil),
+            ("no instance selected", nil, true, nil),
+            ("selected instance offline", nil, false, Self.instanceOneSelection),
+        ]
+        for item in cases {
+            var launchStore: UUID?
+            let (appModel, _) = try await makeFixtureAppModel(
+                sessionResponse: item.session,
+                instanceOneAvailable: item.instanceOneAvailable,
+                storedSelection: item.selection
+            ) { appModel in
+                launchStore = appModel.websiteDataStore.identifier
+                appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            }
+            try await waitUntil("\(item.name): bootstrap settles") {
+                appModel.route != .loading
+            }
+            // A signed-out launch moves to a fresh store; remove that one
+            // too, once the account transport has let it go.
+            let currentStore = appModel.websiteDataStore.identifier
+            if currentStore != launchStore {
+                let cleanup = NamedDataStoreCleanup()
+                cleanup.identifier = currentStore
+                // Weak: the App holds its current store, so the store can
+                // go only once the App has.
+                addTeardownBlock { @MainActor [weak appModel] in
+                    appModel?.mobileSessionCoordinator.deactivateAccountSurface()
+                    let error = await cleanup.remove()
+                    XCTAssertNil(error, "Signed-out store cleanup failed")
+                }
+            }
+            XCTAssertEqual(
+                appModel.mobileSessionCoordinator.currentAccount == nil,
+                item.name == "signed out",
+                item.name
+            )
+
+            appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            try await Task.sleep(for: .milliseconds(100))
+
+            XCTAssertEqual(appModel.route, .onboarding(.instances), item.name)
+            XCTAssertEqual(appModel.runtimeIdentity, 0, item.name)
+            XCTAssertNil(appModel.runtimeOpenAttempt, item.name)
+            if item.selection != nil {
+                // Still selected, and unavailable: the reason nothing opened.
+                XCTAssertEqual(
+                    appModel.mobileSessionCoordinator.selectedInstance?.available,
+                    false,
+                    item.name
+                )
+            }
+        }
+    }
+
+    /// On a cold launch the intent can run before the scene attaches the
+    /// App's model: the request waits, is delivered once on attach, and a
+    /// request after that goes straight through.
+    @MainActor
+    func testShortcutRequestsWaitForTheAppToAttach() {
+        let requests = InstancePathRequests()
+        var delivered: [String] = []
+        requests.open(path: "/chat/early")
+        XCTAssertEqual(delivered, [])
+
+        requests.attach { delivered.append($0) }
+        XCTAssertEqual(delivered, ["/chat/early"])
+
+        var reattached: [String] = []
+        requests.attach { reattached.append($0) }
+        XCTAssertEqual(reattached, [], "A delivered request came back.")
+
+        requests.open(path: "/chat/later")
+        XCTAssertEqual(delivered, ["/chat/early"])
+        XCTAssertEqual(reattached, ["/chat/later"])
+    }
+
+    /// A shortcut usually arrives as the App returns to the foreground, when
+    /// the App may be refreshing the account or updating push on its own.
+    /// Those keep the selection, so the open waits for them and then opens
+    /// the main Bot's conversation instead of being dropped as busy, unless
+    /// the user moved on meanwhile (here: opened Account).
+    @MainActor
+    func testMainBotShortcutWaitsForASelectionKeepingRefresh() async throws {
+        for userMovesOn in [false, true] {
+            let held = HeldSessionReads()
+            addTeardownBlock { held.release.signal() }
+            let (appModel, _) = try await makeFixtureAppModel(
+                storedSelection: Self.instanceOneSelection,
+                heldSessionReads: held
+            )
+            try await waitUntil("The restored open") {
+                appModel.runtimeIdentity == 1
+            }
+            let refresh = Task { @MainActor in
+                try await appModel.mobileSessionCoordinator.refresh()
+            }
+            try await waitUntil("The refresh's session read") {
+                held.count.current == 2
+            }
+            XCTAssertTrue(
+                appModel.mobileSessionCoordinator.isHeldBySelectionKeepingOperation
+            )
+
+            appModel.openSelectedInstance(path: OpenMainBotIntent.path)
+            try await Task.sleep(for: .milliseconds(200))
+            XCTAssertEqual(
+                appModel.runtimeIdentity, 1, "It opened during the refresh."
+            )
+            if userMovesOn {
+                appModel.showAccount()
+                guard case .accountOverBrowser = appModel.route else {
+                    XCTFail("Account did not cover the runtime")
+                    return
+                }
+            }
+
+            held.release.signal()
+            _ = try await refresh.value
+            if userMovesOn {
+                try await Task.sleep(for: .milliseconds(200))
+                XCTAssertEqual(appModel.runtimeIdentity, 1)
+                guard case .accountOverBrowser = appModel.route else {
+                    XCTFail("The waited open replaced Account")
+                    return
+                }
+            } else {
+                try await waitUntil("The shortcut's open after the refresh") {
+                    appModel.runtimeIdentity == 2
+                }
+                _ = try await waitForPushRuntime(
+                    appModel,
+                    instanceID: "instance-1"
+                )
+            }
+        }
+    }
+
+    /// The shortcut reaches Settings > Action Button only through the App
+    /// Intents metadata Xcode extracts into the App bundle, with its
+    /// localized title and Siri phrases beside it.
+    @MainActor
+    func testMainBotShortcutIsInTheAppIntentsMetadata() throws {
+        let metadataURL = try XCTUnwrap(
+            Bundle.main.url(
+                forResource: "Metadata",
+                withExtension: "appintents"
+            ),
+            "The App bundle has no Metadata.appintents"
+        ).appendingPathComponent("extract.actionsdata")
+        let metadata = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: Data(contentsOf: metadataURL)
+            ) as? [String: Any]
+        )
+        let actions = try XCTUnwrap(metadata["actions"] as? [String: Any])
+        let action = try XCTUnwrap(
+            actions["OpenMainBotIntent"] as? [String: Any]
+        )
+        XCTAssertEqual(action["openAppWhenRun"] as? Bool, true)
+        XCTAssertEqual(
+            (action["title"] as? [String: Any])?["key"] as? String,
+            "Open Main Bot"
+        )
+        let shortcuts = try XCTUnwrap(
+            metadata["autoShortcuts"] as? [[String: Any]]
+        )
+        let shortcut = try XCTUnwrap(
+            shortcuts.first {
+                $0["actionIdentifier"] as? String == "OpenMainBotIntent"
+            }
+        )
+        XCTAssertEqual(
+            (shortcut["shortTitle"] as? [String: Any])?["key"] as? String,
+            "Open Main Bot"
+        )
+        XCTAssertEqual(
+            shortcut["systemImageName"] as? String,
+            "bubble.left.and.bubble.right"
+        )
+        // Talking to the main Bot is the background voice shortcut.
+        let voice = try XCTUnwrap(
+            shortcuts.first {
+                $0["actionIdentifier"] as? String == "SpeakToMainBotIntent"
+            }
+        )
+        XCTAssertEqual(
+            (voice["shortTitle"] as? [String: Any])?["key"] as? String,
+            "Talk to Main Bot"
+        )
+        XCTAssertEqual(
+            Set((voice["phraseTemplates"] as? [[String: Any]] ?? []).compactMap { $0["key"] as? String }),
+            ["Talk to Main Bot in ${applicationName}"]
+        )
+        let phrases = Set(
+            (shortcut["phraseTemplates"] as? [[String: Any]] ?? []).compactMap {
+                $0["key"] as? String
+            }
+        )
+        XCTAssertEqual(phrases, ["Open Main Bot in ${applicationName}"])
+
+        let chinese = try XCTUnwrap(
+            Bundle.main.path(forResource: "zh-Hans", ofType: "lproj")
+                .flatMap(Bundle.init(path:))
+        )
+        XCTAssertEqual(
+            chinese.localizedString(
+                forKey: "Open Main Bot",
+                value: nil,
+                table: nil
+            ),
+            "打开主伙伴"
+        )
+        XCTAssertEqual(
+            chinese.localizedString(forKey: "Talk to Main Bot", value: nil, table: nil),
+            "和主伙伴说话"
+        )
+        for phrase in phrases.union(["Talk to Main Bot in ${applicationName}"]) {
+            let localized = chinese.localizedString(
+                forKey: phrase,
+                value: nil,
+                table: "AppShortcuts"
+            )
+            XCTAssertNotEqual(localized, phrase)
+            XCTAssertTrue(localized.contains("${applicationName}"), localized)
+            XCTAssertTrue(localized.contains("主伙伴"), localized)
+        }
     }
 
     @MainActor
@@ -2013,6 +2482,12 @@ final class NavigationPolicyTests: XCTestCase {
         // Consume the parameterized call through RootView's real Runtime
         // bridge wiring, including factory/container callbacks.
         let runtimePage = try XCTUnwrap(runtimeController.livePrimaryWebView)
+        // The App's own first navigation of this page (to a host that does
+        // not exist) ends first, so the fixture document below always
+        // replaces a settled page, not a navigation still under way.
+        try await waitUntil("The App's first navigation of the runtime page settles") {
+            !runtimePage.isLoading
+        }
         let rootProbe = WebViewLoadProbe()
         runtimePage.navigationDelegate = rootProbe
         try await rootProbe.loadHTML(
@@ -2040,6 +2515,34 @@ final class NavigationPolicyTests: XCTestCase {
             hostingController.presentedViewController == nil
                 && hostingController.childForStatusBarStyle === runtimeController
         }
+    }
+
+    @MainActor
+    func testAppInfoWithholdsIdentityUntilTheEnvelopeCommits() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("I3AppInfo.\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var failing = true
+        let store = FileSystemSystemScheduleStore(fileURL: directory.appendingPathComponent("ledger.json"),
+            fileIO: FaultingSystemScheduleFileIO(checkpoint: { if failing && $0 == .beforeDirectorySync { throw CocoaError(.fileWriteUnknown) } }))
+        let webView = WKWebView(frame: .zero, configuration: NativeBridgeConfiguration.make(
+            instanceOrigin: instance, setOuterScrollLocked: { _, _ in false },
+            deviceID: { store.installationID }))
+        let loader = WebViewLoadProbe()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML("<!doctype html><title>Identity</title>", baseURL: instance.url, in: webView)
+        func readID() async throws -> String? {
+            try await webView.callAsyncJavaScript(
+                "return (await window.avibeNative.call('app.info')).device?.id ?? null;",
+                arguments: [:], in: nil, contentWorld: .page) as? String
+        }
+        let uncommitted = try await readID()
+        XCTAssertNil(uncommitted)
+        failing = false
+        XCTAssertTrue(store.retryCommit())
+        let committed = try await readID()
+        XCTAssertEqual(committed, store.installationID)
+        XCTAssertNotNil(committed)
     }
 
     @MainActor
@@ -2090,7 +2593,9 @@ final class NavigationPolicyTests: XCTestCase {
                 showInstances: {
                     instancesShown.fulfill()
                 },
-                instanceName: { nativeName }
+                instanceName: { nativeName },
+                instanceID: { "instance-1" },
+                deviceID: { "device-1" }
             )
         )
         primaryWebView = webView
@@ -2164,6 +2669,7 @@ final class NavigationPolicyTests: XCTestCase {
               accountPresentationCapability: info.capabilities.accountPresentation,
               instancePresentationCapability: info.capabilities.instancePresentation,
               instanceInfo: info.instance,
+              deviceInfo: info.device,
               legacyAccountResult,
               accountRootResult,
               invalidAccountArguments,
@@ -2193,7 +2699,14 @@ final class NavigationPolicyTests: XCTestCase {
             2
         )
         XCTAssertEqual(instancePayload["instancePresentationCapability"] as? Int, 1)
-        XCTAssertEqual(instancePayload["instanceInfo"] as? [String: String], ["name": "Studio"])
+        XCTAssertEqual(
+            instancePayload["instanceInfo"] as? [String: String],
+            ["id": "instance-1", "name": "Studio"]
+        )
+        XCTAssertEqual(
+            instancePayload["deviceInfo"] as? [String: String],
+            ["id": "device-1"]
+        )
         XCTAssertTrue(instancePayload["legacyAccountResult"] is NSNull)
         XCTAssertTrue(instancePayload["accountRootResult"] is NSNull)
         XCTAssertEqual(instancePayload["invalidAccountArguments"] as? [String],
@@ -2222,7 +2735,10 @@ final class NavigationPolicyTests: XCTestCase {
                 "return JSON.stringify((await window.avibeNative.call('app.info')).instance);",
                 arguments: [:], in: nil, contentWorld: .page
             )
-            XCTAssertEqual(try jsonObject(from: info) as? [String: String], ["name": expected])
+            XCTAssertEqual(
+                try jsonObject(from: info) as? [String: String],
+                ["id": "instance-1", "name": expected]
+            )
         }
 
         try await probe.loadHTML(
@@ -3285,9 +3801,16 @@ final class NavigationPolicyTests: XCTestCase {
     private func makeTestAppModel(
         defaults: UserDefaults,
         controlPlane: MobileControlPlaneConfiguration,
-        pushOpenedNow: @escaping () -> Date = Date.init
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        healthSync: HealthSyncCoordinator? = nil
     ) -> AppModel {
-        AppModel(
+        let scheduleDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("I3Fixture.\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scheduleDirectory) }
+        let scheduleStore = FileSystemSystemScheduleStore(
+            fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
+        )
+        return AppModel(
             defaults: defaults,
             controlPlane: controlPlane,
             pushKeychain: InMemoryPushKeychainStore(),
@@ -3296,21 +3819,54 @@ final class NavigationPolicyTests: XCTestCase {
             pushNotificationCenter: NavigationTestPushNotificationCenter(),
             pushOpenedNow: pushOpenedNow,
             // Never the test host's own badge.
-            badgeCenter: NavigationTestBadgeCenter()
+            systemScheduleStore: scheduleStore,
+            badgeCenter: NavigationTestBadgeCenter(),
+            healthSync: healthSync
         )
     }
 
     @MainActor
     private func makePushTapAppModel(
         pushOpenedNow: @escaping () -> Date = Date.init,
-        sessionResponse: LocalHTTPResponse? = nil
+        sessionResponse: LocalHTTPResponse? = nil,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws -> AppModel {
+        let (appModel, requests) = try await makeFixtureAppModel(
+            pushOpenedNow: pushOpenedNow,
+            sessionResponse: sessionResponse
+        )
+        try await waitForSignedInInstances(
+            appModel, requests: requests, file: file, line: line
+        )
+        return appModel
+    }
+
+    /// The selection the App keeps for instance-1 of `account-1`.
+    private static let instanceOneSelection =
+        #"{"accountID":"account-1","instanceID":"instance-1","url":"https://instance-one.example"}"#
+
+    /// An `AppModel` on a local control plane whose session lists
+    /// `account-1` with instances one and two, returned before its
+    /// bootstrap settles. `storedSelection` launches it with that stored
+    /// selection; `whenTheAppExists` runs right after it is made.
+    @MainActor
+    private func makeFixtureAppModel(
+        pushOpenedNow: @escaping () -> Date = Date.init,
+        sessionResponse: LocalHTTPResponse? = nil,
+        instanceOneAvailable: Bool = true,
+        storedSelection: String? = nil,
+        heldSessionReads: HeldSessionReads? = nil,
+        healthSync: HealthSyncCoordinator? = nil,
+        whenTheAppExists: @MainActor (AppModel) async throws -> Void = { _ in }
+    ) async throws -> (AppModel, FixtureRequestLog) {
         let server = try LocalHTTPServer { request in
             switch (request.method, request.path) {
             case ("GET", "/api/config/auth"):
                 return .json("{}")
             case ("GET", "/api/mobile/session"):
-                return sessionResponse ?? .json(
+                let read = heldSessionReads?.count.next() ?? 1
+                let response = sessionResponse ?? .json(
                     """
                     {
                       "account": {
@@ -3325,7 +3881,7 @@ final class NavigationPolicyTests: XCTestCase {
                           "url": "https://instance-one.example",
                           "relationship": "owner",
                           "owner_email": "max@example.com",
-                          "available": true
+                          "available": \(instanceOneAvailable)
                         },
                         {
                           "id": "instance-2",
@@ -3340,6 +3896,19 @@ final class NavigationPolicyTests: XCTestCase {
                     }
                     """
                 )
+                guard let heldSessionReads, read > 1 else {
+                    return response
+                }
+                // The server sends the first 64 KiB at once and holds the
+                // rest: pad the JSON past that so the read really waits.
+                var body = response.body
+                body.append(Data(repeating: UInt8(ascii: " "), count: 70_000))
+                return LocalHTTPResponse(
+                    status: response.status,
+                    headers: response.headers,
+                    body: body,
+                    bodyRelease: heldSessionReads.release
+                )
             default:
                 return .status(404)
             }
@@ -3353,12 +3922,19 @@ final class NavigationPolicyTests: XCTestCase {
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suiteName)
         }
+        if let storedSelection {
+            defaults.set(
+                Data(storedSelection.utf8),
+                forKey: "avibe.mobile.selection"
+            )
+        }
         let appModel = makeTestAppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: baseURL
             ),
-            pushOpenedNow: pushOpenedNow
+            pushOpenedNow: pushOpenedNow,
+            healthSync: healthSync
         )
         let storeCleanup = NamedDataStoreCleanup()
         storeCleanup.identifier = appModel.websiteDataStore.identifier
@@ -3370,8 +3946,8 @@ final class NavigationPolicyTests: XCTestCase {
             XCTAssertNil(error, "Push fixture named-store cleanup failed")
             server.requests.attach(to: self, name: "push App bootstrap requests")
         }
-        try await waitForSignedInInstances(appModel, requests: server.requests)
-        return appModel
+        try await whenTheAppExists(appModel)
+        return (appModel, server.requests)
     }
 
     /// A settled picker is not enough: bootstrap errors also land there.
@@ -3380,10 +3956,13 @@ final class NavigationPolicyTests: XCTestCase {
         _ appModel: AppModel,
         accountID: String = "account-1",
         instanceIDs: Set<String> = ["instance-1", "instance-2"],
-        requests: FixtureRequestLog
+        requests: FixtureRequestLog,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
         try await WebKitReadiness.waitForSignedInFixture(
-            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests
+            appModel, accountID: accountID, instanceIDs: instanceIDs, requests: requests,
+            file: file, line: line
         )
     }
 
@@ -3983,6 +4562,32 @@ private final class KeyboardViewportFixture {
 
 private enum TestWaitError: Error {
     case timedOut
+    case navigationNotCreated
+}
+
+/// Holds the body of every account session read after the bootstrap's
+/// until `release` is signalled, counting the reads.
+private final class HeldSessionReads: @unchecked Sendable {
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+
+        func next() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            value += 1
+            return value
+        }
+
+        var current: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
+    let count = Counter()
+    let release = DispatchSemaphore(value: 0)
 }
 
 @MainActor
@@ -4089,23 +4694,38 @@ private extension Result where Failure == NativeBridgeError {
 }
 
 @MainActor
+/// Loads a fixture document and waits for that load. It answers only for the
+/// navigation it started: a WebView the App is still loading reports the
+/// App's own navigation too (cancelled by this load), which is not this
+/// load's result. A cancellation of this load's own navigation still fails.
 private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<Void, Error>?
+    private var navigation: WKNavigation?
 
     func loadHTML(
         _ html: String,
         baseURL: URL,
-        in webView: WKWebView
+        in webView: WKWebView,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            self.continuation = continuation
-            webView.loadHTMLString(html, baseURL: baseURL)
+        do {
+            try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                navigation = webView.loadHTMLString(html, baseURL: baseURL)
+                if navigation == nil {
+                    finish(with: .failure(TestWaitError.navigationNotCreated))
+                }
+            }
+        } catch {
+            throw recordThrown(
+                "The fixture document did not load", error, file: file, line: line
+            )
         }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation?) {
-        continuation?.resume()
-        continuation = nil
+        finish(navigation, with: .success(()))
     }
 
     func webView(
@@ -4113,8 +4733,7 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
         didFail navigation: WKNavigation?,
         withError error: Error
     ) {
-        continuation?.resume(throwing: error)
-        continuation = nil
+        finish(navigation, with: .failure(error))
     }
 
     func webView(
@@ -4122,8 +4741,19 @@ private final class WebViewLoadProbe: NSObject, WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation?,
         withError error: Error
     ) {
-        continuation?.resume(throwing: error)
+        finish(navigation, with: .failure(error))
+    }
+
+    private func finish(_ navigation: WKNavigation?, with result: Result<Void, Error>) {
+        guard let navigation, navigation === self.navigation else { return }
+        finish(with: result)
+    }
+
+    private func finish(with result: Result<Void, Error>) {
+        let pending = continuation
         continuation = nil
+        navigation = nil
+        pending?.resume(with: result)
     }
 }
 
@@ -4185,5 +4815,826 @@ final class FormAccessoryBarTests: XCTestCase {
         XCTAssertFalse(
             NSStringFromClass(type(of: content)).hasSuffix(FormAccessoryBar.subclassSuffix)
         )
+    }
+
+    // App Store 5.1.2(i): a Workbench that asks before voice goes to a third-party
+    // AI service carries the marker and gets the microphone with no second
+    // question; an older Workbench is told to update; any other page is denied
+    // without that message.
+    @MainActor
+    func testVoiceConsentMarkerIsReadFromTheInstancePage() async throws {
+        let workbench = #"<link rel="manifest" href="/manifest.webmanifest">"#
+        let cases: [(String, String, String, VoiceConsentMarker)] = [
+            ("/chat", #"<meta name="avibe-voice-consent" content="1">"# + workbench, "<div id=\"root\"></div>", .marked),
+            ("/chat", workbench, "<div id=\"root\"></div>", .unmarkedWorkbench),
+            ("/chat", #"<meta name="avibe-voice-consent" content="0">"# + workbench, "<div id=\"root\"></div>", .unmarkedWorkbench),
+            ("/show/ses_1/", workbench, "<div id=\"root\"></div>", .other),
+            ("/chat", "", "<div id=\"root\"></div>", .other),
+        ]
+        for (path, head, body, expected) in cases {
+            let webView = WKWebView(frame: .zero)
+            webView.loadHTMLString(
+                "<!doctype html><html><head>\(head)</head><body>\(body)</body></html>",
+                baseURL: URL(string: "https://alice-app.avibe.bot\(path)")
+            )
+            try await WebKitReadiness.waitForDocument(in: webView)
+            let result = try? await webView.evaluateJavaScript(VoiceConsentMarker.script)
+            XCTAssertEqual(VoiceConsentMarker(result: result), expected, "\(path) \(head)")
+        }
+        XCTAssertEqual(VoiceConsentMarker(result: nil), .other)
+        XCTAssertEqual(VoiceConsentMarker(result: true), .other)
+    }
+}
+
+// MARK: The instance's last page from the cache (cold-start plan, step 2)
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+    func set(_ newValue: Bool) {
+        lock.lock()
+        stored = newValue
+        lock.unlock()
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        value += 1
+        return value
+    }
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+extension NavigationPolicyTests {
+    private static let cachedShell = """
+        <!doctype html><html><head><title>Workbench</title>
+        <script>window.inlineRan = true;</script></head>
+        <body><p>served</p></body></html>
+        """
+    private static let shellCSP = "default-src 'self'; script-src 'self'"
+    /// An instance that answers the cached page's session check as signed
+    /// in (so the page is not replaced by a live load during the test) and
+    /// serves `document` at its root.
+    @MainActor
+    private func signedInInstance(serving document: String) async throws -> (LocalHTTPServer, WebOrigin) {
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session": return .json(#"{"authenticated":true}"#)
+            case "/": return .html(document)
+            default: return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        return (server, try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false)))
+    }
+
+    @MainActor
+    private func primaryWebView(of controller: WebViewController) throws -> WKWebView {
+        try XCTUnwrap(controller.view.subviews.compactMap { $0 as? WKWebView }.first)
+    }
+
+    @MainActor
+    private func waitUntil(
+        _ condition: @MainActor () async throws -> Bool,
+        timeout: Duration = WebKitReadiness.webContentLaunch
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if try await condition() { return }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("The condition did not become true within \(timeout).")
+        throw CancellationError()
+    }
+
+    /// After a live load, the page fetches its own URL once more and that
+    /// response is kept only when its status is 200 and every security
+    /// header equals the live navigation response's: a changed CSP, a
+    /// missing Permissions-Policy or a failed fetch keeps nothing. What is
+    /// kept is the served bytes and the instance's own headers, minus the
+    /// transfer ones.
+    @MainActor
+    func testALiveLoadKeepsItsPageOnlyWhenItsSecurityHeadersMatch() async throws {
+        let marked = Self.cachedShell.replacingOccurrences(
+            of: "<head>",
+            with: #"<head><meta name="avibe-cached-shell" content="1" />"#
+        )
+        let rows: [(name: String, second: [(String, String)], status: Int, keeps: Bool, document: String, keepsShell: Bool)] = [
+            ("same headers", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true, Self.cachedShell, false),
+            ("same headers, the shell marked", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 200, true, marked, true),
+            ("CSP changed", [("Content-Security-Policy", "default-src *"), ("Permissions-Policy", "camera=()")], 200, false, Self.cachedShell, false),
+            ("Permissions-Policy dropped", [("Content-Security-Policy", Self.shellCSP)], 200, false, Self.cachedShell, false),
+            ("not 200", [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")], 503, false, Self.cachedShell, false),
+        ]
+        for row in rows {
+            let documents = LockedCounter()
+            let second = row.second
+            let status = row.status
+            let document = row.document
+            let server = try LocalHTTPServer { request in
+                guard request.path == "/" else { return .status(404) }
+                let first = documents.next() == 1
+                return LocalHTTPResponse(
+                    status: first ? 200 : status,
+                    headers: [("Content-Type", "text/html; charset=utf-8"), ("Cache-Control", "no-store, private")]
+                        + (first
+                            ? [("Content-Security-Policy", Self.shellCSP), ("Permissions-Policy", "camera=()")]
+                            : second),
+                    body: Data(document.utf8)
+                )
+            }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            var stored: [RuntimeCachedPage] = []
+            var finished: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { if $0.stage == .finished { finished.append($0) } },
+                pageCache: RuntimePageCacheAccess(load: { nil }, store: { stored.append($0) }),
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+
+            try await waitUntil { documents.count >= 2 }
+            XCTAssertEqual(finished.map(\.fromCache), [false], row.name)
+            if row.keeps {
+                try await waitUntil { !stored.isEmpty }
+                let page = try XCTUnwrap(stored.first, row.name)
+                XCTAssertEqual(page.body, Data(document.utf8), row.name)
+                // Read from the stored bytes: may this page show uncovered.
+                XCTAssertEqual(page.keepsShell, row.keepsShell, row.name)
+                XCTAssertEqual(page.headers.first { $0.key.lowercased() == "content-security-policy" }?.value, Self.shellCSP, row.name)
+                XCTAssertEqual(page.headers.first { $0.key.lowercased() == "permissions-policy" }?.value, "camera=()", row.name)
+                XCTAssertNil(page.headers.first { $0.key.lowercased() == "content-length" }, row.name)
+                XCTAssertEqual(page.url, origin.url, row.name)
+            } else {
+                // The capture's fetch has been answered; what remains is
+                // local. Give it the same bound a keeping row needs.
+                let clock = ContinuousClock()
+                let settled = clock.now.advanced(by: .seconds(2))
+                while clock.now < settled, stored.isEmpty {
+                    try await Task.sleep(for: .milliseconds(50))
+                }
+                XCTAssertTrue(stored.isEmpty, row.name)
+            }
+        }
+    }
+
+    /// A cached page loads as the instance's own document with the headers
+    /// it was served with: its CSP is enforced exactly as on the live load
+    /// (the inline script is blocked with it and runs without it), its
+    /// origin is the instance's, and the open hears it as from the cache.
+    @MainActor
+    func testACachedPageEnforcesTheCSPItWasServedWith() async throws {
+        for (label, csp, inlineRuns) in [("with CSP", Optional(Self.shellCSP), false), ("without CSP", nil, true)] {
+            let (server, instanceOrigin) = try await signedInInstance(serving: Self.cachedShell)
+            defer { server.stop() }
+            var headers = ["Content-Type": "text/html; charset=utf-8"]
+            if let csp { headers["Content-Security-Policy"] = csp }
+            let page = RuntimeCachedPage(url: instanceOrigin.url, headers: headers, body: Data(Self.cachedShell.utf8), capturedAt: Date())
+            var finished: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: instanceOrigin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { if $0.stage == .finished { finished.append($0) } },
+                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+            let webView = try primaryWebView(of: controller)
+            try await waitUntil { !finished.isEmpty }
+
+            XCTAssertEqual(finished.map(\.fromCache), [true], label)
+            let ran = try await webView.evaluateJavaScript("window.inlineRan === true") as? Bool
+            XCTAssertEqual(ran, inlineRuns, label)
+            let origin = try await webView.evaluateJavaScript("location.origin") as? String
+            XCTAssertEqual(origin, instanceOrigin.serialized, label)
+        }
+    }
+
+    /// Before the instance answers, the cached page is the instance's page
+    /// for the shell: switching instances works from it.
+    @MainActor
+    func testTheCachedPageSwitchesInstancesBeforeConnecting() async throws {
+        let shell = "<!doctype html><title>Workbench</title>"
+        let (server, instanceOrigin) = try await signedInInstance(serving: shell)
+        defer { server.stop() }
+        let page = RuntimeCachedPage(
+            url: instanceOrigin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(shell.utf8),
+            capturedAt: Date()
+        )
+        var finished = false
+        var instancesShown = 0
+        var accountShown = 0
+        let controller = WebViewController(
+            instanceOrigin: instanceOrigin,
+            websiteDataStore: .nonPersistent(),
+            showAccount: { accountShown += 1 },
+            showInstances: { instancesShown += 1 },
+            runtimeNavigationChanged: { if $0.stage == .finished { finished = true } },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+        let webView = try primaryWebView(of: controller)
+        try await waitUntil { finished }
+
+        _ = try await webView.callAsyncJavaScript(
+            "await window.avibeNative.call('app.showInstances'); await window.avibeNative.call('app.showAccount');",
+            contentWorld: .page
+        )
+        XCTAssertEqual(instancesShown, 1)
+        XCTAssertEqual(accountShown, 1)
+    }
+
+    /// The cached page asks the instance for its session once. A signed-in
+    /// answer ends the open, and the instance's page as it is now is
+    /// compared with the one shown: if it changed, the stored entry is
+    /// dropped (the next launch loads live). An answer that needs sign-in,
+    /// or none, loads the instance live, which signs in natively as any
+    /// first load does.
+    @MainActor
+    func testTheCachedPageConnectsOrLoadsLiveForSignIn() async throws {
+        let cached = "<!doctype html><title>cached</title>"
+        let rows: [(name: String, signedIn: Bool, sessionStatus: Int, served: String, drops: Bool)] = [
+            ("signed in, page current", true, 200, cached, false),
+            ("signed in, page changed", true, 200, "<!doctype html><title>new build</title>", true),
+            ("sign-in needed", false, 200, cached, false),
+            ("no answer (unreachable)", false, 530, cached, false),
+        ]
+        for row in rows {
+            let documents = LockedCounter()
+            let signedIn = row.signedIn
+            let sessionStatus = row.sessionStatus
+            let served = row.served
+            let server = try LocalHTTPServer { request in
+                switch request.path {
+                case "/api/session":
+                    if sessionStatus != 200 { return .status(sessionStatus) }
+                    return .json(signedIn ? #"{"authenticated":true}"# : #"{"remote":true,"authenticated":false}"#)
+                case "/":
+                    _ = documents.next()
+                    return .html(served)
+                default:
+                    return .status(404)
+                }
+            }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            let page = RuntimeCachedPage(
+                url: origin.url,
+                headers: ["Content-Type": "text/html; charset=utf-8"],
+                body: Data(cached.utf8),
+                capturedAt: Date()
+            )
+            var connected = 0
+            var removed = 0
+            var events: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { events.append($0) },
+                pageCache: RuntimePageCacheAccess(
+                    load: { page }, store: { _ in }, remove: { removed += 1 }
+                ),
+                cachedPageConnected: { connected += 1 },
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+
+            if row.signedIn {
+                try await waitUntil { connected == 1 }
+                // The comparison's own fetch of the root URL.
+                try await waitUntil { documents.count >= 1 }
+                if row.drops {
+                    try await waitUntil { removed == 1 }
+                } else {
+                    let clock = ContinuousClock()
+                    let settled = clock.now.advanced(by: .seconds(2))
+                    while clock.now < settled, removed == 0 {
+                        try await Task.sleep(for: .milliseconds(50))
+                    }
+                    XCTAssertEqual(removed, 0, row.name)
+                }
+                XCTAssertFalse(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
+            } else {
+                try await waitUntil { documents.count >= 1 }
+                try await waitUntil { events.contains { $0.stage == .finished && !$0.fromCache } }
+                XCTAssertEqual(connected, 0, row.name)
+            }
+            XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache }, row.name)
+        }
+    }
+
+    /// The Web UI's own declaration that it keeps its shell (a replayable
+    /// outcome; ui/src/lib/bootSession.ts), as an inline script.
+    private static let replayedShell =
+        #"<script>document.documentElement.dataset.avibeReplayedShell = '1'</script>"#
+
+    private static func markedCachedPage(_ origin: WebOrigin, head: String) -> RuntimeCachedPage {
+        RuntimeCachedPage(
+            url: origin.url,
+            headers: ["Content-Type": "text/html; charset=utf-8"],
+            body: Data(#"<!doctype html><head><meta name="avibe-cached-shell" content="1" /><title>cached</title>"#.utf8
+                + Data(head.utf8) + Data("</head>".utf8)),
+            capturedAt: Date(),
+            keepsShellUnreachable: true
+        )
+    }
+
+    /// A cached page whose bytes keep their shell while the instance cannot
+    /// be reached, and whose Web UI says it keeps it now, is uncovered; an
+    /// unreachable instance does not replace it with a live load: it is
+    /// asked again until it answers, which ends the open. A live navigation
+    /// from it that never replaces it (a 204) leaves it uncovered and still
+    /// asking. (An unmarked page's unreachable case is the covered probe's
+    /// "no answer (unreachable)" row: it loads live.)
+    @MainActor
+    func testAMarkedCachedPageWaitsOutAnUnreachableInstance() async throws {
+        let reachable = LockedFlag()
+        let documents = LockedCounter()
+        let server = try LocalHTTPServer { request in
+            switch request.path {
+            case "/api/session":
+                return reachable.value ? .json(#"{"authenticated":true}"#) : .status(530)
+            case "/":
+                _ = documents.next()
+                return .html("<!doctype html><title>live</title>")
+            case "/no-content":
+                return LocalHTTPResponse(
+                    status: 204,
+                    headers: [("Content-Type", "text/html; charset=utf-8")],
+                    body: Data()
+                )
+            default:
+                return .status(404)
+            }
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let page = Self.markedCachedPage(origin, head: Self.replayedShell)
+        var connected = 0
+        var uncovered = 0
+        var events: [RuntimeNavigationEvent] = []
+        let controller = WebViewController(
+            instanceOrigin: origin,
+            websiteDataStore: .nonPersistent(),
+            runtimeNavigationChanged: { events.append($0) },
+            pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+            cachedPageConnected: { connected += 1 },
+            cachedPageKeepsShell: { uncovered += 1 },
+            didStartLoading: {},
+            didFinishLoading: {},
+            didFailLoading: {}
+        )
+        let window = host(controller)
+        defer { window.isHidden = true }
+
+        try await waitUntil { uncovered == 1 }
+        XCTAssertTrue(events.contains { $0.stage == .finished && $0.fromCache })
+        // A live navigation that never replaces the page.
+        let webView = try primaryWebView(of: controller)
+        _ = try await webView.evaluateJavaScript("location.href = '/no-content'; 0")
+        try await waitUntil { events.contains { $0.stage == .started && !$0.fromCache } }
+        // Unreachable for a while: no live load, nothing connected.
+        let clock = ContinuousClock()
+        let quiet = clock.now.advanced(by: .seconds(5))
+        while clock.now < quiet {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertEqual(documents.count, 0)
+        XCTAssertEqual(connected, 0)
+        let title = try await webView.evaluateJavaScript("document.title") as? String
+        XCTAssertEqual(title, "cached")
+
+        reachable.set(true)
+        try await waitUntil { connected == 1 }
+        // Connected without a live document (the currency check that follows
+        // fetches the page's own URL, which is not a navigation).
+        XCTAssertFalse(events.contains { $0.stage == .committed && !$0.fromCache })
+        XCTAssertEqual(events.filter { $0.stage == .started && !$0.fromCache }.count, 1)
+        XCTAssertEqual(uncovered, 1)
+    }
+
+    /// A marked page is uncovered only when its Web UI says it keeps its
+    /// shell: without a replayable outcome (no declaration), or at its setup
+    /// fallback (the outcome it had was refused), it stays covered and the
+    /// instance loads live. An uncovered page that later falls to the setup
+    /// fallback, which it would never leave, loads live as well.
+    @MainActor
+    func testAMarkedCachedPageWithoutAReplayedShellLoadsLive() async throws {
+        let rows: [(name: String, head: String, uncovers: Bool)] = [
+            ("no replayable outcome", "", false),
+            ("at the setup fallback", Self.replayedShell + "<script>history.replaceState(null, '', '/setup')</script>", false),
+            ("falls to the setup fallback later", Self.replayedShell, true),
+        ]
+        for row in rows {
+            let documents = LockedCounter()
+            let server = try LocalHTTPServer { request in
+                switch request.path {
+                case "/api/session":
+                    return .status(530)
+                case "/":
+                    _ = documents.next()
+                    return .html("<!doctype html><title>live</title>")
+                default:
+                    return .status(404)
+                }
+            }
+            let baseURL = try await server.start()
+            defer { server.stop() }
+            let origin = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+            let page = Self.markedCachedPage(origin, head: row.head)
+            var connected = 0
+            var uncovered = 0
+            var events: [RuntimeNavigationEvent] = []
+            let controller = WebViewController(
+                instanceOrigin: origin,
+                websiteDataStore: .nonPersistent(),
+                runtimeNavigationChanged: { events.append($0) },
+                pageCache: RuntimePageCacheAccess(load: { page }, store: { _ in }),
+                cachedPageConnected: { connected += 1 },
+                cachedPageKeepsShell: { uncovered += 1 },
+                didStartLoading: {},
+                didFinishLoading: {},
+                didFailLoading: {}
+            )
+            let window = host(controller)
+            defer { window.isHidden = true }
+            // A row that does not reach a step says where it stood, and the
+            // next row still runs.
+            func reach(_ step: String, _ condition: @MainActor () -> Bool) async -> Bool {
+                do {
+                    try await waitUntil(condition)
+                    return true
+                } catch {
+                    let path = try? await primaryWebView(of: controller)
+                        .evaluateJavaScript("location.pathname + ' ' + document.title") as? String
+                    XCTFail("""
+                        \(row.name): did not reach "\(step)"; page \(path ?? "?"), \
+                        documents \(documents.count), uncovered \(uncovered), connected \(connected), \
+                        events \(events.map { "\($0.stage)\($0.fromCache ? "(cache)" : "")" })
+                        """)
+                    return false
+                }
+            }
+
+            guard await reach("cached page loaded", { events.contains { $0.stage == .finished && $0.fromCache } }) else {
+                continue
+            }
+            if row.uncovers {
+                guard await reach("uncovered", { uncovered == 1 }) else { continue }
+                XCTAssertEqual(documents.count, 0, row.name)
+                // The Web UI's own move to its setup fallback (a replace, as
+                // its router does).
+                let moved = try await primaryWebView(of: controller).evaluateJavaScript(
+                    "history.replaceState(null, '', '/setup'); location.pathname"
+                ) as? String
+                XCTAssertEqual(moved, "/setup", row.name)
+            }
+            // The live document, and then the capture's own fetch of it.
+            guard await reach("live load", { documents.count >= 1 }) else { continue }
+            XCTAssertTrue(events.contains { $0.stage == .started && !$0.fromCache }, row.name)
+            XCTAssertEqual(uncovered, row.uncovers ? 1 : 0, row.name)
+            XCTAssertEqual(connected, 0, row.name)
+        }
+    }
+
+    // MARK: A departed instance address
+
+    /// An address the account opened is forgotten, and what it stored
+    /// removed, only after avibe.bot has answered twice without listing it,
+    /// at least a day apart. One answer alone removes nothing (a wrong or
+    /// empty list cannot delete an instance's local data); an address that
+    /// is listed again, or opened again, starts over; a removal that fails
+    /// is tried again; a WebKit store that is gone took its data with it.
+    @MainActor
+    func testADepartedAddressIsRemovedOnlyAfterTwoAnswersADayApart() async throws {
+        let suite = "DepartedInstanceData.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var clock = Date(timeIntervalSince1970: 1_800_000_000)
+        var store = UUID()
+        var removed: [String] = []
+        var removalSucceeds = true
+        let data = DepartedInstanceData(
+            defaults: defaults,
+            now: { clock },
+            currentStore: { store },
+            clean: { origin, accountID in
+                removed.append("\(accountID) \(origin)")
+                return removalSucceeds
+            }
+        )
+        let one = "https://one.example"
+        let two = "https://two.example"
+        let hour: TimeInterval = 60 * 60
+        // The record as it is kept, read from the test's own defaults.
+        func entries(_ accountID: String) -> [String: DepartedInstanceData.Entry] {
+            guard
+                let stored = defaults.data(forKey: DepartedInstanceData.key),
+                let ledger = try? JSONDecoder().decode(
+                    [String: [String: DepartedInstanceData.Entry]].self, from: stored
+                )
+            else {
+                return [:]
+            }
+            return ledger[accountID] ?? [:]
+        }
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        data.noteOpened(accountID: "a", origin: two, store: store)
+
+        // Listed: nothing is counted.
+        await data.reconcile(live: [one, two], accountID: "a")
+        XCTAssertNil(entries("a")[one]?.missingSince)
+
+        // Missing once, and again within the day: nothing is removed.
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(entries("a")[one]?.missingSince, clock)
+        clock += 23 * hour
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, [])
+
+        // Listed again: it starts over.
+        await data.reconcile(live: [one, two], accountID: "a")
+        XCTAssertNil(entries("a")[one]?.missingSince)
+        clock += 2 * hour
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, [])
+
+        // Opened again: it starts over too.
+        clock += 25 * hour
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, [])
+
+        // Another account's answer counts nothing against this one's.
+        clock += 25 * hour
+        await data.reconcile(live: [], accountID: "b")
+        XCTAssertEqual(removed, [])
+
+        // Missing in a second answer a day later: removed. A removal that
+        // fails keeps the address for the next answer.
+        removalSucceeds = false
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, ["a \(one)"])
+        XCTAssertNotNil(entries("a")[one])
+        removalSucceeds = true
+        await data.reconcile(live: [two], accountID: "a")
+        XCTAssertEqual(removed, ["a \(one)", "a \(one)"])
+        XCTAssertNil(entries("a")[one])
+        XCTAssertNotNil(entries("a")[two])
+
+        // An empty list is one answer like any other.
+        await data.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(removed.count, 2)
+        clock += 24 * hour
+        await data.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(removed, ["a \(one)", "a \(one)", "a \(two)"])
+        XCTAssertEqual(entries("a"), [:])
+
+        // The store changed (a sign-out, another account): its data went
+        // with it, so the record goes with no removal.
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        store = UUID()
+        await data.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(entries("a"), [:])
+        XCTAssertEqual(removed.count, 3)
+
+        // An answer that arrives while a removal runs decides about what is
+        // left: an address it lists again is not removed, and starts over.
+        data.noteOpened(accountID: "a", origin: one, store: store)
+        data.noteOpened(accountID: "a", origin: two, store: store)
+        await data.reconcile(live: [], accountID: "a")
+        clock += 24 * hour
+        var arrives: (() async -> Void)?
+        let during = DepartedInstanceData(
+            defaults: defaults,
+            now: { clock },
+            currentStore: { store },
+            clean: { origin, _ in
+                removed.append("during \(origin)")
+                if let answer = arrives {
+                    arrives = nil
+                    await answer()
+                }
+                return true
+            }
+        )
+        arrives = { await during.reconcile(live: [two], accountID: "a") }
+        await during.reconcile(live: [], accountID: "a")
+        XCTAssertEqual(removed.filter { $0.hasPrefix("during") }, ["during \(one)"])
+        XCTAssertNil(entries("a")[one])
+        XCTAssertEqual(
+            entries("a")[two],
+            DepartedInstanceData.Entry(store: store, missingSince: nil)
+        )
+    }
+
+    /// The removal itself, in a WebKit store with two sibling addresses of
+    /// one registrable domain (as two instances of an account are): the
+    /// departed address loses its localStorage, IndexedDB, Cache Storage and
+    /// cookies; the sibling keeps all of its own, and a cookie of the parent
+    /// domain stays. No request reaches the address while it is cleaned.
+    @MainActor
+    func testOnlyTheDepartedAddressesStorageIsRemoved() async throws {
+        // A persistent store, as the account's is. It is left after the
+        // test: WebKit removes a store only on the main thread and once its
+        // processes have let go of it (`DirectPathAppTests` has that
+        // sequence for the App's stores); hosted runners are discarded.
+        let store = WKWebsiteDataStore(forIdentifier: UUID())
+        let departed = try XCTUnwrap(WebOrigin.parseConfigured("https://old-name.avibe-test.example"))
+        let sibling = try XCTUnwrap(WebOrigin.parseConfigured("https://other-name.avibe-test.example"))
+
+        func run(_ script: String, at url: URL) async throws -> String {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = store
+            let webView = WKWebView(frame: .zero, configuration: configuration)
+            let loader = SimulatedPageLoader()
+            webView.navigationDelegate = loader
+            let response = try XCTUnwrap(HTTPURLResponse(
+                url: url,
+                statusCode: 200,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "text/html; charset=utf-8"]
+            ))
+            webView.loadSimulatedRequest(
+                URLRequest(url: url),
+                response: response,
+                responseData: Data("<!doctype html><title>stored</title>".utf8)
+            )
+            try await loader.finished()
+            let result = try await webView.callAsyncJavaScript(
+                script, arguments: [:], in: nil, contentWorld: .page
+            )
+            return try XCTUnwrap(result as? String)
+        }
+        let seed = """
+            localStorage.setItem("kept", "yes");
+            await new Promise((resolve, reject) => {
+              const open = indexedDB.open("conversations", 1);
+              open.onupgradeneeded = () => open.result.createObjectStore("s");
+              open.onerror = () => reject(open.error);
+              open.onsuccess = () => {
+                const tx = open.result.transaction("s", "readwrite");
+                tx.objectStore("s").put("v", "k");
+                tx.oncomplete = () => { open.result.close(); resolve(); };
+                tx.onerror = () => reject(tx.error);
+              };
+            });
+            const cache = await caches.open("pages");
+            await cache.put("/page", new Response("x"));
+            // A cookie the page sets, awaited until it is stored: one set
+            // through `document.cookie` reaches the store only after the
+            // script returns, and this page closes at once, so on a loaded
+            // runner it could be lost before it was stored.
+            if (!window.cookieStore) throw new Error("no Cookie Store API");
+            await cookieStore.set({ name: "page_set", value: "1", path: "/", expires: Date.now() + 86400000 });
+            return "seeded";
+            """
+        let read = """
+            const databases = (await indexedDB.databases()).map((database) => database.name);
+            const cacheNames = await caches.keys();
+            return JSON.stringify([localStorage.getItem("kept"), databases, cacheNames, document.cookie]);
+            """
+        func httpOnlyCookie(_ name: String, domain: String) throws -> HTTPCookie {
+            try XCTUnwrap(HTTPCookie(properties: [
+                .name: name, .value: "1", .domain: domain, .path: "/",
+                .secure: "TRUE", .expires: Date().addingTimeInterval(86_400),
+                HTTPCookiePropertyKey("HttpOnly"): "TRUE",
+            ]))
+        }
+        let cookies = store.httpCookieStore
+        for origin in [departed, sibling] {
+            let seeded = try await run(seed, at: origin.url)
+            XCTAssertEqual(seeded, "seeded")
+            try await cookies.setCookie(httpOnlyCookie("session", domain: origin.host))
+        }
+        try await cookies.setCookie(httpOnlyCookie("parent", domain: ".avibe-test.example"))
+        let stored = #"["yes",["conversations"],["pages"],"page_set=1"]"#
+        let before = try await run(read, at: departed.url)
+        XCTAssertEqual(before, stored)
+
+        // Asked right before anything is deleted: an address listed again
+        // meanwhile keeps everything.
+        var asked = 0
+        let refused = await InstanceSiteDataCleaner.clean(
+            origin: departed,
+            in: store,
+            stillWanted: {
+                asked += 1
+                return false
+            }
+        )
+        XCTAssertFalse(refused)
+        XCTAssertEqual(asked, 1)
+        let untouched = try await run(read, at: departed.url)
+        XCTAssertEqual(untouched, stored)
+        let untouchedCookies = await cookies.allCookies().count
+        XCTAssertEqual(untouchedCookies, 5)
+
+        let cleaned = await InstanceSiteDataCleaner.clean(origin: departed, in: store)
+        XCTAssertTrue(cleaned)
+
+        let afterDeparted = try await run(read, at: departed.url)
+        XCTAssertEqual(afterDeparted, #"[null,[],[],""]"#)
+        let afterSibling = try await run(read, at: sibling.url)
+        XCTAssertEqual(afterSibling, stored)
+        let left = await cookies.allCookies().map { "\($0.name)@\($0.domain)" }.sorted()
+        XCTAssertEqual(left, [
+            "page_set@other-name.avibe-test.example",
+            "parent@.avibe-test.example",
+            "session@other-name.avibe-test.example",
+        ])
+
+        // A real local address: nothing is requested from it, neither by
+        // the seeding pages (simulated) nor by the removal.
+        let requests = LockedCounter()
+        let server = try LocalHTTPServer { _ in
+            _ = requests.next()
+            return .status(404)
+        }
+        let baseURL = try await server.start()
+        defer { server.stop() }
+        let local = try XCTUnwrap(WebOrigin(url: baseURL, requiresHTTPS: false))
+        let seededLocal = try await run(seed, at: local.url)
+        XCTAssertEqual(seededLocal, "seeded")
+        let cleanedLocal = await InstanceSiteDataCleaner.clean(origin: local, in: store)
+        XCTAssertTrue(cleanedLocal)
+        let afterLocal = try await run(read, at: local.url)
+        XCTAssertTrue(afterLocal.hasPrefix(#"[null,[],[],"#), afterLocal)
+        try await Task.sleep(for: .seconds(1))
+        XCTAssertEqual(requests.count, 0)
+    }
+}
+
+@MainActor
+private final class SimulatedPageLoader: NSObject, WKNavigationDelegate {
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var result: Result<Void, Error>?
+
+    func finished() async throws {
+        if let result {
+            return try result.get()
+        }
+        try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+
+    private func settle(_ outcome: Result<Void, Error>) {
+        guard result == nil else {
+            return
+        }
+        result = outcome
+        continuation?.resume(with: outcome)
+        continuation = nil
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        settle(.success(()))
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        settle(.failure(error))
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        settle(.failure(error))
     }
 }

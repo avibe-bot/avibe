@@ -208,19 +208,91 @@ describe('QuotaTab', () => {
     expect(screen.queryAllByRole('meter')).toHaveLength(0);
   });
 
-  it('names a known failure reason and never calls a windowless report usable', () => {
+  it('MH-QUOTA-041: says plainly when the provider reports no quota for an account, and never calls a windowless report usable', async () => {
+    const reportsNothing = [
+      // A current report with no windows: Gemini without a project, or an account with no buckets.
+      claude({ source_id: 'src_gemini', vendor: 'gemini', display_name: 'Gemini', plan: null, state: 'ok', windows: [] }),
+      // A provider whose sign-in has no quota report at all.
+      claude({ source_id: 'src_kimi', vendor: 'kimi', display_name: 'Kimi', plan: null, fetched_at: null, state: 'unsupported', error_key: 'models.quota.error.unsupported', windows: [] }),
+    ];
     draw(readyRegion(summary([
-      claude({ state: 'ok', windows: [] }),
+      ...reportsNothing,
       codex({ state: 'stale', error_key: 'models.quota.error.rate_limited', fetched_at: null, windows: [] }),
     ])));
 
-    expect(within(screen.getByRole('article', { name: 'ChatGPT Pro' })).getByText('服务商暂时限制了额度查询')).toBeTruthy();
-    // An `ok` report with no windows reads as unavailable on its card, so the summary cannot call it usable.
-    const empty = screen.getByRole('article', { name: 'Claude Max' });
-    expect(within(empty).getByText('暂时读不到额度，稍后会自动重试')).toBeTruthy();
-    expect(within(empty).getByText('暂停更新')).toBeTruthy();
+    expect(within(screen.getByRole('article', { name: 'ChatGPT Pro' })).getByText('供应商暂时限制了额度查询')).toBeTruthy();
+    for (const name of ['Gemini', 'Kimi']) {
+      const card = screen.getByRole('article', { name });
+      expect(within(card).getByText('供应商没有提供这个账号的额度数据')).toBeTruthy();
+      expect(within(card).queryAllByRole('meter')).toHaveLength(0);
+    }
+    expect(screen.queryByText('暂时读不到额度，稍后会自动重试')).toBeNull();
+    // Neither reading is current quota, so the summary cannot call those accounts usable.
     expect(screen.queryByText('所有账号都能正常使用')).toBeNull();
     expect(screen.getByText('已读到的额度都没用完')).toBeTruthy();
+
+    await i18n.changeLanguage('en');
+    try {
+      cleanup();
+      draw(readyRegion(summary(reportsNothing)));
+      expect(screen.getAllByText("The provider doesn't report quota for this account")).toHaveLength(2);
+    } finally {
+      await i18n.changeLanguage('zh');
+    }
+  });
+
+  it('MH-QUOTA-040: names model-group 5-hour and weekly limits and a monthly limit in the same card, in zh and en', async () => {
+    const group = (id: string, model: string, kind: 'model_session' | 'model_weekly', used: number, resetsIn: number | null) => window({
+      id, kind, label: model, scope_model: model, used_pct: used,
+      window_seconds: kind === 'model_session' ? 18_000 : 604_800, resets_at: resetsIn === null ? null : iso(NOW + resetsIn),
+    });
+    const gemini = claude({
+      source_id: 'src_gemini', vendor: 'gemini', display_name: 'Gemini', plan: null,
+      windows: [
+        group('bucket:gemini-5h', 'Gemini Models', 'model_session', 100, 70 * 60_000),
+        group('bucket:gemini-weekly', 'Gemini Models', 'model_weekly', 38, 4 * 24 * HOUR),
+        group('bucket:3p-5h', 'Claude and GPT models', 'model_session', 12, 3 * HOUR),
+        group('bucket:3p-weekly', 'Claude and GPT models', 'model_weekly', 0, null),
+      ],
+    });
+    const grok = codex({
+      source_id: 'src_grok', vendor: 'xai', display_name: 'Grok', plan: null,
+      windows: [window({ id: 'credits', kind: 'monthly', label: 'monthly', used_pct: 37.5, window_seconds: 30 * 86_400, resets_at: iso(NOW + 11 * 24 * HOUR) })],
+    });
+    draw(readyRegion(summary([gemini, grok])));
+
+    const card = screen.getByRole('article', { name: 'Gemini' });
+    const rows = [...card.querySelectorAll('[data-quota-window] strong')].map((node) => node.textContent);
+    expect(rows).toEqual(['Gemini Models 5 小时额度', 'Gemini Models 每周额度', 'Claude and GPT models 5 小时额度', 'Claude and GPT models 每周额度']);
+    expect(within(card).getAllByText('只算 Gemini Models 的用量')).toHaveLength(2);
+    expect(within(card).queryByText('所有模型共用')).toBeNull();
+    // Every Gemini limit is a model group's own; there is no weekly limit they also count toward.
+    expect(within(card).getByText('单独计算的模型额度')).toBeTruthy();
+    expect(within(card).queryByText('这些模型也会同时扣每周额度，任一项用完就会暂停')).toBeNull();
+    expect(within(card).getByText('Gemini Models 5 小时额度已用完')).toBeTruthy();
+    expect(card.textContent).toContain('已用完，1 小时 10 分后恢复');
+    // The untouched bucket has nothing to give back and names no reset.
+    expect(card.querySelector('[data-quota-window="bucket:3p-weekly"] .model-hub-quota-reset')).toBeNull();
+
+    const grokCard = screen.getByRole('article', { name: 'Grok' });
+    expect(within(grokCard).getByText('每月额度')).toBeTruthy();
+    expect(within(grokCard).getByText('所有模型共用')).toBeTruthy();
+    expect(within(grokCard).getByRole('meter', { name: '每月额度 已用 37%' })).toBeTruthy();
+    expect(grokCard.textContent).toContain('11 天后重置');
+    expect(grokCard.querySelector('.model-hub-quota-scoped')).toBeNull();
+
+    await i18n.changeLanguage('en');
+    try {
+      cleanup();
+      draw(readyRegion(summary([gemini, grok])));
+      expect(screen.getByText('Gemini Models 5-hour limit')).toBeTruthy();
+      expect(screen.getByText('Claude and GPT models weekly limit')).toBeTruthy();
+      expect(screen.getAllByText('Counts Gemini Models only')).toHaveLength(2);
+      expect(screen.getByText('Monthly limit')).toBeTruthy();
+      expect(screen.getByText('Shared by all models')).toBeTruthy();
+    } finally {
+      await i18n.changeLanguage('zh');
+    }
   });
 
   it('keeps universal summary claims to the case where every account has a current reading', () => {

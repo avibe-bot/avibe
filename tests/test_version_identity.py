@@ -47,6 +47,7 @@ def test_source_sync_identity_refreshes_without_package_reinstall(monkeypatch, t
         "prereleases": False,
         "auto_update": True,
         "host_actions": ["check", "prereleases", "auto_update"],
+        "install": None,
         "build": {"kind": "source", "revision": first_revision, "dirty": False},
     }
     assert second["current"] == first["current"]
@@ -106,6 +107,7 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
         "prereleases": False,
         "auto_update": True,
         "host_actions": ["check", "prereleases", "auto_update", "install"],
+        "install": None,
         "build": {"kind": "package"},
     }
 

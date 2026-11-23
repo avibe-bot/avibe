@@ -121,12 +121,17 @@ enum MobileBridgeMethod: String, CaseIterable {
     case authSignInWithPassword = "auth.signInWithPassword"
     case authVerifySecondFactor = "auth.verifySecondFactor"
     case authVerifyPasskey = "auth.verifyPasskey"
+    case authSignInWithProvider = "auth.signInWithProvider"
+    /// Passkey sign-in with no email first; not the second-factor `auth.verifyPasskey`.
+    case authSignInWithPasskey = "auth.signInWithPasskey"
+    case authProviders = "auth.providers"
     case sessionRefresh = "session.refresh"
     case sessionSelectInstance = "session.selectInstance"
     case sessionLogout = "session.logout"
     case appOpenExternal = "app.openExternal"
     case appDismiss = "app.dismiss"
     case appReturnToInstance = "app.returnToInstance"
+    case appOpenPage = "app.openPage"
 }
 
 struct MobileBridgeRequest {
@@ -255,6 +260,8 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
     private let returnToRuntime: () -> Bool
     private let dismissSurface: () -> Bool
     private let sheetMethodsOnly: Bool
+    /// Set by the view controller once it exists; it presents the page.
+    var presentPage: ((AvibePage) async throws -> Bool)?
 
     init(
         coordinator: MobileSessionCoordinator,
@@ -317,7 +324,10 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                          .authVerifyOTP,
                          .authSignInWithPassword,
                          .authVerifySecondFactor,
-                         .authVerifyPasskey:
+                         .authVerifyPasskey,
+                         .authSignInWithProvider,
+                         .authSignInWithPasskey,
+                         .authProviders:
                         throw MobileAccountError.forbidden
                     default:
                         break
@@ -326,7 +336,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 switch request.method {
                 case .sessionBootstrap:
                     let state = try await coordinator.bootstrap()
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authRequestOTP:
                     guard let email = request.params["email"] as? String else {
                         throw MobileAccountError.invalidRequest
@@ -347,7 +357,7 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         email: email,
                         code: code
                     )
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authSignInWithPassword:
                     guard
                         let email = request.params["email"] as? String,
@@ -372,7 +382,53 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         method: method,
                         code: code
                     )
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: await self.sessionResult(state))
+                case .authProviders:
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError.invalidRequest
+                    }
+                    // Welcome asks when it appears and when the App returns to
+                    // the foreground on it; the answer updates its row in place.
+                    var result: [String: Any] = [:]
+                    if let methods = await coordinator.signInMethods(within: 10) {
+                        result["providers"] = methods.providers.map(\.rawValue)
+                        result["passkey"] = methods.passkey
+                    }
+                    reply(replyHandler, result: result)
+                case .authSignInWithProvider:
+                    guard
+                        request.params.count == 1,
+                        let rawProvider = request.params["provider"] as? String,
+                        let provider = MobileSignInProvider(rawValue: rawProvider)
+                    else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "The sign-in provider is not google, github or apple."
+                        )
+                    }
+                    guard let window = trustedWebView?.window else {
+                        throw MobileAccountError.network
+                    }
+                    let state = try await coordinator.signInWithProvider(
+                        provider,
+                        presentationAnchor: window
+                    )
+                    reply(replyHandler, result: await self.sessionResult(state))
+                case .authSignInWithPasskey:
+                    // Closed: the page names no account, credential, origin or relying party.
+                    guard request.params.isEmpty else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "Passkey sign-in takes no arguments."
+                        )
+                    }
+                    guard let window = trustedWebView?.window else {
+                        throw MobileAccountError.passkeyUnavailable
+                    }
+                    let state = try await coordinator.signInWithPasskey(
+                        presentationAnchor: window
+                    )
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .authVerifyPasskey:
                     guard let window = trustedWebView?.window else {
                         throw MobileAccountError.passkeyUnavailable
@@ -380,22 +436,23 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                     let state = try await coordinator.verifyPasskey(
                         presentationAnchor: window
                     )
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .sessionRefresh:
                     let state = try await coordinator.refresh()
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .sessionSelectInstance:
                     guard let id = request.params["id"] as? String else {
                         throw MobileAccountError.invalidRequest
                     }
-                    let instance = try coordinator.selectInstance(id: id)
+                    let instance = try await coordinator
+                        .selectInstanceAfterSelectionKeepingOperation(id: id)
                     reply(
                         replyHandler,
                         result: ["instance": instance.jsonObject]
                     )
                 case .sessionLogout:
                     let state = try await coordinator.logout()
-                    reply(replyHandler, result: state.jsonObject)
+                    reply(replyHandler, result: await self.sessionResult(state))
                 case .appOpenExternal:
                     guard
                         let rawURL = request.params["url"] as? String,
@@ -425,6 +482,22 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                         throw MobileAccountError.runtimeUnavailable
                     }
                     reply(replyHandler, result: NSNull())
+                case .appOpenPage:
+                    guard
+                        request.params.count == 1,
+                        let rawPage = request.params["page"] as? String,
+                        let page = AvibePage(rawValue: rawPage)
+                    else {
+                        throw MobileAccountError(
+                            code: "invalid_argument",
+                            message: "The page is not one the App shows."
+                        )
+                    }
+                    guard let presentPage else {
+                        throw MobileAccountError.forbidden
+                    }
+                    let completed = try await presentPage(page)
+                    reply(replyHandler, result: ["completed": completed])
                 }
             } catch let error as MobileAccountError {
                 reply(replyHandler, error: error)
@@ -432,6 +505,28 @@ private final class MobileBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 reply(replyHandler, error: .network)
             }
         }
+    }
+
+    /// A session answer for the page. A signed-in account that this generation's provider
+    /// sign-in created carries `new_account: true`, a hint for the empty state only. A
+    /// signed-out answer carries `providers` and `passkey`, the ways in avibe.bot offers the App:
+    /// read now when that answers within 2 s, otherwise the last ones it advertised; Welcome
+    /// shows only those.
+    private func sessionResult(_ state: MobileSessionState) async -> Any {
+        var object = state.jsonObject
+        switch state {
+        case .signedIn where coordinator.accountWasJustCreated:
+            object["new_account"] = true
+        case .signedOut:
+            // What the server answered in time, otherwise the last it advertised.
+            if let methods = await coordinator.signInMethods(within: 2) {
+                object["providers"] = methods.providers.map(\.rawValue)
+                object["passkey"] = methods.passkey
+            }
+        default:
+            break
+        }
+        return object
     }
 
     private func reply(
@@ -475,6 +570,7 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
     private let handler: MobileBridgeHandler
     private let webView: WKWebView
     private var hasLoadedBundledPage = false
+    private weak var presentedAvibePage: UINavigationController?
     private var keyboardViewportLayoutController:
         KeyboardViewportLayoutController?
 
@@ -519,6 +615,12 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         )
         super.init(nibName: nil, bundle: nil)
         handler.trustedWebView = webView
+        handler.presentPage = { [weak self] page in
+            guard let self else {
+                throw MobileAccountError.forbidden
+            }
+            return try await self.presentAvibePage(page)
+        }
         webView.navigationDelegate = self
         webView.translatesAutoresizingMaskIntoConstraints = false
     }
@@ -528,9 +630,54 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         fatalError("init(coder:) has not been implemented")
     }
 
+    /// A sheet over an instance takes that page's scheme; `nil` follows the
+    /// system. WebKit gives the page the matching `prefers-color-scheme`.
+    var pageColorScheme: PageColorScheme? {
+        didSet {
+            guard pageColorScheme != oldValue else { return }
+            applyColorScheme()
+        }
+    }
+
+    /// The bundled pages' own `--background` (ui/src/index.css), so the
+    /// view shows the page's colour before its first paint instead of
+    /// WebKit's white.
+    static let pageBackground = UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 8 / 255, green: 8 / 255, blue: 18 / 255, alpha: 1)
+            : UIColor(red: 244 / 255, green: 246 / 255, blue: 251 / 255, alpha: 1)
+    }
+
+    private func applyColorScheme() {
+        let style: UIUserInterfaceStyle
+        switch pageColorScheme {
+        case .light: style = .light
+        case .dark: style = .dark
+        case nil: style = .unspecified
+        }
+        overrideUserInterfaceStyle = style
+        // In a sheet the grabber and corners belong to the presented
+        // controller, so it takes the same appearance; until this page is in
+        // the hierarchy there is no presentation to ask.
+        guard startScreen.isSheet, parent != nil || presentingViewController != nil else {
+            return
+        }
+        if let presented = presentationController?.presentedViewController
+            ?? parent?.presentationController?.presentedViewController
+        {
+            presented.overrideUserInterfaceStyle = style
+        }
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
+        view.backgroundColor = Self.pageBackground
+        // Transparent until the page paints, so the sheet slides in with the
+        // page's colour rather than WebKit's white.
+        webView.isOpaque = false
+        webView.backgroundColor = .clear
+        webView.scrollView.backgroundColor = .clear
+        applyColorScheme()
         view.addSubview(webView)
         // The pages change screens in place, not in the WebView's history,
         // so WebKit's own back swipe has nothing to go back to. A swipe in
@@ -573,6 +720,13 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
             .refreshForContainerGeometryChange()
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        // The presentation exists now; the sheet's chrome takes the scheme
+        // before it slides in.
+        applyColorScheme()
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         configureSheetPresentation()
@@ -584,6 +738,49 @@ final class MobileOnboardingViewController: UIViewController, WKNavigationDelega
         }
         hasLoadedBundledPage = true
         webView.load(URLRequest(url: resourceURL))
+    }
+
+    /// Shows one of the fixed avibe.bot pages over this page and returns
+    /// once it closes: `true` when the deletion page reported the account
+    /// deleted. The bundled page then reads the session to learn the rest.
+    private func presentAvibePage(_ page: AvibePage) async throws -> Bool {
+        guard presentedViewController == nil, viewIfLoaded?.window != nil else {
+            throw MobileAccountError.busy
+        }
+        let dataStore = page.usesAccountSignIn
+            ? try coordinator.accountWebPageDataStore()
+            : WKWebsiteDataStore.nonPersistent()
+        let controlPlane = coordinator.controlPlaneURL
+        var pageWebView: WKWebView?
+        let completed = await withCheckedContinuation { continuation in
+            let controller = AvibePageViewController(
+                page: page,
+                controlPlane: controlPlane,
+                websiteDataStore: dataStore,
+                onFinish: { continuation.resume(returning: $0) }
+            )
+            if page.usesAccountSignIn {
+                pageWebView = controller.webView
+                coordinator.beginAccountWebPage(controller.webView)
+            }
+            let presentation = controller.makePresentation()
+            presentedAvibePage = presentation
+            present(presentation, animated: true)
+            controller.finishUnlessPresented()
+        }
+        if let pageWebView {
+            coordinator.endAccountWebPage(pageWebView)
+        }
+        return completed
+    }
+
+    /// SwiftUI removed this page (the App changed route). A page it
+    /// presented goes with it, so none outlives the page that awaits it.
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        if parent == nil, let presentedAvibePage, presentedAvibePage.presentingViewController != nil {
+            presentedAvibePage.dismiss(animated: false)
+        }
     }
 
     private func configureSheetPresentation() {

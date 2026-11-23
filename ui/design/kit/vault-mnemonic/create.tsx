@@ -25,7 +25,7 @@ export function SourceCards({ value }: { value: Source }) {
       ) : (
         <HintLine
           text={d('粘贴后逐词检查，并显示账户 #0 的地址，可以先核对再创建。', 'Each word is checked as you paste, and account #0’s addresses show so you can compare before creating.')}
-          info={d('从 MetaMask、Phantom 等钱包搬过来：12 或 24 个英文单词，可选 BIP39 密码。助记词只在这台电脑上处理，不会进入聊天或模型。', 'Bring one over from MetaMask, Phantom and others: 12 or 24 English words, with an optional BIP39 passphrase. The phrase stays on this computer and never reaches a chat or a model.')}
+          info={d('从 MetaMask、Phantom 等钱包搬过来：12 或 24 个英文单词，可选 Passphrase。助记词只在这台电脑上处理，不会进入聊天或模型。', 'Bring one over from MetaMask, Phantom and others: 12 or 24 English words, with an optional passphrase. The phrase stays on this computer and never reaches a chat or a model.')}
         />
       )}
     </div>

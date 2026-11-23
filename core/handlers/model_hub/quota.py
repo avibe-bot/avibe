@@ -1,10 +1,13 @@
 """Subscription quota: parse the vendors' own usage reports into rate-limit windows.
 
-A logged-in subscription (Claude, ChatGPT/Codex) exposes how much of each of its
-rate-limit windows is used through a model-free account endpoint. The engine that
+A logged-in subscription (Claude, ChatGPT/Codex, Gemini through Antigravity, Grok)
+exposes how much of each of its rate-limit windows is used through a model-free
+account endpoint. Kimi's account sign-in has no such report. The engine that
 holds the grant makes the call; this module only turns the returned body into the
 `quota-summary.schema.json` window shape. It is a report, like usage metering:
-nothing in resolution, admission, or cooldown reads it.
+resolution and admission never read it. The one reader is the refresh the user
+presses, which resumes an account paused for quota unless this report still shows
+the limit used up (`ModelHubService.quota_summary`).
 
 Parsing is defensive by construction. A vendor may add, rename, or null a window
 at any time, so a window we cannot read is skipped, a window we do not recognise
@@ -20,13 +23,17 @@ import itertools
 import json
 import logging
 import math
+import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Final, Literal, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
-QuotaWindowKind = Literal["session", "weekly", "model_weekly", "other"]
+# `session`, `weekly` and `monthly` stop the whole account when spent; the
+# `model_*` kinds stop only the models `scope_model` names.
+QuotaWindowKind = Literal["session", "weekly", "monthly", "model_session", "model_weekly", "other"]
 QuotaFailure = Literal["auth_expired", "rate_limited", "unsupported", "unavailable", "malformed"]
 
 SESSION_WINDOW_SECONDS: Final = 5 * 3600
@@ -40,7 +47,9 @@ _MAX_UPSTREAM_ROWS: Final = 64
 # A usage report is a few KiB; refuse anything far larger before decoding it.
 _MAX_BODY_BYTES: Final = 256 * 1024
 
-QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex"})
+QUOTA_VENDORS: Final = frozenset({"anthropic", "openai", "codex", "gemini", "xai"})
+# The vendors whose report can carry reset cards.
+RESET_CARD_VENDORS: Final = frozenset({"anthropic", "openai", "codex"})
 
 # Claude's legacy top-level keys. `seven_day_oauth_apps` is an app-surface limit
 # Claude Code itself does not present, so it is deliberately not a window here.
@@ -106,16 +115,23 @@ def _iso(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _iso_timestamp(value: object) -> Optional[str]:
+def _moment(value: object) -> Optional[datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
         moment = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=timezone.utc)
-        return _iso(moment)
+        # Only a moment that can be written back in UTC is readable.
+        _iso(moment)
     except (OverflowError, ValueError):
         return None
+    return moment
+
+
+def _iso_timestamp(value: object) -> Optional[str]:
+    moment = _moment(value)
+    return _iso(moment) if moment is not None else None
 
 
 def _unix_timestamp(value: object) -> Optional[str]:
@@ -156,17 +172,40 @@ def _window(
     return window
 
 
-def _load_object(body: object) -> dict[str, Any]:
+def _unique_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    members = dict(pairs)
+    if len(members) != len(pairs):
+        raise ValueError("repeated member")
+    return members
+
+
+def _not_json(constant: str) -> Any:
+    raise ValueError("not a JSON number")
+
+
+def _load_object(body: object, *, allow_array: bool = False, unique: bool = False) -> Any:
+    """Decode a vendor body that must be a JSON object (or array) and not an error envelope.
+
+    ``unique`` is for a body something will be decided on: an object that names
+    a member twice, at any depth, says two things and is refused, where an
+    ordinary decoder would quietly keep the last. So is a body that carries
+    ``NaN`` or an infinity, which is not JSON, anywhere.
+    """
+
     if not isinstance(body, (str, bytes, bytearray)):
         raise SubscriptionQuotaError("malformed")
     size = len(body.encode("utf-8", "surrogatepass")) if isinstance(body, str) else len(body)
     if size > _MAX_BODY_BYTES:
         raise SubscriptionQuotaError("malformed")
     try:
-        payload = json.loads(body)
-    except (TypeError, UnicodeDecodeError, ValueError):
+        payload = json.loads(
+            body,
+            object_pairs_hook=_unique_members if unique else None,
+            parse_constant=_not_json if unique else None,
+        )
+    except (TypeError, UnicodeDecodeError, ValueError, RecursionError):
         raise SubscriptionQuotaError("malformed") from None
-    if not isinstance(payload, dict) or "error" in payload:
+    if not (allow_array and isinstance(payload, list)) and (not isinstance(payload, dict) or "error" in payload):
         raise SubscriptionQuotaError("malformed")
     try:
         # An escaped lone surrogate decodes but cannot be served as UTF-8 JSON.
@@ -408,7 +447,151 @@ def parse_codex_quota(body: object) -> dict[str, Any]:
     return {"plan": plan, "windows": _ordered(windows)}
 
 
-_KIND_ORDER: Final = {"session": 0, "weekly": 1, "model_weekly": 2, "other": 3}
+# Antigravity meters Gemini per model group ("Gemini Models", "Claude and GPT
+# models"), each with its own 5-hour and weekly bucket; no bucket stops the
+# whole account, so every known one is model-scoped.
+_GEMINI_WINDOWS: Final[Mapping[str, tuple[QuotaWindowKind, int]]] = {
+    "5h": ("model_session", SESSION_WINDOW_SECONDS),
+    "weekly": ("model_weekly", WEEKLY_WINDOW_SECONDS),
+}
+_GEMINI_WINDOW_SUFFIXES: Final = ("-5h", "-weekly", "_5h", "_weekly")
+_GEMINI_ROW_ORDER: Final = {"model_session": 0, "model_weekly": 1, "other": 2}
+
+
+def _gemini_reading(bucket: Mapping[str, Any]) -> Optional[tuple[float, Optional[str]]]:
+    """(used %, reset) of one bucket, or None when it carries no reading."""
+
+    resets_at = _iso_timestamp(bucket.get("resetTime"))
+    if "remainingFraction" not in bucket:
+        # Proto3 JSON omits a zero: a spent bucket arrives with only its reset.
+        return (100.0, resets_at) if resets_at is not None else None
+    remaining = _number(bucket.get("remainingFraction"))
+    if remaining is None:
+        return None
+    remaining = min(1.0, max(0.0, remaining))
+    used = _percent((1.0 - remaining) * 100)
+    if used is None:
+        return None
+    # An untouched bucket reports a rolling "full window from now" reset that
+    # moves with every read; it has nothing to give back, so it has no reset.
+    return used, None if remaining >= 1.0 else resets_at
+
+
+def _gemini_group_key(bucket_id: str) -> str:
+    for suffix in _GEMINI_WINDOW_SUFFIXES:
+        if bucket_id.lower().endswith(suffix) and len(bucket_id) > len(suffix):
+            return bucket_id[: -len(suffix)]
+    return bucket_id
+
+
+def parse_gemini_quota(body: object) -> dict[str, Any]:
+    """Parse `POST {cloudcode-pa}/v1internal:retrieveUserQuotaSummary`.
+
+    `groups[]` name the models that share their buckets; an older answer lists
+    bare top-level `buckets[]`. A group's own name is display text; without one,
+    the bucket id (less its window suffix) stands in, marked as a key. An empty
+    answer (`{}`, the proto3 form of no groups) is a report of no quota.
+    """
+
+    payload = _load_object(body)
+    groups = payload.get("groups", [])
+    loose = payload.get("buckets", [])
+    if not isinstance(groups, list) or not isinstance(loose, list):
+        raise SubscriptionQuotaError("malformed")
+    rows: list[Mapping[str, Any]] = [group for group in groups[:_MAX_UPSTREAM_ROWS] if isinstance(group, dict)]
+    if not any(isinstance(group.get("buckets"), list) and group["buckets"] for group in rows):
+        rows = [{"buckets": loose}]
+    windows: list[dict[str, Any]] = []
+    for group_index, group in enumerate(rows):
+        buckets = group.get("buckets")
+        if not isinstance(buckets, list):
+            continue
+        group_name = _label(group.get("displayName"))
+        group_windows: list[dict[str, Any]] = []
+        for index, bucket in enumerate(buckets[:_MAX_UPSTREAM_ROWS]):
+            if not isinstance(bucket, dict) or bucket.get("disabled") is True:
+                continue
+            reading = _gemini_reading(bucket)
+            if reading is None:
+                continue
+            used, resets_at = reading
+            bucket_id = _label(bucket.get("bucketId"))
+            scope = group_name or (_gemini_group_key(bucket_id) if bucket_id else None)
+            if scope is None:
+                continue
+            window_name = bucket.get("window")
+            known = _GEMINI_WINDOWS.get(window_name) if isinstance(window_name, str) else None
+            if known is not None:
+                kind, seconds = known
+                label = scope
+            else:
+                kind, seconds = "other", None
+                named = _label(window_name) or _label(bucket.get("displayName"))
+                label = f"{scope} · {named}" if named else scope
+            group_windows.append(
+                _window(
+                    window_id=f"bucket:{bucket_id or f'{group_index}:{index}'}",
+                    kind=kind,
+                    label=label,
+                    used_pct=used,
+                    window_seconds=seconds,
+                    resets_at=resets_at,
+                    scope_model=scope[:_MAX_LABEL_CHARS] if kind != "other" else None,
+                    label_is_key=group_name is None,
+                )
+            )
+        # Each group reads 5-hour first, then weekly, then anything unrecognised.
+        group_windows.sort(key=lambda window: _GEMINI_ROW_ORDER[window["kind"]])
+        windows.extend(group_windows)
+    return {"plan": None, "windows": _ordered(windows)}
+
+
+_GROK_PERIODS: Final[Mapping[str, QuotaWindowKind]] = {"WEEKLY": "weekly", "MONTHLY": "monthly"}
+
+
+def parse_grok_quota(body: object) -> dict[str, Any]:
+    """Parse `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`.
+
+    One account-wide credit window: weekly or monthly by `currentPeriod.type`,
+    resetting at the period's end. Grok omits a zero percentage, so a missing
+    one reads as 0 only beside a well-formed weekly or monthly period.
+    """
+
+    payload = _load_object(body)
+    config = payload.get("config")
+    if not isinstance(config, dict):
+        raise SubscriptionQuotaError("malformed")
+    period = config.get("currentPeriod") if isinstance(config.get("currentPeriod"), dict) else {}
+    period_type = period.get("type")
+    period_key = period_type.strip().upper().removeprefix("USAGE_PERIOD_TYPE_") if isinstance(period_type, str) else ""
+    kind: QuotaWindowKind = _GROK_PERIODS.get(period_key, "other")
+    start, end = _moment(period.get("start")), _moment(period.get("end"))
+    span = _seconds((end - start).total_seconds()) if start is not None and end is not None else None
+    if "creditUsagePercent" in config:
+        used = _percent(config["creditUsagePercent"])
+    else:
+        used = 0.0 if kind != "other" and span is not None else None
+    if used is None:
+        return {"plan": None, "windows": []}
+    if kind != "other":
+        label, label_is_key = kind, False
+    else:
+        label, label_is_key = (_span_label(span), False) if span is not None else ("credit_usage", True)
+    window = _window(
+        window_id="credits",
+        kind=kind,
+        label=label,
+        used_pct=used,
+        window_seconds=span,
+        resets_at=_iso(end) if end is not None else None,
+        label_is_key=label_is_key,
+    )
+    return {"plan": None, "windows": [window]}
+
+
+# The two model-scoped kinds share a rank: a parser emits them model by model,
+# and the stable sort keeps each model's windows together.
+_KIND_ORDER: Final = {"session": 0, "weekly": 1, "monthly": 2, "model_session": 3, "model_weekly": 3, "other": 4}
 
 
 def _ordered(windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -429,6 +612,10 @@ def parse_subscription_quota(vendor: str, body: object) -> dict[str, Any]:
         return parse_claude_quota(body)
     if normalized in {"openai", "codex"}:
         return parse_codex_quota(body)
+    if normalized == "gemini":
+        return parse_gemini_quota(body)
+    if normalized == "xai":
+        return parse_grok_quota(body)
     raise SubscriptionQuotaError("unsupported")
 
 
@@ -449,6 +636,7 @@ _RATE_LIMIT_COOLDOWN_FLOOR: Final = timedelta(minutes=5)
 _RATE_LIMIT_COOLDOWN_CEILING: Final = timedelta(hours=1)
 
 QuotaFetch = Callable[[str, str, str], Awaitable[Mapping[str, Any]]]
+_CARD_ACCOUNT: Final = re.compile(r"[a-f0-9]{64}")
 
 
 @dataclass(frozen=True)
@@ -460,6 +648,35 @@ class QuotaSourceRef:
     account_label: Optional[str]
 
 
+@dataclass(frozen=True)
+class CardReading:
+    """One vendor reading of an account's reset cards, for the decisions that rest on it.
+
+    ``sequence`` orders vendor readings against the moment a card use became
+    unknown and ``started_at`` is when this one began, on the monotonic clock;
+    ``forced`` says the user asked for it; ``account`` is the opaque key of the
+    account the same reading was made under. None of it is serialized.
+    """
+
+    sequence: int
+    started_at: float
+    forced: bool
+    account: Optional[str]
+    cards: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class CardReadingFloor:
+    """What a reading must be to answer an account's unknown card use.
+
+    Numbered above ``sequence``, and begun at or after ``ripe_at`` on the
+    monotonic clock: the wait is elapsed time, whatever the wall clock does.
+    """
+
+    sequence: int
+    ripe_at: float
+
+
 @dataclass
 class _QuotaEntry:
     credential_ref: str
@@ -469,6 +686,15 @@ class _QuotaEntry:
     failure: Optional[QuotaFailure] = None
     cooldown_until: Optional[datetime] = None
     task: Optional[asyncio.Task[None]] = None
+    # The reading last started on this entry, whether or not it has answered.
+    sequence: int = 0
+    forced: bool = False
+    started_at: Optional[float] = None
+    # The reading the snapshot came from, and the account it was made under.
+    snapshot_sequence: int = 0
+    snapshot_forced: bool = False
+    snapshot_started_at: Optional[float] = None
+    card_account: Optional[str] = None
 
 
 def _cooldown(now: datetime, retry_after_seconds: Optional[float]) -> datetime:
@@ -488,13 +714,46 @@ class SubscriptionQuotaCache:
     `stale` (or `auth_expired`) with the windows it last had.
     """
 
-    def __init__(self, fetch: QuotaFetch, *, now: Callable[[], datetime]):
+    def __init__(
+        self,
+        fetch: QuotaFetch,
+        *,
+        now: Callable[[], datetime],
+        monotonic: Callable[[], float] = time.monotonic,
+    ):
         self._fetch = fetch
         self._now = now
+        # Elapsed time, for when a reading began; `now` is the wall clock of the throttles.
+        self._monotonic = monotonic
         self._entries: dict[str, _QuotaEntry] = {}
         self._fetch_slots = asyncio.Semaphore(QUOTA_MAX_CONCURRENT_FETCHES)
+        self._sequence = itertools.count(1)
 
-    async def summary(self, sources: Sequence[QuotaSourceRef], *, force: bool = False) -> dict[str, Any]:
+    def tick(self) -> int:
+        """A point in the order of vendor readings: every reading started later is numbered above it."""
+
+        return next(self._sequence)
+
+    async def summary(
+        self,
+        sources: Sequence[QuotaSourceRef],
+        *,
+        force: bool = False,
+        answering: Optional[Mapping[str, CardReadingFloor]] = None,
+        wait: bool = True,
+    ) -> dict[str, Any]:
+        """Report every Source, re-reading the ones that are due.
+
+        ``answering`` is for a forced read while card uses are unknown: the
+        floor of each such account, by its opaque key. Once an account's floor
+        can be met, its Sources need a reading the user asked for that meets
+        it, so the forced-refresh interval does not hold that one back. A
+        vendor's rate-limit cooldown still does.
+
+        ``wait=False`` reports what is known now and names the Sources still
+        being read in ``pending``, for an answer that must not wait on them.
+        """
+
         live = {source.source_id for source in sources}
         for source_id in list(self._entries):
             if source_id not in live:
@@ -502,9 +761,9 @@ class SubscriptionQuotaCache:
         pending = [
             task
             for source in sources
-            if (task := self._schedule(source, force=force)) is not None
+            if (task := self._schedule(source, force=force, answering=answering)) is not None
         ]
-        if pending:
+        if pending and wait:
             # A slow vendor must not hold the page: whatever has not answered by
             # the deadline keeps running and lands in the next read.
             await asyncio.wait(pending, timeout=QUOTA_READ_DEADLINE_SECONDS)
@@ -541,25 +800,87 @@ class SubscriptionQuotaCache:
             self._entries[source.source_id] = entry
         return entry
 
-    def _schedule(self, source: QuotaSourceRef, *, force: bool) -> Optional[asyncio.Task[None]]:
+    def _schedule(
+        self,
+        source: QuotaSourceRef,
+        *,
+        force: bool,
+        answering: Optional[Mapping[str, CardReadingFloor]] = None,
+    ) -> Optional[asyncio.Task[None]]:
         if source.vendor not in QUOTA_VENDORS:
             return None
         entry = self._entry(source)
-        if entry.task is not None and not entry.task.done():
-            return entry.task
         now = self._now()
+        floor: Optional[CardReadingFloor] = None
+        if force and answering and source.vendor in RESET_CARD_VENDORS:
+            if entry.card_account is not None:
+                # Its own account's unknown use, and nobody else's.
+                floor = answering.get(entry.card_account)
+            else:
+                # Not read under any account yet: held to what would answer every one
+                # of them. Until then the ordinary refresh limit applies to it.
+                floor = CardReadingFloor(
+                    sequence=max(each.sequence for each in answering.values()),
+                    ripe_at=max(each.ripe_at for each in answering.values()),
+                )
+        # Whether this Source owes the user a reading that can answer an unknown card
+        # use: the floor can be met by now, and the reading last started here does not.
+        owed = (
+            floor is not None
+            and self._monotonic() >= floor.ripe_at
+            and not (
+                entry.forced
+                and entry.sequence > floor.sequence
+                and entry.started_at is not None
+                and entry.started_at >= floor.ripe_at
+            )
+        )
+        if entry.task is not None and not entry.task.done():
+            if not owed:
+                # Concurrent reads, and repeated refreshes of one unknown use, share one fetch.
+                return entry.task
+            # The reading in flight began too early to answer; it lands on the detached entry.
+            entry = self._detach(source, entry)
         if entry.cooldown_until is not None and now < entry.cooldown_until:
             return None
         interval = QUOTA_FORCED_REFRESH_INTERVAL if force else QUOTA_REFRESH_INTERVAL
-        if entry.attempted_at is not None and now - entry.attempted_at < interval:
+        if not owed and entry.attempted_at is not None and now - entry.attempted_at < interval:
             return None
+        return self._start(source, entry, forced=force)
+
+    def _detach(self, source: QuotaSourceRef, previous: _QuotaEntry) -> _QuotaEntry:
+        """A fresh entry that keeps what was last read and waits for none of what is in flight."""
+
+        entry = _QuotaEntry(
+            credential_ref=source.credential_ref,
+            snapshot=previous.snapshot,
+            fetched_at=previous.fetched_at,
+            snapshot_sequence=previous.snapshot_sequence,
+            snapshot_forced=previous.snapshot_forced,
+            snapshot_started_at=previous.snapshot_started_at,
+            card_account=previous.card_account,
+        )
+        self._entries[source.source_id] = entry
+        return entry
+
+    def _start(self, source: QuotaSourceRef, entry: _QuotaEntry, *, forced: bool) -> asyncio.Task[None]:
+        # A reading begins here for the rules that rest on it; its vendor request follows.
+        entry.sequence, entry.forced, entry.started_at = self.tick(), forced, self._monotonic()
         entry.task = asyncio.create_task(
-            self._refresh(source, entry),
+            self._refresh(source, entry, sequence=entry.sequence, forced=forced, started_at=entry.started_at),
             name=f"model-hub-quota-{source.source_id}",
         )
         return entry.task
 
-    async def _refresh(self, source: QuotaSourceRef, entry: _QuotaEntry) -> None:
+    async def _refresh(
+        self,
+        source: QuotaSourceRef,
+        entry: _QuotaEntry,
+        *,
+        sequence: int,
+        forced: bool,
+        started_at: float,
+    ) -> None:
         try:
             async with self._fetch_slots:
                 # The throttle counts from the vendor request, not from the queue:
@@ -589,9 +910,61 @@ class SubscriptionQuotaCache:
             # a built-in fee included, replaces it.
             plan = entry.snapshot["plan"]
         entry.snapshot = {"plan": plan, "windows": windows}
+        if "reset_cards" in parsed:
+            entry.snapshot["reset_cards"] = parsed["reset_cards"]
+        account = parsed.get("reset_card_account")
+        entry.card_account = account if isinstance(account, str) and _CARD_ACCOUNT.fullmatch(account) else None
+        entry.snapshot_sequence, entry.snapshot_forced, entry.snapshot_started_at = sequence, forced, started_at
         entry.fetched_at = self._now()
         entry.failure = None
         entry.cooldown_until = None
+
+    async def reread(self, source: QuotaSourceRef) -> dict[str, Any]:
+        """Read one Source again for a card use: its own vendor request, never a cached or shared one.
+
+        Empty when the Source was re-authenticated or read again meanwhile, so
+        that what came back cannot be taken for this Source's current account.
+        """
+
+        previous = self._entries.get(source.source_id)
+        if previous is not None and previous.credential_ref == source.credential_ref:
+            entry = self._detach(source, previous)
+        else:
+            entry = _QuotaEntry(credential_ref=source.credential_ref)
+            self._entries[source.source_id] = entry
+        await asyncio.shield(self._start(source, entry, forced=True))
+        if self._entries.get(source.source_id) is not entry:
+            return {}
+        return self._payload(source)
+
+    def card_reading(self, source: QuotaSourceRef) -> Optional[CardReading]:
+        """The current reading of this Source's cards, or None when its last attempt did not answer."""
+
+        entry = self._entries.get(source.source_id)
+        if (
+            entry is None
+            or entry.credential_ref != source.credential_ref
+            or entry.snapshot is None
+            or entry.snapshot_started_at is None
+            or entry.failure is not None
+            or "reset_cards" not in entry.snapshot
+        ):
+            return None
+        return CardReading(
+            sequence=entry.snapshot_sequence,
+            started_at=entry.snapshot_started_at,
+            forced=entry.snapshot_forced,
+            account=entry.card_account,
+            cards=entry.snapshot["reset_cards"],
+        )
+
+    def card_account(self, source: QuotaSourceRef) -> Optional[str]:
+        """The account this Source was last read under. For display only: it decides nothing."""
+
+        entry = self._entries.get(source.source_id)
+        if entry is None or entry.credential_ref != source.credential_ref:
+            return None
+        return entry.card_account
 
     def _payload(self, source: QuotaSourceRef) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -612,6 +985,10 @@ class SubscriptionQuotaCache:
                 windows=entry.snapshot["windows"],
                 fetched_at=_iso(entry.fetched_at) if entry.fetched_at else None,
             )
+        if source.vendor in RESET_CARD_VENDORS:
+            # Cards are current or unread: a failed attempt never shows the last count as today's.
+            snapshot = entry.snapshot if entry and entry.snapshot and not entry.failure else {}
+            payload["reset_cards"] = snapshot.get("reset_cards") or {"state": "unread", "lock": None, "cards": []}
         failure = entry.failure if entry is not None else None
         if failure is None:
             if entry is None or entry.snapshot is None:

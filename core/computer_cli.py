@@ -174,6 +174,8 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "active_turn_required": "computer.cli.error.activeTurnRequired",
     "ambiguous": "computer.cli.error.scriptAmbiguous",
     "application_not_found": "computer.cli.error.scriptTargetNotFound",
+    "app_dialog_unresolved": "computer.cli.error.appDialogUnresolved",
+    "dock_unsupported": "computer.cli.error.dockUnsupported",
     "computer_script_request_failed": "computer.cli.error.scriptControllerRejected",
     "computer_script_request_too_large": "computer.cli.error.scriptRequestTooLarge",
     "computer_script_message_too_large": "computer.cli.error.scriptMessageTooLarge",

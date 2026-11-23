@@ -18,6 +18,24 @@ final class NativePushCoordinatorTests: XCTestCase {
     private static let vapidPublicKey =
         "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8"
 
+    func testLiveActivityRegistrationIsBoundToActiveAccountOriginAndGeneration() throws {
+        let store = makeInstallationStore(providerGeneration: 1, provider: nil, providerPatchPending: false)
+        for (id, state, pending, generation) in [
+            ("old-generation", PushKeyRecord.State.active, false, Int64(2)),
+            ("revoking", .active, true, 1), ("retiring", .retiring, false, 1),
+            ("current", .active, false, 1)
+        ] {
+            try store.saveRecord(makeRecord(kid: id, state: state, pendingRevoke: pending, bindGeneration: generation))
+        }
+        let account = Locked<MobileAccount?>(Self.accountA)
+        let coordinator = makeCoordinator(store: store, management: ManagementRecorder(), account: account)
+        XCTAssertEqual(coordinator.liveActivityRegistrationID(accountID: Self.accountA.id, instanceOrigin: Self.instanceOrigin), "current")
+        XCTAssertNil(coordinator.liveActivityRegistrationID(accountID: Self.accountA.id, instanceOrigin: "https://other.example"))
+        XCTAssertNil(coordinator.liveActivityRegistrationID(accountID: Self.accountB.id, instanceOrigin: Self.instanceOrigin))
+        account.value = Self.accountB
+        XCTAssertNil(coordinator.liveActivityRegistrationID(accountID: Self.accountA.id, instanceOrigin: Self.instanceOrigin))
+    }
+
     func testProviderPatchesAreSerializedAndUseLatestGeneration() async throws {
         let store = makeInstallationStore(
             providerGeneration: 0,
@@ -267,6 +285,61 @@ final class NativePushCoordinatorTests: XCTestCase {
         XCTAssertEqual(absentStatus["state"] as? String, "off")
         XCTAssertEqual(absentStatus["revokeState"] as? String, "absent")
         XCTAssertNil(absentStatus["endpoint"])
+    }
+
+    /// The status names iOS's notification permission, so the page can turn
+    /// notifications back on after a sign-in only when iOS already allows
+    /// them, never prompting on its own. A fresh install's account (nothing
+    /// bound yet) and a signed-out App say it too.
+    func testStatusNamesTheSystemPermission() async throws {
+        let cases: [(UNAuthorizationStatus, String)] = [
+            (.authorized, "granted"),
+            (.provisional, "granted"),
+            (.ephemeral, "granted"),
+            (.notDetermined, "notDetermined"),
+            (.denied, "denied"),
+        ]
+        for (authorization, expected) in cases {
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: nil,
+                providerPatchPending: false
+            )
+            let bound = makeCoordinator(
+                store: store,
+                management: ManagementRecorder(),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let status = try await bound.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(status["permission"] as? String, expected, "\(authorization)")
+
+            let unbound = makeCoordinator(
+                store: InMemoryPushKeychainStore(),
+                management: ManagementRecorder(),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let fresh = try await unbound.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(fresh["state"] as? String, expected == "denied" ? "unavailable" : "off")
+            XCTAssertEqual(fresh["permission"] as? String, expected, "\(authorization)")
+
+            let signedOut = makeCoordinator(
+                store: InMemoryPushKeychainStore(),
+                management: ManagementRecorder(),
+                account: Locked<MobileAccount?>(nil),
+                notificationAuthorizationStatus: { authorization }
+            )
+            let none = try await signedOut.status(
+                vapidPublicKey: nil,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTAssertEqual(none["permission"] as? String, expected, "\(authorization)")
+        }
     }
 
     func testRevokeOutcomeBridgePayloadRemainsLegacyCompatible() {
@@ -888,7 +961,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             management: recorder
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
 
         XCTAssertEqual(
             recorder.requests.map(\.method),
@@ -901,6 +974,9 @@ final class NativePushCoordinatorTests: XCTestCase {
                 "/api/push/apns/installations/\(store.installation!.installationID.uuidString)/revoke",
             ]
         )
+        // The create carries no reason; the bulk revoke names the sign-out.
+        XCTAssertEqual(Self.jsonBody(recorder.requests[1])?["reason"] as? String, "signed_out")
+        XCTAssertNil(store.installation?.pendingBulkRevokeReason)
         XCTAssertNil(try store.loadRecord(kid: pending.kid))
         XCTAssertNil(store.installation?.pendingBulkRevokeThroughGeneration)
     }
@@ -939,7 +1015,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             management: recorder
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
 
         XCTAssertEqual(recorder.requests.map(\.method), ["PUT"])
         XCTAssertEqual(
@@ -947,6 +1023,55 @@ final class NativePushCoordinatorTests: XCTestCase {
             1
         )
         XCTAssertNotNil(try store.loadRecord(kid: pending.kid))
+    }
+
+    /// A bulk revoke that waited for recovery is sent with the reason it was
+    /// staged with; one staged before reasons existed is sent as `unspecified`.
+    func testAPersistedBulkRevokeIsRetriedWithItsStagedReason() async throws {
+        for (staged, sent) in [("session_expired", "session_expired"), (nil, "unspecified")] as [(String?, String)] {
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: nil,
+                providerPatchPending: false
+            )
+            store.installation?.pendingBulkRevokeThroughGeneration = 1
+            store.installation?.pendingBulkRevokeReason = staged
+            let recorder = ManagementRecorder()
+            let coordinator = makeCoordinator(store: store, management: recorder)
+
+            coordinator.resumeAfterAccountActivation()
+            try await recorder.waitForRequestCount(1)
+
+            let bulk = try XCTUnwrap(recorder.requests.first { $0.method == "POST" })
+            XCTAssertEqual(Self.jsonBody(bulk)?["reason"] as? String, sent)
+            try await waitUntil { store.installation?.pendingBulkRevokeThroughGeneration == nil }
+            XCTAssertNil(store.installation?.pendingBulkRevokeReason)
+        }
+    }
+
+    /// Logout stages its reason on the records it newly retires; a revoke
+    /// already pending keeps the reason it was staged with.
+    func testLogoutKeepsAPendingRevokesFirstReason() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        var earlier = makeRecord(kid: "removed-earlier", state: .retiring, pendingRevoke: true, bindGeneration: 1)
+        earlier.revokeReason = PushRevokeReason.instanceRemoved.rawValue
+        try store.saveRecord(earlier)
+        try store.saveRecord(makeRecord(kid: "active", state: .active, pendingRevoke: false, bindGeneration: 1))
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { _ in
+            PushManagementResponse(statusCode: 503, body: ["error": ["code": "relay_unavailable"]])
+        }
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .sessionExpired)
+
+        XCTAssertEqual(try store.loadRecord(kid: "removed-earlier")?.revokeReason, "instance_removed")
+        XCTAssertEqual(try store.loadRecord(kid: "active")?.revokeReason, "session_expired")
+        XCTAssertEqual(store.installation?.pendingBulkRevokeReason, "session_expired")
     }
 
     func testRebindUsesHigherGenerationAndConcreteReplacementIDs() async throws {
@@ -977,7 +1102,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             account: account
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
         coordinator.resumeAfterAccountActivation()
         account.value = Self.accountB
         _ = try await coordinator.subscribe(
@@ -1137,6 +1262,277 @@ final class NativePushCoordinatorTests: XCTestCase {
             subscription["endpoint"] as? String,
             record.publicSubscription["endpoint"] as? String
         )
+    }
+
+    /// A revoke the relay keeps refusing for one origin (an instance that left
+    /// the account) stays queued for retry, and does not stop another
+    /// origin from subscribing (turning notifications back on after a
+    /// sign-in). One the new registration depends on still does: for the
+    /// subscribing origin itself, or with the same VAPID key (the relay
+    /// refuses a create while another registration with that key is active,
+    /// as when the same instance moved to a new address).
+    func testAStuckRevokeForAnotherOriginDoesNotBlockSubscribing() async throws {
+        let subscribingHash = SHA256.hash(
+            data: try XCTUnwrap(PushBase64URL.decode(Self.vapidPublicKey))
+        ).map { String(format: "%02x", $0) }.joined()
+        let rows: [(name: String, origin: String, vapidKeyHash: String, blocks: Bool)] = [
+            ("another origin", "https://gone.example", String(repeating: "a", count: 64), false),
+            ("own origin", Self.instanceOrigin, String(repeating: "a", count: 64), true),
+            ("another origin, same VAPID key", "https://moved-from.example", subscribingHash, true),
+        ]
+        for row in rows {
+            let ownOrigin = row.blocks
+            let stuckOrigin = row.origin
+            let store = makeInstallationStore(
+                providerGeneration: 1,
+                provider: PushProviderState(
+                    deviceToken: Data(repeating: 15, count: 32),
+                    environment: "sandbox",
+                    topic: "bot.avibe.ios",
+                    generation: 1
+                ),
+                providerPatchPending: false
+            )
+            try store.saveRecord(PushKeyRecord(
+                kid: "stuck-revoke",
+                instanceOrigin: stuckOrigin,
+                accountID: Self.accountA.id,
+                accountGeneration: 1,
+                bindGeneration: 1,
+                privateKey: Data(),
+                authSecret: Data(),
+                vapidKeyHash: row.vapidKeyHash,
+                state: .retiring,
+                pendingRevoke: true,
+                replacementRegistrationIDs: []
+            ))
+            let recorder = ManagementRecorder()
+            recorder.responseHandler = { request in
+                request.method == "DELETE" && Self.pathname(request).hasSuffix("/stuck-revoke")
+                    ? PushManagementResponse(
+                        statusCode: 503,
+                        body: ["error": ["code": "relay_unavailable"]]
+                    )
+                    : Self.successResponse
+            }
+            let coordinator = makeCoordinator(store: store, management: recorder)
+
+            let name = row.name
+            do {
+                let subscription = try await coordinator.subscribe(
+                    vapidPublicKey: Self.vapidPublicKey,
+                    instanceOrigin: Self.instanceOrigin
+                )
+                XCTAssertFalse(ownOrigin, "A revoke it depends on must stop it: \(name)")
+                XCTAssertNotNil(subscription["endpoint"] as? String, name)
+            } catch {
+                XCTAssertTrue(ownOrigin, "Blocked by an unrelated revoke: \(error), \(name)")
+            }
+
+            let creates = recorder.requests.filter {
+                $0.method == "PUT" && $0.path.contains("/registrations/")
+            }
+            XCTAssertEqual(creates.count, ownOrigin ? 0 : 1, name)
+            XCTAssertTrue(
+                recorder.requests.contains {
+                    $0.method == "DELETE" && Self.pathname($0).hasSuffix("/stuck-revoke")
+                },
+                "The stuck revoke was tried: \(name)"
+            )
+            // Still queued for retry either way.
+            let stuck = try XCTUnwrap(try store.loadRecord(kid: "stuck-revoke"), name)
+            XCTAssertTrue(stuck.pendingRevoke, name)
+            XCTAssertEqual(stuck.state, .retiring, name)
+        }
+    }
+
+    /// UIKit hands the device token back as a main-queue block. When it is
+    /// queued while the subscription asks for it again, it runs after the
+    /// subscription's provider reconciliation has found nothing pending and
+    /// before the subscription checks the result: the tuple it leaves pending
+    /// is reconciled again and the registration is still created.
+    func testTokenCallbackQueuedAheadOfReconciliationStillRegisters()
+        async throws
+    {
+        let token = Data(repeating: 41, count: 32)
+        let store = makeInstallationStore(
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            providerPatchPending: false
+        )
+        let recorder = ManagementRecorder()
+        let coordinatorBox = Locked<NativePushCoordinator?>(nil)
+        var registrationCalls = 0
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder,
+            registerForRemoteNotifications: {
+                registrationCalls += 1
+                DispatchQueue.main.async {
+                    coordinatorBox.value?.didRegister(
+                        deviceToken: token,
+                        environment: "sandbox"
+                    )
+                }
+            }
+        )
+        coordinatorBox.value = coordinator
+
+        let subscription = try await coordinator.subscribe(
+            vapidPublicKey: Self.vapidPublicKey,
+            instanceOrigin: Self.instanceOrigin
+        )
+        // The callback's own queued reconciliation finds nothing left to do.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(registrationCalls, 1)
+        XCTAssertEqual(
+            recorder.requests.map(Self.requestKind),
+            ["PUT binding", "PATCH provider", "PUT registration"]
+        )
+        XCTAssertEqual(
+            recorder.requests.compactMap(Self.generation),
+            [6]
+        )
+        XCTAssertEqual(store.installation?.provider?.generation, 6)
+        XCTAssertFalse(store.installation?.providerPatchPending ?? true)
+        let record = try XCTUnwrap(try store.listRecords().first)
+        XCTAssertEqual(try store.listRecords().count, 1)
+        XCTAssertEqual(record.state, .active)
+        XCTAssertEqual(
+            subscription["endpoint"] as? String,
+            record.publicSubscription["endpoint"] as? String
+        )
+    }
+
+    func testTokenCallbackDuringProviderPatchStillRegisters() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 42, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            providerPatchPending: true
+        )
+        let recorder = ManagementRecorder()
+        var patches = 0
+        recorder.responseHandler = { request in
+            if request.method == "PATCH" {
+                patches += 1
+                if patches == 1 {
+                    await recorder.waitForReleaseIfNeeded()
+                }
+            }
+            return Self.successResponse
+        }
+        let coordinator = makeCoordinator(
+            store: store,
+            management: recorder
+        )
+
+        let subscription = Task { @MainActor in
+            try await coordinator.subscribe(
+                vapidPublicKey: Self.vapidPublicKey,
+                instanceOrigin: Self.instanceOrigin
+            )
+        }
+        try await recorder.waitForRequestCount(2)
+        let newerToken = Data(repeating: 43, count: 32)
+        coordinator.didRegister(deviceToken: newerToken, environment: "sandbox")
+        try await waitUntil {
+            store.installation?.provider?.generation == 6
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        recorder.release()
+        _ = try await subscription.value
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(
+            recorder.requests.map(Self.requestKind),
+            [
+                "PUT binding",
+                "PATCH provider",
+                "PATCH provider",
+                "PUT registration",
+            ]
+        )
+        XCTAssertEqual(recorder.requests.compactMap(Self.generation), [5, 6])
+        XCTAssertEqual(
+            recorder.requests.last(where: { $0.method == "PATCH" })
+                .flatMap { $0.body.flatMap(Self.deviceToken) },
+            PushBase64URL.encode(newerToken)
+        )
+        XCTAssertFalse(store.installation?.providerPatchPending ?? true)
+        XCTAssertEqual(try store.listRecords().first?.state, .active)
+    }
+
+    /// A tuple that changes again after every reconciliation ends the
+    /// subscription as unavailable after a bounded number of rounds, with no
+    /// registration created.
+    func testEndlessTokenCallbacksEndUnavailableAfterBoundedRounds()
+        async throws
+    {
+        let base = makeInstallationStore(
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: Data(repeating: 44, count: 32),
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            providerPatchPending: true
+        )
+        let store = ProviderSettledHookStore(base: base)
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(
+            store: base,
+            management: recorder,
+            keychain: store
+        )
+        var callbacks: UInt8 = 0
+        store.onProviderSettled = {
+            // Every settled tuple is replaced by a new callback before the
+            // subscription reads it.
+            MainActor.assumeIsolated {
+                callbacks += 1
+                coordinator.didRegister(
+                    deviceToken: Data(repeating: 44 &+ callbacks, count: 32),
+                    environment: "sandbox"
+                )
+            }
+        }
+
+        do {
+            _ = try await coordinator.subscribe(
+                vapidPublicKey: Self.vapidPublicKey,
+                instanceOrigin: Self.instanceOrigin
+            )
+            XCTFail("A tuple that never settles must not subscribe")
+        } catch {
+            XCTAssertEqual(error as? NativePushError, .unavailable)
+        }
+        store.onProviderSettled = nil
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let rounds = NativePushCoordinator.providerReconciliationRounds
+        XCTAssertEqual(rounds, 3)
+        XCTAssertEqual(
+            Array(recorder.requests.compactMap(Self.generation).prefix(rounds)),
+            [5, 6, 7]
+        )
+        XCTAssertFalse(
+            recorder.requests.contains {
+                $0.method == "PUT" && $0.path.contains("/registrations/")
+            }
+        )
+        XCTAssertEqual(try base.listRecords().count, 0)
     }
 
     func testLostCreateResponseReturnsTheRecoveredRegistration()
@@ -1386,11 +1782,173 @@ final class NativePushCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(
             recorder.requests.map(\.path),
-            ["/api/push/apns/registrations/\(target.kid)"]
+            ["/api/push/apns/registrations/\(target.kid)?reason=notifications_off"]
         )
         XCTAssertNil(try store.loadRecord(kid: target.kid))
         XCTAssertNotNil(try store.loadRecord(kid: "a-other-account"))
         XCTAssertNotNil(try store.loadRecord(kid: "b-stale-generation"))
+    }
+
+    func testTheDeviceIdentifierIsDerivedFromThisInstallationOnly() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        let installation = try XCTUnwrap(store.installation)
+        let coordinator = makeCoordinator(store: store, management: ManagementRecorder())
+
+        // HMAC-SHA256 of the instance id under this installation's secret.
+        XCTAssertEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-1"),
+            "9e24a60986550cf6eb110b6137bfe1a8"
+        )
+        XCTAssertNotEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-2"),
+            coordinator.deviceIdentifier(forInstanceID: "instance-1")
+        )
+        // Neither the relay's installation id nor its secret is the answer.
+        XCTAssertNotEqual(
+            coordinator.deviceIdentifier(forInstanceID: "instance-1"),
+            installation.installationID.uuidString.lowercased()
+        )
+
+        // A Keychain installation from before a reinstall is not this one.
+        let reinstalled = InMemoryPushInstallationMarkerStore()
+        reinstalled.installationID = UUID()
+        let afterReinstall = makeCoordinator(
+            store: store, management: ManagementRecorder(), marker: reinstalled
+        )
+        XCTAssertNil(afterReinstall.deviceIdentifier(forInstanceID: "instance-1"))
+
+        // No installation yet.
+        let empty = makeCoordinator(store: InMemoryPushKeychainStore(), management: ManagementRecorder())
+        XCTAssertNil(empty.deviceIdentifier(forInstanceID: "instance-1"))
+    }
+
+    /// The account's list no longer has some instances: their registrations
+    /// are staged as pending revokes (keys zeroed) and revoked; a listed
+    /// origin, another account's record and a stale generation stay. A
+    /// failed request leaves the revoke pending for recovery, and a call for
+    /// an account that is not the one signed in does nothing.
+    func testRevokingOutsideTheListedOriginsKeepsListedOnes() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        func record(_ kid: String, _ origin: String, account: String = Self.accountA.id, generation: Int64 = 1, state: PushKeyRecord.State = .active) -> PushKeyRecord {
+            PushKeyRecord(
+                kid: kid,
+                instanceOrigin: origin,
+                accountID: account,
+                accountGeneration: generation,
+                bindGeneration: 1,
+                privateKey: Data(repeating: 13, count: 32),
+                authSecret: Data(repeating: 14, count: 16),
+                vapidKeyHash: String(repeating: "a", count: 64),
+                state: state,
+                pendingRevoke: false,
+                replacementRegistrationIDs: []
+            )
+        }
+        try store.saveRecord(record("listed", Self.instanceOrigin))
+        // A create whose answer was lost, for a removed origin.
+        try store.saveRecord(record("removed-3", "https://removed-three.example", state: .pending))
+        try store.saveRecord(record("removed-1", "https://removed-one.example"))
+        try store.saveRecord(record("removed-2", "https://removed-two.example"))
+        try store.saveRecord(record("other-account", "https://removed-one.example", account: Self.accountB.id))
+        try store.saveRecord(record("stale-generation", "https://removed-one.example", generation: 0))
+        let recorder = ManagementRecorder()
+        recorder.responseHandler = { request in
+            Self.pathname(request).hasSuffix("/removed-1")
+                ? PushManagementResponse(statusCode: 503, body: ["error": ["code": "relay_unavailable"]])
+                : Self.successResponse
+        }
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        // Not the account signed in: nothing.
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountB.id)
+        XCTAssertTrue(recorder.requests.isEmpty)
+
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            [
+                "/api/push/apns/registrations/removed-1?reason=instance_removed",
+                "/api/push/apns/registrations/removed-2?reason=instance_removed",
+                "/api/push/apns/registrations/removed-3?reason=instance_removed",
+            ]
+        )
+        // The first one failing does not hold back the others.
+        XCTAssertNil(try store.loadRecord(kid: "removed-2"))
+        XCTAssertNil(try store.loadRecord(kid: "removed-3"))
+        let pending = try XCTUnwrap(try store.loadRecord(kid: "removed-1"))
+        XCTAssertEqual(pending.state, .retiring)
+        XCTAssertTrue(pending.pendingRevoke)
+        XCTAssertTrue(pending.privateKey.isEmpty)
+        XCTAssertEqual(try store.loadRecord(kid: "listed")?.state, .active)
+        XCTAssertEqual(try store.loadRecord(kid: "other-account")?.state, .active)
+        XCTAssertEqual(try store.loadRecord(kid: "stale-generation")?.state, .active)
+
+        XCTAssertEqual(pending.revokeReason, PushRevokeReason.instanceRemoved.rawValue)
+
+        // Called again with the same list: the pending one is retried, with its first reason.
+        recorder.responseHandler = { _ in Self.successResponse }
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+        XCTAssertEqual(recorder.requests.last?.path, "/api/push/apns/registrations/removed-1?reason=instance_removed")
+        XCTAssertNil(try store.loadRecord(kid: "removed-1"))
+        XCTAssertEqual(try store.loadRecord(kid: "listed")?.state, .active)
+    }
+
+    /// A revoke staged by an App from before reasons is retried as
+    /// `unspecified`, never guessed (docs/plans/ios-push-relay-contract.md).
+    func testARevokeStagedBeforeReasonsIsSentAsUnspecified() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        try store.saveRecord(makeRecord(
+            kid: "legacy-pending",
+            state: .retiring,
+            pendingRevoke: true,
+            bindGeneration: 1
+        ))
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        await coordinator.revokeRegistrations(outside: [Self.instanceOrigin], accountID: Self.accountA.id)
+
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            ["/api/push/apns/registrations/legacy-pending?reason=unspecified"]
+        )
+        XCTAssertNil(try store.loadRecord(kid: "legacy-pending"))
+    }
+
+    /// Turning notifications off for an origin whose revoke is already
+    /// pending retries it with the reason it was staged with.
+    func testUnsubscribeRetryingAPendingRevokeKeepsItsReason() async throws {
+        let store = makeInstallationStore(
+            providerGeneration: 1,
+            provider: nil,
+            providerPatchPending: false
+        )
+        var pending = makeRecord(kid: "pending-target", state: .retiring, pendingRevoke: true, bindGeneration: 1)
+        pending.revokeReason = PushRevokeReason.instanceRemoved.rawValue
+        try store.saveRecord(pending)
+        let recorder = ManagementRecorder()
+        let coordinator = makeCoordinator(store: store, management: recorder)
+
+        let outcome = try await coordinator.unsubscribe(instanceOrigin: Self.instanceOrigin)
+
+        XCTAssertEqual(outcome, .confirmed)
+        XCTAssertEqual(
+            recorder.requests.map(\.path),
+            ["/api/push/apns/registrations/pending-target?reason=instance_removed"]
+        )
     }
 
     func testUnsubscribeRetriesThePersistedConcretePendingRevoke()
@@ -1413,7 +1971,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         recorder.responseHandler = { request in
             XCTAssertEqual(
                 request.path,
-                "/api/push/apns/registrations/cleanup-target"
+                "/api/push/apns/registrations/cleanup-target?reason=notifications_off"
             )
             attempts += 1
             return attempts == 1
@@ -1481,7 +2039,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         )
 
         let logout = Task {
-            await coordinator.prepareForLogout(throughBindGeneration: 1)
+            await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
         }
         try await recorder.waitForRequestCount(1)
         XCTAssertEqual(recorder.requests.first?.method, "POST")
@@ -1568,7 +2126,7 @@ final class NativePushCoordinatorTests: XCTestCase {
             notificationCenter: notificationCenter
         )
 
-        await coordinator.prepareForLogout(throughBindGeneration: 1)
+        await coordinator.prepareForLogout(throughBindGeneration: 1, reason: .signedOut)
 
         XCTAssertEqual(
             notificationCenter.removedDelivered,
@@ -1615,9 +2173,29 @@ final class NativePushCoordinatorTests: XCTestCase {
             request.path,
             "/api/push/apns/installations/\(oldID.uuidString)/revoke"
         )
+        XCTAssertEqual(Self.jsonBody(request)?["reason"] as? String, "reinstalled")
         XCTAssertEqual(store.orphanedInstallations.count, 0)
         XCTAssertNotEqual(store.installation?.installationID, oldID)
         XCTAssertEqual(store.installation?.installationSecret.count, 32)
+    }
+
+    func testHealthRequestNotificationOpensOnlyItsStatusLandingPath() {
+        var taps: [PushNotificationTap] = []
+        var recoveries = 0
+        let coordinator = makeCoordinator(
+            store: InMemoryPushKeychainStore(), management: ManagementRecorder(),
+            onTap: { taps.append($0) }, onTapRecovery: { recoveries += 1 }
+        )
+        coordinator.handleNotificationTap(userInfo: [
+            "kind": "health.request", "account_id": Self.accountA.id,
+            "instance_origin": Self.instanceOrigin,
+            "url": "/mobile/health/request-1",
+        ])
+        XCTAssertEqual(taps, [PushNotificationTap(
+            accountID: Self.accountA.id, instanceOrigin: Self.instanceOrigin,
+            url: "/mobile/health/request-1"
+        )])
+        XCTAssertEqual(recoveries, 0)
     }
 
     func testInvalidNotificationTapUsesInstanceRecovery() {
@@ -1664,6 +2242,7 @@ final class NativePushCoordinatorTests: XCTestCase {
     private func makeCoordinator(
         store: InMemoryPushKeychainStore,
         management: ManagementRecorder,
+        keychain: PushKeychainStoring? = nil,
         tokenWaitSeconds: Double = 0.5,
         marker: InMemoryPushInstallationMarkerStore? = nil,
         account: Locked<MobileAccount?>? = nil,
@@ -1684,7 +2263,7 @@ final class NativePushCoordinatorTests: XCTestCase {
         let generationStore = InMemoryPushGenerationStore()
         generationStore.generation = account.value == nil ? 0 : 1
         return NativePushCoordinator(
-            keychain: store,
+            keychain: keychain ?? store,
             generationStore: generationStore,
             managementRequest: { request in
                 management.record(request)
@@ -1760,6 +2339,28 @@ final class NativePushCoordinatorTests: XCTestCase {
         return (json["provider_generation"] as? NSNumber)?.int64Value
     }
 
+    private static func requestKind(
+        _ request: ManagementRecorder.RecordedRequest
+    ) -> String {
+        if request.path.contains("/registrations/") {
+            return "\(request.method) registration"
+        }
+        return "\(request.method) \(request.path.split(separator: "/").last ?? "")"
+    }
+
+    /// The request's path without its query (revokes carry `?reason=`).
+    private static func pathname(_ request: ManagementRecorder.RecordedRequest) -> Substring {
+        request.path.split(separator: "?", maxSplits: 1).first ?? ""
+    }
+
+    private static func jsonBody(
+        _ request: ManagementRecorder.RecordedRequest
+    ) -> [String: Any]? {
+        request.body
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) }
+            .flatMap { $0 as? [String: Any] }
+    }
+
     private static func deviceToken(
         _ body: Data
     ) -> String? {
@@ -1830,6 +2431,54 @@ private final class FakePushNotificationCenter: PushNotificationCentering {
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
         removedPending.append(contentsOf: identifiers)
+    }
+}
+
+/// Calls `onProviderSettled` after every write that leaves a provider tuple
+/// with no PATCH pending, before the writer goes on.
+private final class ProviderSettledHookStore: PushKeychainStoring {
+    let base: InMemoryPushKeychainStore
+    var onProviderSettled: (() -> Void)?
+
+    init(base: InMemoryPushKeychainStore) {
+        self.base = base
+    }
+
+    func loadInstallation() throws -> PushInstallationState? {
+        try base.loadInstallation()
+    }
+
+    func saveInstallation(_ state: PushInstallationState) throws {
+        try base.saveInstallation(state)
+        if state.provider != nil, !state.providerPatchPending {
+            onProviderSettled?()
+        }
+    }
+
+    func loadOrphanedInstallations() throws -> [PushOrphanedInstallation] {
+        try base.loadOrphanedInstallations()
+    }
+
+    func saveOrphanedInstallations(
+        _ installations: [PushOrphanedInstallation]
+    ) throws {
+        try base.saveOrphanedInstallations(installations)
+    }
+
+    func loadRecord(kid: String) throws -> PushKeyRecord? {
+        try base.loadRecord(kid: kid)
+    }
+
+    func saveRecord(_ record: PushKeyRecord) throws {
+        try base.saveRecord(record)
+    }
+
+    func deleteRecord(kid: String) throws {
+        try base.deleteRecord(kid: kid)
+    }
+
+    func listRecords() throws -> [PushKeyRecord] {
+        try base.listRecords()
     }
 }
 

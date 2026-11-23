@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '@/lib/desktopVoiceLock';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, useLayoutEffect, type CSSProperties, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -12,6 +13,7 @@ import { FileCard } from '@/components/ui/file-card';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
+import { beginVoiceConsentRead, noteVoiceStatus, voiceSendAllowed } from '@/lib/voiceConsent';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { readMessageAttachments } from '@/lib/messageAttachments';
@@ -42,6 +44,8 @@ import { FencedSource } from './fencedSource';
 import './pet-mini.css';
 
 const HOLD_MS = 320;
+/** How far (CSS px) a press moves before it is a drag rather than a click or hold. */
+const DRAG_SLOP = 4;
 const DOUBLE_CLICK_DETECTION_MS = 450;
 const DISMISS_EXIT_MS = 500;
 const STOP_CONFIRM_MS = 3000;
@@ -161,6 +165,10 @@ export const PetPage: React.FC = () => {
   return <PetSurface />;
 };
 
+/** The shell's sideways move of the column (and the setup card) off Vibey's
+ * centre, for a pet near a display's side; pet-mini.css reads it. */
+const columnOffsetStyle = (layout: PetLayout) => ({ '--pet-column-offset': `${layout.column_offset}px` }) as CSSProperties;
+
 const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const { t } = useTranslation();
   useOnSummon(recheck);
@@ -168,7 +176,7 @@ const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   useHitRegions(rootRef);
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge} data-layout-pending={awaiting || undefined}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge} data-layout-pending={awaiting || undefined} style={columnOffsetStyle(layout)}>
       <div className="pet-mini-setup" data-pet-hit>
         <p>{t('pet.setupPending')}</p>
         <Button size="sm" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openAvibe')}</Button>
@@ -321,16 +329,26 @@ const PetSurface: React.FC = () => {
   const composerBeforeClickRef = useRef(false);
   const doubleOpenedRef = useRef(false);
   const allowDoubleEventRef = useRef(false);
+  const beginDrag = (press: { dragged: boolean; x: number; y: number; timer: number }) => {
+    press.dragged = true;
+    window.clearTimeout(press.timer);
+    lastClickAtRef.current = 0;
+    doubleOpenedRef.current = false;
+    allowDoubleEventRef.current = false;
+    // The drop's layout arrives as the shell's snapshot (petShell).
+    void petBridge.drag({ x: press.x, y: press.y }).catch(() => undefined);
+  };
   const dismissTimers = useRef<Record<string, number>>({});
   const closeComposer = useCallback(() => {
     setComposing(false);
   }, [setComposing]);
   // An open history stays open: the input takes its place below it (§5.2).
   const openComposer = useCallback((text?: string, selected?: SessionReference[]) => {
-    if (!epoch.isCurrent()) return;
+    if (!epoch.isCurrent() || !desktopVoiceLock.allowed()) return;
     if (text !== undefined) setDraft(text, selected);
     setComposing(true);
-    window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
+    const lockToken = desktopVoiceLock.token();
+    window.setTimeout(() => { if (epoch.isCurrent() && desktopVoiceLock.current(lockToken)) inputRef.current?.focus(); }, 0);
   }, [epoch, setComposing, setDraft]);
   const hotkeyHeld = useRef(false);
   const resetVoiceShortcut = useCallback(() => {
@@ -568,7 +586,7 @@ const PetSurface: React.FC = () => {
       : derivePetPose(state, { othersWorking: liveCards.some((card) => card.running), asleep });
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
-    if (!epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
+    if (!desktopVoiceLock.allowed() || !epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
     if (petComposer.isSending() || petComposer.isUncertain(binding)) return false;
     petComposer.setSending(true);
     try {
@@ -576,7 +594,7 @@ const PetSurface: React.FC = () => {
       const row = await api.sendSessionMessage(binding, {
         text: text.trim(),
         ...(references.length ? { content: { references } } : {}),
-        ...(metadata ? { metadata } : {}),
+        metadata: { ...metadata, input_surface: 'mini' },
       });
       if (epoch.isCurrent()) {
         data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
@@ -691,9 +709,19 @@ const PetSurface: React.FC = () => {
     return () => document.removeEventListener('click', onClick, true);
   }, [composing, voice.busy, closeComposer]);
 
+  useEffect(() => desktopVoiceLock.onInvalidate(() => {
+    hotkeyHeld.current = false;
+    const press = pressRef.current;
+    pressRef.current = null;
+    if (press) window.clearTimeout(press.timer);
+    lastClickAtRef.current = 0;
+    doubleOpenedRef.current = false;
+    allowDoubleEventRef.current = false;
+  }), []);
+
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
-    if (!intent) return;
+    if (!desktopVoiceLock.allowed() || !intent) return;
     if (intent === 'release') {
       hotkeyHeld.current = false;
       voice.stop(true);
@@ -714,7 +742,7 @@ const PetSurface: React.FC = () => {
   }, [setPanel, openCards, voice.stop, voice.busy, voice.finishing, composing, binding, canChat, uncertain, resetVoiceShortcut]);
   useOnSummon(onSummon);
   useEffect(() => {
-    if (!listenPending || !binding || !canChat || !expanded) return;
+    if (!desktopVoiceLock.allowed() || !listenPending || !binding || !canChat || !expanded) return;
     petComposer.takeListen();
     if (uncertain) { resetVoiceShortcut(); setDetailOpen(true); return; }
     if (hotkeyHeld.current && voice.available) voice.start();
@@ -1002,6 +1030,7 @@ const PetSurface: React.FC = () => {
           if (allowDoubleEventRef.current) openDoubleClick();
         }}
         onPointerDown={(event) => {
+          if (!desktopVoiceLock.allowed()) return;
           if (event.button !== 0) return;
           const target = event.currentTarget;
           const pointerId = event.pointerId;
@@ -1019,10 +1048,18 @@ const PetSurface: React.FC = () => {
             double: isSecondClick,
             x: event.clientX,
             y: event.clientY,
-            timer: window.setTimeout(() => {
-              if (!epoch.isCurrent()) return;
+            timer: window.setTimeout(() => void (async () => {
+              // A freshly shown window can get the press but none of the moves
+              // after it, so before calling this a hold, ask the shell where the
+              // pointer is: moved means a drag, released means nothing. The
+              // answer belongs to this press only: a release and a new press
+              // while it is on its way discard it.
               const press = pressRef.current;
-              if (!press) return;
+              if (!press || press.held || press.dragged) return;
+              const pointer = petBridge.shellDrags() ? await petBridge.pointer().catch(() => null) : null;
+              if (!epoch.isCurrent() || pressRef.current !== press || press.held || press.dragged) return;
+              if (pointer?.down === false) { pressRef.current = null; return; }
+              if (pointer && Math.hypot(pointer.x - press.x, pointer.y - press.y) >= DRAG_SLOP) { beginDrag(press); return; }
               press.held = true;
               lastClickAtRef.current = 0;
               doubleOpenedRef.current = false;
@@ -1032,7 +1069,7 @@ const PetSurface: React.FC = () => {
               if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
               if (voice.available) voice.start();
               else openComposer(draft);
-            }, HOLD_MS),
+            })(), HOLD_MS),
           };
         }}
         onMouseDown={(event) => {
@@ -1055,14 +1092,8 @@ const PetSurface: React.FC = () => {
         onPointerMove={(event) => {
           const press = pressRef.current;
           if (!press || press.held || press.dragged || event.buttons !== 1) return;
-          if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 4) return;
-          press.dragged = true;
-          window.clearTimeout(press.timer);
-          lastClickAtRef.current = 0;
-          doubleOpenedRef.current = false;
-          allowDoubleEventRef.current = false;
-          // The drop's layout arrives as the shell's snapshot (petShell).
-          void petBridge.drag().catch(() => undefined);
+          if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < DRAG_SLOP) return;
+          beginDrag(press);
         }}
         onPointerCancel={() => {
           const press = pressRef.current;
@@ -1135,7 +1166,7 @@ const PetSurface: React.FC = () => {
   );
 
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-layout-pending={awaitingLayout || undefined} style={columnOffsetStyle(layout)}>
       {composing && canChat && !uncertain && !voice.busy && (
         // Capture blank-space clicks only while typing. Keep this outside the
         // avatar's hover zone and below every control; the existing document
@@ -1144,7 +1175,7 @@ const PetSurface: React.FC = () => {
       )}
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div
-          className={clsx('pet-mini-cards max-w-79', voice.busy && 'is-hidden')}
+          className={clsx('pet-mini-cards', voice.busy && 'is-hidden')}
           inert={voice.busy || undefined}
           aria-label={cardsExpanded ? t('pet.panel') : undefined}
           style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}
@@ -1231,32 +1262,16 @@ const PetSurface: React.FC = () => {
           {inputShown && <div ref={inputAreaRef}>{voice.busy ? <Marquee text={voice.finishing ? '' : voice.preview} listeningLabel={t(voice.finishing ? 'pet.voice.finishing' : 'pet.voice.listening')} /> : (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
-          <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
-            {draftReferences.length > 0 && <div className="pet-mini-references">
-              {draftReferences.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
-                <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
-                <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}><X size={12} /></button>
-              </span>)}
-            </div>}
-            <div className="pet-mini-input-row">
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={inputDraft}
-              onChange={(event) => setDraft([...draftMarkers, event.target.value].join(' '))}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
-                  event.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder={t('pet.inputPlaceholder')}
-              aria-label={t('pet.inputPlaceholder')}
-            />
-            {voice.available && <button type="button" className="pet-mini-input-button" onClick={() => voice.start()} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
-            <button type="submit" className="pet-mini-send" disabled={!draft.trim() || sending || uncertain} aria-label={t('pet.send')}><SendIcon /></button>
-            </div>
-          </form>
+          <PetComposerInput
+            inputRef={inputRef}
+            references={draftReferences}
+            value={inputDraft}
+            onValueChange={(value) => setDraft([...draftMarkers, value].join(' '))}
+            onRemoveReference={(reference) => setDraft(draft.replaceAll(referenceToMarker(reference), '').trim())}
+            onSubmit={() => void submit()}
+            onVoice={voice.available ? () => voice.start() : null}
+            sendDisabled={!draft.trim() || sending || uncertain}
+          />
           </>
           )}</div>}
         </SpeechSlot>
@@ -1266,6 +1281,49 @@ const PetSurface: React.FC = () => {
   );
 };
 
+
+/** The Mini's composer, drawn from props alone so a design frame can render it. */
+export const PetComposerInput: React.FC<{
+  inputRef?: React.Ref<HTMLTextAreaElement>;
+  references: SessionReference[];
+  value: string;
+  onValueChange: (value: string) => void;
+  onRemoveReference: (reference: SessionReference) => void;
+  onSubmit: () => void;
+  /** Null when voice input is unavailable. */
+  onVoice: (() => void) | null;
+  sendDisabled: boolean;
+}> = ({ inputRef, references, value, onValueChange, onRemoveReference, onSubmit, onVoice, sendDisabled }) => {
+  const { t } = useTranslation();
+  return (
+    <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
+      {references.length > 0 && <div className="pet-mini-references">
+        {references.map((reference) => <span key={reference.session_id} className="pet-mini-reference-chip">
+          <span title={reference.title ?? reference.session_id}># {reference.title ?? reference.session_id}</span>
+          <button type="button" aria-label={t('pet.removeReference', { title: reference.title ?? reference.session_id })} onClick={() => onRemoveReference(reference)}><X size={12} /></button>
+        </span>)}
+      </div>}
+      <div className="pet-mini-input-row">
+      <textarea
+        ref={inputRef}
+        rows={1}
+        value={value}
+        onChange={(event) => onValueChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' && !event.shiftKey && !isComposingKey(event)) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+        placeholder={t('pet.inputPlaceholder')}
+        aria-label={t('pet.inputPlaceholder')}
+      />
+      {onVoice && <button type="button" className="pet-mini-input-button" onClick={onVoice} aria-label={t('pet.voiceContinue')}><MicIcon /></button>}
+      <button type="submit" className="pet-mini-send" disabled={sendDisabled} aria-label={t('pet.send')}><SendIcon /></button>
+      </div>
+    </form>
+  );
+};
 
 function useReducedMotion() {
   const [reduced, setReduced] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
@@ -1350,7 +1408,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
 }
 
 function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; keepTarget: string | null; onOpenComposer: (text?: string) => void; onCaptureEnd: () => void }) {
-  const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
+  const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number; allowed?: boolean }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
   // Stop has been requested; capture and cleanup still run until `done`.
@@ -1366,16 +1424,25 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
   // unfocused, so this read does not wait for activation. Status is keyed to
   // this bind/epoch: a previous available result cannot start a capture on
   // the next one. Settings changes take effect on that next epoch.
+  const readAsr = useCallback((alive: () => boolean) => {
+    const consentRead = beginVoiceConsentRead();
+    void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
+      if (!alive() || !epoch.isCurrent()) return;
+      if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
+      // Whether this account allowed voice input (lib/voiceConsent): a status without the field
+      // comes from an instance that asks nothing.
+      else {
+        noteVoiceStatus(value, consentRead);
+        setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes, allowed: !('consent' in value) || value.consent === 'granted' });
+      }
+    }).catch(() => { if (alive() && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
+  }, [enabled, epoch]);
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
-    void fetch('/api/asr/status', { credentials: 'same-origin' }).then((response) => response.ok ? response.json() : null).then((value) => {
-      if (!alive || !epoch.isCurrent()) return;
-      if (value === null) setAsr({ epoch, enabled, available: false, checked: false });
-      else setAsr({ epoch, enabled, available: Boolean(value.available), checked: true, maxFileBytes: value.max_file_bytes });
-    }).catch(() => { if (alive && epoch.isCurrent()) setAsr({ epoch, enabled, available: false, checked: false }); });
+    readAsr(() => alive);
     return () => { alive = false; };
-  }, [enabled, epoch]);
+  }, [enabled, readAsr]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
     if (!capture) return;
@@ -1405,7 +1472,18 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
     setPreview('');
   }, [onCaptureEnd]);
   const start = useCallback(() => {
-    if (!epoch.isCurrent() || !available || captureRef.current) return;
+    if (!desktopVoiceLock.allowed() || !epoch.isCurrent() || !available || captureRef.current) return;
+    const lockToken = desktopVoiceLock.token();
+    // Voice goes to a third-party AI service: the mini window records nothing before this
+    // account said yes, and says where to turn it on (the question is asked in Avibe's window).
+    // A "no" given since in Avibe's window or on another device reaches this window's store
+    // through the event stream (lib/voiceConsent).
+    if (!asrForEpoch.allowed || !voiceSendAllowed()) {
+      setError('consentOff');
+      // The answer may have changed in Avibe's window since this surface read it.
+      readAsr(() => true);
+      return;
+    }
     const before = draft;
     const capture: Capture = {
       // Kept on the device until its words reach the pet's draft; a take that cannot be
@@ -1414,18 +1492,28 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
         before,
         after: '',
         maxFileBytes: asrForEpoch.maxFileBytes,
-        onPreview: (text) => { if (epoch.isCurrent()) setPreview(text); },
+        onPreview: (text) => { if (epoch.isCurrent() && desktopVoiceLock.current(lockToken) && captureRef.current === capture) setPreview(text); },
         ...(keepTarget ? { keep: { target: keepTarget, intent: 'insert' as const } } : {}),
       }),
       ending: false,
       cancelled: false,
     };
     captureRef.current = capture;
+    const stopWatchingLock = desktopVoiceLock.onInvalidate(() => {
+      capture.cancelled = true;
+      capture.ending = true;
+      if (captureRef.current === capture) {
+        captureRef.current = null;
+        onCaptureEnd();
+        setListening(false); setFinishing(false); setPreview('');
+      }
+      capture.dictation.abort();
+    });
     setListening(true);
     setFinishing(false);
     setError(null);
     const settle = () => {
-      if (captureRef.current !== capture || !epoch.isCurrent()) return false;
+      if (captureRef.current !== capture || !epoch.isCurrent() || !desktopVoiceLock.current(lockToken)) return false;
       if (!capture.ending) onCaptureEnd();
       captureRef.current = null;
       setListening(false);
@@ -1452,14 +1540,14 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
       fail(reason);
       // A take that could not be transcribed stays on the device: the pet lets go of it, so the
       // bound conversation's pending voice items offer it (lib/voiceTakeStore).
-      capture.dictation.detach();
-    });
+      if (!capture.cancelled) capture.dictation.detach();
+    }).finally(stopWatchingLock);
     void capture.dictation.start().then(() => {
-      if (!epoch.isCurrent()) { capture.dictation.abort(); return; }
+      if (!epoch.isCurrent() || !desktopVoiceLock.current(lockToken) || capture.cancelled) { capture.dictation.abort(); return; }
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
-  }, [asrForEpoch.maxFileBytes, available, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd]);
+  }, [asrForEpoch.maxFileBytes, asrForEpoch.allowed, available, epoch, draft, keepTarget, onOpenComposer, onCaptureEnd, readAsr]);
   const cancel = useCallback(() => stop(false), [stop]);
   const clearError = useCallback(() => setError(null), []);
   // The pet's surface changing under a take is not the reader discarding it: what was said is
@@ -1492,7 +1580,7 @@ function usePetVoice({ enabled, epoch, draft, keepTarget, onOpenComposer, onCapt
   };
 }
 
-type VoiceFailure = 'startFailed' | 'empty' | 'failed';
+type VoiceFailure = 'startFailed' | 'empty' | 'failed' | 'consentOff';
 
 // Anything that is not a transcription error comes from getting the
 // microphone itself (permission denied, no input device, capture setup).
@@ -1776,7 +1864,7 @@ export const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open
   // bubble lays out bottom-up: the toggle keeps its place at the bottom and
   // the history opens above it, so expanding never moves what was clicked.
   return (
-    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main max-w-70', compact && 'is-compact')} data-pet-hit>
+    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main', compact && 'is-compact')} data-pet-hit>
       <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
         <span className="pet-mini-bubble-speaker">{speaker}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>

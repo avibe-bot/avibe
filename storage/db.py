@@ -49,14 +49,14 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
     if path.exists() and path.stat().st_size:
         # Explicit-path stores also use this factory, sometimes without the
         # importer. Reject incompatible epochs before even changing WAL mode.
-        from storage.migrations import preflight_database
+        from storage.migrations import preflight_database, preflight_for_write
 
         identity = (path.stat().st_dev, path.stat().st_ino)
         with _cached_engine_lock:
             checked = _checked_sqlite_paths.get(path)
         if checked != identity:
             try:
-                preflight_database(path, read_only=read_only)
+                decision = preflight_database(path, read_only=True) if read_only else preflight_for_write(path)
             except sqlite3.Error as exc:
                 # Factory callers already handle SQLAlchemy's DBAPI error
                 # hierarchy. Preserve it when the earlier raw-SQLite admission
@@ -64,8 +64,11 @@ def create_sqlite_engine(db_path: Path | None = None, *, read_only: bool = False
                 raise DBAPIError.instance(
                     "SQLite compatibility preflight", None, exc, sqlite3.Error, hide_parameters=True,
                 ) from exc
-            with _cached_engine_lock:
-                _checked_sqlite_paths[path] = identity
+            # Do not memoize pending copy-backed upgrades: a read-only open
+            # must not authorize the later writer, and capacity is not stable.
+            if decision.backup_revisions is None or decision.compatible_open or decision.skip_snapshot:
+                with _cached_engine_lock:
+                    _checked_sqlite_paths[path] = identity
     if not read_only:
         path.parent.mkdir(parents=True, exist_ok=True)
     # ``hide_parameters`` keeps bound values out of ``str(exc)`` on every

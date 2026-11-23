@@ -294,6 +294,118 @@ def test_voice_telemetry_logs_a_capture_trace_and_only_its_known_states(caplog):
     assert "device-id-secret" not in record.message
 
 
+def test_voice_telemetry_keeps_a_take_the_ios_app_recorded(caplog):
+    client = app.test_client()
+    trace = _capture_trace(
+        pressMs=262,
+        attempts=[
+            {
+                "kind": "native",
+                "atMs": 3,
+                "mic": "ok",
+                "micMs": 61,
+                "sampleRate": 16_000,
+                "chunks": 40,
+                "firstFrameMs": 83,
+                "levels": 120,
+                "trackStart": "none",
+                "trackEnd": "none",
+                "end": "error",
+                "nativeEnd": "route",
+            }
+        ],
+    )
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post("/api/asr/telemetry", json=trace, headers=csrf_headers(client))
+
+    assert response.status_code == 200
+    _, metric = _logged_metric(caplog)
+    assert metric["pressMs"] == 262
+    assert metric["attempts"] == trace["attempts"]
+    bad = _capture_trace(attempts=[{"kind": "native", "nativeEnd": "the user said hi"}])
+    response = client.post("/api/asr/telemetry", json=bad, headers=csrf_headers(client))
+    assert response.status_code == 400
+
+
+def test_voice_telemetry_keeps_the_ios_apps_timings_of_a_hold_it_recognised(caplog):
+    client = app.test_client()
+    attempt = {
+        "kind": "native",
+        "atMs": 204,
+        "mic": "ok",
+        "micMs": 28,
+        "sampleRate": 16_000,
+        "chunks": 31,
+        "firstFrameMs": 29,
+        "levels": 96,
+        "trackStart": "none",
+        "end": "rendered",
+        "hold": "early",
+        "holdRecMs": 200,
+        "holdLiveMs": 61,
+        "holdBufMs": 160,
+        "holdAdoptMs": 231,
+        "holdUpMs": 2_480,
+        "holdActMs": 38,
+        "holdStartMs": 21,
+        "holdT": 50,
+        "holdDlyMs": 14,
+        "holdArmMs": 66,
+        "holdBeginMs": 66,
+        "holdCatMs": 9,
+        "holdPrepMs": 28,
+        "holdTaps": 42,
+        "holdTapsMoved": 7,
+        "holdTapsOpen": 3,
+        "holdTapsW50": 3,
+        "holdTapsW80": 2,
+        "holdTapsW100": 1,
+        "holdTapsW120": 0,
+    }
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry",
+            # Anything else the App said of the hold (its audio route, say) is not kept.
+            json=_capture_trace(pressMs=204, attempts=[{**attempt, "route": "Speaker"}]),
+            headers=csrf_headers(client),
+        )
+
+    assert response.status_code == 200
+    _, metric = _logged_metric(caplog)
+    assert metric["attempts"] == [attempt]
+    for bad in (
+        {"hold": "sometimes"}, {"holdLiveMs": -139}, {"holdAdoptMs": "soon"}, {"holdActMs": True},
+        {"holdT": "50"}, {"holdTapsW50": -1},
+    ):
+        response = client.post(
+            "/api/asr/telemetry",
+            json=_capture_trace(attempts=[{"kind": "native", **bad}]),
+            headers=csrf_headers(client),
+        )
+        assert response.status_code == 400, bad
+        assert response.get_json() == {"error": "invalid_field", "field": "attempts"}
+
+
+def test_voice_telemetry_keeps_why_the_ios_app_did_not_follow_a_hold(caplog):
+    client = app.test_client()
+    with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
+        response = client.post(
+            "/api/asr/telemetry", json=_capture_trace(holdMiss="covered"), headers=csrf_headers(client)
+        )
+    assert response.status_code == 200
+    _, metric = _logged_metric(caplog)
+    assert metric["holdMiss"] == "covered"
+    response = client.post(
+        "/api/asr/telemetry", json=_capture_trace(holdMiss="unanswered"), headers=csrf_headers(client)
+    )
+    assert response.status_code == 200
+    response = client.post(
+        "/api/asr/telemetry", json=_capture_trace(holdMiss="the page said so"), headers=csrf_headers(client)
+    )
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "invalid_field", "field": "holdMiss"}
+
+
 def test_voice_telemetry_rejects_a_malformed_capture_trace():
     client = app.test_client()
     attempt_with_text = _capture_trace()

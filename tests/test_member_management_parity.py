@@ -110,8 +110,13 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("POST", "/api/remote-access/claims"),
+    ("GET", "/api/remote-access/claims/{claim_id}"),
+    ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
+    ("GET", "/api/devices/connection"),
+    ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
@@ -130,6 +135,28 @@ _RETAINED_OWNER_ROUTES = {
     ("DELETE", "/api/bots/{handle}"),
     ("PUT", "/api/bots/{handle}/avatar"),
     ("GET", "/api/bots/{handle}/avatar"),
+    # Browser policy stays Owner-only. Exact device routes use the independent
+    # bearer/code boundary, covered by test_mobile_health.py.
+    ("POST", "/api/mobile/pairings"),
+    ("GET", "/api/mobile/requests/{request_id}"),
+    ("POST", "/api/mobile/device/v1/pair"),
+    ("POST", "/api/mobile/device/v1/binding-ticket"),
+    ("POST", "/api/devices/{device_id}/health/revoke"),
+    ("POST", "/api/devices/unlinked-health/{device_id}/revoke"),
+    ("PUT", "/api/mobile/device/v1/manifest"),
+    ("PUT", "/api/mobile/device/v1/health/days"),
+    ("POST", "/api/mobile/device/v1/requests/claim"),
+    ("POST", "/api/mobile/device/v1/requests/{request_id}/result"),
+    ("DELETE", "/api/mobile/device/v1/health"),
+    ("DELETE", "/api/mobile/device/v1/"),
+    # Using a reset card spends a consumable that cannot be given back: a signed-in
+    # Member manages the rest of the Model Hub, not this.
+    ("POST", "/api/models/sources/{source_id}/reset-cards/use"),
+    # Changing this Avibe's address ends every session and gives the old name
+    # away after its waiting period (docs/plans/instance-address-change.md A1).
+    ("GET", "/api/instance-address"),
+    ("POST", "/api/instance-address/preview"),
+    ("POST", "/api/instance-address/change"),
 }
 
 
@@ -164,7 +191,28 @@ def test_complete_registered_api_management_inventory():
     # + 3 shared Vault setup and exact-target policy authorization methods.
     # + 1 atomic Vault field save (Editor namespace plus resource management).
     # + 1 protected-HD exact reconciliation read (create's Editor floor plus saved-ID resource use).
-    assert len(endpoints) == 337
+    # + 1 voice consent answer (Editor, with the voice routes it gates).
+    # + 2 system schedule device claim/receipt methods (Editor).
+    # + 7 independent device routes and 2 Owner-only mobile metadata routes.
+    # + 4 account-scoped registry list, self-report and sign-out routes.
+    # + 4 personal Live Activity methods (Viewer; controller enforces ownership and session access).
+    # + 1 Model Hub reset card use (Owner role, classified in _RETAINED_OWNER_ROUTES).
+    # + 3 personal installation claim methods (Owner; browser return is not an API route).
+    # + 8 device function, activity and Health ticket methods.
+    # + 2 Owner-only connection settings methods.
+    # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
+    assert len(endpoints) == 374
+    for method, path in (
+        ("GET", "/api/web-push/live-activities/turn"),
+        ("GET", "/api/web-push/live-activities/{activity_id}"),
+        ("PUT", "/api/web-push/live-activities/{activity_id}"),
+        ("DELETE", "/api/web-push/live-activities/{activity_id}"),
+    ):
+        assert (method, path) in endpoints
+        assert http_authorization_policy(method, path).minimum_role == "viewer"
+    for path in ("/api/system-schedule/claim", "/api/system-schedule/receipt"):
+        assert ("POST", path) in endpoints
+        assert http_authorization_policy("POST", path).minimum_role == "editor"
     idle_policy = http_authorization_policy("GET", "/api/desktop/update/idle")
     assert idle_policy.minimum_role == "member"
     assert idle_policy.direct_loopback_only
@@ -221,6 +269,17 @@ def test_complete_registered_api_management_inventory():
     baseline_read_roles = json.loads(
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
     )
+    baseline_read_roles.update({
+        "GET /api/devices/activity": "viewer",
+        "GET /api/devices/example/health": "viewer",
+        "GET /api/devices/example/health/reads": "viewer",
+        "PUT /api/devices/example/notifications": "viewer",
+        "PUT /api/devices/example/schedule": "viewer",
+        "GET /api/web-push/live-activities/turn": "viewer",
+        "GET /api/web-push/live-activities/example": "viewer",
+        "PUT /api/web-push/live-activities/example": "viewer",
+        "DELETE /api/web-push/live-activities/example": "viewer",
+    })
     actual_read_roles = {}
     owners = {
         (method, raw)
@@ -395,6 +454,23 @@ def test_vault_settings_patch_http_splits_field_authority(management_http, role,
         assert body["settings"] == after.get_json()["settings"] == expected
 
 
+@pytest.mark.parametrize('role,expected', [(None, 401), ('viewer', 403), ('editor', 403), ('member', 403), ('owner', 200)])
+def test_connection_page_role_gate(management_http, role, expected):
+    request = management_http(role, authenticated=role is not None)
+    route = '/api/devices/connection'
+    result = request('GET', route)
+    assert result.status_code == expected
+    if expected != 200:
+        assert 'settings' not in result.get_json()
+    else:
+        assert 'operation' in result.get_json() and 'relay' not in result.get_json()
+        assert request('PATCH', route, payload={'setting':'direct','to':True}, csrf=False).status_code == 403
+    denied = request('PATCH', route, payload={'setting':'relay','to':False})
+    assert denied.status_code == (403 if expected == 200 else expected)
+    if expected == 200:
+        assert denied.get_json()['error'] == 'relay_not_enrolled'
+
+
 @pytest.mark.parametrize("role", ["member", "owner"])
 def test_manager_saves_config_credentials_and_reads_masked_result(management_http, role):
     request = management_http(role)
@@ -416,6 +492,9 @@ def test_manager_saves_config_credentials_and_reads_masked_result(management_htt
     assert response.status_code == 200
     assert "xoxb-test-member-token" not in json.dumps(response.get_json())
     assert response.get_json()["runtime"]["log_level"] == "DEBUG"
+    switches = response.get_json()["remote_access"]["vibe_cloud"]
+    assert ("direct" in switches) is (role == "owner")
+    assert ("public_relay_trial" in switches) is (role == "owner")
 
 
 @pytest.mark.parametrize(

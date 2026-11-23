@@ -6,7 +6,7 @@ import { ArrowLeft, MonitorX, PinOff } from 'lucide-react';
 import { useApi } from '../../context/ApiContext';
 import { useDock } from '../../context/DockContext';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
-import { useWindowManager } from '../../context/WindowManagerContext';
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { sessionChatPath, showPageEmbeddedPath, showPagePrivatePath } from '../../apps/showPageAvatar';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { Button } from '../ui/button';
@@ -27,7 +27,7 @@ import { useShowPageAnnotation } from '../workbench/useShowPageAnnotation';
 export const ShowPageRoute: React.FC = () => {
   const { sessionId = '' } = useParams();
   const isDesktop = useIsDesktop();
-  const wm = useWindowManager();
+  const launchApp = useAppLaunch('show-route');
   const navigate = useNavigate();
   const handledRef = useRef(false);
 
@@ -46,16 +46,8 @@ export const ShowPageRoute: React.FC = () => {
   useEffect(() => {
     if (!isDesktop || handledRef.current || !sessionId) return;
     handledRef.current = true;
-    const own = wm.windows.filter((w) => w.appId === 'showpage' && w.params?.sessionId === sessionId);
-    const target = own.find((w) => !w.minimized) ?? own[0];
-    if (target) {
-      if (target.minimized) wm.restore(target.id);
-      else wm.focus(target.id);
-    } else {
-      wm.openApp('showpage', { params: { sessionId } });
-    }
-    navigate('/', { replace: true });
-  }, [isDesktop, sessionId, wm, navigate]);
+    void launchApp({ appId: 'showpage', sessionId }).then((outcome) => { if (outcome !== 'stale' && outcome !== 'unknown') navigate('/', { replace: true }); });
+  }, [isDesktop, sessionId, launchApp, navigate]);
 
   if (isDesktop) return null; // transient: the effect hands back to the workbench canvas
   // Key by sessionId: React Router keeps this route element mounted across param
@@ -193,6 +185,7 @@ const MobileShowPage: React.FC<{ sessionId: string }> = ({ sessionId }) => {
           ref={setIframe}
           onLoad={handleIframeLoad}
           title={t('chat.showPage.title')}
+          data-avibe-show-session={sessionId}
           src={src ?? undefined}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"

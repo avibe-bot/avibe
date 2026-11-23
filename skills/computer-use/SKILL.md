@@ -2,7 +2,7 @@
 name: computer-use
 slug: computer-use
 description: Use Avibe's local Computer Use CLI for carefully bounded desktop observation and actions.
-version: 1.3.0
+version: 1.4.0
 ---
 
 # Computer Use
@@ -75,6 +75,20 @@ once it stops changing or the timeout ends.
 - For virtualized content, the tree and screenshot describe the current viewport,
   not the full document. Scrolling replaces that content: observe and capture
   what you need as you scroll; do not assume earlier rows remain in the tree.
+
+## Unresolved dialogs and Dock targets
+
+Readiness describes observable content. The driver must still prove where an
+input would go. An observation with `observation_only: true` has no action
+tokens or screenshot capture binding. A visible dialog with
+`app_dialog_unresolved` needs manual handling: tell the user that Computer Use
+cannot confirm input would reach only this window, ask them to handle it, and
+observe again afterward. Do not substitute Return/Escape, a pixel click,
+foreground delivery, or a PID-only key for a refused exact-window action.
+
+An explicit Dock target returns `dock_unsupported`. Computer Use cannot control
+the Dock; ask the user to remove an icon by dragging it out manually. Do not
+edit Dock preferences or use another input route to bypass this boundary.
 
 ## SDK cheat-sheet
 
@@ -154,10 +168,11 @@ owner must restart the service), `starting`, `error`, `unavailable`,
 `target_busy` (another call holds the target), and `observe_first` (observe it
 in this Session first).
 
-## Windows (Preview)
+## Windows
 
-On Windows x64 the Avibe desktop app hosts Computer Use as a Preview. The
-kernel, SDK, saved flows, and safety rules above are the same.
+On Windows x64 the Avibe desktop app hosts Computer Use. The kernel, SDK,
+saved flows, and safety rules above are the same. Display scaling, multiple
+monitors, and input methods may not work as expected on Windows.
 
 - Windows apps have no bundle IDs: select them by `name` or `nameContains`,
   using the names that `observe apps` reports.
@@ -224,7 +239,7 @@ kernel, SDK, saved flows, and safety rules above are the same.
   `app.waitFor`, observe, and continue there. Never start it through a shell
   command (such as `Start-Process`) and then attach, try another launch route,
   or elevate, and do not retry the launch. If Avibe refuses a launch
-  ("Avibe cannot launch this app in the Windows Preview"), do the same.
+  ("Avibe cannot launch this app …"), do the same.
 - To open a menu, `await win.activate()` and observe that this exact window is
   focused before the click: foreground delivery restores the previous window,
   which closes the menu again.

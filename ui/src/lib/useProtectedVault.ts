@@ -10,6 +10,7 @@ import {
   type VaultWebAuthnSerializedCredential,
 } from '@/context/ApiContext';
 import {
+  getActiveVaultSandboxClient,
   getVaultSandboxClient,
   PROTECTED_HD_OP,
   resetVaultSandboxClient,
@@ -218,7 +219,11 @@ async function lockVault(broadcast = false): Promise<void> {
   notifyVaultLockChange();
   if (broadcast) getVaultLockChannel()?.postMessage('lock');
   try {
-    await (await getVaultSandboxClient()).lock();
+    // The client that holds the key, even where this page no longer starts sandbox steps (a desktop
+    // app that moved them to the browser after an in-app unlock): the page never says locked while
+    // the sandbox still holds the key. Without one, nothing is unlocked here; asking for one checks
+    // the entry as before.
+    await (getActiveVaultSandboxClient() ?? await getVaultSandboxClient()).lock();
   } catch {
     // Local parent state is already locked; a best-effort sandbox lock failure remains fail-closed.
   }
@@ -734,22 +739,23 @@ export function useProtectedVault() {
   );
 
   /**
-   * Reveal a protected static value inside the sandbox frame. Plaintext is displayed (and, on the
-   * sandbox-side explicit action, copied) entirely within the sandbox — it is never returned to
-   * the parent. R2: an in-sandbox confirm while unlocked, a passkey while locked or under Strict.
+   * Show a protected static secret's fields in the secure window: one approval, then every field as
+   * its own row (hidden until shown) with Copy, all inside the sandbox. One field keeps the original
+   * single-record request; several go as `items` (a sandbox build that lists them).
    */
-  const revealProtectedValue = useCallback(
+  const revealProtectedSecret = useCallback(
     async (
-      material: ProtectedUnlockMaterial,
-      context: VaultSignedOperationContext,
+      items: Array<{ material: ProtectedUnlockMaterial; context: VaultSignedOperationContext }>,
+      defaultFieldLabel: string,
       authorizationWindow?: string,
     ): Promise<{ completed: boolean }> => {
       assertDurableSetupReady();
+      if (items.length === 0) throw new Error('reveal-needs-a-field');
       const sandbox = await getVaultSandboxClient();
       try {
-        return await sandbox.reveal({ material, context }, authorizationWindow);
+        return await sandbox.reveal(items.length === 1 ? items[0] : { items, defaultFieldLabel }, authorizationWindow);
       } finally {
-        void syncProtectedOperationStatus(material.envelope.wrap_meta).catch(() => undefined);
+        void syncProtectedOperationStatus(items[0].material.envelope.wrap_meta).catch(() => undefined);
       }
     },
     [syncProtectedOperationStatus],
@@ -799,7 +805,7 @@ export function useProtectedVault() {
     sealHdWallet,
     signProtectedRequest,
     approveProtectedRelease,
-    revealProtectedValue,
+    revealProtectedSecret,
     afterCreated,
     lock,
     lockAndResetForPolicyChange,

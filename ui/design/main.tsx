@@ -12,7 +12,7 @@ import '@/index.css';
 import.meta.glob(['/src/**/*.css', '!/src/index.css', '!/src/pet/**'], { eager: true });
 
 import { DesignRoot } from './Canvas';
-import type { DesignLang, DesignTheme, FrameSafeArea } from './frame';
+import type { DesignLang, DesignTheme, FrameSafeArea, FrameStep } from './frame';
 import { loadAllFrames, loadFrame } from './registry';
 import { installFixedClock } from './shell/clock';
 import { apiResponses } from './shell/fixtures';
@@ -30,7 +30,7 @@ void i18n.changeLanguage(lang);
 declare global {
   interface Window {
     __DESIGN__?: {
-      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: string[]; wait?: number; press?: string; reducedMotion?: boolean; safeArea?: FrameSafeArea }[];
+      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: FrameStep[]; wait?: number; press?: string; reducedMotion?: boolean; safeArea?: FrameSafeArea }[];
       unfixtured: () => string[];
       quiet: () => Promise<void>;
       t: (key: string) => string;
@@ -67,14 +67,29 @@ async function boot() {
       value: { invoke: () => new Promise(() => {}) },
     });
   }
+  // The desktop app's Show share marker, as the shell injects it. The design browser keeps Tauri's
+  // command channel absent, so a share it starts answers that the shell is unavailable.
+  if (shown?.fixtures?.desktopShowShare) {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHOW_SHARE__', { configurable: true, value: 1 });
+  }
+  // A native Show window: the app-window marker, and the share marker that lets it export.
+  if (shown?.fixtures?.nativeShowWindow) {
+    Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { configurable: true, value: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHOW_SHARE__', { configurable: true, value: 1 });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHOW_EXPORT__', { configurable: true, value: 1 });
+  }
   // The phone app defines its bridge at document start, before any page script (`src/lib/native.ts`).
   if (shown?.fixtures?.nativeShell) {
     const capabilities = shown.fixtures.nativeShell;
     const instanceName = shown.fixtures.nativeInstanceName;
-    // `app.info` answers as the shell does; every other call answers nothing.
-    const call = async (method: string) => (method === 'app.info'
-      ? { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, ...(instanceName ? { instance: { name: instanceName } } : {}) }
-      : null);
+    const directStatus = shown.fixtures.nativeDirectStatus;
+    // `app.info` and `direct.status` answer as the shell does; every other call answers nothing.
+    const call = async (method: string) => {
+      if (method === 'app.info') {
+        return { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, ...(instanceName ? { instance: { name: instanceName } } : {}) };
+      }
+      return method === 'direct.status' ? directStatus ?? null : null;
+    };
     const mock = { contract: 1, platform: 'ios', shellVersion: 'design', capabilities, call, on: () => () => {} };
     const isolation = (window as unknown as {
       __AVIBE_BROWSER_ISOLATION__?: { setNativeMock: (mock: unknown) => void };

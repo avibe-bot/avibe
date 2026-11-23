@@ -1,14 +1,4 @@
-// The two preconditions the Model Hub's own surfaces impose, as fixtures.
-//
-// `hubSurface` — the page a spec lands on is not a constant. `modelsSurfaceKind`
-// sends `/settings/models` to the DIRECT HOME when every backend is on Direct
-// *and* the instance holds no sources, and that home has no source list and no
-// Add API key button: its only control is "Let Model Hub manage". A machine's very
-// first source arrives by adopting the gateway, which is C6-direct-home's
-// subject. So every spec on this `test` gets one anchor source when the instance
-// has none, and the anchor leaves with the test that needed it. Without it a
-// suite passes its first spec, deletes its own source in teardown, and every
-// later spec times out looking for a button that is no longer on the page.
+// The precondition the Model Hub's gateway specs impose, as a fixture.
 //
 // `gateway` — a backend in Gateway mode with sources of the suite's own to route
 // through. Route rows, the priority button, and every supply guard exist only
@@ -16,8 +6,8 @@
 // those specs a mode-switch test as well, and would report the mode switch's
 // failures under their names.
 import type { Agent, Source } from './api';
-import { routableModels, surfaceKind } from './api';
-import { E2E_SOURCE_PREFIX, mockBaseUrl, NO_MOCK_UPSTREAM } from './env';
+import { routableModels } from './api';
+import { E2E_SOURCE_PREFIX, mockBaseUrl } from './env';
 import { expect, requireModelHub, requireMockUpstream, requireRuntimeRunning, requireSource, test as base } from './fixtures';
 import { anthropicInventory } from './mock';
 import { restoreNativeSources } from './restore';
@@ -32,59 +22,10 @@ export type Gateway = {
 };
 
 // `provide` rather than Playwright's usual `use` — see the note in fixtures.ts.
-export const test = base.extend<{ hubSurface: void; gateway: Gateway }>({
-  hubSurface: [
-    async ({ api, mock }, provide, testInfo) => {
-      // First, because this is an auto fixture: it runs before the suite's own
-      // `beforeEach` guards, so it cannot lean on them. A disabled capability
-      // turns every `/api/models/*` read below into the gate's 404 — which
-      // `read()` (correctly) throws on — and reports a skip-with-reason as a
-      // failure in every B, D, and G spec at once. The runtime and mock guards
-      // are here for the same reason: the anchor below CREATES a source, which
-      // a stopped runtime refuses, and a spec whose only problem is a
-      // documented environmental precondition should skip, not fail.
-      await requireModelHub(api);
-      await requireRuntimeRunning(api);
-      const sources = await api.sources();
-      const agents = await api.agents();
-      // The product's own condition, asked through the one declaration that
-      // owns it: anything other than the gateway surface needs the anchor, and
-      // BOTH direct forms do — an instance with no backend installed renders
-      // the install prompt, which has no source list either.
-      const directEmpty = surfaceKind(agents, sources) !== 'gateway';
-      const anchorName = `${E2E_SOURCE_PREFIX}surface-anchor`;
-      let anchor: Source | null = null;
-      try {
-        if (directEmpty) {
-          testInfo.skip(!(await mock.reachable()), NO_MOCK_UPSTREAM);
-          // A healthy baseline, because the previous test may have left the mock
-          // rejecting everything — and an anchor that cannot be created would
-          // report the last test's mock state as this test's missing precondition.
-          await mock.configure({ auth: 'ok', protocol: 'anthropic', models_endpoint: 'ok' });
-          anchor = await requireSource(api, anchorName, mockBaseUrl());
-        }
-        await provide();
-      } finally {
-        // By NAME, not only by the id a successful create returned: the server
-        // persists the source before its response leaves, so a POST whose
-        // response is lost rejects `requireSource` above — with the anchor
-        // already on the instance and no id in hand. The prefix sweep catches
-        // that path; the id delete covers the ordinary one without re-listing.
-        if (anchor) {
-          await api.deleteSource(anchor.id);
-        } else if (directEmpty) {
-          for (const source of await api.sources()) {
-            if (source.display_name === anchorName) await api.deleteSource(source.id);
-          }
-        }
-      }
-    },
-    { auto: true },
-  ],
-
+export const test = base.extend<{ gateway: Gateway }>({
   gateway: async ({ api, mock }, provide, testInfo) => {
-    // Same ordering rule as `hubSurface`: this fixture is initialized before
-    // the suite's `beforeEach` guards run, so it owns its own preconditions.
+    // This fixture is initialized before the suite's `beforeEach` guards run,
+    // so it owns its own preconditions.
     // Without the mock URL `configure` below throws, and without a running
     // runtime every source create is refused — both documented skip states,
     // not failures.

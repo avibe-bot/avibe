@@ -80,7 +80,6 @@ describe('SourcesCard footer', () => {
     expect(screen.queryByRole('button', { name: /private-relay\.example|sk-…7890|owner@example\.com/ })).toBeNull();
     expect(screen.getByRole('button', { name: (name) => [
       locale.t('settings.models.upstream.kind.apiKey'),
-      'Anthropic Messages',
       locale.t('settings.models.upstream.hiddenDetails'),
     ].every((part) => name.includes(part)) })).toBeTruthy();
     const placeholders = screen.getAllByText(lng === 'zh' ? '已隐藏' : 'Hidden', { exact: true });

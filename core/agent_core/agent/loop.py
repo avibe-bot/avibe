@@ -81,6 +81,7 @@ from core.agent_core.ai.provider import (
     ModelRequest,
     ProviderError,
     Refusal,
+    ThreadObservation,
     TextDelta,
     ThinkingDelta,
 )
@@ -124,7 +125,8 @@ from core.agent_core.harness.context import (
     fit_mind,
     fit_result,
     half_cut,
-    last_anchor,
+    borrowed_last_anchor,
+    conversation_history,
     memo_budget,
     memo_item,
     memo_problems,
@@ -147,9 +149,8 @@ from core.agent_core.harness.context import (
 from core.agent_core.harness.projection import (
     ContextView,
     ProjectionError,
-    context_view,
+    _borrowed_context_view,
     open_tool_calls,
-    project,
     validate_message_append,
 )
 from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
@@ -173,7 +174,8 @@ from core.agent_core.messages import (
     usage_to_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult
-from core.agent_core.tools.paths import to_thread_joined
+from core.loop_watchdog import model_stream_closed, model_stream_opened
+from core.agent_core.tools.paths import read_in_worker, to_thread_joined
 
 T = TypeVar("T")
 logger = logging.getLogger(__name__)
@@ -332,12 +334,14 @@ class _Attempt:
     """
 
     purpose: Literal["conversation", "side_turn"]
-    request: ModelRequest
     message: Optional[AssistantMessage]
+    # Only a conversation response needs the size of the request it answered, never its history.
+    request_facts: Optional[dict[str, int]] = None
     error: Optional[ProviderError] = None
     committed: bool = False
     audited: bool = False
     cache: Optional[dict[str, Any]] = None
+    after_commit: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -535,7 +539,7 @@ class Agent:
                 raise ValueError("context_seq is beyond the committed context")
             if context_seq is not None:
                 rows = [row for row in rows if row.context_seq <= context_seq]
-            projection = project(rows)
+            projection = _borrowed_context_view(rows)
             snapshot = Snapshot(
                 self.session_id, max((row.context_seq for row in rows), default=0), deepcopy(dict(projection.state))
             )
@@ -569,7 +573,7 @@ class Agent:
             )
             if transition is not None:
                 return RequestPreview(snapshot, "needs_context_transition", transition=transition, **facts)
-        wire = await preview_wire_request(prepared.request, gateway=gateway, media_loader=media_loader)
+        wire = await preview_wire_request(prepared.request, gateway=gateway, media_loader=media_loader, session_id=self.session_id)
         if isinstance(wire, ProviderError):
             return RequestPreview(snapshot, "preparation_error", error=wire, **facts)
         return RequestPreview(snapshot, "ready", wire=wire, **facts)
@@ -757,7 +761,7 @@ class Agent:
         await self._save_state()
         # The attempt this response answered: the ledger's latest conversation attempt (the C-9 anchor).
         attempt = next((item for item in reversed(self._attempts) if item.purpose == "conversation"), None)
-        facts = {"request": request_facts(attempt.request), "cache": attempt.cache} if self.context is not None and attempt else {}
+        facts = {"request": attempt.request_facts, "cache": attempt.cache} if attempt and attempt.request_facts is not None else {}
         row = await self._scope.call(
             lambda: self.store.append_response(
                 self.session_id,
@@ -773,6 +777,8 @@ class Agent:
         if attempt is not None:
             attempt.committed = True
         self._rows.append(row)
+        if attempt is not None and attempt.after_commit is not None:
+            await attempt.after_commit()
         return row
 
     async def _drive(
@@ -801,7 +807,7 @@ class Agent:
                     self._cache_tracker.restore((), (*runtime.cache_records, *attempts))
                     self._cache_tracker.change_seqs = dict(runtime.change_seqs)
                     self._cache_fork = bool(self._rows) and not any(row.session_id == self.session_id for row in self._rows)
-                projection = project(self._rows)
+                projection = _borrowed_context_view(self._rows)
                 self._ctx.state = deepcopy(dict(projection.state))
                 self._committed_state_json = state_representation(self._ctx.state)
                 self._committed_state = deepcopy(self._ctx.state)
@@ -958,11 +964,10 @@ class Agent:
         system: str,
         selected: ModelSelection,
         *,
-        messages: Sequence[Message],
-        max_tokens: Optional[int] = None,
+        owned_messages: tuple[Message, ...],
     ) -> tuple[ModelRequest, dict[str, Tool]]:
-        """A request carrying ``messages``, after the user's ``before_model`` hooks: the first pipeline stage."""
-        request, tools = self._built(system, selected, messages=messages, max_tokens=max_tokens)
+        """Compose the conversation request, then apply the user's before_model hooks."""
+        request, tools = self._built(system, selected, messages=owned_messages)
         for hook in self.hooks:
             decision = await self._hook(lambda: hook.before_model(request, self._ctx))
             if isinstance(decision, End):
@@ -978,18 +983,17 @@ class Agent:
         system: str,
         selected: ModelSelection,
         *,
-        messages: Sequence[Message],
+        messages: tuple[Message, ...],
         max_tokens: Optional[int] = None,
     ) -> tuple[ModelRequest, dict[str, Tool]]:
-        """The request carrying ``messages`` on ``selected``, before any hook. C-9 composes its forks and the stop
-        check's minimal request from this alone, which holds because v1 takes no user hooks with a ContextConfig."""
+        """Build without copying history. Budget-only requests can borrow; hooks and providers need owned messages."""
         self._check_model_route(selected)
         capabilities = selected.capabilities
         tools = dict(self._run_tools if self._run_tools is not None else self._tools)
         request = ModelRequest(
             endpoint=deepcopy(selected.endpoint),
             system=system,
-            messages=tuple(deepcopy(messages)),
+            messages=messages,
             tools=tuple(deepcopy(tool.spec) for tool in tools.values()),
             max_tokens=output_tokens(capabilities, self.max_tokens) if max_tokens is None else max_tokens,
             reasoning_effort=(
@@ -1072,10 +1076,40 @@ class Agent:
                         causes=self.cache_causes, fork=self._cache_fork,
                     ))
                     cache.update(prompt_pending=self.prompt_pending, prompt_notice=self.prompt_notice)
+                if request.endpoint.protocol == "anthropic":
+                    observation = ThreadObservation(
+                        self.session_id if purpose == "conversation" else None,
+                        ordinary_retry=len(self._attempts) > first,
+                    )
+                    request = replace(request, thread_observation=observation)
+                    if cache is not None:
+                        cache["thread_attempts"] = observation.attempts
+                    if purpose == "conversation":
+
+                        async def settle_discard(wire_attempt: dict) -> None:
+                            # A rejected send is a non-context attempt, not part of the replacement's context size.
+                            usage = wire_attempt.get("discarded_usage")
+                            if cache is None and usage is None:
+                                return
+                            payload = {"version": 1, "error": wire_attempt["failure"]}
+                            if usage is not None:
+                                payload["usage"] = usage
+                            if cache is not None:
+                                facts = {k: v for k, v in cache.items() if k not in ("prefix", "thread_attempts")}
+                                facts.update(
+                                    thread_attempts=[wire_attempt],
+                                    writes_by_ttl=wire_attempt.get("writes_by_ttl", {}),
+                                    cache_write_basis=wire_attempt.get("cache_write_basis", "unknown"),
+                                )
+                                payload["cache"] = facts
+                            await self._audit("attempt", payload)
+
+                        observation.settle_discard = settle_discard
                 stream = self.models.provider_for(request.endpoint.protocol).stream(request, self._ctx.cancel)
                 streamed = False
                 terminal = None
                 relieve = False
+                model_stream_opened()
                 try:
                     while True:
                         try:
@@ -1102,10 +1136,11 @@ class Agent:
                     self._attempts.append(
                         _Attempt(
                             purpose,
-                            request,
                             terminal.message if isinstance(terminal, Done) else terminal.partial,
-                            None if isinstance(terminal, Done) else terminal,
+                            error=None if isinstance(terminal, Done) else terminal,
                             cache=cache,
+                            after_commit=(request.thread_observation.after_commit
+                                          if isinstance(terminal, Done) and request.thread_observation else None),
                         )
                     )
                     relieve = (
@@ -1154,12 +1189,17 @@ class Agent:
                         admitted = terminal.message if isinstance(terminal, Done) else terminal.partial
                         if isinstance(terminal, Done) or (admitted is not None and admitted.content):
                             self._validate_response(admitted, after=after)
+                            if purpose == "conversation" and self.context is not None:
+                                self._attempts[-1].request_facts = request_facts(request)
                         yield terminal, tools
                         return
                 finally:
-                    close = getattr(stream, "aclose", None)
-                    if close is not None:
-                        await self._cleanup(close, stream=True)
+                    try:
+                        close = getattr(stream, "aclose", None)
+                        if close is not None:
+                            await self._cleanup(close, stream=True)
+                    finally:
+                        model_stream_closed()
                 # The attempt is not the run's answer and is never context (invariant 4): it stays in the ledger and
                 # the audit. A retried request goes out again unchanged; one refused as overflow is rebuilt after a
                 # ladder step (section 8).
@@ -1181,9 +1221,9 @@ class Agent:
                     ladder.overflows += 1
                     ladder.refused = True
                     if ladder.overflows >= MAX_OVERFLOWS:
-                        view = context_view(self._rows)
+                        view = _borrowed_context_view(self._rows)
                         plan = budget(
-                            request, route.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view)
+                            request, route.capabilities, transcript=view.messages, anchor=borrowed_last_anchor(self._rows, view)
                         )
                         movable = half_cut(view.units, turn_inputs=self._turn_inputs, pinned=view.pinned) is not None
                         kind = "context_exhausted" if movable else self._cause(view, None)
@@ -1752,10 +1792,14 @@ class Agent:
 
     async def _prepare_conversation(self, system: str, selected: ModelSelection) -> _PreparedConversation:
         """Compose and budget before any context transition; also used by dry_tick."""
-        view = context_view(self._rows)
-        request, tools = await self._request(system, selected, messages=self._carried(view))
+        view, history, anchor = await self._scope.call(lambda: read_in_worker(
+            conversation_history, tuple(self._rows), self.context is not None,
+        ))
+        request, tools = await self._request(
+            system, selected, owned_messages=(*deepcopy(self._rehydrated()), *history),
+        )
         plan = (
-            budget(request, selected.capabilities, transcript=view.messages, anchor=last_anchor(self._rows, view))
+            budget(request, selected.capabilities, transcript=view.messages, anchor=anchor)
             if self.context is not None else None
         )
         return _PreparedConversation(request, tools, view, plan)
@@ -2408,8 +2452,8 @@ class Agent:
 
     def side_turn_fits(self, turn: SideTurn, route: ModelSelection, *, system: str) -> bool:
         """A dry compose of the first request ``turn`` would send on ``route``, budgeted: a choice, not admission."""
-        view = context_view(self._rows)
-        return self._side_request(system, route, turn, view, (), last_anchor(self._rows, view))[2].can_fit
+        view = _borrowed_context_view(self._rows)
+        return self._side_request(system, route, turn, view, (), borrowed_last_anchor(self._rows, view))[2].can_fit
 
     async def side_turn(self, turn: SideTurn, route: ModelSelection, *, system: str) -> SideTurnResult:
         """``turn`` inside the caller's run, first on ``route``, with the run's ``system`` (section 7).
@@ -2420,8 +2464,8 @@ class Agent:
         rejected reply fails it. One ``fork_turn`` audit on every exit but an abort (F7). v1 runs it only while a run
         is active, the Session's one writer; a side turn while idle is reserved.
         """
-        view = context_view(self._rows)
-        anchor = last_anchor(self._rows, view)
+        view = _borrowed_context_view(self._rows)
+        anchor = borrowed_last_anchor(self._rows, view)
         point = {"as_of": view.context_seq, "units": turn.units}
         policy = turn.policy
         scratch_dir = self.context.scratch_dir if self.context is not None else None
@@ -2445,7 +2489,8 @@ class Agent:
             if not plan.can_fit:
                 raise _SideTurnTooLarge()
             measured[:] = [plan]
-            return request, tools
+            messages = await self._scope.call(lambda: read_in_worker(deepcopy, request.messages))
+            return replace(request, messages=messages), tools
 
         finished: dict[str, Any] = {"outcome": "failed", "error": None, "folded_event_id": None}
         aborted = False
@@ -2744,7 +2789,7 @@ class Agent:
         )
         seq = max((row.context_seq for row in self._rows), default=0) + 1
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
-        after = context_view([*self._rows, candidate])
+        after = _borrowed_context_view([*self._rows, candidate])
         # What the next request would carry; it is budgeted for real when it is built.
         payload["tokens_after_estimate"] = request_tokens(
             request.system, request.tools, self._carried(after), native_hosted_tools(request)

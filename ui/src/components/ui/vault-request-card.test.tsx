@@ -94,3 +94,23 @@ describe('VaultRequestCard provision dialog dismissal', () => {
     expect(onProvisionRequestDenied).toHaveBeenCalledWith(request.id);
   });
 });
+
+// The chat card for a proof-free Bitcoin summary: its key, Protected and Signing chips as the server
+// names them, or the generic line when the name is withheld.
+describe('VaultRequestCard proof-free Bitcoin summary', () => {
+  afterEach(() => cleanup());
+  const summary = (secret_name: string | null, protection: 'protected' | null) => ({
+    ...request, id: 'vrq_btc', request_type: 'sign', secret_name, protection, requester: null, delivery: null, card: null,
+  }) as unknown as VaultRequest;
+
+  it.each([
+    ['R9_PROT_KEY', 'protected', 'R9_PROT_KEY', true],
+    [null, 'protected', en.vaults.requests.detailsOnReview, true],
+    ['STD_KEY', null, 'STD_KEY', false],
+  ] as const)('names %s (%s)', (name, protection, shown, isProtected) => {
+    render(<I18nextProvider i18n={i18n}><VaultRequestCard request={summary(name, protection)} onResolved={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText(shown)).toBeTruthy();
+    expect(screen.getByText(en.vaults.signing)).toBeTruthy();
+    expect(Boolean(screen.queryByText(en.vaults.protected))).toBe(isProtected);
+  });
+});

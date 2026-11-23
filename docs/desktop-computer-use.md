@@ -14,8 +14,10 @@ Avibe desktop shell is running.
    Recording**.
 5. Return to Avibe after granting access. Avibe silently checks the grants
    while it is active and every five seconds. If Screen & System Audio
-   Recording is missing, Avibe opens that pane and tells you to click **+** or
-   drag Avibe into the list, then enable it. Return to Avibe after both
+   Recording is missing, Avibe opens that pane, and the menu item reads that
+   Screen Recording is needed: click **+** or drag Avibe into the list, then
+   enable it. Avibe shows no extra alert of its own; **Settings → System →
+   Computer Use** carries the full steps. Return to Avibe after both
    permissions are enabled; it observes the grant transition and starts
    computer use when the grants are available.
 6. If macOS requires **Quit & Reopen**, or the same fixed app still reports a
@@ -32,13 +34,14 @@ its action:
 
 - **Turn on** turns Computer Use on, exactly like the tray or application menu
   switch. It never turns Computer Use off.
-- Accessibility's **Open Settings** asks macOS for the Accessibility grant
-  (the system prompt lists Avibe in the pane) and opens **Privacy & Security →
-  Accessibility**.
-- Screen & System Audio Recording's **Open Settings** runs the same request the
-  tray switch does, which lists Avibe in the pane where macOS allows it, opens
-  **Privacy & Security → Screen & System Audio Recording**, and shows the
-  **+** / drag guidance.
+- Accessibility's **Open Settings** opens **Privacy & Security →
+  Accessibility** directly. If Avibe is missing, click **+**, select the
+  installed Avibe app, and enable it.
+- Screen & System Audio Recording's **Open Settings** opens **Privacy &
+  Security → Screen & System Audio Recording** directly. The step explains
+  how to click **+** or drag the installed app into the list, then enable it.
+  Neither **Open Settings** action requests permission or attempts a capture;
+  opening a pane alone does not grant access.
 
 While the page is visible it reads the status about every 1.5 seconds, so a
 step turns done within seconds of macOS reporting the grant; it stops reading
@@ -47,9 +50,10 @@ as a manual fallback. Accessibility comes first because the managed driver
 checks it before Screen Recording.
 
 If macOS asks to **Quit & Reopen** after the Screen Recording grant, choose it.
-When the request came from this page, the app quits without asking whether to
-stop the Runtime: the Runtime keeps running, so Agent turns in flight are not
-interrupted, and the relaunched app reconnects to it. It then opens the
+When Screen Recording settings were opened from this page, the app quits
+without asking whether to stop the Runtime: the Runtime keeps running, so Agent
+turns in flight are not interrupted, and the relaunched app reconnects to it.
+It then opens the
 Settings guide again by itself (within 15 minutes of the request), and the page
 picks up the new status. Outside that window, Quit asks as usual, and a later
 launch is not redirected.
@@ -60,9 +64,9 @@ with a notice to complete them in the Avibe desktop app on the Mac; the
 actions cannot run from a browser. When the host has no live desktop shell, it
 sees a short notice that the page is available in the desktop app.
 
-Avibe requests permissions only when you turn the feature on or press a
-step's **Open Settings**. It does not keep showing permission prompts in the
-background. If the menu still reports that a permission is needed, open
+Avibe requests permissions when you turn the feature on, not when you press
+**Open Settings**. That button only navigates; permission checks remain silent.
+If the menu still reports that a permission is needed, open
 **System Settings → Privacy & Security**, confirm that Avibe is enabled in both
 permission panes, then use the off/on or quit/reopen recovery above. Merely
 bringing the Avibe window to the front does not start a permission retry.
@@ -112,6 +116,18 @@ Permission** and does not keep retrying in the background until both grants
 are available. If the exact fixed app still reports a missing permission after
 the grant, use the Quit & Reopen recovery above without rebuilding it.
 
+## Dialogs that need manual handling
+
+Some app dialogs are visible in screenshots but missing from macOS
+Accessibility. Avibe makes a bounded lookup through explicit app and window
+relationships. Recovered surfaces are observation-only: seeing a dialog does
+not by itself prove where keyboard input will go. If input cannot be confined
+to that window, the agent asks you to handle it manually and observes again
+afterward. This also applies to first-run introduction dialogs.
+
+Computer Use does not control the Dock. To remove an icon, drag it out of the
+Dock manually.
+
 ## Stop computer use
 
 Turn off **Computer Use** in the native Avibe application or tray menu. This
@@ -129,11 +145,12 @@ expose internal reason codes, turn the feature on, or issue permission changes. 
 desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
 a native desktop control it cannot own.
 
-## Windows (Preview)
+## Windows
 
-On a Windows x64 host, the Settings page is labelled **Preview**, and its
-Preview card carries one **Computer Use** switch in its header that turns the
-feature on and off, like the tray item. The switch shows the opt-in the server
+On a Windows x64 host, the Settings page shows a Windows card whose description
+notes that display scaling, multiple monitors, and input methods may not work as
+expected. The card carries one **Computer Use** switch in its header that turns
+the feature on and off, like the tray item. The switch shows the opt-in the server
 reports (`enabled`); the status below the card says whether Computer Use is
 ready. A change holds the switch until a status read that began after the
 change reports it, for at most 15 seconds; a failed or unconfirmed change
@@ -163,8 +180,7 @@ The host comes from the server: the status endpoint reports `host_platform`
 describes the Runtime's host, and the desktop app only decides whether the
 page's actions can run. A server without the field is an older macOS-only
 release, and the page keeps the macOS guide. A Windows host that reports
-Computer Use unsupported shows the unsupported notice in Windows terms, still
-labelled Preview. The Home **Getting started** item reads the same field and
+Computer Use unsupported shows the unsupported notice in Windows terms. The Home **Getting started** item reads the same field and
 on Windows asks to turn Computer Use on instead of granting permissions.
 `host_platform` describes the host only; it never turns Computer Use on.
 

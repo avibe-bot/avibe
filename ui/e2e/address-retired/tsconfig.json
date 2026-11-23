@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.app.json",
+  "compilerOptions": { "types": ["vite/client", "node"], "resolveJsonModule": true },
+  "include": ["*.ts", "../../playwright.address-retired.config.ts"],
+  "exclude": []
+}

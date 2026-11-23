@@ -507,7 +507,7 @@ def test_claude_web_start_checks_prerequisites_before_irreversible_callback(
 ) -> None:
     irreversible_starts = []
     monkeypatch.setattr(
-        "core.agent_auth_service.CLAUDE_SDK_AVAILABLE",
+        "modules.claude_sdk_compat.CLAUDE_SDK_AVAILABLE",
         False,
     )
 
@@ -537,7 +537,7 @@ def test_native_web_start_spawn_failure_preserves_irreversible_callback(
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
     if backend == "claude":
         monkeypatch.setattr(
-            "core.agent_auth_service.CLAUDE_SDK_AVAILABLE",
+            "modules.claude_sdk_compat.CLAUDE_SDK_AVAILABLE",
             True,
         )
         service._create_claude_control_client = AsyncMock(
@@ -1906,7 +1906,7 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://stale-relay.example")
     monkeypatch.setattr(_Backend, "auth_mode", "oauth", raising=False)
     monkeypatch.setattr(_Backend, "auth_mode_set", True, raising=False)
-    monkeypatch.setattr("core.agent_auth_service.ClaudeSDKClient", _FakeClaudeClient)
+    monkeypatch.setattr("modules.claude_sdk_compat.ClaudeSDKClient", _FakeClaudeClient)
 
     result = _run(service.test_web_auth("claude"))
 
@@ -2051,7 +2051,7 @@ def test_nonreset_claude_cancel_and_failed_start_restore_real_credential_files(s
     home = tmp_path / "旧 用户/Claude 配置"
     home.mkdir(parents=True)
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
-    monkeypatch.setattr(auth_module, "CLAUDE_SDK_AVAILABLE", True)
+    monkeypatch.setattr("modules.claude_sdk_compat.CLAUDE_SDK_AVAILABLE", True)
     old = {"ANTHROPIC_API_KEY": "test-old-key", "ANTHROPIC_BASE_URL": "https://old.example"}
     restore_claude_settings_env(old)
     credentials = home / ".credentials.json"

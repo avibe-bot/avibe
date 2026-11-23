@@ -32,6 +32,7 @@ from config.v2_config import (
 from core.agent_auth_service import BackendLoginInProgressError
 from core.backend_restart import NativeMigrationBlockedError
 from core.handlers.model_hub.adapter import (
+    ApiKeyModelsCheck,
     DiscoveredModel,
     EngineEnsureResult,
     EngineHealth,
@@ -315,6 +316,19 @@ class FakeAdapter:
             DiscoveredModel(id="claude-opus-4-6"),
             DiscoveredModel(id="claude-sonnet-4-6"),
         )
+
+    async def check_api_key_models(
+        self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
+    ):
+        try:
+            models = await asyncio.wait_for(
+                self.discover_models(vendor, protocol, base_url, credential_ref), timeout=timeout,
+            )
+        except ModelDiscoveryError as exc:
+            return ApiKeyModelsCheck(authenticated=False if exc.rejected_status is not None else None)
+        except (ModelHubError, asyncio.TimeoutError):
+            return ApiKeyModelsCheck(authenticated=None)
+        return ApiKeyModelsCheck(authenticated=None, models=tuple(models))
 
     async def observe_source(self, vendor, base_url, credential_ref, protocol_order):
         self.observed_protocol_orders.append(tuple(protocol_order))
@@ -889,6 +903,11 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
         access == "organization-editor"
         and endpoint == "GET /api/models/agents/<backend>/models"
     )
+
+    if route_contract["path"].endswith("/reset-cards/use"):
+        # A signed-in Owner, or a caller the instance treats as its Owner by where the
+        # request comes from (here: this machine's own address). A signed-in Member is not.
+        admitted = access in {"local", "organization-owner"}
 
     def get_service():
         assert admitted, "authorization must deny before entering a Model Hub handler"
@@ -2828,7 +2847,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
             # Bare `/v1/models` discovery: nothing but the id.
             ModelHubModelConfig(id="gpt-described", provenance="discovered"),
             ModelHubModelConfig(
-                id="gpt-supplier-says",
+                id="gpt-9-example-high",
                 provenance="discovered",
                 display_name="Relay label",
                 reasoning_efforts=["high"],
@@ -2861,7 +2880,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
                     "modalities": {"input": ["text", "image"], "output": ["text"]},
                     "limit": {"context": 400_000, "output": 128_000},
                 },
-                "gpt-supplier-says": {
+                "gpt-9-example": {
                     "name": "Catalog label",
                     "reasoning": True,
                     "reasoning_options": [{"type": "effort", "values": ["low"]}],
@@ -2881,6 +2900,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
         "suppliers": rows["gpt-described"]["suppliers"],
         "origin": "provider",
         "models_dev_id": "openai/gpt-described",
+        "match_kind": "exact",
         "context_window": 400_000,
         "max_output_tokens": 128_000,
         "input_modalities": ["text", "image"],
@@ -2889,9 +2909,10 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
         "supports_reasoning": True,
     }
     # What the suppliers state wins; models.dev only fills what they left unsaid.
-    assert rows["gpt-supplier-says"]["display_name"] == "Relay label"
-    assert rows["gpt-supplier-says"]["reasoning_efforts"] == ["high"]
-    assert rows["gpt-supplier-says"]["models_dev_id"] == "openai/gpt-supplier-says"
+    assert rows["gpt-9-example-high"]["display_name"] == "Relay label"
+    assert rows["gpt-9-example-high"]["reasoning_efforts"] == ["high"]
+    assert rows["gpt-9-example-high"]["models_dev_id"] == "openai/gpt-9-example"
+    assert rows["gpt-9-example-high"]["match_kind"] == "closest"
     # Nobody states a ladder: the tiers the backend's request protocol accepts —
     # fixed for Codex and Claude, the model family's for OpenCode — and no
     # description.
@@ -4180,14 +4201,19 @@ def test_mh_unlisted_002_opencode_fallback_row_keeps_an_agent_running(
 
     response = client.put(endpoint, json=request_body, headers=headers, base_url=base_url)
 
-    # A supplied fallback leaves only the removed row's passthrough hop to confirm.
+    # The removed unlisted row has no automatic hop; a supplied fallback needs
+    # no confirmation. Only a real interruption still asks for consent.
+    if fallback_supplied:
+        assert response.status_code == 200
+        assert "removed_hops" not in response.get_json()
+        assert "interrupted" not in response.get_json()
+        assert [model.id for model in store.config.agents["opencode"].models] == ["kimi-k2"]
+        return
     assert response.status_code == 409
     refusal = response.get_json()
     _assert_valid("guard-refusal.schema.json", refusal)
     assert refusal["would_interrupt"] == expected_gaps
-    assert [hop["menu_model"] for hop in refusal["would_remove_hops"]] == (
-        ["moonshotai/kimi-k2"] if fallback_supplied else []
-    )
+    assert refusal["would_remove_hops"] == []
 
     committed = client.put(
         endpoint,
@@ -4652,6 +4678,32 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
         "opencode": False,
         "vibey": False,
     }
+
+
+def test_agents_endpoint_projects_backend_enablement(tmp_path):
+    # An installed backend switched off in Settings · Backends must read as off,
+    # so the Models page stops drawing it as a live route (owner report 11-16).
+    service, _store, _adapter = _service(tmp_path)
+    service.cli_present_override = lambda backend: backend != "vibey"
+    service.backend_enabled_override = lambda backend: backend == "claude"
+
+    agents = {agent["backend"]: agent for agent in service.list_agents()}
+
+    assert {backend: agent["backend_enabled"] for backend, agent in agents.items()} == {
+        "claude": True,
+        "codex": False,
+        "opencode": False,
+        "vibey": True,
+    }
+    for agent in agents.values():
+        _assert_valid("agent-supply.schema.json", agent)
+
+    def broken(backend):
+        raise RuntimeError("config unavailable")
+
+    service.backend_enabled_override = broken
+    agents = service.list_agents()
+    assert all(agent["backend_enabled"] is True for agent in agents)
 
 
 def test_agents_collection_reads_cli_presence_without_running_discovery(tmp_path):
@@ -5440,7 +5492,7 @@ _PROJECTION_MUTATIONS = {
         lambda service: _confirm_guard(lambda guard: service.set_agent_sources(
             "claude", {"order": ["src_first0001"], **guard},
         )),
-        lambda bindings: bindings["src_second001"].route_model_ids == (_PROJECTION_MODEL,),
+        None,  # The surviving manual hop already registers this exact model.
     ),
     "shorten_chain": (
         _shorten_chain_past_a_newer_family_member,
@@ -5454,7 +5506,7 @@ _PROJECTION_MUTATIONS = {
             confirmed_remove_hops=guard.get("would_remove_hops"),
             confirmed_interruptions=guard.get("would_interrupt"),
         )),
-        lambda bindings: "claude-opus-4-7" not in bindings["src_first0001"].route_model_ids,
+        None,  # An unlisted automatic row never registered a transport target.
     ),
 }
 
@@ -7333,10 +7385,10 @@ def test_delete_guard_includes_all_newly_unsupplied_inherited_routes(tmp_path):
     assert exc_info.value.data["would_interrupt"] == [
         {
             "backend": "claude",
-            "model_id": model.id,
+            "model_id": model,
             "agents": [],
         }
-        for model in claude.models
+        for model in ["claude-opus-4-6", "opus", "opus[1m]"]
     ]
 
 
@@ -9541,7 +9593,7 @@ def test_failed_hub_reauth_rolls_back_when_old_journal_cleanup_fails(tmp_path):
     assert service.oauth_flows.binding(flow["flow_id"]) is None
 
 
-def test_credential_inventory_narrowing_preserves_exact_routes(
+def test_credential_inventory_narrowing_guards_lost_automatic_supply(
     monkeypatch,
     tmp_path,
 ):
@@ -9586,16 +9638,27 @@ def test_credential_inventory_narrowing_preserves_exact_routes(
         base_url=base_url,
     )
 
+    assert response.status_code == 409
+    refusal = response.get_json()
+    assert {gap["model_id"] for gap in refusal["would_interrupt"]} == {
+        "claude-opus-4-6", "opus", "opus[1m]", "claude-sonnet-4-6", "sonnet", "sonnet[1m]",
+    }
+    response = client.put(
+        f"/api/models/sources/{created['id']}/credential",
+        json={**request_body, "force": True, **{
+            key: refusal[key] for key in ("would_remove_hops", "would_interrupt")
+        }}, headers=headers, base_url=base_url,
+    )
     assert response.status_code == 200
     committed = response.get_json()
-    assert committed["removed_hops"] == []
-    assert committed["interrupted"] == []
-    assert committed["source"]["credential_ref"] == "cred_route_2"
+    assert committed["removed_hops"] == refusal["would_remove_hops"]
+    assert committed["interrupted"] == refusal["would_interrupt"]
+    assert committed["source"]["credential_ref"] == "cred_route_3"
     assert store.config.agents["claude"].to_payload()["routes"] == before_routes
     chain = service.agent_chain("claude", "claude-opus-4-6")
-    assert chain["current"] == {"source_id": created["id"], "model_id": "claude-opus-4-6"}
-    assert chain["route_origin"] == "passthrough"
-    assert adapter.revoked == ["cred_test001", "cred_route_1"]
+    assert chain["current"] is chain["route_origin"] is None
+    assert chain["chain"] == []
+    assert adapter.revoked == ["cred_test001", "cred_route_2", "cred_route_1"]
 
 
 def test_failed_hub_oauth_source_creation_revokes_credential(tmp_path):
@@ -10309,6 +10372,13 @@ def test_model_hub_mutations_use_existing_origin_and_csrf_guards(monkeypatch, tm
 
     assert model_response.status_code == config_response.status_code == 403
     assert model_response.get_json() == config_response.get_json()
+    # Using a reset card is behind the same guards: no CSRF token, or another origin, claims nothing.
+    use = "/api/models/sources/src_example1/reset-cards/use"
+    other_origin = {**csrf_headers(client, base_url), "Origin": "https://other.invalid"}
+    for headers in ({"Origin": base_url}, other_origin):
+        rejected = client.post(use, base_url=base_url, headers=headers, json={"kind": "account"})
+        assert rejected.status_code == 403
+    assert not service.card_fences.directory.exists()
 
 
 def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, tmp_path):
@@ -11181,6 +11251,11 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
     headers = csrf_headers(client, origin)
     replacement_url = "https://other-relay.example/v1"
 
+    # Make the claimed exact route explicit; missing inventory only preserves
+    # manual forwarding, not automatic aliases on the same Source.
+    store.config.agents["claude"].routes["claude-opus-4-6"] = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source["id"], "claude-opus-4-6"),)
+    )
     before_routes = store.config.agents["claude"].to_payload()["routes"]
     response = client.patch(
         f"/api/models/sources/{source['id']}",
@@ -11189,9 +11264,17 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
         base_url=origin,
     )
 
+    assert response.status_code == 409
+    refusal = response.get_json()
+    response = client.patch(
+        f"/api/models/sources/{source['id']}",
+        json={"base_url": replacement_url, "force": True, **{
+            key: refusal[key] for key in ("would_remove_hops", "would_interrupt")
+        }}, headers=headers, base_url=origin,
+    )
     assert response.status_code == 200
     committed = response.get_json()
-    committed_retarget = adapter.retargeted_credentials[0]
+    committed_retarget = adapter.retargeted_credentials[-1]
     assert committed_retarget[:4] == (
         old_credential_ref,
         "anthropic",
@@ -11200,11 +11283,12 @@ def test_base_url_change_preserves_missing_inventory_exact_hops(
     )
     assert committed["source"]["base_url"] == replacement_url
     assert committed["source"]["credential_ref"] == committed_retarget[4]
-    assert discovery_refs == [committed_retarget[4]]
+    assert discovery_refs == [item[4] for item in adapter.retargeted_credentials]
     assert old_credential_ref in adapter.revoked
     assert committed_retarget[4] not in adapter.revoked
-    assert committed["removed_hops"] == []
-    assert committed["interrupted"] == []
+    assert committed["removed_hops"] == refusal["would_remove_hops"]
+    assert all(hop["menu_model"] != "claude-opus-4-6" for hop in committed["removed_hops"])
+    assert committed["interrupted"] == refusal["would_interrupt"]
     assert store.config.sources[0].base_url == replacement_url
     assert store.config.agents["claude"].to_payload()["routes"] == before_routes
     assert service.agent_chain("claude", "claude-opus-4-6")["current"] == {

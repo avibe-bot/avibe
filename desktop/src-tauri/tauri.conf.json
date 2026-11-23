@@ -26,7 +26,7 @@
         "titleBarStyle": "Overlay",
         "trafficLightPosition": {
           "x": 12,
-          "y": 24
+          "y": 22
         },
         "hiddenTitle": true
       }
@@ -43,8 +43,12 @@
         "main-computer-use-windows",
         "main-desktop-update",
         "main-app-windows",
+        "main-app-lock",
         "main-desktop-notifications",
-        "main-instance-client"
+        "main-instance-client",
+        "main-window-focus",
+        "show-share",
+        "update-popover"
       ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
     }
@@ -78,7 +82,13 @@
     },
     "macOS": {
       "hardenedRuntime": true,
-      "entitlements": "Entitlements.plist"
+      "entitlements": "Entitlements.plist",
+      "files": {
+        "Resources/en.lproj/InfoPlist.strings": "macos/en.lproj/InfoPlist.strings",
+        "Resources/en.lproj/ServicesMenu.strings": "macos/en.lproj/ServicesMenu.strings",
+        "Resources/zh-Hans.lproj/InfoPlist.strings": "macos/zh-Hans.lproj/InfoPlist.strings",
+        "Resources/zh-Hans.lproj/ServicesMenu.strings": "macos/zh-Hans.lproj/ServicesMenu.strings"
+      }
     },
     "icon": [
       "icons/32x32.png",

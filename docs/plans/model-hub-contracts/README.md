@@ -260,7 +260,7 @@ commit is not evidence that the complete final protocol has landed.
 - Gateway stores one default Source membership/order per backend and sparse manual
   overrides per model. Absent and valid empty values inherit; only nonempty arrays override.
 - The shared pure planner returns nonempty manual hops verbatim, otherwise all accepted matches
-  in default order, otherwise unchanged-id passthrough on eligible non-retired Hub API-key defaults.
+  in default order, otherwise an empty/null-origin unsupplied plan.
 - Reads, previews, summaries, guards, adoption, probes, launches and execution use that
   effective plan. Health and process readiness annotate it without changing its origin.
 - New catalog rows have no override; Source creation appends defaults but never writes
@@ -287,8 +287,13 @@ Normative routing behavior lives only in `docs/plans/model-hub.md`: §4.2 owns e
 turn copy, and guarded mutation envelopes, and §6 owns native-config import actions.
 Contract prose points to those authorities and does not add branches.
 
-API-key passthrough is the delivery scope. Subscriptions continue automatic matching and
-known-model manual routes; an unmatched subscription-only default set is Unconfigured.
+Unlisted API-key forwarding requires an explicit manual hop (2026-11-17 amendment).
+The `passthrough` enum is retained for compatibility but no longer produced.
+Subscriptions continue automatic matching and known-model manual routes; every unmatched
+automatic model is Unconfigured. Opaque request-level 4xx (except 401/403/429) never
+poison Source health, and neither does an unlisted target's `server_error` 5xx, which
+ends that request without fallback or retry; §4.3 defines machine-code and transport
+precedence.
 No underlying engine expansion or OAuth alias substitution is part of this change.
 
 ## Invariants
@@ -304,10 +309,12 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    normally repeats observation before committed credential provisioning. Explicit
    `save_unverified: true` permits a catalog pin or declaration without observation;
    custom Auto still cannot be guessed. Completed Hub OAuth consent can retain its
-   bound credential under the fixed vendor protocol. A newly stored Hub credential
-   that no add-time observation authenticated — an explicit unverified save, a
-   native-config import, Hub OAuth admission, any credential or endpoint replacement —
-   carries an opaque `verification_pending` identity. Model Sources keep the
+   bound credential under the fixed vendor protocol. API-key save, key replacement
+   and Base URL changes check the owned models witness: gated acceptance clears
+   the new pending marker, explicit credential rejection refuses the mutation,
+   and unknown evidence saves pending while retaining usable inventory. A newly
+   stored Hub credential with no authentication evidence — including native-config
+   import and Hub OAuth admission — carries an opaque `verification_pending` identity. Model Sources keep the
    matching-credential model-call rule: a successful model call with the same current
    credential and marker may clear it. A tool-only `search` Source never makes a model call.
    For every search-capable Source, including an official DeepSeek model Source
@@ -317,7 +324,7 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    are empty or its body is unreadable. Clearing requires the same current credential
    and marker and is a fresh cross-process field mutation; `credential_generation`
    does not change. Free-check `unknown` and `invalid` leave it unchanged.
-   Model discovery never clears it.
+   Plain model discovery never clears it.
    A typed Base URL never supplies protocol ownership. For model observation,
    model-free validation, altered-credential controls and publicly readable model
    lists do not prove authentication; on a protocol that
@@ -401,6 +408,10 @@ Controller cache. Production cannot acquire the migration guard without its
 Controller owner. This is a memory-consumer correction inside the existing
 lifecycle, not another journal, marker, lock, phase or public API field.
 
+## Catalog metadata match provenance
+
+Within v23, `match_kind` is an additive, read-only projection on models.dev search results and described provider candidates. Current servers emit `exact` or `closest`; on older servers absence has the legacy `exact` presentation. This does not change a stored backend row, an upstream model identity, a supplier projection, or the envelope version. See `api.md` and `api-response.schema.json`.
+
 ## Authority and mirror guard
 
 `mirror-registry.json` is the executable index for closed vocabularies and decision
@@ -477,7 +488,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 | `observation-result.schema.json` | Non-persisting Add-time connectivity, authentication, protocol-establishment, and inventory observation. |
 | `turn-provenance.schema.json` | Exactly attributed turn attempts and terminal outcome; no policy or mapping discriminator. The one versioned object persisted to disk, so it accepts every released version. |
 | `usage-summary.schema.json` | Metered token usage over a trailing local-day window, aggregated from proxied turns, with its list-API-price valuation. A report only: no consumer may feed it back into resolution, admission, or cooldown. |
-| `quota-summary.schema.json` | Rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report only; carries no grant or raw body. |
+| `quota-summary.schema.json` | Reset-card inventory on supported subscriptions (with the lock a card use holds on its account) and rate-limit windows of hub-held subscriptions, parsed from each vendor's own usage report, and the API-price value of each subscription's metered usage against its monthly fee. A report; carries no grant or raw body. Resolution never reads it. Its one consumer is the refresh the user presses, which resumes an account paused for quota or rate unless the fresh report still shows an account-wide window used up. |
 | `hosted-tools-status.schema.json` | The Tools read: each hosted tool's switch, its passive status (latest success, refusals, per-pair successes), the search executor order (saved, effective, candidates with their unit rates) and the image models with their default. A report only; hop resolution reads config and evidence itself. |
 | `resolution-event.schema.json` | Pull-feed Source/resolution records and their closed reason/detail vocabulary. |
 | `oauth-flow.schema.json` | Subscription creation and re-auth presentation without secret material. |

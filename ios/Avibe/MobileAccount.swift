@@ -127,6 +127,11 @@ struct MobileRuntimeContext: Equatable {
     fileprivate let websiteDataStoreIdentifier: UUID
 }
 
+extension MobileRuntimeContext {
+    /// The WebKit store this runtime belongs to (read-only outside this file).
+    var websiteDataStoreID: UUID { websiteDataStoreIdentifier }
+}
+
 enum MobileSessionState: Equatable {
     case signedOut
     case signedIn(
@@ -238,6 +243,28 @@ struct MobileAccountError: Error, Equatable {
     static let passkeyUnavailable = MobileAccountError(
         code: "passkey_unavailable",
         message: "No passkey for this account is available on this device."
+    )
+    /// Passkey sign-in: avibe.bot did not accept the passkey the person chose.
+    static let passkeyRejected = MobileAccountError(
+        code: "invalid",
+        message: "The passkey was not accepted."
+    )
+    /// The person closed the system sign-in window: the page shows nothing.
+    static let providerCancelled = MobileAccountError(
+        code: "provider_cancelled",
+        message: "The sign-in was cancelled."
+    )
+    static let providerUnavailable = MobileAccountError(
+        code: "provider_unavailable",
+        message: "This sign-in method is not available right now."
+    )
+    static let providerEmailUnverified = MobileAccountError(
+        code: "provider_email_unverified",
+        message: "The provider has not verified this email address."
+    )
+    static let invalidOrExpired = MobileAccountError(
+        code: "invalid_or_expired",
+        message: "The sign-in could not be completed. Try again."
     )
     static let runtimeUnavailable = MobileAccountError(
         code: "runtime_unavailable",
@@ -469,6 +496,27 @@ final class AccountWebsiteDataStore {
     }
 }
 
+/// Why this device revokes its push registrations, sent to the relay with
+/// the revoke so a "my notifications stopped" report can be traced
+/// (docs/plans/ios-push-relay-contract.md, revoke reasons). A closed enum,
+/// never free text; the relay records an unknown value as `unspecified`.
+enum PushRevokeReason: String, CaseIterable {
+    /// The person signed out in the App.
+    case signedOut = "signed_out"
+    /// avibe.bot answered the session read `401`.
+    case sessionExpired = "session_expired"
+    /// A different account signed in.
+    case accountChanged = "account_changed"
+    /// The instance left the account's list.
+    case instanceRemoved = "instance_removed"
+    /// The instance page turned its notifications off (`push.unsubscribe`).
+    case notificationsOff = "notifications_off"
+    /// An installation left by an earlier install of the App.
+    case reinstalled
+    /// Not attributable: a revoke staged before reasons existed.
+    case unspecified
+}
+
 @MainActor
 protocol MobileAuthTransporting: AnyObject {
     func requestOTP(email: String) async throws -> Int
@@ -490,6 +538,50 @@ protocol MobileAuthTransporting: AnyObject {
     func verifySecondFactor(
         _ proof: MobileSecondFactorProof
     ) async throws -> MobileSessionDiscovery
+    /// The ways in avibe.bot offers the App now, from one `GET /api/config/auth`:
+    /// the providers its mobile broker accepts (`mobile_providers`; missing or
+    /// malformed is none) and passkey sign-in (`passkey_login_enabled` exactly
+    /// `true`). `nil` when the config could not be read at all. Never throws.
+    func signInMethods() async -> MobileSignInMethods?
+    /// `POST /api/mobile/auth/start`: a browser address for Google and GitHub,
+    /// the server's nonce for Apple. Throws `providerUnavailable`,
+    /// `rate_limited`, or `network`.
+    func providerStart(
+        provider: MobileSignInProvider,
+        challenge: String,
+        state: String
+    ) async throws -> MobileProviderStart
+    /// `POST /api/mobile/auth/exchange`, then the session read. Throws
+    /// `invalidOrExpired` (also for the session's `401`),
+    /// `providerEmailUnverified`, `rate_limited`, or `network`.
+    func providerExchange(
+        transactionID: String,
+        code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange
+    /// `POST /api/mobile/auth/apple`, then the session read; errors as
+    /// `providerExchange`.
+    func appleExchange(
+        transactionID: String,
+        identityToken: String,
+        authorizationCode: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange
+    /// `POST /api/passkey-primary/options`: a flow and a discoverable request. Throws
+    /// `providerUnavailable` when passkey sign-in is off (503), `rate_limited`, or `network`
+    /// (a 403 is avibe.bot's HTTP boundary, not an answer about this account).
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart
+    /// `POST /api/passkey-primary/verify` in the same store. Success sets the session cookies
+    /// there; the session is read separately (`fetchSession`). Throws `passkeyRejected` when
+    /// avibe.bot does not accept the passkey (`verification_failed`, which is also its answer for
+    /// an account outside the audience), `passkeyCancelled` for an ended or expired flow,
+    /// `rate_limited`, or `network`.
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws
+    /// `POST /api/passkey-primary/cancel`, best effort: an abandoned flow also expires.
+    func primaryPasskeyCancel(flow: String) async
     func logout() async throws
     func pushManagementRequest(
         _ request: PushManagementRequest
@@ -504,6 +596,57 @@ private struct StoredMobileSelection: Codable, Equatable {
     let url: URL
 }
 
+enum HealthAccountEvent {
+    case signedOut(explicit: Bool)
+    case authorizationUnavailable
+    case authenticated(accountID: String, instanceIDs: [String])
+}
+
+/// avibe.bot's last signed-in answer for the session stored on this device,
+/// and how long it lets an instance be loaded before avibe.bot is asked
+/// again.
+///
+/// An instance address that leaves an account cannot become another
+/// account's for 30 days. So within `lifetime` of a confirmation the stored
+/// address still leads to the instance avibe.bot listed; past it nothing of
+/// an instance is loaded (not by a cold start, an open, or the Action
+/// Button's background take) until avibe.bot has answered. `lifetime` must
+/// stay clearly shorter than that wait. It trusts this device's clock: a
+/// clock set back makes an old confirmation look recent; one dated in the
+/// future counts as none.
+enum MobileSessionConfirmation {
+    /// Seconds since 1970, written by the account coordinator only. It goes
+    /// with the stored session.
+    static let key = "avibe.mobile.lastGoodSessionConfirmedAt"
+    static let lifetime: TimeInterval = 14 * 24 * 60 * 60
+    /// From this age on, an App that is running asks avibe.bot again on its
+    /// own (a quiet read behind the open page), so a confirmation does not
+    /// run out under someone who keeps using the App.
+    static let renewalAge: TimeInterval = 7 * 24 * 60 * 60
+
+    /// False with no record (a session stored by a build from before it),
+    /// or one dated in the future.
+    static func isCurrent(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        age(in: defaults, now: now).map { $0 < lifetime } ?? false
+    }
+
+    /// Current, and old enough to be asked for again.
+    static func isDueForRenewal(in defaults: UserDefaults, now: Date = Date()) -> Bool {
+        age(in: defaults, now: now).map { $0 >= renewalAge && $0 < lifetime } ?? false
+    }
+
+    /// How long ago avibe.bot confirmed; nil with no record, or one dated
+    /// in the future.
+    private static func age(in defaults: UserDefaults, now: Date) -> TimeInterval? {
+        let confirmedAt = defaults.double(forKey: key)
+        guard confirmedAt > 0 else {
+            return nil
+        }
+        let age = now.timeIntervalSince1970 - confirmedAt
+        return age >= 0 ? age : nil
+    }
+}
+
 @MainActor
 final class MobileSessionCoordinator {
     typealias TransportFactory = @MainActor (
@@ -512,23 +655,74 @@ final class MobileSessionCoordinator {
     ) -> MobileAuthTransporting
 
     private static let selectionKey = "avibe.mobile.selection"
+    /// The sign-ins avibe.bot last advertised for the App (`mobile_providers`):
+    /// public configuration, not per account, kept so Welcome can show them
+    /// before a fresh read answers (after sign-out, on a cold start).
+    private static let advertisedProvidersKey = "avibe.mobile.advertisedProviders"
+    /// Passkey sign-in's switch from the same read, kept with the list.
+    private static let advertisedPasskeyKey = "avibe.mobile.advertisedPasskey"
+    /// The last session avibe.bot confirmed (the account and its instances,
+    /// no credentials), so a cold start can open the selected instance before
+    /// checking again. It follows `snapshot`: gone whenever that is.
+    private static let lastGoodSessionKey = "avibe.mobile.lastGoodSession"
     /// When each instance was last opened as the selected runtime, per
     /// account: `[accountID: [instanceID: seconds since 1970]]`.
     private static let instanceUseKey = "avibe.mobile.instanceUse"
+    /// The account this device's push may still be bound to: the last one
+    /// signed in, until its push cleanup runs. It survives a relaunch.
+    private static let pushAccountKey = "avibe.mobile.pushAccount"
 
     private let defaults: UserDefaults
+    private let now: () -> Date
     private let controlPlane: MobileControlPlaneConfiguration
     private let websiteDataStore: AccountWebsiteDataStore
     private let transportFactory: TransportFactory
     private let passkeyAuthenticator: MobilePasskeyAuthenticating
+    private let webAuthenticator: MobileWebAuthenticating
+    private let appleAuthorizer: MobileAppleAuthorizing
+    /// The account generation whose provider sign-in the backend attested created the account.
+    /// Memory only: any account transition moves the generation on, which retires it.
+    private var providerCreatedGeneration: Int?
     private let onOpenRuntime: (MobileRuntimeContext) -> Void
     private let onPrepareAccountTransition: () -> [
         WebsiteDataStoreReleaseBarrier
     ]
-    private let onPreparePushLogout: @MainActor () async -> Void
+    private let onDetachActiveOwner: @MainActor () -> Bool
+    private let onDetachActiveOwnerForAuthenticatedAccount: @MainActor (String) -> Bool
+    private let onAuthenticatedAccount: @MainActor (String) -> Bool
+    private let onHealthAccountEvent: @MainActor (HealthAccountEvent) -> Void
+    private var healthAuthorizationAvailable = false
+
+    var healthAccountID: String? {
+        guard healthAuthorizationAvailable, authoritativeTransition == nil else { return nil }
+        if case .resetting = phase { return nil }
+        return snapshot?.account.id
+    }
+
+    /// Revokes this device's push for the account, saying why
+    /// (docs/plans/ios-push-relay-contract.md, revoke reasons).
+    private let onPreparePushLogout: @MainActor (PushRevokeReason) async -> Void
+    /// Revokes this device's registrations for the account's instance
+    /// origins outside the given set (the instances it now lists), leaving
+    /// the others bound. Called with the account that lists them.
+    private let onReconcileInstancePush: @MainActor (Set<String>, String) async -> Void
 
     private var transport: MobileAuthTransporting?
-    private var snapshot: MobileSessionSnapshot?
+    private var snapshot: MobileSessionSnapshot? {
+        didSet {
+            // Restoring reads the stored session; it writes nothing back.
+            guard !restoringLastGoodSession else { return }
+            if snapshot == nil {
+                snapshotIsUnconfirmed = false
+            }
+            persistLastGoodSession()
+        }
+    }
+    /// `snapshot` came from the device, not yet from avibe.bot in this
+    /// process (a cold start that opened first). Only an answer from
+    /// avibe.bot clears it; a local re-read or a failed check does not.
+    private var snapshotIsUnconfirmed = false
+    private var restoringLastGoodSession = false
     /// The email typed for the sign-in that now owes a second factor, shown
     /// when the backend's answer does not name the account.
     private var secondFactorEmail: String?
@@ -540,11 +734,20 @@ final class MobileSessionCoordinator {
     /// Operation that is allowed to preserve the selected runtime while the
     /// account page refreshes or performs a push-management request.
     private var selectionKeepingOperation: UUID?
+    /// Opens waiting, each up to its bound, for `selectionKeepingOperation`
+    /// to finish.
+    private var selectionKeepingOperationWaiters: [
+        UUID: CheckedContinuation<Void, Never>
+    ] = [:]
     /// The operation that currently retains the transport after its surface
     /// closes. This token is separate from `selectionKeepingOperation`:
     /// selection and transport ownership have different invariants.
     private var transportOperationToken: UUID?
     private var signedOutStoreIsFresh = false
+    /// The generation whose store holds a passkey sign-in avibe.bot accepted but whose session
+    /// has not been read yet. Memory only: any account transition retires it, and a relaunch
+    /// reads that store's session anyway.
+    private var verifiedPasskeyGeneration: Int?
     /// A replacement page must read the known result even while push/store
     /// cleanup suspends. The publication ID prevents an older continuation
     /// from clearing a newer transition's result.
@@ -552,6 +755,8 @@ final class MobileSessionCoordinator {
     private var pendingStoreReleaseBarriers: [
         WebsiteDataStoreReleaseBarrier
     ] = []
+    /// The avibe.bot page shown with this account's sign-in, while open.
+    private weak var openAccountWebPage: WKWebView?
 
     private enum Phase: Equatable {
         case ready
@@ -568,8 +773,38 @@ final class MobileSessionCoordinator {
         snapshot?.account
     }
 
+    /// The account signed in, restored or confirmed, outside any sign-out,
+    /// reset or change of account (which keeps the snapshot and selection
+    /// while it revokes push).
+    var settledAccountID: String? {
+        guard authoritativeTransition == nil else { return nil }
+        if case .resetting = phase { return nil }
+        return snapshot?.account.id
+    }
+
+    var controlPlaneURL: URL {
+        controlPlane.baseURL
+    }
+
     var currentInstances: [MobileInstance] {
         snapshot?.instances ?? []
+    }
+
+    /// The signed-in account's stored selection, as the last session read
+    /// lists it, available or not. `nil` when signed out, when nothing is
+    /// selected, or when the selection is another account's or names an
+    /// instance that is no longer listed at that address.
+    var selectedInstance: MobileInstance? {
+        guard
+            let snapshot,
+            let selection = storedSelection(),
+            selection.accountID == snapshot.account.id
+        else {
+            return nil
+        }
+        return snapshot.instances.first {
+            $0.id == selection.instanceID && $0.url == selection.url
+        }
     }
 
     init(
@@ -580,22 +815,47 @@ final class MobileSessionCoordinator {
             MobileAuthTransport(controlPlaneURL: $0, websiteDataStore: $1)
         },
         passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
+        webAuthenticator: MobileWebAuthenticating? = nil,
+        appleAuthorizer: MobileAppleAuthorizing? = nil,
         onOpenRuntime: @escaping (MobileRuntimeContext) -> Void,
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
         ],
-        onPreparePushLogout: @escaping @MainActor () async -> Void = {}
+        onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
+        onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
+        onPreparePushLogout: @escaping @MainActor (PushRevokeReason) async -> Void = { _ in },
+        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in },
+        now: @escaping () -> Date = Date.init
     ) {
         self.defaults = defaults
+        self.now = now
+        self.lastAdvertisedProviders = defaults.stringArray(forKey: Self.advertisedProvidersKey)
+            .map { names in MobileSignInProvider.allCases.filter { names.contains($0.rawValue) } }
+        self.lastAdvertisedPasskey = defaults.bool(forKey: Self.advertisedPasskeyKey)
         self.controlPlane = controlPlane
         self.websiteDataStore = websiteDataStore
         self.transportFactory = transportFactory
         self.passkeyAuthenticator = passkeyAuthenticator
             ?? MobilePasskeyAuthenticator()
+        self.webAuthenticator = webAuthenticator ?? MobileWebAuthenticator()
+        self.appleAuthorizer = appleAuthorizer ?? MobileAppleAuthorizer()
         self.onOpenRuntime = onOpenRuntime
         self.onPrepareAccountTransition = onPrepareAccountTransition
+        self.onDetachActiveOwner = onDetachActiveOwner
+        self.onDetachActiveOwnerForAuthenticatedAccount = onDetachActiveOwnerForAuthenticatedAccount
+        self.onAuthenticatedAccount = onAuthenticatedAccount
         self.onPreparePushLogout = onPreparePushLogout
+        self.onHealthAccountEvent = onHealthAccountEvent
+        self.onReconcileInstancePush = onReconcileInstancePush
         transport = nil
+        // A build from before `pushAccountID` was recorded: the saved
+        // selection's account is the one its push may be bound to. Record it
+        // now, before any sign-in clears the selection.
+        if defaults.object(forKey: Self.pushAccountKey) == nil {
+            pushAccountID = storedSelection()?.accountID
+        }
     }
 
     func activateAccountSurface() {
@@ -603,6 +863,9 @@ final class MobileSessionCoordinator {
             accountSurfaceLeaseID = UUID()
         }
         ensureTransport()
+        // Every account page that appears refreshes the advertised sign-ins,
+        // signed in or not, so a later sign-out shows a current list at once.
+        _ = readAdvertisedProviders()
     }
 
     func deactivateAccountSurface() {
@@ -619,6 +882,37 @@ final class MobileSessionCoordinator {
         guard transportOperationToken != nil else {
             deactivateAccountSurface()
             return
+        }
+    }
+
+    /// The store an avibe.bot page shown with the account's sign-in uses
+    /// (`AvibePage.accountDeletion`): the account's own, so the page is
+    /// already signed in. Only a signed-in account gets it, and not while a
+    /// sign-out or account change is under way.
+    func accountWebPageDataStore() throws -> WKWebsiteDataStore {
+        guard snapshot != nil else {
+            throw MobileAccountError.signedOut
+        }
+        guard keepsSelection else {
+            throw MobileAccountError.busy
+        }
+        return websiteDataStore.dataStore
+    }
+
+    /// A WebView on `accountWebPageDataStore()` is open. An account
+    /// transition waits for it, as for the runtime's, before it rotates the
+    /// store, and leaves the old store for a later sweep if it is still
+    /// alive. Until `endAccountWebPage(_:)`, no instance can be selected
+    /// (a notification tap included): the page's result decides first
+    /// whether there is still an account to open it for.
+    func beginAccountWebPage(_ webView: WKWebView) {
+        openAccountWebPage = webView
+        recordReleaseBarrier(WebsiteDataStoreReleaseBarrier(webViews: [webView]))
+    }
+
+    func endAccountWebPage(_ webView: WKWebView) {
+        if openAccountWebPage === webView {
+            openAccountWebPage = nil
         }
     }
 
@@ -660,23 +954,41 @@ final class MobileSessionCoordinator {
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
+                self.healthAuthorizationAvailable = false
+                self.onHealthAccountEvent(.signedOut(explicit: false))
                 try await self.preparePushLogout(
-                    publishing: .signedOut, generation: requestGeneration
+                    publishing: .signedOut, generation: requestGeneration,
+                    reason: .sessionExpired
                 )
                 let transitionGeneration = self.beginAccountTransition(clearSelection: true)
                 try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
                 return .signedOut
             }
-            if self.belongsToAnotherAccount(discovery) {
-                try await self.preparePushLogout(
-                    publishing: .signedOut, generation: requestGeneration
+            if let authenticatedAccountID = self.differentAuthenticatedAccountID(
+                discovery
+            ) {
+                self.onHealthAccountEvent(.signedOut(explicit: false))
+                let transitionGeneration = self.beginAccountTransition(
+                    clearSelection: true
                 )
-                let transitionGeneration = self.beginAccountTransition(clearSelection: true)
-                try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
+                try self.detachScheduleOwner(
+                    unlessAuthenticatedAccount: authenticatedAccountID
+                )
+                try await self.preparePushLogout(
+                    publishing: .signedOut,
+                    generation: transitionGeneration,
+                    reason: .accountChanged
+                )
+                try await self.replaceWithFreshSignedOutStore(
+                    generation: transitionGeneration
+                )
                 return .signedOut
             }
             self.signedOutStoreIsFresh = false
-            return self.state(for: discovery)
+            try await self.settleKeptPush(
+                for: discovery, generation: requestGeneration
+            )
+            return try self.state(for: discovery)
         }
     }
 
@@ -717,16 +1029,208 @@ final class MobileSessionCoordinator {
                     code: code
                 )
                 try self.requireCurrentGeneration(loginGeneration)
+                try await self.settleKeptPush(
+                    for: discovery, generation: loginGeneration
+                )
                 self.clearStoredSelection()
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
-                return self.state(for: discovery)
+                return try self.state(for: discovery)
             } catch {
                 if self.generation == loginGeneration {
                     try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
                 }
                 throw error
             }
+        }
+    }
+
+    /// The last list avibe.bot advertised, persisted; `nil` until one was read.
+    private(set) var lastAdvertisedProviders: [MobileSignInProvider]?
+    /// Passkey sign-in's switch from that same read, persisted with it.
+    private(set) var lastAdvertisedPasskey = false
+    /// The read in flight, shared by everyone who asks meanwhile.
+    private var advertisedProvidersRead: Task<MobileSignInMethods?, Never>?
+
+    /// Starts a read of the advertised sign-ins, or joins the one in flight.
+    /// A server answer, however late, becomes the last-known list (and passkey
+    /// switch): one read of avibe.bot's public configuration carries both.
+    private func readAdvertisedProviders() -> Task<MobileSignInMethods?, Never> {
+        if let advertisedProvidersRead {
+            return advertisedProvidersRead
+        }
+        guard let transport else {
+            return Task { nil }
+        }
+        let read = Task { @MainActor [weak self] in
+            let methods = await transport.signInMethods()
+            guard let self else { return methods }
+            self.advertisedProvidersRead = nil
+            if let methods {
+                self.lastAdvertisedProviders = methods.providers
+                self.lastAdvertisedPasskey = methods.passkey
+                self.defaults.set(methods.providers.map(\.rawValue), forKey: Self.advertisedProvidersKey)
+                self.defaults.set(methods.passkey, forKey: Self.advertisedPasskeyKey)
+            }
+            return methods
+        }
+        advertisedProvidersRead = read
+        return read
+    }
+
+    /// The ways in Welcome may offer: those avibe.bot advertises for the App
+    /// now when that answers within `seconds`, otherwise the last ones it
+    /// advertised (`nil` when none was ever read). A display gate only; the
+    /// broker and avibe.bot still decide each attempt. The read never holds up
+    /// the answer it decorates for longer than `seconds`, and a late answer
+    /// still updates the last-known list.
+    func signInMethods(within seconds: Double) async -> MobileSignInMethods? {
+        let read = readAdvertisedProviders()
+        final class Once { var settled = false }
+        let once = Once()
+        let fresh: MobileSignInMethods? = await withCheckedContinuation { continuation in
+            Task { @MainActor in
+                let methods = await read.value
+                guard !once.settled else { return }
+                once.settled = true
+                continuation.resume(returning: methods)
+            }
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                guard !once.settled else { return }
+                once.settled = true
+                continuation.resume(returning: nil)
+            }
+        }
+        return fresh ?? lastAdvertisedProviders.map {
+            MobileSignInMethods(providers: $0, passkey: lastAdvertisedPasskey)
+        }
+    }
+
+    /// The providers alone, as `signInMethods(within:)` finds them.
+    func advertisedProviders(within seconds: Double) async -> [MobileSignInProvider]? {
+        await signInMethods(within: seconds)?.providers
+    }
+
+    /// Whether the signed-in account was created by this generation's provider sign-in, as the
+    /// backend attested. A hint for the empty state only: it decides nothing.
+    var accountWasJustCreated: Bool {
+        providerCreatedGeneration == generation && snapshot != nil
+    }
+
+    /// Google or GitHub in the system sign-in window, or Sign in with Apple's sheet, then the
+    /// backend's one-time exchange into this store (contract: avibe-bot-backend's mobile
+    /// provider exchange). A login transition like the
+    /// email code's: it starts from a fresh signed-out store, and every attempt that does not
+    /// sign in, a cancel included, rotates to a fresh one. The verifier, state, code and
+    /// transaction never leave native memory and the transport's fixed scripts.
+    func signInWithProvider(
+        _ provider: MobileSignInProvider,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileSessionState {
+        try await runExclusive {
+            let loginGeneration = self.beginAccountTransition(clearSelection: true)
+            do {
+                if !self.signedOutStoreIsFresh {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                let secrets = try MobileProviderSecrets.generate()
+                let start = try await self.requireTransport().providerStart(
+                    provider: provider,
+                    challenge: secrets.challenge,
+                    state: secrets.state
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                // The store is in use from here: a cancel below still retires it.
+                self.signedOutStoreIsFresh = false
+                let exchange: MobileProviderExchange
+                switch (provider, start) {
+                case (.google, .browser(let transactionID, let url)),
+                     (.github, .browser(let transactionID, let url)):
+                    let code = try await self.authenticateInBrowser(
+                        url: url,
+                        state: secrets.state,
+                        presentationAnchor: presentationAnchor,
+                        generation: loginGeneration
+                    )
+                    exchange = try await self.requireTransport().providerExchange(
+                        transactionID: transactionID,
+                        code: code,
+                        verifier: secrets.verifier
+                    )
+                case (.apple, .apple(let transactionID, let nonce)):
+                    let credential = try await self.appleAuthorizer.authorize(
+                        nonce: MobileAppleNonce.hashed(nonce),
+                        state: secrets.state,
+                        presentationAnchor: presentationAnchor
+                    )
+                    try self.requireCurrentGeneration(loginGeneration)
+                    guard
+                        let returnedState = credential.state,
+                        MobileProviderRoute.constantTimeEqual(returnedState, secrets.state)
+                    else {
+                        throw MobileAccountError.invalidOrExpired
+                    }
+                    exchange = try await self.requireTransport().appleExchange(
+                        transactionID: transactionID,
+                        identityToken: credential.identityToken,
+                        authorizationCode: credential.authorizationCode,
+                        verifier: secrets.verifier
+                    )
+                default:
+                    // The backend answered with the other provider class.
+                    throw MobileAccountError.network
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                self.clearStoredSelection()
+                self.secondFactorEmail = nil
+                if exchange.accountCreated {
+                    self.providerCreatedGeneration = loginGeneration
+                }
+                return try self.state(for: exchange.discovery)
+            } catch {
+                if self.generation == loginGeneration {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Google or GitHub: opens the answered browser address, if it is the control plane's launch
+    /// route, and returns the one-time code from the exact callback.
+    private func authenticateInBrowser(
+        url: URL,
+        state: String,
+        presentationAnchor: ASPresentationAnchor,
+        generation loginGeneration: Int
+    ) async throws -> String {
+        let controlPlane = self.controlPlane.baseURL
+        guard
+            MobileProviderRoute.isAllowedBrowserURL(url, controlPlane: controlPlane),
+            let callbackHost = controlPlane.host
+        else {
+            throw MobileAccountError.network
+        }
+        let returned = try await webAuthenticator.authenticate(
+            url: url,
+            callbackHost: callbackHost,
+            callbackPath: MobileProviderRoute.callbackPath,
+            presentationAnchor: presentationAnchor
+        )
+        try requireCurrentGeneration(loginGeneration)
+        switch MobileProviderRoute.callback(returned, controlPlane: controlPlane, state: state) {
+        case .code(let code):
+            return code
+        case .cancelled:
+            throw MobileAccountError.providerCancelled
+        case .emailUnverified:
+            throw MobileAccountError.providerEmailUnverified
+        case .unavailable:
+            throw MobileAccountError.providerUnavailable
+        case .invalid:
+            throw MobileAccountError.invalidOrExpired
         }
     }
 
@@ -752,11 +1256,14 @@ final class MobileSessionCoordinator {
                     password: password
                 )
                 try self.requireCurrentGeneration(loginGeneration)
+                try await self.settleKeptPush(
+                    for: result.discovery, generation: loginGeneration
+                )
                 self.clearStoredSelection()
                 self.signedOutStoreIsFresh = false
                 self.secondFactorEmail = normalizedEmail
                 return MobilePasswordSignInResult(
-                    state: self.state(for: result.discovery),
+                    state: try self.state(for: result.discovery),
                     weakPasswordReasons: result.weakPasswordReasons
                 )
             } catch {
@@ -785,12 +1292,18 @@ final class MobileSessionCoordinator {
             // transport; opening a page is not required to fetch the session.
             self.ensureTransport()
             let previousAccountID = self.snapshot?.account.id
+            // A cold start that opened before checking: an owed factor keeps
+            // the selection, as a cold start that checked first does.
+            let wasUnconfirmed = self.snapshotIsUnconfirmed
             let requestGeneration = self.generation
             let discovery = try await self.requireTransport().fetchSession()
             try self.requireCurrentGeneration(requestGeneration)
             guard let discovery else {
+                self.healthAuthorizationAvailable = false
+                self.onHealthAccountEvent(.signedOut(explicit: false))
                 try await self.preparePushLogout(
-                    publishing: .signedOut, generation: requestGeneration
+                    publishing: .signedOut, generation: requestGeneration,
+                    reason: .sessionExpired
                 )
                 let transitionGeneration = self.beginAccountTransition(clearSelection: true)
                 try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
@@ -802,41 +1315,56 @@ final class MobileSessionCoordinator {
                     let previousAccountID,
                     previousAccountID != fresh.account.id
                 {
-                    try await self.preparePushLogout(
-                        publishing: .signedOut, generation: requestGeneration
+                    self.onHealthAccountEvent(.signedOut(explicit: false))
+                    let transitionGeneration = self.beginAccountTransition(
+                        clearSelection: true
                     )
-                    let transitionGeneration = self.beginAccountTransition(clearSelection: true)
-                    try await self.replaceWithFreshSignedOutStore(generation: transitionGeneration)
+                    try self.detachScheduleOwner(
+                        unlessAuthenticatedAccount: fresh.account.id
+                    )
+                    try await self.preparePushLogout(
+                        publishing: .signedOut,
+                        generation: transitionGeneration,
+                        reason: .accountChanged
+                    )
+                    try await self.replaceWithFreshSignedOutStore(
+                        generation: transitionGeneration
+                    )
                     return .signedOut
                 }
-                if self.selectedRuntimeOriginIsMissing(in: fresh) {
-                    try await self.preparePushLogout(
-                        publishing: .signedIn(
-                            snapshot: self.orderedByUse(fresh, current: nil),
-                            selectedInstanceID: nil
-                        ),
-                        generation: requestGeneration
-                    )
+                try await self.settleKeptPush(
+                    for: discovery, generation: requestGeneration
+                )
+                // The account stays. Only instances that left the account's
+                // list lose this device's notifications (reconciled once this
+                // operation has ended); the runtime goes only when its own
+                // instance is gone from the list at its address.
+                if self.selectionMissing(from: fresh) != nil {
                     self.beginRuntimeInvalidation(with: fresh)
                 }
                 self.signedOutStoreIsFresh = false
+                self.pushAccountID = fresh.account.id
+                self.scheduleInstancePushReconcile(for: fresh)
+                self.healthAuthorizationAvailable = true
+                self.onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
+                // avibe.bot answered for this account.
+                self.sessionWasConfirmed()
                 return self.state(for: fresh)
-            case .secondFactorRequired(let requirement):
-                try await self.preparePushLogout(
-                    publishing: .twoFactorRequired(
-                        requirement.withEmail(fallback: self.secondFactorEmail)
-                    ),
-                    generation: requestGeneration
-                )
+            case .secondFactorRequired:
+                // Owing the second factor neither ends the session nor names
+                // another account: push stays bound. Whichever account the
+                // factor then lets in is settled against `pushAccountID`.
+                self.healthAuthorizationAvailable = false
+                self.onHealthAccountEvent(.authorizationUnavailable)
                 if previousAccountID != nil {
                     // A live account lost its authorization. A cold launch
                     // that already owes a second factor has no runtime to
                     // revoke: keep its saved selection until the verified
                     // account can decide whether it still belongs to it.
-                    self.beginAccountTransition(clearSelection: true)
+                    self.beginAccountTransition(clearSelection: !wasUnconfirmed)
                 }
                 self.signedOutStoreIsFresh = false
-                return self.state(for: discovery)
+                return try self.state(for: discovery)
             }
         }
     }
@@ -871,6 +1399,95 @@ final class MobileSessionCoordinator {
         }
     }
 
+    /// Passkey sign-in with no email first (avibe.bot's primary passkey). A login transition like
+    /// the email code: a new generation, the selection cleared, and one fresh signed-out store
+    /// kept through options, the system sheet, verify and the session read, so the binding cookie
+    /// and the new session stay together. Any attempt that does not sign in rotates the store.
+    /// Not the second-factor passkey (`verifyPasskey`), which needs a first factor already.
+    func signInWithPasskey(
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileSessionState {
+        try await runExclusive {
+            // avibe.bot already accepted this store's passkey sign-in and only its session read
+            // failed: read it again in the same store, with no second sheet and no second verify.
+            if let verified = self.verifiedPasskeyGeneration, verified == self.generation {
+                do {
+                    return try await self.readVerifiedPasskeySession(generation: verified)
+                } catch {
+                    if self.generation == verified, self.verifiedPasskeyGeneration != verified {
+                        try await self.replaceWithFreshSignedOutStore(generation: verified)
+                    }
+                    throw error
+                }
+            }
+            let loginGeneration = self.beginAccountTransition(clearSelection: true)
+            do {
+                if !self.signedOutStoreIsFresh {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                let start = try await self.requireTransport().primaryPasskeyStart()
+                try self.requireCurrentGeneration(loginGeneration)
+                // The store holds the binding cookie from here: any ending below retires it.
+                self.signedOutStoreIsFresh = false
+                let assertion: MobilePasskeyAssertion
+                do {
+                    assertion = try await self.passkeyAuthenticator.assert(
+                        start.request,
+                        presentationAnchor: presentationAnchor
+                    )
+                } catch {
+                    if self.generation == loginGeneration, let transport = try? self.requireTransport() {
+                        await transport.primaryPasskeyCancel(flow: start.flow)
+                    }
+                    throw error
+                }
+                try self.requireCurrentGeneration(loginGeneration)
+                try await self.requireTransport().primaryPasskeyVerify(
+                    flow: start.flow,
+                    response: assertion.authenticationResponseJSON
+                )
+                try self.requireCurrentGeneration(loginGeneration)
+                // The store now holds the session avibe.bot issued (backend §6: never discard it
+                // before it is read). A passing failure to read it keeps the store.
+                self.verifiedPasskeyGeneration = loginGeneration
+                return try await self.readVerifiedPasskeySession(generation: loginGeneration)
+            } catch {
+                if self.generation == loginGeneration, self.verifiedPasskeyGeneration != loginGeneration {
+                    try await self.replaceWithFreshSignedOutStore(generation: loginGeneration)
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Reads the session an accepted passkey sign-in left in this generation's store: one read,
+    /// and one more after a passing failure, each with the session read's own deadline. Nothing
+    /// is published until a read answers. `401` means the session did not hold: the store is
+    /// no longer kept (the caller retires it). Any other failure keeps it for the next try.
+    private func readVerifiedPasskeySession(generation: Int) async throws -> MobileSessionState {
+        var failure = MobileAccountError.network
+        for _ in 0..<2 {
+            let discovery: MobileSessionDiscovery?
+            do {
+                discovery = try await self.requireTransport().fetchSession()
+            } catch let error as MobileAccountError {
+                try self.requireCurrentGeneration(generation)
+                failure = error
+                continue
+            }
+            try self.requireCurrentGeneration(generation)
+            self.verifiedPasskeyGeneration = nil
+            guard let discovery else {
+                throw MobileAccountError.invalidOrExpired
+            }
+            self.clearStoredSelection()
+            self.secondFactorEmail = nil
+            return try self.state(for: discovery)
+        }
+        throw failure
+    }
+
     /// Confirms with one of the account's passkeys: options from avibe.bot,
     /// the system passkey sheet, then the assertion back to avibe.bot. Neither
     /// side of the exchange reaches the bundled page.
@@ -899,8 +1516,85 @@ final class MobileSessionCoordinator {
         }
     }
 
+    /// The instance list's open (`session.selectInstance`). When the account
+    /// is held only by operations that keep the selection (push-management
+    /// requests the App makes on its own, as on a return to the foreground,
+    /// or a refresh of the signed-in account), it first waits for them, up
+    /// to `bound` in all, then selects once. Any other operation, a reset or
+    /// a sign-out still answers `busy` at once. An open that waited is
+    /// dropped as `busy` if its page closed, another page opened, or the
+    /// account or selection changed meanwhile. `selectInstance` itself and
+    /// transport ownership are unchanged.
+    func selectInstanceAfterSelectionKeepingOperation(
+        id: String,
+        waitingAtMost bound: Duration = .seconds(10)
+    ) async throws -> MobileInstance {
+        guard isHeldBySelectionKeepingOperation else {
+            return try selectInstance(id: id)
+        }
+        let lease = accountSurfaceLeaseID
+        let requestGeneration = generation
+        let selection = storedSelection()
+        await waitForSelectionKeepingOperations(atMost: bound)
+        guard
+            accountSurfaceLeaseID == lease,
+            generation == requestGeneration,
+            storedSelection() == selection
+        else {
+            throw MobileAccountError.busy
+        }
+        return try selectInstance(id: id)
+    }
+
+    /// Waits while only operations that keep the selection hold the
+    /// account, up to `bound` in all; returns at once when nothing, or
+    /// anything else, holds it.
+    func waitForSelectionKeepingOperations(
+        atMost bound: Duration = .seconds(10)
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: bound)
+        // Recovery can run such operations back to back, the next one
+        // starting before this wait resumes.
+        while isHeldBySelectionKeepingOperation, clock.now < deadline {
+            await selectionKeepingOperationFinished(
+                atMost: clock.now.duration(to: deadline)
+            )
+        }
+    }
+
+    /// The account is held only by an operation that keeps the selection: a
+    /// push-management request the App makes on its own, or a refresh of
+    /// the signed-in account.
+    var isHeldBySelectionKeepingOperation: Bool {
+        if case .operation(let token) = phase {
+            return token == selectionKeepingOperation
+        }
+        return false
+    }
+
+    private func selectionKeepingOperationFinished(
+        atMost bound: Duration
+    ) async {
+        let waiter = UUID()
+        let timeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: bound)
+            self?.selectionKeepingOperationWaiters
+                .removeValue(forKey: waiter)?
+                .resume()
+        }
+        await withCheckedContinuation { continuation in
+            if isHeldBySelectionKeepingOperation {
+                selectionKeepingOperationWaiters[waiter] = continuation
+            } else {
+                continuation.resume()
+            }
+        }
+        timeout.cancel()
+    }
+
     func selectInstance(id: String) throws -> MobileInstance {
-        guard phase == .ready else {
+        guard phase == .ready, openAccountWebPage == nil else {
             throw MobileAccountError.busy
         }
         guard
@@ -948,20 +1642,30 @@ final class MobileSessionCoordinator {
         // Reserve invalidation and phase authority BEFORE any await. An older
         // fetch cannot advance generation and strand this logout in cleanup.
         let borrowsCleanup: Bool
-        if case .pushLogout = phase {
+        // Only the account's own push cleanup can stand in for this one;
+        // one instance's revoke cannot.
+        if case .pushLogout = phase, accountPushCleanup == phase {
             borrowsCleanup = true
         } else {
             borrowsCleanup = false
         }
         let resetToken = try beginReset()
-        let resetGeneration = generation
+        healthAuthorizationAvailable = false
+        onHealthAccountEvent(.signedOut(explicit: true))
         defer { finishReset(resetToken) }
+        // Notify before the first await so the schedule slot loses authority
+        // immediately. Its store retains pending durable revocation; a local
+        // write failure must not keep the account snapshot authorized.
+        _ = onDetachActiveOwner()
+        let resetGeneration = generation
         try await preparePushLogout(
             publishing: .signedOut, generation: resetGeneration,
+            reason: .signedOut,
             borrowingCleanup: borrowsCleanup
         )
-        invalidateAccount(clearSelection: true)
+        invalidateAccount(clearSelection: true, prepareRuntime: false)
         secondFactorEmail = nil
+        pushAccountID = nil
 
         if let oldTransport = transport {
             await oldTransport.cancelAll()
@@ -1017,24 +1721,47 @@ final class MobileSessionCoordinator {
         do {
             let discovery = try await operation()
             try requireCurrentGeneration(requestGeneration)
+            try await settleKeptPush(for: discovery, generation: requestGeneration)
             signedOutStoreIsFresh = false
-            return state(for: discovery)
+            return try state(for: discovery)
         } catch let error as MobileAccountError
             where error.code == MobileAccountError.signedOut.code
         {
             // The first-factor session ended while it owed the second factor:
             // an explicit signed-out answer, like a session read's `401`.
             try requireCurrentGeneration(requestGeneration)
-            try await preparePushLogout(publishing: .signedOut, generation: requestGeneration)
+            healthAuthorizationAvailable = false
+            onHealthAccountEvent(.signedOut(explicit: false))
+            try await preparePushLogout(
+                publishing: .signedOut, generation: requestGeneration,
+                reason: .sessionExpired
+            )
             let transitionGeneration = beginAccountTransition(clearSelection: true)
             try await replaceWithFreshSignedOutStore(generation: transitionGeneration)
             return .signedOut
         }
     }
 
+    private func detachScheduleOwner(
+        unlessAuthenticatedAccount accountID: String? = nil
+    ) throws {
+        let detached = if let accountID {
+            onDetachActiveOwnerForAuthenticatedAccount(accountID)
+        } else {
+            onDetachActiveOwner()
+        }
+        guard detached else {
+            throw MobileAccountError(
+                code: "local_state_unavailable",
+                message: "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
+            )
+        }
+    }
+
     private func preparePushLogout(
         publishing state: MobileSessionState,
         generation requestGeneration: Int,
+        reason: PushRevokeReason,
         borrowingCleanup: Bool = false
     ) async throws {
         try requireCurrentGeneration(requestGeneration)
@@ -1046,14 +1773,33 @@ final class MobileSessionCoordinator {
             }
         }
         if !borrowingCleanup {
-            await preparePushLogout()
+            await preparePushLogout(reason: reason)
         }
         // Push cleanup can be superseded by logout and even a new login.
         // Transport ownership alone does not authorize the old state write.
         try requireCurrentGeneration(requestGeneration)
     }
 
-    private func preparePushLogout() async {
+    private func preparePushLogout(reason: PushRevokeReason) async {
+        await runPushCleanup {
+            // Committed from here: the push coordinator keeps its own pending
+            // revoke. Clearing first means a cleanup that finishes after a
+            // newer sign-in cannot erase that account's record.
+            self.pushAccountID = nil
+            let cleanup = self.phase
+            self.accountPushCleanup = cleanup
+            defer {
+                if self.accountPushCleanup == cleanup {
+                    self.accountPushCleanup = nil
+                }
+            }
+            await self.onPreparePushLogout(reason)
+        }
+    }
+
+    /// Runs push work that must reach avibe.bot while this operation holds
+    /// the account (`pushManagementRequest` passes during `.pushLogout`).
+    private func runPushCleanup(_ body: () async -> Void) async {
         let resumePhase = phase
         let cleanupPhase: Phase
         switch resumePhase {
@@ -1072,25 +1818,70 @@ final class MobileSessionCoordinator {
                 phase = resumePhase
             }
         }
-        await onPreparePushLogout()
+        await body()
     }
 
-    private func belongsToAnotherAccount(
+    /// The `.pushLogout` phase of the account push cleanup running now. A
+    /// sign-out borrows only that phase, never an instance revoke's, even
+    /// while an older, superseded cleanup is still finishing.
+    private var accountPushCleanup: Phase?
+
+    /// The account this device's push may still be bound to ("" once its
+    /// cleanup has run; `init` records it on a first launch of this build).
+    private var pushAccountID: String? {
+        get {
+            let recorded = defaults.string(forKey: Self.pushAccountKey) ?? ""
+            return recorded.isEmpty ? nil : recorded
+        }
+        set { defaults.set(newValue ?? "", forKey: Self.pushAccountKey) }
+    }
+
+    /// Push is revoked on two definite answers only: the session ended, or
+    /// another account. A session that owes its second factor keeps it, and
+    /// so does any check that failed. Once a session names its account
+    /// again, a different one than `pushAccountID` first gets the sign-out
+    /// push cleanup, before it is published; the same one keeps its push.
+    private func settleKeptPush(
+        for discovery: MobileSessionDiscovery,
+        generation requestGeneration: Int
+    ) async throws {
+        guard
+            let known = pushAccountID,
+            case .signedIn(let fresh) = discovery,
+            fresh.account.id != known
+        else {
+            return
+        }
+        try await preparePushLogout(
+            publishing: .signedIn(
+                snapshot: orderedByUse(fresh, current: nil),
+                selectedInstanceID: nil
+            ),
+            generation: requestGeneration,
+            reason: .accountChanged
+        )
+    }
+
+    private func differentAuthenticatedAccountID(
         _ discovery: MobileSessionDiscovery
-    ) -> Bool {
+    ) -> String? {
         guard
             case .signedIn(let fresh) = discovery,
-            let selection = storedSelection()
+            let selection = storedSelection(),
+            selection.accountID != fresh.account.id
         else {
-            return false
+            return nil
         }
-        return selection.accountID != fresh.account.id
+        return fresh.account.id
     }
 
     private func beginRuntimeInvalidation(
         with snapshot: MobileSessionSnapshot
     ) {
         generation += 1
+        // A sign-in window or sheet still open belongs to the generation that just ended.
+        webAuthenticator.cancel()
+        appleAuthorizer.cancel()
         authoritativeTransition = nil
         clearStoredSelection()
         self.snapshot = snapshot
@@ -1100,29 +1891,68 @@ final class MobileSessionCoordinator {
         ensureTransport()
     }
 
-    private func selectedRuntimeOriginIsMissing(
-        in fresh: MobileSessionSnapshot
-    ) -> Bool {
+    /// Once the current operation has ended, revokes this device's
+    /// registrations for the account's instance origins it no longer lists,
+    /// as ordinary push requests that keep the selection. The push side
+    /// works from its own records and stages each revoke durably, so a pass
+    /// that cannot run is repeated by the next one. Only while this account
+    /// is still the one signed in.
+    private func scheduleInstancePushReconcile(for fresh: MobileSessionSnapshot) {
+        let accountID = fresh.account.id
+        let live = Set(fresh.instances.compactMap { WebOrigin(url: $0.url)?.serialized })
+        Task { @MainActor [weak self] in
+            guard
+                let self,
+                self.currentAccount?.id == accountID,
+                self.pushAccountID == accountID
+            else {
+                return
+            }
+            await self.onReconcileInstancePush(live, accountID)
+        }
+    }
+
+    /// The stored selection when the refreshed list no longer has it at the
+    /// same address (same account as before).
+    private func selectionMissing(
+        from fresh: MobileSessionSnapshot
+    ) -> StoredMobileSelection? {
         guard
             let previous = snapshot,
             previous.account.id == fresh.account.id,
             let selection = storedSelection(),
-            selection.accountID == fresh.account.id
+            selection.accountID == fresh.account.id,
+            !fresh.instances.contains(where: {
+                $0.id == selection.instanceID && $0.url == selection.url
+            })
         else {
-            return false
+            return nil
         }
-        return !fresh.instances.contains {
-            $0.id == selection.instanceID && $0.url == selection.url
-        }
+        return selection
     }
 
-    private func state(for discovery: MobileSessionDiscovery) -> MobileSessionState {
+    private func state(
+        for discovery: MobileSessionDiscovery
+    ) throws -> MobileSessionState {
         switch discovery {
         case .signedIn(let fresh):
+            guard onAuthenticatedAccount(fresh.account.id) else {
+                throw MobileAccountError(
+                    code: "local_state_unavailable",
+                    message: "Avibe can't read its saved alarm and reminder records on this iPhone. Update Avibe, then try again."
+                )
+            }
+            healthAuthorizationAvailable = true
+            onHealthAccountEvent(.authenticated(accountID: fresh.account.id, instanceIDs: fresh.instances.map(\.id)))
             secondFactorEmail = nil
             snapshot = fresh
+            sessionWasConfirmed()
+            pushAccountID = fresh.account.id
+            scheduleInstancePushReconcile(for: fresh)
             return state(for: fresh)
         case .secondFactorRequired(let requirement):
+            healthAuthorizationAvailable = false
+            onHealthAccountEvent(.authorizationUnavailable)
             snapshot = nil
             return .twoFactorRequired(
                 requirement.withEmail(fallback: secondFactorEmail)
@@ -1192,8 +2022,108 @@ final class MobileSessionCoordinator {
         defaults.set(all, forKey: Self.instanceUseKey)
     }
 
+    /// Whether this device has an instance selected from before: a cold
+    /// start will try to open it, so its skeleton may show meanwhile.
+    var hasStoredSelection: Bool {
+        storedSelection() != nil
+    }
+
+    /// A cold start's first step: the last session avibe.bot confirmed, for
+    /// the account the stored selection belongs to, so the App can open that
+    /// instance at once. The session is then checked with `refresh()`, whose
+    /// answer decides as for any refresh. Nil when there is nothing to open
+    /// first (no selection, another account's session, or a selected
+    /// instance that cannot open), or once this process holds a session.
+    /// `opensOffline` as in `restorableRuntime(from:opensOffline:)`.
+    func restoreLastGoodSession(
+        opensOffline: (MobileRuntimeContext) -> Bool = { _ in false }
+    ) -> MobileSessionState? {
+        guard
+            phase == .ready,
+            snapshot == nil,
+            authoritativeTransition == nil,
+            // Past the confirmation's lifetime the stored session opens
+            // nothing: this launch asks avibe.bot first.
+            sessionConfirmationIsCurrent,
+            let selection = storedSelection(),
+            let data = defaults.data(forKey: Self.lastGoodSessionKey),
+            let stored = try? JSONDecoder().decode(MobileSessionSnapshot.self, from: data),
+            stored.account.id == selection.accountID,
+            stored.instances.contains(where: {
+                $0.id == selection.instanceID && $0.url == selection.url
+            })
+        else {
+            return nil
+        }
+        // The account's local records must be readable, as a check-first
+        // launch requires before it opens (otherwise that launch's check
+        // reports it).
+        guard onAuthenticatedAccount(stored.account.id) else {
+            return nil
+        }
+        restoringLastGoodSession = true
+        defer { restoringLastGoodSession = false }
+        snapshot = stored
+        let restored = state(for: stored)
+        // Only a selection that opens is worth opening first; otherwise this
+        // launch checks the session before anything, as without one.
+        guard restorableRuntime(from: restored, opensOffline: opensOffline) != nil else {
+            snapshot = nil
+            return nil
+        }
+        snapshotIsUnconfirmed = true
+        signedOutStoreIsFresh = false
+        return restored
+    }
+
+    private func persistLastGoodSession() {
+        // Only what opening needs: no other person's email (a shared
+        // instance's owner).
+        guard
+            let snapshot,
+            let data = try? JSONEncoder().encode(MobileSessionSnapshot(
+                account: snapshot.account,
+                instances: snapshot.instances.map {
+                    MobileInstance(
+                        id: $0.id, name: $0.name, host: $0.host, url: $0.url,
+                        relationship: $0.relationship, ownerEmail: nil,
+                        available: $0.available
+                    )
+                }
+            ))
+        else {
+            defaults.removeObject(forKey: Self.lastGoodSessionKey)
+            defaults.removeObject(forKey: MobileSessionConfirmation.key)
+            return
+        }
+        defaults.set(data, forKey: Self.lastGoodSessionKey)
+    }
+
+    /// avibe.bot answered, signed in, for this account: the session is
+    /// confirmed as of now. Nothing else dates it: not reading it back from
+    /// the device, not a read that failed.
+    private func sessionWasConfirmed() {
+        snapshotIsUnconfirmed = false
+        defaults.set(now().timeIntervalSince1970, forKey: MobileSessionConfirmation.key)
+    }
+
+    /// Whether avibe.bot confirmed the stored session within its lifetime
+    /// (`MobileSessionConfirmation`).
+    var sessionConfirmationIsCurrent: Bool {
+        MobileSessionConfirmation.isCurrent(in: defaults, now: now())
+    }
+
+    /// Whether that confirmation is old enough to ask avibe.bot again.
+    var sessionConfirmationIsDueForRenewal: Bool {
+        MobileSessionConfirmation.isDueForRenewal(in: defaults, now: now())
+    }
+
+    /// The selected instance to open from `state`: listed available, or
+    /// listed offline when `opensOffline` says the App can still show it
+    /// (its last page, from the App's cache).
     func restorableRuntime(
-        from state: MobileSessionState
+        from state: MobileSessionState,
+        opensOffline: (MobileRuntimeContext) -> Bool = { _ in false }
     ) -> MobileRuntimeContext? {
         guard
             phase == .ready,
@@ -1202,7 +2132,6 @@ final class MobileSessionCoordinator {
             let selectedInstanceID,
             let selected = snapshot.instances.first(where: {
                 $0.id == selectedInstanceID
-                    && $0.available
                     && WebOrigin(url: $0.url) != nil
             })
         else {
@@ -1214,11 +2143,27 @@ final class MobileSessionCoordinator {
             generation: generation,
             websiteDataStoreIdentifier: websiteDataStore.identifier
         )
-        return isCurrentRuntime(runtime) ? runtime : nil
+        guard isCurrentRuntime(runtime), selected.available || opensOffline(runtime) else {
+            return nil
+        }
+        return runtime
     }
 
     func isCurrentRuntime(_ runtime: MobileRuntimeContext) -> Bool {
         phase == .ready && isSelectedRuntime(runtime)
+    }
+
+    /// Whether `runtime` is the current runtime, or the only thing running
+    /// is an exclusive operation that keeps the selection: a
+    /// push-management request, which the App makes on its own while it
+    /// opens, or a refresh of the signed-in account. Any other operation, a
+    /// reset, a sign-out, or an account change does not keep it, and neither
+    /// does a changed generation, store, or stored selection. The open path
+    /// asks this (the open, route preparation, the release of a held open,
+    /// and the runtime WebView's registration); direct authorization still
+    /// asks `isCurrentRuntime`.
+    func keepsSelectedRuntime(_ runtime: MobileRuntimeContext) -> Bool {
+        keepsSelection && isSelectedRuntime(runtime)
     }
 
     /// Whether `runtime` is still this account's selected instance, whatever
@@ -1276,7 +2221,8 @@ final class MobileSessionCoordinator {
         // Keep its ownership token even if there was no transport on entry.
         transportOperationToken = token
         defer {
-            if selectionKeepingOperation == token {
+            let keptSelection = selectionKeepingOperation == token
+            if keptSelection {
                 selectionKeepingOperation = nil
             }
             if transportOperationToken == token {
@@ -1284,6 +2230,13 @@ final class MobileSessionCoordinator {
             }
             if phase == .operation(token) {
                 phase = .ready
+            }
+            if keptSelection {
+                let waiters = selectionKeepingOperationWaiters.values
+                selectionKeepingOperationWaiters = [:]
+                for waiter in waiters {
+                    waiter.resume()
+                }
             }
         }
         return try await operation()
@@ -1310,19 +2263,30 @@ final class MobileSessionCoordinator {
         clearSelection: Bool
     ) -> Int {
         generation += 1
+        verifiedPasskeyGeneration = nil
+        // A sign-in window or sheet still open belongs to the generation that just ended.
+        webAuthenticator.cancel()
+        appleAuthorizer.cancel()
         authoritativeTransition = nil
         invalidateAccount(clearSelection: clearSelection)
         return generation
     }
 
-    private func invalidateAccount(clearSelection: Bool) {
+    private func invalidateAccount(
+        clearSelection: Bool,
+        prepareRuntime: Bool = true
+    ) {
+        healthAuthorizationAvailable = false
+        onHealthAccountEvent(.authorizationUnavailable)
         snapshot = nil
         if clearSelection {
             clearStoredSelection()
         }
-        pendingStoreReleaseBarriers.append(
-            contentsOf: onPrepareAccountTransition()
-        )
+        if prepareRuntime {
+            pendingStoreReleaseBarriers.append(
+                contentsOf: onPrepareAccountTransition()
+            )
+        }
         // An account page over a live runtime starts no transport; the
         // runtime is released by now, so the transition's requests can run.
         ensureTransport()
@@ -1339,7 +2303,13 @@ final class MobileSessionCoordinator {
         let token = UUID()
         phase = .resetting(token)
         generation += 1
+        // A sign-in window or sheet still open belongs to the generation that just ended.
+        webAuthenticator.cancel()
+        appleAuthorizer.cancel()
         authoritativeTransition = nil
+        pendingStoreReleaseBarriers.append(
+            contentsOf: onPrepareAccountTransition()
+        )
         // Reset is now the sole owner across cleanup and store replacement;
         // an old operation's defer cannot release its replacement transport.
         transportOperationToken = token

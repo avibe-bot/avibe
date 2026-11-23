@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/probe-result.schema.json",
   "title": "ProbeResult",
-  "description": "Outcome of probing the first runnable exact hop from the shared effective route plan. Probes use the same manual, automatic or passthrough tier as reads and execution; live restrictions never create another tier. Unknown-model passthrough is Hub API-key-only; subscriptions retain existing model admission.",
+  "description": "Outcome of probing the first runnable exact hop from the shared effective route plan. Probes use the same manual or inventory-matched automatic plan as reads and execution; live restrictions never create another tier. Unlisted targets require an explicit Hub API-key manual hop; subscriptions retain existing model admission.",
   "type": "object",
   "required": ["contract_version", "backend", "channel", "reachable", "source_id", "model_id", "latency_ms", "error"],
   "additionalProperties": false,

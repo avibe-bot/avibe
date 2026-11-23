@@ -35,7 +35,7 @@ const mount = (chain: AgentChain) => {
   /></I18nextProvider>);
   return close;
 };
-const mode = (name: 'Follow defaults' | 'Custom') => screen.getByRole('radio', { name });
+const mode = (name: 'Follow default routing' | 'Set separately') => screen.getByRole('radio', { name });
 const footer = () => within(document.querySelector<HTMLElement>('.model-hub-route-foot')!);
 
 beforeEach(async () => {
@@ -58,7 +58,7 @@ describe('route mode editing', () => {
       mount(makeChain(backend, origin));
       await screen.findAllByText('gpt-test');
       const manual = origin === 'manual';
-      expect(mode(manual ? 'Custom' : 'Follow defaults').getAttribute('aria-checked')).toBe('true');
+      expect(mode(manual ? 'Set separately' : 'Follow default routing').getAttribute('aria-checked')).toBe('true');
       expect(screen.queryAllByRole('button', { name: 'Edit hop' })).toHaveLength(manual ? 2 : 0);
       expect(screen.queryAllByRole('button', { name: 'Reorder this hop' })).toHaveLength(manual ? 2 : 0);
       expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
@@ -77,7 +77,7 @@ describe('route mode editing', () => {
     const close = mount(chain);
     const put = vi.spyOn(modelsApi, 'putAgentChain');
     await screen.findAllByText('gpt-test');
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     await user.click(screen.getAllByRole('button', { name: 'Remove hop' })[0]);
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
     const latest = { ...chain, chain: [chain.chain[0]] };
@@ -86,7 +86,7 @@ describe('route mode editing', () => {
     await waitFor(() => expect(modelsApi.getAgentChain).toHaveBeenCalledTimes(2));
     expect(await screen.findByText('Provider a')).toBeTruthy();
     expect(screen.queryByText('Provider b')).toBeNull();
-    expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
+    expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true');
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
     expect(close).not.toHaveBeenCalled();
     expect(put).not.toHaveBeenCalled();
@@ -99,14 +99,14 @@ describe('route mode editing', () => {
       chain: makeChain('codex', 'manual'), removed_hops: [], interrupted: [],
     });
     await screen.findAllByText('gpt-test');
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     const note = screen.getByRole('status');
     expect(note.classList.contains('model-hub-route-pending')).toBe(true);
     await user.click(within(note).getByRole('button', { name: 'Undo' }));
-    expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
-    await waitFor(() => expect(document.activeElement).toBe(mode('Follow defaults')));
+    expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true');
+    await waitFor(() => expect(document.activeElement).toBe(mode('Follow default routing')));
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     expect(put).not.toHaveBeenCalled();
     await user.click(footer().getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(put).toHaveBeenCalledWith('codex', 'gpt-test', { hops }));
@@ -138,14 +138,14 @@ describe('route mode editing', () => {
     const user = userEvent.setup();
     mount(makeChain('codex', origin === 'pin' ? 'automatic' : 'manual'));
     await screen.findAllByText('gpt-test');
-    if (origin === 'pin') await user.click(mode('Custom'));
+    if (origin === 'pin') await user.click(mode('Set separately'));
     screen.getAllByRole('button', { name: 'Reorder this hop' })[0].focus();
     await user.keyboard('{Space}{ArrowDown}');
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
     await user.keyboard('{Escape}');
     expect([...document.querySelectorAll('.model-hub-route-hop-name')].map((row) => row.textContent))
       .toEqual(['Provider a', 'Provider b']);
-    expect(mode('Custom').getAttribute('aria-checked')).toBe('true');
+    expect(mode('Set separately').getAttribute('aria-checked')).toBe('true');
     // A pending pin survives the cancelled grab; a saved custom route is clean again.
     expect(document.querySelector('.model-hub-route-pending') !== null).toBe(origin === 'pin');
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', origin === 'manual');
@@ -157,10 +157,10 @@ describe('route mode editing', () => {
     await user.click((await screen.findAllByRole('button', { name: 'Remove hop' }))[0]);
     vi.spyOn(modelsApi, 'previewAgentChain').mockResolvedValue({ ...makeChain('codex', 'automatic'), chain: [] });
     const restore = vi.spyOn(modelsApi, 'restoreAgentChain');
-    await user.click(mode('Follow defaults'));
+    await user.click(mode('Follow default routing'));
     await waitFor(() => expect(document.querySelector('.model-hub-route-pending')?.getAttribute('data-origin')).toBe('automatic'));
     expect(screen.queryByRole('button', { name: 'Edit hop' })).toBeNull();
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     expect(document.querySelector('.model-hub-route-pending')).toBeNull();
     expect([...document.querySelectorAll('.model-hub-route-hop-name')].map((row) => row.textContent)).toEqual(['Provider b']);
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', false);
@@ -173,30 +173,8 @@ describe('route mode editing', () => {
     mount(makeChain('codex', 'manual'));
     await user.click((await screen.findAllByRole('button', { name: 'Remove hop' }))[0]);
     await user.click(screen.getByRole('button', { name: 'Remove hop' }));
-    expect(mode('Follow defaults')).toHaveProperty('disabled', true);
+    expect(mode('Follow default routing')).toHaveProperty('disabled', true);
     await waitFor(() => expect(document.activeElement).toBe(within(document.querySelector<HTMLElement>('.model-hub-route-pending')!).getByRole('button', { name: 'Undo' })));
-  });
-
-  it('does not reopen a nested menu on the next route after the selection is cleared', async () => {
-    const user = userEvent.setup();
-    const chain = makeChain('codex', 'manual');
-    vi.spyOn(modelsApi, 'getAgentChain').mockResolvedValue(chain);
-    const agent: AgentSupply = {
-      backend: 'codex', cli_present: true, mode: 'hub', menu_kind: 'fixed',
-      sources: { order: sources.map((source) => source.id), eligibility: sources.map((source) => ({ source_id: source.id, eligible: true })) },
-      catalog_models: [{ id: 'gpt-test', display_name: null, origin: 'manual', models_dev_id: null, context_window: null, max_output_tokens: null, input_modalities: [], output_modalities: [], supports_tools: null, supports_reasoning: null, reasoning_efforts: [], locked: false, routeable: true }],
-    };
-    const view = (open: boolean) => <I18nextProvider i18n={i18n}><RouteChainDialog
-      selection={open ? { agent, modelId: chain.model_id, read: readyRegion(chain) } : null}
-      sources={sources} onClose={vi.fn()} onManageModel={vi.fn()} readAgents={vi.fn()} readSources={vi.fn()}
-    /></I18nextProvider>;
-    const { rerender } = render(view(true));
-    await user.click(await screen.findByRole('button', { name: 'Model actions' }));
-    expect(screen.getByRole('menuitem', { name: 'Edit model' })).toBeTruthy();
-    rerender(view(false));
-    rerender(view(true));
-    await screen.findAllByRole('button', { name: 'Edit hop' });
-    expect(screen.queryByRole('menuitem', { name: 'Edit model' })).toBeNull();
   });
 
   it('invalidates a pending restore on Cancel changes, without closing or applying the late preview', async () => {
@@ -205,7 +183,7 @@ describe('route mode editing', () => {
     vi.spyOn(modelsApi, 'previewAgentChain').mockReturnValue(new Promise((accept) => { resolve = accept; }));
     const close = mount(makeChain('codex', 'manual'));
     await screen.findAllByRole('button', { name: 'Edit hop' });
-    await user.click(mode('Follow defaults'));
+    await user.click(mode('Follow default routing'));
     await user.click(footer().getByRole('button', { name: 'Cancel changes' }));
     await screen.findAllByRole('button', { name: 'Edit hop' });
     await act(async () => resolve({ ...makeChain('codex', 'automatic'), chain: [] }));
@@ -220,7 +198,7 @@ describe('route mode editing', () => {
     const close = mount(makeChain('codex', 'automatic'));
     const put = vi.spyOn(modelsApi, 'putAgentChain');
     await screen.findAllByText('gpt-test');
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     vi.mocked(modelsApi.getAgentChain).mockRejectedValueOnce(new Error('offline'));
     await user.click(footer().getByRole('button', { name: 'Cancel changes' }));
     expect(await screen.findByRole('button', { name: 'Retry' })).toBeTruthy();
@@ -228,7 +206,7 @@ describe('route mode editing', () => {
     expect(footer().getByRole('button', { name: 'Save' })).toHaveProperty('disabled', true);
     await user.click(screen.getByRole('button', { name: 'Retry' }));
     await screen.findByRole('radiogroup');
-    expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true');
+    expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true');
     expect(modelsApi.getAgentChain).toHaveBeenCalledTimes(3);
     expect(put).not.toHaveBeenCalled();
     expect(close).not.toHaveBeenCalled();
@@ -241,12 +219,12 @@ describe('route mode editing', () => {
       ? new ApiCallError('invalid_route')
       : new Error('response lost'));
     await screen.findAllByText('gpt-test');
-    await user.click(mode('Custom'));
+    await user.click(mode('Set separately'));
     await user.click(footer().getByRole('button', { name: 'Save' }));
     await screen.findByRole('button', { name: 'Retry' });
     if (outcome === 'rejected') {
       await user.click(footer().getByRole('button', { name: 'Cancel changes' }));
-      await waitFor(() => expect(mode('Follow defaults').getAttribute('aria-checked')).toBe('true'));
+      await waitFor(() => expect(mode('Follow default routing').getAttribute('aria-checked')).toBe('true'));
       expect(close).not.toHaveBeenCalled();
       expect(modelsApi.getAgentChain).toHaveBeenCalledTimes(2);
     } else {

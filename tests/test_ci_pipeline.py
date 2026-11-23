@@ -575,7 +575,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     ]
     node_index, node_step = setup_node
     assert node_step["with"] == {
-        "node-version": "22.23.4",
+        "node-version": "26.13.1",
         "cache": "npm",
         "cache-dependency-path": "ui/package-lock.json",
     }
@@ -698,7 +698,7 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     steps = workflow["jobs"]["simulator"]["steps"]
     selection_index, selection = next(
         (index, step) for index, step in enumerate(steps)
-        if step.get("name") == "Select the pinned iPhone 17 Pro simulator"
+        if step.get("name") == "Select the pinned iPhone 18 Pro / iOS 27.2 simulator"
     )
     boot = steps[selection_index + 1]
     assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
@@ -708,14 +708,14 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
     # Execute the actual workflow selector, not a copied implementation.
     selector = shell.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-27-2"
     devices = {
-        "com.apple.CoreSimulator.SimRuntime.iOS-26-4-1": [
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "old"},
+        "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "old"},
         ],
         pinned: [
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "z"},
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "a"},
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "z"},
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "a"},
         ],
     }
     if inventory == "reversed":
@@ -741,7 +741,7 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     else:
         assert result.returncode != 0
         assert result.stdout == ""
-        assert f"No available iPhone 17 Pro simulator for {pinned}" in result.stderr
+        assert f"No available iPhone 18 Pro simulator for {pinned}" in result.stderr
 
 
 @pytest.mark.parametrize("pin_state", ["pending", "published"])
@@ -862,6 +862,8 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
     entitlements = plistlib.loads((ROOT / "ios/Avibe/Avibe.entitlements").read_bytes())
     assert entitlements == {
         "aps-environment": "development",
+        "com.apple.developer.healthkit": True,
+        "com.apple.developer.healthkit.background-delivery": True,
         "com.apple.developer.associated-domains": [
             "webcredentials:avibe.bot",
             "webcredentials:sandbox.avibe.bot",
@@ -871,6 +873,8 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
             "$(AppIdentifierPrefix)bot.avibe.ios",
             "$(AppIdentifierPrefix)bot.avibe.ios.push",
         ],
+        # Sign in with Apple (owner, 2026-11-18); the App Store profile must grant it.
+        "com.apple.developer.applesignin": ["Default"],
     }
     app_info = plistlib.loads((ROOT / "ios/Avibe/Resources/Info.plist").read_bytes())
     extension_info = plistlib.loads((ROOT / "ios/NotificationService/Info.plist").read_bytes())
@@ -904,6 +908,7 @@ _BROWSER_COMMANDS = (
     "run test:vault-integrity",
     "run test:chat-selection",
     "run test:badge-triggers",
+    "run test:address-retired",
     "run test:workbench-general-build -- composer-mention-picker.spec.ts",
     "run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts",
     "run test:safe-browser",
@@ -1014,7 +1019,7 @@ def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
     assert "tests/test_vault_control_requests.py" in vault_step["run"]
     assert not vault_step.get("if") and not vault_step.get("continue-on-error")
     node = next(step for step in ipc_steps if step.get("uses", "").startswith("actions/setup-node@"))
-    assert node["with"]["node-version"] == "22.23.4"
+    assert node["with"]["node-version"] == "26.13.1"
     install = next(step for step in ipc_steps if step.get("name") == "Install package and focused test dependency")
     assert "pytest-asyncio" in install["run"]
     assert jobs["windows-agent"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-agent'] == 'run'"

@@ -1,6 +1,248 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "AVIBE_LIVE_ACTIVITY_NEEDS_YOU_TITLE": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs you"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等你处理"
+          }
+        }
+      }
+    },
+    "AVIBE_LIVE_ACTIVITY_NEEDS_YOU_BODY": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Avibe to respond"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开 Avibe 回应"
+          }
+        }
+      }
+    },
+    "health.title" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect Apple Health"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接 Apple 健康"
+          }
+        }
+      }
+    },
+    "health.sync_to" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync to"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "同步到"
+          }
+        }
+      }
+    },
+    "health.metrics" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Steps, activity, workouts, and sleep"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "步数、活动、锻炼和睡眠"
+          }
+        }
+      }
+    },
+    "health.explanation" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe reads only the data you allow, syncs it to this personal instance, and keeps the last 30 days for your daily and weekly status. It never writes to Apple Health."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe 只读取你允许的数据，同步到这个个人实例并保留最近 30 天，用来了解你每天和每周的状态。Avibe 不会向 Apple 健康写入数据。"
+          }
+        }
+      }
+    },
+    "health.ai_disclosure" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All Agents on this instance can read synced data. Your data may be sent to the AI model services used by those Agents and saved in conversation history."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此实例内的所有 Agent 都可读取同步数据。数据可能发送给这些 Agent 使用的 AI 模型服务，并保存在会话记录中。"
+          }
+        }
+      }
+    },
+    "health.stop" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "To stop, ask an Agent to disconnect Health and delete the data on this instance, or turn off access in iOS Health settings."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要停止，可以在会话里让 Agent 断开健康连接并删除实例上的数据，也可以在 iOS 健康设置里关闭读取权限。"
+          }
+        }
+      }
+    },
+    "health.single_instance" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone syncs health data to one instance at a time. Connecting replaces its previous connection."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone 一次只向一个实例同步健康数据，连接后会替换原来的连接。"
+          }
+        }
+      }
+    },
+    "health.allow" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow and Continue"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许并继续"
+          }
+        }
+      }
+    },
+    "health.not_now" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not Now"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不连接"
+          }
+        }
+      }
+    },
+    "health.ok" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "好"
+          }
+        }
+      }
+    },
+    "health.update_required" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This version of Avibe can't keep syncing Apple Health. Update Avibe."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 Avibe 版本无法继续同步 Apple 健康，请更新 Avibe。"
+          }
+        }
+      }
+    },
+    "health.connection_failed" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to finish connecting Apple Health. Try again from the conversation."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未能完成 Apple 健康连接，请从会话中重试。"
+          }
+        }
+      }
+    },
+    "health.cleanup_failed" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Couldn't clear Health sync data on this iPhone. Reopen Avibe and sign out again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未能清除这台 iPhone 上的健康同步信息。请重新打开 Avibe 后再退出一次。"
+          }
+        }
+      }
+    },
     "AVIBE_PUSH_FALLBACK" : {
       "localizations" : {
         "en" : {
@@ -13,6 +255,55 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "新的 Avibe 通知"
+          }
+        }
+      }
+    },
+    "Talk to Main Bot" : {
+      "comment" : "App Shortcut and its intent: opens Avibe in the main Bot's conversation. Listed under Settings > Action Button > Shortcut.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Talk to Main Bot"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "和主伙伴说话"
+          }
+        }
+      }
+    },
+    "apple.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with Apple on the App’s sign-in screen."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在 App 的登录页用 Apple 登录。"
+          }
+        }
+      }
+    },
+    "apple.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with Apple isn’t available here"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此处无法使用 Apple 登录"
           }
         }
       }
@@ -177,6 +468,304 @@
         }
       }
     },
+    "runtime.loading" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Loading"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在加载"
+          }
+        }
+      }
+    },
+    "runtime.open.awaiting_user.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finish signing in on this page."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在此页面完成登录。"
+          }
+        }
+      }
+    },
+    "runtime.open.awaiting_user.title.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Finish signing in to %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "完成 %@ 的登录"
+          }
+        }
+      }
+    },
+    "runtime.open.cached_timeout.body" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing what was here last" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "显示的是上次的内容" } }
+      }
+    },
+    "runtime.open.cached_timeout.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "runtime.open.cached_timeout.title.named" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Can't reach %@ right now" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时连不上 %@" } }
+      }
+    },
+    "runtime.open.offline.body" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Instance offline. Showing your last content." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "实例不在线，显示的是上次的内容" } }
+      }
+    },
+    "runtime.open.offline.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "runtime.open.offline.switch" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Switch instance" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "切换实例" } }
+      }
+    },
+    "runtime.open.phase.authenticating.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Verifying sign-in for %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在验证 %@ 的登录…"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.connecting.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connecting to %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在连接 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.document_loaded.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ is open"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 已打开"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.failed.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't open %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法打开 %@"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.loading_page.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Connected. Loading %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已连接，正在加载 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.phase.preparing_route.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Preparing to connect to %@…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在准备连接 %@…"
+          }
+        }
+      }
+    },
+    "runtime.open.slow" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Still connecting…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还在连接…"
+          }
+        }
+      }
+    },
+    "runtime.open.slow.last_content" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Still connecting. Showing what was here last."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还在连接，先显示上次的内容"
+          }
+        }
+      }
+    },
+    "runtime.open.stage.authenticating" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "verifying sign-in" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "验证登录" } }
+      }
+    },
+    "runtime.open.stage.awaiting_user" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "waiting for sign-in" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待完成登录" } }
+      }
+    },
+    "runtime.open.stage.connecting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "connecting" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接实例" } }
+      }
+    },
+    "runtime.open.stage.document_loaded" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "page loaded" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "页面已加载" } }
+      }
+    },
+    "runtime.open.stage.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "load failed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载失败" } }
+      }
+    },
+    "runtime.open.stage.loading_page" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "loading the page" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载页面" } }
+      }
+    },
+    "runtime.open.stage.preparing_route" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "preparing to connect" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "准备连接" } }
+      }
+    },
+    "runtime.open.timeout.dismiss" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Dismiss" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭" } }
+      }
+    },
+    "runtime.open.timeout.last_stage" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stopped while %@. Your account and data are unaffected."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停在“%@”这一步。账号和数据不受影响。"
+          }
+        }
+      }
+    },
+    "runtime.open.timeout.reopen_hint.named" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tap %@ above to open it again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "点上面的 %@ 重新打开。" } }
+      }
+    },
+    "runtime.open.timeout.title.named" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ took too long to open"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%@ 打开超时"
+          }
+        }
+      }
+    },
     "browser.loading" : {
       "localizations" : {
         "en" : {
@@ -321,18 +910,50 @@
         }
       }
     },
-    "google.body" : {
+    "github.body" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "Use the email code for the same account. Google blocks sign-in inside embedded browsers."
+            "value" : "Sign in with GitHub on the App’s sign-in screen."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "请改用同一账号的邮箱验证码。Google 不允许在内嵌浏览器中登录。"
+            "value" : "请在 App 的登录页用 GitHub 登录。"
+          }
+        }
+      }
+    },
+    "github.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "GitHub sign-in is unavailable here"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此处无法使用 GitHub 登录"
+          }
+        }
+      }
+    },
+    "google.body" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in with Google on the App’s sign-in screen."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在 App 的登录页用 Google 登录。"
           }
         }
       }
@@ -429,6 +1050,534 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "https://你的实例地址"
+          }
+        }
+      }
+    },
+    "voice.update_required.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This Avibe needs an update before voice input can be used."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "这个 Avibe 需要更新后才能使用语音输入。"
+          }
+        }
+      }
+    },
+    "voice.update_required.message" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Update Avibe to the latest version on the computer that runs it."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请在运行它的电脑上把 Avibe 更新到最新版本。"
+          }
+        }
+      }
+    },
+    "system_schedule.kind.alarm" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Alarm"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "闹钟"
+          }
+        }
+      }
+    },
+    "system_schedule.kind.reminder" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Reminder"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "提醒事项"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.alarm.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Create an Alarm?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要创建闹钟吗？"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.reminder.title" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add a Reminder?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "要添加提醒事项吗？"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.type" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Type"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "类型"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.when" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "When"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "时间"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.time_zone" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Time Zone"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "时区"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.instance" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Instance"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "实例"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.session" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Session"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会话"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.alarm.disclosure" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "iOS controls how this alarm sounds and appears after it is created."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建后，闹钟的响铃和显示方式由 iOS 控制。"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.reminder.disclosure" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The Reminders app controls this reminder after it is created."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建后，此提醒事项由“提醒事项”App 管理。"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.alarm.action" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Create Alarm"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建闹钟"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.reminder.action" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Add Reminder"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加提醒事项"
+          }
+        }
+      }
+    },
+    "system_schedule.confirm.submitting" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Creating in iOS…"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在创建…"
+          }
+        }
+      }
+    },
+    "signin.go" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Go to sign-in"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "去登录"
+          }
+        }
+      }
+    },
+    "system_schedule.alarm.stop" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Stop"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "停止"
+          }
+        }
+      }
+    },
+    "Open Main Bot" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open Main Bot" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开主伙伴" } }
+      }
+    },
+    "Records what you say and sends it to your main Bot. Avibe may open to record." : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Records what you say and sends it to your main Bot. Avibe may open to record." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "录下你说的话，发给主伙伴。可能会打开 Avibe 来录音。" } }
+      }
+    },
+    "Send" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送" } }
+      }
+    },
+    "Cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
+      }
+    },
+    "Retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "Discard" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Discard" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "放弃" } }
+      }
+    },
+    "appLock.lock.lockedTitle" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe is locked"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe 已锁定"
+          }
+        }
+      }
+    },
+    "appLock.lock.unlockTouchID" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with Touch ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用触控 ID 解锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.verifying" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verifying…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在验证…"
+          }
+        }
+      }
+    },
+    "appLock.lock.verificationFailed" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not verified. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有验证成功，再试一次。"
+          }
+        }
+      }
+    },
+    "appLock.lock.changeReason" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Confirm the App Lock change"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "确认更改 App 锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.unlockReason" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock Avibe"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解锁 Avibe"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.unlockFaceID" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with Face ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用面容 ID 解锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.unlockPasscode" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unlock with Passcode"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用设备密码解锁"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.faceIDNotEnrolled" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone has no Face ID set up."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone 没有录入面容 ID。"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.faceIDDenied" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe is not allowed to use Face ID. You can allow it in iOS Settings › Avibe."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avibe 没有使用面容 ID 的权限。可在 iOS 设置 › Avibe 中允许。"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.faceIDLockout" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Face ID did not recognize you several times. Use your passcode."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "面容 ID 多次未识别，请用设备密码解锁。"
+          }
+        }
+      }
+    },
+    "appLock.lock.iphone.touchIDLockout" : {
+      "comment": "Same copy as ui/src/i18n (appLockCopy.test.ts keeps them equal).",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Touch ID did not recognize you several times. Use your passcode."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "触控 ID 多次未识别，请用设备密码解锁。"
           }
         }
       }

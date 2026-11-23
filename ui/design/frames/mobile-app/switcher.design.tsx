@@ -17,7 +17,7 @@ import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
 import { phoneShell } from '../workbench/fixtures';
 import { Workbench } from '@/components/Workbench';
-import { AccountSheetPage, InstanceSheetPage, InstancesPage } from '@/mobile/MobileOnboarding';
+import { AccountDataSheetPage, AccountSheetPage, InstanceSheetPage, InstancesPage } from '@/mobile/MobileOnboarding';
 import type { MobileInstance, MobileSessionState } from '@/mobile/bridge';
 import { GestureNote, NativeSheet, RuntimeFailed, SheetLanguage, SheetPanel, Underneath } from '../../kit/mobile-instance-sheet';
 
@@ -117,6 +117,7 @@ const accountPage = (props: Partial<AccountProps> = {}) => (
     onSwitch={noop}
     onLogout={noop}
     onLicenses={noop}
+    onAccountData={noop}
     {...props}
   />
 );
@@ -132,9 +133,16 @@ const firstRunPage = (props: Partial<Parameters<typeof InstancesPage>[0]> = {}) 
     onRefresh={noop}
     onAccount={noop}
     onAdd={noop}
+    onReopen={noop}
     {...props}
   />
 );
+
+/**
+ * The full page with an instance selected but none open (say it failed to load): the sheet's list
+ * in a page. The current instance opens again from here; there is nothing behind it to close to.
+ */
+const switchingPage = (props: Partial<Parameters<typeof InstancesPage>[0]> = {}) => firstRunPage({ session: bSession, ...props });
 
 const designFrames = frames([
   // A · the sheet the avatar opens over the live instance.
@@ -174,6 +182,11 @@ const designFrames = frames([
       />
     </Underneath>
   )),
+  // Account and data, one page below Account (owner, 2026-11-17): the privacy policy, and deleting
+  // the account as one plain red line at the very bottom.
+  ...both('account-data', '账号与数据：从账号页推入；隐私政策，最底部一行红字「删除账号」', () => (
+    <NativeSheet><AccountDataSheetPage locked={false} onBack={noop} onPrivacy={noop} onDelete={noop} /></NativeSheet>
+  ), { status: 'shipped' }),
   ...both('account-long', '账号 · 完整长邮箱 · 375×667', () => <NativeSheet>{accountPage({ session: session([personal, ...others], personal.id, longEmail) })}</NativeSheet>, { size: SMALL, email: longEmail, status: 'shipped' }),
   // First use: the same rows, as a full page.
   ...both('first-run', '首次使用（还没选过实例）：同样的行，整页', () => firstRunPage(), { status: 'shipped' }),
@@ -188,6 +201,9 @@ const designFrames = frames([
       />
     </div>
   )),
+  // The full page with a selection: the same list as the sheet, in a page.
+  ...both('page-switching', '整页 · 有选中实例（例如实例没能打开后）：和 sheet 同一个列表；点当前实例重新打开', () => switchingPage(), { status: 'shipped' }),
+  ...both('page-switching-stale', '整页 · 刷新失败：横幅 + 重试，列表照常可用', () => switchingPage({ errorKey: 'mobileApp.errors.network' }), { status: 'shipped' }),
   ...both('first-run-error', '首次使用 · 没能载入（没有缓存）', () => firstRunPage({ session: session([], null), errorKey: 'mobileApp.errors.network' }), { status: 'shipped' }),
   // Native: the instance failed to load.
   ...both('runtime-failed', '原生 · 实例打不开：重试 / 其他实例（打开同一张 sheet，不先关掉实例）', () => <RuntimeFailed instance={personal} />),
@@ -196,7 +212,7 @@ const designFrames = frames([
   ...both('b-sheet', 'B · 点名字打开的 sheet（没有账号行）', sheet({ onAccount: undefined }), { b: true, status: 'shipped' }),
   // B's account entries open the same sheet on the Account page (#sheet-account): ✕ returns to the
   // instance, there is no Back, and the licenses still push inside it. Compare A's `account`.
-  ...both('b-account', 'B · 账号入口打开的 sheet 直接是账号页：右上角 ✕ 回到实例，没有返回', () => <NativeSheet>{accountPage({ onClose: noop })}</NativeSheet>, { b: true, status: 'shipped' }),
+  ...both('b-account', 'B · 账号入口打开的 sheet 直接是账号页：右上角 ✕ 回到实例，没有返回；「切换实例」打开同一张 sheet 的实例列表', () => <NativeSheet>{accountPage({ onClose: noop, onSwitchInstance: noop })}</NativeSheet>, { b: true, status: 'shipped' }),
 ]);
 
 export default designFrames;

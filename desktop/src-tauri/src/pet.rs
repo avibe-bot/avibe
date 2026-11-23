@@ -18,19 +18,20 @@ use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
     area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, upward_frame, valid_session_id,
     FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
-    PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
+    PetLayout, PetReady, PetStore, Reveal, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
     DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::{
-    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, Webview, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use url::Url;
 
-use crate::pet_native::{primary_button_down, set_frame, start_drag};
+use crate::pet_native::{follow_pointer, primary_button_down, set_alpha, set_frame, start_drag, Drag, PointerOffset};
 use crate::{native_catalog_for_locales, Shell, DESKTOP_SHELL_MARKER, MAIN_WINDOW};
 
 pub const PET_WINDOW: &str = "pet";
@@ -42,6 +43,12 @@ const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
 const HOVER_EVENT: &str = "avibe:pet-hover";
 const LAYOUT_EVENT: &str = "avibe:pet-layout";
+/// A resize the page answers with `pet_frame_drawn` once it has drawn at the
+/// new height (`{token, height}`).
+const FRAME_EVENT: &str = "avibe:pet-frame";
+/// How long a resized window stays hidden when its page does not answer (an
+/// older page, or one that cannot draw now).
+const REVEAL_TIMEOUT: Duration = Duration::from_millis(300);
 pub const SETTINGS_EVENT: &str = "avibe:desktop-pet-settings";
 /// A drag settles before its anchor is saved, as the main window's frame does.
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
@@ -102,11 +109,16 @@ pub struct Pet {
     registered_shortcuts: Mutex<Vec<String>>,
     voice_shortcut_state: Mutex<VoiceShortcutState>,
     toggle_shortcut_down: Mutex<bool>,
+    voice_suppressed_until_release: Mutex<bool>,
     move_generation: Arc<AtomicU64>,
     /// Advances with every drag and every new window, so a stale drag's steps
     /// change nothing.
     drag_generation: AtomicU64,
     hit_regions: Mutex<Vec<HitRect>>,
+    /// While the shell itself moves the window for a drag (macOS), the
+    /// pointer's offset in it; `None` otherwise.
+    drag_follow: Mutex<Option<PointerOffset>>,
+    reveal: Mutex<Reveal>,
     poll_generation: AtomicU64,
     poll_wake: Arc<tokio::sync::Notify>,
 }
@@ -124,9 +136,12 @@ impl Pet {
             registered_shortcuts: Mutex::new(Vec::new()),
             voice_shortcut_state: Mutex::new(VoiceShortcutState::default()),
             toggle_shortcut_down: Mutex::new(false),
+            voice_suppressed_until_release: Mutex::new(false),
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
             hit_regions: Mutex::new(Vec::new()),
+            drag_follow: Mutex::new(None),
+            reveal: Mutex::new(Reveal::default()),
             poll_generation: AtomicU64::new(0),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
         }
@@ -231,7 +246,7 @@ pub(crate) fn set_native_available(app: &AppHandle, available: bool) {
     }
 }
 
-fn refresh_menu(app: &AppHandle) {
+pub(crate) fn refresh_menu(app: &AppHandle) {
     let Some(menus) = app.try_state::<PetMenus>() else {
         return;
     };
@@ -255,10 +270,10 @@ fn settings_state(pet: &Pet) -> PetSettingsState {
 }
 
 fn dispatch_settings(app: &AppHandle, state: &PetSettingsState) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW).filter(crate::pet::is_workbench) else {
+    let Some(window) = crate::instance_client::active_webview(app).filter(crate::pet::is_workbench) else {
         return;
     };
-    dispatch(
+    dispatch_view(
         &window,
         SETTINGS_EVENT,
         &serde_json::to_value(state).expect("pet settings are serializable"),
@@ -511,13 +526,75 @@ fn shortcut_action(pet: &Pet, shortcut: &Shortcut, event: ShortcutState) -> Opti
         .map(ShortcutAction::Voice)
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn cancel_voice_for_app_lock(app: &AppHandle) {
+    if let Some(pet) = app.try_state::<Pet>() {
+        pet.reset_voice_shortcut_state();
+    }
+}
+
+fn shortcut_lifetime_current(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState, epoch: u64) -> bool {
+    if !crate::app_lock::is_locked(app) && crate::app_lock::voice_epoch(app) == epoch {
+        return true;
+    }
+    // A press queued before lock may not yet have reached shortcut_action.
+    // Still remember its physical hold so an OS repeat after unlock is not new input.
+    if let Some(pet) = app.try_state::<Pet>() {
+        if parse_shortcut(pet.store().shortcut()).is_ok_and(|key| key == *shortcut) {
+            *lock(&pet.voice_suppressed_until_release) = event == ShortcutState::Pressed;
+        }
+        if event == ShortcutState::Released {
+            let _ = shortcut_action(&pet, shortcut, event);
+        }
+    }
+    false
+}
+
 pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutState) {
+    if let Some(pet) = app.try_state::<Pet>() {
+        let voice_key = parse_shortcut(pet.store().shortcut()).is_ok_and(|key| key == *shortcut);
+        if voice_key {
+            let mut suppressed = lock(&pet.voice_suppressed_until_release);
+            if *suppressed {
+                if event == ShortcutState::Released {
+                    *suppressed = false;
+                    let _ = shortcut_action(&pet, shortcut, event);
+                }
+                return;
+            }
+            if crate::app_lock::is_locked(app) && event == ShortcutState::Pressed {
+                *suppressed = true;
+                pet.reset_voice_shortcut_state();
+                drop(suppressed);
+                crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Action, |_| {});
+                return;
+            }
+        }
+    }
+    if crate::app_lock::is_locked(app) {
+        if event == ShortcutState::Pressed {
+            let shortcut = *shortcut;
+            crate::app_lock::defer_kind(app, crate::app_lock::EntryKind::Command, move |app| {
+                handle_shortcut(app, &shortcut, ShortcutState::Pressed);
+                handle_shortcut(app, &shortcut, ShortcutState::Released);
+            });
+        } else if let Some(pet) = app.try_state::<Pet>() {
+            // Key-up still ends an admitted physical press. Drain only the
+            // latch; do not reconcile/show a window or dispatch page actions.
+            let _ = shortcut_action(&pet, shortcut, ShortcutState::Released);
+        }
+        return;
+    }
     if !crate::instance_client::local_selected(app) {
         return;
     }
     let handle = app.clone();
     let shortcut = *shortcut;
+    let epoch = crate::app_lock::voice_epoch(app);
     let _ = app.run_on_main_thread(move || {
+        if !shortcut_lifetime_current(&handle, &shortcut, event, epoch) {
+            return;
+        }
         // Build/replace the window before starting its conversation state.
         // Otherwise page_loading would erase the press that created it.
         let window = reconcile_now(&handle);
@@ -527,6 +604,63 @@ pub fn handle_shortcut(app: &AppHandle, shortcut: &Shortcut, event: ShortcutStat
             None => {}
         }
     });
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_shortcut_cycle(app: &AppHandle, kind: &str, step: &str) -> Result<serde_json::Value, String> {
+    let pet = app.state::<Pet>();
+    if step == "prepare" {
+        pet.set_enabled(true)?;
+        pet.store()
+            .try_set_voice_mode(if kind == "voiceToggle" {
+                VoiceMode::Toggle
+            } else {
+                VoiceMode::Hold
+            })
+            .map_err(|e| e.to_string())?;
+    }
+    let key = {
+        let store = pet.store();
+        parse_shortcut(if kind == "mini" {
+            store.toggle_shortcut()
+        } else {
+            store.shortcut()
+        })?
+    };
+    if step == "suppressed" {
+        return Ok(serde_json::json!(*lock(&pet.voice_suppressed_until_release)));
+    }
+    let action = match step {
+        "stalePress" => {
+            assert!(!shortcut_lifetime_current(
+                app,
+                &key,
+                ShortcutState::Pressed,
+                crate::app_lock::voice_epoch(app).saturating_sub(1)
+            ));
+            None
+        }
+        "nativePress" => {
+            handle_shortcut(app, &key, ShortcutState::Pressed);
+            None
+        }
+        "prepare" => {
+            *lock(&pet.voice_shortcut_state) = VoiceShortcutState::default();
+            *lock(&pet.toggle_shortcut_down) = false;
+            shortcut_action(&pet, &key, ShortcutState::Pressed)
+        }
+        "cancelVoice" => {
+            pet.reset_voice_shortcut_state();
+            None
+        }
+        "release" => {
+            handle_shortcut(app, &key, ShortcutState::Released);
+            None
+        }
+        "next" => shortcut_action(&pet, &key, ShortcutState::Pressed),
+        _ => return Err("unknown shortcut fixture step".into()),
+    };
+    Ok(serde_json::json!(action.map(|action| format!("{action:?}"))))
 }
 
 /// Brings the window in line with the switch and the Runtime the Workbench
@@ -626,6 +760,7 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
         .initialization_script(PET_DRAG_MARKER)
+        .initialization_script(crate::app_lock::VOICE_MARKER)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Avibe")
         .inner_size(width, height)
@@ -677,8 +812,12 @@ fn initial_anchor(saved: Option<&PetAnchor>, areas: &[WorkArea]) -> PetAnchor {
 
 /// Every way to summon the pet. The hotkey listens; everything else shows.
 pub fn wake(app: &AppHandle, intent: PetIntent) {
+    let epoch = crate::app_lock::voice_epoch(app);
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
+        if crate::app_lock::is_locked(&handle) || crate::app_lock::voice_epoch(&handle) != epoch {
+            return;
+        }
         let window = reconcile_now(&handle);
         deliver_summon(&handle, window, intent);
     });
@@ -710,6 +849,9 @@ fn deliver_summon(app: &AppHandle, window: Option<WebviewWindow>, intent: PetInt
 }
 
 fn dispatch(window: &WebviewWindow, event: &str, detail: &serde_json::Value) {
+    dispatch_view(window.as_ref(), event, detail);
+}
+fn dispatch_view(window: &Webview, event: &str, detail: &serde_json::Value) {
     let script = format!(
         "window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}));",
         serde_json::to_string(event).expect("event name JSON"),
@@ -840,7 +982,7 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
 fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
     match step {
         FrameStep::Keep => {}
-        FrameStep::Apply { frame, anchor } => set_frame(window, frame.origin(anchor, 1.0), frame.size()),
+        FrameStep::Apply { frame, anchor } => resize(app, window, frame.origin(anchor, 1.0), frame.size()),
         FrameStep::Publish { snapshot, publication } => {
             // An older page ignores the event; one still loading may already listen.
             dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
@@ -860,6 +1002,53 @@ fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
             });
         }
     }
+}
+
+/// Puts the window at `origin` with `size`. A change of height is made while
+/// the window is hidden (`Reveal`): it shows again once the page has drawn at
+/// the new height, or after `REVEAL_TIMEOUT`, so the last picture, pinned to
+/// the top of the new frame, never shows a second Vibey.
+fn resize(app: &AppHandle, window: &WebviewWindow, origin: (f64, f64), size: (f64, f64)) {
+    let current = window
+        .inner_size()
+        .ok()
+        .zip(window.scale_factor().ok())
+        .map(|(inner, scale)| inner.to_logical::<f64>(scale).height);
+    if current.is_none_or(|height| (height - size.1).abs() < 0.5) {
+        set_frame(window, origin, size);
+        return;
+    }
+    let token = lock(&app.state::<Pet>().reveal).hide();
+    set_alpha(window, 0.0);
+    set_frame(window, origin, size);
+    dispatch(
+        window,
+        FRAME_EVENT,
+        &serde_json::json!({ "token": token, "height": size.1 }),
+    );
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(REVEAL_TIMEOUT).await;
+        let _ = on_main_thread(&app, move |app| show_drawn(app, token)).await;
+    });
+}
+
+/// Shows the window hidden for `token`'s resize, if that is still the one.
+fn show_drawn(app: &AppHandle, token: u64) {
+    if !lock(&app.state::<Pet>().reveal).drawn(token) {
+        return;
+    }
+    if let Some(window) = app.get_webview_window(PET_WINDOW) {
+        set_alpha(&window, 1.0);
+    }
+}
+
+/// The page drew at the height of `token`'s resize (`FRAME_EVENT`).
+#[tauri::command]
+pub fn pet_frame_drawn(window: WebviewWindow, token: u64) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    show_drawn(window.app_handle(), token);
+    Ok(())
 }
 
 /// The display `pet.json` last placed the pet on.
@@ -953,21 +1142,21 @@ fn is_pet_caller(label: &str, built_for: Option<&LoopbackOrigin>, url: &Url) -> 
 }
 
 /// The Workbench in `main`, on the Runtime the shell navigated it to.
-pub(crate) fn is_workbench(window: &WebviewWindow) -> bool {
+pub(crate) fn is_workbench(window: &Webview) -> bool {
     let Some(shell) = window.try_state::<Shell>() else {
         return false;
     };
     let active = lock(&shell.active_origin).clone();
-    window
-        .url()
-        .is_ok_and(|url| is_workbench_caller(window.label(), active.as_ref(), &url))
+    window.url().is_ok_and(|url| {
+        crate::instance_client::is_current_runtime(window) && is_workbench_caller(MAIN_WINDOW, active.as_ref(), &url)
+    })
 }
 
 fn is_workbench_caller(label: &str, active: Option<&LoopbackOrigin>, url: &Url) -> bool {
     label == MAIN_WINDOW && active.is_some_and(|origin| origin.matches_url_origin(url))
 }
 
-fn ensure_workbench_page(window: &WebviewWindow) -> Result<(), String> {
+fn ensure_workbench_page(window: &Webview) -> Result<(), String> {
     if is_workbench(window) {
         Ok(())
     } else {
@@ -976,13 +1165,13 @@ fn ensure_workbench_page(window: &WebviewWindow) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn pet_settings(window: WebviewWindow) -> Result<PetSettingsState, String> {
+pub fn pet_settings(window: Webview) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     Ok(settings_state(&window.state::<Pet>()))
 }
 
 #[tauri::command]
-pub fn pet_set_enabled(window: WebviewWindow, enabled: bool) -> Result<PetSettingsState, String> {
+pub fn pet_set_enabled(window: Webview, enabled: bool) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     set_enabled(window.app_handle(), enabled)?;
     Ok(settings_state(&window.state::<Pet>()))
@@ -990,7 +1179,7 @@ pub fn pet_set_enabled(window: WebviewWindow, enabled: bool) -> Result<PetSettin
 
 #[tauri::command]
 pub fn pet_set_shortcut(
-    window: WebviewWindow,
+    window: Webview,
     target: PetShortcutTarget,
     shortcut: String,
 ) -> Result<PetSettingsState, String> {
@@ -1111,7 +1300,7 @@ fn save_shortcuts(
 }
 
 #[tauri::command]
-pub fn pet_reset_shortcuts(window: WebviewWindow) -> Result<PetSettingsState, String> {
+pub fn pet_reset_shortcuts(window: Webview) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     let app = window.app_handle();
     let before = settings_state(&app.state::<Pet>());
@@ -1123,7 +1312,7 @@ pub fn pet_reset_shortcuts(window: WebviewWindow) -> Result<PetSettingsState, St
 }
 
 #[tauri::command]
-pub fn pet_set_voice_mode(window: WebviewWindow, mode: VoiceMode) -> Result<PetSettingsState, String> {
+pub fn pet_set_voice_mode(window: Webview, mode: VoiceMode) -> Result<PetSettingsState, String> {
     ensure_workbench_page(&window)?;
     let app = window.app_handle();
     let pet = app.state::<Pet>();
@@ -1217,15 +1406,21 @@ fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, Str
 /// revision's `pet_settle` (or after `SETTLE_TIMEOUT`); the reply carries no
 /// layout, so the page has one source for it.
 #[tauri::command]
-pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
+pub async fn pet_drag(window: WebviewWindow, x: Option<f64>, y: Option<f64>) -> Result<(), String> {
     ensure_pet_page(&window)?;
     let app = window.app_handle().clone();
+    // Where the press was, in the window's points (pages since 2026-11-20).
+    let press = match (x, y) {
+        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some((x, y)),
+        _ => None,
+    };
     let generation = on_main_thread(&app, {
         let window = window.clone();
-        move |app| begin_drag(app, &window)
+        move |app| begin_drag(app, &window, press)
     })
     .await??;
     wait_for_release(&app, generation).await;
+    *lock(&app.state::<Pet>().drag_follow) = None;
     let placed = on_main_thread(&app, {
         let window = window.clone();
         move |app| end_drag(app, &window, generation)
@@ -1237,6 +1432,38 @@ pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
         let _ = on_main_thread(&app, move |app| abandon_drag(app, generation)).await;
     }
     placed?
+}
+
+/// Where the pointer is in the pet window (its points from the top-left) and
+/// whether the primary button is down (`None` where the shell cannot tell).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PetPointer {
+    x: f64,
+    y: f64,
+    down: Option<bool>,
+}
+
+/// The pointer as the shell sees it. The page asks before it treats a press
+/// as a hold: a freshly shown window can get the press but none of the moves
+/// that follow it, so the page cannot tell a drag from a hold by itself.
+#[tauri::command]
+pub fn pet_pointer(window: WebviewWindow) -> Result<Option<PetPointer>, String> {
+    ensure_pet_page(&window)?;
+    let app = window.app_handle();
+    let (Ok(cursor), Ok(origin), Ok(window_scale), Ok(size)) = (
+        app.cursor_position(),
+        window.outer_position(),
+        window.scale_factor(),
+        window.inner_size(),
+    ) else {
+        return Ok(None);
+    };
+    let pointer = cursor_in_window(cursor, cursor_scale(app, window_scale), origin, window_scale, size);
+    Ok(Some(PetPointer {
+        x: pointer.x,
+        y: pointer.y,
+        down: primary_button_down(),
+    }))
 }
 
 fn abandon_drag(app: &AppHandle, generation: u64) {
@@ -1301,29 +1528,45 @@ async fn on_main_thread<T: Send + 'static>(
     receive.await.map_err(|_| WINDOW_GONE.to_owned())
 }
 
-fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
+fn begin_drag(app: &AppHandle, window: &WebviewWindow, press: Option<(f64, f64)>) -> Result<u64, String> {
     let pet = app.state::<Pet>();
     let mut frame = lock(&pet.frame);
-    let anchor = window_anchor(window, frame.state.current()).ok_or(WINDOW_GONE)?;
+    let before = frame.state.current();
+    let anchor = window_anchor(window, before).ok_or(WINDOW_GONE)?;
     let Some(strip) = frame.state.begin_drag(anchor) else {
         // Placing it already, or its page has not said it draws the top
         // layout (it drags the window natively then).
         return Err("The desktop pet cannot be dragged by the shell now.".to_owned());
     };
-    set_frame(window, strip.origin(anchor, 1.0), strip.size());
+    resize(app, window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
-    if let Err(error) = start_drag(window) {
-        // No drag will end: the drag finaliser puts the window back.
-        let step = lock(&pet.frame).state.abort_drag();
-        perform(app, window, step);
-        return Err(error);
+    // The press, moved with Vibey from the frame it was in to the strip.
+    let hold = press.map(|(x, y)| {
+        let (from, to) = (before.pet_offset(), strip.pet_offset());
+        PointerOffset {
+            x: x - from.0 + to.0,
+            y: y - from.1 + to.1,
+        }
+    });
+    match start_drag(window, hold) {
+        Ok(Drag::Follow(offset)) => *lock(&pet.drag_follow) = Some(offset),
+        Ok(Drag::Native) => *lock(&pet.drag_follow) = None,
+        Err(error) => {
+            *lock(&pet.drag_follow) = None;
+            // No drag will end: the drag finaliser puts the window back.
+            let step = lock(&pet.frame).state.abort_drag();
+            perform(app, window, step);
+            return Err(error);
+        }
     }
     Ok(generation)
 }
 
-/// Until the primary button is up. Where the shell cannot read the button, a
-/// drag is over once the window has stopped moving for `MOVE_SETTLE`.
+/// Until the primary button is up, moving the window with the pointer when the
+/// shell drags it itself (each poll, and once more as the button comes up).
+/// Where the shell cannot read the button, a drag is over once the window has
+/// stopped moving for `MOVE_SETTLE`.
 async fn wait_for_release(app: &AppHandle, generation: u64) {
     let pet = app.state::<Pet>();
     let moves = pet.move_generation.clone();
@@ -1333,7 +1576,14 @@ async fn wait_for_release(app: &AppHandle, generation: u64) {
         if pet.drag_generation.load(Ordering::SeqCst) != generation {
             return;
         }
-        match on_main_thread(app, |_| primary_button_down()).await {
+        let step = on_main_thread(app, |app| {
+            let follow = *lock(&app.state::<Pet>().drag_follow);
+            if let (Some(offset), Some(window)) = (follow, app.get_webview_window(PET_WINDOW)) {
+                follow_pointer(&window, offset);
+            }
+            primary_button_down()
+        });
+        match step.await {
             Err(_) | Ok(Some(false)) => return,
             Ok(Some(true)) => {}
             Ok(None) => {
@@ -1524,10 +1774,14 @@ pub struct BindResult {
 /// Binds the pet to a session: the pet's switcher, and the Workbench's
 /// "Show in pet", which also brings the pet forward.
 #[tauri::command]
-pub fn pet_bind(window: WebviewWindow, session_id: String) -> Result<BindResult, String> {
+pub fn pet_bind(window: Webview, session_id: String) -> Result<BindResult, String> {
     let from_workbench = is_workbench(&window);
     if !from_workbench {
-        ensure_pet_page(&window)?;
+        let pet = window.state::<Pet>();
+        let url = window.url().map_err(|_| UNAVAILABLE.to_owned())?;
+        if !is_pet_caller(window.label(), lock(&pet.window_origin).as_ref(), &url) {
+            return Err(UNAVAILABLE.to_owned());
+        }
     }
     if !valid_session_id(&session_id) {
         return Err("Not a session id.".to_owned());
@@ -1725,7 +1979,7 @@ mod tests {
                 "{case}"
             );
             assert!((DRAG_HEIGHT..=WINDOW_HEIGHT).contains(&frame.height), "{case}");
-            assert_eq!(frame.size().0, 460.0);
+            assert_eq!(frame.size().0, 500.0);
         }
         assert_eq!(
             initial_anchor(None, &[]),

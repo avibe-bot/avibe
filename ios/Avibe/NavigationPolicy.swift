@@ -1,9 +1,59 @@
 import Foundation
 
+/// A sign-in with another company's account. The App signs in only with
+/// avibe.bot's own account system (email code, password, passkey), so these
+/// are intercepted with an explanation that points at the email code.
+enum ThirdPartySignIn: Equatable {
+    /// Google also rejects sign-in inside embedded browsers.
+    case google
+    case github
+    /// Sign in with Apple on avibe.bot's web login card (owner, 2026-11-18).
+    case apple
+}
+
+/// Voice input's consent marker. An instance page that asks each account before
+/// speech goes to a third-party AI service carries
+/// `<meta name="avibe-voice-consent" content="1">` (ui/index.html). A Workbench
+/// page without it predates that question, so the App gives it no microphone and
+/// says to update the instance (App Store guideline 5.1.2(i)). A marked page
+/// asks for itself, and the App adds no question of its own.
+enum VoiceConsentMarker: Equatable {
+    /// The Workbench that asks before voice input sends anything.
+    case marked
+    /// A Workbench from before that question: the instance needs an update.
+    case unmarkedWorkbench
+    /// Any other page (a Show Page opened on its own, a page mid-navigation):
+    /// no microphone, and nothing to say about updating.
+    case other
+
+    /// Evaluated in the page's main frame when it asks for the microphone. The
+    /// Workbench is recognized by what every 3.x build serves: its React root and
+    /// the Web app manifest, outside the Show Page paths.
+    static let script = #"""
+    (() => {
+      if (document.querySelector('meta[name="avibe-voice-consent"]')?.content === "1") return "marked";
+      const workbench = document.getElementById("root") !== null
+        && document.querySelector('link[rel="manifest"][href="/manifest.webmanifest"]') !== null
+        && !/^\/(show|p)\//.test(location.pathname);
+      return workbench ? "unmarkedWorkbench" : "other";
+    })()
+    """#
+
+    /// What the script's result says. An error, or a page that is gone, reads
+    /// as `other`: denied, without telling anyone to update.
+    init(result: Any?) {
+        switch result as? String {
+        case "marked": self = .marked
+        case "unmarkedWorkbench": self = .unmarkedWorkbench
+        default: self = .other
+        }
+    }
+}
+
 enum NavigationDestination: Equatable {
     case instance
     case authentication
-    case googleAuthentication
+    case thirdPartySignIn(ThirdPartySignIn)
     case external
     case browserInternal
 }
@@ -15,7 +65,7 @@ enum NavigationContext: Equatable {
 
 enum NavigationDisposition: Equatable {
     case allow
-    case googleAuthentication
+    case thirdPartySignIn(ThirdPartySignIn)
     case external
     case externalApplication
 }
@@ -28,7 +78,7 @@ enum SubframeNavigationDisposition: Equatable {
 enum NewWindowDisposition: Equatable {
     case childWebView
     case externalApplication
-    case googleAuthentication
+    case thirdPartySignIn(ThirdPartySignIn)
 }
 
 enum DownloadDisposition: Equatable {
@@ -45,7 +95,6 @@ struct NavigationPolicy {
         // hostname for networks that reset `*.supabase.co`; the default
         // domain stays valid during and after the switch.
         WebOrigin.parseConfigured("https://auth.avibe.bot"),
-        WebOrigin.parseConfigured("https://github.com"),
     ].compactMap { $0 }.reduce(into: []) { result, origin in
         result.insert(origin)
     }
@@ -56,6 +105,16 @@ struct NavigationPolicy {
     ].compactMap { $0 }.reduce(into: []) { result, origin in
         result.insert(origin)
     }
+
+    /// GitHub's OAuth authorization endpoints, intercepted only for
+    /// avibe.bot's own sign-in. The rest of github.com is an ordinary
+    /// external site, including the device-code page (`/login/device`) that
+    /// an instance's Copilot sign-in opens.
+    private static let githubOrigin = WebOrigin.parseConfigured("https://github.com")
+    private static let githubAuthorizationPathPrefix = "/login/oauth/"
+    /// Sign in with Apple's web authorization, intercepted only for avibe.bot's own sign-in.
+    private static let appleOrigin = WebOrigin.parseConfigured("https://appleid.apple.com")
+    private static let appleAuthorizationPath = "/auth/authorize"
 
     let instanceOrigins: Set<WebOrigin>
     let authenticationOrigins: Set<WebOrigin>
@@ -82,7 +141,18 @@ struct NavigationPolicy {
             return .authentication
         }
         if googleOrigins.contains(origin) {
-            return .googleAuthentication
+            return .thirdPartySignIn(.google)
+        }
+        if origin == Self.githubOrigin, isAvibeGitHubAuthorization(url) {
+            return .thirdPartySignIn(.github)
+        }
+        if
+            origin == Self.appleOrigin,
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath.lowercased()
+                == Self.appleAuthorizationPath,
+            returnsToAuthenticationOrigin(url)
+        {
+            return .thirdPartySignIn(.apple)
         }
         return origin.scheme == "http" || origin.scheme == "https"
             ? .external
@@ -94,8 +164,8 @@ struct NavigationPolicy {
             return .externalApplication
         }
         switch destination(for: url) {
-        case .googleAuthentication:
-            return .googleAuthentication
+        case .thirdPartySignIn(let provider):
+            return .thirdPartySignIn(provider)
         case .external:
             return context == .primaryMainFrame ? .external : .allow
         case .instance, .authentication, .browserInternal:
@@ -119,8 +189,8 @@ struct NavigationPolicy {
             return .externalApplication
         }
         switch destination(for: url) {
-        case .googleAuthentication:
-            return .googleAuthentication
+        case .thirdPartySignIn(let provider):
+            return .thirdPartySignIn(provider)
         case .instance, .authentication, .external, .browserInternal:
             return .childWebView
         }
@@ -156,6 +226,40 @@ struct NavigationPolicy {
         default:
             return .blocked
         }
+    }
+
+    /// GitHub authorization for avibe.bot's own sign-in: it returns to an
+    /// authentication origin (Supabase's `/auth/v1/callback`). GitHub sign-in
+    /// for anything else, such as an MCP server an instance connects to, is
+    /// an ordinary external page.
+    private func isAvibeGitHubAuthorization(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        let path = components.percentEncodedPath.lowercased()
+        guard path == "/login/oauth" || path.hasPrefix(Self.githubAuthorizationPathPrefix) else {
+            return false
+        }
+        return returnsToAuthenticationOrigin(url)
+    }
+
+    /// Whether an authorization request's `redirect_uri` is one of avibe.bot's own sign-in
+    /// origins (Supabase's `/auth/v1/callback`).
+    private func returnsToAuthenticationOrigin(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        return components.queryItems?.contains { item in
+            guard
+                item.name == "redirect_uri",
+                let value = item.value,
+                let redirect = URL(string: value),
+                let redirectOrigin = WebOrigin(url: redirect, requiresHTTPS: false)
+            else {
+                return false
+            }
+            return authenticationOrigins.contains(redirectOrigin)
+        } == true
     }
 
     private func isExternalApplicationURL(_ url: URL) -> Bool {

@@ -54,6 +54,25 @@ SERVICE_PHASE_STARTING = "starting"
 SERVICE_PHASE_MIGRATING = "migrating"
 SERVICE_PHASE_RUNNING = "running"
 
+#: Why the last service start ended before it was up, when the service itself
+#: knows. The service records it just before exiting; whoever started it, and
+#: ``vibe status``, report this sentence instead of "the process exited".
+SERVICE_START_FAILURE_DATABASE_DISK_FULL = "database_disk_full"
+#: ``vibe status`` while the service backs up, migrates or validates the database.
+DATABASE_MIGRATING_DETAIL = (
+    "Updating the Avibe database. This can take a few minutes on a large database; don't stop Avibe."
+)
+#: CLI copy (English only, per the CLI rule). "Nothing was changed" is said only
+#: when the migration verified its rollback.
+DATABASE_DISK_FULL_DETAIL = (
+    "Avibe couldn't update its database because the disk is full. Nothing was changed. "
+    "Free some space on the disk that holds your Avibe data, then start Avibe again."
+)
+DATABASE_DISK_FULL_UNCONFIRMED_DETAIL = (
+    "Avibe couldn't update its database because the disk is full. "
+    "Free some space on the disk that holds your Avibe data, then start Avibe again."
+)
+
 
 @dataclass
 class ProcessStartInfo:
@@ -208,6 +227,62 @@ def ensure_config():
             # The same first-run shape the CLI seeds, whichever process starts first.
             settings_service.default_config().save(config_path)
     return V2Config.load(config_path)
+
+
+def _service_start_failure_path() -> Path:
+    return paths.get_runtime_dir() / "service-start-failure.json"
+
+
+def record_service_start_failure(code: str, *, rollback_confirmed: bool) -> None:
+    """Called by the service itself, on its way out of a startup it could not finish."""
+
+    try:
+        write_json(_service_start_failure_path(), {
+            "pid": os.getpid(),
+            "code": code,
+            "rollback_confirmed": bool(rollback_confirmed),
+            "recorded_at": time.time(),
+        })
+    except Exception:
+        logger.warning("Could not record the service start failure", exc_info=True)
+
+
+def clear_service_start_failure() -> None:
+    try:
+        _service_start_failure_path().unlink(missing_ok=True)
+    except OSError:
+        logger.debug("Could not clear the service start failure record", exc_info=True)
+
+
+def service_start_failure(pid: int | None = None, *, since: float | None = None) -> dict | None:
+    """The recorded failure with its user-facing ``detail``.
+
+    ``pid`` limits it to that service process; ``since`` to a start made at or
+    after that wall-clock time, for a caller that cannot name the process.
+    """
+
+    record = read_json(_service_start_failure_path())
+    if not isinstance(record, dict):
+        return None
+    if pid is not None and record.get("pid") != pid:
+        return None
+    recorded_at = record.get("recorded_at")
+    if since is not None and not (isinstance(recorded_at, (int, float)) and recorded_at >= since):
+        return None
+    if record.get("code") != SERVICE_START_FAILURE_DATABASE_DISK_FULL:
+        return None
+    confirmed = record.get("rollback_confirmed") is True
+    detail = DATABASE_DISK_FULL_DETAIL if confirmed else DATABASE_DISK_FULL_UNCONFIRMED_DETAIL
+    reason = "database_disk_full" if confirmed else "database_disk_full_unconfirmed"
+    # ``receipt_reason`` is the Desktop startup receipt's spelling of the same outcome.
+    return {**record, "detail": detail, "receipt_reason": reason}
+
+
+def service_exited_detail(pid: int | None) -> str:
+    """What to say about a service that exited before it was up."""
+
+    failure = service_start_failure(pid)
+    return failure["detail"] if failure else "service process exited before startup completed"
 
 
 def write_json(path, payload):
@@ -485,6 +560,8 @@ def mark_service_instance_started() -> None:
     if lock_file is None:
         return
     _write_service_instance_lock_record(lock_file, SERVICE_PHASE_RUNNING)
+    # A start that got this far supersedes the last one's failure.
+    clear_service_start_failure()
     global _PENDING_SQLITE_BACKUP_READINESS
     try:
         from alembic.script import ScriptDirectory
@@ -1778,7 +1855,7 @@ def resolve_service_state(*, detect_extra_processes: bool = True) -> ServiceStat
         if service_instance_still_starting(owner_pid):
             if service_instance_migrating(owner_pid):
                 return ServiceState(
-                    "starting", "database migration in progress (backup, migration or validation)",
+                    "starting", DATABASE_MIGRATING_DETAIL,
                     owner_pid, owner_pid, extra_pids,
                 )
             return ServiceState("starting", f"{detail} has not finished starting", owner_pid, owner_pid, extra_pids)
@@ -1841,6 +1918,15 @@ def render_status(*, detect_extra_processes: bool = True):
         status["state"] = resolved.state
         status["detail"] = resolved.detail
         status["service_pid"] = resolved.service_pid
+    failure = service_start_failure() if not running else None
+    if failure is not None:
+        # The last start ended for a reason the service recorded; nothing has
+        # started since (a start that did clears the record).
+        status["state"] = "error"
+        status["detail"] = failure["detail"]
+        status["code"] = failure["code"]
+    else:
+        status.pop("code", None)
     if extra_pids:
         status["extra_service_pids"] = extra_pids
     else:
@@ -2574,6 +2660,11 @@ def wait_for_desktop_startup_ready(
     ``/ready`` is the existing combined UI/Controller readiness contract. The
     service owner lookup is still required to return the authoritative process
     for status and rollback; it never becomes a second readiness predicate.
+
+    Time the service spends updating its database pauses the deadline, under the
+    same 30-minute hard cap as ``wait_for_service_ready``. Giving up mid-update
+    would roll the start back and kill the update, so every retry would begin the
+    copy again and stop at the same point. The phase never counts as readiness.
     """
 
     import asyncio
@@ -2582,7 +2673,9 @@ def wait_for_desktop_startup_ready(
 
     from vibe.desktop_runtime import desktop_origin
 
-    deadline = time.monotonic() + max(0.0, timeout)
+    started = time.monotonic()
+    deadline = started + max(0.0, timeout)
+    hard_deadline = started + max(max(0.0, timeout), SERVICE_MIGRATION_TIMEOUT_SECONDS)
     origin = desktop_origin(host, port)
 
     async def observe(client):
@@ -2606,10 +2699,20 @@ def wait_for_desktop_startup_ready(
             except (ValueError, UnicodeDecodeError):
                 return False
 
+    def migrating() -> bool:
+        holder = resolve_service_owner_pid(include_starting=True)
+        return holder is not None and service_instance_migrating(holder)
+
     async def wait():
+        nonlocal deadline
         current_pid = service_pid
+        previous_tick = time.monotonic()
         async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
             while time.monotonic() < deadline:
+                now = time.monotonic()
+                if migrating():
+                    deadline = min(hard_deadline, deadline + (now - previous_tick))
+                previous_tick = now
                 owner_pid = resolve_service_owner_pid(include_starting=False)
                 if owner_pid is not None:
                     current_pid = owner_pid
@@ -2949,14 +3052,13 @@ def stop_service(
 def stop_remote_access_connector() -> bool:
     """Stop this home's tunnel connector; ``False`` when it may still be running.
 
-    The connector's configuration is left as it is, so the next UI start
-    reconciles it back when remote access is enabled.
+    Keep the request intact so the next UI restores only requested access.
     """
 
     try:
         from vibe import remote_access
 
-        result = remote_access.stop()
+        result = remote_access.stop_connector()
     except Exception:
         logger.warning("Failed to stop remote access", exc_info=True)
         return False
@@ -2975,8 +3077,7 @@ def stop_ui(
     """Stop the recorded UI and, by default, the tunnel connector it serves.
 
     With ``runtime_ids``, a UI that is not that Runtime's is refused, and so is
-    its connector: the UI is checked before the connector stops, and again as
-    the pid about to be signalled is read.
+    its connector: verify ownership before signalling the UI.
     """
 
     remote_access_stopped = True
@@ -2986,6 +3087,11 @@ def stop_ui(
         recorded_pid = _read_pid_file(ui_pid_path)
         if recorded_pid and pid_alive(recorded_pid):
             refuse_foreign_desktop_process(recorded_pid, "ui", runtime_ids)
+    # End the monitor and startup worker before stopping the connector; with
+    # intent preserved, either worker could otherwise respawn it during exit.
+    ui_started_at = time.monotonic()
+    ui_stopped = stop_process(ui_pid_path, runtime_ids=runtime_ids, part="ui")
+    ui_seconds = time.monotonic() - ui_started_at
     if stop_remote_access:
         remote_access_started_at = time.monotonic()
         remote_access_stopped = stop_remote_access_connector()
@@ -3002,9 +3108,6 @@ def stop_ui(
         if timings is not None:
             timings["stop_remote_access_seconds"] = 0.0
             timings["stop_remote_access_skipped"] = True
-    ui_started_at = time.monotonic()
-    ui_stopped = stop_process(ui_pid_path, runtime_ids=runtime_ids, part="ui")
-    ui_seconds = time.monotonic() - ui_started_at
     logger.info(
         "Shutdown phase=stop_ui_process duration_ms=%d stopped=%s",
         round(ui_seconds * 1000),

@@ -2,6 +2,7 @@
 //! Existing local bootstrap tests cannot exercise the account/remote boundary.
 use async_trait::async_trait;
 use avibe_runtime_host::instance_client::{
+    enrollment::EnrollmentFlow,
     protocol::{
         account_view, instance_origin, presentation_view, ClientAction, ClientError, ClientRequest, ClientState,
         Instance,
@@ -24,12 +25,159 @@ fn shared_protocol_fixtures_roundtrip_and_keep_private_results_out_of_state() {
         let _: ClientRequest = serde_json::from_value(request.clone()).unwrap();
     }
     let states: Value = serde_json::from_str(include_str!("../../contracts/instance-client-v1/states.json")).unwrap();
-    for state in states.as_object().unwrap().values() {
-        let state: ClientState = serde_json::from_value(state.clone()).unwrap();
+    for sample in states.as_object().unwrap().values() {
+        let state: ClientState = serde_json::from_value(sample.clone()).unwrap();
+        let full = serde_json::to_value(&state).unwrap();
+        assert_eq!(&full["instance_update"], &sample["instance_update"]);
+        assert!(full.get("instance_update").is_some());
+        // The sample is exactly what the shell's validator produces from it.
+        if let Some(snapshot) = sample["instance_update"]["snapshot"].as_object() {
+            let snapshot = Value::Object(snapshot.clone());
+            assert_eq!(
+                avibe_runtime_host::instance_client::instance_update::snapshot(&snapshot).unwrap(),
+                snapshot
+            );
+        }
+        // The shell's own facts about its request are full-state only, and
+        // `installed_from` is a version or null.
+        if let Some(request) = sample["instance_update"]["request"].as_object() {
+            assert!(request["following"].is_boolean());
+            let from = &request["installed_from"];
+            assert!(
+                from.is_null()
+                    || from
+                        .as_str()
+                        .is_some_and(avibe_runtime_host::instance_client::instance_update::is_version)
+            );
+        }
         let projection = state.runtime_projection();
-        for private in ["catalog", "consent", "enrollment"] {
+        let projected = projection.to_string();
+        for private in ["following", "installed_from"] {
+            assert!(!projected.contains(private), "{private}");
+        }
+        for private in [
+            "catalog",
+            "consent",
+            "enrollment",
+            "current_instance",
+            "instance_update",
+        ] {
             assert!(projection.get(private).is_none());
         }
+    }
+    // Released producers omit A5 display metadata; absence grants no owner or
+    // identity inference and must normalize to the nullable new fields.
+    let mut legacy = states["remote_connected"].clone();
+    legacy.as_object_mut().unwrap().remove("current_instance");
+    legacy["local"].as_object_mut().unwrap().remove("slug");
+    let legacy: ClientState = serde_json::from_value(legacy).unwrap();
+    assert!(legacy.local.slug.is_none());
+    assert!(legacy.current_instance.is_none());
+}
+
+// A4: the old single-view grammar rejected locale even though Workbench and
+// the bundled page cannot share localStorage. Extra fields remain forbidden.
+#[test]
+fn account_locale_is_strict_presentation_data() {
+    let owned = "tauri://localhost/".parse().unwrap();
+    for locale in ["en", "zh"] {
+        assert_eq!(
+            account_view(
+                &format!("tauri://localhost/account/index.html?view=instances&locale={locale}")
+                    .parse()
+                    .unwrap(),
+                &owned
+            ),
+            Some("instances")
+        );
+    }
+    for query in [
+        "view=account&locale=fr",
+        "locale=zh&locale=en",
+        "view=account&locale=zh&action=sign_out",
+    ] {
+        assert_eq!(
+            account_view(
+                &format!("tauri://localhost/account/index.html?{query}").parse().unwrap(),
+                &owned
+            ),
+            None
+        );
+    }
+}
+
+struct Descriptor(serde_json::Value);
+#[async_trait]
+impl Transport for Descriptor {
+    async fn send(&self, request: Request) -> Result<Response, ClientError> {
+        assert_eq!(request.url.path(), "/api/desktop/local-instance");
+        Ok(Response {
+            status: 200,
+            headers: HeaderMap::new(),
+            body: serde_json::to_vec(&self.0).unwrap(),
+        })
+    }
+}
+
+// A4: registration status is not local identity. A remote-selected client must
+// still expose its actual local pairing, and failed refresh cannot retain proof.
+#[tokio::test]
+async fn local_descriptor_projects_identity_independently_of_enrollment() {
+    let mut state = ClientState::new("Local".into(), "test".into(), serde_json::json!({}));
+    state.connection.committed = serde_json::from_value(serde_json::json!({
+        "kind":"remote","name":"Studio","instance_id":"studio","canonical_origin":"https://studio.avibe.bot"
+    }))
+    .unwrap();
+    for (pairing, requested, running, expected_id, expected_url, succeeds) in [
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"}),
+            true,
+            true,
+            Some("local-id"),
+            Some("https://local.avibe.bot"),
+            true,
+        ),
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"}),
+            false,
+            false,
+            Some("local-id"),
+            None,
+            true,
+        ),
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"}),
+            true,
+            false,
+            Some("local-id"),
+            None,
+            true,
+        ),
+        (
+            serde_json::json!({"instance_id":"local-id","backend_url":"https://avibe.bot","public_url":"https://evil.test"}),
+            true,
+            true,
+            None,
+            None,
+            false,
+        ),
+        (Value::Null, true, false, None, None, true),
+    ] {
+        let transport = Arc::new(Descriptor(serde_json::json!({
+            "schema_version":1,"installation_id":"installation","device_name":"Local",
+            "binding_revision":"1","pairing":pairing,
+            "remote_access":{"configured_enabled":requested,"requested":requested,"running":running}
+        })));
+        let mut local = NativeSession::new("http://127.0.0.1:1984/".parse().unwrap(), transport);
+        assert_eq!(EnrollmentFlow::read(&mut local, &mut state).await.is_ok(), succeeds);
+        let projection = state.runtime_projection();
+        assert_eq!(projection["local"]["instance_id"], serde_json::json!(expected_id));
+        assert_eq!(
+            projection["local"]["remote_access_url"],
+            serde_json::json!(expected_url)
+        );
+        assert!(state.enrollment.instance_id.is_none());
+        assert_eq!(projection["connection"]["committed"]["instance_id"], "studio");
     }
 }
 
@@ -172,6 +320,40 @@ async fn native_cookie_jar_rejects_cross_authority_and_preserves_private_host_co
             .code,
         "invalid_cookie_scope"
     );
+}
+
+#[tokio::test]
+async fn proof_and_inflight_ceremony_are_memory_only_on_save_and_restore() {
+    let transport = Arc::new(Responses {
+        cookie: Mutex::new(None),
+        received: Mutex::new(vec![]),
+    });
+    let origin: url::Url = "https://account.example/".parse().unwrap();
+    let mut session = NativeSession::new(origin.clone(), transport.clone());
+    let mut old_store = cookie_store::CookieStore::default();
+    for (name, value) in [
+        ("account", "ordinary"),
+        ("__Host-avibe-sign-in-proof", "proof-canary"),
+        ("__Host-avibe-sign-in-start", "start-canary"),
+    ] {
+        let header = format!("{name}={value}; Path=/; Secure; HttpOnly; Max-Age=3600");
+        old_store.parse(&header, &origin).unwrap();
+        *transport.cookie.lock().unwrap() = Some(header);
+        session.request(Method::GET, "/", None).await.unwrap();
+    }
+    let saved = session.persist().unwrap();
+    let text = std::str::from_utf8(&saved).unwrap();
+    assert!(!text.contains("proof-canary") && !text.contains("start-canary"));
+    assert!(session.cookie_value("__Host-avibe-sign-in-proof").is_some());
+    assert!(session.cookie_value("__Host-avibe-sign-in-start").is_some());
+    let mut legacy = vec![];
+    cookie_store::serde::json::save_incl_expired_and_nonpersistent(&old_store, &mut legacy).unwrap();
+    for bytes in [saved, legacy] {
+        let restarted = NativeSession::restore(origin.clone(), transport.clone(), &bytes).unwrap();
+        assert!(restarted.cookie_value("account").as_deref() == Some("ordinary"));
+        assert!(restarted.cookie_value("__Host-avibe-sign-in-proof").is_none());
+        assert!(restarted.cookie_value("__Host-avibe-sign-in-start").is_none());
+    }
 }
 
 #[test]

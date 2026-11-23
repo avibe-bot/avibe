@@ -1,3 +1,6 @@
+import { desktopVoiceLock } from './desktopVoiceLock';
+import { adoptedCaptureFactory, emptyVoiceStream, nativeCaptureFactory } from './nativeVoiceCapture';
+import type { HoldMiss } from './nativeVoiceHold';
 import {
   finalizeVoiceDictation,
   VOICE_SEGMENT_MS,
@@ -18,6 +21,7 @@ import {
 import { createVoiceActivity, reportVoiceSilenceGate, VOICE_SPEECH_RMS } from './voiceActivity';
 import { VoiceCaptureTrace, type VoiceCaptureClass, type VoiceCaptureEntry } from './voiceCaptureTrace';
 import { VoiceTakeKeeper, type VoiceTakeKeep } from './voiceTakeKeeper';
+import { requestVoiceInputStream } from './voiceInput';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from './voiceContext';
 import {
   VoiceRealtimeSession,
@@ -58,6 +62,14 @@ export type ShowPageVoiceDictationInput = {
   /** How the take is recorded (lib/voiceRecording): through Web Audio, or without it (no live
    *  words, no level: its words come on release), or without it and getting no sound at all. */
   onCaptureState?: (state: VoiceCaptureState) => void;
+  /** The iOS App records the take (lib/nativeVoiceCapture) instead of getUserMedia and Web Audio.
+   *  `adopt`: the take is one the App began itself when it recognised the hold; this takes it. */
+  nativeCapture?: boolean | { adopt: string };
+  /** When the press that started this take began (`Date.now()`), for the capture trace. */
+  pressedAt?: number;
+  /** In the iOS App, why the App did not follow the press this take came from (the trace's
+   *  `holdMiss`; lib/nativeVoiceHold). */
+  holdMiss?: HoldMiss;
 };
 
 /** Speech heard without one live preview for this long: the realtime path is taken as not
@@ -147,6 +159,7 @@ export class ShowPageVoiceDictation {
   private resolveDone!: (text: string) => void;
   private rejectDone!: (error: unknown) => void;
   readonly done: Promise<string>;
+  private readonly lockToken = desktopVoiceLock.token();
 
   constructor(
     input: ShowPageVoiceDictationInput,
@@ -156,7 +169,7 @@ export class ShowPageVoiceDictation {
     this.cleanupContext = { before: input.before, after: input.after };
     this.dependencies = {
       getUserMedia: dependencies.getUserMedia
-        ?? (() => navigator.mediaDevices.getUserMedia({ audio: true })),
+        ?? (() => requestVoiceInputStream()),
       createPipeline: dependencies.createPipeline
         ?? ((options) => new VoiceRecordingPipeline(options)),
       createRealtime: dependencies.createRealtime
@@ -168,6 +181,8 @@ export class ShowPageVoiceDictation {
     };
     this.dictationId = this.dependencies.newDictationId();
     this.trace = new VoiceCaptureTrace(input.entry ?? 'show_page', this.dictationId);
+    if (input.holdMiss) this.trace.holdMiss = input.holdMiss;
+    if (input.pressedAt !== undefined) this.trace.pressed(input.pressedAt);
     this.keeper = input.keep ? new VoiceTakeKeeper(this.dictationId, input.keep) : null;
     this.context = resolveVoiceContext(input.context);
     this.queue = this.dependencies.createQueue({
@@ -181,10 +196,12 @@ export class ShowPageVoiceDictation {
       this.resolveDone = resolve;
       this.rejectDone = reject;
     });
-    void this.done.catch(() => undefined);
+    const stopWatchingLock = desktopVoiceLock.onInvalidate(() => this.abort());
+    void this.done.finally(stopWatchingLock).catch(() => undefined);
   }
 
   async start(): Promise<void> {
+    if (!desktopVoiceLock.current(this.lockToken)) { this.abort(); throw cancelledError(); }
     if (this.pipeline || this.stream) throw new Error('show page voice dictation already started');
     const captureClaim = this.input.captureClaim ?? claimVoiceCapture(() => {
       try {
@@ -199,16 +216,19 @@ export class ShowPageVoiceDictation {
     this.captureClaim = captureClaim;
     try {
       await captureClaim.ready;
+      if (!desktopVoiceLock.current(this.lockToken) || this.abortController.signal.aborted) throw cancelledError();
       const requestedAt = this.trace.mark();
       let stream: MediaStream;
       try {
-        stream = await this.dependencies.getUserMedia();
+        // A take the App records opens no microphone in the page.
+        stream = this.input.nativeCapture ? emptyVoiceStream() : await this.dependencies.getUserMedia();
       } catch (error) {
         // The microphone never opened: refused, missing, or held by something else.
         this.trace.micSettled(requestedAt, error);
         throw error;
       }
-      this.trace.micSettled(requestedAt);
+      // The App's capture settles its own microphone (lib/nativeVoiceCapture).
+      if (!this.input.nativeCapture) this.trace.micSettled(requestedAt);
       if (this.abortController.signal.aborted || !captureClaim.isCurrent()) {
         stream.getTracks().forEach((track) => track.stop());
         throw cancelledError();
@@ -220,6 +240,7 @@ export class ShowPageVoiceDictation {
         context: this.context,
         signal: this.abortController.signal,
         onPreview: (preview) => {
+          if (!desktopVoiceLock.current(this.lockToken) || this.abortController.signal.aborted) return;
           this.speechWithoutPreviewMs = 0;
           if (`${preview.text}${preview.stash}`.trim()) this.heardWords = true;
           this.input.onPreview?.(`${preview.text}${preview.stash}`.trim());
@@ -242,6 +263,13 @@ export class ShowPageVoiceDictation {
       const pipeline = this.dependencies.createPipeline({
         stream,
         trace: this.trace,
+        ...(this.input.nativeCapture
+          ? {
+              createCapture: typeof this.input.nativeCapture === 'object'
+                ? adoptedCaptureFactory(this.input.nativeCapture.adopt)
+                : nativeCaptureFactory,
+            }
+          : {}),
         segmentMs: VOICE_SEGMENT_MS,
         maxFileBytes: this.input.maxFileBytes,
         onSegment: (blob, metadata) => {
@@ -249,15 +277,18 @@ export class ShowPageVoiceDictation {
           this.queueSegment(blob, metadata.durationMs, metadata.overlapMs, metadata.final);
         },
         onPcm: (samples) => {
+          if (this.abortController.signal.aborted && !this.setAsideRequested) return;
           // What would be transcribed, its flushed tail included, is what the gate judges.
           this.activity.observePcm(samples);
-          if (this.realtimeState !== 'failed') realtime.sendPcm(samples);
+          if (!this.abortController.signal.aborted && this.realtimeState !== 'failed') realtime.sendPcm(samples);
         },
         onLevel: (rms) => {
+          if (this.abortController.signal.aborted) return;
           this.watchLiveness(rms);
           this.input.onLevel?.(rms);
         },
         onCaptureState: (state) => {
+          if (this.abortController.signal.aborted) return;
           // Without Web Audio there is no live PCM: the take's words come over HTTP on release.
           if (state !== 'live' && this.realtimeState !== 'failed') {
             this.realtime?.abort();
@@ -266,6 +297,7 @@ export class ShowPageVoiceDictation {
           this.input.onCaptureState?.(state);
         },
         onError: (error) => {
+          if (this.abortController.signal.aborted) return;
           this.captureError = error;
           realtime.abort();
           this.realtimeFailed();
@@ -281,7 +313,7 @@ export class ShowPageVoiceDictation {
             this.decideSetAside();
             return;
           }
-          if (reason === 'abort') {
+          if (reason === 'abort' || this.abortController.signal.aborted) {
             this.reject(cancelledError());
             return;
           }
@@ -297,6 +329,7 @@ export class ShowPageVoiceDictation {
       if (!active) return;
       this.startedAt = Date.now();
       if (!captureClaim.isCurrent()) {
+        if (this.abortController.signal.aborted) { pipeline.abort(); return; }
         pipeline.finish();
       }
     } catch (error) {
@@ -441,7 +474,7 @@ export class ShowPageVoiceDictation {
   /** Sends the kept audio again through whichever path works now (cloud, then the local relay):
    *  the segments that have no receipt yet, then the last one. */
   async retry(context: { before: string; after: string }): Promise<string> {
-    if (!this.canRetry()) {
+    if (!desktopVoiceLock.allowed() || !this.canRetry()) {
       throw this.captureError ?? cancelledError();
     }
     this.cleanupContext = context;
@@ -462,6 +495,7 @@ export class ShowPageVoiceDictation {
     overlapMs?: number,
     final = false,
   ): void {
+    if (this.abortController.signal.aborted && !this.setAsideRequested) return;
     const segment: PendingVoiceSegment = {
       blob,
       sequence: this.segments.length,

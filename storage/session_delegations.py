@@ -18,13 +18,16 @@ from storage.models import (
     agent_runs,
     agent_sessions,
     message_deliveries,
-    messages,
-    run_definitions,
     session_delegations,
     session_turns,
 )
 
 IDLE_NOTICE_ACTOR_PREFIX = "delegation-idle:"
+#: ``session_turns.terminal_evidence_json`` key this version writes on every Turn end
+#: (``message_deliveries.terminalize_turn``). A dispatched Turn whose end lacks it was
+#: ended by an older version: history, never answered with a receipt. 3.2.8rc2 sent
+#: 24 receipts for dispatches up to ten days old on its first scan.
+RECEIPT_ELIGIBLE_EVIDENCE_KEY = "delegation_receipt_eligible"
 _PENDING_DELIVERIES = tuple(state for state, policy in DELIVERY_STATE_MATRIX.items() if policy.ordering != "terminal")
 _LIVE_RUN_STATUSES = ("queued", "pending", "running", "processing")
 
@@ -47,6 +50,11 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
     if snapshot.get("source") != "harness":
         return
     metadata = _object(snapshot.get("metadata_json"))
+    if metadata.get("turn_carry"):
+        # A failed or stopped Turn carried this input on (#4010): continued processing
+        # of an input already accepted once, neither a new send nor a return. The pair
+        # projection already counted it; leave both directions as they stand.
+        return
     sources = metadata.get("merged_harness_sources")
     if not isinstance(sources, list):
         sources = [_object(metadata.get("scheduled_provenance")).get("platform_specific")]
@@ -70,11 +78,16 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
             select(agent_sessions.c.id).where(agent_sessions.c.id == sender)
         ).scalar_one_or_none():
             continue
-        answered = conn.execute(update(session_delegations).where(
+        reverse = update(session_delegations).where(
             session_delegations.c.sender_session_id == recipient,
             session_delegations.c.recipient_session_id == sender,
             session_delegations.c.state.in_(("open", "notified", "answered")),
-        ).values(state="answered", updated_at=at)).rowcount
+        )
+        actor = str(run["source_actor"] or "")
+        if run["source_kind"] == "callback" and actor.startswith(IDLE_NOTICE_ACTOR_PREFIX):
+            # A receipt answers only the dispatch it was sent for, not a newer one (#4014 review).
+            reverse = reverse.where(session_delegations.c.run_id == actor[len(IDLE_NOTICE_ACTOR_PREFIX):])
+        answered = conn.execute(reverse.values(state="answered", updated_at=at)).rowcount
         if _object(run["metadata_json"]).get("no_reply") is True:
             # The run is still delivered and traceable, but it is informational:
             # it answers an existing reverse delegation without opening another.
@@ -83,6 +96,7 @@ def record_accepted_exchange(conn: Connection, *, message_id: str, snapshot: dic
         # answers. Only A sending again rearms A→B; wording/turns are not judged.
         if run["source_kind"] != "agent" or answered:
             continue
+
         values = dict(
             sender_session_id=sender, recipient_session_id=recipient,
             message_id=message_id, run_id=run["id"], state="open", notice_run_id=None, updated_at=at,
@@ -120,7 +134,14 @@ def _has_rows(conn: Connection, query) -> bool:
 
 
 def pending_wake_queries(session_id: str):
-    """Session-keyed probes; retired/paused definitions are not future wake-ups."""
+    """Session-keyed probes for work the recipient is still doing or about to do.
+
+    Only a live or waiting Turn, queued input, a live Run for it, or a report it
+    is sending count. A Watch or Task it armed, or a delegation of its own still
+    open, does not: each can wait for hours, and the dispatcher would hear nothing
+    meanwhile (11-15 stall retro). The receipt says the dispatched Turn ended, which
+    is true however the recipient arranged to continue.
+    """
     return (
         select(session_turns.c.id).where(
             session_turns.c.session_id == session_id, text("state in ('starting', 'active')"),
@@ -134,34 +155,37 @@ def pending_wake_queries(session_id: str):
         select(agent_runs.c.id).where(
             agent_runs.c.session_id == session_id, agent_runs.c.status.in_(_LIVE_RUN_STATUSES),
         ),
-        # A report/delegation B sent has not entered the pair projection until
-        # its recipient accepts it. It is still pending work, not silence.
-        select(agent_runs.c.id).where(
-            agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == session_id,
-            agent_runs.c.status.in_(_LIVE_RUN_STATUSES),
-        ),
-        select(run_definitions.c.id).where(
-            run_definitions.c.session_id == session_id,
-            run_definitions.c.definition_type.in_(("watch", "scheduled")),
-            run_definitions.c.enabled == 1, run_definitions.c.deleted_at.is_(None), run_definitions.c.retired_at.is_(None),
-        ),
-        select(session_delegations.c.run_id).where(
-            session_delegations.c.sender_session_id == session_id, session_delegations.c.state == "open",
-        ),
     )
 
 
-def pending_return_queries(sender: str, recipient: str):
-    """Any return B→A defers the notice, not just the latest Run's callback.
+def pending_return_queries(sender: str, recipient: str, run_id: str | None = None):
+    """A return B→A still on its way defers the notice, not just the latest Run's callback.
 
+    "On its way" means not yet accepted by A: once A accepted it, A has it, and A's
+    own live Turn must not hold back a receipt for a newer dispatch (#4014 review).
     An older callback can share a turn with a newer no-callback message. Live
     callback children are bounded by A's live Runs before their metadata is read.
+    An idle receipt counts only for the dispatch it was sent for (``run_id``).
     """
     callback_mode = case((func.json_valid(agent_runs.c.metadata_json) == 1,
                           func.json_extract(agent_runs.c.metadata_json, "$.callback_mode")))
     source_session = case((func.json_valid(agent_runs.c.metadata_json) == 1,
                            func.json_extract(agent_runs.c.metadata_json, "$.source_session_id")))
+    not_accepted = ~exists(select(message_deliveries.c.id).where(
+        message_deliveries.c.id == agent_runs.c.delivery_id, message_deliveries.c.state == "accepted",
+    ))
+    own_receipt = or_(
+        ~agent_runs.c.source_actor.startswith(IDLE_NOTICE_ACTOR_PREFIX),
+        agent_runs.c.source_actor == f"{IDLE_NOTICE_ACTOR_PREFIX}{run_id or ''}",
+    )
     return (
+        # A report B is sending back to A has not entered the pair projection until
+        # A accepts it; it is a return in flight. B's Runs to anyone else are not:
+        # B's own delegate may work for hours (#4014 review).
+        select(agent_runs.c.id).where(
+            agent_runs.c.source_kind == "agent", agent_runs.c.source_actor == recipient,
+            agent_runs.c.session_id == sender, agent_runs.c.status.in_(_LIVE_RUN_STATUSES), not_accepted,
+        ),
         select(agent_runs.c.id).where(
             agent_runs.c.session_id == recipient, agent_runs.c.callback_session_id == sender,
             agent_runs.c.callback_status == "pending",
@@ -170,7 +194,7 @@ def pending_return_queries(sender: str, recipient: str):
         ),
         select(agent_runs.c.id).where(
             agent_runs.c.session_id == sender, agent_runs.c.status.in_(_LIVE_RUN_STATUSES),
-            agent_runs.c.source_kind == "callback", source_session == recipient,
+            agent_runs.c.source_kind == "callback", source_session == recipient, not_accepted, own_receipt,
         ),
     )
 
@@ -186,15 +210,23 @@ def eligible_pair(
     )).mappings().first()
     if pair is None:
         return None
-    run = conn.execute(select(agent_runs.c.metadata_json).where(
-        agent_runs.c.id == pair["run_id"],
-    )).mappings().first()
+    run = conn.execute(select(
+        agent_runs.c.metadata_json, agent_runs.c.status, agent_runs.c.cancel_requested, agent_runs.c.created_at,
+    ).where(agent_runs.c.id == pair["run_id"])).mappings().first()
     if run is None:
         return None
     metadata = _object(run["metadata_json"])
     if metadata.get("no_reply") is True:
         # An older same-epoch binary can open this pair during rollback.
         # Retire it even when pending work would otherwise defer the receipt.
+        return {**dict(pair), "unavailable": True}
+    # History is never answered: a receipt is owed only for a dispatched Turn this
+    # version ended, marked in the end it wrote. No clock is compared. Anything
+    # unresolvable fails closed: no receipt, the pair stays as it is.
+    turn = conn.execute(dispatched_turn_query(str(pair["run_id"]))).mappings().first()
+    if turn is None or turn["state"] != "terminal":
+        return None
+    if _object(turn["terminal_evidence_json"]).get(RECEIPT_ELIGIBLE_EVIDENCE_KEY) is not True:
         return {**dict(pair), "unavailable": True}
     recipient = pair["recipient_session_id"]
     for session_id in (pair["sender_session_id"], recipient):
@@ -212,8 +244,13 @@ def eligible_pair(
             agent_runs.c.source_actor == pair["sender_session_id"], agent_runs.c.session_id == recipient,
         )):
             return None
-    if any(_has_rows(conn, query) for query in pending_return_queries(pair["sender_session_id"], recipient)):
+    if any(_has_rows(conn, query) for query in pending_return_queries(
+        pair["sender_session_id"], recipient, str(pair["run_id"]),
+    )):
         return None
+    if run["cancel_requested"] or str(run["status"] or "") in {"canceled", "cancelled"}:
+        # The dispatcher called it off; its failure notice, not a receipt, answers it.
+        return {**dict(pair), "unavailable": True}
     return {**dict(pair), "metadata": metadata}
 
 
@@ -242,18 +279,33 @@ def acknowledge_sync_return(engine, run_id: str) -> None:
             ).values(state="answered", updated_at=datetime.now(timezone.utc).isoformat()))
 
 
-def latest_reply_query(session_id: str, message_type: str):
-    return select(messages.c.id, messages.c.created_at, messages.c.content_text).where(
-        messages.c.session_id == session_id, messages.c.type == message_type,
-    ).order_by(messages.c.created_at.desc(), messages.c.id.desc()).limit(1)
+def dispatched_turn_query(run_id: str):
+    """The Turn that took a dispatched Run's input: three primary-key lookups."""
+    return (
+        select(
+            session_turns.c.id, session_turns.c.state, session_turns.c.terminal_at,
+            session_turns.c.terminal_evidence_json,
+        )
+        .select_from(
+            agent_runs.join(message_deliveries, message_deliveries.c.id == agent_runs.c.delivery_id)
+            .join(session_turns, session_turns.c.id == message_deliveries.c.turn_id)
+        )
+        .where(agent_runs.c.id == run_id)
+    )
 
 
-def latest_reply(conn: Connection, session_id: str) -> str:
-    # One ordered seek per visible reply kind; an IN + ORDER BY needs to sort a
-    # growing Session history. Hidden assistant/tool/thinking rows are not replies.
-    replies = [row for kind in ("result", "error", "output") if (
-        row := conn.execute(latest_reply_query(session_id, kind)).mappings().first()
-    ) is not None]
-    if not replies:
+def dispatched_turn_reply(conn: Connection, run_id: str) -> str:
+    """The last reply of the Turn that took the dispatched Run's input, or "".
+
+    Not the Session's latest reply: that can be hours old and about something
+    else (11-15 retro, 10:08 receipt quoting 04:33).
+    """
+    from storage.message_deliveries import turn_last_reply
+
+    turn = conn.execute(dispatched_turn_query(run_id)).mappings().first()
+    if turn is None:
         return ""
-    return str(max(replies, key=lambda row: (row["created_at"], row["id"]))["content_text"] or "")
+    # The final reply a Turn ends with is in its terminal evidence; a Turn that ends
+    # without one records the last reply it delivered (``record_turn_reply``).
+    final = _object(turn["terminal_evidence_json"]).get("result_text")
+    return str(final or turn_last_reply(conn, str(turn["id"])) or "")

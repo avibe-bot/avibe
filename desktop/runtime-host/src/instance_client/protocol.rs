@@ -128,6 +128,12 @@ pub enum RemoteAccessState {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct LocalState {
     pub name: String,
+    #[serde(default)]
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
+    #[serde(default)]
+    pub remote_access_url: Option<String>,
     pub remote_access: RemoteAccessState,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -157,10 +163,24 @@ pub struct ClientState {
     pub connection: ConnectionState,
     pub enrollment: EnrollmentState,
     pub catalog: CatalogState,
+    #[serde(default)]
+    pub current_instance: Option<Instance>,
     pub local: LocalState,
     pub desktop: DesktopState,
+    #[serde(default)]
+    pub instance_update: Option<super::instance_update::InstanceUpdate>,
     pub consent: Option<ConsentState>,
     pub remote_auxiliary: RemoteAuxiliary,
+    /// The ways in avibe.bot's public configuration switches on; empty until read.
+    #[serde(default)]
+    pub sign_in: SignInMethodsState,
+}
+/// avibe.bot's public sign-in switches as native last read them (`/api/config/auth`).
+/// A switch that is missing or false offers nothing.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SignInMethodsState {
+    pub providers: Vec<SignInProvider>,
+    pub passkey: bool,
 }
 impl ClientState {
     pub fn new(name: String, version: String, update: serde_json::Value) -> Self {
@@ -194,11 +214,17 @@ impl ClientState {
             },
             local: LocalState {
                 name,
+                slug: None,
+                instance_id: None,
+                remote_access_url: None,
                 remote_access: RemoteAccessState::Off,
             },
             desktop: DesktopState { version, update },
+            instance_update: None,
+            current_instance: None,
             consent: None,
             remote_auxiliary: RemoteAuxiliary::Local,
+            sign_in: SignInMethodsState::default(),
         }
     }
     /// Runtime pages receive no catalog, enrollment or consent transaction.
@@ -220,30 +246,127 @@ pub struct ClientRequest {
     pub expected_generation: u64,
     pub action: ClientAction,
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ClientAction {
     GetState,
-    RequestOtp { email: String },
-    VerifyOtp { code: String },
-    VerifySecondFactor { method: CodeMethod, code: String },
+    RequestOtp {
+        email: String,
+    },
+    SignInPassword {
+        email: String,
+        password: String,
+    },
+    VerifyOtp {
+        code: String,
+    },
+    VerifySecondFactor {
+        method: CodeMethod,
+        code: String,
+    },
     VerifyPasskey,
+    /// Google, GitHub or Apple in the system browser, back through loopback PKCE.
+    /// `locale` is the page's language: the browser's last page speaks it.
+    SignInWithProvider {
+        provider: SignInProvider,
+        #[serde(default)]
+        locale: UiLocale,
+    },
+    /// Passkey sign-in with no email first (not the second-factor passkey).
+    SignInWithPasskey,
+    /// Ends an unfinished sign-in attempt without leaving the account window.
+    AbortSignIn,
+    /// Reads avibe.bot's public sign-in switches into `sign_in`.
+    RefreshSignInMethods,
     BeginTotpEnrollment,
-    FinishTotpEnrollment { code: String },
+    FinishTotpEnrollment {
+        code: String,
+    },
     RefreshInstances,
     RetryEnrollment,
     RetryLocalRemoteAccess,
-    SelectInstance { instance_id: String },
-    DecideConsent { approve: bool },
+    SelectInstance {
+        instance_id: String,
+    },
+    DecideConsent {
+        approve: bool,
+    },
+    InstanceUpdateRefresh {},
+    InstanceUpdateCheck {},
+    InstanceUpdateSetPrereleases {
+        enabled: bool,
+    },
+    InstanceUpdateSetAutoUpdate {
+        enabled: bool,
+    },
+    InstanceUpdateInstall {
+        target_version: String,
+    },
     UpdateCheck {},
-    UpdateSetPrereleases { enabled: bool },
-    UpdateSetAutoUpdate { enabled: bool },
-    UpdateInstall { target_version: String },
+    UpdateSetPrereleases {
+        enabled: bool,
+    },
+    UpdateSetAutoUpdate {
+        enabled: bool,
+    },
+    UpdateInstall {
+        target_version: String,
+    },
     Cancel,
     ReturnLocal,
-    SignOut,
+    SignOut {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent_id: Option<String>,
+    },
+}
+// Actions can carry authentication material. Debug never formats their fields.
+impl std::fmt::Debug for ClientAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Self::GetState => "GetState",
+            Self::RequestOtp { .. } => "RequestOtp",
+            Self::SignInPassword { .. } => "SignInPassword",
+            Self::VerifyOtp { .. } => "VerifyOtp",
+            Self::VerifySecondFactor { .. } => "VerifySecondFactor",
+            Self::VerifyPasskey => "VerifyPasskey",
+            Self::SignInWithProvider { .. } => "SignInWithProvider",
+            Self::SignInWithPasskey => "SignInWithPasskey",
+            Self::AbortSignIn => "AbortSignIn",
+            Self::RefreshSignInMethods => "RefreshSignInMethods",
+            Self::BeginTotpEnrollment => "BeginTotpEnrollment",
+            Self::FinishTotpEnrollment { .. } => "FinishTotpEnrollment",
+            Self::RefreshInstances => "RefreshInstances",
+            Self::RetryEnrollment => "RetryEnrollment",
+            Self::RetryLocalRemoteAccess => "RetryLocalRemoteAccess",
+            Self::SelectInstance { .. } => "SelectInstance",
+            Self::DecideConsent { .. } => "DecideConsent",
+            Self::InstanceUpdateRefresh {} => "InstanceUpdateRefresh",
+            Self::InstanceUpdateCheck {} => "InstanceUpdateCheck",
+            Self::InstanceUpdateSetPrereleases { .. } => "InstanceUpdateSetPrereleases",
+            Self::InstanceUpdateSetAutoUpdate { .. } => "InstanceUpdateSetAutoUpdate",
+            Self::InstanceUpdateInstall { .. } => "InstanceUpdateInstall",
+            Self::UpdateCheck { .. } => "UpdateCheck",
+            Self::UpdateSetPrereleases { .. } => "UpdateSetPrereleases",
+            Self::UpdateSetAutoUpdate { .. } => "UpdateSetAutoUpdate",
+            Self::UpdateInstall { .. } => "UpdateInstall",
+            Self::Cancel => "Cancel",
+            Self::ReturnLocal => "ReturnLocal",
+            Self::SignOut { .. } => "SignOut",
+        };
+        f.write_str(name)
+    }
 }
 impl ClientAction {
+    pub fn is_instance_update(&self) -> bool {
+        matches!(
+            self,
+            Self::InstanceUpdateRefresh {}
+                | Self::InstanceUpdateCheck {}
+                | Self::InstanceUpdateSetPrereleases { .. }
+                | Self::InstanceUpdateSetAutoUpdate { .. }
+                | Self::InstanceUpdateInstall { .. }
+        )
+    }
     pub fn is_desktop_update(&self) -> bool {
         matches!(
             self,
@@ -260,6 +383,42 @@ pub enum CodeMethod {
     Totp,
     Recovery,
 }
+/// The language of the page that asked; the product's two catalogs.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UiLocale {
+    #[default]
+    En,
+    Zh,
+}
+
+/// The other accounts Desktop signs in with, as avibe.bot's login card lists them.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SignInProvider {
+    Google,
+    Github,
+    Apple,
+}
+impl SignInProvider {
+    /// Supabase's provider name.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::Github => "github",
+            Self::Apple => "apple",
+        }
+    }
+    /// avibe.bot's public `/api/config/auth` switch for this provider.
+    pub fn enabled_flag(self) -> &'static str {
+        match self {
+            Self::Google => "google_login_enabled",
+            Self::Github => "github_login_enabled",
+            Self::Apple => "apple_login_enabled",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ClientError {
     pub code: String,
@@ -293,6 +452,10 @@ impl From<reqwest::Error> for ClientError {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DirectResult {
+    SignOutIntent {
+        intent_id: String,
+        generation: u64,
+    },
     TotpEnrollment {
         uri: String,
         #[serde(rename = "qrSvg")]
@@ -304,6 +467,15 @@ pub enum DirectResult {
         #[serde(rename = "recoveryCodes", skip_serializing_if = "Option::is_none")]
         recovery_codes: Option<Vec<String>>,
     },
+}
+impl DirectResult {
+    /// Ephemeral native presentation receipt; never part of ClientState.
+    pub fn new_sign_out_intent(generation: u64) -> Self {
+        Self::SignOutIntent {
+            intent_id: uuid::Uuid::new_v4().to_string(),
+            generation,
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -366,11 +538,16 @@ pub fn account_view(url: &Url, owned_bundle_origin: &Url) -> Option<&'static str
     {
         return None;
     }
-    let pairs: Vec<_> = url.query_pairs().collect();
-    if pairs.len() > 1 || pairs.first().is_some_and(|(key, _)| key != "view") {
-        return None;
+    let mut view = None;
+    let mut locale = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "view" if view.is_none() => view = Some(value.into_owned()),
+            "locale" if locale.is_none() && matches!(value.as_ref(), "en" | "zh") => locale = Some(value),
+            _ => return None,
+        }
     }
-    match pairs.first().map(|(_, value)| value.as_ref()).unwrap_or("account") {
+    match view.as_deref().unwrap_or("account") {
         "account" => Some("account"),
         "instances" => Some("instances"),
         "setup-complete" => Some("setup-complete"),

@@ -133,7 +133,7 @@ describe('AgentCard origin help ownership', () => {
     const view = render(collection());
     const badge = (backend: string, model = 'shared-model') => within(
       document.querySelector<HTMLElement>(`[data-route-backend="${backend}"][data-route-model="${model}"]`)!,
-    ).getByRole('button', { name: 'Automatic' });
+    ).getByRole('button', { name: 'Default' });
     return { ...view, collection, badge, onOpenRoute };
   };
   const onlyHelpFor = (trigger: HTMLElement) => {
@@ -327,8 +327,10 @@ describe('AgentCard', () => {
 
     expect(screen.getByText('1 个模型')).toBeTruthy();
     expect(screen.getByText(modelId)).toBeTruthy();
-    expect(screen.getByText('未配置模型路由')).toBeTruthy();
+    // The row and the backend's status both say no provider supplies it; no origin badge repeats it.
+    expect(screen.getAllByText('没有供应商提供').length).toBeGreaterThan(0);
     expect(screen.queryByText('没有可用供应商')).toBeNull();
+    expect(screen.queryByRole('button', { name: '未配置' })).toBeNull();
   });
 
   it.each([
@@ -390,6 +392,28 @@ describe('AgentCard', () => {
     expect(details.hidden).toBe(true);
   });
 
+  it.each(['en', 'zh'] as const)('before any model provider, offers no add-model step and no attention count in %s', (lng) => {
+    const instance = localeInstance(lng);
+    const empty = { ...openCodeAgent, catalog_models: [], menu: { view: 'featured' as const, checked: [] }, model_supply: [], named_agents: [{ name: 'main', effective_model_id: null, supply_status: null }] };
+    const listed = {
+      ...openCodeAgent,
+      backend: 'claude' as const,
+      menu: { view: 'featured' as const, checked: ['listed-model'] },
+      model_supply: [{ model_id: 'listed-model', route_origin: 'automatic' as const, chain_length: 0, has_runnable_hop: false }],
+      named_agents: [{ name: 'claude', effective_model_id: 'listed-model', supply_status: null, route_reason: 'route_unconfigured' as const }],
+    };
+    render(<I18nextProvider i18n={instance}><AgentCard agents={[empty, listed]} noProviders sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} /></I18nextProvider>);
+
+    expect(screen.getByText(instance.t('settings.models.gateway.group.emptyNoProviders'))).toBeTruthy();
+    expect(screen.queryByText(instance.t('settings.models.gateway.group.emptyModels'))).toBeNull();
+    expect(screen.queryByRole('button', { name: instance.t('settings.models.gateway.addModel') })).toBeNull();
+    // No provider: nothing to order anywhere; an empty catalog has nothing to manage,
+    // while a catalog that already lists a model can still be managed.
+    expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.sourceOrder')) })).toBeNull();
+    expect(screen.getAllByRole('button', { name: new RegExp(instance.t('settings.models.gateway.manageModels')) })).toHaveLength(1);
+    expect(screen.queryByRole('button', { name: new RegExp(instance.t('settings.models.gateway.agentIssues.summary', { count: 1 })) })).toBeNull();
+  });
+
   it('names the unresolved model in the reason and opens the Agent that has to change', async () => {
     const instance = localeInstance('zh');
     const onOpenAgent = vi.fn();
@@ -402,8 +426,8 @@ describe('AgentCard', () => {
     render(<I18nextProvider i18n={instance}><AgentCard agents={[agent]} sources={[]} chains={{}} pendingBackends={new Set()} switchFailures={new Set()} connectingBackend={null} onConnectHub={vi.fn()} onSwitchDirect={vi.fn()} onOpenOrder={vi.fn()} onOpenRoute={vi.fn()} onProbeSettled={vi.fn()} onOpenAgent={onOpenAgent} /></I18nextProvider>);
     await userEvent.click(screen.getByRole('button', { name: instance.t('settings.models.gateway.agentIssues.summary', { count: 1 }) }));
 
-    const reason = screen.getByText(/grok\/grok-4\.6 模型名不存在/);
-    expect(reason.textContent).toContain('添加 grok/grok-4.6 模型的路由');
+    const reason = screen.getByText(/没有供应商提供 grok\/grok-4\.6/);
+    expect(reason.textContent).toContain('添加提供它的供应商');
     await userEvent.click(reason);
 
     expect(onOpenAgent).toHaveBeenCalledWith('opencode');
@@ -460,7 +484,7 @@ describe('AgentCard', () => {
     expect(row).not.toBeNull();
     expect(row?.contains(mapping)).toBe(true);
     expect(mapping.closest('.model-hub-model-current')).toBe(mapping);
-    expect(row?.querySelector('.model-hub-route-origin')?.textContent).toContain(lng === 'zh' ? '手动' : 'Manual');
+    expect(row?.querySelector('.model-hub-route-origin')?.textContent).toContain(lng === 'zh' ? '单独设置' : 'Own route');
     expect(modeCopy).toBeTruthy();
     expect(mapping.textContent).toBe(mappingCopy);
   });
@@ -480,7 +504,7 @@ describe('AgentCard', () => {
     expect(screen.queryByText(/Backup/)).toBeNull();
     expect(screen.queryByText(/takeover/i)).toBeNull();
     expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByRole('button', { name: 'Manual' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Own route' })).toBeTruthy();
   });
 
   it('hides gateway-owned catalog and supply actions in direct mode', () => {
@@ -500,7 +524,7 @@ describe('AgentCard', () => {
 
   it.each([
     ['en', 'Default routing', 'Use own login', 'Let Model Hub manage'],
-    ['zh', '默认路由', '改为 Agent 管理', '交给模型网关管理'],
+    ['zh', '默认路由', '改为自己登录', '交给模型网关管理'],
   ] as const)('uses explicit gateway action labels and icons in %s', async (lng, orderCopy, directCopy, gatewayCopy) => {
     const directAgent: AgentSupply = {
       ...hubAgent,

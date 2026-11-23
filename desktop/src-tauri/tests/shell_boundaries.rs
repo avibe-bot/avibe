@@ -166,12 +166,34 @@ fn the_shell_enables_only_its_declared_capabilities() {
             "main-computer-use-windows",
             "main-desktop-update",
             "main-app-windows",
+            "main-app-lock",
             "main-desktop-notifications",
-            "main-instance-client"
+            "main-instance-client",
+            "main-window-focus",
+            "show-share",
+            "update-popover"
+        ])
+    );
+    // The update popup (ui/design: chrome/remote-update-popup): its own bundled window only,
+    // asking the desktop client for state and updater actions (Rust filters the actions).
+    let popover = read_json(crate_dir().join("capabilities/update-popover.json"));
+    assert_eq!(popover["windows"], serde_json::json!(["update-popover"]));
+    assert_eq!(popover["local"], true);
+    assert!(popover.get("remote").is_none());
+    assert_eq!(
+        popover["permissions"],
+        serde_json::json!([
+            "allow-desktop-client-request",
+            "allow-update-popover-fit",
+            "core:window:allow-close"
         ])
     );
     let account = read_json(crate_dir().join("capabilities/main-instance-client.json"));
-    assert_eq!(account["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert!(
+        account.get("windows").is_none(),
+        "account authority must not match the physical main window"
+    );
+    assert_eq!(account["webviews"], serde_json::json!(["main-account-*"]));
     assert_eq!(account["local"], true);
     assert!(account.get("remote").is_none());
     assert_eq!(
@@ -201,6 +223,28 @@ fn native_app_windows_are_main_only_and_loopback_scoped() {
 }
 
 #[test]
+fn show_share_is_one_command_for_the_workbench_and_show_windows_on_loopback() {
+    let grant = read_json(crate_dir().join("capabilities/show-share.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW, "avibe-app-show-*"]));
+    assert!(grant.get("webviews").is_none());
+    assert_eq!(grant["local"], false);
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-desktop-show-share"]));
+    let patterns = loopback_patterns(&grant);
+    for (url, allowed) in [
+        ("http://127.0.0.1:5123/apps/show/ses-1?standalone=1", true),
+        ("http://[::1]:6174/", true),
+        ("https://studio-app.avibe.bot/apps/show/ses-1", false),
+        ("http://127.0.0.1.evil.example/", false),
+        ("tauri://localhost/index.html", false),
+    ] {
+        let url = url::Url::parse(url).unwrap();
+        assert_eq!(patterns.iter().any(|pattern| pattern.test(&url)), allowed, "{url}");
+    }
+}
+
+/// A Show app window may share its own Show (`show-share`) and do nothing else;
+/// every other native app window gets no IPC at all.
+#[test]
 fn no_capability_grants_ipc_to_native_app_windows() {
     use std::collections::BTreeMap;
     use tauri::utils::acl::{capability::Capability, manifest::Manifest, resolved::Resolved};
@@ -222,8 +266,16 @@ fn no_capability_grants_ipc_to_native_app_windows() {
     for target in [Target::MacOS, Target::Windows] {
         let resolved = Resolved::resolve(&manifests, capabilities.clone(), target).expect("valid permissions");
         assert!(!resolved.allowed_commands.is_empty());
+        let mut show_commands = std::collections::BTreeSet::new();
         for (command, grants) in resolved.allowed_commands {
             for grant in grants {
+                let reaches = |label: &str| {
+                    grant
+                        .windows
+                        .iter()
+                        .chain(&grant.webviews)
+                        .any(|pattern| pattern.matches(label))
+                };
                 for label in [
                     "avibe-app-files",
                     "avibe-app-files--new-1",
@@ -231,20 +283,26 @@ fn no_capability_grants_ipc_to_native_app_windows() {
                     "avibe-app-terminal--new-2",
                     "avibe-app-editor",
                     "avibe-app-editor--new-3",
+                    "avibe-app-preview",
+                    "avibe-app-library",
+                ] {
+                    assert!(!reaches(label), "{command} must not grant IPC to {label}");
+                }
+                for label in [
                     "avibe-app-show-73657373696f6e2d31",
                     "avibe-app-show-73657373696f6e2d31--new-4",
                 ] {
-                    assert!(
-                        !grant
-                            .windows
-                            .iter()
-                            .chain(&grant.webviews)
-                            .any(|pattern| pattern.matches(label)),
-                        "{command} must not grant IPC to {label}"
-                    );
+                    if reaches(label) {
+                        show_commands.insert(command.clone());
+                    }
                 }
             }
         }
+        assert_eq!(
+            show_commands.into_iter().collect::<Vec<_>>(),
+            vec!["desktop_show_share".to_owned()],
+            "a Show window may only share its own Show"
+        );
     }
 }
 
@@ -462,7 +520,6 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
         "install(move |raw| crate::receive_native_deep_link(&app, [raw]))",
         "paramDescriptorForKeyword: DIRECT_OBJECT",
         "descriptor?.stringValue()",
-        "setEventHandler: &*handler",
         "forEventClass: GET_URL_EVENT",
         "andEventID: GET_URL_EVENT",
         "RunEvent::Exit",
@@ -470,6 +527,13 @@ fn macos_receives_original_event_text_before_any_url_parser_can_normalize_it() {
     ] {
         assert!(native.contains(required), "raw native delivery must retain {required}");
     }
+    // Cross-boundary constants only: the Apple Event macOS sends for a URL and
+    // the launch notification that reclaims it before the first delivery. The
+    // cold-launch ordering itself is AppKit runtime behaviour, checked on a
+    // packaged build (see the PR's TEST RC checks), not by source text.
+    assert!(native.contains("const GET_URL_EVENT: u32 = u32::from_be_bytes(*b\"GURL\");"));
+    assert!(native.contains("const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b\"----\");"));
+    assert!(native.contains("Some(NSApplicationWillFinishLaunchingNotification)"));
     for forbidden in [
         "Url::",
         "currentAppleEvent",
@@ -638,17 +702,24 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_reset_voice_shortcut",
         "desktop_notifications_state",
         "desktop_notifications_set_enabled",
+        "desktop_notifications_authorization",
+        "desktop_notifications_open_settings",
         "desktop_update_remote_decline",
         "pet_ready",
         "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
+        "pet_frame_drawn",
+        "pet_pointer",
         "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
         "pet_bind",
         "pet_unbind",
         "pet_open",
+        "focus_main_window",
+        "update_popover_fit",
+        "desktop_show_share",
     ];
     let declared: Vec<&str> = commands
         .into_iter()
@@ -681,8 +752,12 @@ fn installation_help_is_a_fixed_bootstrap_only_destination() {
         "the install action must use the product installation guide"
     );
     assert!(
-        source.contains("fn open_install_docs(window: WebviewWindow)"),
+        source.contains("fn open_install_docs(window: Webview)"),
         "the command must accept no URL or protocol argument from the WebView"
+    );
+    assert!(
+        source.contains("instance_client::is_current_runtime(window) && is_bootstrap_page_url(&url)"),
+        "bootstrap commands must check both the invoking role and its bundled page"
     );
 }
 
@@ -868,21 +943,25 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         "the main window must be built by ensure_main_window, not auto-created"
     );
     let source = shipping_source("src/lib.rs");
-    let builder = source
-        .split("fn build_main_window(")
-        .nth(1)
-        .expect("main window builder")
-        .split("\n}\n")
-        .next()
-        .expect("builder body");
-    assert!(
-        builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
-        "the main window must register the new-window handler"
-    );
+    for name in ["fn build_main_window(", "fn build_main_child("] {
+        let builder = source
+            .split(name)
+            .nth(1)
+            .expect("main window or child builder")
+            .split("\n}\n")
+            .next()
+            .expect("builder body");
+        assert!(
+            builder.contains(".on_new_window(|url, _features| handle_new_window_request(url))"),
+            "{name} must register the new-window handler"
+        );
+    }
     let setup = &source[source.find(".setup(|app|").expect("shell setup")..];
     assert!(setup.contains("ensure_main_window(app.handle())"));
     assert!(source.contains("build_main_window(app, None, false, None)"));
-    assert!(shipping_source("src/instance_client.rs").contains("crate::build_main_window("));
+    let instance_client = shipping_source("src/instance_client.rs");
+    assert!(instance_client.contains("crate::build_main_child("));
+    assert!(instance_client.contains(".on_new_window(|url, _| crate::handle_new_window_request(url))"));
     let handler = source
         .split("fn handle_new_window_request(")
         .nth(1)
@@ -892,10 +971,11 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
         .expect("handler body");
     assert!(handler.contains("new_window_decision(&url)"));
     assert!(handler.contains("tauri_plugin_opener::open_url(url.as_str(), None::<&str>)"));
+    // The one in-app window, the Vault sandbox's on macOS, is not wry's.
     for forbidden in ["NewWindowResponse::Allow", "NewWindowResponse::Create"] {
         assert!(
-            !source.contains(forbidden),
-            "the page must never get a second webview, found {forbidden:?}"
+            !source.contains(forbidden) && !instance_client.contains(forbidden),
+            "wry must never build the page a second webview, found {forbidden:?}"
         );
     }
 }
@@ -964,6 +1044,21 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true })"));
     assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
     assert!(builder.contains(".initialization_script(DESKTOP_NOTIFICATIONS_MARKER)"));
+    assert!(builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"));
+    let child_builder = source
+        .split("fn build_main_child(")
+        .nth(1)
+        .expect("Runtime child builder")
+        .split("\n}\n")
+        .next()
+        .expect("child builder body");
+    assert!(
+        child_builder.contains(".initialization_script(window_return::DESKTOP_FOCUS_MARKER)"),
+        "a promoted Runtime must advertise the same focus command as the initial Workbench"
+    );
+    assert!(shipping_source("src/window_return.rs").contains(
+        "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_FOCUS__', { value: true })"
+    ));
     let settings_marker = pet_source
         .split("const DESKTOP_PET_SETTINGS_MARKER: &str =")
         .nth(1)
@@ -991,6 +1086,10 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
         "the Workbench must probe the native notification marker"
     );
     assert!(
+        reader.contains("window.__AVIBE_DESKTOP_FOCUS__ === true"),
+        "the Workbench must probe the window-focus marker before calling it"
+    );
+    assert!(
         shipping_source("src/app_windows.rs").contains("if (window.self === window.top) Object.defineProperty(window, '__AVIBE_NATIVE_APP_WINDOW__', { value: true })"),
         "native children must define the shared identity key at the top level"
     );
@@ -1006,7 +1105,7 @@ fn the_macos_overlay_title_bar_keeps_its_layout_and_defaults_to_no_inset() {
     assert_eq!(window["titleBarStyle"], "Overlay");
     assert_eq!(window["hiddenTitle"], true);
     assert_eq!(window["trafficLightPosition"]["x"], 12);
-    assert_eq!(window["trafficLightPosition"]["y"], 24);
+    assert_eq!(window["trafficLightPosition"]["y"], 22);
     // Bootstrap management and window gestures have separate capability grants.
     assert!(!read_to_string(&crate_dir().join("capabilities/bootstrap.json")).contains("start-dragging"));
     let css = read_to_string(&crate_dir().join("../../ui/src/index.css"));
@@ -1035,7 +1134,7 @@ fn native_navigation_failures_return_to_a_retryable_bootstrap_state() {
 fn a_dropped_retry_is_reported_to_the_bootstrap_page() {
     let source = shipping_source("src/lib.rs");
     for required in [
-        "fn bootstrap_retry(window: WebviewWindow, app: AppHandle) -> Result<bool, String>",
+        "fn bootstrap_retry(window: Webview, app: AppHandle) -> Result<bool, String>",
         "Ok(spawn_bootstrap(app, BootstrapTrigger::Retry))",
         "fn spawn_bootstrap(app: AppHandle, trigger: BootstrapTrigger) -> bool",
         "return false",
@@ -1209,6 +1308,38 @@ fn native_tray_copy_has_locale_and_placeholder_parity() {
 }
 
 #[test]
+fn remote_auxiliary_menu_uses_plain_copy_and_preserves_availability_controls() {
+    let source = shipping_source("src/lib.rs");
+    assert!(
+        source.contains("instance_client::native_copy(\"auxiliaryIncomplete\")")
+            && source.contains("MenuItem::with_id(app, \"instance-auxiliary-limitation\", label, false, None::<&str>)"),
+        "the native limitation item must consume the shared localized copy without becoming an action"
+    );
+    for (locale, expected) in [
+        ("en", "While connected to another computer, Desktop Mini and system notifications are off. Switch back to this Mac to use them."),
+        ("zh", "连接到其他电脑时，桌面迷你窗和系统通知暂时关闭。切回本机即可使用。"),
+    ] {
+        let catalog = read_json(crate_dir().join(format!("../../ui/src/i18n/{locale}.json")));
+        let note = catalog["desktopClient"]["auxiliaryIncomplete"].as_str().expect("remote limitation copy");
+        assert_eq!(note, expected);
+        assert!(!note.contains("Phase 1") && !note.contains("第一阶段"));
+    }
+    let refresh = source
+        .split("fn refresh_native_controls(")
+        .nth(1)
+        .expect("native control refresh")
+        .split("\n}\n")
+        .next()
+        .expect("refresh body");
+    assert!(refresh.contains("let local = instance_client::local_selected(&handle);"));
+    assert!(refresh.contains("menus.notifications.set_enabled(local)"));
+    assert!(refresh.contains("pet::set_native_available(&handle, local)"));
+    assert!(refresh.contains("menus.auxiliary_visible.swap(!local, Ordering::SeqCst) == local"));
+    assert!(refresh.contains("if local {\n                    let _ = menus.tray.remove(note);"));
+    assert!(refresh.contains("} else {\n                    let _ = menus.tray.append(note);"));
+}
+
+#[test]
 fn computer_use_menu_constructor_keeps_enabled_and_checked_in_their_slots() {
     let source = shipping_source("src/lib.rs");
     assert!(source
@@ -1256,7 +1387,7 @@ fn settings_open_in_the_shown_workbench_and_only_while_one_is_shown() {
         .next()
         .expect("page-load hook body");
     assert!(page_load
-        .contains("webview.label() == MAIN_WINDOW && payload.event() == tauri::webview::PageLoadEvent::Finished"));
+        .contains("instance_client::is_main_view(webview.app_handle(), webview.label()) && payload.event() == tauri::webview::PageLoadEvent::Finished"));
     assert!(
         page_load.contains("main_document_finished(webview);")
             && body("main_document_finished").contains("refresh_native_controls(webview.app_handle(), None);"),
@@ -1325,11 +1456,41 @@ fn start_at_login_is_restored_through_the_toggle_write_policy() {
         );
     }
     // The policy takes its write as `FnOnce` and the adapter runs it once, so a
-    // failure is reported, never retried. Nothing else enables the registration
-    // or draws its checkbox, so no caller can discard a write's result again.
+    // failure is reported, never retried. Deferred menu clicks may redraw the
+    // effective value, but must not become another registration write adapter.
     assert_eq!(source.matches("settle_start_at_login(").count(), 2);
     assert_eq!(source.matches(".enable()").count(), 1);
-    assert_eq!(source.matches("login.set_checked(").count(), 1);
+    let redraw = body("render_saved_checkmarks");
+    let check_redraw = |redraw: &str| {
+        assert!(redraw.contains("app.autolaunch().is_enabled().unwrap_or(false)"));
+        assert!(redraw.contains("menus.login.set_checked(login)"));
+        for forbidden in [
+            ".enable(",
+            ".disable(",
+            "set_start_at_login(",
+            "toggle_start_at_login(",
+            "settle_start_at_login(",
+            ".save(",
+            ".persist(",
+        ] {
+            assert!(!redraw.contains(forbidden), "redraw must not call {forbidden}");
+        }
+    };
+    check_redraw(&redraw);
+    assert_eq!(redraw.matches("login.set_checked(").count(), 1);
+    assert_eq!(adapter.matches("login.set_checked(").count(), 1);
+    assert_eq!(source.replace(&redraw, "").matches("login.set_checked(").count(), 1);
+    // Prove this boundary rejects accidental writes, rather than merely
+    // accepting the increased number of checkbox calls.
+    for mutation in [
+        "app.autolaunch().enable();",
+        "app.autolaunch().disable();",
+        "set_start_at_login(app, Ok(true));",
+        "preferences.save();",
+    ] {
+        let mutated = format!("{redraw}\n{mutation}");
+        assert!(std::panic::catch_unwind(|| check_redraw(&mutated)).is_err());
+    }
 }
 
 #[test]
@@ -1574,6 +1735,8 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
             "allow-pet-context-menu",
             "allow-pet-set-expanded",
             "allow-pet-drag",
+            "allow-pet-frame-drawn",
+            "allow-pet-pointer",
             "allow-pet-settle",
             "allow-pet-hit-regions",
             "allow-pet-set-dismissed",
@@ -1646,7 +1809,9 @@ fn desktop_notifications_are_main_only_and_loopback_scoped() {
         grant["permissions"],
         serde_json::json!([
             "allow-desktop-notifications-state",
-            "allow-desktop-notifications-set-enabled"
+            "allow-desktop-notifications-set-enabled",
+            "allow-desktop-notifications-authorization",
+            "allow-desktop-notifications-open-settings"
         ])
     );
     let patterns = loopback_patterns(&grant);
@@ -1677,4 +1842,83 @@ fn desktop_notifications_are_main_only_and_loopback_scoped() {
             );
         }
     }
+}
+
+#[test]
+fn bringing_the_window_forward_is_main_only_loopback_scoped_and_argument_free() {
+    let grant = read_json(crate_dir().join("capabilities/main-window-focus.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(grant["local"], false);
+    assert!(
+        grant.get("platforms").is_none(),
+        "macOS and Windows both return from the browser"
+    );
+    assert_eq!(grant["permissions"], serde_json::json!(["allow-focus-main-window"]));
+    let patterns = loopback_patterns(&grant);
+    for allowed in ["http://127.0.0.1:5123/chat/ses_1", "http://[::1]:6174/vaults"] {
+        let url = url::Url::parse(allowed).unwrap();
+        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for rejected in [
+        "https://example.com/chat/ses_1",
+        "http://127.0.0.1.example.com/",
+        "http://192.168.1.2:5123/vaults",
+        "http://localhost:5123/vaults",
+    ] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().is_some_and(|name| name != "main-window-focus.json") {
+            assert!(
+                !read_to_string(&path).contains("allow-focus-main-window"),
+                "{} must not grant the window-focus command",
+                path.display()
+            );
+        }
+    }
+
+    // The page names no window and passes nothing: the command acts on the
+    // caller, and only after the shell has confirmed the caller is its Workbench.
+    let source = shipping_source("src/window_return.rs");
+    let command = source
+        .split("#[tauri::command]")
+        .nth(1)
+        .expect("focus command")
+        .split("\n}\n")
+        .next()
+        .expect("focus command body");
+    assert!(command.contains("pub fn focus_main_window(webview: Webview) -> Result<(), String>"));
+    let admission = command
+        .find("if !crate::pet::is_workbench(&webview)")
+        .expect("actual caller admission");
+    let physical = command
+        .find("let window = webview.window();")
+        .expect("caller's physical parent");
+    let focus = command
+        .find("window.is_focused()")
+        .expect("physical window focus observation");
+    assert!(admission < physical && physical < focus);
+    for forbidden in [
+        "navigate",
+        "eval(",
+        "emit",
+        "get_webview_window",
+        "get_window",
+        "ensure_main_window",
+        "focus_or_restore_main_window",
+    ] {
+        assert!(!command.contains(forbidden), "the focus command must not {forbidden}");
+    }
+}
+
+#[test]
+fn the_shell_asks_the_same_close_guard_key_the_app_pages_register() {
+    // The key is a cross-language byte contract; the close and quit behaviour
+    // itself is owned and tested in `app_windows`.
+    let windows = shipping_source("src/app_windows.rs");
+    let guard = read_to_string(&crate_dir().join("../../ui/src/apps/nativeWindowCloseGuard.ts"));
+    assert!(windows.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__"));
+    assert!(guard.contains("window.__AVIBE_APP_WINDOW_CLOSE_GUARD__ ="));
 }

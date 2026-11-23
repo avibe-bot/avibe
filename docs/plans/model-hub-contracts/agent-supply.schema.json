@@ -12,6 +12,10 @@
       "type": "boolean",
       "description": "Server-authoritative fact that this backend's configured CLI executable is present on the Avibe host. It does not prove login, process readiness, or Source health. OPTIONAL in the reusable schema and REQUIRED on AgentSupply API payloads."
     },
+    "backend_enabled": {
+      "type": "boolean",
+      "description": "Whether this backend is switched on in Settings · Backends, as the controller has applied it. Orthogonal to cli_present: an installed CLI can be switched off. Unknown reads as true. Vibey is built in and always true. OPTIONAL: a payload without it reads as true."
+    },
     "mode": {
       "enum": ["hub", "direct"],
       "description": "Gateway or Direct. Existing installations start Direct until the user switches; fresh installations default Gateway. A native_cli Source is one configured Gateway hop and is distinct from Direct mode."
@@ -169,7 +173,7 @@
           },
           "route_origin": {
             "enum": ["automatic", "manual", "passthrough", null],
-            "description": "Shared planner origin, independent of transient health. Passthrough uses Hub API-key defaults only; subscriptions remain subject to known-model admission. Null exactly when chain_length is zero."
+            "description": "Shared planner origin, independent of transient health. Passthrough remains a compatible legacy enum but is no longer generated. Automatic includes only matching non-retired inventory; no match means chain_length zero, has_runnable_hop false, and null origin. Manual API-key hops can target unlisted models."
           },
           "chain_length": {
             "type": "integer",
@@ -217,7 +221,7 @@
           },
           "route_reason": {
             "enum": ["route_unconfigured", null],
-            "description": "Why this Agent has no usable route before Source health is considered. route_unconfigured means the selected model has no configured hops; null covers configured routes, Direct mode, and Agents without an explicit model."
+            "description": "Why this Agent has no usable route before Source health is considered. route_unconfigured means the selected model has no configured hops, including an inherited model absent from every eligible default inventory after upgrade; null covers configured routes, Direct mode, and Agents without an explicit model."
           }
         },
         "allOf": [
@@ -362,7 +366,7 @@
     },
     {
       "if": { "properties": { "backend": { "const": "vibey" } }, "required": ["backend"] },
-      "then": { "properties": { "mode": { "const": "hub" }, "cli_present": { "const": false } } }
+      "then": { "properties": { "mode": { "const": "hub" }, "cli_present": { "const": false }, "backend_enabled": { "const": true } } }
     },
     {
       "$comment": "BackendModel has no discriminator, so the containing catalog owns native_protocol presence.",

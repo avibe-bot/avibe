@@ -1,11 +1,13 @@
 /** @vitest-environment jsdom */
 import 'fake-indexeddb/auto';
+import './ChatPage.duplicateKeyGuard';
 
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useNavigate } from 'react-router-dom';
 
 import type { SessionRuntimeState, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import type { ComposerProps } from './Composer';
 import { clearLocalSnapshots, setLocalSnapshotPrincipal } from '../../lib/localSnapshots';
 
@@ -101,7 +103,8 @@ vi.mock('../../context/ComposerBridgeContext', () => ({
   useRegisterComposerTarget: vi.fn(),
 }));
 
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()),
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
 
@@ -196,7 +199,7 @@ vi.mock('./Composer', async () => {
 
 import { ChatPage } from './ChatPage';
 
-const SESSION = 'ses_a';
+const SESSION = 'session-a';
 const running: SessionRuntimeState = {
   in_flight: true,
   foreground: 'running',
@@ -305,4 +308,90 @@ describe('Send now on the queue strip', () => {
     expect(mocks.api.sendQueuedNow).toHaveBeenCalledWith(SESSION, 'q1');
     expect(document.activeElement).toBe(draft);
   });
+});
+
+describe('the Lock Screen progress entry', () => {
+  it('is not on the chat page, even in a shell that advertises Live Activities', async () => {
+    const call = vi.fn(async () => ({ enabled: true, tracking: false }));
+    vi.stubGlobal('avibeNative', {
+      contract: 1, platform: 'ios', shellVersion: 'test',
+      capabilities: { liveActivities: 1 }, call, on: () => () => {},
+    });
+
+    mount();
+    await screen.findByText('next step');
+
+    expect(screen.queryByTestId('live-activity-entry')).toBeNull();
+    expect(screen.queryByText(/liveActivity\./)).toBeNull();
+    expect(call.mock.calls.filter(([method]) => String(method).startsWith('liveActivity.'))).toEqual([]);
+  });
+});
+
+// Regresses the lead's duplicateKey.repro: reuse the real ChatPage through repeated
+// session changes with the queue strip present. No orphan nodes remain.
+function SessionLinks() {
+  const navigate = useNavigate();
+  return <button onClick={() => navigate(`/chat/${screen.getByLabelText('destination').getAttribute('data-session')}`)}>switch</button>;
+}
+it.each([
+  { version: 0, prefix: 'session-' }, { version: 1, prefix: 'session-' },
+  { version: 2, prefix: 'session-' }, { version: 1, prefix: 'ses_' },
+])('leaves no chat nodes behind when switching $prefix sessions on shell capability $version', async ({ version, prefix }) => {
+  const call = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({ ok: true }));
+  vi.stubGlobal('avibeNative', {
+    contract: 1, platform: 'ios', shellVersion: 'test',
+    capabilities: { lockScreenProgress: version }, call, on: () => () => {},
+  });
+  mocks.api.getSessionBootstrap.mockImplementation(async (id: string) => ({
+    ...bootstrap, session: { ...bootstrap.session, id, title: `Title ${id}` },
+    queued: [{ ...queued, id: `queue-${id}`, session_id: id, text: `next ${id}` }],
+  }));
+  const view = render(<MemoryRouter initialEntries={[`/chat/${prefix}a`]}>
+    <SessionLinks /><span aria-label="destination" />
+    <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+  </MemoryRouter>);
+  await screen.findByText(`next ${prefix}a`);
+  const nodeCount = view.container.querySelectorAll('*').length;
+  for (const suffix of ['b', 'c', 'd', 'a', 'b']) {
+    const id = `${prefix}${suffix}`;
+    screen.getByLabelText('destination').setAttribute('data-session', id);
+    await act(async () => screen.getByRole('button', { name: 'switch' }).click());
+    await screen.findByText(`next ${id}`);
+    expect(screen.getAllByTestId('composer')).toHaveLength(1);
+    expect(screen.getAllByLabelText('draft')).toHaveLength(1);
+    expect(screen.queryByText(/liveActivity\./)).toBeNull();
+    expect(view.container.querySelectorAll('*')).toHaveLength(nodeCount);
+  }
+  if (version < 1) expect(call).not.toHaveBeenCalled();
+  else expect(call).toHaveBeenLastCalledWith('liveActivity.observe', {
+    sessionId: `${prefix}b`, agentName: prefix === 'ses_' ? `Title ${prefix}b` : 'vibey',
+    sessionTitle: prefix === 'ses_' ? null : `Title ${prefix}b`, running: true,
+  });
+  view.unmount();
+  if (version >= 1) expect(call).toHaveBeenLastCalledWith('liveActivity.observe', { sessionId: null });
+});
+
+// Settings keeps the chat mounted underneath its route surface. Leaving that
+// conversation must clear the native observation even without an unmount.
+it('clears the observation while Settings covers the retained chat and restores it on return', async () => {
+  const call = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({ ok: true }));
+  vi.stubGlobal('avibeNative', {
+    contract: 1, platform: 'ios', shellVersion: 'test',
+    capabilities: { lockScreenProgress: 1 }, call, on: () => () => {},
+  });
+  const page = (active: boolean) => <MemoryRouter initialEntries={[`/chat/${SESSION}`]}>
+    <RouteSurfaceActiveContext.Provider value={active}>
+      <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+    </RouteSurfaceActiveContext.Provider>
+  </MemoryRouter>;
+  const view = render(page(true));
+  await screen.findByText('next step');
+  expect(call).toHaveBeenLastCalledWith('liveActivity.observe', expect.objectContaining({ sessionId: SESSION, running: true }));
+  view.rerender(page(false));
+  expect(call).toHaveBeenLastCalledWith('liveActivity.observe', { sessionId: null });
+  const count = call.mock.calls.length;
+  view.rerender(page(false));
+  expect(call).toHaveBeenCalledTimes(count);
+  view.rerender(page(true));
+  expect(call).toHaveBeenLastCalledWith('liveActivity.observe', expect.objectContaining({ sessionId: SESSION, running: true }));
 });

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from core.handlers.model_hub.quota import (
     SubscriptionQuotaError,
     parse_claude_quota,
     parse_codex_quota,
+    parse_gemini_quota,
+    parse_grok_quota,
 )
 
 CONTRACTS = Path("docs/plans/model-hub-contracts")
@@ -73,6 +76,35 @@ CODEX_REPORT = {
     ],
     "credits": {"has_credits": False, "unlimited": False, "balance": None},
 }
+# Shaped after Antigravity's `v1internal:retrieveUserQuotaSummary` (groups of
+# models sharing a 5-hour and a weekly bucket); every value is made up. Proto3
+# omits a zero, so the spent 5-hour bucket carries only its reset.
+GEMINI_SUMMARY = {
+    "groups": [
+        {"buckets": [
+            {"bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly",
+             "resetTime": "2026-09-29T15:52:48Z", "remainingFraction": 0.62},
+            {"bucketId": "gemini-5h", "displayName": "Five Hour Limit Remaining", "window": "5h",
+             "resetTime": "2026-09-25T05:10:00Z"},
+        ], "displayName": "Gemini Models", "description": "Models within this group: Gemini Flash, Gemini Pro"},
+        {"buckets": [
+            {"bucketId": "3p-weekly", "window": "weekly", "resetTime": "2026-10-02T03:00:00Z", "remainingFraction": 1},
+            {"bucketId": "3p-5h", "window": "5h", "resetTime": "2026-09-25T08:00:00Z", "remainingFraction": 0.9},
+            {"bucketId": "3p-daily", "window": "daily", "remainingFraction": 0.5},
+            {"bucketId": "3p-legacy", "window": "5h", "remainingFraction": 1, "disabled": True},
+        ], "displayName": "Claude and GPT models"},
+    ],
+    "description": "Within each group, models share a weekly limit and a 5-hour limit.",
+}
+# Shaped after Grok's `/v1/billing?format=credits`; values are made up.
+GROK_BILLING = {
+    "config": {
+        "creditUsagePercent": 37.5,
+        "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-09-21T00:00:00Z",
+                          "end": "2026-09-28T00:00:00Z"},
+        "productUsage": [{"product": "grok-cli", "usagePercent": 30}],
+    },
+}
 
 
 def _validate_windows(parsed):
@@ -106,10 +138,11 @@ def test_quota_contract_carries_a_reason_exactly_when_not_ok(state, error_key, v
 @pytest.mark.parametrize(
     ("kind", "scope_model", "valid"),
     [
-        ("model_weekly", "Sonnet", True),
-        ("model_weekly", None, False),
-        *[(kind, None, True) for kind in ("session", "weekly", "other")],
-        *[(kind, "Sonnet", False) for kind in ("session", "weekly", "other")],
+        *[(kind, "Sonnet", True) for kind in ("model_session", "model_weekly")],
+        *[(kind, None, False) for kind in ("model_session", "model_weekly")],
+        *[(kind, None, True) for kind in ("session", "weekly", "monthly", "other")],
+        *[(kind, "Sonnet", False) for kind in ("session", "weekly", "monthly", "other")],
+        ("daily", None, False),
     ],
 )
 def test_quota_contract_names_a_model_exactly_for_model_weekly(kind, scope_model, valid):
@@ -247,9 +280,90 @@ def test_codex_quota_parser_classifies_a_lone_weekly_primary_by_length():
     assert [(window["id"], window["kind"]) for window in parsed["windows"]] == [("primary_window", "weekly")]
 
 
+def test_gemini_quota_parser_reads_model_group_windows():
+    """MH-QUOTA-037: Antigravity buckets are scoped to their model group, 5-hour before weekly; a spent bucket reads used up, a full one has no moving reset."""
+
+    parsed = parse_gemini_quota(json.dumps(GEMINI_SUMMARY))
+    _validate_windows(parsed)
+    assert parsed["plan"] is None
+    assert [(w["id"], w["kind"], w.get("scope_model"), w["used_pct"], w["resets_at"]) for w in parsed["windows"]] == [
+        ("bucket:gemini-5h", "model_session", "Gemini Models", 100.0, "2026-09-25T05:10:00Z"),
+        ("bucket:gemini-weekly", "model_weekly", "Gemini Models", 38.0, "2026-09-29T15:52:48Z"),
+        ("bucket:3p-5h", "model_session", "Claude and GPT models", 10.0, "2026-09-25T08:00:00Z"),
+        # Untouched: Antigravity reports a full window from now, which is no reset at all.
+        ("bucket:3p-weekly", "model_weekly", "Claude and GPT models", 0.0, None),
+        # A window Antigravity may add later is shown generically, never as an account limit.
+        ("bucket:3p-daily", "other", None, 50.0, None),
+    ]
+    by_id = {w["id"]: w for w in parsed["windows"]}
+    assert (by_id["bucket:gemini-5h"]["window_seconds"], by_id["bucket:gemini-weekly"]["window_seconds"]) == (18000, 604800)
+    assert by_id["bucket:3p-daily"]["label"] == "Claude and GPT models · daily"
+    # A group's own name is display text; nothing here stops the whole account.
+    assert not any(w.get("label_is_key") for w in parsed["windows"])
+    assert {w["kind"] for w in parsed["windows"]}.isdisjoint({"session", "weekly", "monthly"})
+
+    # The older answer lists bare buckets: the bucket id, less its window, names the group as a key.
+    older = {"buckets": [{"bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.5,
+                          "resetTime": "2026-09-29T00:00:00Z"}]}
+    windows = parse_gemini_quota(json.dumps(older))["windows"]
+    _validate_windows({"windows": windows})
+    assert [(w["kind"], w["scope_model"], w.get("label_is_key")) for w in windows] == [("model_weekly", "gemini", True)]
+
+    # No groups (proto3 sends `{}`), or none with a reading: the vendor reported no quota.
+    for empty in ({}, {"groups": []}, {"groups": [{"displayName": "Gemini Models", "buckets": [
+            {"bucketId": "gemini-5h", "window": "5h"}, {"bucketId": "gemini-weekly", "window": "weekly", "disabled": True,
+                                                       "remainingFraction": 0.1}]}]}):
+        assert parse_gemini_quota(json.dumps(empty)) == {"plan": None, "windows": []}
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (GROK_BILLING["config"], ("weekly", "weekly", 37.5, 604800, "2026-09-28T00:00:00Z")),
+        ({"creditUsagePercent": 120, "currentPeriod": {"type": "USAGE_PERIOD_TYPE_MONTHLY",
+                                                        "start": "2026-09-01T00:00:00Z", "end": "2026-10-01T00:00:00Z"}},
+         ("monthly", "monthly", 100.0, 30 * 86400, "2026-10-01T00:00:00Z")),
+        # Grok omits a zero percentage: 0 only beside a well-formed weekly or monthly period.
+        ({"currentPeriod": {"type": "MONTHLY", "start": "2026-09-01T00:00:00Z", "end": "2026-10-01T00:00:00Z"}},
+         ("monthly", "monthly", 0.0, 30 * 86400, "2026-10-01T00:00:00Z")),
+        ({"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "end": "2026-09-28T00:00:00Z"}}, None),
+        ({"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-09-28T00:00:00Z",
+                            "end": "2026-09-21T00:00:00Z"}}, None),
+        ({"currentPeriod": {"type": "USAGE_PERIOD_TYPE_DAILY", "start": "2026-09-25T00:00:00Z",
+                            "end": "2026-09-26T00:00:00Z"}}, None),
+        ({"creditUsagePercent": None, "currentPeriod": GROK_BILLING["config"]["currentPeriod"]}, None),
+        ({}, None),
+        # A period this parser does not know is shown generically by its length.
+        ({"creditUsagePercent": 12, "currentPeriod": {"type": "USAGE_PERIOD_TYPE_DAILY", "start": "2026-09-25T00:00:00Z",
+                                                       "end": "2026-09-26T00:00:00Z"}},
+         ("other", "1d", 12.0, 86400, "2026-09-26T00:00:00Z")),
+        ({"creditUsagePercent": 12}, ("other", "credit_usage", 12.0, None, None)),
+    ],
+)
+def test_grok_quota_parser_reads_the_one_credit_window(config, expected):
+    """MH-QUOTA-038: Grok's credit window is weekly or monthly by its period, resets at the period's end, and is absent rather than invented."""
+
+    parsed = parse_grok_quota(json.dumps({"config": config}))
+    _validate_windows(parsed)
+    assert parsed["plan"] is None
+    if expected is None:
+        assert parsed["windows"] == []
+        return
+    [window] = parsed["windows"]
+    assert (window["kind"], window["label"], window["used_pct"], window["window_seconds"], window["resets_at"]) == expected
+    assert window.get("label_is_key", False) is (window["label"] == "credit_usage")
+
+
 @pytest.mark.parametrize(
     ("parser", "body"),
     [
+        (parse_gemini_quota, json.dumps({"groups": {"displayName": "Gemini Models"}})),
+        (parse_gemini_quota, json.dumps({"buckets": "none"})),
+        (parse_gemini_quota, json.dumps({"error": {"code": 403, "message": "Verify your account to continue"}})),
+        (parse_gemini_quota, "<html>"),
+        (parse_grok_quota, json.dumps({"creditUsagePercent": 5})),
+        (parse_grok_quota, json.dumps({"config": [1]})),
+        (parse_grok_quota, json.dumps({"error": "WKE=privacy-mode:legacy"})),
         (parse_claude_quota, "not json"),
         (parse_claude_quota, json.dumps([1, 2])),
         (parse_claude_quota, json.dumps({"error": {"type": "authentication_error"}})),
@@ -281,6 +395,11 @@ def test_quota_parsers_stop_reading_a_runaway_row_list():
                   for i in range(2_000)]
     parsed = parse_codex_quota(json.dumps({"additional_rate_limits": additional}))
     assert len(parsed["windows"]) == 16
+    bucket = {"window": "5h", "remainingFraction": 0.5}
+    for groups in ([{"buckets": [{**bucket, "bucketId": f"g{i}"}]} for i in range(2_000)],
+                   [{"buckets": [{**bucket, "bucketId": f"b{j}"} for j in range(2_000)]}]):
+        parsed = parse_gemini_quota(json.dumps({"groups": groups}, separators=(",", ":")))
+        assert len(parsed["windows"]) == 16
 
 
 def test_quota_parsers_bound_values_from_a_hostile_body():
@@ -325,6 +444,26 @@ def test_quota_parsers_bound_values_from_a_hostile_body():
     parsed = parse_codex_quota(json.dumps(codex))
     _validate_windows(parsed)
     assert [(w["used_pct"], w["window_seconds"], w["resets_at"]) for w in parsed["windows"]] == [(5.0, None, None)]
+
+    # Antigravity fractions clamp to 0–1, an unreadable one drops, and a long group name is bounded.
+    hostile = {"groups": [{"displayName": "G" * 300, "buckets": [
+        {"bucketId": "a", "window": "5h", "remainingFraction": -3, "resetTime": "2026-09-25T05:00:00Z"},
+        {"bucketId": "b", "window": "weekly", "remainingFraction": 7},
+        {"bucketId": "c", "window": "5h", "remainingFraction": "half", "resetTime": "2026-09-25T05:00:00Z"},
+        {"bucketId": "d", "window": "weekly", "remainingFraction": huge, "resetTime": "2026-09-29T00:00:00Z"},
+        {"bucketId": "e", "window": "weekly", "resetTime": "garbage"},
+    ]}]}
+    parsed = parse_gemini_quota(json.dumps(hostile))
+    _validate_windows(parsed)
+    assert [(w["id"], w["used_pct"], len(w["scope_model"])) for w in parsed["windows"]] == [
+        ("bucket:a", 100.0, 64), ("bucket:b", 0.0, 64)]
+    # A Grok percent past 100 is spent, never more; an impossible date is no period.
+    parsed = parse_grok_quota(json.dumps({"config": {"creditUsagePercent": 400,
+                                                     "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY",
+                                                                       "start": "2026-02-30T00:00:00Z",
+                                                                       "end": "2026-03-07T00:00:00Z"}}}))
+    _validate_windows(parsed)
+    assert [(w["used_pct"], w["window_seconds"]) for w in parsed["windows"]] == [(100.0, None)]
 
     # Unknown metadata ahead of Claude's fixed keys does not crowd them out.
     padded = {f"meta{i}": {} for i in range(100)} | {"five_hour": {"utilization": 7}}
@@ -599,6 +738,10 @@ class _EngineClient:
                 {"auth_index": "7", "id": "claude-a.json", "name": "claude-a.json", "provider": "claude"},
                 {"auth_index": "8", "id": "codex-b.json", "name": "codex-b.json", "provider": "codex",
                  "id_token": {"chatgpt_account_id": "acct_123"}},
+                {"auth_index": "9", "id": "antigravity-c.json", "name": "antigravity-c.json", "provider": "antigravity",
+                 "email": "someone@example.com", "project_id": _PROJECT_ID},
+                {"auth_index": "10", "id": "xai-d.json", "name": "xai-d.json", "provider": "xai"},
+                {"auth_index": "11", "id": "antigravity-e.json", "name": "antigravity-e.json", "provider": "antigravity"},
             ]}
         answer = self.by_url.get((payload or {}).get("url"), self.response)
         if isinstance(answer, Exception):
@@ -622,10 +765,17 @@ def _adapter(response, metadata, by_url=None):
     return adapter, client
 
 
+_PROJECT_ID = "made-up-project-4711"
 _METADATA = {
     "cred_a": {"kind": "oauth", "vendor": "anthropic", "auth_name": "claude-a.json", "source_id": "src_claude"},
     "cred_b": {"kind": "oauth", "vendor": "openai", "auth_name": "codex-b.json", "source_id": "src_codex"},
+    "cred_c": {"kind": "oauth", "vendor": "gemini", "auth_name": "antigravity-c.json", "source_id": "src_gemini"},
+    "cred_d": {"kind": "oauth", "vendor": "xai", "auth_name": "xai-d.json", "source_id": "src_grok"},
+    "cred_e": {"kind": "oauth", "vendor": "gemini", "auth_name": "antigravity-e.json", "source_id": "src_gemini"},
 }
+_GEMINI_DAILY = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+_GEMINI_PROD = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+_GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 
 
 async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant():
@@ -637,9 +787,12 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
         {_PROFILE_URL: {"status_code": 200, "body": "{}"}},
     )
     parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
-    assert set(parsed) == {"plan", "windows"}
-    usage_calls = [call for call in client.calls if (call[2] or {}).get("url") != _PROFILE_URL]
-    method, path, payload = usage_calls[-1]
+    assert set(parsed) == {"plan", "windows", "reset_cards", "reset_card_account"}
+    # A profile that names no organization names no account either.
+    assert parsed["reset_card_account"] is None
+    usage_calls = [call for call in client.calls if call[1] == '/api-call' and call[2]['url'] != _PROFILE_URL]
+    method, path, payload = usage_calls[0]
+    assert usage_calls[1][2] == {**payload, 'url': payload['url'] + '?cedar_ember=1&skip_spend=1'}
     assert (method, path) == ("POST", "/api-call")
     assert payload["auth_index"] == "7"
     assert payload["url"] == "https://api.anthropic.com/api/oauth/usage"
@@ -648,13 +801,261 @@ async def test_adapter_reads_quota_through_the_engine_without_exposing_the_grant
     assert payload["header"]["User-Agent"] == "axios/1.15.2"
 
     adapter, client = _adapter({"status_code": 200, "header": {}, "body": json.dumps(CODEX_REPORT)}, _METADATA)
-    await adapter.subscription_quota("src_codex", "openai", "cred_b")
+    parsed = await adapter.subscription_quota("src_codex", "openai", "cred_b")
+    # The account a reading was made under leaves as an opaque key, never as the vendor's id.
+    assert re.fullmatch("[a-f0-9]{64}", parsed["reset_card_account"]) and "acct_123" not in json.dumps(parsed)
     payload = client.calls[-1][2]
     assert payload["auth_index"] == "8"
     assert payload["url"] == "https://chatgpt.com/backend-api/wham/usage"
     assert payload["header"]["ChatGPT-Account-ID"] == "acct_123"
     assert payload["header"]["User-Agent"] == "codex-cli"
     assert "anthropic-beta" not in payload["header"]
+
+
+async def test_chatgpt_cards_use_usage_count_and_only_available_codex_details():
+    """MH-QUOTA-042: ChatGPT reports its usage count, not a detail row count, and never promises a stated effect."""
+    usage = {**CODEX_REPORT, "rate_limit_reset_credits": {"available_count": 3}}
+    credit = {
+        "id": "private-marker",
+        "status": "available",
+        "reset_type": "codex_rate_limits",
+        "expires_at": "2090-01-01T00:00:00Z",
+    }
+    details = {
+        "credits": [
+            credit,
+            {**credit, "reset_type": "other", "expires_at": "2080-01-01T00:00:00Z"},
+            {**credit, "status": "redeemed", "expires_at": "2070-01-01T00:00:00Z"},
+        ]
+    }
+    adapter, client = _adapter(
+        {"status_code": 200, "body": json.dumps(usage)},
+        _METADATA,
+        {
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits": {
+                "status_code": 200,
+                "body": json.dumps(details),
+            }
+        },
+    )
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    summary = await cache.summary([QuotaSourceRef("src_codex", "openai", "cred_b", "Personal", None)])
+    assert summary["sources"][0]["reset_cards"] == {
+        "state": "ok",
+        "lock": None,
+        "cards": [
+            {
+                "kind": "account",
+                "count": 3,
+                "usable": True,
+                "blocked": None,
+                "stated": False,
+                "blocked_until": None,
+                "expires_at": "2090-01-01T00:00:00Z",
+            }
+        ],
+    }
+    serialized = json.dumps(summary)
+    for sentinel in ("private-marker", "acct_123", "$TOKEN$", "auth_index"):
+        assert sentinel not in serialized
+    assert all(call[2]["method"] == "GET" for call in client.calls if call[1] == "/api-call")
+    Draft7Validator(QUOTA_SCHEMA).validate(summary)
+
+
+async def test_card_details_failure_preserves_current_windows(caplog):
+    """MH-QUOTA-044: A cards-only failure returns unread without discarding quota or exposing the error."""
+    usage = {**CODEX_REPORT, "rate_limit_reset_credits": {"available_count": 2}}
+    from vibe.model_hub_runtime.client import EngineClientError
+
+    adapter, client = _adapter(
+        {"status_code": 200, "body": json.dumps(usage)},
+        _METADATA,
+        {
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits": EngineClientError("private-marker"),
+        },
+    )
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    source = QuotaSourceRef("src_codex", "openai", "cred_b", "Personal", None)
+    summary = await cache.summary([source])
+    row = summary["sources"][0]
+    assert row["state"] == "ok" and row["windows"]
+    assert row["reset_cards"] == {"state": "unread", "lock": None, "cards": []}
+    assert "private-marker" not in json.dumps(summary) + caplog.text
+    assert all(payload["method"] == "GET" for _, path, payload in client.calls if path == "/api-call")
+
+
+async def test_claude_cards_group_by_kind_without_exposing_grants():
+    """MH-QUOTA-043: A grouped card has only closed fields and counts held grants, not vendor labels or identities."""
+    grant = {
+        "id": "private-marker",
+        "label": "private-marker",
+        "type": "full",
+        "resets_left": 2,
+        "usable_now": True,
+        "clears": ["five_hour", "seven_day"],
+        "ends_at": "2090-01-01T00:00:00Z",
+    }
+    program = {
+        "eligible": True,
+        "at_limit": True,
+        "grants": [
+            grant,
+            {**grant, "id": "second", "resets_left": 3},
+            {**grant, "id": "third", "paused": True},
+            {**grant, "id": "fourth", "ends_at": "2000-01-01T00:00:00Z"},
+        ],
+    }
+    adapter, _ = _adapter(
+        {"status_code": 200, "body": json.dumps({**CLAUDE_LEGACY, "cedar_ember": program})}, _METADATA
+    )
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    summary = await cache.summary([QuotaSourceRef("src_claude", "anthropic", "cred_a", "Personal", None)])
+    cards = summary["sources"][0]["reset_cards"]
+    assert cards == {
+        "state": "ok",
+        "lock": None,
+        "cards": [
+            {
+                "kind": "all",
+                "count": 5,
+                "expires_at": "2090-01-01T00:00:00Z",
+                "stated": True,
+                "usable": True,
+                "blocked": None,
+                "blocked_until": None,
+            }
+        ],
+    }
+    assert "private-marker" not in json.dumps(summary)
+    Draft7Validator(QUOTA_SCHEMA).validate(summary)
+
+
+@pytest.mark.parametrize(
+    ("patch", "extra", "kind", "blocked", "stated"),
+    [
+        ({"clears": ["five_hour"]}, {}, "session", "needs_limit", True),
+        ({"clears": ["seven_day"]}, {}, "weekly", "needs_limit", True),
+        ({"type": "full", "clears": ["seven_day"]}, {}, "all", "needs_limit", False),
+        ({"gives_back_weekly": True}, {"cooldown_until": "2090-01-01T00:00:00Z"}, "fable", "cooldown", True),
+        ({"use_requires_limit": False, "blocking": ["private-marker"]}, {}, "session", "unavailable", True),
+    ],
+)
+async def test_cards_keep_blocked_grants_and_report_only_vendor_stated_effects(patch, extra, kind, blocked, stated):
+    grant = {"id": "private-marker", "resets_left": 1, "usable_now": True, "clears": ["five_hour"], **patch}
+    block = {"eligible": True, "at_limit": False, "grants": [grant], **extra}
+    adapter, _ = _adapter({"status_code": 200, "body": json.dumps({**CLAUDE_LEGACY, "cedar_ember": block})}, _METADATA)
+    parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+    assert parsed["reset_cards"]["cards"] == [
+        dict(
+            kind=kind,
+            count=1,
+            usable=False,
+            blocked=blocked,
+            blocked_until=extra.get("cooldown_until"),
+            expires_at=None,
+            stated=stated,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        False,
+        [],
+        {"grants": {}},
+        {"grants": [{"resets_left": True}]},
+        {"grants": [], "cooldown_until": "private-marker"},
+    ],
+)
+async def test_hostile_card_fields_never_escape_or_break_windows(malformed, caplog):
+    adapter, _ = _adapter(
+        {"status_code": 200, "body": json.dumps({**CLAUDE_LEGACY, "cedar_ember": malformed})}, _METADATA
+    )
+    parsed = await adapter.subscription_quota("src_claude", "anthropic", "cred_a")
+    assert parsed["reset_cards"] == {"state": "unread", "lock": None, "cards": []}
+    assert parsed["windows"] and "private-marker" not in json.dumps(parsed) + caplog.text
+
+
+async def test_adapter_reads_gemini_and_grok_quota_as_the_engine_itself_would():
+    """MH-QUOTA-039: Antigravity is asked per project with the engine's own client identity, falling back to prod only when daily does not answer; Grok's billing read carries the engine's Grok CLI identity; nothing of the grant or project comes back."""
+
+    def answer(body, status=200):
+        return {"status_code": status, "header": {}, "body": json.dumps(body)}
+
+    adapter, client = _adapter(answer(GROK_BILLING), _METADATA, {_GEMINI_DAILY: answer(GEMINI_SUMMARY)})
+    parsed = await adapter.subscription_quota("src_gemini", "gemini", "cred_c")
+    assert set(parsed) == {"plan", "windows"} and parsed["windows"]
+    assert _PROJECT_ID not in json.dumps(parsed)
+    reads = [call for call in client.calls if call[1] == "/api-call"]
+    assert len(reads) == 1
+    method, path, payload = reads[0]
+    assert (method, path) == ("POST", "/api-call")
+    assert payload == {
+        "auth_index": "9",
+        "method": "POST",
+        "url": _GEMINI_DAILY,
+        "header": {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer $TOKEN$",
+            "User-Agent": "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)",
+        },
+        "data": json.dumps({"project": _PROJECT_ID}, separators=(",", ":")),
+    }
+
+    await adapter.subscription_quota("src_grok", "xai", "cred_d")
+    method, path, payload = client.calls[-1]
+    assert payload == {
+        "auth_index": "10",
+        "method": "GET",
+        "url": _GROK_BILLING_URL,
+        "header": {
+            "Accept": "application/json",
+            "Authorization": "Bearer $TOKEN$",
+            "X-XAI-Token-Auth": "xai-grok-cli",
+            "x-grok-client-version": "1.0.46",
+            "User-Agent": "xai-grok-workspace/1.0.46",
+            "x-grok-client-identifier": "grok-shell",
+        },
+    }
+
+    # Both reach the page as readings, in the contract's shape, with nothing of the account in them.
+    cache = SubscriptionQuotaCache(adapter.subscription_quota, now=_Clock())
+    summary = await cache.summary([QuotaSourceRef("src_gemini", "gemini", "cred_c", "Gemini", None),
+                                   QuotaSourceRef("src_grok", "xai", "cred_d", "Grok", None)])
+    _validate_summary(summary)
+    assert [(source["state"], len(source["windows"])) for source in summary["sources"]] == [("ok", 5), ("ok", 1)]
+    assert _PROJECT_ID not in json.dumps(summary)
+
+    # Daily not answering sends the same read to prod; a refusal or a 429 does not.
+    for status in (404, 408, 503):
+        adapter, client = _adapter(answer(GEMINI_SUMMARY), _METADATA, {_GEMINI_DAILY: answer({}, status)})
+        assert (await adapter.subscription_quota("src_gemini", "gemini", "cred_c"))["windows"]
+        urls = [call[2]["url"] for call in client.calls if call[1] == "/api-call"]
+        assert urls == [_GEMINI_DAILY, _GEMINI_PROD]
+        assert client.calls[-1][2]["data"] == json.dumps({"project": _PROJECT_ID}, separators=(",", ":"))
+    for status, reason in ((403, "auth_expired"), (429, "rate_limited")):
+        adapter, client = _adapter(answer(GEMINI_SUMMARY), _METADATA, {_GEMINI_DAILY: answer({}, status)})
+        with pytest.raises(SubscriptionQuotaError) as caught:
+            await adapter.subscription_quota("src_gemini", "gemini", "cred_c")
+        assert caught.value.reason == reason
+        assert [call[2]["url"] for call in client.calls if call[1] == "/api-call"] == [_GEMINI_DAILY]
+    adapter, client = _adapter(answer({}, 503), _METADATA)
+    with pytest.raises(SubscriptionQuotaError) as caught:
+        await adapter.subscription_quota("src_gemini", "gemini", "cred_c")
+    assert caught.value.reason == "unavailable"
+
+    # A grant without a project has nothing to ask: no call, and a report of no quota.
+    adapter, client = _adapter(answer(GEMINI_SUMMARY), _METADATA)
+    assert await adapter.subscription_quota("src_gemini", "gemini", "cred_e") == {"plan": None, "windows": []}
+    assert not [call for call in client.calls if call[1] == "/api-call"]
+
+    from vibe.model_hub_runtime.adapter import _auth_inventory
+
+    # The project id stays out of the auth record's printed form.
+    inventory = _auth_inventory(_EngineClient({}))
+    assert inventory["antigravity-c.json"].project_id == _PROJECT_ID
+    assert _PROJECT_ID not in repr(inventory)
 
 
 _PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"

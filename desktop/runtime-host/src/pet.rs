@@ -586,10 +586,13 @@ impl WorkArea {
     }
 }
 
-// Shared with pet-mini.css. Bottom layout: image top-left (172.5, 449), dock at
-// y=552. Top layout: image top-left (172.5, 12), dock at y=115.
+// Shared with pet-mini.css. Bottom layout: image top-left (192.5, 449), dock at
+// y=552. Top layout: image top-left (192.5, 12), dock at y=115.
 pub const PET_SIZE: f64 = 115.0;
-pub const WINDOW_WIDTH: f64 = 460.0;
+/// Wide enough for the column moved as far as it goes against a display's
+/// side (`COLUMN_WIDTH` plus twice `MAX_COLUMN_OFFSET`: 494), so nothing the
+/// column draws is cut at the window's edge.
+pub const WINDOW_WIDTH: f64 = 500.0;
 pub const WINDOW_HEIGHT: f64 = 600.0;
 const PET_BOTTOM: f64 = 36.0;
 /// The image's inset from the window's top in the top layout; it keeps the
@@ -603,6 +606,17 @@ const PET_AND_DOCK_HEIGHT: f64 = 143.0;
 pub const DRAG_HEIGHT: f64 = PET_TOP + PET_SIZE + PET_BOTTOM;
 /// Distance from the work area's corner for a pet with no saved place.
 const DEFAULT_MARGIN: f64 = 24.0;
+/// Vibey's inset from a work area's left or right edge at the closest: like
+/// `PET_TOP`, it keeps the listening glow on the display.
+const PET_SIDE: f64 = 12.0;
+/// The column's width (pet-mini.css: the 280px card plus an 18px gutter on
+/// each side). It opens centred on Vibey and moves toward the middle of the
+/// display only as far as it must to stay on it (`column_offset`).
+pub const COLUMN_WIDTH: f64 = 316.0;
+/// How far the column moves at most: with Vibey `PET_SIDE` from a side, its
+/// centred column passes that side by this much (rounded up).
+const MAX_COLUMN_OFFSET: f64 = 89.0;
+const _: () = assert!(COLUMN_WIDTH + 2.0 * MAX_COLUMN_OFFSET <= WINDOW_WIDTH);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -621,10 +635,14 @@ pub enum PanelEdge {
 /// Which side of Vibey the column opens on, shared by the native frame and the
 /// page. `edge: bottom` puts Vibey at the bottom of the window, so the column
 /// grows upward; `edge: top` puts Vibey at the top and the column grows down.
+/// `column_offset` is how far, in window points, the page moves the column
+/// right (negative: left) of its place centred on Vibey, so that a pet near a
+/// display's side still opens its column whole on that display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct PetLayout {
     pub panel_side: PanelSide,
     pub panel_edge: PanelEdge,
+    pub column_offset: i32,
 }
 
 impl Default for PetLayout {
@@ -632,6 +650,7 @@ impl Default for PetLayout {
         Self {
             panel_side: PanelSide::Left,
             panel_edge: PanelEdge::Bottom,
+            column_offset: 0,
         }
     }
 }
@@ -714,25 +733,59 @@ pub fn rescale(point: (f64, f64), from_scale: f64, to_scale: f64) -> (f64, f64) 
 /// Vibey, or while there is at least as much room above as below; otherwise
 /// it flips and opens downward. Either way the window extends from Vibey
 /// toward the column only as far as the work area goes, up to its full height,
-/// so no part of it is ever off the display: macOS never lets a window rise
-/// above the menu bar, so a frame that did would move Vibey instead.
+/// so no part of it is ever off the display vertically: macOS never lets a
+/// window rise above the menu bar, so a frame that did would move Vibey
+/// instead. Sideways the window stays centred on Vibey and may pass the
+/// display's edge with its transparent sides; the column moves inward instead
+/// (`column_offset`, decision 2026-11-20).
 pub fn settle_frame(anchor: (f64, f64), area: &WorkArea) -> PetFrame {
     let unit = area.unit;
     let above = (anchor.1 - area.area.y) / unit;
     let below = (area.area.bottom() - anchor.1) / unit - PET_AND_DOCK_HEIGHT;
     let full_above = WINDOW_HEIGHT - PET_BOTTOM - PET_SIZE;
+    let column_offset = column_offset(anchor, area);
     if above >= full_above || above >= below {
-        return upward_frame(anchor, area);
+        let upward = upward_frame(anchor, area);
+        return PetFrame {
+            layout: PetLayout {
+                column_offset,
+                ..upward.layout
+            },
+            ..upward
+        };
     }
     PetFrame {
-        layout: PetLayout::edge(PanelEdge::Top),
+        layout: PetLayout {
+            column_offset,
+            ..PetLayout::edge(PanelEdge::Top)
+        },
         height: (PET_TOP + PET_AND_DOCK_HEIGHT + below).clamp(DRAG_HEIGHT, WINDOW_HEIGHT),
     }
 }
 
+/// How far the column moves from its place centred on Vibey to lie whole on
+/// `area`, in window points (whole points, rounded inward). A display
+/// narrower than the column centres it on the display.
+pub fn column_offset(anchor: (f64, f64), area: &WorkArea) -> i32 {
+    let unit = area.unit;
+    let width = COLUMN_WIDTH * unit;
+    let left = anchor.0 + PET_SIZE * unit / 2.0 - width / 2.0;
+    let shift = if area.area.width <= width {
+        (area.area.x + (area.area.width - width) / 2.0 - left) / unit
+    } else if left < area.area.x {
+        ((area.area.x - left) / unit).ceil()
+    } else if left + width > area.area.right() {
+        ((area.area.right() - left - width) / unit).floor()
+    } else {
+        0.0
+    };
+    shift.round() as i32
+}
+
 /// The window with the column opening upward whatever the room, as tall as
 /// the room above Vibey allows: for a page that predates the top layout (a
-/// shell can adopt an older running Runtime). Vibey still stays put.
+/// shell can adopt an older running Runtime). Vibey still stays put. Such a
+/// page does not move its column either, so its layout is the default.
 pub fn upward_frame(anchor: (f64, f64), area: &WorkArea) -> PetFrame {
     let above = (anchor.1 - area.area.y) / area.unit;
     PetFrame {
@@ -773,21 +826,18 @@ pub fn area_for(areas: &[WorkArea], anchor: (f64, f64)) -> Option<&WorkArea> {
 /// What must be inside is what a drag must keep on the display: Vibey and the
 /// dock with the strip's margins above and below them (`DRAG_HEIGHT`), which
 /// leaves room for the window's edge on the column's side in either layout
-/// (`settle_frame`). It spans the window's width on a display that fits the
-/// whole window, else Vibey's.
+/// (`settle_frame`), and `PET_SIDE` to Vibey's left and right. The window's
+/// transparent sides may pass the display's edge: the column moves inward
+/// rather than keeping Vibey away from it (decision 2026-11-20).
 pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     let at = (anchor.x, anchor.y);
     let footprint = |area: &WorkArea| {
         let unit = area.unit;
         let strip = area.window_rect(at, PetFrame::dragging(PetLayout::default()));
-        if area.area.width >= WINDOW_WIDTH * unit && area.area.height >= WINDOW_HEIGHT * unit {
-            strip
-        } else {
-            LogicalRect {
-                x: anchor.x,
-                width: PET_SIZE * unit,
-                ..strip
-            }
+        LogicalRect {
+            x: anchor.x - PET_SIDE * unit,
+            width: (PET_SIZE + 2.0 * PET_SIDE) * unit,
+            ..strip
         }
     };
     if let Some(home) = work_areas.iter().find(|area| area.area.contains(&footprint(area))) {
@@ -871,6 +921,42 @@ pub fn place_moved(
     let at = (anchor.x, anchor.y);
     let frame = area_for(areas, at).map_or_else(PetFrame::default, |area| upward_frame(at, area));
     (anchor, frame)
+}
+
+/// The pet window hidden across a change of its height (a drag starting or
+/// ending). A resized window shows its last picture, pinned to its top, until
+/// the page draws at the new size, so the strip's Vibey would flash above the
+/// real one. The shell hides the window, resizes it and shows it again once the
+/// page has drawn at that size (`drawn`), or when the wait runs out
+/// (`REVEAL_TIMEOUT`). Each hiding has a new token; only that hiding's answer
+/// or timer shows the window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Reveal {
+    token: u64,
+    pending: Option<u64>,
+}
+
+impl Reveal {
+    /// The window is hidden for a new resize; answers that resize's token.
+    pub fn hide(&mut self) -> u64 {
+        self.token += 1;
+        self.pending = Some(self.token);
+        self.token
+    }
+
+    /// The page drew at the size of `token`, or its wait ran out: whether the
+    /// window must be shown now. A token of an earlier resize changes nothing.
+    pub fn drawn(&mut self, token: u64) -> bool {
+        if self.pending == Some(token) {
+            self.pending = None;
+            return true;
+        }
+        false
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 /// The layout the page should draw, and its revision. The shell is its only
@@ -1255,6 +1341,129 @@ mod tests {
         }
     }
 
+    /// The column as the page draws it for `frame`: centred on Vibey, moved
+    /// by the layout's `column_offset`.
+    fn column_rect(area: &WorkArea, anchor: (f64, f64), frame: PetFrame) -> LogicalRect {
+        let unit = area.unit;
+        let window = area.window_rect(anchor, frame);
+        LogicalRect {
+            x: anchor.0 + (PET_SIZE - COLUMN_WIDTH) / 2.0 * unit + f64::from(frame.layout.column_offset) * unit,
+            width: COLUMN_WIDTH * unit,
+            ..window
+        }
+    }
+
+    /// What a settled pet shows is on `area`: the window's full height, the
+    /// column, and Vibey with its side inset. The window's transparent sides
+    /// may pass the display's left or right edge.
+    fn assert_whole(area: &WorkArea, anchor: (f64, f64), frame: PetFrame) {
+        let unit = area.unit;
+        let window = area.window_rect(anchor, frame);
+        let vertical = LogicalRect {
+            x: area.area.x,
+            width: area.area.width,
+            ..window
+        };
+        assert!(area.area.contains(&vertical), "{:?}: window {window:?}", area.name);
+        let column = column_rect(area, anchor, frame);
+        assert!(area.area.contains(&column), "{:?}: column {column:?}", area.name);
+        assert!(
+            window.contains(&column),
+            "{:?}: column {column:?} past the window {window:?}",
+            area.name
+        );
+        let vibey = LogicalRect {
+            x: anchor.0 - PET_SIDE * unit,
+            y: anchor.1,
+            width: (PET_SIZE + 2.0 * PET_SIDE) * unit,
+            height: PET_SIZE * unit,
+        };
+        assert!(area.area.contains(&vibey), "{:?}: Vibey {vibey:?}", area.name);
+    }
+
+    #[test]
+    fn vibey_reaches_each_side_and_the_column_moves_inward_to_stay_whole() {
+        // A MacBook below the menu bar with the Dock at the bottom, the same
+        // laptop with the Dock on the right, an external display to its right
+        // (macOS: one space of points), and a 200% display on its own.
+        let laptop = area("laptop", 0.0, 25.0, 1512.0, 890.0);
+        let dock_right = area("laptop", 0.0, 25.0, 1440.0, 957.0);
+        let external = area("external", 1512.0, 0.0, 2560.0, 1440.0);
+        let dense = WorkArea {
+            unit: 2.0,
+            ..area("dense", 0.0, 0.0, 2880.0, 1800.0)
+        };
+        for (area, others) in [
+            (&laptop, vec![laptop.clone()]),
+            (&dock_right, vec![dock_right.clone()]),
+            (&laptop, vec![laptop.clone(), external.clone()]),
+            (&external, vec![laptop.clone(), external.clone()]),
+            (&dense, vec![dense.clone()]),
+        ] {
+            let unit = area.unit;
+            let a = &area.area;
+            let (left, right) = (a.x + PET_SIDE * unit, a.right() - (PET_SIZE + PET_SIDE) * unit);
+            let (top, bottom) = (a.y + PET_TOP * unit, a.bottom() - (PET_SIZE + PET_BOTTOM) * unit);
+            // Dropped a little past each side and corner (mostly still on this
+            // display, so not onto its neighbour): Vibey comes to rest
+            // `PET_SIDE` from the side (top and bottom as before).
+            for (dropped, expected) in [
+                ((a.x - 10.0, a.y + 300.0), (left, a.y + 300.0)),
+                ((a.right() - 100.0, a.y + 300.0), (right, a.y + 300.0)),
+                ((a.x + 600.0, a.y - 40.0), (a.x + 600.0, top)),
+                ((a.x + 600.0, a.bottom() - 20.0), (a.x + 600.0, bottom)),
+                ((a.x - 10.0, a.y - 40.0), (left, top)),
+                ((a.right() - 100.0, a.bottom() - 20.0), (right, bottom)),
+            ] {
+                let (anchor, frame) = place_dropped(dropped, &others, area.name.clone());
+                assert_eq!((anchor.x, anchor.y), expected, "{:?} dropped at {dropped:?}", area.name);
+                assert_eq!(anchor.monitor, area.name);
+                assert_whole(area, expected, frame);
+            }
+            // Anywhere along the display the column is whole, and it moves
+            // only near a side: by as little as keeps it on the display.
+            let mut x = left;
+            while x <= right {
+                let frame = settle_frame((x, a.y + 500.0 * unit), area);
+                assert_whole(area, (x, a.y + 500.0 * unit), frame);
+                let centred = x + (PET_SIZE - COLUMN_WIDTH) / 2.0 * unit;
+                let room = centred >= a.x && centred + COLUMN_WIDTH * unit <= a.right();
+                assert_eq!(frame.layout.column_offset == 0, room, "{:?} at {x}", area.name);
+                x += 5.0 * unit;
+            }
+        }
+        // At the side the column moves by the gap between its centred place
+        // and the display: (316 - 115) / 2 - 12 points.
+        let (_, at_left) = place_dropped((-60.0, 400.0), std::slice::from_ref(&laptop), None);
+        assert_eq!(at_left.layout.column_offset, 89);
+        let (_, at_right) = place_dropped((1500.0, 400.0), std::slice::from_ref(&laptop), None);
+        assert_eq!(at_right.layout.column_offset, -89);
+        // Dropped across the seam with the external display, Vibey settles
+        // `PET_SIDE` from the seam on the display it is mostly on, with its
+        // column there too.
+        let areas = [laptop.clone(), external.clone()];
+        let (anchor, frame) = place_dropped((1450.0, 400.0), &areas, Some("laptop".into()));
+        assert_eq!(
+            (anchor.x, anchor.monitor.as_deref()),
+            (1512.0 - PET_SIZE - PET_SIDE, Some("laptop"))
+        );
+        assert_whole(&laptop, (anchor.x, anchor.y), frame);
+        let (anchor, frame) = place_dropped((1500.0, 400.0), &areas, Some("laptop".into()));
+        assert_eq!(
+            (anchor.x, anchor.monitor.as_deref()),
+            (1512.0 + PET_SIDE, Some("external"))
+        );
+        assert_whole(&external, (anchor.x, anchor.y), frame);
+        // A page that predates the moving column always gets the default.
+        let (_, legacy) = place_moved((-60.0, 400.0), std::slice::from_ref(&laptop), None, false);
+        assert_eq!(legacy.layout, PetLayout::default());
+        // A display narrower than the column centres it on the display.
+        let narrow = area("narrow", 0.0, 0.0, 300.0, 900.0);
+        let frame = settle_frame((PET_SIDE, 500.0), &narrow);
+        // (to the whole point the page draws).
+        assert!((column_rect(&narrow, (PET_SIDE, 500.0), frame).x + 8.0).abs() <= 0.5);
+    }
+
     #[test]
     fn dismissed_cards_survive_restart_and_stay_scoped_to_the_binding() {
         let directory = TestDirectory::new();
@@ -1535,8 +1744,30 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(PetLayout::default()).unwrap(),
-            serde_json::json!({"panel_side": "left", "panel_edge": "bottom"})
+            serde_json::json!({"panel_side": "left", "panel_edge": "bottom", "column_offset": 0})
         );
+    }
+
+    #[test]
+    fn a_resize_shows_the_window_only_for_its_own_answer() {
+        let mut reveal = Reveal::default();
+        assert!(!reveal.hidden());
+        let first = reveal.hide();
+        assert!(reveal.hidden());
+        // Another resize before the page drew the first: only its answer shows.
+        let second = reveal.hide();
+        assert!(
+            !reveal.drawn(first),
+            "an earlier resize's answer or timer changes nothing"
+        );
+        assert!(reveal.hidden());
+        assert!(reveal.drawn(second));
+        assert!(!reveal.hidden());
+        // The answer and the timer of one resize show the window once.
+        assert!(!reveal.drawn(second));
+        let third = reveal.hide();
+        assert_ne!(third, second);
+        assert!(reveal.drawn(third));
     }
 
     #[test]
@@ -1545,7 +1776,11 @@ mod tests {
         for unit in [1.0, 1.25, 2.0] {
             for panel_side in [PanelSide::Left, PanelSide::Right] {
                 for panel_edge in [PanelEdge::Top, PanelEdge::Bottom] {
-                    let layout = PetLayout { panel_side, panel_edge };
+                    let layout = PetLayout {
+                        panel_side,
+                        panel_edge,
+                        column_offset: 0,
+                    };
                     for frame in [
                         PetFrame {
                             layout,
@@ -1571,8 +1806,11 @@ mod tests {
             PetFrame::dragging(PetLayout::edge(PanelEdge::Bottom)).pet_offset()
         );
         assert_eq!(DRAG_HEIGHT, 163.0);
-        // The default (bottom) frame keeps today's image box.
-        assert_eq!(PetFrame::default().pet_offset(), (172.5, 449.0));
+        // The default (bottom) frame: Vibey centred, 36px above the bottom.
+        assert_eq!(PetFrame::default().pet_offset(), (192.5, 449.0));
+        // The window holds the column wherever it moves (checked at compile
+        // time next to `MAX_COLUMN_OFFSET`).
+        assert_eq!(MAX_COLUMN_OFFSET, ((COLUMN_WIDTH - PET_SIZE) / 2.0 - PET_SIDE).ceil());
         assert_eq!(PetFrame::default().size(), (WINDOW_WIDTH, WINDOW_HEIGHT));
     }
 
@@ -1738,6 +1976,7 @@ mod tests {
         layout: PetLayout {
             panel_side: PanelSide::Left,
             panel_edge: PanelEdge::Bottom,
+            column_offset: 0,
         },
         height: 380.0,
     };
@@ -2228,13 +2467,11 @@ mod tests {
         );
         assert_eq!(frame, PetFrame::default());
         // Partly off the laptop's top-left corner: it comes back whole, just
-        // inside, with its column below it.
+        // inside, with its column below it and moved right onto the display.
         let (anchor, frame) = place_dropped((-80.0, 10.0), &areas, None);
-        assert_eq!((anchor.x, anchor.y), (172.5, 33.0 + 12.0));
+        assert_eq!((anchor.x, anchor.y), (PET_SIDE, 33.0 + 12.0));
         assert_eq!(frame.layout.panel_edge, PanelEdge::Top);
-        assert!(areas[0]
-            .area
-            .contains(&areas[0].window_rect((anchor.x, anchor.y), frame)));
+        assert_whole(&areas[0], (anchor.x, anchor.y), frame);
         // Without any display information nothing moves.
         assert_eq!(
             place_dropped((5.0, 6.0), &[], None),
@@ -2293,7 +2530,7 @@ mod tests {
 
         // The external display is unplugged: the pet lands whole on the built-in one.
         let clamped = clamp_anchor(&on_external, &areas[..1]);
-        assert_eq!((clamped.x, clamped.y), (1152.5, 749.0));
+        assert_eq!((clamped.x, clamped.y), (1440.0 - PET_SIZE - PET_SIDE, 749.0));
         assert_eq!(clamped.monitor.as_deref(), Some("Built-in"));
 
         // Half off an edge: pulled in on the display it overlaps.
@@ -2305,7 +2542,7 @@ mod tests {
         let pulled = clamp_anchor(&straddling, &areas);
         assert_eq!(
             (pulled.x, pulled.y),
-            (172.5, 400.0),
+            (PET_SIDE, 400.0),
             "only pulled sideways: near the top it flips"
         );
 
@@ -2317,7 +2554,7 @@ mod tests {
         };
         let home = clamp_anchor(&lost, &areas);
         assert_eq!(home.monitor.as_deref(), Some("External"));
-        assert_eq!((home.x, home.y), (3072.5, 904.0));
+        assert_eq!((home.x, home.y), (3360.0 - PET_SIZE - PET_SIDE, 904.0));
 
         assert_eq!(clamp_anchor(&lost, &[]), lost, "no display information moves nothing");
 
@@ -2390,9 +2627,7 @@ mod tests {
         );
         assert_eq!(external.monitor.as_deref(), Some("full"));
         let at = (external.x, external.y);
-        assert!(areas[1]
-            .area
-            .contains(&areas[1].window_rect(at, settle_frame(at, &areas[1]))));
+        assert_whole(&areas[1], at, settle_frame(at, &areas[1]));
     }
 
     #[test]
@@ -2627,7 +2862,7 @@ mod tests {
         let frame = settle_frame(at, &areas[1]);
         assert_eq!(frame.layout.panel_edge, PanelEdge::Top);
         let window_at = rescale(frame.origin(at, window / primary), primary, 1.0);
-        assert!((window_at.0 - (3000.0 - 258.75)).abs() < 1e-9 && (window_at.1 - (200.0 - 18.0)).abs() < 1e-9);
+        assert!((window_at.0 - (3000.0 - 288.75)).abs() < 1e-9 && (window_at.1 - (200.0 - 18.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -2640,11 +2875,12 @@ mod tests {
         };
         let areas = [area("primary", 0.0, 0.0, 1920.0, 1080.0), side.clone()];
         let edge = (
-            side.area.right() - (WINDOW_WIDTH - PetFrame::default().pet_offset().0) * side.unit,
+            side.area.right() - (PET_SIZE + PET_SIDE) * side.unit,
             side.area.bottom() - (WINDOW_HEIGHT - PetFrame::default().pet_offset().1) * side.unit,
         );
-        // Overlapping the right edge: pulled in by the window's width, and
-        // left at its height, where its column opens below it.
+        // Overlapping the right edge: pulled in to `PET_SIDE` (in the
+        // display's points), and left at its height, where its column opens
+        // below it.
         let past_edge = PetAnchor {
             x: side.area.right() - 100.0,
             y: 300.0,
@@ -2656,7 +2892,7 @@ mod tests {
             settle_frame((pulled.x, pulled.y), &side).layout.panel_edge,
             PanelEdge::Top
         );
-        // Inside by the image size but not by the window's width is not whole.
+        // Inside by the image size but not by its side inset is not whole.
         let almost = PetAnchor {
             x: side.area.right() - 100.0,
             y: side.area.bottom() - 100.0,

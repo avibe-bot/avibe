@@ -1,14 +1,13 @@
 import { createContext, useContext, type ReactNode } from 'react';
-import { AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, Plus, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
+import { AlertTriangle, Database, ArrowLeft, ArrowRight, Check, ChevronRight, ExternalLink, Eye, EyeOff, Globe, KeyRound, Laptop, Mail, MonitorDown, RotateCw, ShieldCheck, Sparkles, UserRound } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Skeleton } from '@/components/ui/skeleton';
 import { MoreAccountSection } from '@/components/workbench/MorePage';
 import { MobileAppHeader } from '@/components/apps/MobileAppHeader';
 import type { AppLicenses } from '@/mobile/appLicenses';
-import { LicensesContent, LicensesEntry } from '@/mobile/LicensesPage';
+import { AboutSection, AccountLinkRow, LicensesContent } from '@/mobile/LicensesPage';
 import logo from '@/assets/logo.png';
 import mailMascot from '@/assets/pet/vibey-message.png';
 import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
@@ -58,7 +57,6 @@ export interface MobilePasswordFixture {
    */
   compact?: boolean;
 }
-export type PickerState = 'own' | 'mixed' | 'current' | 'offline' | 'offline-tapped' | 'loading' | 'error' | 'pulling' | 'refreshing';
 export interface MobileInstance { id: string; name: string; host: string; owner?: string; online: boolean }
 export interface MobileAccount { name: string; email: string }
 const Locale = createContext<MobileLocale>('zh');
@@ -102,6 +100,8 @@ export function WelcomePage() {
   </div><div className="flex flex-col gap-4 pb-3"><Primary>{t('登录 / 注册', 'Sign in / Create account')}</Primary><p className="text-center text-xs leading-relaxed text-muted">{t('Vibey，你的内置 AI 伙伴。', 'Vibey, your built-in AI partner.')}<br />{t('连接自己的实例，也可以加入别人共享的实例。', 'Connect to your instances or those shared with you.')}</p></div></CloudScreen>;
 }
 
+const noop = () => {};
+
 /** One accessible input; six equally spaced cells are a decorative fixture display. */
 function CodeInput({ code, invalid, busy, label }: { code: string; invalid: boolean; busy: boolean; label?: string }) {
   const t = useCopy();
@@ -138,20 +138,6 @@ function InstanceRow({ instance, current = false }: { instance: MobileInstance; 
   const t = useCopy();
   return <button type="button" className={cn(raised, 'w-full text-left', current && 'border-mint/50')}><span className="flex items-start gap-3"><span className="grid size-11 shrink-0 place-items-center rounded-2xl bg-mint-soft"><Laptop className={cn('size-5', instance.online ? 'text-mint-ink' : 'text-muted')} /></span><span className="min-w-0 flex-1"><span className="block break-words text-base font-semibold">{instance.name}</span><span className="mt-1 block break-all text-xs leading-5 text-muted">{instance.host}</span><span className="mt-3 flex flex-wrap items-center gap-2"><Badge variant={instance.online ? 'success' : 'secondary'}>{instance.online ? t('在线', 'Online') : t('离线', 'Offline')}</Badge>{instance.owner && <Badge variant="info">{t('共享', 'Shared')}</Badge>}{current && <Badge variant="outline"><Check className="size-3" />{t('当前', 'Current')}</Badge>}</span><span className="mt-2 block break-words text-xs leading-5 text-muted">{instance.owner ? t(`${instance.owner} 共享`, `Shared by ${instance.owner}`) : t('我的实例', 'Yours')}</span></span><ChevronRight className="mt-3 size-4 shrink-0 text-muted" /></span></button>;
 }
-/** Still skeleton; the approved shimmer and hand-over are specified in the handoff. */
-function InstanceSkeleton() {
-  return <div aria-hidden="true" className={cn(raised, 'flex gap-3')}><Skeleton className="size-11 rounded-2xl" /><div className="min-w-0 flex-1"><Skeleton className="h-6 w-3/4" /><Skeleton className="mt-1 h-5 w-full" /><div className="mt-3 h-6"><Skeleton className="h-full w-1/3 rounded-full" /></div><Skeleton className="mt-2 h-5 w-1/2" /></div></div>;
-}
-export function InstancePicker({ state, instances, currentId, selectedOffline }: { state: PickerState; instances: MobileInstance[]; currentId?: string; selectedOffline?: MobileInstance }) {
-  const t = useCopy();
-  const loading = state === 'loading';
-  return <CloudScreen><Brand account /><div className="flex items-start justify-between gap-3"><PageTitle title={currentId ? t('切换实例', 'Switch instance') : t('想从哪里开始？', 'Where shall we begin?')} subtitle={t('自己的实例，以及别人共享的实例', 'Your instances and those shared with you')} /><Button variant="ghost" size="icon" className="mt-9 shrink-0 rounded-full" disabled={loading || state === 'refreshing'} aria-label={t('刷新实例', 'Refresh instances')}><RotateCw className="size-4" /></Button></div>
-    {(state === 'pulling' || state === 'refreshing') && <p role="status" className="mb-4 flex items-center justify-center gap-2 text-sm text-muted">{state === 'pulling' && <ArrowDown className="size-4" />}{state === 'pulling' ? t('松开即可刷新', 'Release to refresh') : t('正在刷新…', 'Refreshing…')}</p>}
-    <div className="flex flex-col gap-4" aria-busy={loading || state === 'refreshing'}>{loading ? <><span role="status" className="sr-only">{t('正在加载实例…', 'Loading instances…')}</span><InstanceSkeleton /><InstanceSkeleton /></> : state === 'error' ? <div className={cn(raised, 'py-8 text-center')}><AlertTriangle className="mx-auto mb-4 size-7 text-gold-ink" /><p className="text-base font-semibold">{t('暂时无法加载实例', 'Couldn’t load instances')}</p><p className="mt-3 text-sm leading-6 text-muted">{t('检查网络后，再试一次。', 'Check your connection and try again.')}</p><Button variant="outline" className="mt-5 rounded-full"><RotateCw className="size-4" />{t('重试', 'Retry')}</Button></div> : instances.map(instance => <InstanceRow key={instance.id} instance={instance} current={instance.id === currentId} />)}</div>
-    {state === 'offline-tapped' && selectedOffline && <div role="status" className={cn(raised, 'mt-4')}><p className="break-words text-sm font-semibold">{t(`${selectedOffline.name} 处于离线状态`, `${selectedOffline.name} is offline`)}</p><p className="mt-2 text-xs leading-6 text-muted">{t('在这台电脑上启动 Avibe 并连接网络，然后刷新列表，或选择其他在线实例。', 'Start Avibe on that computer and connect it to the internet. Then refresh the list or choose another online instance.')}</p></div>}
-    {!loading && state !== 'error' && <div className="mt-auto pt-8 pb-3"><Button variant="outline" size="lg" className="w-full gap-2 rounded-full"><Plus className="size-4" />{t('添加自己的实例', 'Add your own instance')}</Button></div>}
-  </CloudScreen>;
-}
 export function EmptyInstancesPage({ cli = false }: { cli?: boolean }) {
   const t = useCopy();
   return <CloudScreen><Brand back={cli} account={!cli} /><div className="pt-7"><span className="grid size-16 place-items-center rounded-3xl border border-edge bg-surface/80 shadow-elevation-0"><Laptop className="size-7 text-mint-ink" /></span></div><PageTitle title={cli ? t('安装与配对', 'Install and pair') : t('让电脑与手机相连。', 'Bring your work along.')} subtitle={t('在电脑上运行，从手机上连接', 'Run on your computer. Connect from your phone.')} />
@@ -161,7 +147,7 @@ export function EmptyInstancesPage({ cli = false }: { cli?: boolean }) {
 }
 export function AccountPage({ instance, licenses = false }: { instance?: MobileInstance; licenses?: boolean }) {
   const t = useCopy();
-  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section>{licenses && <LicensesEntry />}<div className="mt-auto pt-9 pb-3"><Button variant="link" className="px-0 text-destructive-ink">{t('删除账号', 'Delete account')}<ExternalLink className="size-4" /></Button><p className="mt-2 text-xs leading-6 text-muted">{t('前往 avibe.bot，查看影响并确认删除。', 'Continue to avibe.bot to review the impact and confirm deletion.')}</p></div></CloudScreen>;
+  return <CloudScreen><Brand back /><PageTitle title={t('账户', 'Account')} /><div className="[&>div]:rounded-3xl [&>div]:shadow-elevation-0 [&_.truncate]:overflow-visible [&_.truncate]:whitespace-normal [&_.truncate]:break-all"><MoreAccountSection /></div><section className="mt-8"><h2 className="mb-4 text-sm font-semibold">{t('当前实例', 'Current instance')}</h2>{instance ? <InstanceRow instance={instance} current /> : <div className={cn(raised, 'py-8 text-center text-sm text-muted')}>{t('尚未选择实例', 'No instance selected')}</div>}<Button variant="outline" size="lg" className="mt-4 w-full justify-between rounded-full">{instance ? t('切换实例', 'Switch instance') : t('选择实例', 'Choose an instance')}<ChevronRight className="size-4" /></Button></section><div className="mt-8"><AccountLinkRow icon={Database} label={t('账号与数据', 'Account and data')} onClick={noop} /></div><AboutSection licenses={licenses} /></CloudScreen>;
 }
 /** The shipped Open-source licenses page (`LicensesContent`) in the A screen. */
 export function LicensesScreen({ licenses, openGroup }: { licenses: AppLicenses; openGroup?: number }) {

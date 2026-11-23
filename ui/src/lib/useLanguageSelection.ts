@@ -206,6 +206,13 @@ export const selectLanguage = (held: LanguageHost, code: string): Promise<void> 
 };
 
 /**
+ * The language an interface is showing or about to show, a pick still loading
+ * included. For code that runs later than the render it was handed `i18n` in:
+ * the object a component holds is a copy frozen at that render.
+ */
+export const languageChoice = (held: LanguageHost): string => becoming(instanceOf(held));
+
+/**
  * Adopts the persisted instance language on load. A config read can answer late
  * — and the shell starts another one whenever `api` changes identity, which a
  * language change does — so it may only ever speak before the user has: once

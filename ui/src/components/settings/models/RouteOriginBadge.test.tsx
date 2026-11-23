@@ -16,7 +16,7 @@ afterEach(cleanup);
 describe('route origin help', () => {
   it('keeps dialog provenance noninteractive and outside the collection help state', () => {
     render(<I18nextProvider i18n={i18n}><RouteOriginBadge origin="manual" backend="codex" interactive={false} /></I18nextProvider>);
-    expect(screen.getByText('Manual').tagName).toBe('SPAN');
+    expect(screen.getByText('Own route').tagName).toBe('SPAN');
     expect(screen.queryByRole('button')).toBeNull();
     expect(document.querySelector('.model-hub-origin-help')).toBeNull();
   });
@@ -29,7 +29,7 @@ describe('route origin help', () => {
     expect(await screen.findByText(/eligible API-key providers/)).toBeTruthy();
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByText(/eligible API-key providers/)).toBeNull());
-    fireEvent.click(screen.getByRole('button', { name: 'Passthrough' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Forwarded as is' }));
     expect(await screen.findByText(/eligible API-key providers/)).toBeTruthy();
     expect(route).not.toHaveBeenCalled();
   });

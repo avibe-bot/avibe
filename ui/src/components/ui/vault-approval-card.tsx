@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, Info, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, ExternalLink, Globe, Info, KeyRound, Link2, Loader2, LockKeyhole, PenTool, Puzzle, RefreshCw, ShieldCheck, Tag, Trash2, Wallet } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 
@@ -17,7 +17,7 @@ import {
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { partitionTags } from '@/lib/vaultTags';
 import { useProtectedVault, useVaultSandboxWarm, type ProtectedUnlockMaterial } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { isVaultPasskeyFallback, openVaultsInBrowser, useVaultPasskeyHandoff } from '@/lib/vaultBrowserHandoff';
 import { vaultEntryIssue } from '@/lib/vaultEntry';
 import { VaultEntryNotice } from './vault-entry-notice';
 import { vaultApprovalNeedsPasskey } from '@/lib/vaultRequestPlacement';
@@ -125,6 +125,35 @@ const hdBitcoinSigningAddress = (account: HdApprovalAccount): SigningAddresses =
   return type === 'p2wpkh' ? { btc_segwit: address } : type === 'p2pkh' ? { btc_legacy: address } : { btc_taproot: address };
 };
 
+/** A protected Bitcoin request's input, read from its persisted context, which the daemon validated
+ *  when the request was made: the script type it spends and the network the requester named. The
+ *  amount, recipients and fee are decoded and checked only in the secure window, never shown here.
+ *  Anything that is not exactly one of the three typed contexts shows nothing. */
+const BTC_INPUT_CONTEXTS = {
+  'bitcoin-p2pkh-v1': { type: 'p2pkh', code: 'P2PKH' },
+  'bitcoin-p2wpkh-v1': { type: 'p2wpkh', code: 'P2WPKH' },
+  'bitcoin-taproot-keypath-v1': { type: 'p2tr', code: null },
+} as const;
+const BTC_NETWORKS = new Set(['bitcoin', 'testnet', 'signet', 'regtest']);
+
+function protectedBitcoinInput(context: unknown): { type: BitcoinAddressType; code: string | null; network: string } | null {
+  if (typeof context !== 'object' || context === null || Array.isArray(context)) return null;
+  const { kind, addressType, network } = context as Record<string, unknown>;
+  if (typeof kind !== 'string' || !Object.hasOwn(BTC_INPUT_CONTEXTS, kind)) return null;
+  const input = BTC_INPUT_CONTEXTS[kind as keyof typeof BTC_INPUT_CONTEXTS];
+  // The typed ECDSA contexts name their type twice; both must agree. Taproot's names it by kind alone.
+  if (input.code !== null ? addressType !== input.type : addressType !== undefined) return null;
+  if (typeof network !== 'string' || !BTC_NETWORKS.has(network)) return null;
+  return { type: input.type, code: input.code, network };
+}
+
+function hdSigningPath(account: HdApprovalAccount | null, chain: 'evm' | 'bitcoin' | 'solana', type: BitcoinAddressType | undefined): string | undefined {
+  if (!account) return undefined;
+  if (chain !== 'bitcoin') return account.paths?.[chain];
+  if (account.bitcoin_path) return account.bitcoin_path;
+  return (type ?? 'p2tr') === 'p2tr' ? account.paths?.bitcoin : undefined;
+}
+
 /** Whether a protected request's persisted derivation and its signed release name the same account:
  *  both absent (an ordinary key), or the same chain, account and (Bitcoin only) type. */
 function sameProtectedDerivation(
@@ -180,24 +209,18 @@ export const DetailRow: React.FC<{ label: string; children: React.ReactNode }> =
   </div>
 );
 
-/** Shared presentation for approval cards and inert design frames; never opens custody. */
-export function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
+/** The addresses a sign request signs as; never opens custody. */
+function VaultSigningIdentity({ scheme, addresses, protectedKey }: {
   scheme?: string;
   addresses: SigningAddresses | null;
   protectedKey: boolean;
 }) {
   const { t } = useTranslation();
   const shown = addressesForScheme(scheme, addresses, protectedKey);
-  return <>
-    {protectedKey ? (
-      <div role="alert" className="rounded-lg border border-gold/40 bg-gold/10 px-3 py-2 text-xs text-gold-ink">
-        {t('vaults.approval.protectedWarning')}
-      </div>
-    ) : null}
-    {Object.values(shown).some(Boolean) ? (
-      <DetailRow label={t('vaults.approval.signingAs')}><SigningAddressList addresses={shown} /></DetailRow>
-    ) : null}
-  </>;
+  // A protected card says where the key stays once, in its bottom note, not here as well.
+  return Object.values(shown).some(Boolean) ? (
+    <DetailRow label={t('vaults.approval.signingAs')}><SigningAddressList addresses={shown} /></DetailRow>
+  ) : null;
 }
 
 /**
@@ -221,7 +244,6 @@ const SignMessage: React.FC<{ messageHex: string; scheme: string; address?: stri
         <span className="text-[13px] text-foreground">
           {bytes > 0 ? t('vaults.approval.messageBytes', { count: bytes }) : t('vaults.approval.emptyMessage')}
         </span>
-        <Badge variant="secondary">{scheme}</Badge>
         {bytes > 0 ? (
           <button
             type="button"
@@ -233,11 +255,12 @@ const SignMessage: React.FC<{ messageHex: string; scheme: string; address?: stri
               });
             }}
             aria-label={t('vaults.approval.copyMessage')}
-            className="ml-auto shrink-0 text-muted transition-colors hover:text-foreground"
+            className="shrink-0 text-muted transition-colors hover:text-foreground"
           >
             {copied ? <Check className="size-3.5 text-mint-ink" /> : <Copy className="size-3.5" />}
           </button>
         ) : null}
+        <Badge variant="secondary">{scheme}</Badge>
       </DetailRow>
       {address || bytes > 0 ? (
         <div className="flex min-w-0 flex-col rounded-lg bg-surface-2">
@@ -370,6 +393,9 @@ export const VaultApprovalCard: React.FC<{
   const [error, setError] = useState<string | null>(null);
   // The last approval failed because avault needs its one-time Keychain authorization.
   const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
+  // The secure code did not finish downloading (a slow or lost connection): Retry is the Approve
+  // button again, in place, with what the card shows now and Approve's own gate.
+  const [canRetry, setCanRetry] = useState(false);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   // The addresses this request signs as: a wallet's stored account snapshot, else the key's row.
   const signingAddresses = hdDerivation
@@ -416,7 +442,9 @@ export const VaultApprovalCard: React.FC<{
 
   const needsProtectedApproval = useMemo(() => vaultApprovalNeedsPasskey(request), [request]);
   // Where passkeys can't run, the approver finishes this request in the browser instead; nothing
-  // (no binding contexts, no sandbox ceremony) starts here.
+  // (no binding contexts, no sandbox ceremony) starts here. That includes a desktop app whose
+  // in-app passkey step already failed on this page.
+  const handoff = useVaultPasskeyHandoff();
   const entryIssue = needsProtectedApproval ? vaultEntryIssue() : null;
   const approveInBrowser = entryIssue === 'desktop';
   const entryBlocked = !!entryIssue && !approveInBrowser;
@@ -451,10 +479,15 @@ export const VaultApprovalCard: React.FC<{
       setBusy(true);
       setError(null);
       setNeedsAvaultAuthorization(false);
+      setCanRetry(false);
       run()
         .catch((err: unknown) => {
+          // This attempt moved the app to the browser hand-off, whose note now says what happened.
+          if (isVaultPasskeyFallback(err)) return;
           setError(vaultErrorMessage(t, err, t('vaults.approval.errors.failed')));
           setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
+          const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : null;
+          setCanRetry(code === 'sandbox_unreachable' || code === 'sandbox_offline');
         })
         .finally(() => setBusy(false));
     },
@@ -619,6 +652,11 @@ export const VaultApprovalCard: React.FC<{
   }, [api, onResolved, request.id, t]);
 
   const deleteNeedsHold = isKeypair || isProtected;
+  // The path this request signs with. A Bitcoin request names its type, whose path is the snapshot's
+  // `bitcoin_path`; the account's `paths.bitcoin` is Taproot's, so it stands in only for Taproot.
+  // Protected requests only: a standard request's context is never decoded, so it says nothing more.
+  const bitcoinInput = isSign && isProtected ? protectedBitcoinInput(delivery.signing_context ?? delivery.signingContext) : null;
+  const signingPath = hdDerivation ? hdSigningPath(hdAccount, hdDerivation.chain, hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type) : undefined;
 
   const deny = () =>
     finish(async () => {
@@ -748,12 +786,21 @@ export const VaultApprovalCard: React.FC<{
                   // The type this request signs as; older requests without one are Taproot.
                   : t('vaults.addresses.btcWithType', { type: t(BTC_TYPE_LABEL[hdAccount?.bitcoin_address_type ?? delivery.derivation?.address_type ?? 'p2tr']) })}</Badge>
               </span>
-              {hdAccount?.paths?.[hdDerivation.chain] ? (
-                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', {
-                  // A Bitcoin request names the type it signs as; its path differs from Taproot's.
-                  path: hdDerivation.chain === 'bitcoin' && hdAccount.bitcoin_path ? hdAccount.bitcoin_path : hdAccount.paths[hdDerivation.chain],
-                })}</span>
+              {signingPath ? (
+                <span className="font-mono text-[11.5px] text-muted">{t('vaults.approval.path', { path: signingPath })}</span>
               ) : null}
+            </span>
+          </DetailRow>
+        ) : null}
+        {bitcoinInput ? (
+          // ui/design: vault/signing/protected-btc-*
+          <DetailRow label={t('vaults.approval.btcInput')}>
+            <span className="flex min-w-0 flex-col gap-1">
+              <Badge variant="outline" className="self-start">{bitcoinInput.code
+                ? t('vaults.approval.btcInputType', { type: t(BTC_TYPE_LABEL[bitcoinInput.type]), code: bitcoinInput.code })
+                : t(BTC_TYPE_LABEL[bitcoinInput.type])}</Badge>
+              <span className="text-[12px] text-muted">{t('vaults.approval.btcInputNetwork', { network: bitcoinInput.network })}</span>
+              <span className="text-[12px] leading-snug text-muted">{t('vaults.approval.btcInputReview')}</span>
             </span>
           </DetailRow>
         ) : null}
@@ -794,7 +841,7 @@ export const VaultApprovalCard: React.FC<{
               {/* Full digest in a copyable code box (break-all) — it's the exact bytes being
                   signed, so the user can verify it rather than trust an elision. */}
               <div className="flex min-w-0 items-start gap-2">
-                <code className="min-w-0 flex-1 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
+                <code className="min-w-0 break-all rounded-md bg-surface-2 px-2 py-1.5 font-mono text-[11.5px] leading-relaxed text-foreground">
                   {signInput}
                 </code>
                 <button
@@ -868,9 +915,14 @@ export const VaultApprovalCard: React.FC<{
       {entryBlocked ? <VaultEntryNotice issue={entryIssue} /> : needsProtectedApproval ? (
         <span className="flex items-start gap-2 rounded-lg bg-mint-soft px-3 py-2.5 text-[11.5px] text-foreground">
           <ShieldCheck className="mt-0.5 size-[15px] shrink-0 text-mint-ink" />
-          {approveInBrowser
-            ? t('vaults.approval.browserNote')
-            : isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
+          {approveInBrowser ? (
+            // Finished in the browser: say so, and for a signature also where its key stays, as the
+            // browser's card does.
+            <span className="flex flex-col gap-1">
+              <span>{t(handoff === 'fallback' ? 'vaults.approval.browserFallbackNote' : 'vaults.approval.browserNote')}</span>
+              {isSign ? <span>{t('vaults.approval.signNote')}</span> : null}
+            </span>
+          ) : isSign ? t('vaults.approval.signNote') : t('vaults.approval.accessNote')}
         </span>
       ) : null}
 
@@ -905,8 +957,17 @@ export const VaultApprovalCard: React.FC<{
       {needsAvaultAuthorization ? (
         <AvaultAuthorizationNotice forceVisible />
       ) : error ? (
-        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
+        <div className="flex flex-col gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
           {error}
+          {canRetry ? (
+            <Button
+              type="button" variant="secondary" size="sm" className="self-start" disabled={approveDisabled}
+              onClick={isSign ? approveSign : approveAccess}
+            >
+              <RefreshCw className="size-3.5" />
+              {t('vaults.requests.retry')}
+            </Button>
+          ) : null}
         </div>
       ) : null}
 

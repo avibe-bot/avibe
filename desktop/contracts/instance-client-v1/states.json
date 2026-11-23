@@ -30,7 +30,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -46,7 +49,16 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null,
+    "instance_update": null,
+    "sign_in": {
+      "providers": [
+        "google",
+        "github"
+      ],
+      "passkey": false
+    }
   },
   "signed_in": {
     "version": 1,
@@ -92,7 +104,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -108,7 +123,9 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null,
+    "instance_update": null
   },
   "challenge": {
     "version": 1,
@@ -144,7 +161,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -160,7 +180,9 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null,
+    "instance_update": null
   },
   "enroll": {
     "version": 1,
@@ -196,7 +218,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -212,7 +237,9 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null,
+    "instance_update": null
   },
   "consent": {
     "version": 1,
@@ -263,7 +290,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -284,7 +314,9 @@
       "host": "studio.avibe.bot",
       "scope": "openid profile email"
     },
-    "remote_auxiliary": "local"
+    "remote_auxiliary": "local",
+    "current_instance": null,
+    "instance_update": null
   },
   "remote_connected": {
     "version": 1,
@@ -331,7 +363,10 @@
     },
     "local": {
       "name": "小明的 Mac",
-      "remote_access": "off"
+      "remote_access": "off",
+      "instance_id": null,
+      "remote_access_url": null,
+      "slug": null
     },
     "desktop": {
       "version": "0.1.0",
@@ -347,6 +382,52 @@
       }
     },
     "consent": null,
-    "remote_auxiliary": "disabled_incomplete"
+    "remote_auxiliary": "disabled_incomplete",
+    "current_instance": {
+      "id": "studio-1",
+      "name": "工作室 Studio",
+      "host": "studio.avibe.bot",
+      "url": "https://studio.avibe.bot",
+      "relationship": "shared",
+      "owner_email": "owner@example.test",
+      "available": true
+    },
+    "instance_update": {
+      "instance_id": "studio-1",
+      "status": "ready",
+      "snapshot": {
+        "current": "3.2.8rc3",
+        "latest": "3.2.8rc4",
+        "has_update": true,
+        "error": null,
+        "prereleases": true,
+        "auto_update": false,
+        "host_actions": [
+          "check",
+          "prereleases",
+          "auto_update",
+          "install"
+        ],
+        "build": {
+          "kind": "package"
+        },
+        "install": {
+          "phase": "installing",
+          "target": "3.2.8rc4",
+          "started_at": "2026-11-20T07:03:17Z"
+        }
+      },
+      "can_manage": true,
+      "request": {
+        "action": "install",
+        "phase": "sending",
+        "target": "3.2.8rc4",
+        "error_code": null,
+        "updated_at": "2026-11-20T07:03:16.000Z",
+        "following": true,
+        "installed_from": "3.2.8rc3"
+      },
+      "fetched_at": "2026-11-20T07:03:20.000Z"
+    }
   }
 }

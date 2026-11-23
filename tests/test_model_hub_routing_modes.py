@@ -146,17 +146,64 @@ def test_prompt_cache_override_is_rejected_for_non_vibey_routes():
     assert config.agents["claude"].routes == {}
 
 
-def test_no_matching_inventory_forwards_exact_id_to_all_defaults():
+def test_no_matching_inventory_leaves_automatic_route_unsupplied():
+    """MH-ROUTING-002: inventory absence is not consent to forward a model id."""
     first = _source("src_first001", ())
     second = _source("src_second001", ("other-model",))
     config = _sparse_config(first, second)
     plan = effective_model_route(config, "claude", MODEL)
-    assert plan.route_origin == "passthrough"
-    assert _pairs(plan) == [(first.id, MODEL), (second.id, MODEL)]
+    assert plan.route_origin is None
+    assert _pairs(plan) == []
     resolution = resolve_model_hub_turn(config, "claude", MODEL)
-    assert resolution.source is first
-    assert resolution.target_model == MODEL
-    assert all(not hop.inventory_member and hop.runnable for hop in resolution.inspected_hops)
+    assert resolution.source is None
+    assert resolution.route_reason == "route_unconfigured"
+    assert resolution.supply_status == "interrupted"
+    assert resolution.inspected_hops == ()
+
+
+@pytest.mark.parametrize("backend", ["claude", "codex", "opencode", "vibey"])
+def test_upgrade_recomputes_unsupplied_routes_and_manual_forwarding_is_explicit(tmp_path, backend):
+    """MH-ROUTING-015: upgrade reports affected Agents; only an explicit hop forwards.
+
+    Old coverage accepted speculative automatic hops and never checked that the
+    named-Agent projection disagreed with an inventory-empty relay after load.
+    """
+    source = _source("src_manual001", ("other-model",))
+    config = _loaded_catalog_config(backend, MODEL, source)
+    service, store, adapter = _service(tmp_path, config)
+    store.requested_models[backend] = MODEL
+    service.named_agents_override = lambda name: [("assistant", MODEL)] if name == backend else []
+    chain = service.agent_chain(backend, MODEL)
+    assert chain["manual_override"] is chain["route_origin"] is chain["current"] is None
+    assert chain["chain"] == []
+    assert chain["supply_state"] == "interrupted"
+    supply = service.get_agent_sources(backend)
+    assert supply["model_supply"] == [{
+        "model_id": MODEL, "chain_length": 0, "has_runnable_hop": False, "route_origin": None,
+    }]
+    assert supply["named_agents"] == [{
+        "name": "assistant", "effective_model_id": MODEL,
+        "route_reason": "route_unconfigured", "supply_status": "interrupted",
+    }]
+    assert supply["supply_status"] == "interrupted"
+    payload = {"hops": [{"source_id": source.id, "model_id": MODEL}]}
+    preview = service.preview_agent_chain(backend, MODEL, {"manual_override": payload})
+    saved = asyncio.run(service.set_agent_chain(backend, MODEL, payload))["chain"]
+    assert saved == preview
+    assert saved["route_origin"] == "manual"
+    assert saved["manual_override"] == payload
+    assert saved["current"] == payload["hops"][0]
+    reloaded = ModelHubConfig.from_payload(store.config.to_payload())
+    assert reloaded.agents[backend].routes[MODEL].to_payload() == payload
+    assert reloaded.sources[0].models == source.models
+    assert service.get_agent_sources(backend)["named_agents"][0]["route_reason"] is None
+    adapter.outcomes.append(RawCallOutcome(
+        kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
+        stream_started=False, source_id=source.id, model_id=MODEL,
+    ))
+    result = asyncio.run(service.resolve(backend=backend, model_id=MODEL, request={}))
+    assert result.source_id == source.id
+    assert adapter.invocations == [(source.id, MODEL)]
 
 
 def test_manual_inventory_is_matching_evidence_and_retirement_is_not():
@@ -167,8 +214,8 @@ def test_manual_inventory_is_matching_evidence_and_retirement_is_not():
     assert _pairs(effective_model_route(config, "claude", MODEL)) == [(second.id, MODEL)]
     second.models = [ModelHubModelConfig(id=MODEL, provenance="discovered", retired=True)]
     plan = effective_model_route(config, "claude", MODEL)
-    assert plan.route_origin == "passthrough"
-    assert _pairs(plan) == [(first.id, MODEL)]
+    assert plan.route_origin is None
+    assert _pairs(plan) == []
     config.agents["claude"].routes[MODEL] = ModelHubRouteConfig(hops=(ModelHubRouteHopConfig(second.id, MODEL),))
     blocked = resolve_model_hub_turn(config, "claude", MODEL)
     assert blocked.route_origin == "manual"
@@ -241,13 +288,13 @@ def test_subscription_match_suppresses_unknown_api_speculation(tmp_path):
     assert all(binding.route_model_ids == () for binding in bindings)
 
 
-def test_mixed_unmatched_defaults_only_use_api_key_passthrough():
+def test_mixed_unmatched_defaults_do_not_automatically_forward():
     subscription = _source("src_subscription01", (), kind="subscription")
     api = _source("src_api00001", ())
     config = _sparse_config(subscription, api)
     plan = effective_model_route(config, "claude", MODEL)
-    assert plan.route_origin == "passthrough"
-    assert _pairs(plan) == [(api.id, MODEL)]
+    assert plan.route_origin is None
+    assert _pairs(plan) == []
 
 
 def test_equal_save_is_manual_and_empty_save_restores_inherited_changes(tmp_path):
@@ -264,12 +311,11 @@ def test_equal_save_is_manual_and_empty_save_restores_inherited_changes(tmp_path
     store.config.sources[0].models.clear()
     reloaded = ModelHubConfig.from_payload(store.config.to_payload())
     assert reloaded.agents["claude"].routes == {}
-    assert effective_model_route(reloaded, "claude", MODEL).route_origin == "passthrough"
-    with pytest.raises(ModelHubError) as guard:
-        asyncio.run(service.set_agent_sources("claude", {"order": []}))
-    asyncio.run(service.set_agent_sources("claude", {"order": [], "force": True, **guard.value.data}))
+    assert effective_model_route(reloaded, "claude", MODEL).route_origin is None
+    # With no automatic hops remaining there is no supplier removal to confirm.
+    asyncio.run(service.set_agent_sources("claude", {"order": []}))
     assert service.agent_chain("claude", MODEL)["route_origin"] is None
-    assert adapter.synced
+    assert adapter.synced == []
 
 
 def test_preview_and_restore_use_same_plan_without_preview_side_effects(tmp_path):
@@ -283,8 +329,9 @@ def test_preview_and_restore_use_same_plan_without_preview_side_effects(tmp_path
     store.save = lambda updated: (writes.append(updated), original_save(updated))[-1]
     draft = service.preview_agent_chain("claude", MODEL, {"manual_override": None})
     assert draft["manual_override"] is None
-    assert draft["route_origin"] == "passthrough"
-    assert draft["current"] == {"source_id": source.id, "model_id": MODEL}
+    assert draft["route_origin"] is None
+    assert draft["current"] is None
+    assert draft["chain"] == []
     assert store.config.to_payload() == before
     assert writes == adapter.synced == []
     assert not (tmp_path / "events.json").exists()
@@ -347,7 +394,7 @@ def test_engine_route_targets_are_deterministic_truthful_and_health_mode_indepen
     service, _, _ = _service(tmp_path, config)
     binding = service._bindings(config)[0]
     assert binding.model_ids == ("inventory-only",)
-    assert binding.route_model_ids == (MODEL, "unlisted")
+    assert binding.route_model_ids == ("unlisted",)
     agent.mode = "direct"
     source.state = ModelHubSourceStateConfig(
         status="needs_action", detail_key="models.source.needs_action.oauth_expired"
@@ -478,7 +525,7 @@ def test_empty_override_equals_absence_at_all_route_consumers(tmp_path, backend,
     payload["agents"][backend]["routes"][MODEL] = {"hops": []}
     loaded = ModelHubConfig.from_payload(payload)
     assert loaded.agents[backend].routes == {}
-    assert effective_model_route(loaded, backend, MODEL).route_origin == ("automatic" if matched else "passthrough")
+    assert effective_model_route(loaded, backend, MODEL).route_origin == ("automatic" if matched else None)
     saved = asyncio.run(service.set_agent_chain(backend, MODEL, {"hops": []}))
     assert saved["chain"] == expected
     assert store.config.agents[backend].routes == {}
@@ -487,8 +534,14 @@ def test_empty_override_equals_absence_at_all_route_consumers(tmp_path, backend,
         kind=RawOutcomeKind.SUCCESS, http_status=200, error_code=None, redacted_message=None,
         stream_started=False, source_id=source.id, model_id=MODEL,
     ))
-    assert asyncio.run(service.probe_agent(backend, MODEL))["reachable"] is True
-    assert adapter.invocations == [(source.id, MODEL)]
+    if matched:
+        assert asyncio.run(service.probe_agent(backend, MODEL))["reachable"] is True
+        assert adapter.invocations == [(source.id, MODEL)]
+    else:
+        with pytest.raises(ModelHubError) as refusal:
+            asyncio.run(service.probe_agent(backend, MODEL))
+        assert refusal.value.code == "probe_no_candidate"
+        assert adapter.invocations == []
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
@@ -674,7 +727,7 @@ def test_failed_route_sync_rolls_back_canonical_intent_and_retry(tmp_path, backe
     result = asyncio.run(service.set_agent_chain(backend, MODEL, payload))
     assert result["chain"]["manual_override"] == (None if restore else manual)
     assert all(route.hops for route in store.config.agents[backend].routes.values())
-    assert adapter.synced[-1][0].route_model_ids == ((MODEL,) if restore else ("mapped",))
+    assert adapter.synced[-1][0].route_model_ids == (() if restore else ("mapped",))
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
@@ -684,7 +737,7 @@ def test_empty_intent_follows_refresh_defaults_and_health_without_reseeding(tmp_
     config = _loaded_catalog_config(backend, MODEL, first, second)
     config.agents[backend].routes[MODEL] = ModelHubRouteConfig()
     service, store, adapter = _service(tmp_path, config)
-    assert service.agent_chain(backend, MODEL)["route_origin"] == "passthrough"
+    assert service.agent_chain(backend, MODEL)["route_origin"] is None
     adapter.discovered = (MODEL,)
     refreshed = asyncio.run(service.refresh_source(second.id))
     assert refreshed["removed_hops"] == refreshed["interrupted"] == []
@@ -697,12 +750,12 @@ def test_empty_intent_follows_refresh_defaults_and_health_without_reseeding(tmp_
     with pytest.raises(ModelHubError) as defaults:
         asyncio.run(service.set_agent_sources(backend, {"order": [first.id]}))
     asyncio.run(service.set_agent_sources(backend, {"order": [first.id], "force": True, **defaults.value.data}))
-    assert service.agent_chain(backend, MODEL)["route_origin"] == "passthrough"
+    assert service.agent_chain(backend, MODEL)["route_origin"] is None
     assert store.config.agents[backend].routes == {}
 
 
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-def test_inventory_refinement_still_guards_new_supply_loss(tmp_path, backend):
+def test_inventory_gain_on_a_blocked_source_does_not_remove_previous_supply(tmp_path, backend):
     fallback = _source("src_fallback1", ())
     known = _source("src_known0001", (), status="error")
     known.state.detail_key = "models.source.error.unclassified"
@@ -711,16 +764,12 @@ def test_inventory_refinement_still_guards_new_supply_loss(tmp_path, backend):
     updated = copy.deepcopy(config)
     updated.sources[1].models = [ModelHubModelConfig(id=MODEL, provenance="discovered")]
     before = config.to_payload()
-    with pytest.raises(ModelHubError) as refusal:
-        service._guard_inventory_mutation(
-            config, updated, known.id, force=False,
-            confirmed_remove_hops=None, confirmed_interruptions=None,
-        )
-    assert refusal.value.code == "source_last_supplier"
-    assert refusal.value.data == {
-        "would_remove_hops": [],
-        "would_interrupt": [{"backend": backend, "model_id": MODEL, "agents": []}],
-    }
+    # The old passthrough tier falsely supplied this row; it is now already
+    # unsupplied, so discovering a blocked match cannot remove usable supply.
+    assert service._guard_inventory_mutation(
+        config, updated, known.id, force=False,
+        confirmed_remove_hops=None, confirmed_interruptions=None,
+    ) == ([], [])
     assert store.config.to_payload() == before
     assert adapter.synced == []
 

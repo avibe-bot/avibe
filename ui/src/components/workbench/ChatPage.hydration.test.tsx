@@ -1,4 +1,5 @@
 /** @vitest-environment jsdom */
+import './ChatPage.duplicateKeyGuard';
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';
@@ -86,7 +87,8 @@ vi.mock('../../context/ComposerBridgeContext', () => ({
   useRegisterComposerTarget: vi.fn(),
 }));
 
-vi.mock('../../context/WindowManagerContext', () => ({
+vi.mock('../../context/WindowManagerContext', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../context/WindowManagerContext')>()),
   useWindowManager: () => ({ focusedId: null, focusCanvas: vi.fn() }),
 }));
 
@@ -277,6 +279,65 @@ describe('ChatPage transcript hydration', () => {
     vi.useRealTimers();
     mocks.realInbox = false;
     Reflect.deleteProperty(document, 'hasFocus');
+  });
+
+  it.each([
+    { surface: 'the phone App, untouched', native: true, hidden: false, touch: false, marked: false },
+    { surface: 'the phone App, touched', native: true, hidden: false, touch: true, marked: true },
+    { surface: 'the phone App, hidden', native: true, hidden: true, touch: true, marked: false },
+    { surface: 'a browser, touched', native: false, hidden: false, touch: true, marked: false },
+  ])('marks an unfocused chat read in $surface: $marked', async ({ native, hidden, touch, marked }) => {
+    // A push tap opens the conversation in a new App web view, which has no focus
+    // until a tap makes it first responder; the reader scrolls it. In the App a
+    // touch since the page was shown counts; in a browser an unfocused window may
+    // not be looked at, touched or not.
+    mocks.realInbox = true;
+    document.hasFocus = () => false;
+    if (hidden) Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'hidden' });
+    if (native) {
+      Object.defineProperty(window, 'avibeNative', {
+        configurable: true,
+        value: {
+          contract: 1,
+          platform: 'ios',
+          shellVersion: '1.0 (1)',
+          capabilities: {},
+          call: vi.fn(() => new Promise(() => {})),
+          on: vi.fn(() => () => undefined),
+        },
+      });
+    }
+    mocks.api.connectWorkbenchEvents.mockImplementation(() => () => {});
+    mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+    mocks.api.getSessionBootstrap.mockResolvedValue(bootstrapPayload('session-new'));
+    mocks.api.listInbox.mockResolvedValue({ sessions: [], next_cursor: null, unread_by_session: { 'session-new': 1 } });
+    mocks.api.markSessionRead.mockResolvedValue({ updated: 1, unread_counts: {}, unread_by_session: {} });
+    const settle = () => act(async () => {
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    try {
+      render(
+        <WorkbenchInboxProvider>
+          <MemoryRouter initialEntries={['/chat/session-new']}>
+            <Routes><Route path="/chat/:sessionId" element={<ChatPage />} /></Routes>
+          </MemoryRouter>
+        </WorkbenchInboxProvider>,
+      );
+      await waitFor(() => expect(mocks.api.listInbox).toHaveBeenCalled());
+      await settle();
+      // Nothing is read before the reader touches the page.
+      expect(mocks.api.markSessionRead).not.toHaveBeenCalled();
+      if (touch) {
+        fireEvent.pointerDown(document.body);
+        await settle();
+      }
+      if (marked) await waitFor(() => expect(mocks.api.markSessionRead).toHaveBeenCalledWith('session-new', undefined, { handleError: false }));
+      else expect(mocks.api.markSessionRead).not.toHaveBeenCalled();
+    } finally {
+      Reflect.deleteProperty(window, 'avibeNative');
+      Reflect.deleteProperty(document, 'visibilityState');
+    }
   });
 
   it('waits for a new count or a read elsewhere before marking a chat read again after the write is refused', async () => {
@@ -774,17 +835,20 @@ describe('ChatPage transcript hydration', () => {
 
   // A notification can outlive its chat; its tap must not strand the reader on
   // an error. Any other refusal, or the same refusal for an ordinary link, keeps
-  // the error view.
+  // the error view. The iOS Action Button shortcut opens the main Bot's
+  // conversation the same way, on whatever instance is selected: only the Owner
+  // has Bots, so anyone else gets the server's 404 and lands in the Inbox.
   it.each([
-    [404, '?msg=msg-1&from=notification', true],
-    [403, '?from=notification', true],
-    [404, '?msg=msg-1', false],
-    [500, '?msg=msg-1&from=notification', false],
-  ])('answers a %i bootstrap for /chat/session-gone%s with the Inbox: %s', async (status, search, toInbox) => {
+    [404, 'session-gone', '?msg=msg-1&from=notification', true],
+    [403, 'session-gone', '?from=notification', true],
+    [404, 'session-gone', '?msg=msg-1', false],
+    [500, 'session-gone', '?msg=msg-1&from=notification', false],
+    [404, 'ses_main', '?from=notification', true],
+  ])('answers a %i bootstrap for /chat/%s%s with the Inbox: %s', async (status, sessionId, search, toInbox) => {
     mocks.api.getSessionBootstrap.mockRejectedValue(Object.assign(new Error('chat refused'), { status }));
 
     render(
-      <MemoryRouter initialEntries={[`/chat/session-gone${search}`]}>
+      <MemoryRouter initialEntries={[`/chat/${sessionId}${search}`]}>
         <Routes>
           <Route path="/chat/:sessionId" element={<ChatPage />} />
           <Route path="/inbox" element={<p>inbox page</p>} />

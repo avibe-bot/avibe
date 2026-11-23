@@ -9,7 +9,7 @@ import { DesktopAccountRow } from './DesktopAccountRow';
 
 const mock = vi.hoisted(() => ({
   present: vi.fn(), remote: false, phase: 'available', signedIn: true,
-  invoke: vi.fn(), getVersion: vi.fn(),
+  invoke: vi.fn(), getVersion: vi.fn(), localUrl: null as string | null, localAccess: 'off', slug: undefined as string | null | undefined,
 }));
 vi.mock('../context/ApiContext', () => ({ useApi: () => ({ getVersion: mock.getVersion }) }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_instance: true } }) }));
@@ -19,7 +19,7 @@ vi.mock('./useDesktopClient', () => ({
   useDesktopClientProjection: () => ({
     account: { status: mock.signedIn ? 'signed_in' : 'signed_out', identity: { id: 'fixture', email: 'max@example.test' } },
     connection: { status: mock.remote ? 'remote_connected' : 'local', committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
-    local: { name: '小麦的 Mac', remote_access: 'off' },
+    local: { slug: mock.slug, name: '小麦的 Mac.local', remote_access: mock.localAccess, remote_access_url: mock.localUrl },
     desktop: { version: '3.2.6rc12', update: { phase: mock.phase, latest: '3.2.7' } },
     remote_auxiliary: 'disabled_incomplete',
   }),
@@ -27,7 +27,7 @@ vi.mock('./useDesktopClient', () => ({
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 beforeEach(() => {
-  mock.remote = false; mock.phase = 'available'; mock.signedIn = true;
+  mock.remote = false; mock.phase = 'available'; mock.signedIn = true; mock.localUrl = null; mock.localAccess = 'off'; mock.slug = undefined;
   mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
   mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
     ? {
@@ -81,7 +81,7 @@ it('AUTH-SETUP-178 routes the native menu to the same panel and preserves Skip',
   expect(mock.present).not.toHaveBeenCalled();
 });
 
-it('AUTH-SETUP-178 current version offers no install; the account menu has no updater action', async () => {
+it('AUTH-SETUP-178 current version offers no install; account entry stays separate from updates', async () => {
   mock.phase = 'current';
   mount();
   fireEvent.click(await screen.findByTitle('v3.2.6rc12'));
@@ -91,23 +91,48 @@ it('AUTH-SETUP-178 current version offers no install; the account menu has no up
   expect(document.querySelector('[data-update-menu]')).toBeNull();
   fireEvent.click(within(dialog).getByRole('button', { name: en.common.close }));
   fireEvent.click(document.querySelector('[data-account-trigger]')!);
-  const menu = document.querySelector('[data-instance-menu]')!;
-  expect(menu.textContent).not.toMatch(/update|upgrade/i);
+  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+  expect(mock.present).toHaveBeenCalledWith('instances');
 });
 
-it('AUTH-SETUP-178 remote Runtime presents the trusted update view without local or remote update IPC', async () => {
+// ui/design: update/instance-and-app. The version beside another computer's name is that instance's, read by
+// its own page; the page's API mock has `getVersion` alone, so any install or updater call from here throws.
+it("AUTH-SETUP-178 remote Runtime shows the instance's own version and presents the shell's panel without update IPC", async () => {
   mock.remote = true;
+  mock.getVersion.mockResolvedValue({ current: '3.2.5', latest: '3.2.7', has_update: true });
   mount();
-  fireEvent.click(screen.getByRole('button', { name: 'Local Desktop version 3.2.6rc12' }));
+  // The app is on 3.2.6rc12: that version is no longer shown beside the instance's name.
+  fireEvent.click(await screen.findByRole('button', { name: 'Studio is on v3.2.5' }));
+  expect(screen.queryByText(/3\.2\.6rc12/)).toBeNull();
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
   expect(mock.invoke).not.toHaveBeenCalled();
-  expect(mock.getVersion).not.toHaveBeenCalled();
   expect(document.querySelector('[data-update-menu]')).toBeNull();
   mock.present.mockClear();
   const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
   fireEvent(window, event);
   expect(event.defaultPrevented).toBe(true);
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('updates');
+});
+
+// ui/design: chrome/bottom-row. The owner found the remote version read as plain text, though it
+// opens the update panel: on every surface the row is status-left, version-right, and the version
+// is the same chip, so a plain-text version or a reversed row fails here.
+it('the bottom row reads the same locally and on another computer: status, then the version chip', async () => {
+  for (const remote of [false, true]) {
+    mock.remote = remote;
+    const view = mount();
+    const row = document.querySelector('[data-sidebar-status-row]')!;
+    const version = remote
+      ? await screen.findByRole('button', { name: 'Studio is on v3.2.6rc12' })
+      : await screen.findByTitle('v3.2.6rc12');
+    expect(version.hasAttribute('data-version-chip')).toBe(true);
+    expect(row.lastElementChild!.contains(version)).toBe(true);
+    const status = row.querySelector('[data-account-trigger]')!;
+    expect(row.firstElementChild!.contains(status)).toBe(true);
+    // The status dot leads the computer's name.
+    expect(status.firstElementChild!.querySelector('[data-status-indicator]')).toBeTruthy();
+    view.unmount();
+  }
 });
 
 // The previous updater-only test never exercised the account trigger: signed-out
@@ -121,18 +146,59 @@ it('AUTH-SETUP-177 signed-out footer directly presents account without opening a
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
 });
 
-it('AUTH-SETUP-178 signed-in menu keeps instance actions separate from remote access status', async () => {
-  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
-  render(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+it('AUTH-SETUP-178 the whole signed-in footer directly opens instances without a popup or caret', async () => {
+  mount();
   const trigger = document.querySelector('[data-account-trigger]')!;
-  fireEvent.click(trigger);
-  expect(trigger.getAttribute('aria-expanded')).toBe('true');
-  expect(mock.present).not.toHaveBeenCalled();
-  const status = screen.getByText('Remote access to this Mac');
-  expect(status.closest('button, a, [role="button"]')).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: 'Switch instance' }));
+  fireEvent.click(trigger.querySelector('[data-status-indicator]')!);
   expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
-  fireEvent.click(trigger);
-  fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
-  expect(mock.present).toHaveBeenLastCalledWith('sign-out');
+  expect(trigger.hasAttribute('aria-expanded')).toBe(false);
+  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+  expect(document.querySelector('[data-account-chevron]')).toBeNull();
+  expect(document.querySelector('[data-account-avatar]')).toBeNull();
+  expect(trigger.textContent).toBe('This computer');
+});
+
+// A5 display data must not fall back to an OS hostname or leak the local slug
+// into a remote footer. This exercises the product container and shared view.
+it.each([
+  { remote: false, slug: 'authoritative-local', label: 'authoritative-local' },
+  { remote: false, slug: null, label: 'This computer' },
+  { remote: false, slug: undefined, label: 'This computer' },
+  { remote: true, slug: 'authoritative-local', label: 'Studio' },
+])('uses authoritative footer display (remote=$remote, slug=$slug)', ({ remote, slug, label }) => {
+  mock.remote = remote; mock.slug = slug;
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  expect(trigger.textContent).toBe(label);
+  // The label is the button's name; no hover tip (Max, 2026-11-20).
+  expect(trigger.hasAttribute('title')).toBe(false);
+});
+
+// Max, 2026-11-22 12:51: the entry reads from the left, the dot then the name, with no instance icon, in
+// every state. Its size, wash and the line above it are the e2e's (AUTH-SETUP-178); jsdom lays nothing out.
+it.each([
+  { remote: false, signedIn: true }, { remote: true, signedIn: true }, { remote: false, signedIn: false },
+])('the footer entry starts with the status dot (remote=$remote, signedIn=$signedIn)', ({ remote, signedIn }) => {
+  mock.remote = remote; mock.signedIn = signedIn;
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  expect(trigger.firstElementChild!.querySelector('[data-status-indicator]')).toBeTruthy();
+  expect(trigger.querySelector('svg:not([data-status-indicator])')).toBeNull();
+  expect(trigger.className.split(/\s+/)).not.toContain('justify-center');
+  // A plain button, so it carries the keyboard focus ring the shared Button gave it.
+  expect(trigger.className.split(/\s+/)).toContain('focus-visible:ring-2');
+});
+
+// Max, 2026-11-20: no hover tip in either state, not even for a name too long to show whole.
+it.each([
+  { signedIn: false, slug: undefined },
+  { signedIn: true, slug: 'a-very-long-instance-name-that-the-sidebar-cannot-show-whole' },
+])('the footer entry has no hover tip (signedIn=$signedIn)', ({ signedIn, slug }) => {
+  mock.signedIn = signedIn; mock.slug = slug;
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  fireEvent.pointerEnter(trigger);
+  fireEvent.mouseOver(trigger);
+  expect(trigger.hasAttribute('title')).toBe(false);
+  expect(trigger.querySelector('[title]')).toBeNull();
 });

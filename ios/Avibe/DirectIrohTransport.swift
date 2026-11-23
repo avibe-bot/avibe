@@ -45,6 +45,8 @@ enum DirectIrohReport: Equatable, Sendable {
     /// The App went to the background: everything stopped, and the path is
     /// gone.
     case lostToBackground
+    /// The usable path's connection now runs on another kind of path.
+    case pathChanged(DirectPathKind?)
 }
 
 /// Fetches the rendezvous answer for a selection, natively and on that
@@ -238,6 +240,10 @@ final class DirectIrohTransport {
         /// times the path stopped being usable.
         let authority: DirectIrohAuthority
         private var streams: [WeakStream] = []
+        /// The kind of path last reported for the connection, and the watch
+        /// that reports changes.
+        var lastPath: DirectPathKind?
+        var pathWatch: (any DirectPathWatch)?
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link, authority: DirectIrohAuthority) {
             self.id = id
@@ -312,12 +318,20 @@ final class DirectIrohTransport {
     private var debounceTimer: (any DirectIrohTimer)?
     private var stableTimer: (any DirectIrohTimer)?
     private var spacingTimer: (any DirectIrohTimer)?
+    /// The last attempts, oldest first (`DirectPathDiagnostics`).
+    private var attempts: [DirectDialAttempt] = []
+    /// How often the path was checked again, and why, for this selection.
+    private var counts = DirectPathCounts()
+    /// The monitor's count of ignored updates when this selection began.
+    private var ignoredUpdatesAtSelection = 0
     /// The live path. Whenever this is cleared or replaced, the path's
     /// authority is revoked.
     private var session: Session? {
         didSet {
             if oldValue !== session {
                 oldValue?.authority.revoke()
+                oldValue?.pathWatch?.stop()
+                oldValue?.pathWatch = nil
             }
         }
     }
@@ -403,6 +417,10 @@ final class DirectIrohTransport {
         stopWork()
         self.selection = selection
         self.report = report
+        // The history speaks for one selection (one instance, one account).
+        attempts.removeAll()
+        counts = DirectPathCounts()
+        ignoredUpdatesAtSelection = network.ignoredUpdates
         failures = 0
         pageRetries = 0
         // Path generations are compared within one selection only: nothing
@@ -423,6 +441,9 @@ final class DirectIrohTransport {
         stopWork()
         selection = nil
         report = nil
+        attempts.removeAll()
+        counts = DirectPathCounts()
+        ignoredUpdatesAtSelection = network.ignoredUpdates
         network.stop()
     }
 
@@ -663,10 +684,13 @@ final class DirectIrohTransport {
             if
                 let session,
                 session.offer.generation == offer.generation,
-                session.offer.endpointID == offer.endpointID
+                session.offer.endpointID == offer.endpointID,
+                session.offer.relay == offer.relay
             {
-                // The same endpoint and addresses: the path stays, under
-                // the new answer's deadline.
+                // The same endpoint, addresses and relay: the path stays,
+                // under the new answer's deadline. The instance advances
+                // the generation when its relay or relay policy changes;
+                // a changed relay under the same generation is retired too.
                 lease = accepted
                 session.authority.renew(deadline: accepted.deadline)
                 armLeaseTimer()
@@ -686,7 +710,7 @@ final class DirectIrohTransport {
                 }
                 return
             }
-            // A new endpoint key or address set. The old path is retired
+            // A new endpoint key, address set or relay. The old path is retired
             // before the new one is dialled: new connections use the
             // public origin until the new path answers.
             guard endSessionReportingLoss() else {
@@ -765,6 +789,7 @@ final class DirectIrohTransport {
         raiseFloor()
         ensureAsking()
         if wasUsable {
+            counts.verifications += 1
             emit(.verifying)
         }
     }
@@ -832,6 +857,7 @@ final class DirectIrohTransport {
 
     private func startDial(under accepted: Lease, key: DirectIrohLaunchKey, host: String) {
         cancelDial()
+        counts.dials += 1
         lease = accepted
         armLeaseTimer()
         let offer = accepted.offer
@@ -910,7 +936,9 @@ final class DirectIrohTransport {
                     allowed: allowed,
                     discard: closeEndpoint,
                     { () async throws -> any DirectIrohEndpoint in
-                        try await engine.bind(secretKey: key.secret)
+                        // Relays only for an answer under a known relay
+                        // policy; otherwise none, as before.
+                        try await engine.bind(secretKey: key.secret, relayURLs: offer.relay?.relayURLs ?? [])
                     }
                 )
             }
@@ -921,7 +949,7 @@ final class DirectIrohTransport {
             let addresses = offer.addresses.map(\.socketAddress)
             let alpn = Data(DirectRendezvous.alpn.utf8)
             let connection: any DirectIrohConnection = try await directIrohDeadline(
-                timing.dialSeconds,
+                offer.relay == nil ? timing.dialSeconds : timing.relayDialSeconds,
                 discard: closeConnection
             ) {
                 try await directIrohCall(
@@ -931,6 +959,7 @@ final class DirectIrohTransport {
                         try await endpoint.connect(
                             to: offer.endpointID,
                             addresses: addresses,
+                            relayURL: offer.relay?.url,
                             alpn: alpn
                         )
                     }
@@ -954,16 +983,52 @@ final class DirectIrohTransport {
             }
             return .success(Link(endpoint: endpoint, connection: connection))
         } catch {
+            // Read before the endpoint closes: what this device could offer
+            // is the diagnosis of a failed attempt.
+            let local = endpoint.localFamilies
             Task {
                 await endpoint.close()
             }
-            return .failure(error)
+            return .failure(DialFailure(underlying: error, local: local))
         }
+    }
+
+    /// A dial that failed after its endpoint was bound, with what the
+    /// endpoint could offer.
+    private struct DialFailure: Error {
+        let underlying: Error
+        let local: DirectAddressFamilies?
+    }
+
+    /// Records how an attempt ended, for `pathDiagnostics` and the log.
+    /// Families and counts only: no address, key, or identity.
+    private func recordAttempt(_ offer: DirectRendezvousOffer, local: DirectAddressFamilies?, path: DirectPathKind?) {
+        let attempt = DirectDialAttempt(
+            offered: DirectAddressFamilies(socketAddresses: offer.addresses.map(\.socketAddress)),
+            offeredRelay: offer.relay != nil,
+            local: local,
+            path: path
+        )
+        attempts.append(attempt)
+        if attempts.count > DirectPathDiagnostics.attemptLimit {
+            attempts.removeFirst(attempts.count - DirectPathDiagnostics.attemptLimit)
+        }
+        let localText = local.map { "ipv4=\($0.ipv4) ipv6=\($0.ipv6)" } ?? "unknown"
+        Self.logger.info(
+            """
+            Direct transport attempt: offered ipv4=\(attempt.offered.ipv4, privacy: .public) \
+            ipv6=\(attempt.offered.ipv6, privacy: .public) relay=\(attempt.offeredRelay, privacy: .public) \
+            local \(localText, privacy: .public) result=\(path?.rawValue ?? "failed", privacy: .public)
+            """
+        )
     }
 
     private func dialDidFinish(_ outcome: Result<Link, Error>, lease accepted: Lease) {
         let offer = accepted.offer
         guard case .success(let link) = outcome else {
+            if case .failure(let failure) = outcome {
+                recordAttempt(offer, local: (failure as? DialFailure)?.local, path: nil)
+            }
             Self.logger.info("Direct transport: no path to the instance")
             dropLease()
             scheduleRetry()
@@ -977,6 +1042,9 @@ final class DirectIrohTransport {
             authority: DirectIrohAuthority(deadline: accepted.deadline, clock: uptime)
         )
         self.session = session
+        session.lastPath = link.connection.selectedPath
+        recordAttempt(offer, local: link.endpoint.localFamilies, path: session.lastPath)
+        watchPath(of: session)
         watchClose(of: session)
         stableTimer?.cancel()
         stableTimer = scheduler.schedule(after: timing.stableSeconds) { [weak self] in
@@ -1056,6 +1124,14 @@ final class DirectIrohTransport {
             clock: uptime
         )
         probeReason = reason
+        switch reason {
+        case .networkChange:
+            counts.probesAfterPathUpdate += 1
+        case .candidateFailure:
+            counts.probesAfterCandidateFailure += 1
+        case .renewal:
+            counts.probesAfterRenewal += 1
+        }
         probeTask = Task { @MainActor [weak self] in
             let verdict: ProbeVerdict
             do {
@@ -1198,6 +1274,31 @@ final class DirectIrohTransport {
         self.report?(report)
     }
 
+    /// Reports each change of the kind of path the session's connection
+    /// runs on (relay, IPv4, IPv6) while the session is current and usable.
+    private func watchPath(of session: Session) {
+        let id = session.id
+        session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind in
+            Task { @MainActor [weak self] in
+                self?.pathDidChange(to: kind, session: id)
+            }
+        }
+    }
+
+    private func pathDidChange(to kind: DirectPathKind?, session id: Int) {
+        guard let session, session.id == id, session.lastPath != kind else {
+            return
+        }
+        session.lastPath = kind
+        // While the path is verified again, or after its answer ran out, the
+        // next `usable` report carries the path it then has.
+        guard session.isUsable else {
+            return
+        }
+        Self.logger.info("Direct transport: path now \(kind?.rawValue ?? "unknown", privacy: .public)")
+        emit(.pathChanged(kind))
+    }
+
     // MARK: The network and the App's lifecycle
 
     private func startNetworkWatch() {
@@ -1212,6 +1313,12 @@ final class DirectIrohTransport {
         guard selection != nil, !isInBackground else {
             return
         }
+        counts.pathUpdates += 1
+        let acted = counts.pathUpdates
+        let ignored = network.ignoredUpdates - ignoredUpdatesAtSelection
+        Self.logger.info(
+            "Direct transport: network path changed (\(acted, privacy: .public) so far, \(ignored, privacy: .public) updates ignored as no change)"
+        )
         reconcileLease()
         debounceTimer?.cancel()
         if let session {
@@ -1232,6 +1339,7 @@ final class DirectIrohTransport {
                 self?.startProbe(.networkChange)
             }
             if wasUsable {
+                counts.verifications += 1
                 emit(.verifying)
             }
             return
@@ -1324,6 +1432,8 @@ extension DirectPathReport {
             self = .lost
         case .lostToBackground:
             self = .lostToBackground
+        case .pathChanged(let kind):
+            self = .pathChanged(kind)
         }
     }
 }
@@ -1331,6 +1441,24 @@ extension DirectPathReport {
 extension DirectIrohByteStream: DirectByteStream {}
 
 extension DirectIrohTransport: DirectTransporting {
+    /// How often this selection's path was checked again, and why, with the
+    /// network path updates the monitor ignored meanwhile.
+    var pathCounts: DirectPathCounts {
+        var current = counts
+        current.pathUpdatesIgnored = network.ignoredUpdates - ignoredUpdatesAtSelection
+        return current
+    }
+
+    /// The path the usable session's connection runs on now, read from the
+    /// binding, and the last attempts.
+    var pathDiagnostics: DirectPathDiagnostics {
+        let connection = session.flatMap { $0.isUsable ? $0.link.connection : nil }
+        let current = connection?.selectedPath
+        // Read apart from `current`: kept only while the two agree.
+        let selected = connection?.selectedPathDetail.flatMap { $0.kind == current ? $0 : nil }
+        return DirectPathDiagnostics(current: current, attempts: attempts, selected: selected)
+    }
+
     func select(
         _ target: DirectTarget,
         report: @escaping @MainActor (DirectPathReport) -> Void

@@ -279,6 +279,87 @@ async def test_C1_tool_set_is_captured_per_request_and_unavailable_calls_are_err
     ]
 
 
+async def test_settled_attempt_does_not_keep_its_request_history_alive():
+    from weakref import ref
+
+    requests = []
+
+    async def first(request, cancel):
+        requests.append(ref(request))
+        yield Done(assistant(calls=[ToolCallBlock("c", "echo", {})]))
+
+    async def second(request, cancel):
+        assert requests[0]() is None  # During the same Turn, not just after final cleanup.
+        requests.append(ref(request))
+        yield Done(assistant("done"))
+
+    agent = make_agent(ScriptedProvider([first, second]), tools=[FakeTool()], context=ContextConfig())
+    events = await collect(agent)
+    assert events[-1].reason == "completed"
+    assert agent.last_attempt_response == assistant("done")
+    assert len(requests) == 2 and all(item() is None for item in requests)
+
+
+async def test_stop_skips_queued_request_preparation(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from tests.agent_core.fakes import SELECTION
+
+    # Occupy the only worker. Stop must finish without the unrelated work finishing first.
+    loop = asyncio.get_running_loop()
+    submit = loop.run_in_executor
+    queued = asyncio.Event()
+    release = Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        busy = submit(pool, release.wait)
+
+        def enqueue(executor, fn, *args):
+            assert executor is None
+            future = submit(pool, fn, *args)
+            queued.set()
+            return future
+
+        monkeypatch.setattr(loop, "run_in_executor", enqueue)
+        agent = make_agent(ScriptedProvider([]))
+        preparing = asyncio.create_task(agent._prepare_conversation("system", SELECTION))
+        try:
+            await asyncio.wait_for(queued.wait(), 2)
+            preparing.cancel()
+            done, _ = await asyncio.wait({preparing}, timeout=1)
+            assert preparing in done and preparing.cancelled()
+        finally:
+            release.set()
+            await busy
+            await asyncio.gather(preparing, return_exceptions=True)
+
+
+async def test_conversation_history_copy_does_not_run_on_the_loop_or_leak_hook_mutations():
+    import threading
+    from core.agent_core.harness.store import ContextEntry
+    from tests.agent_core.fakes import SELECTION
+
+    loop_thread = threading.get_ident()
+
+    class HistoryList(list):
+        def __deepcopy__(self, memo):
+            assert threading.get_ident() != loop_thread, "copying history on the event loop"
+            return list(self)
+
+    class Edit(Hooks):
+        async def before_model(self, request, ctx):
+            assert threading.get_ident() == loop_thread
+            request.messages[0].tool_calls[0].arguments["items"].append("hook only")
+
+    agent = make_agent(ScriptedProvider([]), hooks=[Edit()])
+    message = assistant(calls=[ToolCallBlock("past", "read", {})])
+    message.tool_calls[0].arguments["items"] = HistoryList(["stored"])
+    agent._rows = [ContextEntry("session", 1, "response", "past", message)]
+    for _ in range(2):
+        prepared = await agent._prepare_conversation("system", SELECTION)
+        assert prepared.request.messages[0].tool_calls[0].arguments["items"] == ["stored", "hook only"]
+        assert message.tool_calls[0].arguments["items"] == ["stored"]
+
+
 async def test_C2_rewrites_compose_on_detached_requests_and_select_rewritten_transport():
     class Rewrite(Hooks):
         async def before_run(self, input, ctx):
@@ -1191,6 +1272,9 @@ async def test_a_diagnostic_before_the_failure_is_never_the_cause():
 
 
 async def test_abort_closes_provider_stream_and_allows_a_new_turn():
+    from core import loop_watchdog
+
+    baseline = loop_watchdog._active_requests
     entered = asyncio.Event()
 
     async def blocked(request, cancel):
@@ -1202,8 +1286,10 @@ async def test_abort_closes_provider_stream_and_allows_a_new_turn():
     agent = make_agent(provider)
     run = asyncio.create_task(collect(agent))
     await entered.wait()
+    assert loop_watchdog._active_requests == baseline + 1
     agent.abort("stop")
     events = await asyncio.wait_for(run, 1)
+    assert loop_watchdog._active_requests == baseline
     assert events[-1].reason == "aborted"
     assert provider.closed_streams == 1
     assert [row.kind for row in await agent.store.load("session")] == ["input"]

@@ -81,6 +81,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
 )
 
 from .adapter import (
+    ApiKeyModelsCheck,
     ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     DiscoveredModel,
     EngineAdapter,
@@ -141,7 +142,7 @@ from .errors import ModelDiscoveryError
 from .evidence_rules import LearnedEvidence
 from .evidence_rules import learn as learn_from_rejection
 from .evidence_rules import wire_effort
-from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content
+from .hosted_admission import PIN_UNAVAILABLE_CODE, HostedContent, admits, hosted_content, thread_mode
 from .hosted_executor import (
     EXECUTOR_RESPONSE_MAX_BYTES,
     ExecutorCall,
@@ -222,6 +223,8 @@ from .pricing import (
     load_price_table,
     quota_values,
 )
+from . import card_action
+from .card_fences import CardFences
 from .quota import QuotaSourceRef, SubscriptionQuotaCache, SubscriptionQuotaError
 from .provenance import (
     REQUEST_NONFALLBACK_TURN_OUTCOME,
@@ -791,6 +794,21 @@ class UnavailableEngineAdapter:
     def subscription_account_label(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
         return None
 
+    async def reset_card_account_key(self, source_id: str, vendor: str, credential_ref: str) -> str | None:
+        return None
+
+    async def use_reset_card(
+        self,
+        source_id: str,
+        vendor: str,
+        credential_ref: str,
+        kind: str,
+        request_id: str,
+        expected_key: str,
+        expected_count: int,
+    ) -> dict[str, Any]:
+        return {"statement": "no_card"}
+
     async def subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> dict[str, Any]:
         raise SubscriptionQuotaError("unavailable")
 
@@ -821,6 +839,11 @@ class UnavailableEngineAdapter:
         *,
         start_engine: bool = True,
     ):
+        raise EngineUnavailableError
+
+    async def check_api_key_models(
+        self, vendor, protocol, base_url, *, secret=None, credential_ref=None, timeout,
+    ) -> ApiKeyModelsCheck:
         raise EngineUnavailableError
 
     async def observe_source(
@@ -906,6 +929,41 @@ def _pinned_hop(request: Any, backend: str) -> tuple[str, str | None] | None:
     """The exact (Source, model) a Vibey request is pinned to (``x-avibe-pin-source``), if any."""
 
     return getattr(request, "pinned_hop", None) if backend == "vibey" else None
+
+
+_QUOTA_PAUSE_REASONS: Final = frozenset({"quota_exhausted", "rate_limited"})
+# The windows a whole account stops on; a model's own limit never pauses it.
+_ACCOUNT_QUOTA_WINDOWS: Final = frozenset({"session", "weekly", "monthly"})
+
+
+def _paused_for_quota(source: ModelHubSourceConfig, live: SourceRecoveryAnnotation | None) -> bool:
+    """Whether requests are held from this Source for quota or rate, on disk or in the live deadline."""
+
+    if source.state.status == "cooldown":
+        return (source.state.detail_key or "").rsplit(".", 1)[-1] in _QUOTA_PAUSE_REASONS
+    return (
+        source.state.status in {"active", "standby"}
+        and live is not None
+        and live.retry_at is not None
+        and live.reason in _QUOTA_PAUSE_REASONS
+    )
+
+
+def _quota_used_up(reading: Mapping[str, Any], now: datetime) -> bool:
+    """Whether a current vendor reading still shows an account-wide window spent."""
+
+    if reading.get("state") != "ok":
+        return False
+    for window in reading.get("windows") or ():
+        if window.get("kind") not in _ACCOUNT_QUOTA_WINDOWS or window.get("used_pct", 0) < 100:
+            continue
+        resets_at = window.get("resets_at")
+        try:
+            if resets_at is None or parse_model_hub_timestamp(resets_at) > now:
+                return True
+        except ValueError:
+            return True
+    return False
 
 
 def _pin_unavailable(learned: LearnedEvidence | None = None, source_id: str = "") -> ModelHubError:
@@ -1095,6 +1153,8 @@ class ResolvedInvocation:
     # This hop's request asked for the vendor's fast tier, so its served response
     # confirms or not that it ran fast (``docs/plans/fast-mode.md``).
     fast_requested: bool = False
+    # A failed speculative Anthropic request says nothing about ordinary full-request Source health.
+    thread_attempt: bool = False
     # Frozen at final transport admission, including inventory/alias revalidation.
     inventory_member: bool = True
 
@@ -1594,6 +1654,7 @@ class ModelHubService:
             Callable[[], list[tuple[BackendName, str]]]
         ] = None,
         cli_present_override: Optional[Callable[[BackendName], bool]] = None,
+        backend_enabled_override: Optional[Callable[[BackendName], bool]] = None,
         cli_presence_refresh: Optional[
             Callable[[bool, tuple[BackendName, ...] | None], None]
         ] = None,
@@ -1672,6 +1733,9 @@ class ModelHubService:
         # controller owns those Agent rows.
         self.builtin_agent_models_override = builtin_agent_models_override
         self.cli_present_override = cli_present_override
+        # Whether the backend is switched on in Settings · Backends. The controller
+        # owns that runtime fact; without it every backend reads as on.
+        self.backend_enabled_override = backend_enabled_override
         self.cli_presence_refresh = cli_presence_refresh
         self.backend_catalog_changed = backend_catalog_changed
         self.repair_model_selections = repair_model_selections
@@ -1730,7 +1794,16 @@ class ModelHubService:
         self._builtin_snapshot_generations: dict[BackendName, str] = {}
         self._builtin_snapshot_cache: dict[BackendName, list[dict[str, Any]]] = {}
         self._pending_builtin_catalog_refresh: set[BackendName] = set()
-        self.quota = SubscriptionQuotaCache(self._fetch_subscription_quota, now=lambda: self.now())
+        # Reset-card uses: the durable claim per account, and the presses being handled now.
+        # Elapsed time for the wait after an unknown outcome: never the wall clock, which can be set.
+        self.monotonic: Callable[[], float] = time.monotonic
+        self.card_fences = CardFences(
+            paths.get_state_dir() / "model_hub_card_fences", monotonic=lambda: self.monotonic()
+        )
+        self._card_presses: list[card_action.Press] = []
+        self.quota = SubscriptionQuotaCache(
+            self._fetch_subscription_quota, now=lambda: self.now(), monotonic=lambda: self.monotonic()
+        )
         # A cached copy only: the picker read must not wait on the network.
         self.models_dev_catalog: Callable[[], Mapping[str, Any]] = models_dev_catalog or (
             lambda: _cached_models_dev_catalog()
@@ -2029,10 +2102,8 @@ class ModelHubService:
                 self._drop_search_reenable_trial(sid)
         return canonical
 
-    def _persist_config(self, payload: dict) -> ModelHubConfig:
-        """``_save_config``'s blocking half, run off the loop: canonicalize and write."""
-
-        canonical = ModelHubConfig.from_payload(payload)
+    def _permitted_takeover(self, canonical: ModelHubConfig) -> dict | None:
+        """Check the persisted takeover decision before committing either store."""
         try:
             pending = self.migration_journal.load()
         except (TakeoverStateError, OSError):
@@ -2046,6 +2117,13 @@ class ModelHubService:
             # The write-ahead decision must not overwrite intervening route
             # edits on recovery. Finish/revert that decision before new writes.
             raise ModelHubError("migration_item_conflict", status=409)
+        return pending
+
+    def _persist_config(self, payload: dict) -> ModelHubConfig:
+        """``_save_config``'s blocking half, run off the loop: canonicalize and write."""
+        canonical = ModelHubConfig.from_payload(payload)
+        pending = self._permitted_takeover(canonical)
+        reverse = pending is not None and pending["phase"] == "reverting"
         if pending is not None and isinstance(self.store, V2ModelHubConfigStore):
             native_before = pending.get("native_before", {})
             self.store.save_takeover(
@@ -2703,6 +2781,27 @@ class ModelHubService:
             )
         )
 
+    async def _check_api_key_models(
+        self, source: ModelHubSourceConfig, *, secret: str | None = None,
+    ) -> list[DiscoveredModel] | None:
+        """Only a gated listing accepts a key; failed inventory is not rejection."""
+        result = await self._engine_call(self.adapter.check_api_key_models(
+            source.vendor,
+            source.protocol,
+            source.base_url,
+            secret=secret,
+            credential_ref=source.credential_ref if secret is None else None,
+            timeout=_SOURCE_DISCOVERY_TIMEOUT_SECONDS,
+        ))
+        if result.authenticated is False:
+            raise ModelHubError(
+                "discovery_failed", status=422,
+                detail="modelHub.errors.authentication_failed",
+            )
+        if result.authenticated is True:
+            source.verification_pending = None
+        return list(result.models) if result.models is not None else None
+
     @staticmethod
     def _observation_protocols(
         vendor: str,
@@ -3229,27 +3328,38 @@ class ModelHubService:
                 now=self.now(),
             )
 
-    async def _finalize_successful_discovery(
+    async def _finalize_source_discovery(
         self,
         previous: ModelHubConfig,
         updated: ModelHubConfig,
         source: ModelHubSourceConfig,
-        discovered: list[DiscoveredModel],
+        discovered: list[DiscoveredModel] | None,
         *,
         force: bool,
         confirmed_remove_hops: object,
         confirmed_interruptions: object,
     ) -> tuple[list[dict], list[dict]]:
-        """Apply one successful inventory observation and commit it atomically."""
+        """Commit inventory atomically, preserving it when a key check cannot list."""
 
-        manual = [model for model in source.models if model.provenance == "manual"]
-        overrides = self._apply_discovered_models(
-            source,
-            manual,
-            discovered,
-            allow_empty=True,
-        )
-        source.state = ModelHubSourceStateConfig(status="standby")
+        overrides = []
+        if discovered is not None:
+            manual = [model for model in source.models if model.provenance == "manual"]
+            overrides = self._apply_discovered_models(
+                source,
+                manual,
+                discovered,
+                allow_empty=True,
+            )
+        listed = next((item for item in previous.sources if item.id == source.id), None)
+        if not (
+            listed is not None
+            and listed.state.status == "cooldown"
+            and source_identity(listed) == source_identity(source)
+        ):
+            # A listing proves the credential and endpoint, so it retires an
+            # error. It is not inference evidence: any pause of an unchanged
+            # Source (quota, rate, upstream) stays, as its live deadline does.
+            source.state = ModelHubSourceStateConfig(status="standby")
         removed_hops, interrupted = self._guard_inventory_mutation(
             previous,
             updated,
@@ -4596,6 +4706,23 @@ class ModelHubService:
                         detail_key="models.source.error.unclassified",
                     )
 
+            if save_unverified and source.protocol != "search":
+                # Reject before provisioning permanent custody. Public or failed
+                # listings remain saveable; only the gated witness clears pending.
+                discovered = await self._check_api_key_models(
+                    source, secret=cast(str, credential_value),
+                )
+                if discovered is not None:
+                    candidate = ModelHubSourceConfig.from_payload(source.to_payload())
+                    try:
+                        self._apply_discovered_models(
+                            candidate, candidate.models, discovered, allow_empty=True,
+                        )
+                    except ModelHubError:
+                        pass
+                    else:
+                        source = candidate
+
             # AC-29 requires the canonical Source validator to run before any
             # permanent credential is provisioned. The placeholder is never saved.
             try:
@@ -4642,10 +4769,8 @@ class ModelHubService:
                     elif outcome == "unknown" and source.protocol == "search":
                         self._mark_source_unverified(source)
                 source = ModelHubSourceConfig.from_payload(source.to_payload())
-                if save_unverified:
-                    # Inventory is useful, not admission evidence. Work on a
-                    # clone so a failed listing cannot partly replace manual
-                    # entries. The new Source still has one commit/nonce owner.
+                if save_unverified and source.protocol == "search":
+                    # Search admission is separate from model-list witnessing.
                     candidate = ModelHubSourceConfig.from_payload(source.to_payload())
                     try:
                         discovered = await asyncio.wait_for(
@@ -4868,7 +4993,7 @@ class ModelHubService:
                 discovered = (
                     [DiscoveredModel(id=model.id) for model in source.models if not model.retired]
                     if search_balance
-                    else await self._discover(source)
+                    else await self._check_api_key_models(source)
                 )
                 if old_credential_ref != replacement_ref:
                     if any(
@@ -4897,7 +5022,7 @@ class ModelHubService:
                     )
                     await self._commit_synced(previous, config)
                 else:
-                    removed_hops, interrupted = await self._finalize_successful_discovery(
+                    removed_hops, interrupted = await self._finalize_source_discovery(
                         previous,
                         config,
                         source,
@@ -5004,10 +5129,10 @@ class ModelHubService:
                     source.credential_ref = replacement_ref
                     self._mark_source_unverified(source)
                     source.base_url = base_url
-                    discovered = await self._discover(source)
+                    discovered = await self._check_api_key_models(source)
                     self.revocations.add(source.id, old_credential_ref)
                     old_revocation_recorded = True
-                    removed_hops, interrupted = await self._finalize_successful_discovery(
+                    removed_hops, interrupted = await self._finalize_source_discovery(
                         previous,
                         config,
                         source,
@@ -5233,7 +5358,7 @@ class ModelHubService:
 
         before = previous.agents[backend]
         after = updated.agents[backend]
-        if before.mode != "hub" or self.named_agents_override is None:
+        if not removed_model_ids or before.mode != "hub" or self.named_agents_override is None:
             return []
         unavailable_source_ids = self._unavailable_native_sources(updated, backend)
         live_recovery = self.recovery_annotations(updated)
@@ -5415,8 +5540,7 @@ class ModelHubService:
         previous: ModelHubConfig,
         updated: ModelHubConfig,
     ) -> list[dict]:
-        # Inventory evidence narrows speculative candidates without deleting routes.
-        # It also re-targets an inherited hop on a Source that still serves the
+        # Inventory re-targets an inherited hop on a Source that still serves the
         # same row, which is not a removal: a Claude family alias follows the
         # newest member its Source lists. Literal matching inherits only the
         # row's own id, so no other inherited hop can move this way.
@@ -5432,8 +5556,6 @@ class ModelHubService:
                 effective_model_route(previous, backend, menu_model).route_origin,
                 effective_model_route(updated, backend, menu_model).route_origin,
             )
-            if origins == ("passthrough", "automatic"):
-                return False
             return "manual" in origins or (backend, menu_model, item["source_id"]) not in serving
 
         return [item for item in removed if moved_supply(item)]
@@ -5596,7 +5718,7 @@ class ModelHubService:
                 raise ModelHubError("discovery_failed")
             try:
                 model_ids = await self._discover(source)
-                removed_hops, would_interrupt = await self._finalize_successful_discovery(
+                removed_hops, would_interrupt = await self._finalize_source_discovery(
                     previous,
                     config,
                     source,
@@ -6427,6 +6549,10 @@ class ModelHubService:
             # The UI must distinguish an installed backend CLI from a configured
             # Model Hub route. Keep this host fact at the controller boundary.
             "cli_present": self._cli_present(backend),
+            # Switched on in Settings · Backends. Orthogonal to cli_present: an
+            # installed CLI can be off, and the Models page draws an off backend
+            # as off rather than as a live route.
+            "backend_enabled": self._backend_enabled(backend),
             "sources": sources,
             "supply_status": (
                 resolution.supply_status
@@ -6496,7 +6622,7 @@ class ModelHubService:
         return suppliers, display_name, reasoning_efforts
 
     def _models_dev_descriptions(self, model_ids: list[str], *, fetch_catalog: bool = True) -> dict[str, dict]:
-        """Exact models.dev matches for provider candidates; empty when unknown.
+        """Conservative models.dev descriptions for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
         candidate as its suppliers describe it rather than failing the picker.
@@ -6504,11 +6630,11 @@ class ModelHubService:
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import cached_models_dev_catalog, exact_models_dev_matches
+        from vibe.models_dev_catalog import cached_models_dev_catalog, models_dev_metadata_matches
 
         try:
             catalog = self.models_dev_catalog() if fetch_catalog else cached_models_dev_catalog()
-            return exact_models_dev_matches(model_ids, dict(catalog))
+            return models_dev_metadata_matches(model_ids, dict(catalog))
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -6678,6 +6804,7 @@ class ModelHubService:
                         field: getattr(admitted, field)
                         for field in enriched_fields
                     },
+                    **({"match_kind": described[model_id]["match_kind"]} if enriched_fields else {}),
                     **protocol_payload(admitted.id),
                 }
             )
@@ -6739,6 +6866,17 @@ class ModelHubService:
         except Exception:
             logger.warning("Model Hub CLI presence refresh failed", exc_info=True)
 
+    def _backend_enabled(self, backend: BackendName) -> bool:
+        # Vibey is built in and cannot be switched off. An unknown answer reads
+        # as on, so a failed probe never hides a backend that may be running.
+        if backend == "vibey" or self.backend_enabled_override is None:
+            return True
+        try:
+            return bool(self.backend_enabled_override(backend))
+        except Exception:
+            logger.warning("Model Hub backend enablement probe failed for %s", backend, exc_info=True)
+            return True
+
     def _cli_present(self, backend: BackendName) -> bool:
         if backend == "vibey":
             return False
@@ -6788,8 +6926,9 @@ class ModelHubService:
         selection itself is untouched, so switching back to Direct still runs
         it. A row the user removed stays removed, and a selection nothing
         serves stays visible as an Agent that needs attention. During migration,
-        a static Source carried from that selection's native provider can instead
-        retain it by passthrough, without claiming an upstream inventory.
+        a static Source carried from that selection's native provider can retain
+        the menu identity without claiming inventory or automatic supply. The
+        selection remains unsupplied until discovery or an explicit manual hop.
         """
 
         if self.named_agents_override is None:
@@ -7077,7 +7216,7 @@ class ModelHubService:
         A provider row takes models.dev's description as it is written (see
         ``_provider_candidate``). Written before any copy was cached, by the
         picker or a seed, it has none, and an Agent budgets it with default
-        limits. Once a copy names its id exactly, the row gets each limit it
+        limits. Once a copy describes its id, the row gets each limit it
         lacks and the ``models_dev_id`` they came from. A limit already set
         stands, and a row models.dev has described is not described again, so
         a limit its user cleared stays cleared. Built-in rows are their CLI's
@@ -8092,6 +8231,10 @@ class ModelHubService:
             raise ModelHubError("backend_model_catalog_invalid")
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
+            # A caller may echo the candidate projection. Provenance describes
+            # the lookup, not the stored backend row (which keeps models_dev_id).
+            if isinstance(item, dict) and "match_kind" in item:
+                item = {key: value for key, value in item.items() if key != "match_kind"}
             if backend == "claude" and isinstance(item, dict) and item.get("id") == "default":
                 raise ModelHubError("backend_model_id_invalid")
             try:
@@ -8482,6 +8625,7 @@ class ModelHubService:
         models: object,
         *,
         expected_suppliers: object = None,
+        renames: object = ...,
         force: bool = False,
         confirmed_remove_hops: object = None,
         confirmed_interruptions: object = None,
@@ -8499,6 +8643,38 @@ class ModelHubService:
                 models,
             )
 
+            # Re-key the staged catalog AND optimistic baseline before ordinary list merging.
+            # Consequently this identity change is neither an addition nor a guarded removal.
+            moves = {} if renames is ... else renames
+            if not isinstance(moves, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in moves.items()):
+                raise ModelHubError("backend_model_conflict", status=409)
+            if len(set(moves.values())) != len(moves) or set(moves).intersection(moves.values()):
+                raise ModelHubError("backend_model_conflict", status=409)
+            if moves:
+                current = {row.id: row for row in agent.models}
+                base = {row.id: row for row in baseline_models}
+                desired_ids = {row.id for row in desired_models}
+                for old, new in moves.items():
+                    if (
+                        old not in base or current.get(old) != base[old]
+                        or new in base or new in current or new in agent.routes
+                        or old in desired_ids or new not in desired_ids
+                    ):
+                        raise ModelHubError("backend_model_conflict", status=409)
+                    if self._catalog_model_payload(current[old])["locked"]:
+                        raise ModelHubError("backend_model_locked", status=409)
+                    refusal = self._backend_model_admission_error(cast(BackendName, backend), new)
+                    if refusal:
+                        raise ModelHubError(refusal)
+                    if old in agent.routes:
+                        agent.routes[new] = agent.routes.pop(old)
+                    if old not in agent.removed_model_ids:
+                        # Suppression belongs to the vacated identity, not the row's origin.
+                        # A built-in can have been removed and then manually re-added.
+                        agent.removed_model_ids.append(old)
+                agent.removed_model_ids = [mid for mid in agent.removed_model_ids if mid not in moves.values()]
+                agent.models = [replace(row, id=moves[row.id]) if row.id in moves else row for row in agent.models]
+                baseline_models = [replace(row, id=moves[row.id]) if row.id in moves else row for row in baseline_models]
             current_by_id = {model.id: model for model in agent.models}
             baseline_by_id = {model.id: model for model in baseline_models}
             desired_by_id = {model.id: model for model in desired_models}
@@ -8694,7 +8870,38 @@ class ModelHubService:
                 would_interrupt=interrupted,
                 error="backend_model_in_route",
             )
-            await self._commit_synced(previous, config)
+            if moves:
+                # Validate the entire prospective document and recovery gate before the SQLite commit.
+                # A failed file replacement leaves the old catalog retryable: the same SQL is a no-op.
+                from storage.model_selection_rename import SelectionChanged, rename_selections
+
+                prior_menu_ids = (
+                    frozenset(row.id for row in previous.agents[backend].models)
+                    if backend == "opencode" and previous.agents[backend].mode == "hub" else None
+                )
+                # An old provider-qualified spelling can name a different moved row.
+                # Such a destination is ambiguous on a retry after SQLite commits.
+                if prior_menu_ids is not None and any(
+                    (resolved := opencode_menu_model_id(new, prior_menu_ids)) in prior_menu_ids and resolved != old
+                    for old, new in moves.items()
+                ):
+                    raise ModelHubError("backend_model_conflict", status=409)
+
+                def move_selections() -> None:
+                    canonical = ModelHubConfig.from_payload(config.to_payload())
+                    self._ensure_config_writable()
+                    self._permitted_takeover(canonical)
+                    rename_selections(backend, moves, opencode_menu_ids=prior_menu_ids)
+
+                try:
+                    await run_owned_in_thread(move_selections)
+                except SelectionChanged:
+                    # Concurrent SQLite writes exhausted the bounded replans.
+                    # The catalog baseline is still valid; retry the same draft.
+                    raise ModelHubError("backend_model_store_busy", status=503) from None
+            # SQLite selections now refer to the new catalog. Engine sync failure
+            # must not roll the file back over them; reconcile on next demand.
+            await self._commit_synced(previous, config, rollback_on_sync_failure=not moves)
             await self._refresh_backend_catalog(cast(BackendName, backend))
             committed = self.store.load()
             result = {
@@ -9008,16 +9215,46 @@ class ModelHubService:
             )
         return refs
 
-    async def quota_summary(self, *, force: bool = False) -> dict:
+    async def use_reset_card(self, source_id: object, payload: object) -> dict:
+        """Use one reset card of the kind in ``payload`` on this Source's account.
+
+        Reached only from the Web route, over the private controller route that
+        carries it: deliberately not an operation of ``dispatch_model_hub_rpc``,
+        so the `vibe` CLI and Agent tools cannot ask for it. The rules it keeps
+        are in ``card_action``.
+        """
+
+        return await card_action.use(self, source_id, payload)
+
+    async def quota_summary(self, *, force: bool = False, wait: bool = True) -> dict:
         """Report each hub-held subscription's rate-limit windows.
 
-        A report only, like usage metering: nothing in resolution reads it. The
-        cache re-reads a Source at most every five minutes, or every thirty
-        seconds when forced, and keeps the last good snapshot across failures.
+        A report, like usage metering: resolution never reads it. The cache
+        re-reads a Source at most every five minutes, or every thirty seconds
+        when forced, and keeps the last good snapshot across failures.
+
+        A forced read is the user's refresh, and it is the one place the report
+        is acted on: an account paused for quota or rate is resumed unless the
+        vendor's reading still shows the limit used up.
+
+        ``wait=False`` is for the answer to a reset-card use: what is known now,
+        without waiting for another account's reading.
         """
 
         sources = await asyncio.to_thread(self._quota_sources)
-        summary = await self.quota.summary(sources, force=force)
+        # A reset-card use whose outcome is unknown is answered only here, by the
+        # user's own refresh: once that account's wait is over, its Sources get a
+        # reading begun since (shared by concurrent refreshes, held back by a
+        # vendor's rate-limit cooldown), and a recognised reading of the same
+        # account lifts its lock. An earlier refresh reads as usual and leaves the
+        # lock. A read that is not forced asks no vendor on a lock's behalf.
+        unknown = await card_action.unknown_floors(self) if force else {}
+        summary = await self.quota.summary(sources, force=force, answering=unknown, wait=wait)
+        if unknown:
+            await card_action.lift_unknown(self, sources)
+        await card_action.overlay(self, sources, summary)
+        if force:
+            await self._resume_accounts_with_quota(summary)
         try:
             summary["value"] = await asyncio.to_thread(self._quota_values, summary["sources"])
         except Exception:  # noqa: BLE001 - the valuation is optional; the windows are not
@@ -9025,6 +9262,66 @@ class ModelHubService:
             for source in summary["sources"]:
                 source.pop("value", None)
         return summary
+
+    async def _resume_accounts_with_quota(self, summary: Mapping[str, Any]) -> None:
+        """Lift the quota or rate pause of each account the vendor no longer reports as used up.
+
+        The pause lasts until the reset time the vendor gave with its refusal and
+        is never probed early, so a reset on the vendor's side is invisible until
+        the user asks. Where the reading cannot be had, the next request asks the
+        vendor instead: a refusal there pauses the account again with the
+        vendor's own time. An expired sign-in and a read still running are left
+        as they are.
+        """
+
+        pending = set(summary.get("pending") or ())
+        readings = {
+            reading["source_id"]: reading
+            for reading in summary["sources"]
+            if reading["source_id"] not in pending and reading["state"] != "auth_expired"
+        }
+        if not readings:
+            return
+        async with self._mutation_lock:
+            config = await asyncio.to_thread(self.store.load)
+            annotations = self.recovery.annotations(config)
+            now = self.now()
+            updated = config
+            resumed: list[ModelHubSourceConfig] = []
+            for source in config.sources:
+                reading = readings.get(source.id)
+                if (
+                    reading is None
+                    or source.supply_channel != "hub"
+                    or not _paused_for_quota(source, annotations.get(source.id))
+                    or _quota_used_up(reading, now)
+                ):
+                    continue
+                # The same retirement a verified response makes, on the user's word.
+                # Like it, the refresh outranks every attempt admitted before it:
+                # a refusal the vendor gave before the reset must not pause the
+                # account again when it settles afterwards.
+                self._latest_source_attempt_generation[source.id] = self._mint_settlement_generation()
+                self.recovery.succeeded(source)
+                resumed.append(source)
+                if source.state.status == "cooldown":
+                    updated = self._replace_source(
+                        updated, replace(source, state=ModelHubSourceStateConfig(status="standby")),
+                    )
+            if updated is not config:
+                try:
+                    await self._save_runtime_config(config, updated)
+                except OSError:
+                    # The live deadline is already retired; the policy remembers
+                    # which saved pause must not be read back.
+                    logger.warning("Could not persist Model Hub resumed state")
+        for source in resumed:
+            # The event log is read and rewritten on disk: off the loop, outside the lock.
+            await asyncio.to_thread(
+                self._record_event,
+                agent="system", kind="recover", model_id=None, reason="recovery",
+                to_source=source.id, to_label=source.display_name, now=now,
+            )
 
     def _quota_values(self, sources: list[dict[str, Any]]) -> dict[str, Any]:
         config = self.store.load()
@@ -9672,7 +9969,7 @@ class ModelHubService:
                 async for _chunk in handle.stream:
                     pass
             outcome = await self._engine_call(handle.outcome())
-            decision = await self._classify_source_outcome(source, outcome)
+            decision = await self._classify_source_outcome(source, outcome, inventory_member=inventory_member)
             if decision.action == "refresh":
                 await handle.close_stream()
                 self.recovery.release(source.id, settlement_generation)
@@ -9691,7 +9988,7 @@ class ModelHubService:
                     async for _chunk in handle.stream:
                         pass
                 outcome = await self._engine_call(handle.outcome())
-                decision = classify_outcome(outcome, refresh_attempted=True)
+                decision = classify_outcome(outcome, refresh_attempted=True, inventory_member=inventory_member)
             elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
             reachable = decision.action == "return"
             if reachable:
@@ -9718,7 +10015,6 @@ class ModelHubService:
                         detail_key=error_key,
                         settlement_generation=settlement_generation,
                         outcome=outcome,
-                        inventory_member=inventory_member,
                     )
             return {
                 "contract_version": PROBE_RESULT_CONTRACT_VERSION,
@@ -10564,28 +10860,12 @@ class ModelHubService:
         detail_key: Optional[str] = None,
         settlement_generation: Optional[int] = None,
         outcome: RawCallOutcome | None = None,
-        inventory_member: bool = True,
-        recovery_request: RecoveryRequest | None = None,
-        recovery_identity: tuple | None = None,
     ) -> tuple[EventReason, bool]:
         """Persist one fallback-class Source result before the turn settles."""
 
         if decision.reason is None:
             raise AssertionError("fallback-class outcome must retain its Source reason")
         event_reason = cast(EventReason, decision.reason)
-        if (
-            not inventory_member and source.supply_channel == "hub"
-            and outcome is not None and outcome.kind is RawOutcomeKind.HTTP_ERROR
-            and outcome.http_status == 503 and decision.reason == "server_error"
-        ):
-            # This model's refusal is not evidence against the whole provider.
-            # Each request still owes its own backoff, even when another admission
-            # superseded this attempt's shared settlement generation.
-            self.recovery.release(source.id, settlement_generation)
-            if recovery_request is not None:
-                assert recovery_identity is not None
-                recovery_request.defer_unlisted(source.id, recovery_identity, outcome)
-            return event_reason, False
         settlement_rule = source_settlement_rule(event_reason)
         if decision.reason == "network" and outcome is not None and outcome.stream_started:
             return event_reason, False
@@ -10711,6 +10991,7 @@ class ModelHubService:
         outcome: RawCallOutcome,
         decision: ResolutionDecision,
         source_transition_persisted: bool | None = None,
+        inventory_member: bool = True,
     ) -> TurnOutcomeProjectionInput | None:
         """Produce the sole complete terminal projection after attempt settlement."""
 
@@ -10732,6 +11013,11 @@ class ModelHubService:
                 config=config,
                 resolution=resolution,
                 upstream_detail=outcome.upstream_detail,
+                # Identifies the refusing hop only; this row appends no suffix.
+                last_upstream_failure=self._upstream_failure(
+                    self._source_label(config, source_id), outcome, source_id=source_id,
+                    model_id=source_model_id, inventory_member=inventory_member,
+                ),
             )
         if category == "upstream_protocol":
             # The Gateway's existing protocol-error copy is the positive row;
@@ -10758,21 +11044,28 @@ class ModelHubService:
             backend=backend,
             model_id=model_id,
         )
-        source_label = next(
-            (source.display_name for source in config.sources if source.id == source_id), source_id,
-        )
         return produce_turn_outcome(
             "turn.streamed_fallback",
             config=config,
             resolution=resolution,
             attempted_hop=(source_id, source_model_id),
             source_transition_persisted=source_transition_persisted,
-            last_upstream_failure=self._upstream_failure(source_label, outcome, source_id=source_id),
+            last_upstream_failure=self._upstream_failure(
+                self._source_label(config, source_id), outcome, source_id=source_id,
+                model_id=source_model_id, inventory_member=inventory_member,
+            ),
+        )
+
+    @staticmethod
+    def _source_label(config: ModelHubConfig, source_id: str) -> str:
+        return next(
+            (source.display_name for source in config.sources if source.id == source_id), source_id,
         )
 
     @staticmethod
     def _upstream_failure(
         source_label: str, outcome: RawCallOutcome, *, source_id: str = "",
+        model_id: str = "", inventory_member: bool = True,
     ) -> TurnUpstreamFailure | None:
         if not outcome.upstream_detail and outcome.kind is not RawOutcomeKind.HTTP_ERROR:
             return None
@@ -10784,6 +11077,8 @@ class ModelHubService:
                 detail=outcome.upstream_detail,
                 connection_error=True,
                 source_id=source_id,
+                model_id=model_id,
+                inventory_member=inventory_member,
             )
         status = outcome.http_status
         return TurnUpstreamFailure(
@@ -10795,6 +11090,8 @@ class ModelHubService:
             ),
             detail=outcome.upstream_detail or "",
             source_id=source_id,
+            model_id=model_id,
+            inventory_member=inventory_member,
         )
 
     @staticmethod
@@ -10931,6 +11228,7 @@ class ModelHubService:
         decision = await self._classify_credential_outcome(
             resolved.credential_ref,
             outcome,
+            inventory_member=resolved.inventory_member,
         )
         # Only the gateway can grant this after matching the exact overload
         # in a fully buffered, uncommitted Responses body. Keep the upstream
@@ -10979,6 +11277,7 @@ class ModelHubService:
         source_transition_persisted: bool | None = None
         if decision.reason is not None:
             source_transition_persisted = False
+        if decision.reason is not None and not resolved.thread_attempt:
             config = self.store.load()
             source = next(
                 (item for item in config.sources if item.id == resolved.source_id),
@@ -10992,7 +11291,6 @@ class ModelHubService:
                     model_id=resolved.requested_model_id,
                     settlement_generation=resolved.settlement_generation,
                     outcome=outcome,
-                    inventory_member=resolved.inventory_member,
                 )
         if retry_overload:
             # An attempt failed, not the Turn. The resolver still owns its
@@ -11009,6 +11307,7 @@ class ModelHubService:
                 outcome=outcome,
                 decision=decision,
                 source_transition_persisted=source_transition_persisted,
+                inventory_member=resolved.inventory_member,
             ),
         )
 
@@ -11064,7 +11363,6 @@ class ModelHubService:
         backend: BackendName,
         model_id: str,
         supply_channel: Literal["hub"] | None = None,
-        recovery_request: RecoveryRequest | None = None,
     ) -> ModelHubTurnResolution:
         if config.agents[backend].mode != "hub":
             # Only Hub turns reach the gateway. One admitted before a switch to
@@ -11073,8 +11371,6 @@ class ModelHubService:
             config = self._clone_config(config)
             config.agents[backend].mode = "hub"
         live_recovery = self.recovery_annotations(config)
-        if recovery_request is not None:
-            live_recovery = recovery_request.annotations(config, live_recovery)
         resolution = resolve_model_hub_turn(
             config,
             backend,
@@ -11128,7 +11424,7 @@ class ModelHubService:
             try:
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, backend, requested_model_id, supply_channel, recovery_request,
+                    config, backend, requested_model_id, supply_channel,
                 )
                 pinned_hop = _pinned_hop(request, backend)
                 candidates = [
@@ -11409,7 +11705,7 @@ class ModelHubService:
         decision: ResolutionDecision,
         settlement_generation: int,
         attempt_observer: Optional[AttemptObserver],
-        inventory_member: bool,
+        thread_attempt: bool = False,
     ) -> None:
         """Persist facts from an upstream call that beat downstream cancellation."""
 
@@ -11424,12 +11720,12 @@ class ModelHubService:
                 (),
                 (),
                 HopOrigin(source.vendor, source.protocol, source_model_id, source.id, identity_digest(source))
-                if backend == "vibey" else None,
+                if backend == "vibey"
+                else None,
             )
-        if decision.action == "fallback" or (
-            decision.action == "surface"
-            and outcome.stream_started
-            and decision.reason is not None
+        if not thread_attempt and (
+            decision.action == "fallback"
+            or (decision.action == "surface" and outcome.stream_started and decision.reason is not None)
         ):
             await self._settle_fallback_source(
                 source,
@@ -11438,7 +11734,6 @@ class ModelHubService:
                 model_id=requested_model_id,
                 settlement_generation=settlement_generation,
                 outcome=outcome,
-                inventory_member=inventory_member,
             )
         elif decision.action == "return" and self._verified_recovery_outcome(outcome):
             await self._record_recovery_success(
@@ -11504,10 +11799,12 @@ class ModelHubService:
         self,
         source: ModelHubSourceConfig,
         outcome: RawCallOutcome,
+        *,
+        inventory_member: bool = True,
     ) -> ResolutionDecision:
         """Apply the credential-capability branch of the section 4.3 matrix once."""
 
-        decision = classify_outcome(outcome)
+        decision = classify_outcome(outcome, inventory_member=inventory_member)
         if decision.action != "refresh":
             return decision
         return await self._classify_credential_outcome(
@@ -11522,10 +11819,11 @@ class ModelHubService:
         outcome: RawCallOutcome,
         *,
         decision: Optional[ResolutionDecision] = None,
+        inventory_member: bool = True,
     ) -> ResolutionDecision:
         """Resolve one credential failure using its exact refresh capability."""
 
-        decision = decision or classify_outcome(outcome)
+        decision = decision or classify_outcome(outcome, inventory_member=inventory_member)
         if decision.action != "refresh":
             return decision
         if not credential_ref:
@@ -11562,6 +11860,11 @@ class ModelHubService:
         if backend not in MODEL_HUB_BACKENDS:
             raise ModelHubError("mapping_target_unavailable")
         pinned_hop = _pinned_hop(request, backend)
+        thread_attempt = (
+            pinned_hop is not None
+            and getattr(request, "protocol", None) == "anthropic"
+            and thread_mode(request) in ("continue", "create")
+        )
         hosted = (
             # A walk of the whole history, so off the controller loop.
             await asyncio.to_thread(
@@ -11592,7 +11895,7 @@ class ModelHubService:
         async with self._mutation_lock:
             config = self.store.load()
             resolution = self._invocation_resolution(
-                config, cast(BackendName, backend), model_id, supply_channel, recovery_request,
+                config, cast(BackendName, backend), model_id, supply_channel,
             )
         event_agent = cast(EventAgent, backend)
         candidate_hops = list(resolution.candidate_hops)
@@ -11652,7 +11955,7 @@ class ModelHubService:
                     break
                 config = self.store.load()
                 resolution = self._invocation_resolution(
-                    config, cast(BackendName, backend), model_id, supply_channel, recovery_request,
+                    config, cast(BackendName, backend), model_id, supply_channel,
                 )
                 inspection = next(
                     (
@@ -11695,14 +11998,12 @@ class ModelHubService:
                 )
             settlement_generation = None
             inventory_member = True
-            recovery_identity = None
 
             def admitted(generation: int, listed: bool) -> None:
-                nonlocal attempted, settlement_generation, inventory_member, recovery_identity
+                nonlocal attempted, settlement_generation, inventory_member
                 attempted = True
                 settlement_generation = generation
                 inventory_member = listed
-                recovery_identity = source_identity(source)
                 if recovery_request is not None:
                     recovery_request.attempt_count += 1
                     recovery_request.source_id = source.id
@@ -11790,11 +12091,12 @@ class ModelHubService:
                     verification_pending=verification_pending,
                     origin=origin,
                     source_identity=identity,
+                    thread_attempt=thread_attempt,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                     inventory_member=inventory_member,
                 )
-            decision = await self._classify_source_outcome(source, outcome)
+            decision = await self._classify_source_outcome(source, outcome, inventory_member=inventory_member)
             learned = await self._learn_capability_evidence(source, target_model, request, outcome)
             if cancelled is not None:
                 await self._settle_cancelled_attempt(
@@ -11805,8 +12107,8 @@ class ModelHubService:
                     outcome=outcome,
                     decision=decision,
                     settlement_generation=settlement_generation,
+                    thread_attempt=thread_attempt,
                     attempt_observer=attempt_observer,
-                    inventory_member=inventory_member,
                 )
                 raise cancelled
             if decision.action == "refresh":
@@ -11861,11 +12163,12 @@ class ModelHubService:
                         verification_pending=verification_pending,
                         origin=origin,
                         source_identity=identity,
+                        thread_attempt=thread_attempt,
                         hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                         fast_requested=_asks_fast_tier(fast_catalog, source, target_model, request),
                         inventory_member=inventory_member,
                     )
-                decision = classify_outcome(outcome, refresh_attempted=True)
+                decision = classify_outcome(outcome, refresh_attempted=True, inventory_member=inventory_member)
                 learned = await self._learn_capability_evidence(source, target_model, request, outcome)
                 if cancelled is not None:
                     await self._settle_cancelled_attempt(
@@ -11876,8 +12179,8 @@ class ModelHubService:
                         outcome=outcome,
                         decision=decision,
                         settlement_generation=settlement_generation,
+                        thread_attempt=thread_attempt,
                         attempt_observer=attempt_observer,
-                        inventory_member=inventory_member,
                     )
                     raise cancelled
             if attempt_observer is not None and settlement_generation is not None:
@@ -11941,6 +12244,7 @@ class ModelHubService:
                 source_transition_persisted: bool | None = None
                 if outcome.stream_started and decision.reason is not None:
                     source_transition_persisted = False
+                if outcome.stream_started and decision.reason is not None and not thread_attempt:
                     _reason, source_transition_persisted = await self._settle_fallback_source(
                         source,
                         decision,
@@ -11948,7 +12252,6 @@ class ModelHubService:
                         model_id=model_id,
                         settlement_generation=settlement_generation,
                         outcome=outcome,
-                        inventory_member=inventory_member,
                     )
                 raise ModelHubError(
                     decision.error_code or outcome.error_code or "engine_down",
@@ -11971,9 +12274,13 @@ class ModelHubService:
                         outcome=outcome,
                         decision=decision,
                         source_transition_persisted=source_transition_persisted,
+                        inventory_member=inventory_member,
                     ),
                 )
             if decision.action == "fallback" and pinned_hop is not None:
+                if thread_attempt:
+                    self.recovery.release(source.id, settlement_generation)
+                    raise _pin_unavailable()
                 # A failure normal routing would fail over from. The Source's
                 # health is settled as usual; the request goes back to Vibey,
                 # which re-renders it in portable form and sends it unpinned.
@@ -11984,7 +12291,6 @@ class ModelHubService:
                     model_id=model_id,
                     settlement_generation=settlement_generation,
                     outcome=outcome,
-                    inventory_member=inventory_member,
                 )
                 raise _pin_unavailable()
             if decision.action == "fallback":
@@ -11996,7 +12302,10 @@ class ModelHubService:
                     recovery_request.non_retryable_failure = True
                 # The newest refusal wins even without text: an older message
                 # would name a response that did not end this request.
-                last_upstream_failure = self._upstream_failure(source.display_name, outcome, source_id=source.id)
+                last_upstream_failure = self._upstream_failure(
+                    source.display_name, outcome, source_id=source.id,
+                    model_id=target_model, inventory_member=inventory_member,
+                )
                 if recovery_request is not None:
                     recovery_request.last_upstream_failure = last_upstream_failure
                 event_reason, _persisted = await self._settle_fallback_source(
@@ -12006,9 +12315,6 @@ class ModelHubService:
                     model_id=model_id,
                     settlement_generation=settlement_generation,
                     outcome=outcome,
-                    inventory_member=inventory_member,
-                    recovery_request=recovery_request,
-                    recovery_identity=recovery_identity,
                 )
                 globally_blocked_source_ids.add(source.id)
                 failed_source = source
@@ -12120,6 +12426,7 @@ class ModelHubService:
                     pending.reason = "server_error"
                     pending.last_upstream_failure = self._upstream_failure(
                         resolved.source_label, retry_outcome, source_id=resolved.source_id,
+                        model_id=resolved.model_id, inventory_member=resolved.inventory_member,
                     )
                     if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
                         # Never replay opaque continuation content on a different
@@ -12138,7 +12445,7 @@ class ModelHubService:
                         raise self._recovery_exhausted(exc, pending.reason) from exc
                     config = self.store.load()
                     resolution = self._invocation_resolution(
-                        config, kwargs["backend"], kwargs["model_id"], supply_channel, pending,
+                        config, kwargs["backend"], kwargs["model_id"], supply_channel,
                     )
                     request = kwargs.get("request")
                     if any(
@@ -12156,7 +12463,7 @@ class ModelHubService:
                     waitable = resolution.self_healing_hops(supply_channel)
                     if not waitable:
                         raise
-                    annotations = pending.annotations(config, self.recovery.annotations(config))
+                    annotations = self.recovery.annotations(config)
                     waits = [
                         (
                             max(0.0, (parse_model_hub_timestamp(hop.retry_at) - self.now()).total_seconds()),
@@ -12216,6 +12523,7 @@ def create_default_service(
         Callable[[], list[tuple[BackendName, str]]]
     ] = None,
     cli_present_override: Optional[Callable[[BackendName], bool]] = None,
+    backend_enabled_override: Optional[Callable[[BackendName], bool]] = None,
     cli_presence_refresh: Optional[
         Callable[[bool, tuple[BackendName, ...] | None], None]
     ] = None,
@@ -12277,6 +12585,7 @@ def create_default_service(
         named_agents_override=named_agents_override,
         builtin_agent_models_override=builtin_agent_models_override,
         cli_present_override=cli_present_override,
+        backend_enabled_override=backend_enabled_override,
         cli_presence_refresh=cli_presence_refresh,
         backend_catalog_changed=backend_catalog_changed,
         repair_model_selections=repair_model_selections,

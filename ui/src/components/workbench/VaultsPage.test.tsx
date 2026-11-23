@@ -41,7 +41,7 @@ const api = vi.hoisted(() => ({
   listSkills: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
-const revealProtectedValue = vi.hoisted(() => vi.fn());
+const revealProtectedSecret = vi.hoisted(() => vi.fn());
 const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
 const remoteOwner = {
   remote: true,
@@ -77,7 +77,7 @@ vi.mock('../../context/ToastContext', () => ({
 }));
 
 vi.mock('../../lib/useProtectedVault', () => ({
-  useProtectedVault: () => ({ revealProtectedValue, status: 'locked', refresh: vi.fn(), hasPasskey: () => false }),
+  useProtectedVault: () => ({ revealProtectedSecret, status: 'locked', refresh: vi.fn(), hasPasskey: () => false }),
   useVaultSandboxWarm,
   useVaultLock: () => ({ unlocked: false, remainingMs: 0, lockNow: vi.fn() }),
 }));
@@ -209,11 +209,11 @@ describe('PERMISSIONS-013 VaultsPage capability-gated management actions', () =>
   const cases = [
     {
       label: 'Editor', context: editor, canRevoke: true, hasSettings: false,
-      protectedMenu: ['Show value', 'Copy value'], standardMenu: null,
+      protectedMenu: ['View secret'], standardMenu: null,
     },
     {
       label: 'Member', context: member, canRevoke: true, hasSettings: true,
-      protectedMenu: ['Show value', 'Copy value', 'Edit key', 'Delete'], standardMenu: ['Edit key', 'Delete'],
+      protectedMenu: ['View secret', 'Edit key', 'Delete'], standardMenu: ['Edit key', 'Delete'],
     },
   ] as const;
 
@@ -559,7 +559,7 @@ describe('VaultsPage list discovery', () => {
   it('consumes a reveal handoff without dropping the saved view', async () => {
     api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {} });
     renderPage(remoteOwner, '/vaults?q=alpha&tag=shared&skill=release&filter=protected&sort=recent&reveal=alpha&other=keep');
-    await screen.findByRole('menuitem', { name: 'Show value' });
+    await screen.findByRole('menuitem', { name: 'View secret' });
     await waitFor(() => expect(Object.fromEntries(params())).toEqual({ q: 'alpha', tag: 'shared', skill: 'release', filter: 'protected', sort: 'recent', other: 'keep' }));
     expect(names()).toEqual(['alpha']);
   });
@@ -567,7 +567,7 @@ describe('VaultsPage list discovery', () => {
   it('opens a reveal target hidden by saved filters, clearing those filters but keeping sort', async () => {
     api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {} });
     renderPage(remoteOwner, '/vaults?q=zeta&tag=z-only&skill=missing&filter=unused&sort=added&reveal=alpha&other=keep');
-    await screen.findByRole('menuitem', { name: 'Show value' });
+    await screen.findByRole('menuitem', { name: 'View secret' });
     await waitFor(() => expect(Object.fromEntries(params())).toEqual({ sort: 'added', other: 'keep' }));
     expect(names()).toEqual(['zeta', 'beta', 'alpha']);
   });
@@ -636,7 +636,7 @@ describe('VaultsPage protected reveal', () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     stubReleaseFetch();
     api.listVaultSecrets.mockResolvedValue({ secrets: [protectedSecret('alpha')] });
-    revealProtectedValue.mockResolvedValue(undefined);
+    revealProtectedSecret.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -645,7 +645,7 @@ describe('VaultsPage protected reveal', () => {
     vi.useRealTimers();
   });
 
-  const showValue = () => screen.getByRole('menuitem', { name: 'Show value' }) as HTMLButtonElement;
+  const showValue = () => screen.getByRole('menuitem', { name: 'View secret' }) as HTMLButtonElement;
 
   const openMenu = async (index = 0) => {
     const user = userEvent.setup();
@@ -666,7 +666,7 @@ describe('VaultsPage protected reveal', () => {
     fireEvent.click(showValue());
     expect(api.createVaultRevealContext).not.toHaveBeenCalled();
     expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
-    expect(revealProtectedValue).not.toHaveBeenCalled();
+    expect(revealProtectedSecret).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -681,7 +681,7 @@ describe('VaultsPage protected reveal', () => {
     const open = vi.spyOn(window, 'open');
     fireEvent.click(showValue());
     await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(en.errors.sandbox_browser_unavailable, 'warning'));
-    expect(revealProtectedValue).not.toHaveBeenCalled();
+    expect(revealProtectedSecret).not.toHaveBeenCalled();
     expect(open).not.toHaveBeenCalled();
   });
 
@@ -689,13 +689,13 @@ describe('VaultsPage protected reveal', () => {
     // Keep the public hook operation pending while the REAL opener verifies source-fixture bytes.
     // Settling it immediately would close the handle before asynchronous verification can finish.
     let finish!: () => void;
-    revealProtectedValue.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    revealProtectedSecret.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
     const popup = stubBlankPopup();
     const open = vi.mocked(window.open);
     await vi.waitFor(() => expect(showValue().disabled).toBe(false));
     fireEvent.click(showValue());
     // Asserted synchronously after the click dispatch, before any awaited work can run.
-    expect(open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank', 'popup,width=520,height=760');
+    expect(open).toHaveBeenCalledExactlyOnceWith('about:blank', '_blank', expect.stringMatching(/^popup,width=520,height=760,left=\d+,top=\d+$/));
     expect(popup.location.replace).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(popup.location.replace).toHaveBeenCalledOnce());
     const opened = new URL(String(popup.location.replace.mock.calls[0][0]));
@@ -704,8 +704,8 @@ describe('VaultsPage protected reveal', () => {
     const params = new URLSearchParams(opened.hash.slice(1));
     expect(params.get('mode')).toBe('authorize');
     expect(params.get('id')).toMatch(/^[a-f0-9]{32}$/);
-    await vi.waitFor(() => expect(revealProtectedValue).toHaveBeenCalledOnce());
-    expect(revealProtectedValue.mock.calls[0][2]).toBe(params.get('id'));
+    await vi.waitFor(() => expect(revealProtectedSecret).toHaveBeenCalledOnce());
+    expect(revealProtectedSecret.mock.calls[0][2]).toBe(params.get('id'));
     finish();
     await vi.waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
     expect(popup.closed).toBe(true);
@@ -723,11 +723,11 @@ describe('VaultsPage protected reveal', () => {
     await openMenu();
     await clickShowValue();
 
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual(revealed);
+    expect(revealProtectedSecret.mock.calls[0][0][0].context).toEqual(revealed);
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(fetches);
   });
 
-  it('keeps the fields warning visible and exposes the current named field line', async () => {
+  it('keeps the fields warning visible, and offers one View secret entry with no field picker or copy entry', async () => {
     api.listVaultSecrets.mockResolvedValue({
       secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'], fields_state: 'corrupt' }],
     });
@@ -735,31 +735,54 @@ describe('VaultsPage protected reveal', () => {
     expect(await screen.findByText(/password/)).toBeTruthy();
     expect(screen.getByRole('alert')).toBeTruthy();
     await openMenu();
-    expect(screen.getByRole('combobox', { name: 'Field to reveal' })).toBeTruthy();
-    expect(screen.getByRole('menuitem', { name: 'Show value' })).toBeTruthy();
+    expect(within(screen.getByRole('menu')).queryByRole('combobox')).toBeNull();
+    expect(screen.getByRole('menuitem', { name: 'View secret' })).toBeTruthy();
+    expect(screen.queryByRole('menuitem', { name: /Copy/ })).toBeNull();
   });
 
-  it('reveals a selected field using its canonical record name', async () => {
+  it('shows the whole secret: one context per field, every field sent in order under its record name', async () => {
     api.listVaultSecrets.mockResolvedValue({
-      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username', 'totp'] }],
     });
     api.createVaultRevealContext.mockImplementation(async (_name, payload) => ({ ok: true, context: { field: payload.field }, envelope }));
     await openMenu();
-    fireEvent.change(screen.getByRole('combobox', { name: 'Field to reveal' }), { target: { value: 'username' } });
-    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenLastCalledWith('alpha', { session_label: 'Vaults', field: 'username' }));
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledTimes(3));
+    for (const field of ['password', 'username', 'totp']) {
+      expect(api.createVaultRevealContext).toHaveBeenCalledWith('alpha', { session_label: 'Vaults', field });
+    }
     await clickShowValue();
-    expect(revealProtectedValue.mock.calls[0][0].name).toBe('alpha.username');
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ field: 'username' });
+    const [items, defaultFieldLabel] = revealProtectedSecret.mock.calls[0];
+    expect(items.map((item: { material: { name: string } }) => item.material.name)).toEqual(['alpha', 'alpha.username', 'alpha.totp']);
+    expect(items.map((item: { context: unknown }) => item.context)).toEqual([{ field: 'password' }, { field: 'username' }, { field: 'totp' }]);
+    expect(defaultFieldLabel).toBe('password');
   });
 
-  it('keeps a stale field handoff visible without preparing a default field', async () => {
+  it('does not open the window on a field whose context failed: it says so and shows nothing', async () => {
+    api.listVaultSecrets.mockResolvedValue({
+      secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password', 'username'] }],
+    });
+    api.createVaultRevealContext.mockImplementation(async (_name, payload) => (
+      payload.field === 'username' ? { ok: false, code: 'vault_error', message: 'boom' } : { ok: true, context: { field: payload.field }, envelope }
+    ));
+    await openMenu();
+    await vi.waitFor(() => expect(showValue().disabled).toBe(false));
+    const popup = stubBlankPopup();
+    fireEvent.click(showValue());
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled());
+    expect(revealProtectedSecret).not.toHaveBeenCalled();
+    // The window the click reserved is closed again, empty.
+    await vi.waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+  });
+
+  it('a link naming one field (older handoff) opens View secret for the whole secret', async () => {
     api.listVaultSecrets.mockResolvedValue({
       secrets: [{ ...protectedSecret('alpha'), default_field: 'password', fields: ['password'] }],
     });
+    api.createVaultRevealContext.mockResolvedValue({ ok: true, context: {}, envelope });
     renderPage(remoteOwner, '/vaults?reveal=alpha&field=username&sort=recent');
-    expect((await screen.findByRole('alert')).textContent).toBe('This link points to a field that no longer exists. Open the secret and choose a current field.');
-    expect(api.createVaultRevealContext).not.toHaveBeenCalled();
-    expect(revealProtectedValue).not.toHaveBeenCalled();
+    expect(await screen.findByRole('menuitem', { name: 'View secret' })).toBeTruthy();
+    await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledWith('alpha', { session_label: 'Vaults', field: 'password' }));
+    expect(revealProtectedSecret).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByTestId('location').textContent).toContain('sort=recent'));
   });
   it('keeps Show value waiting while the context or the sandbox client are not ready', async () => {
@@ -794,7 +817,7 @@ describe('VaultsPage protected reveal', () => {
     await vi.waitFor(() => expect(api.createVaultRevealContext).toHaveBeenCalledWith('beta', expect.anything()));
     await clickShowValue();
 
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ secret_name: 'beta' });
+    expect(revealProtectedSecret.mock.calls[0][0][0].context).toEqual({ secret_name: 'beta' });
   });
 
   it('refreshes the context while the menu stays open, so the click fetches nothing', async () => {
@@ -811,7 +834,7 @@ describe('VaultsPage protected reveal', () => {
     now.mockReturnValue(opened + 35_000);
     const { open } = await clickShowValue();
 
-    expect(revealProtectedValue.mock.calls[0][1]).toEqual({ fetch: 2 });
+    expect(revealProtectedSecret.mock.calls[0][0][0].context).toEqual({ fetch: 2 });
     expect(api.createVaultRevealContext).toHaveBeenCalledTimes(2);
     for (const order of api.createVaultRevealContext.mock.invocationCallOrder) {
       expect(order).toBeLessThan(open.mock.invocationCallOrder[0]);

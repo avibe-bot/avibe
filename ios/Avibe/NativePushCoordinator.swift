@@ -148,6 +148,9 @@ final class NativePushCoordinator {
     private static let publicBaseURL = "https://avibe.bot"
     private static let topic = "bot.avibe.ios"
     private static let retiringKeyTTL: TimeInterval = 86_400
+    /// How many provider reconciliations one subscription makes before a
+    /// tuple that keeps changing underneath it is reported as unavailable.
+    static let providerReconciliationRounds = 3
 
     private final class TokenWaiter {
         let id = UUID()
@@ -175,6 +178,16 @@ final class NativePushCoordinator {
     private var mutationTask: Task<Void, Never>?
     private var providerPatchTask: Task<Void, Error>?
     private var recoveryTask: Task<Void, Never>?
+    private var mutationsInFlight = 0
+
+    /// The live coordinator, so voice capture can tell whether push work is
+    /// in flight before it ends a background process.
+    static weak var current: NativePushCoordinator?
+
+    /// Registration, a provider patch, a recovery or a mutation under way.
+    var hasWorkInFlight: Bool {
+        mutationsInFlight > 0 || providerPatchTask != nil || recoveryTask != nil || !tokenWaiters.isEmpty
+    }
 
     init(
         keychain: PushKeychainStoring = PushKeychainStore(),
@@ -243,6 +256,7 @@ final class NativePushCoordinator {
             object: nil
         )
         refreshAPNsRegistration()
+        Self.current = self
     }
 
     deinit {
@@ -293,9 +307,43 @@ final class NativePushCoordinator {
         resumeAfterAccountActivation()
     }
 
+    /// The push state for one instance origin, with iOS's notification
+    /// permission for the App (`permission`: granted, notDetermined or
+    /// denied), which the page reads to turn notifications back on after a
+    /// sign-in without ever prompting.
+    /// The registration belongs to this account generation and this instance.
+    /// Activity tokens use it only as relay authorization, never as their token.
+    func liveActivityRegistrationID(accountID: String, instanceOrigin: String) -> String? {
+        guard accountProvider()?.id == accountID,
+              let installation = try? keychain.loadInstallation(),
+              installation.accountID == accountID,
+              let records = try? keychain.listRecords() else { return nil }
+        return records.first {
+            $0.accountID == accountID && $0.instanceOrigin == instanceOrigin
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.accountGeneration == generationStore.generation
+                && $0.state == .active && !$0.pendingRevoke
+        }?.kid
+    }
+
     func status(
         vapidPublicKey: String?,
         instanceOrigin: String
+    ) async throws -> [String: Any] {
+        let authorizationStatus = await notificationAuthorizationStatus()
+        var status = try await statusBody(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instanceOrigin,
+            authorizationStatus: authorizationStatus
+        )
+        status["permission"] = Self.permissionName(authorizationStatus)
+        return status
+    }
+
+    private func statusBody(
+        vapidPublicKey: String?,
+        instanceOrigin: String,
+        authorizationStatus: UNAuthorizationStatus
     ) async throws -> [String: Any] {
         guard let account = accountProvider() else {
             return [
@@ -303,7 +351,6 @@ final class NativePushCoordinator {
                 "revokeState": "absent",
             ]
         }
-        let authorizationStatus = await notificationAuthorizationStatus()
         let inactiveState = Self.authorizationAllowsAlerts(authorizationStatus)
             || authorizationStatus == .notDetermined
             ? "off"
@@ -396,7 +443,10 @@ final class NativePushCoordinator {
 
         let vapidKeyHash = try Self.requireVapidHash(vapidPublicKey)
         let installation = try await ensureBound(to: account)
-        try await reconcilePendingOperations(for: installation)
+        try await reconcilePendingOperations(
+            for: installation,
+            subscribing: (instanceOrigin, vapidKeyHash)
+        )
         try await requestPermission()
         let provider = try await ensureProvider(installation: installation)
         guard provider.generation > 0 else {
@@ -470,6 +520,12 @@ final class NativePushCoordinator {
         }
     }
 
+    /// The single revoke, with its reason as the one query parameter.
+    private static func revokePath(kid: String, reason: String?) -> String {
+        let reason = reason.flatMap(PushRevokeReason.init(rawValue:)) ?? .unspecified
+        return "/api/push/apns/registrations/\(kid)?reason=\(reason.rawValue)"
+    }
+
     func unsubscribe(
         instanceOrigin: String
     ) async throws -> NativePushRevokeOutcome {
@@ -516,13 +572,17 @@ final class NativePushCoordinator {
             vapidKeyHash: record.vapidKeyHash,
             state: .retiring,
             pendingRevoke: true,
-            replacementRegistrationIDs: []
+            replacementRegistrationIDs: [],
+            // A retry of an earlier pending revoke keeps its first reason.
+            revokeReason: record.pendingRevoke
+                ? record.revokeReason
+                : PushRevokeReason.notificationsOff.rawValue
         )
         try keychain.saveRecord(pendingRecord)
         do {
             let response = try await request(
                 method: "DELETE",
-                path: "/api/push/apns/registrations/\(pendingRecord.kid)",
+                path: Self.revokePath(kid: pendingRecord.kid, reason: pendingRecord.revokeReason),
                 installation: installation,
                 body: nil
             )
@@ -540,6 +600,66 @@ final class NativePushCoordinator {
         } catch {
             return .pending
         }
+    }
+
+    /// Revokes this account's registrations for instance origins the account
+    /// no longer lists. Each is staged as a pending revoke (keys zeroed)
+    /// before its request, so push recovery finishes any that fail; origins
+    /// still listed keep theirs. A no-op unless `accountID` is the account
+    /// signed in and this installation's binding.
+    func revokeRegistrations(
+        outside liveOrigins: Set<String>,
+        accountID: String
+    ) async {
+        _ = try? await enqueueMutation {
+            try await self.revokeRegistrationsNow(
+                outside: liveOrigins,
+                accountID: accountID
+            )
+        }
+    }
+
+    private func revokeRegistrationsNow(
+        outside liveOrigins: Set<String>,
+        accountID: String
+    ) async throws {
+        guard
+            !isFrozen,
+            let account = accountProvider(),
+            account.id == accountID,
+            let installation = try keychain.loadInstallation(),
+            installation.accountID == account.id
+        else {
+            return
+        }
+        // A create whose answer was lost (`.pending`) may exist on the relay
+        // too: its DELETE either revokes it or answers not found.
+        let stale = try keychain.listRecords().filter {
+            ($0.state == .active || $0.state == .pending)
+                && !$0.pendingRevoke
+                && $0.accountID == account.id
+                && $0.bindGeneration == installation.bindGeneration
+                && $0.accountGeneration == generationStore.generation
+                && !liveOrigins.contains($0.instanceOrigin)
+        }
+        for record in stale {
+            try keychain.saveRecord(PushKeyRecord(
+                kid: record.kid,
+                instanceOrigin: record.instanceOrigin,
+                accountID: record.accountID,
+                accountGeneration: record.accountGeneration,
+                bindGeneration: record.bindGeneration,
+                privateKey: Data(),
+                authSecret: Data(),
+                vapidKeyHash: record.vapidKeyHash,
+                state: .retiring,
+                pendingRevoke: true,
+                replacementRegistrationIDs: [],
+                revokeReason: PushRevokeReason.instanceRemoved.rawValue
+            ))
+        }
+        // Also retries revokes an earlier pass left pending.
+        try await reconcilePendingRevokes(for: installation)
     }
 
     func didRegister(deviceToken: Data, environment: String) {
@@ -579,15 +699,22 @@ final class NativePushCoordinator {
         resumeTokenWaiters(with: NativePushError.unavailable)
     }
 
-    func prepareForLogout(throughBindGeneration: Int64) async {
+    func prepareForLogout(
+        throughBindGeneration: Int64,
+        reason: PushRevokeReason
+    ) async {
         _ = try? await enqueueMutation {
             await self.prepareForLogoutNow(
-                throughBindGeneration: throughBindGeneration
+                throughBindGeneration: throughBindGeneration,
+                reason: reason
             )
         }
     }
 
-    private func prepareForLogoutNow(throughBindGeneration: Int64) async {
+    private func prepareForLogoutNow(
+        throughBindGeneration: Int64,
+        reason: PushRevokeReason
+    ) async {
         guard !isFrozen else { return }
         isFrozen = true
         guard var installation = try? loadOrCreateInstallation() else {
@@ -602,6 +729,7 @@ final class NativePushCoordinator {
             return
         }
         installation.pendingBulkRevokeThroughGeneration = throughBindGeneration
+        installation.pendingBulkRevokeReason = reason.rawValue
         try? keychain.saveInstallation(installation)
         advanceAccountGeneration()
         let notificationKids = (try? keychain.listRecords())
@@ -618,7 +746,8 @@ final class NativePushCoordinator {
             )) == true
         installation.accountID = nil
         zeroAccountKeys(
-            throughBindGeneration: throughBindGeneration
+            throughBindGeneration: throughBindGeneration,
+            reason: reason
         )
         await Self.removeNotifications(
             forKids: notificationKids,
@@ -636,14 +765,15 @@ final class NativePushCoordinator {
         do {
             try await sendPendingBulkRevoke(
                 installation: installation,
-                throughBindGeneration: throughBindGeneration
+                throughBindGeneration: throughBindGeneration,
+                reason: reason.rawValue
             )
         } catch {
             // The persisted bulk revoke remains for the next execution opportunity.
         }
     }
 
-    func prepareForLogout() async {
+    func prepareForLogout(reason: PushRevokeReason) async {
         _ = try? await enqueueMutation {
             guard let installation = try? self.loadOrCreateInstallation(),
                   installation.bindGeneration > 0
@@ -653,7 +783,8 @@ final class NativePushCoordinator {
                 return
             }
             await self.prepareForLogoutNow(
-                throughBindGeneration: installation.bindGeneration
+                throughBindGeneration: installation.bindGeneration,
+                reason: reason
             )
         }
     }
@@ -745,10 +876,19 @@ final class NativePushCoordinator {
         return installation
     }
 
+    /// With `subscribing`, a pending revoke that fails stays queued for retry
+    /// instead of failing the subscription, unless the new registration
+    /// depends on it: one for the same origin, or one with the same VAPID key
+    /// (the relay refuses a create while another registration with that key
+    /// is active). The account-wide revoke still fails it.
     private func reconcilePendingOperations(
-        for installation: PushInstallationState
+        for installation: PushInstallationState,
+        subscribing: (origin: String, vapidKeyHash: String)? = nil
     ) async throws {
-        try await reconcilePendingRevokes(for: installation)
+        try await reconcilePendingRevokes(
+            for: installation,
+            failingOnlyFor: subscribing
+        )
         try await reconcileRegistrationCreates(
             for: installation,
             throughBindGeneration: installation.bindGeneration
@@ -808,29 +948,48 @@ final class NativePushCoordinator {
         return true
     }
 
+    /// Tries every pending revoke: one the relay keeps refusing must not hold
+    /// back the others. The first failure is reported after, or, with
+    /// `subscription`, only the first failure a registration for that origin
+    /// and VAPID key depends on; the others stay pending for the next pass.
     private func reconcilePendingRevokes(
-        for installation: PushInstallationState
+        for installation: PushInstallationState,
+        failingOnlyFor subscription: (origin: String, vapidKeyHash: String)? = nil
     ) async throws {
+        var firstFailure: Error?
         let records = try keychain.listRecords()
         for record in records where
             record.state == .retiring && record.pendingRevoke
         {
-            let response = try await request(
-                method: "DELETE",
-                path: "/api/push/apns/registrations/\(record.kid)",
-                installation: installation,
-                body: nil
-            )
-            if (200..<300).contains(response.statusCode)
-                || (
-                    response.statusCode == 404
-                        && Self.errorCode(response) == "registration_not_found"
+            do {
+                let response = try await request(
+                    method: "DELETE",
+                    path: Self.revokePath(kid: record.kid, reason: record.revokeReason),
+                    installation: installation,
+                    body: nil
                 )
-            {
-                try keychain.deleteRecord(kid: record.kid)
-                continue
+                if (200..<300).contains(response.statusCode)
+                    || (
+                        response.statusCode == 404
+                            && Self.errorCode(response) == "registration_not_found"
+                    )
+                {
+                    try keychain.deleteRecord(kid: record.kid)
+                    continue
+                }
+                throw Self.managementError(response)
+            } catch {
+                let blocks = subscription.map {
+                    record.instanceOrigin == $0.origin
+                        || record.vapidKeyHash == $0.vapidKeyHash
+                } ?? true
+                if firstFailure == nil, blocks {
+                    firstFailure = error
+                }
             }
-            throw Self.managementError(response)
+        }
+        if let firstFailure {
+            throw firstFailure
         }
     }
 
@@ -880,31 +1039,27 @@ final class NativePushCoordinator {
     private func ensureProvider(
         installation: PushInstallationState
     ) async throws -> PushProviderState {
-        if installation.provider != nil {
-            try await reconcileProvider()
-            let updated = try loadOrCreateInstallation()
-            guard
-                let provider = updated.provider,
-                !updated.providerPatchPending
-            else {
+        if installation.provider == nil {
+            try await waitForProviderToken()
+            guard try loadOrCreateInstallation().provider != nil else {
                 throw NativePushError.unavailable
             }
-            return provider
         }
-        try await waitForProviderToken()
-        let updated = try loadOrCreateInstallation()
-        guard updated.provider != nil else {
-            throw NativePushError.unavailable
+        // `requestPermission` has just asked APNs for the token again. Its
+        // callback can land after a reconciliation has read the installation
+        // and before this check, leaving a newer tuple pending. That tuple
+        // is reconciled again, a bounded number of times.
+        for _ in 0..<Self.providerReconciliationRounds {
+            try await reconcileProvider()
+            let updated = try loadOrCreateInstallation()
+            guard let provider = updated.provider else {
+                throw NativePushError.unavailable
+            }
+            if !updated.providerPatchPending {
+                return provider
+            }
         }
-        try await reconcileProvider()
-        let reconciled = try loadOrCreateInstallation()
-        guard
-            let provider = reconciled.provider,
-            !reconciled.providerPatchPending
-        else {
-            throw NativePushError.unavailable
-        }
-        return provider
+        throw NativePushError.unavailable
     }
 
     private func reconcileProvider() async throws {
@@ -1038,6 +1193,23 @@ final class NativePushCoordinator {
             )
         )
         return response
+    }
+
+    /// This installation's id for one instance's device list
+    /// (`device.describe`), derived so the relay's installation id and secret
+    /// never leave the App. Nil before the installation exists, or when the
+    /// Keychain holds one from before a reinstall (recovery replaces it).
+    func deviceIdentifier(forInstanceID instanceID: String) -> String? {
+        guard
+            let installation = try? keychain.loadInstallation(),
+            installationMarker.installationID == installation.installationID
+        else {
+            return nil
+        }
+        return NativeDeviceDescription.installationID(
+            secret: installation.installationSecret,
+            instanceID: instanceID
+        )
     }
 
     private func loadOrCreateInstallation() throws -> PushInstallationState {
@@ -1186,6 +1358,7 @@ final class NativePushCoordinator {
                 installation: installation,
                 body: [
                     "through_bind_generation": orphan.throughBindGeneration,
+                    "reason": PushRevokeReason.reinstalled.rawValue,
                 ]
             )
             if (200..<300).contains(response.statusCode)
@@ -1217,19 +1390,25 @@ final class NativePushCoordinator {
         )
         try await sendPendingBulkRevoke(
             installation: installation,
-            throughBindGeneration: through
+            throughBindGeneration: through,
+            reason: installation.pendingBulkRevokeReason
         )
     }
 
     private func sendPendingBulkRevoke(
         installation: PushInstallationState,
-        throughBindGeneration: Int64
+        throughBindGeneration: Int64,
+        reason: String?
     ) async throws {
+        let reason = reason.flatMap(PushRevokeReason.init(rawValue:)) ?? .unspecified
         let response = try await request(
             method: "POST",
             path: "/api/push/apns/installations/\(installation.installationID.uuidString)/revoke",
             installation: installation,
-            body: ["through_bind_generation": throughBindGeneration]
+            body: [
+                "through_bind_generation": throughBindGeneration,
+                "reason": reason.rawValue,
+            ]
         )
         guard (200..<300).contains(response.statusCode) else {
             throw Self.managementError(response)
@@ -1239,6 +1418,7 @@ final class NativePushCoordinator {
             == throughBindGeneration
         {
             current.pendingBulkRevokeThroughGeneration = nil
+            current.pendingBulkRevokeReason = nil
             try keychain.saveInstallation(current)
         }
         for record in try keychain.listRecords()
@@ -1248,7 +1428,10 @@ final class NativePushCoordinator {
         }
     }
 
-    private func zeroAccountKeys(throughBindGeneration: Int64) {
+    private func zeroAccountKeys(
+        throughBindGeneration: Int64,
+        reason: PushRevokeReason
+    ) {
         guard let records = try? keychain.listRecords() else {
             return
         }
@@ -1269,7 +1452,11 @@ final class NativePushCoordinator {
                 vapidKeyHash: record.vapidKeyHash,
                 state: state,
                 pendingRevoke: pendingRevoke,
-                replacementRegistrationIDs: record.replacementRegistrationIDs
+                replacementRegistrationIDs: record.replacementRegistrationIDs,
+                // One already pending keeps its own first reason.
+                revokeReason: record.pendingRevoke
+                    ? record.revokeReason
+                    : (pendingRevoke ? reason.rawValue : nil)
             )
             try? keychain.saveRecord(cleared)
         }
@@ -1334,6 +1521,8 @@ final class NativePushCoordinator {
     private func enqueueMutation<Value>(
         _ operation: @escaping @MainActor () async throws -> Value
     ) async throws -> Value {
+        mutationsInFlight += 1
+        defer { mutationsInFlight -= 1 }
         let previous = mutationTask
         let current: Task<Value, Error> = Task { @MainActor in
             await previous?.value
@@ -1374,6 +1563,15 @@ final class NativePushCoordinator {
     ) -> String? {
         response.body["error"] as? String
             ?? (response.body["error"] as? [String: Any])?["code"] as? String
+    }
+
+    private static func permissionName(
+        _ status: UNAuthorizationStatus
+    ) -> String {
+        if authorizationAllowsAlerts(status) {
+            return "granted"
+        }
+        return status == .notDetermined ? "notDetermined" : "denied"
     }
 
     private static func authorizationAllowsAlerts(

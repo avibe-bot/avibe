@@ -140,7 +140,7 @@ from storage.agent_transcript import (
     text_parts,
 )
 from storage.db import get_cached_sqlite_engine
-from storage.models import agent_events, agent_runs, agent_sessions, message_deliveries, messages, session_turns
+from storage.models import agent_events, agent_runs, agent_sessions, agents, message_deliveries, messages, session_turns
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 from vibe.i18n import t as i18n_t
 
@@ -1042,7 +1042,7 @@ class VibeyAgent(BaseAgent):
         if route is None or not isinstance(target, dict) or str(target.get("id") or "") != turn.session_id:
             return
         try:
-            row = await asyncio.to_thread(self._session_route_settings, turn.session_id)
+            row = await asyncio.to_thread(self._session_route_settings, turn.session_id, request.vibe_agent_id)
         except Exception:
             # Following is an addition to the Turn, never a reason to fail it: it keeps what it has.
             logger.warning("Vibey could not read the settings of Session %s", turn.session_id, exc_info=True)
@@ -1051,7 +1051,7 @@ class VibeyAgent(BaseAgent):
             return
         model, reasoning_effort, _ = session_model_settings(
             row,
-            fallback_model=request.vibe_agent_inherited_model,
+            fallback_model=row.get("inherited_model", request.vibe_agent_inherited_model),
             fallback_reasoning_effort=request.vibe_agent_inherited_reasoning_effort,
         )
         current = _Route(
@@ -1072,9 +1072,26 @@ class VibeyAgent(BaseAgent):
             # The request's capability filter still decides whether the hop takes it (``Agent._built``).
             turn.agent.reasoning_effort = current.reasoning_effort
 
-    def _session_route_settings(self, session_id: str) -> Optional[dict[str, Any]]:
+    def _session_route_settings(self, session_id: str, agent_id: str | None) -> Optional[dict[str, Any]]:
         with self._engine.connect() as conn:
-            return session_route_settings(conn, session_id)
+            row = session_route_settings(conn, session_id)
+            if row is not None and not row["model"]:
+                # The Session can rebind within Vibey while this Turn runs. A
+                # name-only legacy binding also takes priority over dispatch.
+                if row["agent_id"]:
+                    binding = agents.c.id == row["agent_id"]
+                elif row["agent_name"]:
+                    from core.vibe_agents import normalize_agent_name
+
+                    binding = agents.c.normalized_name == normalize_agent_name(row["agent_name"])
+                elif agent_id:
+                    binding = agents.c.id == agent_id
+                else:
+                    return row
+                current = conn.execute(select(agents.c.model).where(binding)).first()
+                if current is not None:
+                    row["inherited_model"] = current.model
+            return row
 
     async def _native_search_recovery_route(self, turn: _Run, selection: ModelSelection) -> ModelSelection:
         """Derive a per-tool route from this Turn's immutable committed response facts."""

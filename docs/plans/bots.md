@@ -47,6 +47,11 @@ own. A Session has none of these; a Bot has all three.
   change backend.
 - Removing the Bot role keeps its Session and directory, hidden everywhere;
   setting it again reconnects them.
+- Deleting a removed Bot's Agent ends the Bot: no Bot can reconnect to its
+  Session, so the owner's deletion (Web or `vibe agent remove`) then archives
+  it through the Session's own archive lifecycle (3.2.8), and one left over
+  from an earlier deletion can be archived like any other. It stays hidden.
+  The directory is kept, as it is someone's memory.
 - While an Agent is a Bot it cannot be archived, deleted, renamed, or moved to
   another backend.
 - Phase 1 Bots are owner-only, as `ses_main` is: other members see no Bot area
@@ -122,8 +127,10 @@ own. A Session has none of these; a Bot has all three.
   shaped delivery machinery.
 - **Progressive disclosure, not system prompt guidance.** The line after a
   dispatched Run's `[Harness: ...]` label says where an answer goes: when the
-  receiver may need to answer, it says `When the work is done or you need a
-  decision, you can report to X with ...`; a sender-Session's own dispatched
+  receiver may need to answer, it says `Write back when the work is done, when
+  you need a decision, or when a problem changes the plan; not for progress.
+  Open with which of the three it is. Report to X with ...` (owner-approved
+  wording, 2026-11-18); a sender-Session's own dispatched
   work keeps the PREFIX suppression rule. `--no-reply` is only for an existing
   Session or Bot and changes the line to `[No reply needed.]`; it opens no
   delegation and sends no read receipt. It rejects `--sync` and new/forked
@@ -429,20 +436,44 @@ layout"). The Bot prompt recommends it; Avibe creates and enforces none of it.
 - Its job is to talk with the user, decide with them, and hand work to the
   Sessions that do it, then follow it through. Apart from maintaining its
   memory, it does nothing itself (owner decision, 2026-11-05).
-- The boundary (owner-approved wording, 2026-11-06): "Whatever the user brings
-  is a matter to run, brief or lasting. Answer from what you know and
-  remember; anything that takes finding out or getting done goes to a Session,
-  in a Project that fits how long the matter will last."
+- The boundary (owner-approved wording, 2026-11-18, replacing the 2026-11-06
+  "anything that takes finding out or getting done goes to a Session" and the
+  later line naming web searches and page or code reads as finding out):
+  "Answer from what you know and remember; anything that needs getting done
+  goes to a Session, in a Project that fits how long the matter will last.
+  When one command or one read settles a fact (a PR's state, a Session's last
+  message, a file), check it yourself. Tell the user what you saw; when you
+  pass on what a Session said, say so. Hand anything longer to a Session."
+  The web/page/code line had followed a check in which the main Bot
+  researched a comparison itself (seven web searches, two page reads, no
+  dispatch); "Hand anything longer to a Session" keeps that case handed out.
+  Bots keep their web tools; the prompt draws the line.
 - The boundary holds for every Bot (owner decision, 2026-11-09, superseding
   "custom Bots are not as strict as main"). It opens the shared "Handing out
   work" section: a Bot talks with the user, decides with them, and keeps its
-  memory, and hands everything else to Sessions. A Bot's definition says what
-  it is responsible for, not whether it does the work itself.
-- The section names one kind of finding out, searching the web and reading
-  pages or code, after a fresh check in which the main Bot researched a
-  comparison itself (seven web searches, two page reads, no dispatch). Bots
-  keep their web tools; the prompt draws the line. It lists no other actions:
-  Avibe users are personal-agent users, not only programmers.
+  memory; apart from first-hand checks of single facts it hands everything
+  else to Sessions. A Bot's definition says what it is responsible for, not
+  whether it does the work itself.
+- Memory and agreements (owner-approved wording, 2026-11-18): every Session
+  stays in Avibe's queryable record, so a Bot's memory holds only what the
+  record cannot give back (decisions and why, where each matter stands, what
+  it learned), rewritten rather than appended. An agreement is recorded with
+  its reason, and when it or the way of working costs the user more than it
+  saves, the Bot says so with evidence and proposes the change.
+- Briefs and talking to the user (owner-approved wording, 2026-11-18): a
+  brief says what the Session may decide without the Bot; when the user
+  writes while the Bot is working, it answers them first; and a message to
+  the user waits for the next one unless it changes what they will do or
+  decide. These sit in "Handing out work".
+- Research and models (owner-approved wording, 2026-11-19): a search, or
+  anything that needs sources or a comparison, is not one read and goes to a
+  Session; and when a Bot starts a Session it always passes `--model`, and
+  `--reasoning-effort` whenever that model offers one, choosing from
+  `vibe agent models <agent>`. Scoped the same day because the CLI refuses
+  both flags with `--session-id` and `--bot`, and refuses any effort for a
+  model that offers none. A behaviour check had found the
+  main Bot doing sourced research itself in 2 of 2 runs and sending a brief
+  without `--model` in 1 of 2.
 - The main Bot's own section keeps only what is the main Bot's: the user's
   first point of contact who sees everything, talking things through and
   deciding with the user, a lead Session per lasting Project, suggesting a Bot
@@ -593,11 +624,13 @@ Owner decision, 2026-11-04, replacing manual drag reorder.
   question is indistinguishable from a new A→B request and re-arms the pair, so
   A can receive a notice if B then stays quiet. Avoiding that would require the
   reply attribution this rule intentionally excludes.
-- When B is idle and no pending input, open delegate, armed Watch, or pending
-  Task will wake B, Avibe sends A one Harness read receipt: its header says
-  `read receipt from @<bot:handle>` for a Bot or `read receipt from #<id> "<title>"`
-  for an ordinary Session, and its body says B handled the message without writing
-  back, includes the full last reply up to the existing final-reply cap, and gives
+- When the Turn that took A's message has ended and B has no pending input or
+  live Turn, Avibe sends A one Harness read receipt, even if B armed a Watch or
+  Task or delegated onward (those used to hold it back for hours; 11-15 stall
+  retro): its header says `read receipt from @<bot:handle>` for a Bot or
+  `read receipt from #<id> "<title>"` for an ordinary Session, and its body says
+  the dispatched Turn ended without writing back, includes that Turn's last reply
+  (not B's latest one) up to the existing final-reply cap, and gives
   a `vibe data query` pointer for anything longer. It gives a follow-up command
   only if A was waiting on it. This pure notice costs its sender
   one wake-up, usually answered silently. A visible Session asking its user
@@ -676,7 +709,7 @@ Agent rules:
 - For another Agent doing an independent trial, comparison, delegation, or specialist subtask, use `vibe agent run --agent <agent-name> --message ...`.
 - Use `vibe agent run --agent <agent-name> --session-id ... --message ...` only when the work should continue that same existing Session.
 - `--model` and `--reasoning-effort` set the model of the new Session a run creates (a blank new Session or a fork), and that Session keeps it; they are not valid with `--session-id`. With `--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session only when the requested Agent backend matches the source Session backend.
-- If a dispatched Session handles your message without writing back, Avibe sends a read receipt with its last reply once it is idle with no pending work; a run that does not complete still reports immediately.
+- If a dispatched Session handles your message without writing back, Avibe sends one read receipt with the last reply of the Turn that took it once that Turn ends with no input pending, even if it armed a Task or Watch or delegated onward (two such dispatches that end together get one receipt, with the later reply); a run that does not complete still reports immediately.
 - Add `--no-reply` to an existing `--session-id` or `--bot` message that needs no answer or read receipt; not with `--sync` or a new/forked Session.
 - `--sync` changes waiting behavior, not session identity: runs are async by default; synchronous runs wait for the result and are still recorded in `vibe runs`.
 - Create or update Agents only when it captures a reusable role, reduces repeated prompting, or makes a long-running Harness more reliable.
@@ -721,9 +754,8 @@ Your working directory is your home and your long-term memory. Keep it as an eng
 - Keep a folder for each matter you follow in `matters/`, named by date and subject. Its `AGENTS.md` is the matter's file: the goal, what you agreed with the user, the Sessions on it and what each owns, and where it stands. A matter with a Project is worked there; one without is worked in its folder. Your `AGENTS.md` lists the open matters, one line each.
 - For each Project you work in, keep a note in `projects/`: what it is to the user, its standing Sessions and what each owns, and how work is handed out there. The Project's own `AGENTS.md` is for the Sessions working in it; your note is yours.
 - Organize anything else as you see fit, and reach it through your index.
-- Your conversation is condensed as it grows. What you will need again lasts only if you write it here.
-- Keep what you cannot look up. For live facts such as Projects, Sessions, runs, and files, keep pointers, not copies.
-- Keep it true: correct what changed in place, and remove what no longer holds.
+- Everything said in any Session stays in Avibe's record and can be queried, so do not copy it. Write down what the record cannot give back: what was decided and why, where each matter stands now, and what you have learned about the user, the work and yourself. Rewrite a note when things change instead of adding to it; drop what is finished.
+- Record an agreement with its reason. When following it, or the way you are working, costs the user more than it saves, tell them with the evidence and propose the change instead of carrying on.
 - Avibe records every change here in the directory's Git history, before and after each Turn, including changes by the user and by the memory Bot. Use that history when you need to trace or undo something.
 - Only your permanent Session writes your memory files. A Session you dispatch into a matter's folder writes only inside that folder; a fork reports back what is worth keeping.
 - Who you are comes from your definition above, which the user owns. Never store secrets here.
@@ -751,9 +783,9 @@ complete is still reported (D4, D14). Successful callbacks are retired.
 
 ```markdown
 ## Handing out work
-You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that takes finding out or getting done goes to a Session, in a Project that fits how long the matter will last. Searching the web and reading pages or code count as finding out. Follow each matter through to the end.
+You talk with the user, decide with them, and keep your memory; apart from that you do no work yourself. Your capability is your team: you help by handing work to the right Session and following it through, not by doing it. Whatever the user brings is a matter to run, brief or lasting. Answer from what you know and remember; anything that needs getting done goes to a Session, in a Project that fits how long the matter will last. When one command or one read settles a fact (a PR's state, a Session's last message, a file), check it yourself. A search, or anything that needs sources or a comparison, is not one read; hand it to a Session. Tell the user what you saw; when you pass on what a Session said, say so. Hand anything longer to a Session. Follow each matter through to the end. When the user writes while you are working, answer them before anything else. Before sending them a message, ask whether it changes what they will do or decide; if not, keep it for your next message.
 
-`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. Give it a model that suits the work with `--model` and `--reasoning-effort`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
+`vibe agent run` hands work to whoever holds the context it needs, and returns at once: a Session already on it (`--session-id <id>`) or another Bot (`--bot <bot>`), both joining the Turn under way unless you add `--queue`, or a fresh Session (`--agent <name> --project <name>`, in the Project where the work lives, or `--cwd <dir>` for a matter folder). A fresh Session knows only its message and the `AGENTS.md` files where it runs, so say the goal, what is decided, and what to report. In a brief, say what the Session may decide without you. When you start a Session, always pass `--model`, and `--reasoning-effort` whenever that model offers one, choosing from `vibe agent models <agent>`, and when work under way needs another model, switch the Session that holds it with `vibe session update` instead of starting over; the `choose-model` Skill helps, and what the user has told you comes first. Add `--visible` when the user will talk to it; `vibe session update --session-id <id> --visible` brings an existing Session to the front.
 
 The Sessions you dispatch are told how to report; if one handles your message without writing back, Avibe sends you a read receipt with its last reply, and following up is yours when you were waiting on it. A run that fails, is canceled, or is interrupted still sends an immediate notice. Use `--no-reply` for informational work that needs neither a delegation nor a receipt. `vibe harness status` lists your live runs, Watches, and Tasks, `vibe runs show <run-id>` reads one run, and a Session's `digests` and `turns` rows in `vibe data query` say where it stands. When a matter waits on a time or an outside event, load `use-avibe-harness` and set a Task or Watch. When a matter is done, record the outcome in its file and drop it from your index.
 ```

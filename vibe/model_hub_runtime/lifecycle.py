@@ -486,6 +486,8 @@ class EngineLifecycle:
         return generation, {
             "path": str(binary), "install_dir": generation.install_dir,
             "version": generation.runtime_version, "asset_release_tag": generation.asset_release_tag,
+            "installed": True, "platform": generation.platform,
+            "contract_manifest": self.manager._contract_manifest(manifest),
         }
 
     def before_launch(self, fingerprint: str) -> None:

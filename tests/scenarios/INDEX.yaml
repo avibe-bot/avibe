@@ -120,7 +120,9 @@ capabilities:
       - tests/test_model_hub_hosted_images.py
       - tests/test_model_hub_usage.py
       - tests/test_ui_server_fastapi.py
+      - tests/test_model_hub_card_use.py
       - tests/test_model_hub_quota.py
+      - tests/test_model_hub_account_refresh.py
       - tests/test_model_hub_pricing.py
       - tests/test_models_dev_catalog.py
       - tests/test_local_deps.py
@@ -128,6 +130,7 @@ capabilities:
       - tests/test_runtime_activation.py
       - ui/src/components/settings/models/UsageTab.test.tsx
       - ui/src/components/settings/models/QuotaTab.test.tsx
+      - ui/src/components/settings/models/ResetCards.test.tsx
       - ui/src/components/settings/models/usageProjection.test.ts
       - ui/src/components/settings/models/format.test.ts
       - ui/src/components/settings/models/SettingsModelsPage.render.test.tsx

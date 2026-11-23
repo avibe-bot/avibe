@@ -306,7 +306,7 @@ describe('main-only resolution', () => {
     render(<PetPage />);
     await userEvent.type(await screen.findByRole('textbox'), 'main only{Enter}');
     await shellBound('another-session', 10);
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'main only' });
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'main only', metadata: { input_surface: 'mini' } });
     expect(api.getSessionResult).not.toHaveBeenCalledWith('legacy');
     expect(api.getSessionResult).not.toHaveBeenCalledWith('another-session');
     expect(invoke.mock.calls.some(([command]) => command === 'pet_bind' || command === 'pet_unbind')).toBe(false);
@@ -372,7 +372,7 @@ describe('main-only resolution', () => {
     }
     summon('listen');
     await userEvent.type(await screen.findByRole('textbox'), 'recovered{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'recovered' });
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'recovered', metadata: { input_surface: 'mini' } });
     expect(api.getMainSession).toHaveBeenCalledTimes(2);
   });
 
@@ -1280,7 +1280,7 @@ describe('PetPage live convergence', () => {
     await waitFor(() => expect(screen.getByLabelText('pet.keyboard.open').hasAttribute('disabled')).toBe(false));
     summon('listen');
     await userEvent.type(await screen.findByRole('textbox'), 'recovered{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'recovered' });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'recovered', metadata: { input_surface: 'mini' } });
   });
 
   it('reads the tail on a live row when no tail read has landed yet', async () => {
@@ -1574,14 +1574,14 @@ describe('desktop mini v2 interaction contract', () => {
   // A tapped (not held) hotkey opens the text input once voice status is known.
   const tapHotkey = () => { summon('listen'); summon('release'); };
 
-  async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>) {
+  async function withVoiceEnv(asrAvailable: () => boolean, dictation: unknown, body: () => Promise<void>, status: () => Record<string, unknown> = () => ({})) {
     vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: dictation }));
     const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
     const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
     try {
       Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
       Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
-      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: asrAvailable() }) })));
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: asrAvailable(), ...status() }) })));
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
       await body();
@@ -1594,6 +1594,44 @@ describe('desktop mini v2 interaction contract', () => {
       else Reflect.deleteProperty(navigator, 'mediaDevices');
     }
   }
+
+  it.each(['starting', 'listening', 'finishing'] as const)('App Lock discards %s Mini capture, fences late results and preserves the draft', async (phase) => {
+    const captures: Dictation[] = [];
+    class Dictation {
+      ready = deferred<void>(); result = deferred<string>(); done = this.result.promise;
+      start = vi.fn(() => this.ready.promise); finish = vi.fn();
+      abort = vi.fn(); detach = vi.fn(); setAside = vi.fn(); landed = vi.fn();
+      constructor(public input: { onPreview: (text: string) => void }) { captures.push(this); }
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      const revisionBase = Date.now();
+      const signal = (revision: number, locked: boolean) => act(() => {
+        Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: revisionBase + revision, locked } });
+        window.dispatchEvent(new Event('avibe:voice-lock'));
+      });
+      try {
+        mainSession('S'); render(<PetPage />); tapHotkey();
+        await userEvent.type(await screen.findByRole('textbox'), 'draft before lock');
+        await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+        const old = captures[0];
+        if (phase !== 'starting') await act(async () => old.ready.resolve());
+        if (phase === 'finishing') await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+        signal(1, true); signal(1, true);
+        expect(old.abort).toHaveBeenCalledOnce();
+        summon('release'); summon('listen');
+        expect(captures).toHaveLength(1);
+        signal(2, false);
+        await act(async () => { old.input.onPreview('stale'); old.ready.resolve(); old.result.resolve('stale final'); });
+        expect(old.detach).not.toHaveBeenCalled(); expect(old.setAside).not.toHaveBeenCalled();
+        expect(old.landed).not.toHaveBeenCalled(); expect(api.sendSessionMessage).not.toHaveBeenCalled();
+        expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('draft before lock');
+        expect(captures).toHaveLength(1);
+        await userEvent.click(screen.getByLabelText('pet.voice.open'));
+        await act(async () => { captures[1].ready.resolve(); captures[1].result.resolve('new words'); });
+        expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('draft before lock new words');
+      } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+    });
+  });
 
   it.each(['stop', 'escape', 'failure', 'completion'] as const)('resets native toggle voice state on %s so the next press starts again', async (ending) => {
     const captures: Array<Deferred<string>> = [];
@@ -1661,6 +1699,31 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
+
+  // ui/design: composer/voice-consent/*: the mini window opens no microphone without this
+  // account's yes, whether it was refused before or taken back since in Avibe's window.
+  it.each(['declined here', 'taken back elsewhere'] as const)('records nothing and says where to turn voice on when %s', async (when) => {
+    const created = vi.fn();
+    class Dictation {
+      constructor() { created(); }
+      done = new Promise<string>(() => {});
+      start = async () => {};
+      finish = () => {}; abort = () => {}; landed = () => {}; detach = () => {};
+    }
+    let consent = when === 'declined here' ? 'declined' : 'granted';
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      const mic = await screen.findByLabelText('pet.voice.open');
+      if (when === 'taken back elsewhere') {
+        await waitFor(async () => expect((await import('@/lib/voiceConsent')).knownVoiceConsent()).toBe('granted'));
+        consent = 'declined';
+        (await import('@/lib/voiceConsent')).noteVoiceStatus({ available: true, consent });
+      }
+      await userEvent.click(mic);
+      expect(await screen.findByText('pet.voice.consentOff')).toBeTruthy();
+      expect(created).not.toHaveBeenCalled();
+    }, () => ({ consent }));
+  });
 
   it('clears a previous ASR-available cache when the authorization epoch changes', async () => {
     const status = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
@@ -1820,7 +1883,7 @@ describe('desktop mini v2 interaction contract', () => {
       const input = await screen.findByRole('textbox');
       await finishUp(input);
       await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
-      expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text, ...(metadata ? { metadata } : {}) });
+      expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text, metadata: { ...metadata, input_surface: 'mini' } });
       expect(label).toBeTruthy();
     });
   });
@@ -1925,7 +1988,7 @@ describe('desktop mini v2 interaction contract', () => {
     await userEvent.type(await screen.findByRole('textbox'), 'my draft');
     await emit((h) => h.onAuthorizationChanged?.({}));
     await userEvent.keyboard('{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q' } });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q', input_surface: 'mini' } });
     await act(async () => pending.resolve(message('late-choice', 'S', { author: 'user', type: 'user', text: 'Yes' })));
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('my draft');
     expect(document.querySelector('.pet-mini-title')?.textContent).not.toBe('Yes');
@@ -1963,7 +2026,7 @@ describe('desktop mini v2 interaction contract', () => {
       await acknowledge();
       await update();
     }
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1', input_surface: 'mini' } });
     expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
     expect(screen.queryByRole('button', { name: 'No', exact: true })).toBeNull();
     // The history stayed open above the input; Escape closes it, then the input.
@@ -1993,7 +2056,7 @@ describe('desktop mini v2 interaction contract', () => {
     await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
     expect(screen.queryByRole('button', { name: 'Continue', exact: true })).toBeNull();
     await userEvent.keyboard('duplicate{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1', input_surface: 'mini' } });
   });
 
   it('does not label idle processes as working or completed, and hides unsupported run stops', async () => {
@@ -2289,7 +2352,7 @@ describe('desktop mini v2 interaction contract', () => {
     const input = await screen.findByRole('textbox');
     expect(historyIsOpen()).toBe(true);
     await userEvent.type(input, 'next{Enter}');
-    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'next' });
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'next', metadata: { input_surface: 'mini' } });
   });
 
   it('opens the history above dictation without ending it, and Escape closes the history before cancelling', async () => {
@@ -2501,6 +2564,7 @@ describe('Personal Agent mini', () => {
     expect(api.sendSessionMessage).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      metadata: { input_surface: 'mini' },
       text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
     });
   });
@@ -2528,6 +2592,7 @@ describe('Personal Agent review invariants', () => {
     expect(screen.getByRole('button', { name: 'pet.removeReference' })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'pet.send' }));
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', {
+      metadata: { input_surface: 'mini' },
       text: 'Check this #<other>', content: { references: [{ kind: 'session', session_id: 'other', title: 'pet.untitledTask' }] },
     });
     summon('listen');
@@ -2935,7 +3000,7 @@ describe('PetPage IME composition', () => {
     expect(input.value).toBe('hello');
     fireEvent.keyDown(input, { key: 'Enter', keyCode: 13 });
     await waitFor(() => expect(api.sendSessionMessage).toHaveBeenCalledTimes(1));
-    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'hello' });
+    expect(api.sendSessionMessage).toHaveBeenCalledWith('S', { text: 'hello', metadata: { input_surface: 'mini' } });
   });
 
   it('leaves the composer and its draft open when Escape dismisses an IME candidate', async () => {
@@ -3519,6 +3584,26 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
   });
 
+  it('moves the column by the snapshot\'s column_offset, and keeps it centred for an older shell', async () => {
+    const offset = () => (document.querySelector('.pet-mini-stage') as HTMLElement | null)?.style.getPropertyValue('--pet-column-offset');
+    const invoke = recording((command, args) => command === 'pet_ready' ? ready(bottom, 1) : { revision: args?.revision ?? 1, layout: bottom });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    // An older shell's layout has no column_offset: centred on Vibey.
+    await waitFor(() => expect(offset()).toBe('0px'));
+    // Near the left side the shell moves the column right; the page draws it,
+    // then acknowledges that revision.
+    await publish(2, { ...bottom, column_offset: 89 } as typeof top);
+    await waitFor(() => expect(offset()).toBe('89px'));
+    await waitFor(() => expect(settles(invoke).map(([revision]) => revision)).toContain(2));
+    await publish(3, { ...bottom, column_offset: -89 } as typeof top);
+    await waitFor(() => expect(offset()).toBe('-89px'));
+    // Anything but a finite number is no move at all.
+    await publish(4, { ...bottom, column_offset: 'far' } as unknown as typeof top);
+    await waitFor(() => expect(offset()).toBe('0px'));
+  });
+
   it('draws nothing until the shell\'s first snapshot, whichever layout it is', async () => {
     const readyAnswer = deferred<unknown>();
     shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));
@@ -3571,6 +3656,58 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(called('pet_ready')).toBe(3);
     drag(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(called('pet_drag')).toBe(1));
+    // The shell keeps the pressed point of Vibey under the pointer.
+    expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
+  });
+
+  // A freshly shown window can deliver the press but none of the moves after
+  // it; the hold timer asks the shell where the pointer is before it holds.
+  for (const [name, pointer, expected] of [
+    ['a pointer that moved is a drag', { x: 40, y: 10, down: true }, 'drag'],
+    ['a released button is nothing', { x: 10, y: 10, down: false }, 'nothing'],
+    ['a pointer that stayed is a hold', { x: 11, y: 10, down: true }, 'hold'],
+  ] as const) {
+    it(`asks the shell before a hold: ${name}`, async () => {
+      const invoke = recording((command, args) => {
+        if (command === 'pet_ready') return ready();
+        if (command === 'pet_pointer') return pointer;
+        if (command === 'pet_drag') return new Promise(() => {});
+        return { revision: args?.revision ?? 1, layout: bottom };
+      });
+      shell(invoke);
+      mainSession('S'); render(<PetPage />);
+      const avatar = await screen.findByLabelText('pet.recentTurns');
+      await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending')).toBe(false));
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_pointer'));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const dragged = invoke.mock.calls.some(([command]) => command === 'pet_drag');
+      expect(dragged).toBe(expected === 'drag');
+      if (expected === 'drag') expect(invoke).toHaveBeenCalledWith('pet_drag', { x: 10, y: 10 });
+      // Only a hold opens the hold's surface (the composer without voice).
+      expect(screen.queryByRole('textbox') !== null).toBe(expected === 'hold');
+    });
+  }
+
+  it('discards a pointer answer that arrives after its press was released and a new one began', async () => {
+    const answers: ReturnType<typeof deferred<unknown>>[] = [];
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return ready();
+      if (command === 'pet_pointer') { const answer = deferred<unknown>(); answers.push(answer); return answer.promise; }
+      if (command === 'pet_drag') return new Promise(() => {});
+      return { revision: args?.revision ?? 1, layout: bottom };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending')).toBe(false));
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    await waitFor(() => expect(answers).toHaveLength(1));
+    fireEvent.pointerUp(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 2, clientX: 10, clientY: 10 });
+    // The first press's answer says "moved": it must not turn the new press into a drag.
+    await act(async () => answers[0].resolve({ x: 60, y: 10, down: true }));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_drag')).toBe(false);
   });
 
   it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {

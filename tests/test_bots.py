@@ -289,6 +289,36 @@ def test_removing_hides_and_setting_again_reconnects(service, home):
     assert (session["agent_name"], session["title"]) == ("scholar", "Scholar")
 
 
+def test_a_bot_session_is_reserved_from_archive_only_while_its_agent_exists(service):
+    """A removed Bot reconnects to its Session, so archive refuses it; once its Agent is deleted no Bot can, and the
+    Session (one left over from an earlier deletion too) archives like any other, still hidden as a Bot's Session."""
+    from storage.agent_session_rows import hidden_bot_session_ids
+    from storage.db import create_sqlite_engine
+    from storage.workbench_sessions_service import ReservedSessionError, archive_session
+    from vibe.authorization import AuthorizationContext
+
+    gone = service.create_bot(display_name="Gone")
+    kept = service.create_bot(display_name="Kept")
+    for bot in (gone, kept):
+        service.remove_bot(bot.handle)
+    service.store.archive(gone.agent.name)
+
+    with create_sqlite_engine().begin() as conn, pytest.raises(ReservedSessionError):
+        archive_session(conn, kept.session_id)
+    # It is still the owner's: another member is refused before any write, even if the refusal is caught.
+    editor = AuthorizationContext(instance_role="member", is_remote=True, subject="m1")
+    assert editor.has_role("editor") and not editor.is_instance_owner
+    with create_sqlite_engine().begin() as conn:
+        with pytest.raises(LookupError):
+            archive_session(conn, gone.session_id, authorization_context=editor)
+    assert _session(gone.session_id)["status"] == "active"
+    with create_sqlite_engine().begin() as conn:
+        archive_session(conn, gone.session_id)
+        assert gone.session_id in hidden_bot_session_ids(conn, owner=True)
+    assert _session(gone.session_id)["status"] == "archived"
+    assert _session(kept.session_id)["status"] == "active"
+
+
 def test_only_enabled_vibey_agents_can_be_set(service):
     from core.bots import BotError
 

@@ -379,12 +379,6 @@ impl LaunchWatch {
         }
     }
 
-    pub fn cancel_receipt(&self) {
-        if let Some(receipt) = self.0.receipt.lock().ok().and_then(|receipt| receipt.clone()) {
-            receipt.cancel();
-        }
-    }
-
     pub(crate) fn acknowledge_receipt_failure(&self) {
         let _ = self.0.presented_receipt_failure.set(());
     }
@@ -1475,6 +1469,8 @@ mod tests {
                         }),
                     })],
                     "eof" => vec![ReceiptEvent::Eof],
+                    // The reader lost its pipe before any verdict.
+                    "cancel" => vec![ReceiptEvent::TransportError],
                     _ => vec![],
                 };
                 let watch = if scenario == "legacy" {
@@ -1482,9 +1478,6 @@ mod tests {
                 } else {
                     LaunchWatch::with_receipt(StartupReceiptStream::from_events(events))
                 };
-                if scenario == "cancel" {
-                    watch.cancel_receipt();
-                }
                 let launcher = Launcher {
                     first: watch.clone(),
                     launches: Arc::new(AtomicUsize::new(0)),
@@ -1558,6 +1551,140 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A helper still updating the database outlives the 120 s readiness wait.
+    /// Retry must wait on that same helper with a fresh budget and report its
+    /// real outcome: the disk-full cause, or the Runtime once it is ready.
+    #[tokio::test(start_paused = true)]
+    async fn retry_after_a_timeout_reports_the_retained_helpers_real_outcome() {
+        use crate::bootstrap::{BootstrapTrigger, DiscardStatus, RuntimeHost, RuntimeHostSettings};
+        use crate::health::{HealthProbe, Presence};
+        use crate::receipt::{StartupReceipt, StartupReceiptOutcome, StartupReceiptReason, StartupReceiptStream};
+        use crate::status::BootstrapPhase;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct Launcher {
+            watch: LaunchWatch,
+            launches: Arc<AtomicUsize>,
+        }
+        impl RuntimeLauncher for Launcher {
+            fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+                Ok(Arc::new(self.clone()))
+            }
+        }
+        impl ResolvedRuntimeLauncher for Launcher {
+            fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
+                Ok(LoopbackOrigin::parse("http://127.0.0.1:5123").unwrap())
+            }
+            fn launch(&self, _hand_over: bool) -> Result<LaunchedRuntime, LaunchError> {
+                self.launches.fetch_add(1, Ordering::SeqCst);
+                Ok(LaunchedRuntime {
+                    pid: 42,
+                    watch: self.watch.clone(),
+                })
+            }
+        }
+        struct Probe(Arc<AtomicBool>);
+        #[async_trait::async_trait]
+        impl HealthProbe for Probe {
+            async fn presence(&self, _origin: &LoopbackOrigin, _expected: Option<&str>) -> Presence {
+                if self.0.load(Ordering::SeqCst) {
+                    Presence::Unmanaged
+                } else {
+                    Presence::Absent
+                }
+            }
+        }
+
+        // How the helper ends after the first timeout, and what Retry must show.
+        #[derive(Clone, Copy, Debug)]
+        enum End {
+            /// Still running, then ready.
+            Ready,
+            /// Still running when it reports the disk-full verdict.
+            DiskFullRunning,
+            /// Reports the verdict, then exits non-zero, all before the Retry.
+            DiskFullThenExit,
+            /// Exits first; its final frame follows inside the exit drain.
+            ExitThenFinalFrame,
+        }
+        let disk_full = |ready: bool| {
+            ReceiptEvent::Receipt(StartupReceipt {
+                schema_version: 1,
+                outcome: if ready {
+                    StartupReceiptOutcome::Ready
+                } else {
+                    StartupReceiptOutcome::Failed
+                },
+                origin: "http://127.0.0.1:5123".to_owned(),
+                reason: (!ready).then_some(StartupReceiptReason::DatabaseDiskFull),
+            })
+        };
+        for end in [
+            End::Ready,
+            End::DiskFullRunning,
+            End::DiskFullThenExit,
+            End::ExitThenFinalFrame,
+        ] {
+            let stream = StartupReceiptStream::from_events([]);
+            let watch = LaunchWatch::with_receipt(stream.clone());
+            let launcher = Launcher {
+                watch: watch.clone(),
+                launches: Arc::new(AtomicUsize::new(0)),
+            };
+            let serving = Arc::new(AtomicBool::new(false));
+            let host = RuntimeHost::new(
+                Arc::new(Probe(serving.clone())),
+                Arc::new(launcher.clone()),
+                RuntimeHostSettings {
+                    ready_timeout: Duration::from_millis(20),
+                    poll_interval: Duration::from_millis(1),
+                    ..RuntimeHostSettings::default()
+                },
+            );
+            let first = host.bootstrap(&DiscardStatus, BootstrapTrigger::Launch).await;
+            assert_eq!(first.notice.code, BootstrapNoticeCode::ReadyTimeout, "{end:?}");
+            // Retry during the update: the same helper, still no verdict, a fresh budget.
+            let during = host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+            assert_eq!(
+                during.notice.code,
+                BootstrapNoticeCode::ReadyTimeout,
+                "{end:?}: not an address or install failure"
+            );
+
+            match end {
+                End::Ready => {
+                    serving.store(true, Ordering::SeqCst);
+                    stream.deliver(disk_full(true));
+                }
+                End::DiskFullRunning => stream.deliver(disk_full(false)),
+                End::DiskFullThenExit => {
+                    stream.deliver(disk_full(false));
+                    watch.record(LaunchExit::Failed);
+                }
+                End::ExitThenFinalFrame => {
+                    // The exit is seen first; the final frame follows inside the drain.
+                    watch.record(LaunchExit::Failed);
+                    stream.deliver(disk_full(false));
+                }
+            }
+            let after = host.bootstrap(&DiscardStatus, BootstrapTrigger::Retry).await;
+            match end {
+                End::Ready => assert_eq!(after.phase, BootstrapPhase::Ready),
+                _ => assert_eq!(
+                    (after.phase, after.notice.code),
+                    (BootstrapPhase::Failed, BootstrapNoticeCode::DatabaseDiskFull),
+                    "{end:?}: the real cause, not the generic exit"
+                ),
+            }
+            assert_eq!(
+                launcher.launches.load(Ordering::SeqCst),
+                1,
+                "{end:?}: no second launch over the update"
+            );
         }
     }
 

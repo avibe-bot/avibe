@@ -1775,6 +1775,7 @@ def test_cmd_start_reuses_independent_ui_or_recovers_only_unhealthy_ui(monkeypat
 
     monkeypatch.setattr(runtime, "spawn_background", spawn)
     monkeypatch.setattr(runtime, "stop_ui", no_full_stop)
+    monkeypatch.setattr("vibe.remote_access.stop_connector", no_full_stop)
     monkeypatch.setattr("vibe.remote_access.stop", no_full_stop)
     assert cli.cmd_start() == 0
     expected_ui = 111 if ui_state == "healthy" else 333
@@ -1807,6 +1808,7 @@ def test_service_repair_preserves_independent_ui_status_and_never_touches_proces
 
     for name in ("start_ui", "stop_ui", "stop_pid", "spawn_background"):
         monkeypatch.setattr(runtime, name, forbidden)
+    monkeypatch.setattr("vibe.remote_access.stop_connector", forbidden)
     monkeypatch.setattr("vibe.remote_access.stop", forbidden)
     result = cli._start_service_after_repair("service", "ok", "failed", stopped_pids=[])
     assert result["status"] == ("failed" if service_fails else "repaired")
@@ -1902,7 +1904,17 @@ def test_cmd_start_against_a_live_service_neither_resets_its_uptime_nor_skips_th
     assert "starting" not in announced, f"a reused service was announced as starting: {announced}"
 
 
-def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
+def _service_recorded_failure(pid: int, code: str, **fields) -> None:
+    """What a service writes on its way out when the database update could not go ahead."""
+
+    vibe.runtime.write_json(
+        cli.paths.get_runtime_dir() / "service-start-failure.json",
+        {"pid": pid, "code": code, "recorded_at": time.time(), **fields},
+    )
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch, recorded):
     config = SimpleNamespace(
         has_configured_platform_credentials=lambda: True,
         ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=5123, open_browser=False),
@@ -1921,10 +1933,16 @@ def test_cmd_start_fails_only_when_slow_service_exits(monkeypatch):
     monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: False)
     monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: statuses.append(args))
 
-    with pytest.raises(RuntimeError):
+    if recorded:
+        _service_recorded_failure(1234, "database_disk_full", rollback_confirmed=True)
+    with pytest.raises(RuntimeError) as raised:
         cli.cmd_start()
 
-    assert ("error", "service process exited before startup completed", 1234, 5678) in statuses
+    expected = vibe.runtime.DATABASE_DISK_FULL_DETAIL if recorded else "service process exited before startup completed"
+    assert ("error", expected, 1234, 5678) in statuses
+    if recorded:
+        # The sentence is also what the command itself fails with, not "exited".
+        assert str(raised.value) == expected
 
 
 def _ui_refuses_to_start(
@@ -4378,6 +4396,96 @@ def test_desktop_receipt_frame_has_bounded_utf8_schema():
     }
 
 
+def test_desktop_start_waits_out_a_database_update_longer_than_its_budget(monkeypatch, capsys):
+    """The Desktop start path must not kill a service that is updating its database.
+
+    Desktop's own 120-second budget, and a copy that takes five minutes. The
+    readiness wait's clock runs fast (two seconds per reading) so the test takes
+    a few real seconds. The real wait runs against a real /ready endpoint. The
+    start must report ready and roll nothing back. Before this fix, the wait gave
+    up at 120 s and the rollback stopped the service mid-update.
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    real_time = time
+
+    class FastClock:
+        offset = 0.0
+
+        def now(self) -> float:
+            return real_time.monotonic() + self.offset
+
+        def monotonic(self) -> float:
+            self.offset += 2.0
+            return self.now()
+
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+    clock = FastClock()
+    update_seconds = 300.0
+    began = clock.now()
+
+    def updating() -> bool:
+        return clock.now() - began < update_seconds
+
+    class Ready(BaseHTTPRequestHandler):
+        def do_GET(self):
+            ready = not updating()
+            body = json.dumps({"schema_version": 1, "product": "avibe", "ready": ready}
+                              | ({} if ready else {"code": "service_starting"})).encode()
+            self.send_response(200 if ready else 503)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Ready)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    config = SimpleNamespace(
+        has_configured_platform_credentials=lambda: True,
+        ui=SimpleNamespace(setup_host="127.0.0.1", setup_port=server.server_address[1], open_browser=False),
+    )
+    rolled_back = []
+    monkeypatch.setattr(cli.paths, "ensure_data_dirs", lambda: None)
+    monkeypatch.setattr(cli, "_guard_cli_default_state_migration", lambda: None)
+    monkeypatch.setattr(cli, "_ensure_config", lambda: config)
+    monkeypatch.setattr(cli, "_handover_superseded_desktop_runtime", lambda **kwargs: 0)
+    monkeypatch.setattr(vibe.runtime, "claim_desktop_runtime_start", lambda: None)
+    monkeypatch.setattr(cli, "_write_status", lambda *args: None)
+    monkeypatch.setattr(vibe.runtime, "write_status", lambda *args: None)
+    monkeypatch.setattr(vibe.runtime, "effective_ui_bind_host", lambda _config: "127.0.0.1")
+    monkeypatch.setattr(cli, "_in_ssh_session", lambda: False)
+    monkeypatch.setattr(cli, "_open_browser", lambda _url: pytest.fail("desktop mode must not open a browser"))
+    monkeypatch.setattr(vibe.runtime, "claim_ready_service", lambda *args, **kwargs: None)
+    monkeypatch.setattr("vibe.install_generations.collect_install_generations", lambda *_args: None)
+    monkeypatch.setattr(vibe.runtime, "roll_back_start", lambda *args: rolled_back.append(args))
+    monkeypatch.setattr(vibe.runtime, "start_service", lambda **kwargs: _fake_start_result(1234, kwargs))
+    monkeypatch.setattr(vibe.runtime, "start_ui", lambda host, port, **kwargs: _fake_start_result(5678, kwargs))
+    # The service holds the lock while it updates the database, then owns it running.
+    monkeypatch.setattr(
+        vibe.runtime, "resolve_service_owner_pid",
+        lambda *, include_starting=True: 1234 if include_starting or not updating() else None,
+    )
+    monkeypatch.setattr(vibe.runtime, "service_instance_migrating", lambda pid: pid == 1234 and updating())
+    monkeypatch.setattr(vibe.runtime, "service_instance_started", lambda pid: not updating())
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(vibe.runtime, "time", clock)
+    try:
+        # Desktop's default budget: the launcher passes 120 seconds.
+        assert cli.cmd_start(open_browser=False, desktop_receipt=True, desktop_ready_timeout=120.0) == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert clock.now() - began >= update_seconds
+    assert rolled_back == []
+    output = capsys.readouterr().out
+    assert '"outcome":"ready"' in output and '"outcome":"failed"' not in output
+
+
 @pytest.mark.parametrize("ready_timeout", [None, 1.0, 600.0])
 def test_desktop_receipt_start_shares_readiness_and_does_not_wait_twice(monkeypatch, capsys, ready_timeout):
     config = SimpleNamespace(
@@ -4486,6 +4594,41 @@ def test_desktop_receipt_failure_is_emitted_after_rollback(monkeypatch, capsys):
     assert '"outcome":"failed"' in output
     assert '"reason":"runtime_not_ready"' in output
     assert len(stopped) == 1
+
+
+@pytest.mark.parametrize(
+    ("code", "fields", "reason"),
+    [
+        ("database_disk_full", {"rollback_confirmed": True}, "database_disk_full"),
+        ("database_disk_full", {"rollback_confirmed": False}, "database_disk_full_unconfirmed"),
+    ],
+)
+def test_desktop_receipt_names_why_the_database_update_stopped(monkeypatch, capsys, code, fields, reason):
+    _ui_refuses_to_start(monkeypatch, reused=False, ui_outcome=5678)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: False)
+
+    def service_died(*args, **kwargs):
+        _service_recorded_failure(1234, code, **fields)
+        return None
+
+    monkeypatch.setattr(vibe.runtime, "wait_for_desktop_startup_ready", service_died)
+    with pytest.raises(RuntimeError):
+        cli.cmd_start(open_browser=False, desktop_receipt=True)
+    output = capsys.readouterr().out
+    assert f'"reason":"{reason}"' in output
+
+
+def test_an_earlier_starts_recorded_failure_is_not_this_ones(monkeypatch, capsys):
+    _ui_refuses_to_start(monkeypatch, reused=False, ui_outcome=5678)
+    monkeypatch.setattr(vibe.runtime, "pid_alive", lambda pid: False)
+    monkeypatch.setattr(vibe.runtime, "wait_for_desktop_startup_ready", lambda *args, **kwargs: None)
+    vibe.runtime.write_json(
+        cli.paths.get_runtime_dir() / "service-start-failure.json",
+        {"pid": 1234, "code": "database_disk_full", "rollback_confirmed": True, "recorded_at": time.time() - 3600},
+    )
+    with pytest.raises(RuntimeError):
+        cli.cmd_start(open_browser=False, desktop_receipt=True)
+    assert '"reason":"runtime_not_ready"' in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("failure", ["transport", "housekeeping"])

@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type {
   MobileBridgeError,
+  MobileInstance,
   MobilePasswordSignInResult,
   MobileSessionState,
 } from './bridge';
@@ -15,10 +16,13 @@ const mobile = vi.hoisted(() => ({
   dismiss: vi.fn<() => Promise<null>>(),
   logout: vi.fn<() => Promise<MobileSessionState>>(),
   openExternal: vi.fn(),
+  openPage: vi.fn<(page: string) => Promise<{ completed: boolean }>>(),
   refresh: vi.fn<() => Promise<MobileSessionState>>(),
   requestOtp: vi.fn(),
   returnToInstance: vi.fn<() => Promise<null>>(),
   selectInstance: vi.fn(),
+  signInWithProvider: vi.fn<(provider: string) => Promise<MobileSessionState>>(),
+  readProviders: vi.fn<() => Promise<{ providers?: ('google' | 'github' | 'apple')[]; passkey?: boolean }>>(),
   signInWithPassword: vi.fn<
     (email: string, password: string) => Promise<MobilePasswordSignInResult>
   >(),
@@ -35,11 +39,14 @@ vi.mock('./bridge', async (importOriginal) => ({
   dismissMobileSheet: mobile.dismiss,
   logoutMobileSession: mobile.logout,
   openMobileExternal: mobile.openExternal,
+  openMobilePage: mobile.openPage,
   refreshMobileSession: mobile.refresh,
   requestMobileOtp: mobile.requestOtp,
   returnToMobileInstance: mobile.returnToInstance,
   selectMobileInstance: mobile.selectInstance,
   signInMobileWithPassword: mobile.signInWithPassword,
+  signInMobileWithProvider: mobile.signInWithProvider,
+  readMobileProviders: mobile.readProviders,
   verifyMobileOtp: mobile.verifyOtp,
   verifyMobilePasskey: mobile.verifyPasskey,
   verifyMobileSecondFactor: mobile.verifySecondFactor,
@@ -129,11 +136,18 @@ const resetMobileMocks = () => {
   mobile.dismiss.mockResolvedValue(null);
   mobile.logout.mockReset();
   mobile.openExternal.mockReset();
+  mobile.openPage.mockReset();
+  mobile.openPage.mockResolvedValue({ completed: false });
   mobile.refresh.mockReset();
   mobile.requestOtp.mockReset();
   mobile.returnToInstance.mockReset();
   mobile.selectInstance.mockReset();
   mobile.signInWithPassword.mockReset();
+  mobile.signInWithProvider.mockReset();
+  mobile.readProviders.mockReset();
+  // Native answered without a list (none ever read): the row stays as the session left it.
+  mobile.readProviders.mockResolvedValue({});
+  mobile.signInWithProvider.mockRejectedValue({ code: 'provider_cancelled', message: 'cancelled' });
   mobile.verifyOtp.mockReset();
   mobile.verifyPasskey.mockReset();
   mobile.verifySecondFactor.mockReset();
@@ -261,7 +275,7 @@ const expectedErrorKey = (
 /** Sends the email code and returns its input. */
 const reachCode = async (): Promise<HTMLInputElement> => {
   render(<MobileOnboarding />);
-  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
   fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
     target: { value: 'alex@example.com' },
   });
@@ -272,7 +286,7 @@ const reachCode = async (): Promise<HTMLInputElement> => {
 /** Opens the password step for a valid email and returns its password field. */
 const reachPassword = async (email = 'alex@example.com'): Promise<HTMLInputElement> => {
   render(<MobileOnboarding />);
-  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
   fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
     target: { value: email },
   });
@@ -300,7 +314,7 @@ const openAccount = async (hash: '#account' | '#runtime-account') => {
 const reachSecondFactor = async (state: SecondFactorState = owed()) => {
   mobile.verifyOtp.mockResolvedValueOnce(state);
   render(<MobileOnboarding />);
-  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
   fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
     target: { value: 'alex@example.com' },
   });
@@ -327,7 +341,7 @@ describe('mobile onboarding', () => {
   it('AUTH-SETUP-148 completes email OTP discovery and authorized instance selection', async () => {
     render(<MobileOnboarding />);
 
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
     });
@@ -383,7 +397,7 @@ describe('mobile onboarding', () => {
           mobile.requestOtp.mockRejectedValueOnce(error);
           render(<MobileOnboarding />);
           fireEvent.click(await screen.findByRole('button', {
-            name: 'mobileApp.welcome.action',
+            name: 'mobileApp.welcome.continueWithEmail',
           }));
           fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
             target: { value: 'alex@example.com' },
@@ -396,7 +410,7 @@ describe('mobile onboarding', () => {
             .mockRejectedValueOnce(error);
           render(<MobileOnboarding />);
           fireEvent.click(await screen.findByRole('button', {
-            name: 'mobileApp.welcome.action',
+            name: 'mobileApp.welcome.continueWithEmail',
           }));
           fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
             target: { value: 'alex@example.com' },
@@ -408,7 +422,7 @@ describe('mobile onboarding', () => {
           mobile.verifyOtp.mockRejectedValueOnce(error);
           render(<MobileOnboarding />);
           fireEvent.click(await screen.findByRole('button', {
-            name: 'mobileApp.welcome.action',
+            name: 'mobileApp.welcome.continueWithEmail',
           }));
           fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
             target: { value: 'alex@example.com' },
@@ -497,12 +511,18 @@ describe('mobile onboarding', () => {
           break;
         }
 
-        const alert = await screen.findByRole('alert');
-        expect(alert.textContent, `${operation} ${code}`).toContain(
-          expectedErrorKey(operation, code),
-        );
+        if (operation === 'refresh') {
+          // A failed refresh over a list keeps the list, under the sheet's banner that retries.
+          expect(await screen.findByText('mobileApp.sheet.stale'), `${operation} ${code}`).toBeTruthy();
+          expect(screen.getByRole('button', { name: /Shared Research Avibe/ })).toBeTruthy();
+        } else {
+          const alert = await screen.findByRole('alert');
+          expect(alert.textContent, `${operation} ${code}`).toContain(
+            expectedErrorKey(operation, code),
+          );
+        }
         expect(
-          screen.queryByRole('button', { name: 'mobileApp.welcome.action' }),
+          screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }),
           `${operation} ${code}`,
         ).toBeNull();
 
@@ -609,7 +629,7 @@ describe('mobile onboarding', () => {
 
         render(<MobileOnboarding />);
         fireEvent.click(await screen.findByRole('button', {
-          name: 'mobileApp.welcome.action',
+          name: 'mobileApp.welcome.continueWithEmail',
         }));
         fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
           target: { value: 'alex@example.com' },
@@ -662,7 +682,7 @@ describe('mobile onboarding', () => {
 
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
@@ -702,10 +722,31 @@ describe('mobile onboarding', () => {
     expect(mobile.logout).not.toHaveBeenCalled();
   });
 
+  it.each(['local_state_unavailable', 'local_state_write_failed'])(
+    'keeps %s on the existing recovery surface and retries discovery, not logout',
+    async (code) => {
+      mobile.bootstrap
+        .mockRejectedValueOnce({ code, message: 'local records unavailable' })
+        .mockRejectedValueOnce({ code, message: 'local records unavailable' })
+        .mockResolvedValueOnce(signedIn());
+      render(<MobileOnboarding />);
+      expect(await screen.findByText('mobileApp.errors.localRecords')).toBeTruthy();
+      expect(screen.queryByText('mobileApp.errors.network')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      await waitFor(() => expect(mobile.bootstrap).toHaveBeenCalledTimes(2));
+      expect(await screen.findByText('mobileApp.errors.localRecords')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      expect(await screen.findByRole('button', { name: /Personal Avibe/ })).toBeTruthy();
+      expect(screen.queryByText('mobileApp.errors.localRecords')).toBeNull();
+      expect(mobile.logout).not.toHaveBeenCalled();
+      expect(mobile.requestOtp).not.toHaveBeenCalled();
+    },
+  );
+
   it('enters Welcome only from an explicit signed-out result', async () => {
     render(<MobileOnboarding />);
     expect(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeTruthy();
     cleanup();
 
@@ -717,7 +758,7 @@ describe('mobile onboarding', () => {
       name: 'mobileApp.instances.refresh',
     }));
     expect(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeTruthy();
     cleanup();
 
@@ -729,7 +770,7 @@ describe('mobile onboarding', () => {
       name: 'mobileApp.account.signOut',
     }));
     expect(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeTruthy();
     cleanup();
 
@@ -738,7 +779,7 @@ describe('mobile onboarding', () => {
     mobile.verifyOtp.mockResolvedValueOnce({ status: 'signedOut' });
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
@@ -753,7 +794,7 @@ describe('mobile onboarding', () => {
     );
     expect(screen.getByLabelText('mobileApp.code.label')).toBeTruthy();
     expect(screen.queryByRole('button', {
-      name: 'mobileApp.welcome.action',
+      name: 'mobileApp.welcome.continueWithEmail',
     })).toBeNull();
   });
 
@@ -784,7 +825,7 @@ describe('mobile onboarding', () => {
     );
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
 
     const send = screen.getByRole('button', { name: 'mobileApp.email.send' });
@@ -815,7 +856,7 @@ describe('mobile onboarding', () => {
     });
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
@@ -844,7 +885,7 @@ describe('mobile onboarding', () => {
     const user = userEvent.setup();
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
@@ -871,7 +912,7 @@ describe('mobile onboarding', () => {
     });
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
 
@@ -921,8 +962,325 @@ describe('mobile onboarding', () => {
     expect(screen.getByText('alexander.with.a.very.long.address@example.com')).toBeTruthy();
   });
 
+  // ui/design: mobile-app/passkey/passkey-link; the body is shared with the Desktop's first page.
+  it('keeps the App\'s brand row and its own subtitle on Welcome', async () => {
+    mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
+    render(<MobileOnboarding />);
+    await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+    expect(screen.getByText('mobileApp.brand.agentOs')).toBeTruthy();
+    expect(screen.getByRole('heading').textContent).toBe('mobileApp.welcome.titleLine1mobileApp.welcome.titleLine2');
+    expect(document.body.textContent).toContain('mobileApp.welcome.bodyLine1mobileApp.welcome.bodyLine2');
+    expect(document.body.textContent).not.toContain('desktopClient.welcomeLine1');
+  });
+
+  describe('AUTH-SETUP-185 the ways in on Welcome follow the signed-out answer', () => {
+    const marks = {
+      google: 'mobileApp.welcome.continueWithGoogle',
+      github: 'mobileApp.welcome.continueWithGitHub',
+      apple: 'mobileApp.welcome.continueWithApple',
+    } as const;
+    const offered = () => ({
+      providers: (Object.keys(marks) as (keyof typeof marks)[])
+        .filter((provider) => screen.queryByRole('button', { name: marks[provider] })),
+      passkey: Boolean(screen.queryByRole('button', { name: 'signIn.passkey.use' })),
+    });
+
+    // A signed-out answer names native's read of avibe.bot's configuration, in time or the last
+    // one: `providers` is the mobile broker's list, `passkey` passkey sign-in's switch. Only exact
+    // names and `true` count; before any read, email alone.
+    it.each([
+      ['only Google', { providers: ['google'], passkey: false }, { providers: ['google'], passkey: false }],
+      ['Apple off', { providers: ['google', 'github'], passkey: false }, { providers: ['google', 'github'], passkey: false }],
+      ['all off', { providers: [], passkey: false }, { providers: [], passkey: false }],
+      ['not read', {}, { providers: [], passkey: false }],
+      ['passkey on', { providers: [], passkey: true }, { providers: [], passkey: true }],
+      ['malformed', { providers: ['google', 'facebook', 1], passkey: 'true' }, { providers: ['google'], passkey: false }],
+    ])('AUTH-SETUP-185 %s', async (_name, answer, expected) => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', ...answer } as MobileSessionState);
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual(expected);
+    });
+
+    it('AUTH-SETUP-185 coming back to Welcome keeps passkey with the list when the new answer names none', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github'], passkey: true });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: marks.github });
+      mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
+      fireEvent.click(screen.getByRole('button', { name: marks.github }));
+      // The account is gone by the next refresh, and native had never read the switches it names.
+      mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.instances.refresh' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(offered()).toEqual({ providers: ['google', 'github'], passkey: true });
+    });
+
+    it('AUTH-SETUP-185 a read on Welcome turns passkey sign-in on and off with the list', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: marks.google });
+      expect(offered()).toEqual({ providers: ['google'], passkey: false });
+      mobile.readProviders.mockResolvedValueOnce({ providers: ['google'], passkey: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await screen.findByRole('button', { name: 'signIn.passkey.use' });
+      // An answer without the list leaves both as they are; the next list sets both.
+      mobile.readProviders.mockResolvedValueOnce({});
+      document.dispatchEvent(new Event('visibilitychange'));
+      await waitFor(() => expect(mobile.readProviders).toHaveBeenCalledTimes(3));
+      expect(offered()).toEqual({ providers: ['google'], passkey: true });
+      mobile.readProviders.mockResolvedValueOnce({ providers: [], passkey: false });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'signIn.passkey.use' })).toBeNull());
+      expect(offered()).toEqual({ providers: [], passkey: false });
+    });
+  });
+
+  describe('Google, GitHub and Apple on Welcome', () => {
+    const openWelcome = async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google', 'github', 'apple'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
+    };
+
+    const marks = () => ['Google', 'GitHub', 'Apple']
+      .filter((name) => screen.queryByRole('button', { name: `mobileApp.welcome.continueWith${name}` }));
+
+    it('updates the row in place when Welcome learns a newer list, never passing through none', async () => {
+      const newer = deferred<{ providers?: ('google' | 'github' | 'apple')[] }>();
+      mobile.readProviders.mockReturnValueOnce(newer.promise);
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['google'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' });
+      expect(mobile.readProviders).toHaveBeenCalledTimes(1);
+      const seen: string[][] = [];
+      const observer = new MutationObserver(() => seen.push(marks()));
+      observer.observe(document.body, { subtree: true, childList: true });
+      newer.resolve({ providers: ['google', 'github', 'apple'] });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithApple' });
+      observer.disconnect();
+      expect(marks()).toEqual(['Google', 'GitHub', 'Apple']);
+      expect(seen.every((list) => list.length > 0)).toBe(true);
+    });
+
+    it('asks again when the App returns to the foreground on Welcome', async () => {
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut' });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(marks()).toEqual([]);
+      mobile.readProviders.mockResolvedValueOnce({ providers: ['github'] });
+      document.dispatchEvent(new Event('visibilitychange'));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' });
+      expect(marks()).toEqual(['GitHub']);
+    });
+
+    it('offers only the sign-ins avibe.bot advertises, and keeps them when an answer names none', async () => {
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
+      expect(screen.queryByText('mobileApp.welcome.or')).toBeNull();
+      cleanup();
+
+      mobile.bootstrap.mockResolvedValueOnce({ status: 'signedOut', providers: ['github'] });
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' });
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithApple' })).toBeNull();
+
+      // A signed-out answer without the list (its read did not answer in time) keeps it:
+      // sign in with GitHub, then sign out with an answer that names no providers.
+      mobile.signInWithProvider.mockResolvedValueOnce(signedIn());
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.title' }));
+      mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.signOut' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' })).toBeTruthy();
+    });
+
+    it('AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances', async () => {
+      await openWelcome();
+      const pending = deferred<MobileSessionState>();
+      mobile.signInWithProvider.mockReturnValueOnce(pending.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGitHub' }));
+      expect(mobile.signInWithProvider).toHaveBeenCalledWith('github');
+      await waitFor(() => {
+        for (const name of [
+          'mobileApp.welcome.continueWithEmail',
+          'mobileApp.welcome.continueWithGoogle',
+          'mobileApp.welcome.continueWithGitHub',
+          'mobileApp.welcome.continueWithApple',
+        ]) {
+          expect((screen.getByRole('button', { name }) as HTMLButtonElement).disabled).toBe(true);
+        }
+      });
+      pending.resolve(signedIn());
+      await screen.findByText('Personal Avibe');
+      // Authorized selection, as after the email code (AUTH-SETUP-148).
+      fireEvent.click(await screen.findByRole('button', { name: /Personal Avibe/ }));
+      await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+    });
+
+    it('says nothing when the person closes the window, and names the provider when its email is unverified', async () => {
+      await openWelcome();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }));
+      await waitFor(() => expect(mobile.signInWithProvider).toHaveBeenCalledWith('apple'));
+      await waitFor(() => {
+        expect(
+          (screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }) as HTMLButtonElement).disabled,
+        ).toBe(false);
+      });
+      expect(screen.queryByRole('alert')).toBeNull();
+
+      mobile.signInWithProvider.mockRejectedValueOnce({ code: 'provider_email_unverified', message: 'unverified' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' }));
+      expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.provider.googleEmailUnverified');
+
+      mobile.signInWithProvider.mockRejectedValueOnce({ code: 'network', message: 'network' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }));
+      await waitFor(() => {
+        expect(screen.getByRole('alert').textContent).toBe('mobileApp.provider.appleFailed');
+      });
+    });
+
+    it('shows each failure its own line, and stays silent when an account change ended the attempt', async () => {
+      await openWelcome();
+      for (const [provider, name, code, line] of [
+        ['github', 'mobileApp.welcome.continueWithGitHub', 'invalid_or_expired', 'mobileApp.provider.githubFailed'],
+        ['google', 'mobileApp.welcome.continueWithGoogle', 'rate_limited', 'mobileApp.code.rateLimited'],
+        ['google', 'mobileApp.welcome.continueWithGoogle', 'provider_unavailable', 'mobileApp.provider.unavailable'],
+        ['apple', 'mobileApp.welcome.continueWithApple', 'local_state_write_failed', 'mobileApp.errors.localRecords'],
+        ['github', 'mobileApp.welcome.continueWithGitHub', 'network', 'mobileApp.errors.network'],
+      ] as const) {
+        mobile.signInWithProvider.mockRejectedValueOnce({ code, message: code });
+        fireEvent.click(screen.getByRole('button', { name }));
+        await waitFor(() => expect(screen.getByRole('alert').textContent).toBe(line));
+        expect(mobile.signInWithProvider).toHaveBeenLastCalledWith(provider);
+      }
+      const stale = deferred<MobileSessionState>();
+      mobile.signInWithProvider.mockReturnValueOnce(stale.promise);
+      const apple = screen.getByRole('button', { name: 'mobileApp.welcome.continueWithApple' }) as HTMLButtonElement;
+      fireEvent.click(apple);
+      await waitFor(() => expect(apple.disabled).toBe(true));
+      stale.reject({ code: 'stale_session', message: 'stale' });
+      // Only once the attempt has settled does the absence of a line say anything.
+      await waitFor(() => expect(apple.disabled).toBe(false));
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+
+    it('marks an account a provider sign-in just created, until it has an instance', async () => {
+      await openWelcome();
+      mobile.signInWithProvider.mockResolvedValueOnce({ ...signedIn(), instances: [], new_account: true });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.welcome.continueWithGoogle' }));
+      expect(await screen.findByText('mobileApp.empty.newAccount')).toBeTruthy();
+      mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.empty.newAccountSignOut' }));
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(mobile.logout).toHaveBeenCalledTimes(1);
+      cleanup();
+
+      // Without the hint, the empty page is the usual one.
+      resetMobileMocks();
+      mobile.bootstrap.mockResolvedValueOnce({ ...signedIn(), instances: [] });
+      render(<MobileOnboarding />);
+      await screen.findByText('mobileApp.empty.title');
+      expect(screen.queryByText('mobileApp.empty.newAccount')).toBeNull();
+    });
+  });
+
+  describe('account and data: privacy policy and account deletion', () => {
+    const deleteButton = () => screen.getByRole('button', { name: 'mobileApp.account.delete' });
+    const privacyButton = () => screen.getByRole('button', { name: 'mobileApp.account.privacy' }) as HTMLButtonElement;
+    const openAccountData = async (hash: '#account' | '#runtime-account' = '#account') => {
+      await openAccount(hash);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title' });
+    };
+
+    it('keeps deletion off Account: one level down, at the bottom, and Back returns to Account', async () => {
+      await openAccount('#account');
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.delete' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.privacy' })).toBeNull();
+
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title' });
+      const buttons = screen.getAllByRole('button');
+      expect(buttons[buttons.length - 1]).toBe(deleteButton());
+
+      fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title' });
+    });
+
+    it('opens the privacy policy in the App without touching the session', async () => {
+      await openAccountData();
+      fireEvent.click(privacyButton());
+      expect(mobile.openPage).toHaveBeenCalledWith('privacyPolicy');
+      expect(mobile.refresh).not.toHaveBeenCalled();
+    });
+
+    it('locks the page while the deletion page is open, then goes to Welcome once the session reads signed out', async () => {
+      await openAccountData('#runtime-account');
+      const page = deferred<{ completed: boolean }>();
+      mobile.openPage.mockReturnValueOnce(page.promise);
+      mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
+      fireEvent.click(deleteButton());
+
+      await waitFor(() => expect(mobile.openPage).toHaveBeenCalledWith('accountDeletion'));
+      await waitFor(() => {
+        expect(privacyButton().disabled).toBe(true);
+        expect((screen.getByRole('button', { name: 'common.back' }) as HTMLButtonElement).disabled).toBe(true);
+      });
+      expect(mobile.refresh).not.toHaveBeenCalled();
+
+      page.resolve({ completed: true });
+      await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+      expect(mobile.refresh).toHaveBeenCalledTimes(1);
+      expect(mobile.logout).not.toHaveBeenCalled();
+    });
+
+    it('reads the session after any close, and stays put while the account is still there', async () => {
+      await openAccountData();
+      mobile.openPage.mockResolvedValueOnce({ completed: false });
+      mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
+      fireEvent.click(deleteButton());
+
+      await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(privacyButton().disabled).toBe(false));
+      expect(screen.getByRole('heading', { name: 'mobileApp.accountData.title' })).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeNull();
+    });
+
+    it('signs this device out when the page reported the deletion but the read-back did not', async () => {
+      for (const readBack of [
+        () => mobile.refresh.mockRejectedValueOnce({ code: 'busy', message: 'busy' }),
+        () => mobile.refresh.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' }),
+      ]) {
+        await openAccountData();
+        mobile.openPage.mockResolvedValueOnce({ completed: true });
+        readBack();
+        mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
+        fireEvent.click(deleteButton());
+
+        await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
+        expect(mobile.logout).toHaveBeenCalledTimes(1);
+        cleanup();
+        resetMobileMocks();
+      }
+    });
+
+    it('stays as it was when the deletion page cannot open', async () => {
+      await openAccountData();
+      mobile.openPage.mockRejectedValueOnce({ code: 'busy', message: 'busy' });
+      fireEvent.click(deleteButton());
+
+      await waitFor(() => expect(privacyButton().disabled).toBe(false));
+      expect(mobile.refresh).not.toHaveBeenCalled();
+      expect(screen.queryByRole('alert')).toBeNull();
+    });
+  });
+
   it('disables account navigation while logout is pending', async () => {
-    window.history.replaceState({}, '', '/#account');
+    // Over an instance, Account names it and offers Switch as well as Back.
+    window.history.replaceState({}, '', '/#runtime-account');
     mobile.bootstrap.mockResolvedValueOnce({
       ...signedIn(),
       selected_instance_id: 'owned',
@@ -952,7 +1310,7 @@ describe('mobile onboarding', () => {
     });
 
     finishLogout?.({ status: 'signedOut' });
-    await screen.findByRole('button', { name: 'mobileApp.welcome.action' });
+    await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' });
   });
 
   it('locks every interactive control on each screen that owns an account operation', async () => {
@@ -968,7 +1326,7 @@ describe('mobile onboarding', () => {
     const send = deferred<{ cooldown_seconds: number }>();
     mobile.requestOtp.mockReturnValueOnce(send.promise);
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     expectScreenLocked();
@@ -976,7 +1334,7 @@ describe('mobile onboarding', () => {
 
     resetMobileMocks();
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     mobile.verifyOtp.mockReturnValueOnce(deferred<MobileSessionState>().promise);
@@ -1031,7 +1389,7 @@ describe('mobile onboarding', () => {
     });
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     const code = await screen.findByLabelText('mobileApp.code.label');
@@ -1061,7 +1419,7 @@ describe('mobile onboarding', () => {
     mobile.verifyOtp.mockReturnValueOnce(verification.promise);
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     await user.type(await screen.findByLabelText('mobileApp.code.label'), '123456');
@@ -1081,7 +1439,7 @@ describe('mobile onboarding', () => {
     mobile.verifyOtp.mockReturnValueOnce(verification.promise);
 
     render(<MobileOnboarding />);
-    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    await user.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     await user.type(screen.getByLabelText('mobileApp.email.label'), 'alex@example.com');
     await user.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     const code = await screen.findByLabelText('mobileApp.code.label');
@@ -1246,7 +1604,7 @@ describe('mobile onboarding', () => {
     mobile.verifyPasskey.mockResolvedValueOnce({ status: 'signedOut' });
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.usePasskey' }));
-    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
     expect(mobile.logout).not.toHaveBeenCalled();
     cleanup();
 
@@ -1256,7 +1614,7 @@ describe('mobile onboarding', () => {
     fireEvent.click(await screen.findByRole('button', {
       name: 'mobileApp.twoFactor.differentAccount',
     }));
-    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
     expect(mobile.logout).toHaveBeenCalledTimes(1);
     expect(mobile.verifyPasskey).not.toHaveBeenCalled();
   });
@@ -1379,7 +1737,7 @@ describe('mobile onboarding', () => {
     await openAccount('#account');
     fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
     expect(await screen.findByRole('heading', {
-      name: 'mobileApp.instances.switchTitle',
+      name: 'mobileApp.sheet.title',
     })).toBeTruthy();
     expect(mobile.returnToInstance).not.toHaveBeenCalled();
     cleanup();
@@ -1414,21 +1772,24 @@ describe('mobile onboarding', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
     await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole('heading', { name: 'mobileApp.instances.switchTitle' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'mobileApp.sheet.title' })).toBeNull();
   });
 
   it('returns from the instance list to the instance it covers, and offers no Back without one', async () => {
     await openAccount('#runtime-account');
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
-    await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' });
+    await screen.findByRole('heading', { name: 'mobileApp.sheet.title' });
     fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
     await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(1));
     cleanup();
 
     resetMobileMocks();
     await openAccount('#account');
-    fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
-    await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' });
+    // Back leads to the list, which already shows the current instance: no Switch here.
+    expect(screen.queryByRole('button', { name: 'mobileApp.account.switch' })).toBeNull();
+    expect(screen.queryByText('mobileApp.account.current')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
+    await screen.findByRole('heading', { name: 'mobileApp.sheet.title' });
     // Nothing to swipe back to, either.
     expect(screen.queryByRole('button', { name: 'common.back' })).toBeNull();
     expect(document.querySelector('[data-mobile-back]')).toBeNull();
@@ -1450,13 +1811,13 @@ describe('mobile onboarding', () => {
       message: 'No instance is open behind the account page.',
     });
     expect(await screen.findByRole('heading', {
-      name: 'mobileApp.instances.switchTitle',
+      name: 'mobileApp.sheet.title',
     })).toBeTruthy();
 
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.title' }));
     fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
     expect(await screen.findByRole('heading', {
-      name: 'mobileApp.instances.switchTitle',
+      name: 'mobileApp.sheet.title',
     })).toBeTruthy();
     expect(mobile.returnToInstance).toHaveBeenCalledTimes(1);
   });
@@ -1470,7 +1831,7 @@ describe('mobile password sign-in', () => {
   /** Opens the email step and types `email` in code mode. */
   const reachEmail = async (email: string) => {
     render(<MobileOnboarding />);
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     if (email) fireEvent.change(emailField(), { target: { value: email } });
   };
 
@@ -1747,7 +2108,7 @@ describe('mobile password sign-in', () => {
       } else {
         // Code mode, then Back leaves the step for Welcome.
         fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
-        fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+        fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
         expect(emailField().value, name).toBe('alex@example.com');
         fireEvent.click(screen.getByRole('button', { name: 'mobileApp.password.entry' }));
       }
@@ -1887,7 +2248,7 @@ describe('mobile password sign-in', () => {
 
     // The next account signs in with its password and owes its own second factor.
     mobile.signInWithPassword.mockResolvedValueOnce(owed({ methods: ['totp'], email: 'sam@example.com' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'sam@example.com' },
     });
@@ -1915,7 +2276,7 @@ describe('mobile password sign-in', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
 
     // A new email sign-in owes no notice for the old password.
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), {
       target: { value: 'alex@example.com' },
     });
@@ -2059,7 +2420,7 @@ describe('mobile instance sheet', () => {
     await openSheet();
     const opening = deferred<{ instance: typeof lab }>();
     mobile.selectInstance.mockReturnValueOnce(opening.promise);
-    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
     expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
 
@@ -2092,7 +2453,7 @@ describe('mobile instance sheet', () => {
     expect(await screen.findByText('mobileApp.sheet.stale')).toBeTruthy();
     // No blanket "can't reach avibe.bot": the cached list is still there.
     expect(screen.queryByText('mobileApp.errors.network')).toBeNull();
-    expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toBeTruthy();
 
     mobile.refresh.mockResolvedValueOnce(inSheet());
     fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
@@ -2129,7 +2490,7 @@ describe('mobile instance sheet', () => {
     render(<MobileOnboarding />);
     await screen.findByText('mobileApp.sheet.updating');
 
-    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ }));
     expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
     // Native runs one account operation at a time: the open waits rather than failing as busy.
     expect(mobile.selectInstance).not.toHaveBeenCalled();
@@ -2184,7 +2545,7 @@ describe('mobile instance sheet', () => {
     refreshing.resolve(inSheet());
     await waitFor(() => expect(screen.queryByText('mobileApp.sheet.updating')).toBeNull());
     expect(screen.queryByText('mobileApp.sheet.stale')).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: /^Lab/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ }));
     await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('lab'));
   });
 
@@ -2200,10 +2561,20 @@ describe('mobile instance sheet', () => {
     expect(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' })).toBeTruthy();
   });
 
+  it('keeps its sections when a refresh drops the current instance, down to none at all', async () => {
+    window.history.replaceState({}, '', '/#sheet');
+    mobile.bootstrap.mockResolvedValueOnce(inSheet());
+    mobile.refresh.mockResolvedValueOnce({ ...inSheet(), instances: [] });
+    render(<MobileOnboarding />);
+    expect(await screen.findByText('mobileApp.sheet.noOthers')).toBeTruthy();
+    expect(screen.getByText('mobileApp.sheet.others')).toBeTruthy();
+    expect(screen.queryByText('mobileApp.sheet.youreIn')).toBeNull();
+  });
+
   it('opened from the instance name, lists the instances without the account', async () => {
     await openSheet(inSheet(), '#sheet-instances');
     expect(screen.queryByRole('button', { name: /alexander\.with\.a\.very\.long/ })).toBeNull();
-    expect(screen.getByRole('button', { name: /^Lab/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'mobileApp.sheet.close:Personal Avibe' })).toBeTruthy();
     // It scrolls its document, as the avatar's sheet does.
     expect(screen.getByRole('main').classList.contains('overflow-y-auto')).toBe(false);
@@ -2218,6 +2589,36 @@ describe('mobile instance sheet', () => {
       render(<MobileOnboarding />);
       await screen.findByText('mobileApp.account.signedInAs');
     };
+
+    it('pushes Account and data inside the sheet, whose Back names Account for the edge swipe', async () => {
+      await openAccountRoot();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.accountData.title' }));
+      await screen.findByRole('heading', { name: 'mobileApp.accountData.title', level: 1 });
+      const back = document.querySelector('[data-mobile-back]') as HTMLButtonElement;
+      expect(back.textContent).toBe('mobileApp.account.title');
+      expect(screen.getByRole('button', { name: 'mobileApp.account.delete' })).toBeTruthy();
+
+      fireEvent.click(back);
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+      expect(document.querySelector('[data-mobile-back]')).toBeNull();
+    });
+
+    it('switches instance from the sheet\'s Account to its list, whose account row leads back', async () => {
+      await openAccountRoot();
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.switch' }));
+      await screen.findByText('mobileApp.sheet.youreIn');
+      expect(screen.getByText('Personal Avibe')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long\.address@example\.com/ }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+    });
+
+    it('offers Switch instance only on the Account the avatar\'s sheet opens on', async () => {
+      await openSheet();
+      fireEvent.click(screen.getByRole('button', { name: /alexander\.with\.a\.very\.long\.address@example\.com/ }));
+      await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 });
+      // Account pushed from the list has Back to it instead.
+      expect(screen.queryByRole('button', { name: 'mobileApp.account.switch' })).toBeNull();
+    });
 
     it('is the sheet\'s root: Account with Close, and no Back for the edge swipe to press', async () => {
       await openAccountRoot();
@@ -2245,7 +2646,7 @@ describe('mobile instance sheet', () => {
       mobile.bootstrap.mockResolvedValueOnce(inSheet());
       mobile.refresh.mockResolvedValueOnce({ status: 'signedOut' });
       render(<MobileOnboarding />);
-      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
       expect(mobile.refresh).toHaveBeenCalledTimes(1);
     });
 
@@ -2267,12 +2668,15 @@ describe('mobile instance sheet', () => {
         groups: [],
       });
       await openAccountRoot();
+      // The sheet's one refresh as it opens (on a timer): let it run before going anywhere.
+      await waitFor(() => expect(mobile.refresh).toHaveBeenCalledTimes(1));
       fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.licenses.title' }));
       expect(await screen.findByRole('heading', { name: 'mobileApp.licenses.title' })).toBeTruthy();
       fireEvent.click(screen.getByRole('button', { name: 'common.back' }));
       expect(await screen.findByRole('heading', { name: 'mobileApp.account.title', level: 1 })).toBeTruthy();
       expect(screen.getByRole('button', { name: 'common.close' })).toBeTruthy();
-      expect(document.querySelector('[data-mobile-back]')).toBeNull();      // Coming back is not opening: the sheet refreshed once.
+      expect(document.querySelector('[data-mobile-back]')).toBeNull();
+      // Coming back is not opening: the sheet refreshed once.
       expect(mobile.refresh).toHaveBeenCalledTimes(1);
     });
 
@@ -2281,7 +2685,126 @@ describe('mobile instance sheet', () => {
       mobile.logout.mockResolvedValueOnce({ status: 'signedOut' });
       fireEvent.click(screen.getByRole('button', { name: 'mobileApp.account.signOut' }));
       await waitFor(() => expect(mobile.logout).toHaveBeenCalledTimes(1));
-      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.action' })).toBeTruthy();
+      expect(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' })).toBeTruthy();
+    });
+  });
+
+  // The full page with an instance selected but none open, say after one failed to load: the
+  // sheet's list in a page (ui/design: mobile-app/switcher/page-switching).
+  describe('the full page with a selection', () => {
+    const openPage = async (state = inSheet()) => {
+      mobile.bootstrap.mockResolvedValueOnce(state);
+      render(<MobileOnboarding />);
+      await screen.findByText('mobileApp.sheet.youreIn');
+    };
+
+    it('shows the sheet\'s list: where you are, then the others by recent use, under the sheet\'s title', async () => {
+      await openPage();
+      expect(screen.getByRole('heading', { name: 'mobileApp.sheet.title', level: 1 })).toBeTruthy();
+      expect(screen.queryByText('mobileApp.sheet.firstRunSubtitle')).toBeNull();
+      expect(screen.queryByText('mobileApp.instances.subtitle')).toBeNull();
+      expect(screen.getByRole('button', { name: 'mobileApp.sheet.reopen:Personal Avibe' }).textContent)
+        .toContain('mobileApp.instances.current');
+      expect(screen.getByText('mobileApp.sheet.recent')).toBeTruthy();
+      // The others are listed once each; the current instance only in its block.
+      expect(screen.getAllByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toHaveLength(1);
+      expect(screen.queryAllByRole('button', { name: /^(mobileApp.instances.online\s*)?Personal Avibe/ })).toHaveLength(0);
+      // Nothing is behind the page to close to.
+      expect(screen.queryByRole('button', { name: /mobileApp\.sheet\.close/ })).toBeNull();
+      // The account button is the account's initial, as on Home, and opens Account.
+      const account = screen.getByRole('button', { name: 'mobileApp.account.title' });
+      expect(account.textContent).toBe('A');
+      fireEvent.click(account);
+      expect(await screen.findByText('mobileApp.account.signedInAs')).toBeTruthy();
+    });
+
+    it('opens the current instance again, and reports a failure on its block with a retry', async () => {
+      await openPage();
+      const opening = deferred<{ instance: MobileInstance }>();
+      mobile.selectInstance.mockReturnValueOnce(opening.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.sheet.reopen:Personal Avibe' }));
+      await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledWith('owned'));
+      expect(await screen.findByText('mobileApp.sheet.opening')).toBeTruthy();
+      expect(mobile.dismiss).not.toHaveBeenCalled();
+
+      opening.reject({ code: 'network', message: 'The instance did not answer.' });
+      expect((await screen.findByRole('alert')).textContent).toBe('mobileApp.sheet.openFailed:Personal Avibe');
+      mobile.selectInstance.mockResolvedValueOnce({ instance: inSheet().instances[0] });
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      await waitFor(() => expect(mobile.selectInstance).toHaveBeenCalledTimes(2));
+    });
+
+    it('explains a current instance that is offline, in place', async () => {
+      const state = inSheet();
+      state.instances[0] = { ...state.instances[0], available: false };
+      await openPage(state);
+      // Tapping explains rather than opens, so the block is named by its lines, offline included.
+      expect(screen.queryByRole('button', { name: 'mobileApp.sheet.reopen:Personal Avibe' })).toBeNull();
+      const current = screen.getByRole('button', { name: /^Personal Avibe.*mobileApp\.sheet\.offlineLine/ });
+      fireEvent.click(current);
+      expect(current.getAttribute('aria-expanded')).toBe('true');
+      expect(screen.getByText('mobileApp.sheet.offlineBody:Personal Avibe')).toBeTruthy();
+      expect(mobile.selectInstance).not.toHaveBeenCalled();
+    });
+
+    it('keeps the list under the banner when a refresh fails, and says Updating while it runs', async () => {
+      await openPage();
+      const refreshing = deferred<MobileSessionState>();
+      mobile.refresh.mockReturnValueOnce(refreshing.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.instances.refresh' }));
+      expect(await screen.findByText('mobileApp.sheet.updating')).toBeTruthy();
+      refreshing.reject({ code: 'network', message: 'offline' });
+      expect(await screen.findByText('mobileApp.sheet.stale')).toBeTruthy();
+      expect(screen.queryByText('mobileApp.instances.unavailable')).toBeNull();
+      expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ })).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'mobileApp.sheet.reopen:Personal Avibe' })).toBeTruthy();
+
+      mobile.refresh.mockResolvedValueOnce(inSheet());
+      fireEvent.click(screen.getByRole('button', { name: 'common.retry' }));
+      await waitFor(() => expect(screen.queryByText('mobileApp.sheet.stale')).toBeNull());
+      expect(mobile.refresh).toHaveBeenCalledTimes(2);
+    });
+
+    it('over a live instance, returns to it from the current block, as the sheet does', async () => {
+      window.history.replaceState({}, '', '/#runtime-account');
+      mobile.bootstrap.mockResolvedValueOnce(inSheet());
+      render(<MobileOnboarding />);
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.account.switch' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.sheet.returnTo:Personal Avibe' }));
+      await waitFor(() => expect(mobile.returnToInstance).toHaveBeenCalledTimes(1));
+      expect(mobile.selectInstance).not.toHaveBeenCalled();
+    });
+
+    it('keeps the others under their label when the selected instance left the list', async () => {
+      const state = { ...inSheet(), instances: inSheet().instances.slice(1) };
+      mobile.bootstrap.mockResolvedValueOnce(state);
+      render(<MobileOnboarding />);
+      await screen.findByRole('button', { name: /^(mobileApp.instances.online\s*)?Lab/ });
+      expect(screen.getByRole('heading', { name: 'mobileApp.sheet.title', level: 1 })).toBeTruthy();
+      expect(screen.getByText('mobileApp.sheet.others')).toBeTruthy();
+      expect(screen.queryByText('mobileApp.sheet.youreIn')).toBeNull();
+    });
+
+    it('on first use lists the rows only: no current block and no recency', async () => {
+      mobile.bootstrap.mockResolvedValueOnce(signedIn());
+      render(<MobileOnboarding />);
+      // The boot page shares the title; the rows say the list is drawn.
+      await screen.findByRole('button', { name: /^(mobileApp.instances.online\s*)?Personal Avibe/ });
+      expect(screen.getByRole('heading', { name: 'mobileApp.instances.title', level: 1 })).toBeTruthy();
+      expect(screen.getByText('mobileApp.sheet.firstRunSubtitle')).toBeTruthy();
+      expect(screen.queryByText('mobileApp.sheet.youreIn')).toBeNull();
+      expect(screen.queryByText('mobileApp.sheet.others')).toBeNull();
+      expect(screen.queryByText('mobileApp.sheet.recent')).toBeNull();
+      expect(screen.getByRole('button', { name: /^(mobileApp.instances.online\s*)?Personal Avibe/ })).toBeTruthy();
+
+      // A refresh says Updating above the rows, as the sheet does in its header.
+      const refreshing = deferred<MobileSessionState>();
+      mobile.refresh.mockReturnValueOnce(refreshing.promise);
+      fireEvent.click(screen.getByRole('button', { name: 'mobileApp.instances.refresh' }));
+      expect(await screen.findByText('mobileApp.sheet.updating')).toBeTruthy();
+      expect(screen.queryByText('mobileApp.sheet.recent')).toBeNull();
+      refreshing.resolve(signedIn());
+      await waitFor(() => expect(screen.queryByText('mobileApp.sheet.updating')).toBeNull());
     });
   });
 
@@ -2361,7 +2884,7 @@ describe('mobile launch second factor', () => {
 
   it('shows the list when another account passed', async () => {
     await passAtLaunch('alex@example.com', { ...signedIn(), selected_instance_id: 'owned' });
-    expect(await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'mobileApp.sheet.title' })).toBeTruthy();
     expect(mobile.selectInstance).not.toHaveBeenCalled();
   });
 
@@ -2372,14 +2895,14 @@ describe('mobile launch second factor', () => {
     mobile.verifySecondFactor.mockResolvedValueOnce({ ...signedIn(), selected_instance_id: 'owned' });
     render(<MobileOnboarding />);
     fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.twoFactor.differentAccount' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.action' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'mobileApp.welcome.continueWithEmail' }));
     fireEvent.change(screen.getByLabelText('mobileApp.email.label'), { target: { value: email } });
     fireEvent.click(screen.getByRole('button', { name: 'mobileApp.email.send' }));
     fireEvent.change(await screen.findByLabelText('mobileApp.code.label'), { target: { value: '123456' } });
     fireEvent.change(await screen.findByLabelText('mobileApp.twoFactor.totpLabel'), {
       target: { value: '287082' },
     });
-    expect(await screen.findByRole('heading', { name: 'mobileApp.instances.switchTitle' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'mobileApp.sheet.title' })).toBeTruthy();
     expect(mobile.selectInstance).not.toHaveBeenCalled();
   });
 });

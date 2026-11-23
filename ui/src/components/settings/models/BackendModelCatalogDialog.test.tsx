@@ -406,7 +406,7 @@ describe('BackendModelCatalogDialog', () => {
 
     await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
-    await user.type(screen.getByLabelText('Model'), 'added');
+    await user.type(screen.getByLabelText('Model ID'), 'added');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
 
     expect(await screen.findByText('3 models')).toBeTruthy();
@@ -431,7 +431,7 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('checkbox', { name: 'beta' }));
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
-    await user.type(screen.getByLabelText('Model'), 'added');
+    await user.type(screen.getByLabelText('Model ID'), 'added');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
 
     expect(await screen.findByText('4 models')).toBeTruthy();
@@ -510,9 +510,9 @@ describe('BackendModelCatalogDialog', () => {
     const catalog = [model('glm-4.7', { native_protocol: 'openai_responses' }), GROK];
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, { backend: 'opencode' }));
     vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
-    // models.dev publishes this model under exactly the id the list already
-    // holds, which is the whole point: the typed query does not name the saved
-    // row, and the chosen suggestion does.
+    // The catalog registers this model under exactly the id the list already
+    // holds, which is the whole point: describing the row from it stamps
+    // `models_dev` on a row the server remembers as `provider`.
     vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([{
       provider_id: 'xai',
       provider_name: 'xAI',
@@ -534,10 +534,10 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(await screen.findByRole('button', { name: 'Remove Grok 4.6' }));
     await user.click(screen.getByRole('button', { name: 'Add models' }));
     await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
-    // The editor in add mode, whose lookup stamps `models_dev` on what it fills.
+    // The editor in add mode, where the catalog's answer stamps `models_dev` on what it fills.
     await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
-    await user.type(await screen.findByLabelText('Model'), 'grok 4.6');
-    await user.click(await screen.findByRole('option', { name: /Grok 4\.6/ }));
+    await user.type(await screen.findByLabelText('Model ID'), 'grok-4.6');
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('256,000'));
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     await user.click(await screen.findByRole('button', { name: 'Save' }));
 
@@ -561,7 +561,7 @@ describe('BackendModelCatalogDialog', () => {
     renderDialog();
 
     await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
-    expect((screen.getByLabelText('Model') as HTMLInputElement).readOnly).toBe(true);
+    expect((screen.getByLabelText('Model ID') as HTMLInputElement).readOnly).toBe(true);
     await user.clear(screen.getByLabelText('Context window'));
     await user.type(screen.getByLabelText('Context window'), '2000');
     await user.click(screen.getByRole('button', { name: 'Save model' }));
@@ -925,7 +925,7 @@ describe('BackendModelCatalogDialog', () => {
 
     expect(await screen.findByText('legacy-a')).toBeTruthy();
     expect(screen.getByText('legacy-b')).toBeTruthy();
-    expect(screen.getByText('This model engine build does not offer an editable model list yet. These are the models it currently exposes.')).toBeTruthy();
+    expect(screen.getByText('This model engine version can’t edit its model list. These are the models it provides.')).toBeTruthy();
     expect(screen.getByText('2 models')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Add models' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: 'Save' }).hasAttribute('disabled')).toBe(true);
@@ -1377,7 +1377,7 @@ describe('BackendModelCatalogDialog', () => {
       await screen.findByRole('checkbox', { name: /Backup relay/ });
       await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
 
-      expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('');
+      expect((await screen.findByLabelText('Model ID') as HTMLInputElement).value).toBe('');
       const leave = within(screen.getByRole('dialog', { name: 'Add model' }))
         .getByRole('button', { name: 'Cancel' });
       await user.click(leave);

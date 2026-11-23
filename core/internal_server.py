@@ -56,6 +56,8 @@ logger = logging.getLogger(__name__)
 _PROCESSING_RECORD_CURSOR_RE = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _PROCESSING_RECORD_ENTRY_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
 _COMPUTER_SCRIPT_REQUEST_MAX_BYTES = 8 * 1024 * 1024
+# `{"source_id": ..., "selection": {"kind": ..., "count": ...}}`: a Source id, one short word and a number.
+_RESET_CARD_REQUEST_MAX_BYTES = 1024
 
 
 class _RequestBodyTooLarge(RuntimeError):
@@ -457,6 +459,7 @@ def create_app(
                 if existing is not None and existing["session_id"] != session_id:
                     return "duplicate"
                 if existing is not None and existing["state"] != "reserved":
+                    resolved_carry = False
                     if execution_id:
                         run_owner = conn.execute(
                             select(
@@ -467,6 +470,15 @@ def create_app(
                             .where(agent_runs.c.id == execution_id)
                             .limit(1)
                         ).mappings().first()
+                        if run_owner is not None and run_owner["delivery_id"] not in (None, existing["id"]):
+                            # A failed or stopped Turn carried this input on: the Run now
+                            # belongs to its carry, which answers for the original (#4010).
+                            current = message_deliveries.get_delivery(conn, str(run_owner["delivery_id"]))
+                            if current is not None and (
+                                message_deliveries.turn_carry(current) or {}
+                            ).get("original_id") == existing["id"]:
+                                existing = current
+                                resolved_carry = True
                         if (
                             run_owner is not None
                             and normalize_run_status(run_owner["status"])
@@ -490,6 +502,7 @@ def create_app(
                                 )
                             if (
                                 legacy_send_now
+                                and not resolved_carry
                                 and existing_state == "queued"
                                 and existing.get("priority") == "p3"
                                 and message_deliveries.delivery_has_history_event(
@@ -797,6 +810,30 @@ def create_app(
                     delivery_id,
                 )
         return submission if delivery_owner_transferred else route
+
+    @app.post("/internal/diagnostics/warm-gc-freeze")
+    async def _arm_warm_gc_freeze():
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        return {"state": watchdog.arm_warm_freeze(), "controller_pid": os.getpid()}
+
+    @app.post("/internal/diagnostics/warm-gc-unfreeze")
+    async def _rollback_warm_gc_freeze():
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        return {"state": watchdog.rollback_warm_freeze(), "controller_pid": os.getpid()}
+
+    @app.post("/internal/diagnostics/warm-gc-census")
+    async def _arm_warm_gc_census():
+        import os
+
+        watchdog = getattr(controller, "_loop_watchdog", None)
+        if watchdog is None:
+            raise HTTPException(status_code=503, detail="watchdog_unavailable")
+        armed = watchdog.arm_warm_census(controller)
+        return {"armed": armed, "controller_pid": os.getpid()}
 
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
@@ -1338,6 +1375,15 @@ def create_app(
                 content={"ok": False, "error": "show_access_internal_failure"},
             )
 
+    @app.post("/internal/live-activities")
+    async def _live_activities(request: Request) -> Any:
+        from core.live_activities import controller_service
+        payload = await _bounded_json_object(request, limit=4096)
+        return await controller_service(controller).handle(
+            payload["operation"], payload["owner"], payload["activity_id"], payload["payload"],
+            authorization=payload.get("authorization"),
+        )
+
     @app.get("/internal/turn-state/{session_id}")
     async def _turn_state(session_id: str) -> Any:
         """HTTP adapter: whether a turn is running, delegated to the turn owner
@@ -1806,6 +1852,37 @@ def create_app(
             return JSONResponse(status_code=503, content={"ok": False, "error": "session_archive_unavailable"})
         return {"ok": True, "session": session}
 
+    @app.post("/internal/model-hub-ui/reset-card")
+    async def _model_hub_ui_reset_card(request: Request) -> Any:
+        """Carry the Web route's reset-card use to the controller-owned service.
+
+        A route of its own, deliberately not an operation of ``/internal/model-hub``:
+        what the `vibe` CLI and Agent tools can ask of that dispatcher never
+        includes spending a card. The Web route has already checked the caller
+        and the body; the body is still read bounded and checked again here, so
+        nothing else is ever decoded on the controller's loop.
+        """
+
+        from config.v2_config import is_model_hub_enabled
+        from core.handlers.model_hub import ModelHubError
+
+        invalid = JSONResponse(status_code=400, content={"ok": False, "error": "invalid_parameter"})
+        try:
+            body = await _bounded_json_object(request, limit=_RESET_CARD_REQUEST_MAX_BYTES)
+        except _RequestBodyTooLarge:
+            return invalid
+        service = getattr(controller, "model_hub_service", None)
+        if not is_model_hub_enabled() or service is None:
+            return JSONResponse(status_code=404, content={"ok": False, "error": "feature_disabled"})
+        if set(body) != {"source_id", "selection"}:
+            return invalid
+        try:
+            result = await service.use_reset_card(body["source_id"], body["selection"])
+        except ModelHubError as exc:
+            # A refusal carries the summary as it now is, and nothing else.
+            return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.code, **exc.data})
+        return {"ok": True, "result": result}
+
     @app.post("/internal/model-hub")
     async def _model_hub(request: Request) -> Any:
         """Dispatch UI operations to the controller-owned Model Hub aggregate."""
@@ -2087,11 +2164,20 @@ async def serve(
         )
         server = _create_controller_loop_server(config)
         bound = host.bind()
+        watchdog = getattr(controller, "_loop_watchdog", None)
         try:
             host.publish(bound)
             _write_internal_server_status("ready")
+            # Freeze the warmed controller heap once, by default. Armed only once this
+            # listener is published, so the unfreeze command is reachable for as long
+            # as the freeze can last. Stream count does not gate the natural full
+            # collection that triggers the freeze after two hours of uptime.
+            if watchdog is not None:
+                watchdog.arm_warm_freeze()
             await server.serve(sockets=[bound.listener])
         finally:
+            if watchdog is not None:
+                watchdog.rollback_warm_freeze()  # listener gone: never stay frozen unreachable
             host.cleanup(bound)
     finally:
         await skill_recorder.close()

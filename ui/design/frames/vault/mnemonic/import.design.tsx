@@ -28,7 +28,7 @@ const { valid, passphrase, unknownWord: unknown, checksum } = importFixtures;
 const designFrames = frames([
   { name: 'empty', title: '导入 · 还没粘贴（完整对话框）', width: 800, height: 1320, status: 'shipped', fixtures, click: importTab, render: add },
   { name: 'valid', title: '导入 · 校验通过，核对账户 #0 的地址', width: 800, height: 900, status: 'shipped', fixtures, render: alone(T, panel(valid)()) },
-  { name: 'passphrase', title: '导入 · BIP39 密码（地址随之变化）', width: 800, height: 980, status: 'shipped', fixtures, render: alone(T, panel(passphrase)()) },
+  { name: 'passphrase', title: '导入 · Passphrase（地址随之变化）', width: 800, height: 980, status: 'shipped', fixtures, render: alone(T, panel(passphrase)()) },
   { name: 'unknown-word', title: '错误 · 有一个词不在词表里（给出建议）', width: 800, height: 760, status: 'shipped', fixtures, render: alone(T, panel(unknown)()) },
   { name: 'checksum', title: '错误 · 词都对，校验和不通过', width: 800, height: 760, status: 'shipped', fixtures, render: alone(T, panel(checksum)()) },
   { name: 'avault-old', title: '错误 · avault 版本太旧（不能保存，内容保留）', width: 800, height: 1000, status: 'shipped', fixtures: old, render: alone(T, panel(valid, { avaultOld: true })()) },

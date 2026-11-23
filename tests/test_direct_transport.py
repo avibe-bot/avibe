@@ -98,7 +98,14 @@ SIDECAR = textwrap.dedent(
         message = json.loads(sys.stdin.readline())
         event({"kind": "admission_notice", "message": message})
 
-    if mode == "ready_addresses":
+    if mode in {"relay_trial", "relay_invalid"}:
+        ready()
+        send({"type": "relay_status", "url": "https://aps1-1.relay.n0.iroh.link./"})
+        send({"type": "relay_status", "url": None})
+        if mode == "relay_invalid":
+            send({"type": "relay_status", "url": "https://other.invalid/"})
+        wait_for_stop()
+    elif mode == "ready_addresses":
         ready()
         time.sleep(0.1)
         send({"type": "addresses", "addresses": ["192.168.1.21:51235"]})
@@ -158,6 +165,8 @@ SIDECAR = textwrap.dedent(
             wait_for_stop()
         else:
             wait_for_stop()
+    elif mode == "exit_flap":
+        raise SystemExit(17)
     elif mode == "restart":
         ready()
         if generation == 1:
@@ -239,6 +248,32 @@ def _events(path: Path) -> list[dict]:
 
 def _admission_notices(path: Path) -> list[dict]:
     return [item["message"] for item in _events(path) if item["kind"] == "admission_notice"]
+
+
+@pytest.mark.asyncio
+async def test_public_trial_start_bytes_status_withdrawal_and_nonmember_rejection(sidecar, monkeypatch):
+    path, events, env = sidecar
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DIRECT_TEST_MODE", "relay_invalid")
+    rv = RecordingRendezvous()
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), rv, relay_policy="public-trial-v1", restart_initial_delay_seconds=10)
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: any(reason == "invalid_relay_url" for _, reason in rv.published))
+        assert _events(events)[0]["start"]["relay"] == {"policy": "public-trial-v1"}
+        assert [ep.relay_origin for ep, _ in rv.published if ep] == [None, "https://aps1-1.relay.n0.iroh.link./", None]
+        assert rv.published[-1][0] is None
+    finally:
+        await supervisor.stop()
+    monkeypatch.setenv("DIRECT_TEST_MODE", "legacy")
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), rv)
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: len(_events(events)) >= 2)
+        assert "relay" not in _events(events)[-1]["start"]
+    finally:
+        await supervisor.stop()
 
 
 @pytest.mark.asyncio
@@ -331,7 +366,91 @@ async def test_admission_notices_follow_rendezvous_admissions(sidecar):
 
 
 @pytest.mark.asyncio
-async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar):
+async def test_stream_log_budget_pairs_and_summarizes_across_windows(caplog):
+    from vibe.direct_transport import _StreamLogBudget
+
+    caplog.set_level(logging.INFO, logger="vibe.direct_transport")
+    budget = _StreamLogBudget()
+    decisions = [budget.open(i) for i in range(1, 24)]
+    assert decisions == [True] * 20 + [False] * 3
+    for i in range(1, 23):
+        budget.close(decisions[i-1], i, i, 2, 3)
+    budget.flush()  # Fire the minute boundary; stream 23 is still open.
+    assert budget.open(24)
+    budget.close(False, 23, 80, 4, 5)
+    budget.close(True, 24, 1, 0, 0)
+    budget.flush()
+    lines = [r.getMessage() for r in caplog.records if r.name == "vibe.direct_transport"]
+    assert sum(line.startswith("direct stream open ") for line in lines) == 21
+    assert sum(line.startswith("direct stream close ") for line in lines) == 21
+    assert [line for line in lines if "summary" in line] == [
+        "direct stream summary opened=3 closed=2 bytes_in=4 bytes_out=6 max_duration_ms=22",
+        "direct stream summary opened=0 closed=1 bytes_in=4 bytes_out=5 max_duration_ms=80",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_device_sideband_projection_is_independent_of_log_budget(caplog):
+    rv = RecordingRendezvous()
+    rv.publish(DirectEndpoint(ENDPOINT_ONE, ("192.168.1.2:3210",)))
+    epochs = []
+    rv.set_admission_listener(lambda _peer, _ttl, epoch: epochs.append(epoch))
+    rv.offer(instance_id="instance", hostname="test", subject="owner", client_endpoint_id=PEER, session=("binding", "sid"))
+    supervisor = DirectTransportSupervisor("unused", RecordingIngress(), rv)
+    supervisor._endpoint_id = ENDPOINT_ONE
+    supervisor._path_reports = supervisor._device_reports = True
+    caplog.set_level(logging.INFO, logger="vibe.direct_transport")
+    fields = ("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx")
+    msg = dict(type="path_report", ordinal=1, phase="open", selected="relay", partial=False,
+               families=[dict.fromkeys(fields, 0) for _ in range(4)], peer=PEER, epoch=epochs[-1], scope=None, rtt_ms=19)
+    legacy_msg = {k: v for k, v in msg.items() if k not in ("peer", "epoch", "scope", "rtt_ms")}
+    supervisor._device_reports = False
+    for phase in ("open", "change", "close"):
+        supervisor._handle_path_report({**legacy_msg, "phase": phase})
+        assert rv.is_admitted(PEER) and not rv.session_paths("binding")
+    supervisor._device_reports = True
+    supervisor._handle_path_report(msg)
+    for family, scope, kind in (("relay", None, "relay"), ("ipv4", "local", "lan"), ("ipv6", "global", "punched")):
+        supervisor._handle_path_report({**msg, "phase": "change", "selected": family, "scope": scope})
+        assert rv.session_paths("binding") == {("owner", "sid"): {"kind": kind, "family": None if kind == "relay" else family, "rtt_ms": 19}}
+    for ordinal in range(2, 100):
+        supervisor._handle_path_report({**msg, "ordinal": ordinal})
+    assert len(rv._admissions[PEER].connections) == 32
+    for ordinal in range(1, 100):
+        supervisor._handle_path_report({**msg, "phase": "close", "ordinal": ordinal})
+    assert not rv.session_paths("binding") and PEER not in caplog.text
+    supervisor._handle_path_report(msg)
+    assert rv.session_paths("binding")
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    await supervisor._drain_stderr(reader)
+    assert rv.is_admitted(PEER) and not rv.session_paths("binding")
+
+
+@pytest.mark.asyncio
+async def test_path_budget_reserves_terminal_ipv6_evidence(caplog):
+    supervisor = DirectTransportSupervisor("unused", RecordingIngress(), RecordingRendezvous())
+    supervisor._endpoint_id = ENDPOINT_ONE
+    supervisor._path_reports = True
+    caplog.set_level(logging.INFO, logger="vibe.direct_transport")
+    rows = [dict.fromkeys(("open", "rx_bytes", "tx_bytes", "challenge_tx", "challenge_rx", "response_tx", "response_rx"), 0) for _ in range(4)]
+    msg = dict(type="path_report", ordinal=1, phase="open", selected="relay", partial=False, families=rows)
+    supervisor._handle_path_report(msg)
+    for _ in range(59):
+        supervisor._handle_path_report({**msg, "phase": "change"})
+    rows[2]["rx_bytes"] = 17
+    supervisor._handle_path_report({**msg, "phase": "close"})
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("direct path ")]
+    assert len(lines) == 60 and "phase=close" in lines[-1] and "ipv6.rx_bytes=17" in lines[-1]
+    reader = asyncio.StreamReader()
+    reader.feed_data(json.dumps({**msg, "endpoint_id": PEER}).encode() + b"\n")
+    reader.feed_eof()
+    await supervisor._drain_stderr(reader)
+    assert PEER not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar, caplog):
     """Protect the sole data door and the peer label passed to ingress."""
     path, events, env = sidecar
     env["DIRECT_TEST_MODE"] = "stream"
@@ -340,9 +459,14 @@ async def test_valid_header_reaches_ingress_with_endpoint_label(sidecar):
     os.environ.update(env)
     supervisor = DirectTransportSupervisor(str(path), ingress, RecordingRendezvous())
     try:
+        caplog.set_level(logging.INFO, logger="vibe.direct_transport")
         await supervisor.start()
         await asyncio.wait_for(ingress.started.wait(), timeout=5)
         assert ingress.calls == [(PEER, b"payload")]
+        lines = [record.getMessage() for record in caplog.records if record.getMessage().startswith("direct stream ")]
+        assert len(lines) == 2 and lines[0] == "direct stream open stream=1"
+        import re
+        assert re.fullmatch(r"direct stream close stream=1 duration_ms=\d+ bytes_in=7 bytes_out=0", lines[1])
     finally:
         await supervisor.stop()
         os.environ.clear()
@@ -432,7 +556,28 @@ async def test_invalid_sidecar_messages_withdraw_and_restart(sidecar, mode, reas
 
 
 @pytest.mark.asyncio
-async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar):
+async def test_exit_flap_logs_one_warning_with_observed_status(sidecar, caplog):
+    path, _, env = sidecar
+    env["DIRECT_TEST_MODE"] = "exit_flap"
+    rendezvous = RecordingRendezvous()
+    supervisor = DirectTransportSupervisor(str(path), RecordingIngress(), rendezvous,
+                                           restart_initial_delay_seconds=0.02, restart_max_delay_seconds=0.05)
+    old_env = os.environ.copy()
+    os.environ.update(env)
+    try:
+        await supervisor.start()
+        await _wait_until(lambda: sum(reason == "sidecar_exited" for _, reason in rendezvous.published) >= 3)
+    finally:
+        await supervisor.stop()
+        os.environ.clear()
+        os.environ.update(old_env)
+    assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_transport" and r.levelno >= logging.WARNING] == [
+        "direct transport sidecar restarting reason=sidecar_exited exit_status=17 suppressed=0"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar, caplog):
     """Protect immediate rendezvous withdrawal and non-tight fatal recovery."""
     path, _events_path, env = sidecar
     env["DIRECT_TEST_MODE"] = "fatal_restart"
@@ -454,6 +599,9 @@ async def test_fatal_withdraws_immediately_and_restarts_with_backoff(sidecar):
         )
         await _wait_until(lambda: supervisor.diagnostics.endpoint_id == ENDPOINT_TWO)
         assert any(endpoint is not None for endpoint, _reason in rendezvous.published[fatal_index + 1 :])
+        assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_transport" and r.levelno >= logging.WARNING] == [
+            "direct transport sidecar restarting reason=sidecar_fatal exit_status=0 suppressed=0"
+        ]
     finally:
         await supervisor.stop()
         os.environ.clear()

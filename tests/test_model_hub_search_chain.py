@@ -560,6 +560,7 @@ async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldo
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
+    first_sent = asyncio.Event()
     started = asyncio.Event()
     first_release = asyncio.Event()
     second_release = asyncio.Event()
@@ -573,6 +574,7 @@ async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldo
         if calls == 2:
             started.set()
         if index == 1:
+            first_sent.set()
             await first_release.wait()
             return wire(503, {"error": {"message": "temporary"}})
         await second_release.wait()
@@ -580,6 +582,7 @@ async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldo
 
     monkeypatch.setattr(service.adapter, "search", search, raising=False)
     first = asyncio.create_task(run(service, query="first"))
+    await asyncio.wait_for(first_sent.wait(), timeout=5)
     second = asyncio.create_task(run(service, query="second"))
     await asyncio.wait_for(started.wait(), timeout=1)
     first_release.set()
@@ -605,6 +608,7 @@ async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldo
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
+    success_sent = asyncio.Event()
     success_release = asyncio.Event()
     failure_started = asyncio.Event()
     calls = 0
@@ -614,6 +618,7 @@ async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldo
         await on_sent()
         calls += 1
         if calls == 1:
+            success_sent.set()
             await success_release.wait()
             return wire()
         failure_started.set()
@@ -621,6 +626,7 @@ async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldo
 
     monkeypatch.setattr(service.adapter, "search", success_then_failure, raising=False)
     success = asyncio.create_task(run(service, query="success-first"))
+    await asyncio.wait_for(success_sent.wait(), timeout=5)
     failure = asyncio.create_task(run(service, query="failure-second"))
     await asyncio.wait_for(failure_started.wait(), timeout=1)
     failure_result = await failure
@@ -1141,30 +1147,43 @@ async def test_connect_holds_no_mutation_lock_and_only_the_first_ready_trial_sen
         await finish.wait()
         return wire(400 if phase == "rearmed" and index == 0 else 401 if phase == "recovered" and index == 1 else 200)
 
-    async def another_session():
+    async def second_session():
+        await connecting[0].wait()
+        # Acquire the lock while the first connection is still parked.
         async with service._mutation_lock:
-            return True
+            pass
+        return await run(service)
 
     monkeypatch.setattr(service.adapter, "search", search, raising=False)
     first = asyncio.create_task(run(service))
-    await connecting[0].wait()
-    assert await asyncio.wait_for(another_session(), timeout=.2)
-    second = asyncio.create_task(run(service))
-    await asyncio.wait_for(connecting[1].wait(), timeout=.2)
-    connect[0].set()
-    await sent.wait()
-    if phase != "concurrent":
+    second = asyncio.create_task(second_session())
+
+    async def exercise():
+        await connecting[1].wait()
+        connect[0].set()
+        await sent.wait()
+        if phase != "concurrent":
+            finish.set()
+            await first
+        connect[1].set()
+        loser = await second
         finish.set()
-        await first
-    connect[1].set()
-    loser = await asyncio.wait_for(second, timeout=.2)
+        return await first, loser
+
+    try:
+        # Events enforce the ordering; the watchdog is for deadlocks, not a
+        # latency assertion on a call that also persists usage and evidence.
+        winner, loser = await asyncio.wait_for(exercise(), timeout=5)
+    finally:
+        for task in (first, second):
+            task.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
     if phase == "concurrent":
         assert loser["record"]["attempts"][0]["skipped"] == "blocked"
     else:
         assert loser["record"]["attempts"][0]["outcome"] == ("failed" if phase == "recovered" else "completed")
         assert not loser["record"]["attempts"][0].get("superseded")
-    finish.set()
-    assert (await first)["record"]["status"] == ("failed" if phase == "rearmed" else "completed")
+    assert winner["record"]["status"] == ("failed" if phase == "rearmed" else "completed")
     assert sends == ([0] if phase == "concurrent" else [0, 1])
     assert summary(service)["services"][0]["requests"] == len(sends)
     assert service.store.load().sources[0].state.status == ("needs_action" if phase == "recovered" else "standby")

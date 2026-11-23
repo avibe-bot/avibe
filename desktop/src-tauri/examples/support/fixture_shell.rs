@@ -121,7 +121,7 @@ pub fn control(app: &AppHandle, command: serde_json::Value) {
     app.run_on_main_thread(move || {
         match command["operation"].as_str().unwrap() {
             "finished" => {
-                super::main_document_finished(handle.get_webview_window(MAIN_WINDOW).unwrap().as_ref());
+                super::main_document_finished(&instance_client::active_webview(&handle).unwrap());
             }
             "hold_link_return" => {
                 let gate = handle.state::<LinkAdmission>();
@@ -133,7 +133,15 @@ pub fn control(app: &AppHandle, command: serde_json::Value) {
                 let (_, release) = handle.state::<LinkAdmission>().0.lock().unwrap().take().unwrap();
                 release.notify_one();
             }
-            "hide" => handle.get_webview_window(MAIN_WINDOW).unwrap().hide().unwrap(),
+            "hide" => handle.get_window(MAIN_WINDOW).unwrap().hide().unwrap(),
+            "focus" => super::focus_or_restore_main_window(&handle),
+            "close" => handle.get_window(MAIN_WINDOW).unwrap().close().unwrap(),
+            "destroy" => handle.get_window(MAIN_WINDOW).unwrap().destroy().unwrap(),
+            "updates" => assert!(super::open_desktop_updates(&handle)),
+            "resize" => handle.get_window(MAIN_WINDOW).unwrap().set_size(tauri::LogicalSize::new(
+                command["width"].as_f64().unwrap(), command["height"].as_f64().unwrap())).unwrap(),
+            #[cfg(target_os = "macos")]
+            "geometry" => geometry(&handle),
             "notifications" => {
                 notifications::set_enabled(&handle, command["enabled"].as_bool().unwrap()).unwrap();
             }
@@ -149,4 +157,30 @@ pub fn control(app: &AppHandle, command: serde_json::Value) {
         }
         println!("{}", serde_json::json!({"event":"shell_control", "operation":command["operation"]}));
     }).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+fn geometry(app: &AppHandle) {
+    use objc2::{msg_send, runtime::AnyObject};
+    use objc2_foundation::NSRect;
+    let window = app.get_window(MAIN_WINDOW).unwrap();
+    unsafe {
+        let native = &*window.ns_window().unwrap().cast::<AnyObject>();
+        let content: *mut AnyObject = msg_send![native, contentView];
+        let bounds: NSRect = msg_send![content, bounds];
+        let scale: f64 = msg_send![native, backingScaleFactor];
+        let flipped: bool = msg_send![content, isFlipped];
+        let mut buttons = Vec::new();
+        for index in 0isize..3 {
+            let button: *mut AnyObject = msg_send![native, standardWindowButton:index];
+            let bounds_button: NSRect = msg_send![button, bounds];
+            let rect: NSRect = msg_send![button, convertRect:bounds_button, toView:content];
+            let top = if flipped {rect.origin.y} else {bounds.size.height - rect.origin.y - rect.size.height};
+            buttons.push(serde_json::json!({"x":rect.origin.x,"top":top,"width":rect.size.width,"height":rect.size.height}));
+        }
+        println!("{}", serde_json::json!({"event":"geometry","scale":scale,"size":[bounds.size.width,bounds.size.height],
+            "buttons":buttons,"views":app.webviews().into_values().map(|view|serde_json::json!({
+                "label":view.label(),"physical":view.window().label(),"size":view.size().unwrap()
+            })).collect::<Vec<_>>()}));
+    }
 }

@@ -33,7 +33,6 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Manager, RunEvent};
-use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot};
@@ -188,6 +187,17 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
+    #[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+    pub(crate) fn e2e_menu() -> Self {
+        let (sender, _) = mpsc::unbounded_channel();
+        Self {
+            sender,
+            view: Arc::new(Mutex::new(MenuView::default())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: AtomicBool::new(false),
+        }
+    }
+
     pub(crate) fn start(app: &AppHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let view = Arc::new(Mutex::new(MenuView::default()));
@@ -234,8 +244,8 @@ impl Controller {
         receiver.await.map_err(|_| "Computer Use is unavailable.".to_owned())?
     }
 
-    /// Asks macOS for `pane`'s grant where it allows a prompt, then opens the
-    /// pane in System Settings.
+    /// Opens the matching System Settings pane without requesting permission.
+    /// The guide explains how to add Avibe if it is not listed.
     pub(crate) fn open_permission(&self, pane: PermissionPane) -> Result<(), String> {
         self.request(Event::OpenPermission(pane))
     }
@@ -573,7 +583,7 @@ impl RuntimeState {
         }
         let grants = request_permissions(&self.app, &self.diagnostics).await;
         if grants.missing_reason().is_some() {
-            open_missing_permission_settings(&self.app, grants);
+            open_missing_permission_settings(grants);
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
@@ -590,16 +600,12 @@ impl RuntimeState {
     }
 
     async fn open_permission(&mut self, pane: PermissionPane) {
-        match pane {
-            PermissionPane::Accessibility => request_accessibility_grant(&self.app, &self.diagnostics).await,
-            PermissionPane::ScreenRecording => {
-                // The full request also runs the one-pixel capture, which is
-                // what lists Avibe in the Screen Recording pane.
-                let _ = request_permissions(&self.app, &self.diagnostics).await;
-                self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
-            }
+        // Navigation is not an authorization request. Initial enable owns the
+        // prompting/registration path; reopening Settings must not repeat it.
+        if pane == PermissionPane::ScreenRecording {
+            self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
         }
-        open_permission_settings(&self.app, pane);
+        open_permission_settings(pane);
         self.activated().await;
         self.settle_setup_resume();
     }
@@ -704,7 +710,7 @@ impl RuntimeState {
         }
         let visible = self
             .app
-            .get_webview_window("main")
+            .get_window(crate::MAIN_WINDOW)
             .is_some_and(|window| window.is_visible().unwrap_or(false) && !window.is_minimized().unwrap_or(true));
         let directive =
             self.lifecycle
@@ -2059,30 +2065,6 @@ async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Gra
     result.grants()
 }
 
-/// The Accessibility half of [`request_permissions`]: the system prompt lists
-/// Avibe in the pane, and Screen Recording is left alone.
-async fn request_accessibility_grant(app: &AppHandle, diagnostics: &BootstrapLog) {
-    let (sender, receiver) = oneshot::channel();
-    let dispatched = app.run_on_main_thread(move || {
-        let granted = if MainThreadMarker::new().is_some() {
-            Some(request_accessibility())
-        } else {
-            None
-        };
-        let _ = sender.send(granted);
-    });
-    let outcome = match dispatched {
-        Err(_) => "dispatch_failed".to_owned(),
-        Ok(()) => match timeout(PERMISSION_REQUEST_TIMEOUT, receiver).await {
-            Ok(Ok(Some(granted))) => granted.to_string(),
-            Ok(Ok(None)) => "non_main".to_owned(),
-            Ok(Err(_)) => "dropped".to_owned(),
-            Err(_) => "timed_out".to_owned(),
-        },
-    };
-    diagnostics.record("computer-use.accessibility-request", &[("accessibility", outcome)]);
-}
-
 fn request_accessibility() -> bool {
     // SAFETY: The dictionary contains two process-lifetime CoreFoundation
     // constants. The prompting call does not retain it after returning.
@@ -2350,25 +2332,19 @@ fn record_permission_request(diagnostics: &BootstrapLog, result: &PermissionRequ
     );
 }
 
-fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
+fn open_missing_permission_settings(grants: Grants) {
     let pane = if grants.accessibility {
         PermissionPane::ScreenRecording
     } else {
         PermissionPane::Accessibility
     };
-    open_permission_settings(app, pane);
+    open_permission_settings(pane);
 }
 
-fn open_permission_settings(app: &AppHandle, pane: PermissionPane) {
+/// Opens the pane only. The `+`/drag recovery is explained by the Settings
+/// guide and the menu label, not by a native alert stacked on the macOS prompt.
+fn open_permission_settings(pane: PermissionPane) {
     let _ = tauri_plugin_opener::open_url(pane.settings_url(), None::<&str>);
-    if pane == PermissionPane::ScreenRecording {
-        let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).computer_use;
-        app.dialog()
-            .message(catalog.screen_recording_guide)
-            .title(catalog.screen_recording_title)
-            .kind(MessageDialogKind::Info)
-            .show(|_| {});
-    }
 }
 
 fn sha256_file(path: &Path) -> Option<String> {
@@ -3771,10 +3747,16 @@ esac
 
     #[tokio::test]
     async fn failed_permission_probe_join_cannot_be_acknowledged_by_repeated_off() {
-        let (cancel, cancelled) = oneshot::channel();
+        let (cancel, _cancelled) = oneshot::channel();
+        let (started, started_rx) = oneshot::channel();
+        // Tokio abort is asynchronous, and `stop` sends cancellation before
+        // awaiting the task. Park a started task forever so the test cannot
+        // accidentally complete normally through that cancellation path.
         let task = tauri::async_runtime::spawn(async move {
-            let _ = cancelled.await;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
         });
+        started_rx.await.expect("permission probe task started");
         task.abort();
         let mut probe = PermissionProbe {
             id: 1,

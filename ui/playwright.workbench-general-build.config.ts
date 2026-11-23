@@ -16,7 +16,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e/workbench-general',
-  testMatch: ['**/composer-mention-picker.spec.ts'],
+  testMatch: ['**/composer-mention-picker.spec.ts', '**/pending-voice-offline.spec.ts'],
   outputDir: './e2e/.artifacts/workbench-general/run',
   workers: 1,
   retries: 0,

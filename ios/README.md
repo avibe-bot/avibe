@@ -16,7 +16,7 @@ and Web resizing cannot both run.
 
 - Bundle identifier: `bot.avibe.ios`
 - Display name: `Avibe`
-- Deployment target: iOS 17
+- Deployment target: iOS 17.4 (App Shortcuts limited to a later iOS need `AppShortcutsBuilder.buildLimitedAvailability`, iOS 17.4)
 - The shell follows WebKit browser behavior except for the closed deviation
   list below. Origin-specific exceptions are not added for individual Web UI
   features.
@@ -37,12 +37,67 @@ and Web resizing cannot both run.
   Each child shows its current host plus Done and Open in Safari controls; the
   latter opens the current HTTP(S) URL in the Safari app.
 - Ordinary child-main-frame navigation stays in that child regardless of
-  origin. Google authorization remains intercepted, and external application
-  schemes use the system.
+  origin. Google, GitHub and Apple authorization remain intercepted, and external
+  application schemes use the system.
 - Microphone capture is granted only to the configured instance main frame.
   Authentication, external, and arbitrary subframes receive neither microphone
   access nor a native bridge.
-- Google authorization is intercepted with an email-code explanation.
+- That main frame gets the microphone only when its page carries
+  `<meta name="avibe-voice-consent" content="1">`: such a page asks each
+  account before voice input sends speech to a third-party AI service, and the
+  App adds no question of its own. A Workbench page without it (an instance
+  older than that question) is refused with a native alert saying to update the
+  instance. Any other page, such as a Show Page opened on its own under
+  `/show/` or `/p/`, is refused without that alert.
+- A cold start opens the account's last instance before asking avibe.bot
+  (the session is checked behind it), but only while avibe.bot's last signed-in
+  answer for that session is at most 14 days old. Past that, with no record of
+  one, or with one dated in the future, nothing of an instance is loaded until
+  avibe.bot has answered: the App asks first and then opens, and with no answer
+  it stops at the instance list. The same holds for any open, for a page still
+  open when the App returns to the foreground, for the Action Button's
+  background take (past the limit it asks for the App instead), and for a Live
+  Activity's requests (sent only to an address the session lists, within the
+  limit). An App that keeps running renews the confirmation itself: from 7 days
+  on, a return to the foreground reads the session quietly behind the open
+  page. Reason: an instance address
+  that leaves an account cannot become another account's for 30 days, so within
+  14 days of a confirmation the address still leads to the instance avibe.bot
+  listed. The limit trusts the phone's clock.
+- The App records which instance addresses an account has opened. When
+  avibe.bot has answered, signed in, twice at least a day apart without listing
+  one of them, what that address left on the phone is removed: its site data in
+  the account's WebKit store (localStorage, IndexedDB, Cache Storage, cookies of
+  that host), its cached page, and this device's path choice for it. WebKit's
+  own removal works per registrable domain (all of `avibe.bot`), so the App
+  shows a page of its own at the address instead, without the network, and
+  deletes that origin's storage from it. Other instances and the avibe.bot
+  sign-in are untouched.
+- On a cold start the App may show the instance's last page from its own
+  cache (stored per store, account and origin, at most a day old). A cached page
+  whose bytes carry `<meta name="avibe-cached-shell" content="1">` comes from a
+  Web UI that keeps its shell while the instance cannot be reached, behind a
+  replayable outcome; when the loaded page also sets
+  `data-avibe-replayed-shell="1"` on its root element (it replays one, and is not
+  at its setup fallback), the App uncovers it with the progress line while
+  connecting. Any other cached page stays covered until the instance answers.
+  When avibe.bot lists the instance offline, only such an uncovered page keeps
+  the open (whether the answer comes before or after it is uncovered): it stays
+  with the row 「实例不在线，显示的是上次的内容」 / "Instance offline. Showing your
+  last content." offering Retry and Switch instance, and connects by itself
+  when the instance answers it. A launch opens an instance listed offline only
+  for such a page; otherwise the App shows the instance list, as before.
+- Google, GitHub and Apple authorization are intercepted with an alert whose
+  「去登录」 / "Go to sign-in" reads the session: the instance page asked
+  avibe.bot to sign in, so the App's avibe.bot session has lapsed, and the
+  read's `401` lands on the App's own sign-in screen, which offers the same
+  provider natively (a session that still reads signed in shows the instance
+  list). GitHub's are the `/login/oauth/` pages on `github.com` and Apple's
+  `appleid.apple.com/auth/authorize`, each only when its `redirect_uri`
+  returns to an authentication origin, that is avibe.bot's own sign-in.
+  Sign-in for anything else (an MCP server an instance connects to) and the
+  rest of those sites, including the device-code page an instance's Copilot
+  sign-in opens, are an ordinary external site.
 - Instance WebViews (primary and child) show no form accessory bar
   (previous / next / Done) above the keyboard: `FormAccessoryBar` gives
   WebKit's content view a runtime subclass whose `inputAccessoryView` is nil.
@@ -147,16 +202,18 @@ and Web resizing cannot both run.
   keyboard-free geometry without hiding chrome; a known software keyboard stays
   active across rotation until the resized viewport recovers. Safari and
   installed Web apps keep their existing chrome behavior.
-- `AppIcon.appiconset` contains one opaque 1024-by-1024 icon. It is a temporary
-  upscale of the existing 512-pixel iOS Home Screen Vibey artwork and should be
-  replaced when a native 1024-pixel source is delivered.
+- `AppIcon.appiconset` contains one opaque 1024-by-1024 RGB icon with square
+  corners and no alpha, built from the native 1024-pixel Vibey source with the
+  same composition as the earlier 512-pixel Home Screen artwork.
 - The user agent includes `AvibeiOS/<CFBundleShortVersionString>`.
 
 The closed deviation list is:
 
 1. Primary-main-frame HTTP(S) navigation outside the configured instance and
    authentication origins opens in `SFSafariViewController`.
-2. Google authorization endpoints are intercepted because Google rejects
+2. Google, GitHub and Apple authorization endpoints for avibe.bot's sign-in
+   are intercepted in instance WebViews. The App signs in with them natively
+   (the system sign-in window, Apple's sheet), and Google also rejects
    embedded browsers.
 3. Top-level external application schemes use `UIApplication`; subframes
    cancel them.
@@ -222,6 +279,8 @@ The native bridge method surface is fixed:
 | `accountPresentation: 2` | `app.setAccountActionAvailable({available})` | `null`; primary Workbench display hint used to suppress or restore the old-Web native fallback |
 | `app: 1` | `app.info()` | `{contract, platform, shellVersion, capabilities}` |
 | `app: 1` | `app.openExternal({url})` | `{opened}` for `http`/`https` URLs with a host and `mailto`/`tel` URLs with a target |
+| `appLock: 1` | `appLock.status()`, `appLock.setPolicy({policy})` | The contract in `ui/src/lib/appLockContract.ts`: `{policy, available, biometry, biometryState}`, and for a change `{ok, reason?, status}`. A change is saved only after one `.deviceOwnerAuthentication`; see App Lock below |
+| `device: 1` | `device.describe()` | `{kind: "iphone_app", display_name, installation_id?, aliases, app_version, system_version}` for the selected instance's main frame only, else `forbidden`; the page sends it to that instance's `POST /api/devices/self` once per load. `display_name` is the model ("iPhone 16 Pro"; "iPhone" for one the App doesn't know yet); `installation_id` is HMAC-SHA256(push installation secret, `avibe-device:v1:` + instance id), 16 bytes hex, so it is new after a reinstall and can't be linked across instances; `aliases` are `{source: "health", id}` (only to the instance Health is paired with) and `{source: "schedule", id}`. Display and grouping only. `device.describe({health_binding: true})`, used by the page's report alone, also asks the paired instance for a one-use Health binding ticket (`POST /api/mobile/device/v1/binding-ticket`, at most 3 seconds, one every 30 seconds, only for a description with an installation id; after a 404, a 405 or an older tunnel's code-less 401 that instance is not asked again in this process) and adds it as `health_binding_ticket` only in front, on the current account, while Health is paired with this instance; otherwise, and on any failure, the property is left out. The ticket is kept nowhere, and no answer to that request changes the Health connection |
 | `haptics: 1` | `haptics.impact({style})` | `null`; styles are `light`, `medium`, `heavy`, `soft`, or `rigid` |
 | `haptics: 1` | `haptics.notify({type})` | `null`; types are `success`, `warning`, or `error` |
 | `haptics: 1` | `haptics.selection()` | `null` |
@@ -231,6 +290,8 @@ The native bridge method surface is fixed:
 | `push: 1` | `push.subscribe({vapidPublicKey, forceResubscribe?: boolean})` | `{endpoint, keys: {p256dh, auth}}`; `forceResubscribe` requests a concrete replacement even when one matching active registration exists; the Web UI submits this subscription through the existing instance API |
 | `push: 1` | `push.unsubscribe()` | `{revoked: boolean, revoke: "confirmed" | "pending" | "not_needed"}`; native confirms the concrete registration revoke, reports no scoped target, or retains a pending revoke for recovery |
 | `voice: 1` | `voice.permission()` | `{state: "granted" | "denied" | "prompt"}` without prompting |
+| `voiceCapture: 1` | `voice.capturePrepare()`, `voice.captureStart({take})`, `voice.captureStop({take})` | The in-App hold's microphone, instance document only (`NativeHoldCapture.swift`). Prepare sets the audio session's category and starts nothing; start activates it and answers `{sampleRate: 16000, activateMs, engineMs}` once the input runs, or fails `permission`, `busy` or with the step; `take` is 1–64 letters, digits, `-` or `_`. Audio arrives as `avibe:native:voice.capture` events `{take, pcm}` (base64 Int16 little-endian mono, the first at once, then about 100 ms each), and the take's end as `{take, ended: true, reason?}` after its last audio. The App ends a take itself when it goes to the background, its page goes, or the system interrupts or changes the input |
+| `voiceHold: 3` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?, startAfterMs?, prepare?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App prepares the input off the main thread (session and engine, nothing started) and starts it at the later of "prepared" and `startAfterMs` (0 to 500 ms; 50 when the page names none), and only if the touch, asked on the main thread once every touch event that reached the App has been handled, is still down and within the slop: **a lift before the input starts never opens the microphone**, and a stalled main thread starts nothing (a hold made then records from when it is free). `start: "recognition"` (or `avibe-diagnostics://voice/hold-quiet?on=1`) starts it with the cue instead; `prepare: "start"` prepares nothing before the start; when other audio plays or the route is Bluetooth nothing is prepared before the hold is recognised. A list with any other key or value is `invalid_argument`, so a page sends the new keys only from version 3. At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only, with how long the touch took to reach the App and when the input was asked to start), and counts of the touches that were not holds by duration (25 ms steps), with how many had the microphone started (`open`) and how many would have with a `startAfterMs` of 50, 80, 100 and 120 ms (`w50`…), are kept for the next Action Button message's `capture_earlier`; the counts since installation also ride in each hold's `timings` event (`taps`). `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2. Version 2 (51.1) started the input at touch-down with no look at the finger, so a tap opened the microphone for a moment |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
 
@@ -262,6 +323,260 @@ Unknown methods never expand the native surface.
 The production Supabase Auth origin is an explicit primary-navigation
 allowlist entry. If Avibe Cloud moves to another Supabase project, update that
 origin and its navigation test in the same change.
+
+## App Shortcuts
+
+`AppShortcuts.swift` holds the App's one `AppShortcutsProvider`. It offers
+"Open Main Bot" (`zh-Hans`: "打开主伙伴") to Siri, Spotlight, the
+Shortcuts app, and Settings > Action Button > Shortcut. Its intent,
+`OpenMainBotIntent`, runs in the App's own process with the App in front
+(`openAppWhenRun`, and `supportedModes` `.foreground(.immediate)` from
+iOS 26). It hands `/chat/ses_main?from=notification` to
+`AppModel.openSelectedInstance(path:)`, which opens the selected instance the
+way a notification tap does: the instance opens again, and its page receives
+the path through `push.opened` once it loads. A request that arrives before
+the scene or the bootstrap is ready waits for them, and only the latest
+waits. Signed out, with no instance selected, or with the selected instance
+unavailable, the App stays on the screen it shows anyway, with no prompt.
+
+The main Bot's conversation is the Web UI's `/chat/ses_main`; the Owner's
+Workbench creates `ses_main` on first use. Only the Owner has Bots: for
+anyone else the server answers 404, and `from=notification` makes the Web UI
+open the Inbox instead of an error. The shortcut adds no entitlement,
+capability, extension, or Info.plist key. Its title and Siri phrases are
+localized in `Localizable.xcstrings` and `AppShortcuts.xcstrings`. Xcode
+extracts the metadata the system reads into `Metadata.appintents` in the
+App bundle, and an XCTest checks it there.
+
+### Talk to Main Bot (background voice)
+
+The provider also offers "Talk to Main Bot" (`zh-Hans`: "和主伙伴说话") from
+iOS 18, which is why the deployment target is iOS 17.4
+(`AppShortcutsBuilder.buildLimitedAvailability`). Its intent,
+`SpeakToMainBotIntent`, is an `AudioRecordingIntent`: it runs in the App's
+process (`supportedModes` `[.background, .foreground(.dynamic)]` from iOS 26),
+and Apple requires a Live Activity for as long as it records. It is also a
+`LiveActivityIntent`: only then may it start its island from the background.
+A starting press tries the background first; if that is refused, Avibe comes forward
+(below).
+`UIBackgroundModes` declares `audio`, which Apple requires to keep recording
+once the App is in the background (`AVAudioSession.Category.record`); the
+other Info.plist addition is `NSSupportsLiveActivities`. The background audio mode is
+used only while recording a take the user started (App Store guideline
+2.5.4), with the system microphone indicator and our Live Activity showing:
+the audio session is activated when a take starts recording and deactivated
+on every way it ends (send, cancel, the cap, an interruption, a failure, an
+account change), and Avibe plays no audio. The system asks
+for Face ID first (`authenticationPolicy` `.requiresAuthentication`), because
+the main Bot acts on the user's computer.
+
+- A run with no take starts one; a run while one records stops it and sends
+  it, so a second long press of the Action Button sends. The Live Activity's
+  Send, Cancel, Retry, and Discard are `LiveActivityIntent`s that run in the
+  App's process. A take ends by itself after five minutes, is discarded under
+  0.6 seconds, and is sent as far as it got when the microphone is
+  interrupted.
+- Once recording has begun, `VoiceCaptureController` reads the selected
+  instance's `GET /api/asr/status`; nothing is transcribed or sent unless
+  `consent` is `granted`. A missing `consent` field is an Avibe from before
+  the voice consent question: the take is discarded and the Live Activity
+  asks to update Avibe. `null` or `declined` discards the take; in front the
+  App opens the main Bot's conversation, where the Web UI asks, and in the
+  background the island says so. An unreachable instance is not a no: it is
+  asked again when the take is sent, and if still unreachable the take is
+  kept on the phone, unsent, and sent again by itself (after 2, 5, 10, 20
+  and 30 s, then every minute, and when Avibe comes to the front; each send
+  asks again first), its island saying 还没发出去，连上你的 Avibe 后会自动发送。
+  with Retry and Discard (in front, where no island is drawn, a banner says
+  the line). A take that could not be turned into text, or one this process
+  cannot send until Avibe is opened again (`direct_fault`), waits for Retry
+  instead.
+- Takes that are not sent yet are kept in order (`VoiceCaptureOutbox`): in
+  `Application Support/VoiceOutbox`, excluded from backup, each a record
+  (`<sequence>-<id>.json`: where it goes, when it was spoken, its
+  transcription id, its `capture_attempt` and `capture_timing`, its words
+  once transcribed, and whether its POST was begun) next to its audio. A
+  new press never discards one: the earlier take gives its island up and
+  goes on being sent. They are sent oldest first, one at a time, each as
+  its own message; a take that stops while an earlier one is on its way
+  waits behind it. While a take is sent again it stays kept, so a press,
+  Discard or Retry is never swallowed; one send of a take runs at a time,
+  and a take given up meanwhile makes no more requests (only a POST already
+  on its way cannot be taken back, and `capture_earlier` then says
+  `sentAfterEnd`). The order survives the App being ended: the next launch
+  reads the outbox, asking about voice input afresh; a take whose POST was
+  begun is never posted again (audio no record points at, from a write
+  the App did not live to finish, is removed then), and no POST is made
+  unless that marker
+  reached the disk first. An expired instance session destroys nothing: a
+  take found signed out waits for Retry, and one being recorded when that
+  is found is stopped at once and kept.
+- A take is sent without the user asking only within ten minutes of the
+  end of speaking (`automaticWindow`): the schedule above, and once more,
+  silently, when Avibe comes to the front. Then its island goes, and a
+  lasting notification says 没发出去 · 这条语音没能发出去，打开 Avibe 可以重试。
+  (scheduled when the take is kept, so it shows whether or not the App runs
+  then; removed once nothing is unsent). From then only Retry sends it, a
+  relaunch included (a send nobody asked for that outlasts the window, a
+  slow transcription say, posts nothing), and it no longer holds newer takes back; neither does
+  one that could not be turned into text. When Avibe comes to the front
+  and something is still unsent, one alert says 有一条 3 小时前的语音没能发出去。
+  (or 有 3 条语音没能发出去，最早的是 3 小时前。) with 重试 / 全部重试, which sends
+  all of them oldest first, and 放弃, which deletes them. An unsent take is
+  deleted after 24 hours, and at once on a sign-out or account change; a
+  voice consent "no" discards it. At most 20 are kept.
+- A take sent more than a minute after it was spoken tells the main Bot so:
+  its message begins with one line, （这条语音说于今天 08:44，刚刚才送达。） (another
+  day: （这条语音说于 11 月 19 日 23:10，刚刚才送达。）; in the phone's local time and
+  the App's language), then a line break and the words, and
+  `metadata.spoken_at` carries the time (ISO 8601). The model sees a
+  message's text and a few rendered header lines, not its metadata, so the
+  line is what tells it the instruction was not given just now. No
+  sign-in, no microphone permission, or Live Activities turned off bring the
+  App to the main Bot's conversation before anything records. A later
+  `403 voice_consent_required` stops the take and keeps nothing. The take's
+  file lives in `Caches/VoiceCapture` (excluded from backup, the default
+  protection class) until it is sent or discarded; leftovers are deleted at
+  launch.
+- The take is sent as `POST /api/asr/transcribe` (the whole AAC take), then
+  `GET /api/sessions/main` and `POST /api/sessions/<id>/messages` with
+  `metadata.input = "voice"`. The reply arrives as the instance's usual
+  notification. A failure before the message `POST` keeps the take, and its
+  text once transcribed, for Retry for ten minutes. Once the `POST` was made
+  its outcome may be unknown, so a failure there is reported and never
+  retried: an instruction is never sent twice. An ordinary submission clears
+  the Session's composer draft, so an unsent draft is read first and put back
+  after, unless one was written meanwhile.
+- A Live Activity this process does not hold is a leftover of a take whose
+  process is gone (killed, or ended by the system); its recording is lost. It
+  is ended at launch, and by any press or island button that finds it, shown
+  for a moment as 录音中断了，没有发出去. Such a press records nothing; the next
+  one starts a new take. A listening or sending Live Activity also goes stale
+  on its own 90 seconds past the five-minute cap, and a stale one is drawn as
+  interrupted, so no timer runs on for a take nobody holds.
+- A starting press makes exactly one background try: the island, then a
+  mixable session (`.playAndRecord` with `.mixWithOthers` and
+  `.duckOthers`) as the first and only activation, then the recorder. Two
+  public projects record from the background on an iPhone 17 this way, each
+  press a process the press launched (legato `spikes/ios-keyboard/FINDINGS.md`,
+  oliv `ios/docs/TESTING.md`): iOS lets such a process start audio once; a
+  second start in it, or a non-mixable first activation, is refused. The
+  owner's 38.1 presses were all in a warm process after an exclusive try
+  (`!int`, then `!pla`). If the try is refused and the intent can bring
+  Avibe forward (iOS 26), its island goes at once and Avibe records in
+  front as soon as it is active (`.record`); only then come a haptic and the
+  line 正在录音，再长按一次操作按钮发送. A press that waits more than 30 s to come
+  forward never records. A stop press (or the island's Send) runs in the
+  background and sends without coming forward. The intent stays an
+  `AudioRecordingIntent` and a `LiveActivityIntent` (without the latter the
+  island is refused from the background).
+- No word is lost to the instance's round trip: the instance is asked
+  about voice input once recording has begun. Until it says yes the audio
+  stays on the phone; a no, an older Avibe or voice input being unavailable
+  stops the take and discards it unsent, said in the App (in front) or on
+  the island. A stop before the answer waits for it. The message carries how
+  it recorded (`0` in the background, `3` in front, with the refused
+  background try), the press's process facts (`pid=`, `start=`, `age=`,
+  `byPress=` and `cold` when this press launched the process within 2 s and
+  it was never shown, `scene=`, `presses=` that started a take, `session=`,
+  `launch=`, `prevEnd=`, and `bgTries=` background activations this process
+  made before), whether another App was playing audio and where sound goes,
+  in `metadata.capture_attempt`, for example
+  `3 [background warm pid=812 start=1795104000 age=95.2 byPress=0 scene=1 presses=2 session=0 launch=background prevEnd=- otherAudio=0 silenceHint=0 out=Speaker bgTries=2] (0 sessionActivate 561015905)`.
+  `metadata.capture_timing` gives each step's milliseconds from the press (its reservation, after the leftover check):
+  `island=`, `session=`, `record=`, `audio=` (the recorder's first audio, or `none` if it stopped without), and
+  for a press that came forward `refused=`, `front=`, `frontIsland=`,
+  `frontSession=`, `frontRecord=`; then `stop=<ms>:<press|island|interrupted|max|input>`,
+  `tries=` (sends after it was kept), and what the audio session reported
+  from the try's session on (at most eight): `intBegan=<ms>:r<reason>`,
+  `intEnded=<ms>[:resume]`, `route<reason>=<ms>:<input port>`.
+- With Avibe already in front at the press, the take records there at once
+  with the exclusive session (other audio pauses and resumes after): the
+  mixable one recorded music playing from the speaker (39.1).
+- `capture_attempt` ends with which recorder took the take: `rec[recorder]`
+  (AVAudioRecorder), or, when its `record()` said no in the background
+  (39.1: navigation speaking, the mixable session already active),
+  `rec[engine vp=1 recorder=0 prep=<0|1> in=<input available> port=<input>
+  ins=<inputs> ch=<channels> rate=<Hz> cat= mode= opts= other= hint=]`: an
+  AVAudioEngine input on the same session, with no second activation,
+  writing the same AAC file. It asks for voice processing first (`vp=1`;
+  `vp=0(<code>)` when that would not start and the plain input records);
+  whether that keeps another App's audio out of the take is only known on a
+  device. When the input changes under it
+  (`AVAudioEngineConfigurationChange`) it takes the new input up into the
+  same file, or, if it cannot, the take is sent as far as it got
+  (`stop=…:input`). If the engine fails too, `engine=<code>` names the system's
+  reason, and the press goes on in front as before; the refused try's
+  `rec[...]` is kept with it.
+- A press that left no message leaves one line on the phone (the last five,
+  each at most 700 characters; `UserDefaults`): the time (UTC), what
+  happened (`short:`, `cancel`, `start:<step> <code>`, `needsApp:`,
+  `refused:`, `kept:<reason> {requests that did not reach the instance}`,
+  `expired`, `discarded`, `discardedAll <n>`, `overflow`, `leftover`,
+  `repeat`, `abandoned`, `noFront`, `nothingHeard`, `sendUnknown`,
+  `sentAfter {…}`, `sentAfterEnd`), the press's
+  facts and its steps. No audio and no words. The next message that
+  arrives carries them as `metadata.capture_earlier` and they are then
+  dropped; they never go out on their own.
+- The microphone permission is checked before anything else; a missing one
+  brings Avibe forward. If the audio session or the recorder then refuses to
+  start, or the take's file or the Live Activity cannot be made, the user is
+  told 录音没能开始 with the step where it stopped (准备录音文件, 设置音频会话,
+  激活音频会话, 启动录音器, 启动实时活动) and the error as given (the system's
+  number, or an ActivityKit error's type and case), never the permission
+  line. The line is posted once as a notification that stays in Notification
+  Center (thread `voice-capture`; tapping it only opens Avibe), which needs
+  notification permission. It also shows on the island, except for
+  启动实时活动, where no island exists and the alert Avibe shows on coming
+  forward carries it. A run within a second of a start
+  that failed and said so does nothing, so a press the system runs twice
+  shows one notice.
+- If the system will not start the Live Activity, nothing is recorded. When
+  "Talk to Main Bot" has to bring Avibe forward, an alert says why.
+- An account sign-out or change (`AppModel.prepareForAccountTransition`)
+  stops and discards any take, releases its WebView, and makes a press still
+  coming forward give up.
+- Variant (a), behind a hidden switch that is off by default: once a take
+  recorded in the background has been sent (its message accepted, its audio
+  deleted), the process ends about a second later (held as a background task
+  so the wait runs then; a wait that ran late is skipped), so the next press
+  is a process launched for it (legato and oliv do the same; Apple's QA1561
+  discourages ending an App, so it stays off unless the owner turns it on).
+  It never ends a process that was ever shown, while Avibe is in front, with
+  a take under way, or with health sync or push work in flight; the decision
+  goes into the next press's `capture_attempt` (`prevEnd=`). The switch is
+  not in Settings and not discoverable: in a TestFlight or development build,
+  opening `avibe-diagnostics://voice/end-after-background?on=1` (or `on=0`)
+  sets it; an App Store build ignores the URL.
+- The hidden document loads through the App's local listener for the
+  instance, as the page does, so before its load it asks the same gate
+  (`DirectPathController.loadGate`, through `VoiceCaptureLoadGate`): in
+  front a held gate (the listener closed or being bound again, right after
+  Avibe comes forward) is waited for, up to 5 s, and a load that failed in
+  that window is made once more; a fault fails as `direct_fault`. The gate
+  is asked for the take's own store and host
+  (`DirectPathController.loadGate(forInstanceURL:)`), whatever instance is
+  shown, or none: a kept take of an instance that is no longer selected
+  still loads through the listener its host is routed to. In the background the gate stays
+  held for as long as Avibe is there, so nothing waits: a background take's
+  load rests on WebKit's own failover past the closed listener
+  (`allowFailover`), a safety net rather than a guarantee, so a failure
+  there stays retryable and is never `direct_fault`. Each request that does not reach the instance is kept as
+  which request, where it gave up (`loadp <domain> <code>`, `load …`,
+  `webcontent`, `nodoc`, `js …`, `fetch0 <error> <ms>/<deadline>`,
+  `http <status>`, `direct_fault`, `gate … after <ms>`) and when, for
+  `capture_earlier`. A take's transcription keeps one `dictation_id`
+  however often it is sent.
+- `VoiceCaptureInstanceClient` makes these requests as the signed-in user
+  without the runtime WebView: a hidden `WKWebView` on the account's own
+  named store (the selection and store identifier the account coordinator
+  persisted, read and never written) loads `/api/csrf-token` on the instance
+  origin and runs same-origin `fetch` there. WebKit stays the only owner of
+  the session cookie, `Origin`, and the CSRF pair, as for the Workbench.
+- The `AvibeLiveActivity` widget extension (`bot.avibe.ios.live-activity`)
+  only draws. It has no entitlements, no App Group, and no network; the views
+  and their `VoiceCapture.xcstrings` table are also compiled into the App,
+  which renders review frames from them.
 
 ## Remote direct path (inactive)
 
@@ -438,11 +753,67 @@ Vite build generated from the same source commit so ES modules, styles, and
 image assets share one fixed local origin. Its fixed
 surface is `session.bootstrap`, `auth.requestOtp`, `auth.verifyOtp`,
 `auth.signInWithPassword`, `auth.verifySecondFactor`, `auth.verifyPasskey`,
-`session.refresh`,
-`session.selectInstance`, `session.logout`, `app.returnToInstance`, and the
-closed `app.openExternal` allowlist (the two install guides and avibe.bot's
-Account security page). Instance documents, child windows, Show Pages, and
-iframes do not receive these handlers.
+`auth.signInWithProvider`, `auth.signInWithPasskey`, `session.refresh`,
+`session.selectInstance`, `session.logout`, `app.returnToInstance`,
+`app.openPage`, and the closed `app.openExternal` allowlist (the two install
+guides and avibe.bot's Account security page). Instance documents, child
+windows, Show Pages, and iframes do not receive these handlers.
+
+### Sheet appearance
+
+The instance and account sheets over a live instance take the instance page's
+colour scheme (`AppModel.runtimePageColorScheme`, the scheme the page reports
+for the status bar), and the system's until the page reports one. The sheet's
+controller and its presented container get the matching
+`overrideUserInterfaceStyle`, so WebKit gives the bundled page that
+`prefers-color-scheme` and the grabber and corners match. Until the bundled
+page paints, the WebView is transparent over the page's own `--background`
+(`MobileOnboardingViewController.pageBackground`), so the sheet slides in in
+its final colour rather than WebKit's white. The bundled page still loads when
+the sheet has appeared; no preloading.
+
+### avibe.bot pages in the App
+
+账号与数据 / Account and data, one page below Account, holds 隐私政策 /
+Privacy policy and, as one plain red line at its very bottom, 删除账号 /
+Delete account, so deletion is never on Account itself (owner, 2026-11-17).
+Both (App Review 5.1.1(i) and 5.1.1(v)) call `app.openPage({page})`, where `page`
+is `privacyPolicy` or `accountDeletion` and nothing else; any other value or
+an extra parameter is `invalid_argument`. Native code owns the addresses:
+`/privacy` and `/account/delete` on the control-plane origin
+(`https://avibe.bot`). The page opens in a native sheet over the bundled page
+with Done, the current host as its title, and a user agent ending in
+`AvibeiOS/<version>`, so avibe.bot hides its site chrome and Cancel. It
+receives no bridge.
+
+- Account deletion uses the account's WebKit store, so the page is already
+  signed in; only a signed-in account with no account change under way gets
+  it (`signed_out` or `busy` otherwise). The WebView joins the coordinator's
+  release barriers: the sign-out that follows waits for it before rotating
+  the store and leaves the old store to a later sweep while it is alive.
+  While it is open no instance can be selected: a notification tap is set
+  aside (nothing opens and the page stays) rather than opening an instance
+  of an account the page may be deleting. The privacy policy uses a non-persistent store.
+- A page closes with the bundled page that awaits it: if the App changes
+  route underneath, the page is dismissed and answers `{completed: false}`,
+  and a presentation UIKit refuses answers at once.
+- The pages use no JavaScript dialogs and no `window.open` the App must
+  follow; the App implements no dialogs for them.
+- Main-frame navigation stays on the control-plane origin; other web
+  addresses and application schemes open in the system, as do new windows.
+  Subframes load web content but launch nothing.
+- avibe-bot-backend's agreed done signal is a main-frame navigation to
+  exactly `/account/delete/done` on that origin, made only after
+  `/api/mobile/session` answers 401 for the cookie jar. The App cancels it,
+  closes the sheet, and `app.openPage` resolves `{completed: true}`; any other
+  close resolves `{completed: false}`.
+- Either way the bundled page then runs `session.refresh`. A signed-out
+  answer is the existing explicit sign-out: the store rotates and the page
+  shows Welcome (from the sheet, the App replaces it with the full-screen
+  account page as for any account transition). A signed-in answer keeps
+  Account. When the page reported the deletion but the read-back failed or
+  still read signed in, the bundled page signs this device out
+  (`session.logout`) so nothing of the deleted account stays.
 
 A complete six-digit email or authenticator code starts verification as soon
 as an edit completes it, whether typed, pasted, or offered above the keyboard
@@ -712,6 +1083,104 @@ the shared viewport scroll, as the shipped code and two-step screens do; the
 password form scrolls its Sign in action above the keyboard while the field
 has focus.
 
+### Google, GitHub and Sign in with Apple
+
+Owner decisions 2026-11-18: the App also signs in with Google and GitHub, in
+the system sign-in window, and with Apple, in its native sheet. Welcome keeps
+email as the one primary action and shows the three as one row of marks
+(layout B). The backend wire is avibe-bot-backend's mobile provider exchange
+(provisional until its independent security agreement); the App's side is
+below.
+
+- Welcome shows only the providers avibe.bot advertises for the App now:
+  `mobile_providers` in `GET /api/config/auth`, read fresh by the hidden
+  transport (without cookies) and added natively to a signed-out session
+  answer as `providers` when it answers within 2 s (known names once each,
+  in the App's order; a missing or malformed list means none). An answer
+  without it leaves the page's last list, which starts empty: email alone.
+  The App keeps the last list avibe.bot answered (memory and `UserDefaults`,
+  an enum list, not per account) and refreshes it whenever an account page
+  appears, signed in or not; a signed-out answer whose read is slower than
+  2 s carries that last list instead, so Welcome after sign-out or on a cold
+  start shows the row at once. Welcome also asks `auth.providers` (no
+  arguments; refused in sheets) when it appears and when the App returns to
+  the foreground on it, and replaces the row in place with the answer. The
+  same read carries passkey sign-in (`passkey_login_enabled` exactly `true`;
+  every iOS the App runs on has the passkey sheet): it is kept with the list
+  and answered beside it as `passkey`, in signed-out answers and in
+  `auth.providers`. So the App can ship before the broker serves a provider,
+  and each way in appears when avibe.bot enables it.
+- Passkey sign-in with no email first is the closed `auth.signInWithPasskey`
+  (no arguments; the sheet forbids it), apart from the second-factor
+  `auth.verifyPasskey`. The coordinator runs avibe.bot's primary passkey
+  options, the system sheet with no allow-list and verify in one fresh
+  store, then reads the session as a request of its own. A closed sheet
+  cancels the flow and any attempt that does not sign in retires the store,
+  but a store that holds an accepted verify is kept until its session is
+  read (a `401` there retires it), so trying again reads it without a
+  second sheet or verify. `503` is passkey sign-in switched off
+  (`provider_unavailable`); a `403` is avibe.bot's HTTP boundary (`network`).
+- The bundled Welcome calls `auth.signInWithProvider({provider})`, with
+  `provider` exactly `google`, `github` or `apple`; any other value or an extra key
+  is `invalid_argument`, and the sheet forbids it like every auth method. It
+  answers like `auth.verifyOtp`. Errors: `provider_cancelled` (the page shows
+  nothing), `provider_unavailable`, `provider_email_unverified`,
+  `invalid_or_expired`, `rate_limited`, `network`.
+- `MobileSessionCoordinator.signInWithProvider` is a login transition like
+  the email code: generation bump, selection cleared, runtime released, a
+  fresh signed-out store first (the backend refuses an active account
+  cookie), and a fresh store again after every attempt that does not sign
+  in, a cancel included. Each attempt draws a 32-byte verifier and a 32-byte
+  state (unpadded base64url) and sends the S256 challenge; they, the
+  transaction and the one-time code live only in native memory and the
+  transport's fixed-script arguments, never in the bundled page, logs or
+  storage.
+- The hidden account transport posts `/api/mobile/auth/start` and
+  `/api/mobile/auth/exchange` with fixed scripts, same origin, no
+  redirects. Native opens only the answered browser address that is exactly
+  the control plane's `/api/mobile/auth/browser` with one `launch`
+  parameter, in `ASWebAuthenticationSession` with the `https` callback
+  `<control plane host>/mobile/auth/complete` (iOS 17.4, the deployment
+  target; `webcredentials:avibe.bot` and avibe.bot's
+  `apple-app-site-association` authorise it) and
+  `prefersEphemeralWebBrowserSession` off, so Safari's Google or GitHub
+  sign-in is reused. The callback is read only in its exact shape:
+  `https`, that host and path, no port, userinfo or fragment content (the
+  backend may end it with a bare `#` so the browser drops an earlier hop's
+  fragment), `state` equal in constant time, and exactly one of `code`
+  (opaque, at most 4 KiB) or an `error` the App knows; anything else is
+  `invalid_or_expired` and is never exchanged. The answered browser address
+  must carry a canonical 43-character `launch`, and start's `transaction_id`
+  and Apple `nonce` must be canonical too, or nothing opens (`network`).
+  The App has no URL or user-activity handler for the callback path, so an
+  unsolicited callback reaches nothing.
+- The exchange's `204` sets the account cookies in this store; the
+  existing `/api/mobile/session` read then decides: signed in, the existing
+  two-step gate, or `invalid_or_expired` for `401`. An optional
+  `Avibe-Account-Created: 1` is the backend's attestation that this
+  exchange created the account; native keeps it for the account generation
+  and adds `new_account: true` to that signed-in session's answers, a hint
+  for the empty state only. Any account transition retires it.
+- Apple: `/api/mobile/auth/start` answers the server's raw nonce. The App
+  asks Apple for the email scope only (the name is never sent), with
+  `nonce` = lowercase hex SHA256 of that nonce and `state` = the attempt's
+  state, requires the returned `state` to be equal (constant time), and posts
+  the identity token and the authorization code (UTF-8) with the verifier to
+  `/api/mobile/auth/apple`, which answers like the exchange.
+- Any account transition, sign-out included, closes an open sign-in window
+  or Apple sheet, and its attempt can no longer exchange.
+- `Avibe.entitlements` carries `com.apple.developer.applesignin =
+  ["Default"]`, the app's alone. `testflight.py` requires exactly that in the
+  signed app and the App Store profile and forbids it in both extensions.
+  Enabling the capability on `bot.avibe.ios` invalidates the App Store
+  profile, so this change merges only after the profile is regenerated and the
+  signing secret updated; simulator CI builds unsigned and is unaffected.
+
+What only a device proves: the `https` callback on a signed build, Safari's
+shared sign-in and the system consent alert, the Apple sheet with Face ID
+(first time and repeat), and the real providers on production with
+designated accounts after the backend's go.
+
 Coordinator tests inject an in-memory named-store registry. Integration tests
 that require real named stores use suite-scoped `UserDefaults`, track every UUID
 they create, and remove only that set. One integration case snapshots WebKit's
@@ -728,14 +1197,14 @@ cleanup.
 
 This inventory is organized by the finite WebKit API surface instead of by
 individual Web UI call sites. It includes the iOS methods present through the
-local iOS 27 SDK; iOS 27-only methods are documentation-only while CI remains
-pinned to Xcode 26.6.
+local iOS 27 SDK; iOS 27-only methods are still documentation-only (CI now
+builds with Xcode 27.2; adopting them is separate work).
 
 ### `WKNavigationDelegate`
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
+| `decidePolicyFor navigationAction` | Implemented. Download actions use the download admission rule. New contexts continue to `WKUIDelegate`. Subframes follow WebKit except external application schemes. The primary main frame externalizes HTTP(S) destinations outside instance/authentication origins; child main frames use WebKit except for Google, GitHub and Apple authorization and external application schemes. | Pure tests cover primary and child top-level destinations, `about:srcdoc`, blank, blob, data, cross-origin HTTPS, external schemes, and trusted/untrusted download sources. |
 | `decidePolicyFor navigationAction:preferences:` | Intentionally not implemented because WebKit calls this overload instead of the implemented action-policy method. `defaultWebpagePreferences` remains the single preference owner. | Simulator build verifies the selected overload. |
 | `decidePolicyFor navigationResponse` | Implemented. Attachment and non-displayable responses use the same download admission rule; displayable responses use WebKit. | Simulator XCTest and build cover response conversion to `WKDownload`. |
 | `didStartProvisionalNavigation` | Implemented. Cancels stale JavaScript dialogs and starts primary loading state. | Simulator build; exactly-once dialog cleanup is a manual interaction check. |
@@ -750,13 +1219,13 @@ pinned to Xcode 26.6.
 | `navigationAction:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `navigationResponse:didBecome download` | Implemented and attaches the shared download context/delegate. | Simulator build and download policy tests. |
 | `shouldGoTo backForwardListItem` | Uses WebKit default continuation. The ordinary action-policy delegate still rejects a primary `.backForward` target outside the selected instance origin. | Hermetic SPA/auth-history XCTest on iOS 26.4.1 and 27.2; gesture feel remains a device check. |
-| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `willSubmitForm` (iOS 27) | Uses WebKit default continuation. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when the shell needs to see or stop a form submission. |
 
 ### `WKUIDelegate`
 
 | Method | Handling | Verification |
 | --- | --- | --- |
-| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google is intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
+| `createWebViewWith` | Implemented. Every ordinary new-window target creates a closable child WebView with WebKit's exact configuration, preserving `window.opener` across origins and recursive child creation. Google, GitHub and Apple authorization are intercepted and external application schemes use the system. | Pure new-window tests cover instance, authentication, Vault, external HTTP(S), `about:blank`, Google, GitHub, Apple, and application schemes; simulator evidence covers the host toolbar and same-origin opener round trip. |
 | `webViewDidClose` | Implemented and closes the matching child subtree. | Simulator build; `window.close()` is an interactive check. |
 | `runJavaScriptAlertPanelWithMessage` | Implemented with an initiating-WebView `UIAlertController` and exactly-once completion. | Simulator build; interaction and removal cleanup are manual checks. |
 | `runJavaScriptConfirmPanelWithMessage` | Implemented with OK/Cancel and exactly-once completion. | Simulator build; existing Web UI `confirm()` callers are manual checks. |
@@ -768,7 +1237,7 @@ pinned to Xcode 26.6.
 | `showLockdownModeFirstUseMessage` | Uses WebKit's default Lockdown Mode message. | System-owned behavior; no shell test. |
 | `willPresentEditMenuWithAnimator`, `willDismissEditMenuWithAnimator` | Use WebKit's default edit menu. This preserves selection, copy, paste, and the Web UI clipboard fallback. | Existing Web UI clipboard tests plus manual copy/paste check. |
 | `runOpenPanelWith` | Uses WebKit's Safari-matching iOS file picker. The shell declares localized camera and photo-library-add usage descriptions. | Simulator build validates resources; Files, Camera, and Save Image remain device checks. |
-| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The pinned Xcode 26.6 toolchain does not expose this method. | Revisit when CI moves to an iOS 27 SDK. |
+| `requestGeolocationPermissionFor` (iOS 27) | Uses WebKit/system prompting. The iOS 27.2 SDK exposes this method (CI builds with it since the move to Xcode 27.2); it is not implemented, so the default stays. | Implement when a page of an instance needs location and the shell should decide. |
 | `insertInputSuggestion` | Uses WebKit's default keyboard insertion behavior. | Manual keyboard suggestion check. |
 
 ### `WKDownloadDelegate`
@@ -786,7 +1255,7 @@ pinned to Xcode 26.6.
 
 | Property | Shell value and reason | Verification |
 | --- | --- | --- |
-| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
+| `websiteDataStore` | One persistent named store belongs to the current phone account. Runtime primary/child WebViews and the hidden account transport use it in non-overlapping phases; logout/account switch rotates the identifier and deletes the old store. The avibe.bot account deletion page also uses it while open, alongside a covered runtime, as a release barrier: rotation waits for it and defers the old store's removal while it lives. | Coordinator lifecycle XCTest plus real `WKHTTPCookieStore` handoff, chunk rotation/deletion, redirect isolation, and delayed-response tests. |
 | `websiteDataStore.proxyConfigurations` | Never written by this shell, which has no direct transport. With one, `DirectRouteOwner` is the only writer: one HTTP CONNECT route per account store to the App's loopback proxy, listing exact instance hosts, written before a runtime's first load and never cleared or switched. | XCTest with and without a stand-in transport on real `WKWebsiteDataStore` objects, counting every setter call, including that no listening socket and no route exist without one. No WebKit load through the route is part of this suite. |
 | `userContentController` | The root installs the document-start `avibeNative` script and reply handler. Children receive WebKit's exact configuration through the shared WebView factory, preserving the same controller and `window.opener`; each message still repeats the main-frame and exact-origin check. | XCTest covers instance main-frame discovery and calls, child discovery, subframe absence, external-origin absence, and unknown-method rejection. |
 | `applicationNameForUserAgent` | `AvibeiOS/<CFBundleShortVersionString>`, appended by WebKit to its standard user agent. | Configuration XCTest and Debug/Release simulator builds. |
@@ -813,7 +1282,7 @@ pinned to Xcode 26.6.
 | Capability | Outcome |
 | --- | --- |
 | New windows and `window.close()` | Supported by `createWebViewWith` and `webViewDidClose`; every ordinary target opens in a child WebView, children recursively use the same delegates, and the toolbar exposes host, Done, and Open in Safari. The Safari action is enabled only for HTTP(S) URLs. |
-| JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path. |
+| JavaScript `alert`, `confirm`, and `prompt` | Supported with native dialogs and exactly-once completion on every exit path, in instance WebViews. avibe.bot pages in the App (`app.openPage`) get none: WebKit's defaults apply (`confirm` is false), and those pages use none. |
 | Instance HTTPS, matching `blob:`, and instance-frame `data:` downloads | Supported through the action/response policies and `WKDownloadDelegate`; non-displayable MIME and attachment responses use the same rule. |
 | File selection, camera, and photo saving | Uses WebKit's Safari-style picker and the system activity sheet. `NSCameraUsageDescription` and `NSPhotoLibraryAddUsageDescription` are localized. |
 | External application schemes | Trusted top-level contexts use `UIApplication.open`; subframes cancel them without leaving the app. |
@@ -876,7 +1345,7 @@ bridge and do not run these Web UI branches.
 
 | Environment | Coverage |
 | --- | --- |
-| CI: Xcode 26.6, pinned iOS 26.5 / iPhone 17 Pro simulator | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
+| CI: Xcode 27.2 (GitHub's `xcode-27` image), pinned iOS 27.2 / iPhone 18 Pro simulator (the image has no iPhone 17 Pro on 27.2) | Authoritative `ios-shell` build and serialized full XCTest, including cold WebKit transport startup, redirect isolation, cookie behavior, bundled-page interaction, and notification-driven keyboard viewport invariants. |
 | Local: Xcode 27.2, iOS 26.4.1 simulator | Focused Debug XCTest for notification-driven viewport geometry and bundled onboarding, plus real-WebKit Home quick-task, conversation composer, background/foreground, and bundled OTP explicit-dismissal checks. Each path returned to its safe-area baseline. Interactive pull-down dismissal remains an owner device retest. |
 | Local: Xcode 27.2, iOS 27.2 simulator | Focused Home quick-task check with the software keyboard; explicit dismissal returned the tab bar to its safe-area baseline. |
 
@@ -1014,13 +1483,29 @@ A structural test derives both pull-request and push path lists from that
 single source, so new shared or out-of-tree UI inputs cannot silently skip the
 mobile build. The job installs the repository-pinned Node version and lockfile,
 runs `build:mobile`, generates the license notices, verifies the generated
-entry, assets and notices, then pins the same
-Xcode 26.6 toolchain used by the desktop native workflow. It builds against the
-iOS Simulator SDK without signing and runs the XCTest navigation, new-window,
-download, bundled-page, and WebKit capability contracts on an available iPhone
-simulator. Debug and Release use the same generated folder resource; the
-bundled-page XCTest resolves `MobileApp` from the built application bundle and
-executes its React entry through `avibe-app://bundle`.
+entry, assets and notices, then pins Xcode 27.2 and the iOS 27.2 SDK on
+GitHub's hosted `xcode-27` image (the desktop native workflow stays on Xcode
+26.6). It builds against the iOS Simulator SDK without signing and runs the
+XCTest navigation, new-window, download, bundled-page, and WebKit capability
+contracts on the pinned iPhone 18 Pro / iOS 27.2 simulator. Debug and Release
+use the same generated folder resource; the bundled-page XCTest resolves
+`MobileApp` from the built application bundle and executes its React entry
+through `avibe-app://bundle`.
+
+**Going back to Xcode 26.6.** GitHub lists the `xcode-27` image as a public
+preview. If it breaks or is withdrawn, revert the squash commit of
+avibe-bot/avibe#4128 (one commit; it restores both workflows, their lint
+expectations and the tests as they were on Xcode 26.6). To keep its test
+changes instead, change only these lines: in `ios-shell.yml` and
+`ios-testflight.yml`, `runs-on: macos-26`,
+`DEVELOPER_DIR=/Applications/Xcode_26.6.app/Contents/Developer`, the
+`Xcode 26.6` version check (dropping the 27.2 SDK check); in `ios-shell.yml`,
+the simulator `SimRuntime.iOS-26-5` / `iPhone 17 Pro`; and the matching
+expectations in `tests/test_ci_pipeline.py`. Everything else from that PR works on
+Xcode 26.6 as it is: the sheet fixture's scene life cycle (the comparison's 26.6
+build uses it), the deferred removal of fixture stores (it acts only on WebKit's
+"in use (by network process)" refusal), the cold-first-tap expected failure
+(only on an iOS 27 simulator) and the dispatch-only `ios-sdk-comparison`.
 
 ## TestFlight
 
@@ -1038,11 +1523,31 @@ Actions → ios-testflight → Run workflow) and only from `master`. In one job 
 3. archives the Release configuration with manual signing, using
    `<run number>.<attempt>` as `CFBundleVersion`;
 4. checks the archived app's bundle, build number, encryption declaration, and
-   distribution entitlements (`verify-archive`);
+   distribution entitlements, that the Notification Service extension carries
+   the app's version, and that both bundles carry a privacy manifest
+   (`verify-archive`);
 5. exports and uploads with the App Store Connect API key;
 6. waits for App Store Connect to process the build and adds it to the internal
    group `Avibe Internal` (`distribute`); internal testing needs no App Review;
 7. always removes the keychain, profile, and key (`cleanup`).
+
+`MARKETING_VERSION` is the App Store version (1.0) for the app and its
+extension; App Store Connect files each TestFlight build under it.
+
+The app and the Notification Service extension each carry a
+`PrivacyInfo.xcprivacy`. Both declare their `UserDefaults` use (the bundle's
+own defaults, `CA92.1`, and the shared App Group, `1C8F.1`) and no tracking;
+the app also declares system boot time (`35F9.1`), which the direct
+transport's deadlines read through `ProcessInfo.systemUptime`.
+The app also declares the data it collects, matching its App Privacy answers
+(owner-approved, 2026-11-17): the account's email address and user ID, the
+device's push token, which the avibe.bot relay stores (Device ID),
+hold-to-talk recordings, which avibe.bot relays to the speech service (Audio
+Data), and the voice usage records avibe.bot keeps (Other Usage Data). Each is linked to the user, for App Functionality only, and not used
+for tracking. The extension decrypts and shows notifications on the device and
+collects nothing. `verify-archive` checks that each manifest exists and
+declares no tracking; it does not compare the collected types with App Store
+Connect, so change both together.
 
 `Info.plist` declares `ITSAppUsesNonExemptEncryption = false`: the app uses
 only the system's HTTPS and passkey cryptography, so builds need no export
@@ -1062,3 +1567,219 @@ the Apple Developer account and replace `IOS_APP_STORE_PROFILE_BASE64`; the
 workflow refuses an expired profile, or one without Associated Domains, before
 it builds. The profile was last regenerated on 2026-11-07, after Associated
 Domains was enabled.
+
+## Apple Health
+
+The instance conversation and encrypted health-request notifications are the
+entry points. The configured instance main frame can call
+`health.connect({requestId, pairingCode})`; native consent names the destination,
+read-only data groups, automatic synchronization, Agent/model access, and how to
+stop. Its response contains only `state`. Every other `health.*` bridge method
+is unsupported, including on Show pages. Health data never returns through the
+WebView bridge or notification service extension.
+
+The main app reads steps, activity, workouts and sleep. It backfills 30 days
+and refreshes the most recent eight calendar days on foreground activation and
+HealthKit observer delivery. Sleep uses the local 18:00 boundary and interval
+unions. Empty results do not identify denied HealthKit read permission. Device
+credentials and the random installation identifier use private, nonsynchronizing
+ThisDeviceOnly Keychain items. Logout deletes the credential, stops observation,
+cancels uploads and removes local sync state; the non-authenticating installation
+identifier remains for repeat-pairing identification.
+
+The protected, backup-excluded outbox uses monotonic persisted sequence numbers
+and one background URLSession upload at a time. Payload and execution dependencies
+commit together. An upload acknowledgement removes the outbox reference and
+releases its value-free request result in one state write. A reclaimed request
+uses its recorded result with the new lease token rather than querying again;
+an interrupted query without a durable payload is resumed. Redirects and cookies
+are disabled for device requests. Revocation or loss of instance eligibility
+clears the connection; invalid payloads and unsupported contracts suspend sync
+until a new explicit connection. Retry-After applies to device requests.
+When avibe.bot answers with the account's instance list, and before each
+device request (restoration and HealthKit delivery included), the list it last
+confirmed in this process must still list the paired instance at its origin.
+If it does not (the instance was renamed, or removed while no connection was
+loaded), the connection ends locally and nothing more is sent to that origin,
+not even a revoke; a later connect starts over. A removal seen in a nonempty
+list while the connection is loaded revokes it, as before. A confirmed empty
+list (the account has no instance left) ends it locally like a rename, with no
+revoke: a deleted instance's name can later belong to another account. A list
+avibe.bot has not confirmed in this process changes nothing.
+
+Both HealthKit entitlements and the localized read-purpose description belong
+only to the main app. The archive checker requires boolean grants and rejects
+HealthKit entitlements on extensions and any Health write-purpose description.
+For this Health sync feature, the main app's privacy manifest declares Health data
+as linked, not used for tracking, and for app functionality, and the archive
+checker requires exactly that declaration.
+Changing Apple App ID capabilities or provisioning profiles, signing an archive,
+physical-device validation and TestFlight distribution require separate owner
+approval. Unsigned simulator builds and synthetic-data tests do not establish
+physical-device authorization, locked-device access, or background wake latency.
+
+## App Lock
+
+Settings › General › App Lock (Off by default, Immediately, After 1 minute, After
+5 minutes) is kept in this App's `UserDefaults` and owned by `AppLockController`
+(`AppLock.swift`); behavior and the shared contract: `docs/plans/app-lock.md`.
+
+- The lock is `AppLockWindow`, a second window of the scene above `.alert` that
+  never becomes key. It covers the WebView, the account pages, sheets, and alerts
+  the App presents; those keep presenting on the main window and show after unlock.
+- Going inactive covers the App Switcher snapshot with the logo. Time away starts at
+  `didEnterBackground` on a clock that counts sleep; a return at or past the
+  threshold, or a cold start, is locked. The App asks for Face ID once each time it
+  arrives in front, except while an Action Button take is recording; after a cancel
+  the button waits. Its own verification sheets never re-lock or cover.
+- Routing, notification taps, App Shortcuts, Health sync, reminders, push, and voice
+  capture are not gated: they run under the lock, and the target page is ready when
+  it lifts.
+- No passcode means the lock does not engage; the stored choice applies again once
+  one is set. `NSFaceIDUsageDescription` says only "Use Face ID to unlock Avibe."
+- The lock screen's words are the `appLock.lock.*` keys shared with the Web bundles
+  (`ui/src/i18n/appLockCopy.test.ts` keeps `Localizable.xcstrings` equal); its
+  visual spec is `ui/design: app-lock/lock/*`.
+- Tests: `AppLockTests.swift` (machine, capability decoding, controller with a
+  stand-in authenticator, and the real lock window in the test host). A physical
+  Face ID device, passcode fallback, and Touch ID iPhone remain device checks.
+
+## Sharing a Show from the iPhone App
+
+Open the Show, then its share control. **Share link** passes the existing private,
+restricted, or public address to the iOS system share sheet; sharing never changes
+who can open the page. AirDrop, Messages, and other destinations are provided by
+iOS and the apps installed on that phone.
+
+**Share PDF** and **Share image** first explain that the recipient can keep an
+independent copy which Avibe cannot revoke. After confirmation, the App captures
+only the currently visible region of the displayed Show. The PDF is a single-page
+raster copy of those pixels; the image is PNG. Neither export scrolls the page,
+loads lazy content, or promises a full-page archive. Video and external embeds may
+be absent. Keep the Show visible until the system sheet appears.
+
+The `c1.share_draft: 1` capability offers `share.capabilities` and
+`share.present({operationId, kind, sessionId})`. The trusted instance main frame
+names the Show; the native host reads its current access and existing link through
+the same WebView's read-only APIs. It accepts no export URL, HTML, coordinates,
+cookies, or local file path from a frame. A matching visible, loaded Show iframe
+is required for PDF/image, and navigation or account/instance teardown cancels a
+pending share. Older App versions keep their Web Share link path and explain how
+to update for exports.
+
+Results distinguish `completed`, `cancelled`, `failed`, and `expired`.
+`completed` means the system reported a successful handoff, not that another
+person received or read the item. Completion and cancellation add no toast;
+errors explain how to try again. Export files are limited to 50 MiB, live in a
+controlled temporary directory, and expire five minutes after a successful
+callback or immediately after cancellation/failure. An operation without a
+callback expires after fifteen minutes, including when the App resumes from
+suspension. Launch removes orphan export directories older than 24 hours.
+Copies already kept by a destination remain under that destination's control.
+
+This feature adds no Share Extension and needs no new entitlement, App ID, or
+provisioning profile. Receiving content from another app is a separate delivery.
+Physical-device sharing and a newly distributed TestFlight build remain release
+acceptance checks; unsigned simulator evidence cannot replace them.
+
+### Reproduce the Show sharing foreground check
+
+`ShowShareForegroundTests` exercises the actual Show route and sharing controls
+in English/Chinese and light/dark, opens the system activity sheet, and attaches
+menu, confirmation, and system-sheet screenshots to the XCTest result. It uses a
+nonpersistent WebKit store and disposable export files; it selects no destination
+and sends no content to another app. Without `AVIBE_I1_FOREGROUND_ORIGIN`, this
+on-demand test skips.
+
+Install the UI's existing dependencies with `npm ci` in `ui/` if needed. From the
+repository root, start the fixture server in a separate terminal:
+
+```sh
+node ios/scripts/show_share_foreground.mjs
+```
+
+The script resolves the checkout and UI dependencies relative to itself, so an
+absolute script path also works from any working directory. It prints one JSON
+readiness line containing `pid`, `url`, and `backendPort`. Both ports are assigned
+by the OS on `127.0.0.1`. The optional `--report-file <path>` writes that same JSON
+to a new file; its parent directory must already exist, and an existing file is
+never overwritten.
+
+Copy the printed `url` into `AVIBE_I1_FOREGROUND_ORIGIN` for the test process.
+For an `xcodebuild` simulator run, forward it with the `TEST_RUNNER_` prefix:
+
+```sh
+TEST_RUNNER_AVIBE_I1_FOREGROUND_ORIGIN='http://127.0.0.1:<printed port>' \
+xcodebuild \
+  -project ios/Avibe.xcodeproj \
+  -scheme Avibe \
+  -destination 'platform=iOS Simulator,name=<installed iPhone>,OS=latest' \
+  -only-testing:AvibeTests/ShowShareForegroundTests \
+  CODE_SIGNING_ALLOWED=NO \
+  test
+```
+
+For an Xcode launch, add `AVIBE_I1_FOREGROUND_ORIGIN` with the same value to the
+test action's environment. Keep the server running until the test finishes, then
+use Ctrl-C or send SIGTERM to the reported PID. Both signals close Vite and the
+fixture backend and remove the process-owned temporary Vite cache. Remove an
+optional report file after use.
+
+The server serves the repository's design frames and only the disposable
+`ses_funnel` Show/access data. `/show/ses_funnel/` is explicitly routed to the
+fixture document, including query strings. Both HTTP entrypoints reject every
+method except GET. The Vite proxy target is the process-owned fixture backend,
+and local `.env` files are disabled; no real account, running Avibe service, or
+production instance is used.
+
+
+## Turn Live Activities
+
+The shell always announces `lockScreenProgress: 1`: `liveActivity.setting`,
+`setSetting`, `observe`, and `openSettings`. Version-1 `status`, `start`, and
+`stop` calls return `unsupported`. The shell never announces `liveActivities`,
+so older Web bundles do not activate the retired entry's bridge observers. The
+new Web requires `lockScreenProgress`, so older TestFlight builds never show the
+setting or a conversation entry.
+
+The device-only setting defaults off. On launch with it off, earlier cards end
+locally and their tokens are forgotten without contacting an instance. Turning
+it off explicitly ends cards and sends best-effort DELETE `disabled`.
+
+`TurnActivityCoordinator` keeps the latest visible conversation observation and
+prefetches its running Turn on observation changes and foreground entry. Only
+`UIScene.willDeactivateNotification` can create a card, while the App is active,
+with the device and system settings enabled, a matching prefetched Turn, and an
+active relay registration. Activity.request runs first; failure leaves the old
+card and its observers intact. On success, displaced observers stop and the
+replacement is persisted before the callback returns. A UIKit background task
+then ends the old card, sends DELETE `replaced`, waits up to ten
+seconds for the new token, and PUTs. No conversation control, toast, or hint is
+rendered. Agent names and titles stay in immutable phone-local attributes.
+
+The persisted shown-Turn ledger survives dismissal, replacement, timeout,
+logout, and relaunch. A Turn cannot create another card; entries are retained
+for up to 30 days, including Turns that outlive ActivityKit's eight-hour limit.
+The registration ledger separately tracks requested_at and whether the current
+token received a successful PUT. Token rotation and foreground reconciliation
+follow the shared contract. A 503 or lost PUT response leaves an unregistered
+card for a later foreground/token retry. Registered cards GET on foreground.
+Instance requests reuse the account-owned transport and its session authority
+checks. The normative contract and vectors are in
+`docs/plans/2026-11-20-ios-live-activity-contract.md` and
+`tests/fixtures/live_activity/contract_vectors.json`.
+
+`TurnLiveActivity` lives in the existing signed AvibeLiveActivity target. It
+renders the reviewed `ios/live-activity/*` frames in English and Simplified
+Chinese. A stale running card stops its timer; terminal cards show total time and
+remain for one hour. The `avibe-app://live-activity/<activityID>` private scheme
+resolves only local ActivityKit activities and routes through the existing
+account/instance chat opener. Voice capture activities remain a separate type.
+
+Owning validation is `AvibeTests/TurnActivityTests`: relay-vector decoding, local
+privacy boundaries, dismissal/relaunch, token rotation, 503 recovery, cleanup,
+selection races, terminal retention, deep links, and card render attachments.
+Physical-device acceptance still needs the runtime publisher and deployed relay:
+lock the TestFlight device, observe needsYou -> working -> terminal APNs updates,
+verify screen lighting, tap back into the correct conversation, and verify stale
+and one-hour dismissal behavior. Simulator tests do not establish APNs delivery.

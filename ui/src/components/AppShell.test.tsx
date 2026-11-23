@@ -153,6 +153,8 @@ vi.mock('./VersionBadge', () => ({ VersionBadge: () => <div data-testid="version
 vi.mock('./apps/MobileDockDrawer', () => ({
   MobileDockDrawer: () => <div data-testid="mobile-dock-drawer" />,
 }));
+// The native launch fallback reads the real window manager, which this suite replaces.
+vi.mock('./apps/NativeAppLaunchFallback', () => ({ NativeAppLaunchFallback: () => null }));
 vi.mock('./apps/WindowLayer', () => ({
   WindowLayer: ({ active }: { active: boolean }) => (
     <div data-testid="window-layer" data-active={String(active)} />
@@ -996,6 +998,31 @@ describe('AppShell persistent Workbench chrome', () => {
     await waitFor(() => expect(i18n.changeLanguage).toHaveBeenCalledWith('zh'));
   });
 
+  it.each([
+    ['keeps the reader language while setup is pending', { needs_setup: true }, []],
+    ['applies the saved language once setup is finished', { needs_setup: false }, ['en']],
+  ])('%s', async (_name, setupState, expected) => {
+    viewport.isDesktop = true;
+    // A fresh instance stores the default `en`; nobody chose it yet.
+    api.getConfig.mockResolvedValue({ language: 'en', setup_state: setupState, platforms: { enabled: [] } });
+    i18n.language = 'zh';
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route index element={<div data-testid="workbench" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByTestId('workbench')).toBeTruthy();
+    await waitFor(() => expect(api.getConfig).toHaveBeenCalled());
+    await act(async () => {});
+    expect(i18n.changeLanguage.mock.calls.map(([code]: [string]) => code)).toEqual(expected);
+  });
+
   it('keeps a language the user picked while the instance config was still being read', async () => {
     viewport.isDesktop = true;
     const instance = i18n;
@@ -1457,15 +1484,16 @@ describe('AppShell route prefetch', () => {
   // requestIdleCallback, so each step waits on a timer.
   const startShell = async () => {
     vi.resetModules();
-    const [{ AppShell: Shell }, pages, { DeferredInboxPreview }] = await Promise.all([
+    const [{ AppShell: Shell }, pages, { LazyNewProjectDialog }] = await Promise.all([
       import('./AppShell'),
       import('../routePages'),
-      import('./workbench/InboxHoverPopover'),
+      import('./workbench/LazyNewProjectDialog'),
     ]);
     let finishFirst!: () => void;
     const firstStep = new Promise<void>((resolve) => { finishFirst = resolve; });
-    const first = vi.spyOn(pages.ChatPage, 'preload').mockReturnValue(firstStep as never);
-    const second = vi.spyOn(DeferredInboxPreview, 'preload').mockResolvedValue(undefined as never);
+    // The order is routePages' own: the new-project dialog, then the conversation.
+    const first = vi.spyOn(LazyNewProjectDialog, 'preload').mockReturnValue(firstStep as never);
+    const second = vi.spyOn(pages.ChatPage, 'preload').mockResolvedValue(undefined as never);
     const view = render(
       <MemoryRouter initialEntries={['/']}>
         <Routes>
@@ -1521,6 +1549,16 @@ describe('AppShell route prefetch', () => {
   });
 });
 
+it('the Web bottom row shows the running state on the left and the version chip on the right', async () => {
+  viewport.isDesktop = true;
+  render(<MemoryRouter><Routes><Route element={<AppShell />}><Route path="*" element={<div />} /></Route></Routes></MemoryRouter>);
+  // VersionBadge is stubbed in this file; its chip is covered by DesktopAccountRow.test.
+  const badge = await screen.findByTestId('version-badge');
+  const row = document.querySelector('[data-sidebar-footer] [data-sidebar-status-row]')!;
+  expect(row.firstElementChild!.querySelector('[data-status-indicator]')).toBeTruthy();
+  expect(row.lastElementChild!.contains(badge)).toBe(true);
+});
+
 it('uses the real footer slot without replacing the Apps/Settings tools', async () => {
   viewport.isDesktop = true;
   render(<MemoryRouter><Routes><Route element={<AppShell footer={({ tools }) => <AppShellFooter tools={tools}><span>Injected account row</span></AppShellFooter>} />}><Route path="*" element={<div />} /></Route></Routes></MemoryRouter>);
@@ -1528,4 +1566,15 @@ it('uses the real footer slot without replacing the Apps/Settings tools', async 
   const footer = document.querySelector('[data-sidebar-footer]')!;
   expect(footer.querySelector('[data-settings-toggle]')).toBeTruthy();
   expect(footer.firstElementChild?.className).toContain('h-[39px]');
+  // Only the desktop app's footer draws the line above its bottom row (Max, 2026-11-22).
+  expect(footer.querySelector('[data-sidebar-footer-divider]')).toBeNull();
+});
+
+it('a divided footer draws its line between the tools and the bottom row', () => {
+  render(<AppShellFooter tools={<span>Tools</span>} divided><span>Bottom row</span></AppShellFooter>);
+  const footer = document.querySelector('[data-sidebar-footer]')!;
+  const line = footer.querySelector('[data-sidebar-footer-divider]')!;
+  expect(line.getAttribute('aria-hidden')).toBe('true');
+  expect(line.previousElementSibling).toBe(footer.firstElementChild);
+  expect(line.nextElementSibling?.textContent).toBe('Bottom row');
 });

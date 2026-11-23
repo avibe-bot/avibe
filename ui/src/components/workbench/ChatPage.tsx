@@ -1,3 +1,9 @@
+import { useLiveActivityObservation } from '../../lib/useLiveActivityObservation';
+import { HealthRequestCard } from '../health/HealthRequest';
+import { readHealthRequest } from '../../lib/healthRequests';
+import { isNativeAppWindow } from '../../lib/desktopShell';
+import { useWindowManager } from '../../context/WindowManagerContext';
+import { useAppLaunch } from '../../apps/useAppLaunch';
 import { desktopDragRegion } from '../../lib/desktopShell';
 import { createPortal } from 'react-dom';
 import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext';
@@ -22,8 +28,8 @@ import { BotConversationTitle } from './bots/BotSwitch';
 import { VoiceMark } from '../voice/VoiceMark';
 import type { VoiceTarget } from '../voice/VoiceCard';
 import { isVoiceMessage } from '../../lib/voiceMessage';
-import { useRegisterComposerTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
-import { useWindowManager } from '../../context/WindowManagerContext';
+import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
+import { composeReady } from './composeReady';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
@@ -54,7 +60,7 @@ import { isEditableFile, isEditableMeta, previewOverlayKind } from '../../lib/fi
 import { recentPathLabel } from '../../lib/editorRecents';
 import type { LocalFileLinkTarget } from '../../lib/localFileLinks';
 import { formatLocalDateTime, formatRelativeTime } from '../../lib/relativeTime';
-import { canMarkConversationRead, usePageActive } from '../../lib/pageActivity';
+import { canMarkConversationRead, usePageActive, usePagePresented } from '../../lib/pageActivity';
 import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '../../lib/routeSurfaceActivity';
 import { isDesktopViewport, useIsDesktop } from '../../lib/useIsDesktop';
 import { resultFooterParts } from '../../lib/resultFooter';
@@ -73,11 +79,15 @@ import {
   harnessChipLabelKey,
   isVaultCallback,
   needsHarnessProvenanceReconcile,
+  turnCarryLabelKey,
   vaultCallbackStatusKey,
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
 import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
+import { WorkspaceNoticeActions } from './WorkspaceNoticeActions';
+import { workspaceNoticeSource } from '../../lib/workspaceNoticeSource';
+import { requestFailureRetry, retryAdmitted } from '../../lib/failureRetryRequest';
 import { FailureNextStep } from './FailureNextStep';
 import { settingsOverlayContinuationState } from '../../lib/settingsOverlay';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
@@ -380,6 +390,7 @@ export const ChatPage: React.FC = () => {
   const routeSurfaceActive = useRouteSurfaceActive();
   const windowChrome = useDesktopWindowChrome();
   const pageActive = usePageActive();
+  const pagePresented = usePagePresented();
   // The mobile chat surface is a fixed full-screen flex column; this keeps the
   // composer glued to the iOS keyboard (settle-then-correct; see the hook).
   const chatSurfaceRef = useRef<HTMLDivElement>(null);
@@ -613,7 +624,6 @@ export const ChatPage: React.FC = () => {
         : null,
     [sessionId, session, showPageActive, writable, insertSessionReference],
   );
-  useRegisterComposerTarget(composerTarget);
 
   // Pending vault requests for this session. Provision requests are attached to
   // the Agent reply that announced them; access/sign retain the approval flow.
@@ -645,6 +655,24 @@ export const ChatPage: React.FC = () => {
   const [failedBootstrapSessionId, setFailedBootstrapSessionId] = useState<string | null>(null);
   // The route whose failed bootstrap said the chat is gone or not readable.
   const [unavailableSessionId, setUnavailableSessionId] = useState<string | null>(null);
+  // Ask Vibey (desktop shell) puts a selection into this composer. Unlike the
+  // insert target it is published under a Show Page too, so the source can
+  // switch back to the conversation first. ui/design: composer/ask-vibey/inserted-zh
+  const sessionLoaded = session != null;
+  const composeTarget = useMemo<ComposeTarget | null>(
+    () =>
+      sessionId && sessionLoaded && writable
+        ? {
+            sessionId,
+            composerReady: composeReady({ sessionId, showPageActive, hydratedSessionId: hydratedTranscriptSessionId }),
+            showChat: () => selectChatView(sessionId, true),
+            appendLine: (text, surface) => composerRef.current?.appendLine(text, surface) ?? false,
+            addFiles: (files, surface) => composerRef.current?.stageFiles(files, surface) ?? false,
+          }
+        : null,
+    [sessionId, sessionLoaded, writable, showPageActive, hydratedTranscriptSessionId, selectChatView],
+  );
+  useRegisterComposerTarget(composerTarget, composeTarget);
   const provisionPlacement = useMemo(
     () => placeVaultProvisionRequests(messages, vaultRequests),
     [messages, vaultRequests],
@@ -2790,15 +2818,10 @@ export const ChatPage: React.FC = () => {
       // A notice-bound action does not read, clear, or restore the composer.
       // ``continueOnBackend`` moves the session to that backend's built-in Agent
       // first, in the same server transaction as the retry.
-      const response = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          retry_for: messageId,
-          ...(options?.continueOnBackend ? { continue_on_backend: options.continueOnBackend } : {}),
-        }),
-      });
-      const body = await response.json().catch(() => null);
+      const { response, body: replied } = await requestFailureRetry(sid, messageId, options);
+      const body = replied as (Partial<WorkbenchMessage> & {
+        retry_notice?: WorkbenchMessage; state?: string; queued?: boolean; delivery_state?: string;
+      }) | null;
       if (sid !== sessionIdRef.current) return false;
       if (body?.retry_notice) {
         const notice = body.retry_notice as WorkbenchMessage;
@@ -2827,7 +2850,7 @@ export const ChatPage: React.FC = () => {
       void refreshQueue();
       // The header shows the Agent the session moved to.
       if (options?.continueOnBackend) void refreshSessionRow();
-      return ['queued', 'claimed', 'accepted'].includes(body?.delivery_state ?? body?.state ?? '');
+      return retryAdmitted(body);
     } catch (err) {
       if (sid === sessionIdRef.current) setError(errorMessage(err) ?? t('chat.retryFailed'));
       return false;
@@ -3175,7 +3198,7 @@ export const ChatPage: React.FC = () => {
     // consume the owner's unread state.
     if (!canChat) return;
     if (!canMarkConversationRead({
-      pageActive,
+      pageActive: pagePresented,
       routeSurfaceActive,
       sessionReady: !loading && session?.id === sessionId,
       viewResolved: showPageViewResolved,
@@ -3205,7 +3228,7 @@ export const ChatPage: React.FC = () => {
     session?.id,
     showPageViewResolved,
     historicalWindow,
-    pageActive,
+    pagePresented,
     routeSurfaceActive,
     showPageActive,
     isDesktop,
@@ -3428,20 +3451,29 @@ export const ChatPage: React.FC = () => {
     [expandedActivity, loadActivityDetail],
   );
 
-  if (!sessionId) {
-    return <ChatMissing onBack={goBack} />;
-  }
-
   // A direct session→session switch reuses this ChatPage instance. Until the
   // current row arrives, the state can still hold the previous row or be empty
   // while a newer recovery read supersedes bootstrap. Neither means not-found.
   const viewState = chatSessionViewState({
-    routeSessionId: sessionId,
+    routeSessionId: sessionId ?? '',
     loadedSessionId: session?.id ?? null,
     hydratedTranscriptSessionId,
     failedBootstrapSessionId,
     snapshotSessionId: chatSnapshotView?.sessionId ?? null,
   });
+  const agentDisplayName = session ? sessionAgentDisplayName(session, agents) : '';
+  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
+  const conversationBotName = conversationBot
+    ? botDisplayName(conversationBot)
+    : botConversation ? session?.title?.trim() || t('bots.mainDefaultName') : null;
+  const observationAgentName = conversationBotName ?? agentDisplayName;
+  useLiveActivityObservation(routeSurfaceActive && observationAgentName && session && session.id === sessionId && viewState !== 'loading' && viewState !== 'failed' ? {
+    sessionId: session.id,
+    agentName: observationAgentName,
+    sessionTitle: botConversation ? null : session.title || t('chat.untitled'),
+    running: runtimeState.foreground === 'running',
+  } : { sessionId: null });
+  if (!sessionId) return <ChatMissing onBack={goBack} />;
   // Nothing is known of this chat yet, not even its row (opened by a link, or
   // before any list has it): a skeleton of the whole chat, never a spinner.
   if (viewState === 'loading') return <ChatPageSkeleton onBack={goBack} />;
@@ -3468,15 +3500,8 @@ export const ChatPage: React.FC = () => {
     );
   }
 
-  const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
   const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
-  // Who the conversation is with: the Bot, by the name the user gave it, or its
-  // Session title (which follows that name) until the Bot list has answered.
-  const conversationBot = botConversation ? botForSession(sessionId) : undefined;
-  const conversationBotName = conversationBot
-    ? botDisplayName(conversationBot)
-    : botConversation ? session.title?.trim() || t('bots.mainDefaultName') : null;
   // A Bot's conversation reads like talking to a person while its "Hide details"
   // is on (docs/plans/bots.md D5): on unless the Bot turned it off, including
   // before the Bot list has answered. Anything else shows what it always has.
@@ -3586,6 +3611,7 @@ export const ChatPage: React.FC = () => {
           ref={setShowPageIframe}
           onLoad={annotation.handleIframeLoad}
           title={t('chat.showPage.title')}
+          data-avibe-show-session={sessionId}
           src={showPageUrl}
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-modals allow-downloads"
           allow="clipboard-write"
@@ -5018,14 +5044,14 @@ export const Transcript: React.FC<TranscriptProps> = ({
   const { botForSession, displayName: botDisplayName } = useBots();
   const conversationBot = botForSession(session.id);
   const navigate = useNavigate();
-  const { openApp } = useWindowManager();
+  const launchApp = useAppLaunch('chat-attachment');
   const fileViewer = useFileViewer();
   const openLocalFile = useCallback(async (target: LocalFileLinkTarget) => {
     const pathLabel = recentPathLabel(target.path);
-    const desktop = isDesktopViewport();
+    const desktop = isDesktopViewport() || isNativeAppWindow();
     const openPreview = (name: string, size: number | null, mime: string | null, ext: string | null) => {
       if (desktop) {
-        openApp('preview', { title: name, params: { path: target.path, name } });
+        void launchApp({ appId: 'preview', title: name, params: { path: target.path, name, ...(mime ? { mime } : {}) } });
       } else if (fileViewer) {
         fileViewer.open({ kind: 'local', path: target.path, name, size, mime, ext });
       } else {
@@ -5034,7 +5060,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
     };
     const openEditor = (filename: string, mtime: number | null) => {
       const launch = { ...target, filename, mtime };
-      if (desktop) openApp('editor', { title: filename, params: launch });
+      if (desktop) void launchApp({ appId: 'editor', title: filename, params: launch });
       else navigate('/apps/editor', { state: launch });
     };
 
@@ -5054,7 +5080,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
       else if (isEditableFile(fallback)) openEditor(pathLabel, null);
       else downloadFile(target.path);
     }
-  }, [fileViewer, navigate, openApp]);
+  }, [fileViewer, navigate, launchApp]);
   const selectionActions = transcriptSelectionActions(session, readOnly);
   const latestRetryBoundary = messages.reduce((last, message, index) =>
     message.type === 'user' || message.type === 'harness' || isRetryableFailureNotice(message)
@@ -6426,6 +6452,7 @@ export const MessageRow = memo(function MessageRow({
   // Trigger-message provenance click-through (contract A9a/A9b): agent-callback
   // rows link to the source session's chat; task/watch rows to the Harness view.
   const triggerLink = isHarness ? chatTriggerLink(message, t('chat.source.agentFallback')) : null;
+  const turnCarryKey = isHarness ? turnCarryLabelKey(message) : null;
   const vaultStatusKey = isVaultCallback(message) ? vaultCallbackStatusKey(message) : null;
   const messageFontStyle = { fontSize: `${normalizeChatMessageFontSize(messageFontSize)}px` };
   const resultPresentation = useMemo(() => resultFooterParts(message), [message]);
@@ -6574,8 +6601,20 @@ export const MessageRow = memo(function MessageRow({
     );
   }
 
+  const healthRequest = isNotify && message.author === 'harness' ? readHealthRequest(message.metadata?.mobile_request) : null;
+  if (healthRequest) {
+    return <div data-message-id={message.id} className={rowClass('justify-start')}>
+      <div className="group/message flex w-full flex-col gap-1">
+        <HealthRequestCard key={healthRequest.id} request={healthRequest} readOnly={readOnly} />
+        {time}
+      </div>
+    </div>;
+  }
+
   // ----- Notify: compact gold pill, left-aligned (a status marker) -----
   if (isNotify) {
+    // A notice in the workspace thread reports on another Session (ui/design: chat/workspace-notices/*).
+    const failureSource = workspaceNoticeSource(message);
     return (
       <div data-message-id={message.id} className={rowClass('justify-start')}>
         <div className="group/message flex max-w-[min(92%,860px)] flex-col items-start gap-1">
@@ -6594,6 +6633,13 @@ export const MessageRow = memo(function MessageRow({
               <FailureDetails message={message} />
             </span>
           </div>
+          {failureSource ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {/* The Models step a failure names (no retry from it here: Retry is the workspace action's). */}
+              <FailureNextStep message={message} readOnly={readOnly} />
+              <WorkspaceNoticeActions message={message} source={failureSource} />
+            </div>
+          ) : (
           <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
             <FailureNextStep
               message={message}
@@ -6610,6 +6656,7 @@ export const MessageRow = memo(function MessageRow({
               />
             )}
           </div>
+          )}
           {time}
         </div>
       </div>
@@ -6700,6 +6747,10 @@ export const MessageRow = memo(function MessageRow({
               )}
             </span>
           </div>
+          {turnCarryKey && (
+            // A message carried over from a Turn that failed or was stopped says so, once.
+            <span className="px-0.5 text-[11px] text-muted">{t(turnCarryKey)}</span>
+          )}
           <Button
             type="button"
             variant="ghost"

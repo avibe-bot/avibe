@@ -89,12 +89,6 @@ export class ModelHubPage {
     await this.tab(id).click();
   }
 
-  /** The home a machine with no sources and every backend on Direct lands on,
-   *  instead of an empty gateway. */
-  get directHome(): Locator {
-    return this.page.locator('.model-hub-direct');
-  }
-
   // --- Upstream sources -----------------------------------------------------
 
   get addApiKeyButton(): Locator {
@@ -339,17 +333,9 @@ export class ModelHubPage {
     return this.pickerDialog.locator('.model-hub-picker-row:not(:disabled)');
   }
 
-  /** The editor's first field, which is also its models.dev search box. */
+  /** The editor's first field: the model's ID, as typed. */
   get modelIdField(): Locator {
     return this.modelEditorDialog.getByLabel(hub('gateway.modelEditor.id.label'), { exact: true });
-  }
-
-  /** The last row of the editor's typeahead: take the query as the id. It is
-   *  present in every open state, including "searching" and "unavailable", and
-   *  it names the id it will actually create, which is the query canonicalized
-   *  rather than the raw characters in the box. */
-  get literalIdOption(): Locator {
-    return this.modelEditorDialog.locator('.model-hub-model-match--literal');
   }
 
   /** The editor's `API` field, present for OpenCode rows only. */
@@ -415,11 +401,22 @@ export const fillApiKeyForm = async (
     await dialog.page().getByRole('option', { name: values.vendor, exact: true }).click();
   }
   if (values.name !== undefined) {
-    await dialog.getByLabel(hub('addKey.field.name'), { exact: true }).fill(values.name);
+    // The optional name waits under 「More settings」.
+    const name = dialog.getByLabel(hub('addKey.field.name'), { exact: true });
+    if (!(await name.isVisible())) await dialog.getByRole('button', { name: hub('addKey.more'), exact: true }).click();
+    await name.fill(values.name);
   }
   if (values.protocol) {
-    await dialog.getByRole('button', { name: values.protocol, exact: true }).click();
+    // The format is a choice only once asked for: 「Change」 opens it.
+    const format = dialog.getByRole('button', { name: values.protocol, exact: true });
+    if (!(await format.isVisible())) {
+      await dialog.getByRole('button', { name: new RegExp(`^(${hub('addKey.protocol.change')}|${hub('addKey.protocol.manual')})$`) }).click();
+    }
+    await format.click();
   }
-  await dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true }).fill(values.baseUrl);
+  // A preset's address waits under 「More settings」.
+  const baseUrl = dialog.getByLabel(hub('addKey.field.baseUrl'), { exact: true });
+  if (!(await baseUrl.isVisible())) await dialog.getByRole('button', { name: hub('addKey.more'), exact: true }).click();
+  await baseUrl.fill(values.baseUrl);
   await dialog.getByLabel(hub('addKey.field.apiKey'), { exact: true }).fill(values.apiKey);
 };

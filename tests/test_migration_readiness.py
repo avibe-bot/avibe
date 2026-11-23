@@ -24,7 +24,7 @@ def test_database_preparation_publishes_phase_and_clears_it_before_controller(tm
             status = json.loads(runtime.render_status())
             assert status["state"] == "starting"
             assert not status["running"]
-            assert "migration in progress" in status["detail"]
+            assert status["detail"] == runtime.DATABASE_MIGRATING_DETAIL
             if fails:
                 raise RuntimeError("migration failed")
             return "prepared"

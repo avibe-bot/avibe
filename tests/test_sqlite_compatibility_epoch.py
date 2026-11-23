@@ -29,9 +29,10 @@ pytestmark = pytest.mark.no_sqlite_template
 def bridge_graph(tmp_path, monkeypatch):
     """Keep bridge/next-epoch fault cases at epoch 1 with today's additive schema.
 
-    Only the marker-only epoch-2 transition is omitted; dropping later additive
-    revisions would leave today's required tables absent from these fixtures.
-    Production epoch-2 behavior is exercised in test_tool_trace_suppression.
+    The marker-only epoch-2 transition is omitted; epoch-3 schema/lifecycle
+    effects remain with its marker held at 1 in this artificial graph. Dropping
+    later revisions would leave today's schema absent. Actual breaking behavior
+    is exercised separately in test_tool_trace_suppression/test_epoch3_writers.
     This source fixture is not evidence about a published historical binary.
     """
     graph = tmp_path / "bridge-alembic"
@@ -40,7 +41,15 @@ def bridge_graph(tmp_path, monkeypatch):
     from storage.migration_policy import classify_migration
 
     for revision in script.iterate_revisions("head", "20261108_0083"):
-        assert classify_migration(Path(revision.path)).permitted == "additive"
+        if revision.revision == "20261114_0089":
+            path = graph / "versions" / Path(revision.path).name
+            source = path.read_text()
+            assert "COMPATIBILITY_EPOCH = 3" in source and "advance_compatibility_epoch(conn, 3)" in source
+            path.write_text(source.replace("COMPATIBILITY_EPOCH = 3", "COMPATIBILITY_EPOCH = 1").replace(
+                "advance_compatibility_epoch(conn, 3)", "advance_compatibility_epoch(conn, 1)",
+            ))
+        else:
+            assert classify_migration(Path(revision.path)).permitted == "additive"
     omitted = script.get_revision("20261108_0083")
     (graph / "versions" / Path(omitted.path).name).unlink()
     for revision in script.walk_revisions():

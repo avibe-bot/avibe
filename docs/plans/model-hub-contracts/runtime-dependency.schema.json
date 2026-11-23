@@ -110,8 +110,8 @@
         }
       ],
       "properties": {
-        "installed_version": { "type": ["string", "null"] },
-        "verified": { "type": "boolean", "description": "SHA256 of installed binary matches manifest" },
+        "installed_version": { "type": ["string", "null"], "description": "Version of the verified binary. For a settled live lifecycle launch, the version captured at launch; otherwise from a fresh disk inspection." },
+        "verified": { "type": "boolean", "description": "SHA256 of the binary matches the exact manifest. For a settled live lifecycle launch, this is the synchronous pre-spawn verification of that launch's input, not a continuous disk audit or memory attestation; otherwise a fresh disk inspection. installing is always false and there is no eventual-verification field." },
         "listening": {
           "type": ["object", "null"],
           "required": ["host", "port"],

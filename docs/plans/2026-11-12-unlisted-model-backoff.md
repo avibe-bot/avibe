@@ -1,5 +1,10 @@
 # Unlisted-model 503: request-owned backoff
 
+> **Superseded 2026-11-17.** An unlisted target's `server_error` 5xx no longer waits:
+> it ends the request at once as `request_nonfallback`, with no fallback, retry or
+> Source state (`model-hub.md` §4.3, unlisted-target server refusal). The private
+> backoff below was removed. This plan is kept as history only.
+
 ## Contract (product approval, 2026-11-12)
 
 A literal upstream HTTP 503 classified as `server_error` for an actual sent model

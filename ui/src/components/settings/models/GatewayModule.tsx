@@ -33,9 +33,14 @@ export const GatewayModule: React.FC<GatewayModuleProps> = ({ runtime, runtimeSn
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-border px-3.5">
         <span className="flex items-center gap-[7px]">
           <h2 className="text-[16px] font-bold leading-[23px] text-foreground">{t('settings.models.gateway.heading')}</h2>
-          <ModelHubInfoHint label={t('settings.models.gateway.infoLabel')} content={t('settings.models.gateway.info')} className="model-hub-overview-info" />
+          {/* The local address is for pointing another tool at the gateway; a
+              first-time user has no use for it on the card itself. */}
+          <ModelHubInfoHint
+            label={t('settings.models.gateway.infoLabel')}
+            content={listening ? <><span className="block">{t('settings.models.gateway.info')}</span><span className="mt-1.5 block">{t('settings.models.gateway.address', { address: `${listening.host}:${listening.port}` })}</span></> : t('settings.models.gateway.info')}
+            className="model-hub-overview-info"
+          />
         </span>
-        {listening && <span className="model-hub-pill model-hub-fill-0a border border-edge text-muted">{listening.host}:{listening.port}</span>}
       </header>
       <div className="flex-1 px-2 pb-2 pt-3">
         {supply.kind === 'loading' && agents === undefined

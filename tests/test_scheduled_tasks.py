@@ -144,7 +144,7 @@ class _StubScheduler:
     def add_job(self, func, trigger, id, replace_existing, coalesce, max_instances, args, **kwargs):
         # ``func`` is retained so a test can fire a registered job exactly the way
         # APScheduler does: ``await job.func(*job.args)``.
-        self.jobs[id] = SimpleNamespace(id=id, func=func, trigger=trigger, args=args)
+        self.jobs[id] = SimpleNamespace(id=id, func=func, trigger=trigger, args=args, options=kwargs)
 
     def remove_job(self, job_id):
         self.jobs.pop(job_id, None)
@@ -12349,6 +12349,167 @@ def test_hfr_477_consumed_terminal_outcome_belongs_to_the_consuming_run(
         include_successful_finished=False,
     )
     assert task.id in {item["id"] for item in compact.items}
+
+
+@pytest.mark.parametrize("initial", ["absent", "empty", "revoked", "paired"])
+def test_mobile_maintenance_follows_pairing_lifecycle(tmp_path: Path, monkeypatch, initial) -> None:
+    from core import inbox_events
+    from storage.mobile_store import MobileStore
+    from tests.test_mobile_health import pair_device
+
+    monkeypatch.setattr(inbox_events, "is_controller_process", lambda: True)
+    mobile_dir = paths.get_state_dir() / "mobile"
+    mobile = None if initial == "absent" else MobileStore()
+    if initial in {"paired", "revoked"}:
+        pair_device(mobile)
+        if initial == "revoked":
+            mobile.revoke()
+    store = ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
+    service = ScheduledTaskService(controller=SimpleNamespace(platform_settings_managers={}), store=store)
+    service.scheduler = _StubScheduler()
+    job_id = "mobile-health-maintenance"
+
+    async def exercise():
+        service.start()
+        try:
+            await service._mobile_probe
+            assert (service.scheduler.get_job(job_id) is not None) == (initial == "paired")
+            assert service.scheduler.get_job("mobile-health-callback-recovery") is None
+            if initial == "absent":
+                assert not mobile_dir.exists()
+            devices = mobile or MobileStore()
+            first, _ = await asyncio.to_thread(pair_device, devices, installation="other")
+            await service._mobile_probe
+            job = service.scheduler.get_job(job_id)
+            assert job is not None and job.options["seconds"] == 60
+            service.reconcile_jobs()
+            assert service.scheduler.get_job(job_id) is job
+            if initial == "paired":
+                await asyncio.to_thread(devices.revoke, device_id=first["device_id"])
+                await service._mobile_probe
+                assert service.scheduler.get_job(job_id) is job
+            await asyncio.to_thread(devices.revoke)
+            await service._mobile_probe
+            assert service.scheduler.get_job(job_id) is None
+            assert service.scheduler.get_job("mobile-health-callback-recovery") is None
+        finally:
+            await service.stop()
+        assert service.scheduler.shutdown_calls == 1 and not service._running
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("scenario", ["offline-expiry", "live-connect", "last-revoke", "lost-pair-hint"])
+async def test_mobile_callback_recovery(tmp_path: Path, monkeypatch, scenario) -> None:
+    from core import inbox_events, scheduled_tasks
+    from storage import mobile_store
+    from tests.test_mobile_health import IDENTITY, pair_device
+
+    monkeypatch.setattr(inbox_events, "is_controller_process", lambda: True)
+    callbacks = []
+    monkeypatch.setattr(scheduled_tasks, "enqueue_session_callback", lambda _, **kw: callbacks.append(kw))
+    devices = mobile_store.MobileStore()
+    service = ScheduledTaskService(controller=SimpleNamespace(platform_settings_managers={}),
+                                   store=ScheduledTaskStore(tmp_path / "tasks.json"))
+    service.scheduler = _StubScheduler()
+    if scenario == "last-revoke":
+        pair_device(devices)
+        devices.create_request("health.refresh", IDENTITY, callback_session="session")
+    if scenario == "offline-expiry":
+        devices.create_request("health.connect", IDENTITY, callback_session="session")
+    service.start()
+    try:
+        await service._mobile_probe
+        if scenario == "live-connect":
+            await asyncio.to_thread(devices.create_request, "health.connect", IDENTITY, callback_session="session")
+        elif scenario == "last-revoke":
+            await asyncio.to_thread(devices.revoke)
+        elif scenario == "lost-pair-hint":
+            monkeypatch.setattr(mobile_store, "publish_mobile_schedule_changed", lambda: None)
+            pair_device(devices)
+            service._mobile_probe_after = 0  # next existing scheduler reconciliation
+            service._request_mobile_probe(periodic=True)
+            await service._mobile_probe
+            assert service.scheduler.get_job("mobile-health-maintenance") is not None
+            return
+        await service._mobile_probe
+        assert service.scheduler.get_job("mobile-health-maintenance") is None
+        if scenario == "last-revoke":
+            # The revoke commit announces the cancellation, so it is delivered at once (#3989).
+            assert [json.loads(c["message"])["state"] for c in callbacks] == ["canceled"]
+            assert service.scheduler.get_job("mobile-health-callback-recovery") is None
+            return
+        job = service.scheduler.get_job("mobile-health-callback-recovery")
+        assert job.options["seconds"] == 60 and job.options["next_run_time"] is not None
+        with devices.transaction() as conn:
+            conn.execute("UPDATE requests SET expires_at='2000-01-01'")
+        await job.func(*job.args)
+        await service._mobile_probe
+        assert [json.loads(c["message"])["state"] for c in callbacks] == ["expired"]
+        assert service.scheduler.get_job(job.id) is None
+        assert service.scheduler.get_job("mobile-health-maintenance") is None
+    finally:
+        await service.stop()
+
+
+@pytest.mark.parametrize("event", ["device-result", "cancel", "released-waiter", "restart"])
+async def test_mobile_callbacks_follow_commits_not_a_timer(tmp_path: Path, monkeypatch, event) -> None:
+    """#3989: a paired instance delivers on the commit that owes a continuation; the sweep is low frequency."""
+    from core import inbox_events, scheduled_tasks
+    from storage import mobile_store
+    from tests.test_mobile_health import IDENTITY, device_for, pair_device, upload_payload
+
+    monkeypatch.setattr(inbox_events, "is_controller_process", lambda: True)
+    callbacks = []
+    monkeypatch.setattr(scheduled_tasks, "enqueue_session_callback", lambda _, **kw: callbacks.append(kw))
+    devices = mobile_store.MobileStore()
+    paired, _ = pair_device(devices)
+    device = device_for(devices, paired)
+    request, _ = devices.create_request("health.refresh", IDENTITY, callback_session="session")
+    claim = devices.claim(device["id"], maximum=1, request_id=request["id"])["requests"][0]
+    devices.upload(device, upload_payload())
+
+    def post_result():
+        devices.result(device, request["id"], {
+            "claim_token": claim["claim_token"], "outcome": "succeeded",
+            "result": {"metrics": {"steps": "ok", "sleep": "ok"}},
+        })
+
+    if event == "restart":
+        # Committed while no controller listened: the hint is lost, the continuation is not.
+        with monkeypatch.context() as offline:
+            offline.setattr(mobile_store, "publish_mobile_schedule_changed", lambda: None)
+            post_result()
+    service = ScheduledTaskService(controller=SimpleNamespace(platform_settings_managers={}),
+                                   store=ScheduledTaskStore(tmp_path / "tasks.json"))
+    service.scheduler = _StubScheduler()
+    service.start()
+    try:
+        await service._mobile_probe
+        job = service.scheduler.get_job("mobile-health-maintenance")
+        assert job is not None and job.options["seconds"] == 60
+        if event != "restart":
+            assert callbacks == []
+            if event == "device-result":
+                await asyncio.to_thread(post_result)
+            elif event == "cancel":
+                await asyncio.to_thread(devices.cancel_request, request["id"])
+            else:
+                waiter = "b" * 32
+                assert await asyncio.to_thread(devices.arm_wait, request["id"], waiter, 20)
+                await asyncio.to_thread(post_result)
+                await service._mobile_probe
+                assert callbacks == []  # a live synchronous waiter owns the continuation
+                await asyncio.to_thread(devices.finish_wait, request["id"], waiter, consumed=False)
+            await service._mobile_probe
+        # Delivered without running the interval job.
+        assert [json.loads(c["message"])["state"] for c in callbacks] == [
+            "canceled" if event == "cancel" else "succeeded"
+        ]
+        await service._mobile_probe
+        assert len(callbacks) == 1  # claimed and sent once
+    finally:
+        await service.stop()
 
 
 def test_start_keeps_watcher_alive_after_initial_reconcile_failure(tmp_path: Path) -> None:

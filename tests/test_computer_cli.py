@@ -23,6 +23,7 @@ from core.computer_cli import (
     format_human_result,
     prepare_arguments_for_output,
     tool_for_command,
+    translate_computer_error,
     write_screenshot,
 )
 from modules.im import MessageContext
@@ -992,3 +993,24 @@ def test_turn_end_does_not_cancel_session_keyed_computer_use_request() -> None:
     response, calls = asyncio.run(exercise())
     assert response["ok"] is True
     assert calls == [("list_windows", {"session": "ses-cli"})]
+
+
+@pytest.mark.parametrize("code, english, chinese", [
+    (
+        "app_dialog_unresolved",
+        "This dialog is visible, but Computer Use can't confirm that input would reach only this window. Handle it manually, then continue.",
+        "能看到这个弹窗，但无法确认操作只会作用于它。请手动处理后再继续。",
+    ),
+    (
+        "dock_unsupported",
+        "Computer Use cannot control the Dock. To remove an icon, drag it out of the Dock manually.",
+        "电脑操作无法控制程序坞。若要移除图标，请手动将它拖出程序坞。",
+    ),
+])
+def test_ownership_refusal_has_actionable_localized_guidance(code, english, chinese):
+    """CU-TRANSPORT-01: stable codes select approved guidance, never driver prose."""
+    for language, expected in [("en", english), ("zh", chinese)]:
+        assert translate_computer_error(
+            {"code": code, "detail": "untrusted driver prose"},
+            translate=lambda key, **params: i18n_t(key, language, **params),
+        ) == expected

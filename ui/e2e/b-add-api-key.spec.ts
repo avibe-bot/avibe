@@ -14,9 +14,7 @@ import {
   requireModelHub,
   requireRuntimeRunning,
 } from './support/fixtures';
-// `gateway` rather than `fixtures` for the auto `hubSurface` fixture it carries:
-// the Add API key button lives on the gateway surface, and an instance with no
-// sources shows the direct home instead. See support/gateway.ts.
+// `gateway` rather than `fixtures`: B6 routes through the suite's own sources.
 import { expect, test } from './support/gateway';
 import { fillApiKeyForm } from './support/hub';
 import { anthropicInventory } from './support/mock';
@@ -118,8 +116,9 @@ test.describe('B · add an API-key source', () => {
     await hub.goto();
     await hub.addApiKeyButton.click();
     await fillApiKeyForm(hub.addKeyDialog, { vendor: preset.label, name, baseUrl: mockBaseUrl(), apiKey: 'e2e-add' });
+    // A preset fixes the format, so the form neither asks for it nor shows it.
     await expect(hub.addKeyDialog.getByRole('group', { name: copy('addKey.field.protocol') })).toHaveCount(0);
-    await expect(hub.addKeyDialog).toContainText(PROTOCOLS.find((item) => item.id === preset.protocol)!.label);
+    await expect(hub.addKeyDialog.locator('.model-hub-add-key-protocol-area')).toHaveCount(0);
     await hub.addKeyDialog.getByRole('button', { name: copy('addKey.confirm'), exact: true }).click();
     await expect(hub.addKeyDialog).toHaveCount(0, { timeout: 30_000 });
     expect((await api.sources()).find((source) => source.display_name === name)).toMatchObject({

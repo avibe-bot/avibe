@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '@/lib/desktopVoiceLock';
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { AudioLines, FileHeadphone, FileX, Loader2, PenLine, RotateCcw, Send, Trash2 } from 'lucide-react';
 import clsx from 'clsx';
@@ -21,6 +22,7 @@ import {
   subscribeVoiceTakeRetries,
 } from '@/lib/voiceTakeRetry';
 import { Button } from '../ui/button';
+import { askVoiceConsent, knownVoiceConsent, useVoiceConsent } from '@/lib/voiceConsent';
 
 // The takes kept on this device whose words have not landed yet (lib/voiceTakeStore), as small
 // items above the composer of the conversation they were spoken into (ui/design:
@@ -178,18 +180,25 @@ const triedOnLoad = new Set<string>();
  *  browser reports no network. */
 function useAutoRetry(takes: VoiceTake[], onFailed: (id: string) => void) {
   const retryAll = useRef<(only?: (take: VoiceTake) => boolean) => void>(() => undefined);
+  // Re-rendered when this account's voice answer is known or changes: a kept take is sent again
+  // only after it said yes (ui/design: composer/voice-consent/*).
+  useVoiceConsent();
   useEffect(() => {
     retryAll.current = (only) => {
+      if (!desktopVoiceLock.allowed()) return;
       if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      if (knownVoiceConsent() !== 'granted') return;
       for (const take of takes) {
         if (take.status === 'transcribed' || isRetryingVoiceTake(take.id) || !keptVoiceTakeHasAudio(take)) continue;
         if (only && !only(take)) continue;
+        // An online/visible attempt also satisfies the initial attempt. Otherwise
+        // a render with the old pending row can start it again as that run ends.
+        triedOnLoad.add(take.id);
         void retryKeptVoiceTake(take).catch(() => onFailed(take.id));
       }
     };
     retryAll.current((take) => {
       if (take.setAside || triedOnLoad.has(take.id)) return false;
-      triedOnLoad.add(take.id);
       return true;
     });
   });
@@ -237,6 +246,11 @@ export function PendingVoiceTakes({
             retrying={isRetryingVoiceTake(take.id)}
             failed={failed.has(take.id)}
             onRetry={() => {
+              if (!desktopVoiceLock.allowed()) return;
+              if (knownVoiceConsent() !== 'granted') {
+                askVoiceConsent();
+                return;
+              }
               void retryKeptVoiceTake(take).then(
                 () => setFailed((current) => {
                   const next = new Set(current);
@@ -249,11 +263,11 @@ export function PendingVoiceTakes({
             onDiscard={() => void deleteVoiceTake(take.id)}
             // Once, across documents: another tab showing the same take cannot land it again.
             onInsert={() => {
-              if (text) void landVoiceTake(take.id, () => onInsert(text));
+              if (desktopVoiceLock.allowed() && text) void landVoiceTake(take.id, () => desktopVoiceLock.allowed() && onInsert(text));
             }}
             onSend={onSend && take.intent === 'send'
               ? () => {
-                  if (text) void landVoiceTake(take.id, () => onSend(text));
+                  if (desktopVoiceLock.allowed() && text) void landVoiceTake(take.id, () => desktopVoiceLock.allowed() ? onSend(text) : Promise.resolve(false));
                 }
               : undefined}
           />

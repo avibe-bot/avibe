@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import type { HdAccountAddresses, HdQuestion, PhraseCheck } from '@/lib/vaultHdWallet';
+import { passphraseJudged, type HdAccountAddresses, type HdQuestion, type PhraseCheck } from '@/lib/vaultHdWallet';
 import { cn, copyTextToClipboard } from '@/lib/utils';
 import { Button } from './button';
 import { Input } from './input';
@@ -207,8 +207,8 @@ export function HdAccountAddressList({ account, types, hint = true }: {
     bitcoin_address_types?: BitcoinAddressType[];
   };
   types?: BitcoinAddressType[];
-  /** The ⓘ beside a lone Taproot (other wallets show SegWit by default). A protected wallet, which
-   *  can sign for Taproot only, shows the plain label instead. */
+  /** The ⓘ beside a lone Taproot (other wallets show SegWit by default). A protected wallet shows the
+   *  plain label instead. */
   hint?: boolean;
 }) {
   const { t } = useTranslation();
@@ -227,15 +227,18 @@ export function HdAccountAddressList({ account, types, hint = true }: {
 }
 
 /** Done: account #0 is ready and checked, and the user learns how to point an Agent at it. */
-export function HdDoneStep({ name, account, withPassphrase = false, protectedTier = false }: {
+export function HdDoneStep({ name, account, withPassphrase = false, protectedTier = false, bitcoinTypes }: {
   name: string;
-  account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'>;
+  account: Pick<HdAccountAddresses, 'eth' | 'btc_taproot' | 'solana'> & Partial<Pick<HdAccountAddresses, 'btc_segwit' | 'btc_legacy'>>;
   /** The wallet was made with a passphrase: recovery names both, not "if one was set". */
   withPassphrase?: boolean;
   /** A protected wallet (made in the sandbox window). The same screen, with three differences its
-   *  custody forces: Bitcoin is Taproot only (plain label), the check is the daemon's snapshot against
-   *  the window's result, and recovery also covers a lost Passkey. */
+   *  custody forces: Bitcoin offers only the types the server lists (`bitcoinTypes`, else Taproot;
+   *  plain label), the check is the daemon's snapshot against the window's result, and recovery also
+   *  covers a lost Passkey. */
   protectedTier?: boolean;
+  /** A protected wallet's `bitcoin_address_types` for account #0, as the save answer listed them. */
+  bitcoinTypes?: BitcoinAddressType[];
 }) {
   const { t } = useTranslation();
   return (
@@ -252,7 +255,7 @@ export function HdDoneStep({ name, account, withPassphrase = false, protectedTie
           <span className="rounded-md bg-violet-soft px-1.5 font-mono text-[11.5px] text-violet-ink">{t('vaults.hd.accountIndex', { account: 0 })}</span>
           {t('vaults.hd.mainAccount')}
         </span>
-        {protectedTier ? <HdAccountAddressList account={account} types={['p2tr']} hint={false} /> : <HdAccountAddressList account={account} />}
+        {protectedTier ? <HdAccountAddressList account={account} types={bitcoinTypes ?? ['p2tr']} hint={false} /> : <HdAccountAddressList account={account} />}
         <span className="flex items-center gap-1.5 text-[11.5px] text-mint-ink">
           <CircleCheck className="size-3.5 shrink-0" />
           {t(protectedTier ? 'vaults.hd.protected.verified' : 'vaults.hd.done.verified')}
@@ -475,10 +478,14 @@ export function HdMismatchBlock({ outcome, error, busy, onClose, onDelete }: {
 }
 
 /** A passphrase field with the same show/hide as other secret inputs: a typo here costs the wallet. */
-function PassphraseField({ label, value, onChange, invalid, disabled }: {
+function PassphraseField({ label, value, onChange, onFocus, onBlur, onEnter, invalid, disabled }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  /** Enter in the box, or show/hide on it: the person is done with it, as if it were left. */
+  onEnter?: () => void;
   invalid?: boolean;
   disabled?: boolean;
 }) {
@@ -492,14 +499,18 @@ function PassphraseField({ label, value, onChange, invalid, disabled }: {
           type={shown ? 'text' : 'password'}
           value={value}
           onChange={(event) => onChange(event.target.value)}
+          onFocus={onFocus}
+          onBlur={onBlur}
+          onKeyDown={(event) => { if (event.key === 'Enter') onEnter?.(); }}
           autoComplete="off"
           spellCheck={false}
           disabled={disabled}
           aria-label={label}
           aria-invalid={invalid || undefined}
-          className="min-w-0 flex-1 font-mono text-xs"
+          // A red border when judged different, as the name field shows a problem.
+          className={cn('min-w-0 flex-1 font-mono text-xs', invalid && 'border-destructive/60')}
         />
-        <Button type="button" variant="ghost" size="icon" onClick={() => setShown((current) => !current)} aria-label={shown ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}>
+        <Button type="button" variant="ghost" size="icon" onClick={() => { setShown((current) => !current); onEnter?.(); }} aria-label={shown ? t('vaults.dialog.hideValue') : t('vaults.dialog.showValue')}>
           {shown ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
         </Button>
       </span>
@@ -509,18 +520,22 @@ function PassphraseField({ label, value, onChange, invalid, disabled }: {
 
 /** Creating a wallet: an optional BIP39 passphrase, folded by default and entered twice (ui/design:
  *  vault/mnemonic/create-passphrase). Taken as typed; the seed applies the same NFKD as import. */
-export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, disabled }: {
+export function HdCreatePassphrase({ value, confirm, confirmLeft, onChange, onConfirmChange, onConfirmLeftChange, disabled }: {
   value: string;
   confirm: string;
+  /** Whether the second box was left (see {@link passphraseJudged}); the form also reads it. */
+  confirmLeft: boolean;
   onChange: (value: string) => void;
   onConfirmChange: (value: string) => void;
+  onConfirmLeftChange: (left: boolean) => void;
   disabled?: boolean;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(Boolean(value || confirm));
   const Chevron = open ? ChevronDown : ChevronRight;
   const typed = Boolean(value || confirm);
-  const mismatch = typed && value !== confirm;
+  const judged = passphraseJudged(value, confirm, confirmLeft);
+  const mismatch = judged && value !== confirm;
   return (
     <div className="flex flex-col rounded-[10px] border border-edge bg-surface-2">
       <button type="button" aria-expanded={open} onClick={() => setOpen((current) => !current)} className="flex items-center gap-1.5 px-3 py-2.5 text-left">
@@ -535,10 +550,10 @@ export function HdCreatePassphrase({ value, confirm, onChange, onConfirmChange, 
         <div className="flex flex-col gap-2.5 px-3 pb-3">
           <span className="text-[11.5px] leading-snug text-muted">{t('vaults.hd.passphrase.body')}</span>
           <PassphraseField label={t('vaults.hd.passphrase.label')} value={value} onChange={onChange} disabled={disabled} />
-          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={onConfirmChange} invalid={mismatch} disabled={disabled} />
+          <PassphraseField label={t('vaults.hd.passphrase.again')} value={confirm} onChange={(next) => { onConfirmChange(next); if (!next) onConfirmLeftChange(false); }} onFocus={() => onConfirmLeftChange(false)} onBlur={() => onConfirmLeftChange(true)} onEnter={() => onConfirmLeftChange(true)} invalid={mismatch} disabled={disabled} />
           {mismatch ? (
             <span role="alert" className="text-[11.5px] text-destructive-ink">{t('vaults.hd.passphrase.mismatch')}</span>
-          ) : typed ? (
+          ) : judged ? (
             <span className="text-[11.5px] text-mint-ink">{t('vaults.hd.passphrase.match')}</span>
           ) : (
             <span className="text-[11.5px] text-muted">{t('vaults.hd.passphrase.hint')}</span>

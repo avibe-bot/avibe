@@ -91,10 +91,32 @@ fn the_bundle_declares_why_it_uses_the_microphone() {
     // access outright — no prompt — so the Workbench's getUserMedia fails.
     let path = crate_dir().join("Info.plist");
     let plist = read_to_string(&path);
+    let keys = plist_keys(&plist);
     assert_eq!(
-        plist_keys(&plist),
-        vec!["NSMicrophoneUsageDescription".to_owned()],
-        "Info.plist carries only the microphone usage description"
+        keys.iter()
+            .filter(|key| key.ends_with("UsageDescription"))
+            .collect::<Vec<_>>(),
+        vec!["NSMicrophoneUsageDescription", "NSLocalNetworkUsageDescription"],
+        "the microphone and the local network are the only privacy usages the bundle declares"
+    );
+    // Besides it, the plist carries exactly the "Ask Vibey" Service that
+    // receives explicitly selected text, URLs and files, and nothing else.
+    assert_eq!(
+        keys,
+        [
+            "CFBundleLocalizations",
+            "NSServices",
+            "NSMenuItem",
+            "default",
+            "NSMessage",
+            "NSPortName",
+            "NSSendTypes",
+            "NSMicrophoneUsageDescription",
+            "NSLocalNetworkUsageDescription"
+        ]
+        .map(str::to_owned)
+        .to_vec(),
+        "Info.plist carries only its localizations, the Ask Vibey Service and its two usage descriptions"
     );
     let description = plist
         .split_once("<key>NSMicrophoneUsageDescription</key>")
@@ -103,6 +125,36 @@ fn the_bundle_declares_why_it_uses_the_microphone() {
         .map(|(value, _)| value.trim())
         .unwrap_or_default();
     assert!(!description.is_empty(), "the microphone usage description is non-empty");
+}
+
+/// The direct path dials another computer's instance on the same network.
+/// macOS then asks for Local Network access and shows the bundle's
+/// sentence for it: the iPhone App's own, in English and Simplified Chinese.
+#[test]
+fn the_bundle_says_why_it_uses_the_local_network_in_the_iphone_apps_words() {
+    const KEY: &str = "NSLocalNetworkUsageDescription";
+    let catalog: Value = serde_json::from_str(&read_to_string(
+        &crate_dir().join("../../ios/Avibe/Resources/InfoPlist.xcstrings"),
+    ))
+    .expect("the iPhone App's catalog is JSON");
+    let iphone = |language: &str| {
+        catalog["strings"][KEY]["localizations"][language]["stringUnit"]["value"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the iPhone App's {language} sentence"))
+            .to_owned()
+    };
+    let (english, chinese) = (iphone("en"), iphone("zh-Hans"));
+    assert!(!english.is_empty() && !chinese.is_empty() && english != chinese);
+
+    // The plist's own value is what a system in any other language shows.
+    let plist = read_to_string(&crate_dir().join("Info.plist"));
+    assert_eq!(plist_string_after(&plist, KEY), english);
+    // Each localization of the bundle carries the sentence under the key.
+    for (language, sentence) in [("en", &english), ("zh-Hans", &chinese)] {
+        let strings = read_to_string(&crate_dir().join(format!("macos/{language}.lproj/InfoPlist.strings")));
+        let entries: Vec<&str> = strings.lines().filter(|line| line.starts_with('"')).collect();
+        assert_eq!(entries, [format!("\"{KEY}\" = \"{sentence}\";")], "{language}");
+    }
 }
 
 #[test]
@@ -150,5 +202,56 @@ fn the_dmg_script_never_re_signs_an_identity_signed_app() {
     assert!(
         !script.contains("--deep --sign"),
         "--deep selects nested code only for verification, never for signing"
+    );
+}
+
+fn plist_string_after(plist: &str, key: &str) -> String {
+    plist
+        .split_once(&format!("<key>{key}</key>"))
+        .and_then(|(_, tail)| tail.split_once("<string>"))
+        .and_then(|(_, tail)| tail.split_once("</string>"))
+        .map(|(value, _)| value.trim().to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_service_is_named_ask_vibey_and_localized_for_simplified_chinese() {
+    let plist = read_to_string(&crate_dir().join("Info.plist"));
+    assert_eq!(plist_string_after(&plist, "default"), "Ask Vibey");
+    // The selector the provider implements; the Rust method name must match.
+    assert_eq!(plist_string_after(&plist, "NSMessage"), "askVibey");
+    let provider = read_to_string(&crate_dir().join("src/macos_services.rs"));
+    assert!(provider.contains("#[unsafe(method(askVibey:userData:error:))]"));
+    // macOS reads Services menu titles from ServicesMenu.strings, keyed by the
+    // NSMenuItem default title, in each localization of the providing bundle.
+    let zh = read_to_string(&crate_dir().join("macos/zh-Hans.lproj/ServicesMenu.strings"));
+    assert!(zh.contains("\"Ask Vibey\" = \"问 Vibey\";"), "{zh}");
+    let en = read_to_string(&crate_dir().join("macos/en.lproj/ServicesMenu.strings"));
+    assert!(en.contains("\"Ask Vibey\" = \"Ask Vibey\";"), "{en}");
+    // English must stay a bundle localization, or an English system would be
+    // given the only one present (zh-Hans) for every AppKit and WebKit string.
+    let localizations = plist
+        .split_once("<key>CFBundleLocalizations</key>")
+        .and_then(|(_, tail)| tail.split_once("</array>"))
+        .map(|(array, _)| {
+            array
+                .split("<string>")
+                .skip(1)
+                .filter_map(|s| s.split_once("</string>"))
+                .map(|(v, _)| v.trim().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(localizations, ["en", "zh-Hans"]);
+    let files = config()["bundle"]["macOS"]["files"].clone();
+    assert_eq!(
+        files,
+        serde_json::json!({
+            "Resources/en.lproj/InfoPlist.strings": "macos/en.lproj/InfoPlist.strings",
+            "Resources/en.lproj/ServicesMenu.strings": "macos/en.lproj/ServicesMenu.strings",
+            "Resources/zh-Hans.lproj/InfoPlist.strings": "macos/zh-Hans.lproj/InfoPlist.strings",
+            "Resources/zh-Hans.lproj/ServicesMenu.strings": "macos/zh-Hans.lproj/ServicesMenu.strings"
+        }),
+        "the bundle carries exactly the en and zh-Hans Services menu titles and usage sentences"
     );
 }

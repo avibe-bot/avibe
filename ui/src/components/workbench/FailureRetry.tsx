@@ -15,11 +15,15 @@ export function FailureRetry({
   message,
   readOnly,
   disabled,
+  eligible,
   onRetry,
 }: {
   message: WorkbenchMessage;
   readOnly?: boolean;
   disabled?: boolean;
+  /** The caller has the server's word that this notice's Turn can be retried (a
+   *  workspace notice, whose own metadata names no Turn). */
+  eligible?: boolean;
   onRetry: (messageId: string) => Promise<boolean>;
 }) {
   const { t } = useTranslation();
@@ -32,7 +36,7 @@ export function FailureRetry({
   const admitted = action?.state
     ? ADMITTED_RETRY_STATES.includes(action.state)
     : requested;
-  if (readOnly || !isRetryableFailureNotice(message)) return null;
+  if (readOnly || !(eligible || isRetryableFailureNotice(message))) return null;
   return (
     <Button
       type="button"

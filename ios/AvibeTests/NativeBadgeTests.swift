@@ -221,6 +221,12 @@ final class NativeBadgeTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
         let center = FakeAppBadgeCenter(allowed: true)
+        let scheduleDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("I3Fixture.\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: scheduleDirectory) }
+        let scheduleStore = FileSystemSystemScheduleStore(
+            fileURL: scheduleDirectory.appendingPathComponent("ledger.json")
+        )
         let appModel = AppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(testBaseURL: baseURL),
@@ -228,6 +234,7 @@ final class NativeBadgeTests: XCTestCase {
             pushGenerationStore: InMemoryPushGenerationStore(),
             pushInstallationMarker: InMemoryPushInstallationMarkerStore(),
             pushNotificationCenter: BadgeTestPushNotificationCenter(),
+            systemScheduleStore: scheduleStore,
             badgeCenter: center
         )
         let one = try XCTUnwrap(

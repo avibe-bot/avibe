@@ -2,10 +2,11 @@
 // mobile-app/switcher/*): one row per instance, the current instance in its own block, offline
 // explained in place, an open failure reported on its row, Add an instance, and the account row.
 import { AlertTriangle, Check, ChevronDown, ChevronRight, Laptop, Loader2, Plus, RotateCw, Users, X } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { accountHeaderAvatarClassName, accountInitialFor } from '@/components/AccountAvatar';
+import { LineGlyph, StatusDot } from '@/components/SidebarStatusRow';
 import { Button } from '@/components/ui/button';
 import type { TranslationKey } from '@/i18n/types';
 import { cn } from '@/lib/utils';
@@ -14,6 +15,9 @@ import type { MobileInstance } from './bridge';
 
 const group = 'overflow-hidden rounded-2xl border border-edge bg-surface';
 const sectionLabel = 'mb-2 px-1 text-xs font-medium text-muted';
+// Each name's type, which its status dot's column shares so both sit on the name's first baseline.
+const CURRENT_NAME = 'text-base font-semibold leading-6';
+const ROW_NAME = 'text-sm font-semibold leading-5';
 
 /** What a row is doing: opening, failed to open (with the reason's copy), or idle. */
 export type RowStatus =
@@ -45,39 +49,125 @@ function useSubline() {
   };
 }
 
-/** Where you are. Tapping it returns to it: you are already here. */
+/**
+ * Where you are. In the sheet, tapping it returns to it, unchanged; on the full page (nothing open
+ * behind it) it opens it again, so it reports opening, a failure, or offline as a row does.
+ * Its dot follows the connection, as the Desktop's current row does: over a live instance it is
+ * green whatever the catalog last said; with nothing open, gold while it reopens and grey when
+ * reopening failed, and otherwise the catalog's word, there being no connection to report.
+ */
 export function CurrentInstance({
-  instance,
+  instance: listed,
+  live = false,
+  label,
+  status = { kind: 'idle' },
+  expanded = false,
   disabled,
   onClick,
+  onRetry,
+  onRefresh,
 }: {
   instance: MobileInstance;
+  /** The instance is open behind this list, so it is connected now. */
+  live?: boolean;
+  /** What tapping it does, for assistive tech (`mobileApp.sheet.returnTo` or `…reopen`). */
+  label: string;
+  status?: RowStatus;
+  expanded?: boolean;
   disabled?: boolean;
   onClick: () => void;
+  onRetry?: () => void;
+  onRefresh?: () => void;
 }) {
   const { t } = useTranslation();
+  const statusId = useId();
   const subline = useSubline();
+  // A live instance is reachable now, so the catalog's older offline cannot grey or disable it.
+  const instance = live && !listed.available ? { ...listed, available: true } : listed;
+  const offline = !instance.available;
+  const opening = status.kind === 'opening';
+  const tone = opening ? 'connecting' : offline || status.kind === 'failed' ? 'stopped' : 'running';
+  const body = (
+    <>
+      <InstanceIcon instance={instance} current />
+      <span className="flex min-w-0 flex-1 items-start gap-2">
+        <LineGlyph text={instance.name} className={cn('w-2', CURRENT_NAME)}>
+          <StatusDot tone={tone} label={tone === 'running' ? t('mobileApp.instances.online') : undefined} />
+        </LineGlyph>
+        <span className="min-w-0 flex-1">
+          <span className={cn('block break-words', CURRENT_NAME)}>{instance.name}</span>
+          {status.kind === 'opening' ? (
+            <span role="status" className="mt-0.5 block text-xs leading-5 text-gold-ink">{t('mobileApp.sheet.opening')}</span>
+          ) : status.kind === 'failed' ? (
+            <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
+              {t(status.reason, { name: instance.name })}
+            </span>
+          ) : (
+            <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
+          )}
+        </span>
+      </span>
+    </>
+  );
+  const frame = 'flex w-full items-center gap-3 p-4 text-left';
   return (
     <section>
       <h2 className={sectionLabel}>{t('mobileApp.sheet.youreIn')}</h2>
-      <button
-        type="button"
-        disabled={disabled}
-        aria-label={t('mobileApp.sheet.returnTo', { name: instance.name })}
-        className="flex w-full items-center gap-3 rounded-2xl border border-mint/50 bg-surface p-4 text-left disabled:opacity-60"
-        onClick={onClick}
-      >
-        <InstanceIcon instance={instance} current />
-        <span className="min-w-0 flex-1">
-          <span className="block break-words text-base font-semibold leading-6">{instance.name}</span>
-          <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
-        </span>
-        <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-mint-ink">
-          <Check className="size-4" />
-          {t('mobileApp.instances.current')}
-        </span>
-      </button>
+      <div className={cn('rounded-2xl border border-mint/50 bg-surface', status.kind === 'waiting' && 'opacity-50')}>
+        {status.kind === 'failed' ? (
+          // The block holds its own Retry, so the block itself is not a button.
+          <div className={frame}>
+            {body}
+            <Button type="button" variant="outline" size="sm" disabled={disabled} className="shrink-0 rounded-full" onClick={onRetry}>
+              {t('common.retry')}
+            </Button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            disabled={disabled || (status.kind !== 'idle')}
+            // Offline on the page, tapping explains rather than opens: named by its lines, as a row is.
+            aria-label={offline && onRefresh ? undefined : label}
+            aria-describedby={!opening && !offline ? statusId : undefined}
+            aria-expanded={offline && onRefresh ? expanded : undefined}
+            className={frame}
+            onClick={onClick}
+          >
+            {body}
+            {!opening && !offline ? <span id={statusId} className="sr-only">{t('mobileApp.instances.online')}</span> : null}
+            {status.kind === 'opening' ? (
+              <Loader2 className="size-4 shrink-0 animate-spin text-gold-ink" aria-hidden="true" />
+            ) : (
+              <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-mint-ink">
+                <Check className="size-4" />
+                {t('mobileApp.instances.current')}
+              </span>
+            )}
+          </button>
+        )}
+        {offline && expanded && onRefresh ? <OfflineHelp instance={instance} disabled={disabled} onRefresh={onRefresh} /> : null}
+      </div>
     </section>
+  );
+}
+
+function OfflineHelp({ instance, disabled, onRefresh }: { instance: MobileInstance; disabled?: boolean; onRefresh: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div role="status" className="mx-4 mb-4 rounded-xl bg-field p-3 text-xs leading-5 text-muted">
+      <p className="break-words">{t('mobileApp.sheet.offlineBody', { name: instance.name })}</p>
+      <Button
+        type="button"
+        variant="link"
+        size="sm"
+        disabled={disabled}
+        className="mt-1 h-auto gap-1 px-0 text-xs text-foreground"
+        onClick={onRefresh}
+      >
+        <RotateCw className="size-3" />
+        {t('mobileApp.sheet.refreshList')}
+      </Button>
+    </div>
   );
 }
 
@@ -102,24 +192,30 @@ export function InstanceListRow({
   const { t } = useTranslation();
   const subline = useSubline();
   const offline = !instance.available;
+  const opening = status.kind === 'opening';
   const body = (
     <>
       <InstanceIcon instance={instance} />
-      <span className="min-w-0 flex-1">
-        <span className={cn('block break-words text-sm font-semibold leading-5', offline && 'text-muted')}>
-          {instance.name}
+      <span className="flex min-w-0 flex-1 items-start gap-2">
+        <LineGlyph text={instance.name} className={cn('w-2', ROW_NAME)}>
+          <StatusDot tone={opening ? 'connecting' : offline ? 'stopped' : 'running'} label={!opening && !offline ? t('mobileApp.instances.online') : undefined} />
+        </LineGlyph>
+        <span className="min-w-0 flex-1">
+          <span className={cn('block break-words', ROW_NAME, offline && 'text-muted')}>
+            {instance.name}
+          </span>
+          {status.kind === 'opening' ? (
+            <span role="status" className="mt-0.5 block text-xs leading-5 text-gold-ink">
+              {t('mobileApp.sheet.opening')}
+            </span>
+          ) : status.kind === 'failed' ? (
+            <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
+              {t(status.reason, { name: instance.name })}
+            </span>
+          ) : (
+            <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
+          )}
         </span>
-        {status.kind === 'opening' ? (
-          <span role="status" className="mt-0.5 block text-xs leading-5 text-mint-ink">
-            {t('mobileApp.sheet.opening')}
-          </span>
-        ) : status.kind === 'failed' ? (
-          <span role="alert" className="mt-0.5 block break-words text-xs leading-5 text-destructive-ink">
-            {t(status.reason, { name: instance.name })}
-          </span>
-        ) : (
-          <span className="mt-0.5 block break-all text-xs leading-5 text-muted">{subline(instance)}</span>
-        )}
       </span>
     </>
   );
@@ -150,7 +246,7 @@ export function InstanceListRow({
         >
           {body}
           {status.kind === 'opening' ? (
-            <Loader2 className="size-4 shrink-0 animate-spin text-mint-ink" aria-hidden="true" />
+            <Loader2 className="size-4 shrink-0 animate-spin text-gold-ink" aria-hidden="true" />
           ) : offline ? (
             <ChevronDown className={cn('size-4 shrink-0 text-muted', expanded && 'rotate-180')} aria-hidden="true" />
           ) : (
@@ -158,22 +254,7 @@ export function InstanceListRow({
           )}
         </button>
       )}
-      {offline && expanded ? (
-        <div role="status" className="mx-4 mb-4 rounded-xl bg-field p-3 text-xs leading-5 text-muted">
-          <p className="break-words">{t('mobileApp.sheet.offlineBody', { name: instance.name })}</p>
-          <Button
-            type="button"
-            variant="link"
-            size="sm"
-            disabled={disabled}
-            className="mt-1 h-auto gap-1 px-0 text-xs text-foreground"
-            onClick={onRefresh}
-          >
-            <RotateCw className="size-3" />
-            {t('mobileApp.sheet.refreshList')}
-          </Button>
-        </div>
-      ) : null}
+      {offline && expanded ? <OfflineHelp instance={instance} disabled={disabled} onRefresh={onRefresh} /> : null}
     </div>
   );
 }

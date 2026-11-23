@@ -204,6 +204,19 @@ struct DirectIrohFakeStream {
     }
 }
 
+/// A watch a test can see stopped.
+struct FakeWatch: DirectPathWatch {
+    let onStop: @Sendable () -> Void
+
+    init(_ onStop: @escaping @Sendable () -> Void) {
+        self.onStop = onStop
+    }
+
+    func stop() {
+        onStop()
+    }
+}
+
 final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable {
     static let established = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
     static let refused = Data("HTTP/1.1 503 Service Unavailable\r\n\r\n".utf8)
@@ -215,6 +228,48 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
     private var answers: [Data]
     private var storedStreams: [DirectIrohFakeStream] = []
     private var storedGate: DirectIrohPending<Void>?
+    private var storedPath: DirectPathKind?
+
+    /// The path the stand-in reports as selected.
+    var selectedPath: DirectPathKind? {
+        get { lock.withLock { storedPath } }
+        set { lock.withLock { storedPath = newValue } }
+    }
+
+    private var storedDetail: DirectSelectedPath?
+
+    /// The selected path's class and round-trip time, as the binding would
+    /// read them; set apart from `selectedPath`, as the binding reads them
+    /// apart.
+    var selectedPathDetail: DirectSelectedPath? {
+        get { lock.withLock { storedDetail } }
+        set { lock.withLock { storedDetail = newValue } }
+    }
+
+    private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
+
+    func watchSelectedPath(
+        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+    ) -> (any DirectPathWatch)? {
+        lock.withLock { pathWatcher = onChange }
+        let log = log
+        return FakeWatch { [weak self] in
+            log.add("watch.stop")
+            guard let self else {
+                return
+            }
+            self.lock.withLock { self.pathWatcher = nil }
+        }
+    }
+
+    /// The connection's paths changed: the selected one is now `kind`.
+    func movePath(to kind: DirectPathKind?) {
+        let watcher: (@Sendable (DirectPathKind?) -> Void)? = lock.withLock {
+            storedPath = kind
+            return pathWatcher
+        }
+        watcher?(kind)
+    }
 
     /// `answers` are what the first read of each new stream returns, in
     /// order: the instance's answer to a probe. A stream beyond them stays
@@ -282,12 +337,19 @@ final class DirectIrohFakeEndpoint: DirectIrohEndpoint, @unchecked Sendable {
     struct Dial: Equatable {
         let endpointID: DirectEndpointID
         let addresses: [String]
+        let relayURL: String?
         let alpn: Data
     }
 
     private let log: DirectIrohEventLog
     private let lock = NSLock()
     private var storedDials: [Dial] = []
+    private var storedLocal: DirectAddressFamilies?
+    /// What the stand-in reports as its own candidates.
+    var localFamilies: DirectAddressFamilies? {
+        get { lock.withLock { storedLocal } }
+        set { lock.withLock { storedLocal = newValue } }
+    }
     /// What the dial returns, once the test supplies it.
     let connection = DirectIrohPending<DirectIrohFakeConnection>()
 
@@ -302,11 +364,12 @@ final class DirectIrohFakeEndpoint: DirectIrohEndpoint, @unchecked Sendable {
     func connect(
         to endpointID: DirectEndpointID,
         addresses: [String],
+        relayURL: String?,
         alpn: Data
     ) async throws -> any DirectIrohConnection {
         log.add("connect")
         lock.withLock {
-            storedDials.append(Dial(endpointID: endpointID, addresses: addresses, alpn: alpn))
+            storedDials.append(Dial(endpointID: endpointID, addresses: addresses, relayURL: relayURL, alpn: alpn))
         }
         return try await connection.wait()
     }
@@ -327,6 +390,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
     private var prepared: [DirectIrohFakeEndpoint] = []
     private var storedBound: [DirectIrohFakeEndpoint] = []
     private var storedSecrets: [Data] = []
+    private var storedRelayMaps: [[String]] = []
     private var storedBindGate: DirectIrohPending<Void>?
 
     init(log: DirectIrohEventLog) {
@@ -340,6 +404,11 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
 
     var secrets: [Data] {
         lock.withLock { storedSecrets }
+    }
+
+    /// The relay map of each bind so far, in order; empty for no relay.
+    var relayMaps: [[String]] {
+        lock.withLock { storedRelayMaps }
     }
 
     /// The endpoint the next bind returns.
@@ -365,7 +434,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
         return gate
     }
 
-    func bind(secretKey: Data) async throws -> any DirectIrohEndpoint {
+    func bind(secretKey: Data, relayURLs: [String]) async throws -> any DirectIrohEndpoint {
         log.add("bind")
         let gate = lock.withLock { storedBindGate }
         if let gate {
@@ -374,6 +443,7 @@ final class DirectIrohFakeEngine: DirectIrohEngine, @unchecked Sendable {
         let fresh = DirectIrohFakeEndpoint(log: log)
         let endpoint: DirectIrohFakeEndpoint = lock.withLock {
             storedSecrets.append(secretKey)
+            storedRelayMaps.append(relayURLs)
             let next = prepared.isEmpty ? fresh : prepared.removeFirst()
             storedBound.append(next)
             return next
@@ -505,6 +575,8 @@ final class DirectIrohManualClock: @unchecked Sendable {
 @MainActor
 final class DirectIrohFakeNetwork: DirectIrohNetworkMonitoring {
     private var onChange: (@MainActor () -> Void)?
+    /// What the stand-in says the monitor ignored so far.
+    var ignoredUpdates = 0
 
     var isWatching: Bool {
         onChange != nil
@@ -578,12 +650,13 @@ enum DirectIrohFixtures {
         addresses: [[String: String]] = [
             ["kind": "lan", "address": "192.168.1.20:51234"],
             ["kind": "lan", "address": "[fd12::1]:51234"],
-        ]
+        ],
+        relay: [String: String]? = nil
     ) -> Data {
         let endpointObject: [String: Any] = [
             "id": endpoint.hex,
             "addresses": addresses,
-            "relay": NSNull(),
+            "relay": relay.map { $0 as Any } ?? NSNull(),
         ]
         let clientObject: [String: Any] = [
             "endpoint_id": client.hex,

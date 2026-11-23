@@ -84,6 +84,81 @@ def test_only_lan_and_global_ipv6_socket_addresses_are_candidates(address, expec
 # --- the published endpoint and its generations -------------------------------
 
 
+def test_public_trial_requires_owner_even_with_direct_addresses_and_fences_old_offers():
+    rendezvous = DirectRendezvous(_Clock())
+    ips = ("192.168.1.20:51234",)
+    a = "https://aps1-1.relay.n0.iroh.link./"
+    b = "https://use1-1.relay.n0.iroh.link./"
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ips))
+    before = _offer(rendezvous)
+    def owner_offer():
+        return rendezvous.offer(instance_id="inst_123", hostname="alex.avibe.bot", subject="owner",
+                                client_endpoint_id=CLIENT_ENDPOINT, is_owner=True)
+    revisions = [before["generation"]]
+    for url in (None, a, b, None):
+        rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ips, url, "public-trial-v1"))
+        assert _offer(rendezvous, client="d" * 64)["status"] == "unavailable"
+        assert not rendezvous.is_admitted("d" * 64)
+        offer = owner_offer()
+        assert offer["endpoint"]["relay"] == ({"policy": "public-trial-v1", "url": url} if url else None)
+        revisions.append(offer["generation"])
+    assert len(set(revisions)) == len(revisions)
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (), a, "public-trial-v1"))
+    assert owner_offer()["endpoint"]["addresses"] == []
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (), None, "public-trial-v1"))
+    assert owner_offer()["status"] == "unavailable"
+
+
+def test_offer_and_renewal_logs_only_offer_counts_and_safe_reason(caplog):
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    rv = DirectRendezvous()
+    relay = next(iter(direct_rendezvous.PUBLIC_TRIAL_RELAYS))
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.8:3210", "[2606:4700::1]:1234"), relay, "public-trial-v1"))
+    args = dict(instance_id="private-instance", hostname="private.example", subject="private-subject", client_endpoint_id=CLIENT_ENDPOINT)
+    result = rv.offer(**args, is_owner=True)
+    rv.offer(**args, is_owner=True)
+    rv.offer(**args, is_owner=False)
+    rv.publish(None, reason=CLIENT_ENDPOINT)
+    rv.offer(**args)
+    lines = [r.getMessage() for r in caplog.records if r.name == "vibe.direct_rendezvous"]
+    prefix = f"direct rendezvous generation={result['generation']} "
+    assert lines[:2] == [prefix + "public_trial_v1=yes lan=1 ipv6=1 outcome=offered reason=none suppressed=0",
+                         prefix + "public_trial_v1=no lan=0 ipv6=0 outcome=refused reason=owner_required suppressed=1"]
+    assert len(lines) == 3 and lines[-1].endswith("outcome=refused reason=unavailable suppressed=0")
+    for private in (*args.values(), INSTANCE_ENDPOINT, relay, "192.168", "2606:4700"):
+        assert private not in "\n".join(lines)
+
+
+@pytest.mark.parametrize("reason", ["transport_installing", "transport_install_failed"])
+def test_install_refusal_log_preserves_fixed_reason(reason, caplog):
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    rv = DirectRendezvous()
+    rv.publish(None, reason=reason)
+    _offer(rv)
+    assert caplog.messages[-1].endswith(f"outcome=refused reason={reason} suppressed=0")
+
+
+def test_repeat_log_window_is_per_caller_and_keeps_permission_codes(monkeypatch, caplog):
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    now = [100.0]
+    monkeypatch.setattr(direct_rendezvous.time, "monotonic", lambda: now[0])
+    rv = DirectRendezvous()
+    rv.publish(None, reason="permission_required")
+    _offer(rv)
+    for i in range(4):
+        now[0] += 14
+        _offer(rv, client=f"{i:064x}")
+    _offer(rv, subject="another-caller")
+    now[0] += 4
+    _offer(rv)
+    rv.publish(None, reason="permission_denied")
+    _offer(rv)
+    assert [r.getMessage().split("reason=")[1] for r in caplog.records if r.name == "vibe.direct_rendezvous"] == [
+        "permission_required suppressed=0", "permission_required suppressed=0",
+        "permission_required suppressed=4", "permission_denied suppressed=0",
+    ]
+
+
 def test_offer_describes_the_endpoint_and_admits_the_client():
     clock = _Clock()
     rendezvous = DirectRendezvous(clock)
@@ -126,7 +201,7 @@ def test_admission_listener_notifies_before_offer_return_and_on_extension():
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     events: list[tuple[str, int]] = []
     order: list[str] = []
-    rendezvous.set_admission_listener(lambda endpoint_id, ttl: (events.append((endpoint_id, ttl)), order.append("notice")))
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl, _epoch: (events.append((endpoint_id, ttl)), order.append("notice")))
 
     _offer(rendezvous)
     order.append("answer")
@@ -142,7 +217,7 @@ def test_admission_listener_reports_early_drops_and_no_listener_is_optional():
     rendezvous = DirectRendezvous(_Clock())
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     events: list[tuple[str, int]] = []
-    rendezvous.set_admission_listener(lambda endpoint_id, ttl: events.append((endpoint_id, ttl)))
+    rendezvous.set_admission_listener(lambda endpoint_id, ttl, _epoch: events.append((endpoint_id, ttl)))
     clients = [f"{index:064x}" for index in range(9)]
     for client in clients:
         _offer(rendezvous, client=client, subject="same-subject")
@@ -264,6 +339,45 @@ def test_any_signed_in_remote_role_may_ask():
     assert http_authorization_policy("POST", PATH).minimum_role == "viewer"
 
 
+@pytest.mark.parametrize("role", ["viewer", "editor"])
+def test_trial_rendezvous_withholds_peer_admission_and_relay_from_nonowners(instance, role):
+    config, rendezvous = instance
+    rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, (), "https://aps1-1.relay.n0.iroh.link./", "public-trial-v1"))
+    payload = _post(_signed_in(config, role=role), _body()).get_json()
+    assert payload["status"] == "unavailable" and "endpoint" not in payload
+    assert not rendezvous.is_admitted(CLIENT_ENDPOINT)
+
+
+def test_trial_consent_only_changes_from_host_shell(instance):
+    from vibe import api, cli
+    from vibe.authorization import AuthorizationContext, invocation_authority
+    from config.v2_config import V2Config
+
+    from vibe import connection_settings as cs
+
+    config = V2Config.load()
+    config.remote_access.vibe_cloud.instance_secret = 'test-pairing-credential'
+    config.save()
+    assert not cs.relay_enrolled(config)
+    parser = cli.build_parser()
+    def args(state):
+        return parser.parse_args(["remote", "direct", "relay", "public-trial", state])
+
+    assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    with pytest.raises(ValueError, match="instance host shell"):
+        api.save_config({"remote_access": {"vibe_cloud": {"public_relay_trial": True}}})
+    with invocation_authority(AuthorizationContext(is_remote=True, instance_role="owner")):
+        assert cli.cmd_remote_direct(args("on")) == 1
+    assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    assert cli.cmd_remote_direct(args("on")) == 0
+    assert V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    with pytest.raises(ValueError, match="instance host shell"):
+        api.save_config({"remote_access": {"vibe_cloud": {"public_relay_trial": False}}})
+    assert cli.cmd_remote_direct(args("off")) == 0
+    assert not V2Config.load().remote_access.vibe_cloud.public_relay_trial
+    assert cs.relay_enrolled(V2Config.load())
+
+
 def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
     config, rendezvous = instance
     rendezvous.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
@@ -281,7 +395,9 @@ def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
         "addresses": [{"kind": "lan", "address": "192.168.1.20:51234"}],
         "relay": None,
     }
-    assert rendezvous._admissions == {CLIENT_ENDPOINT: ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)}
+    (grant,) = rendezvous._admissions.values()
+    assert rendezvous.is_admitted(CLIENT_ENDPOINT)
+    assert (grant.subject, grant.until) == ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)
 
 
 def test_before_a_transport_exists_the_answer_is_unavailable(instance):

@@ -24,6 +24,7 @@ const authorization = vi.hoisted(() => ({
   capabilities: { can_read_instance: true, can_use_show_pages: true, can_use_vault_secrets: true, can_use_skills: true },
 }));
 const viewport = vi.hoisted(() => ({ desktop: true }));
+const toast = vi.hoisted(() => ({ showToast: vi.fn() }));
 
 vi.mock('../../context/ApiContext', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../context/ApiContext')>()),
@@ -41,6 +42,7 @@ vi.mock('../../lib/native', async (importOriginal) => ({
 vi.mock('../workbench/computerUseStatus', () => ({ readComputerUseStatus: () => computerUse.read() }));
 vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
 vi.mock('../../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
+vi.mock('../../context/ToastContext', () => ({ useToast: () => toast }));
 
 import { BotsContext, type BotsState } from '../../context/BotsContext';
 import en from '../../i18n/en.json';
@@ -127,6 +129,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   // The account's writer is module state; each case starts with none in flight.
   resetCoalescedWrites();
   Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
@@ -154,7 +157,53 @@ describe('Getting started reads what the UI already observes (ui/design: home/ho
   });
 
   it.each([
-    ['a Windows host', 'windows', 'Turn on Computer Use (Preview)', 'Turn on'],
+    ['says so when turning notifications on fails', new Error('subscribe_failed'), 'off', true],
+    ['says so when turning on fails and the state cannot be read', new Error('subscribe_failed'), 'unavailable', true],
+    ['says nothing when a failed attempt still left them on', new Error('subscribe_failed'), 'on', false],
+    ['says nothing when the prompt was refused', new Error('permission_denied'), 'off', false],
+  ] as const)('%s', async (_case, error, after, toasts) => {
+    push.state = 'off';
+    push.enable.mockImplementation(async () => {
+      push.state = after;
+      throw error;
+    });
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
+    await user.click(screen.getByRole('button', { name: 'Turn on' }));
+    await waitFor(() => expect(push.read).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(toast.showToast).toHaveBeenCalledTimes(toasts ? 1 : 0));
+    if (toasts) {
+      expect(toast.showToast).toHaveBeenCalledWith(en.workbench.inbox.notifications.enableFailed, 'error');
+    }
+  });
+
+  it('says nothing when the browser blocks notifications', async () => {
+    vi.stubGlobal('Notification', { permission: 'denied' });
+    push.state = 'off';
+    push.enable.mockRejectedValue(new Error('subscribe_failed'));
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
+    await user.click(screen.getByRole('button', { name: 'Turn on' }));
+    await waitFor(() => expect(push.read).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(toast.showToast).not.toHaveBeenCalled();
+  });
+
+  it('says nothing when notifications turn on', async () => {
+    push.state = 'off';
+    push.enable.mockImplementation(async () => { push.state = 'on'; });
+    const user = userEvent.setup();
+    renderGuide();
+    await waitFor(() => expect(items()).toEqual(['Turn on notifications']));
+    await user.click(screen.getByRole('button', { name: 'Turn on' }));
+    await waitFor(() => expect(items()).toEqual([]));
+    expect(toast.showToast).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a Windows host', 'windows', 'Turn on Computer Use', 'Turn on'],
     ['a macOS host', 'macos', 'Allow Computer Use', 'Grant'],
   ])('names Computer Use setup for %s, as the server reports it', async (_case, host, title, action) => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });

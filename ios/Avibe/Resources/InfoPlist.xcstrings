@@ -18,6 +18,57 @@
         }
       }
     },
+    "NSFaceIDUsageDescription" : {
+      "comment" : "Explains the system Face ID permission prompt; App Lock is its only use.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Use Face ID to unlock Avibe."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "用面容 ID 解锁 Avibe。"
+          }
+        }
+      }
+    },
+    "NSHealthShareUsageDescription" : {
+      "comment" : "Explains the system HealthKit read permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe reads your steps, activity, workouts, and sleep to provide your personal daily and weekly status through your own Avibe instance. Access is read-only; Avibe never writes to Apple Health."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe 只读你的步数、活动、锻炼和睡眠，通过你自己的 Avibe 实例提供个人每日和每周状态。Avibe 不会向 Apple 健康写入数据。"
+          }
+        }
+      }
+    },
+    "NSHealthUpdateUsageDescription" : {
+      "comment" : "Required by App Store upload validation for HealthKit; Avibe never writes to Health.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe never writes to Apple Health. It only reads the data you allow."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe 不会向「健康」写入数据，只读取你允许的数据。"
+          }
+        }
+      }
+    },
     "NSLocalNetworkUsageDescription" : {
       "comment" : "Explains the system Local Network permission prompt.",
       "localizations" : {
@@ -65,6 +116,40 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "当你选择“存储图像”时，Avibe 会将图像保存到照片图库。"
+          }
+        }
+      }
+    },
+    "NSAlarmKitUsageDescription" : {
+      "comment" : "Explains the system alarm permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe creates an alarm only after you confirm its title and time."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在你确认标题和时间后，Avibe 才会创建闹钟。"
+          }
+        }
+      }
+    },
+    "NSRemindersFullAccessUsageDescription" : {
+      "comment" : "Explains the system Reminders permission prompt.",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Avibe adds a reminder only after you confirm its title and time."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "只有在你确认标题和时间后，Avibe 才会添加提醒事项。"
           }
         }
       }

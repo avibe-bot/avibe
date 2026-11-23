@@ -1953,6 +1953,7 @@ def _expire_pending_request_rows(
     *,
     reason: str = "request-expired",
     delivery_extra: dict[str, Any] | None = None,
+    callback_status: str = "pending",
 ) -> int:
     now = _now()
     expired = 0
@@ -1960,7 +1961,7 @@ def _expire_pending_request_rows(
         result = conn.execute(
             vault_requests.update()
             .where(vault_requests.c.id == row["id"], vault_requests.c.status == "pending")
-            .values(status="expired", decided_at=now, callback_status="pending")
+            .values(status="expired", decided_at=now, callback_status=callback_status)
         )
         if result.rowcount != 1:
             continue
@@ -1976,6 +1977,67 @@ def _expire_pending_request_rows(
         )
         expired += 1
     return expired
+
+
+class RequestNotYoursError(VaultServiceError):
+    """An Agent asked to withdraw a Vault request another Session made."""
+
+
+def withdraw_request(conn: Connection, request_id: str, *, session_id: str | None) -> dict[str, Any]:
+    """End a pending Vault request of the calling Session, as if it had expired.
+
+    A request belongs to the Session it records (``requester.session_id``): the one it was made in,
+    or the one a ``--session-id`` made it for, whose conversation shows its card and gets its outcome.
+    Any kind (provide, access, sign, delete) and either tier: only the request row ends, so its card
+    leaves the pending list and a later approval is refused as on an expired request. A request that
+    is not pending (being signed, decided or expired) stays as it is. The Session withdrew it itself,
+    so it is not woken with the outcome. Only the row's small columns are read, never its payload.
+    """
+    # The Session the request belongs to, in ``_request_session_id``'s order and typing, read as
+    # typed scalars (``_summary_request_session_id``) so a signing payload is never loaded.
+    session_columns = []
+    for label, column, path in (
+        ("requester", vault_requests.c.requester, "$.session_id"),
+        ("delivery", vault_requests.c.delivery, "$.session_id"),
+        ("card", vault_requests.c.delivery, "$.card.session_id"),
+    ):
+        safe = _safe_request_json(column)
+        session_columns += [
+            func.json_type(safe, path).label(f"_session_{label}_type"),
+            func.json_quote(func.json_extract(safe, path)).label(f"_session_{label}_json"),
+        ]
+    row = conn.execute(
+        select(
+            vault_requests.c.id, vault_requests.c.status, vault_requests.c.expires_at,
+            vault_requests.c.request_type, vault_requests.c.secret_name, *session_columns,
+        ).where(vault_requests.c.id == request_id)
+    ).mappings().first()
+    if row is None:
+        raise RequestNotFoundError(request_id)
+    row = dict(row)
+    owner = _summary_request_session_id(row)
+    if not session_id or not owner or owner != str(session_id):
+        raise RequestNotYoursError(request_id)
+    if row.get("status") != "pending":
+        raise InvalidRequestError(f"request is {row.get('status')}, not pending")
+    outcome = {
+        "id": row["id"], "status": "expired",
+        "request_type": row.get("request_type"), "secret_name": row.get("secret_name"),
+    }
+    expires_at = _parse_iso_datetime(row.get("expires_at"))
+    if expires_at is not None and expires_at <= datetime.now(timezone.utc):
+        # Already past its deadline: it expires as any overdue request does, and that is committed;
+        # the caller reports it was not withdrawn.
+        if _expire_pending_request_rows(conn, [row]) != 1:
+            raise InvalidRequestError("request is not pending")
+        return {**outcome, "withdrawn": False}
+    withdrawn = _expire_pending_request_rows(
+        conn, [row], reason="request-withdrawn", delivery_extra={"session_id": str(session_id)},
+        callback_status="skipped",
+    )
+    if withdrawn != 1:
+        raise InvalidRequestError("request is not pending")
+    return {**outcome, "withdrawn": True}
 
 
 def _expire_request_if_due(conn: Connection, row: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -2745,6 +2807,22 @@ def sign_audit_delivery(scheme: str, *, digest: str | None, message_hex: str | N
     }
 
 
+def protected_hd_bitcoin_return_scripts(
+    row: dict[str, Any], derivation: dict[str, Any] | None,
+) -> set[bytes] | None:
+    """Project returns only after the owning full-table and enabled-index check."""
+    if row.get("signer_kind") != vault_hd.SIGNER_KIND or row.get("protection") != "protected":
+        return None
+    try:
+        selection = vault_protected_hd.selection(derivation)
+        if selection["chain"] != "bitcoin" or selection["address_type"] == "p2tr":
+            return None
+        account = vault_protected_hd.selected_account(row["name"], _row_sealed(row), _public_meta(row.get("public_meta")), selection)
+        return set(vault_bitcoin.hd_account_return_scripts(account).values())
+    except ValueError as exc:
+        raise InvalidHdWalletError(str(exc)) from exc
+
+
 def validate_bitcoin_signing_context(
     signing_context: Any,
     *,
@@ -2752,6 +2830,7 @@ def validate_bitcoin_signing_context(
     scheme: str,
     signing_key: Any,
     protected: bool = False,
+    return_scripts: set[bytes] | None = None,
 ) -> None:
     """One preflight for typed Bitcoin, including headless and persisted callers.
 
@@ -2765,7 +2844,7 @@ def validate_bitcoin_signing_context(
                 raise ProtectedBitcoinTypeMismatchError("new Bitcoin contexts require ecdsa-secp256k1-der")
             vault_bitcoin.validate_ecdsa_context(
                 signing_context, expected_digest=digest,
-                public_key=require_compressed_signing_public_key(signing_key),
+                public_key=require_compressed_signing_public_key(signing_key), return_scripts=return_scripts,
             )
         except vault_bitcoin.BitcoinTypeMismatchError as exc:
             raise ProtectedBitcoinTypeMismatchError(str(exc)) from exc
@@ -2828,16 +2907,20 @@ def _capture_protected_bitcoin_identity(
         raise InvalidSigningContextError("protected Bitcoin request is missing its typed signing context")
     if row.get("kind") != "keypair" or row.get("protection") != "protected":
         raise InvalidSigningContextError("new Bitcoin typed contexts require a protected signing key")
-    if signer != "local":
-        # Extend the owning protected-HD implementation only once it is on the
-        # default branch. No parallel seed/table/selection implementation here.
-        raise ProtectedBitcoinUnsupportedError("protected HD Bitcoin type support is not available in this build")
-    if derivation is not None:
-        raise ProtectedBitcoinTypeMismatchError("ordinary Bitcoin requests must not have HD selectors")
+    if signer == vault_hd.SIGNER_KIND:
+        validate_new_bitcoin_selection(row, signing_context, scheme=vault_bitcoin.ECDSA_SCHEME, derivation=derivation)
+    elif signer == "local":
+        if derivation is not None:
+            raise ProtectedBitcoinTypeMismatchError("ordinary Bitcoin requests must not have HD selectors")
+    else:
+        raise ProtectedBitcoinUnsupportedError("unsupported protected Bitcoin signer")
     support = vault_sandbox_release.current_support()
-    if support is None or signing_context.get("addressType") not in support.ordinary_input_types:
+    if support is None:
         raise ProtectedBitcoinUnsupportedError("the trusted sandbox pin does not support this protected Bitcoin type")
-    point = require_compressed_signing_public_key(_row_signing_public_key(row))
+    types = support.hd_input_types if signer == vault_hd.SIGNER_KIND else support.ordinary_input_types
+    if signing_context.get("addressType") not in types:
+        raise ProtectedBitcoinUnsupportedError("the trusted sandbox pin does not support this protected Bitcoin type")
+    point = require_compressed_signing_public_key(_row_signing_public_key(row, derivation=derivation))
     envelope = {key: row.get(key) for key in ("ciphertext", "nonce", "wrap_meta")}
     if not all(type(value) is str and value for value in envelope.values()):
         raise InvalidRequestError("protected Bitcoin requires a complete stored envelope")
@@ -2891,7 +2974,8 @@ def _require_current_protected_bitcoin_identity(
         raise InvalidRequestError("protected Bitcoin saved signing identity changed")
     validate_bitcoin_signing_context(
         delivery.get("signing_context"), digest=delivery.get("digest"), scheme=delivery.get("scheme"),
-        signing_key=_row_signing_public_key(current), protected=True,
+        signing_key=_row_signing_public_key(current, derivation=delivery.get("derivation")), protected=True,
+        return_scripts=protected_hd_bitcoin_return_scripts(current, delivery.get("derivation")),
     )
     operation = delivery.get("operation_context")
     if operation is not None or require_release:
@@ -2900,6 +2984,7 @@ def _require_current_protected_bitcoin_identity(
             "publicKey": captured_key["public_key"], "signingContext": delivery.get("signing_context"),
             "signingKey": captured_key,
             "sandboxCohort": {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")},
+            **({"derivation": delivery.get("derivation")} if current.get("signer_kind") == vault_hd.SIGNER_KIND else {}),
         }
         if type(operation) is not dict or operation.get("release") != expected_release or operation.get("requestId") != request_row["id"] or operation.get("purpose") != "sign" or type(operation.get("v")) is not int or operation["v"] != 2:
             raise InvalidRequestError("protected Bitcoin release does not match its initial signing capture")
@@ -2928,6 +3013,8 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
                     "name": name, "scheme": scheme, "publicKey": signing_key["public_key"],
                     "derivation": selection, "signingKey": delivery["signing_key"], "signingContext": context,
                     **({"messageHex": delivery.get("message_hex")} if scheme == vault_solana.SCHEME else {"digest": delivery.get("digest")}),
+                    **({"sandboxCohort": {key: delivery["bitcoin_cohort"][key] for key in ("buildHash", "manifestHash")}}
+                       if _is_new_bitcoin_delivery(delivery) else {}),
                 }
                 if (not isinstance(operation, dict) or operation.get("purpose") != "sign"
                         or operation.get("release") != expected_release):
@@ -2951,6 +3038,7 @@ def _validate_persisted_signing_context(conn: Connection, name: str, delivery: d
         return
     validate_bitcoin_signing_context(
         context, digest=delivery.get("digest"), scheme=scheme, signing_key=signing_key, protected=protected,
+        return_scripts=protected_hd_bitcoin_return_scripts(row, selection) if vault_bitcoin.needs_ecdsa_preflight(context) else None,
     )
 
 
@@ -3069,6 +3157,12 @@ def audit(
     if snapshot is not None and (delivery is None or isinstance(delivery, dict)):
         stored_delivery = dict(delivery or {})
         stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = snapshot
+        if event == "proxied":
+            from storage.compatibility import permits_compact_writes
+            from storage.vault_snapshots import intern
+
+            if permits_compact_writes(conn):
+                stored_delivery[_AUDIT_ACCESS_SNAPSHOT_KEY] = {"ref": intern(conn, snapshot)}
     # The audit trail is a non-secret summary, and callers now hand it the same
     # requester payload the request row stores. That payload may carry the
     # internal authorization snapshot, which belongs to the request's deferred
@@ -5994,6 +6088,7 @@ def _create_sign_request(
     validate_bitcoin_signing_context(
         signing_context, digest=digest, scheme=scheme, signing_key=signing_key,
         protected=row.get("protection") == "protected",
+        return_scripts=protected_hd_bitcoin_return_scripts(row, derivation) if vault_bitcoin.needs_ecdsa_preflight(signing_context) else None,
     )
     if isinstance(signing_context, dict) and signing_context.get("kind") not in {
         vault_bitcoin.BITCOIN_CONTEXT_KIND, vault_solana.CONTEXT_KIND, "avault-agent-operation",
@@ -6336,6 +6431,7 @@ def _complete_sign_request(
             validated = vault_bitcoin.validate_ecdsa_context(
                 delivery_payload["signing_context"], expected_digest=delivery_payload["digest"],
                 public_key=delivery_payload["signing_key"]["public_key"],
+                return_scripts=protected_hd_bitcoin_return_scripts(secret, derivation),
             )
             signature = vault_bitcoin.verify_ecdsa_result(validated, signature).signature
         except vault_bitcoin.BitcoinContextError as exc:
@@ -6700,6 +6796,9 @@ def _request_collection_columns():
         case((new_bitcoin, None), else_=vault_requests.c.delivery).label("delivery"),
         new_bitcoin.label("_bitcoin_summary"),
         case((new_bitcoin, func.json_extract(_safe_request_json(vault_requests.c.delivery), "$.signing_key.secret_id")), else_=None).label("_saved_secret_id"),
+        # Display-only capture: do not hydrate the card or consult live metadata.
+        case((and_(new_bitcoin, func.json_extract(_safe_request_json(vault_requests.c.delivery), "$.bitcoin_identity.protection") == "protected"),
+              "protected"), else_=None).label("_summary_protection"),
     ])
     for label, column, path in (
         ("requester", vault_requests.c.requester, "$.session_id"),
@@ -6745,13 +6844,19 @@ def _new_bitcoin_request_summary(row: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "id": row["id"], "request_type": "sign", "status": row["status"],
         "created_at": row["created_at"], "decided_at": row.get("decided_at"), "expires_at": row.get("expires_at"),
-        "secret_name": None, "requester": None, "delivery": None,
+        "secret_name": row.get("secret_name"), "protection": row.get("_summary_protection"),
+        "requester": None, "delivery": None,
         "message_id": None, "card": None, "session": None,
     }
     encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    if len(encoded) > 1024 and summary["secret_name"] is not None:
+        # Legal names have no global length cap. Keep the whole name or the
+        # existing generic fallback, never a truncated name or a dropped row.
+        summary["secret_name"] = None
+        encoded = json.dumps(summary, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
     if len(encoded) > 1024:
-        # Never truncate/drop a row or change count semantics to repair a bad
-        # producer/serializer. All valid generated identifiers/times fit here.
+        # Invalid generated identifiers/times still fail rather than changing
+        # collection count semantics to repair a bad producer/serializer.
         raise InvalidRequestError("new Bitcoin summary exceeds its 1,024-byte bound")
     return summary
 

@@ -21,7 +21,7 @@ from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskE
 from storage import message_deliveries as deliveries
 from storage.models import agent_runs, agent_sessions, messages, run_definitions, session_delegations
 from storage.session_delegations import (
-    candidate_query, has_dispatch_pair, latest_reply_query, pending_return_queries, pending_wake_queries,
+    candidate_query, dispatched_turn_query, has_dispatch_pair, pending_return_queries, pending_wake_queries,
 )
 
 NOW = "2026-11-08T00:00:00+00:00"
@@ -54,7 +54,7 @@ def _send(h, sender="sesA", recipient="sesB", **kwargs):
     )
 
 
-def _accept(h, *requests, finish=True, provenance=None):
+def _accept(h, *requests, finish=True, provenance=None, suffix=""):
     """Use the actual shared acceptance boundary, including multi-sender batching."""
     turn_id = "turn_" + uuid4().hex
     with h.engine.begin() as conn:
@@ -63,17 +63,19 @@ def _accept(h, *requests, finish=True, provenance=None):
             snapshot = deliveries.message_snapshot(
                 scope_id=None, session_id=request.session_id, platform="avibe", author="harness", source="harness",
                 message_type="harness", text=request.prompt,
-                metadata={"scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
+                metadata={**({"turn_carry": "failed"} if suffix else {}),
+                          "scheduled_provenance": (provenance or {}).get(request.id) or {"platform_specific": {
                     "task_trigger_kind": "agent_run", "task_execution_id": request.id,
                     "source_kind": request.source_kind, "source_actor": request.source_actor,
                 }}},
             )
             batch.append(deliveries.insert_delivery(
-                conn, delivery_id="msg_" + request.id, session_id=request.session_id, priority="p3", state="queued",
+                conn, delivery_id="msg_" + request.id + suffix, session_id=request.session_id, priority="p3",
+                state="queued",
                 snapshot=snapshot, dispatch_text=request.prompt,
             ))
             conn.execute(update(agent_runs).where(agent_runs.c.id == request.id).values(
-                status="running", delivery_id="msg_" + request.id,
+                status="running", delivery_id="msg_" + request.id + suffix,
             ))
         deliveries.claim_start_batch(
             conn, turn_id=turn_id, session_id=requests[0].session_id, backend="vibey", deliveries=batch,
@@ -112,6 +114,12 @@ def _notices(h):
         return list(conn.execute(select(agent_runs).where(agent_runs.c.source_actor.like("delegation-idle:%"))).mappings())
 
 
+def _turn_reply(h, turn_id, reply):
+    """The reply the dispatcher delivered for a live Turn (``record_turn_reply``)."""
+    with h.engine.begin() as conn:
+        assert deliveries.record_turn_reply(conn, turn_id, reply)
+
+
 def _reply(h, session_id, reply):
     with h.engine.begin() as conn:
         conn.execute(messages.insert().values(
@@ -125,15 +133,16 @@ def test_idle_notice_once_restart_and_new_message_rearms(harness, recipient):
     h = harness
     run = _send(h, recipient=recipient)
     assert _pair(h, recipient=recipient) is None  # queued is not accepted
-    _accept(h, run)
+    turn = _accept(h, run, finish=False)
     reply = "Which option do you prefer?\n\n```text\n" + "x" * 400 + "\n```"
-    _reply(h, recipient, reply)
+    _turn_reply(h, turn, reply)
+    _finish(h, turn, [run])
     pair = _pair(h, recipient=recipient)
     assert h.lane._notify(pair)
     notice = _notices(h)[0]
     assert notice["session_id"] == "sesA"
     lines = notice["prompt"].splitlines()
-    assert lines[0].startswith("[It handled your message without writing back; its last reply is below. Follow up with ")
+    assert lines[0].startswith("[The dispatched Turn ended without writing back; its last reply is below. Follow up with ")
     assert lines[0].endswith(" only if you were waiting on it.]")
     assert notice["prompt"].split("\n", 1)[1] == reply
     assert "Last reply:" not in notice["prompt"]
@@ -236,7 +245,7 @@ def test_no_reply_delivery_provenance_survives_queued_merge_and_acceptance(harne
         for run in runs
     ]
     assert harness_hint(sources[0], receiver="sesB") == "No reply needed."
-    assert "report to #sesD" in harness_hint(sources[1], receiver="sesB")
+    assert "Report to #sesD" in harness_hint(sources[1], receiver="sesB")
     assert _pair(h) is None and _pair(h, sender="sesD") is not None
 
 
@@ -277,8 +286,7 @@ def test_multipart_answers_stay_answers_until_dispatcher_sends_again(harness, me
     assert [row["session_id"] for row in _notices(h)] == ["sesA"]
 
 
-@pytest.mark.parametrize("blocker", ["turn", "queued_run", "queued_input", "watch", "scheduled", "delegate",
-                                     "outgoing-report", "outgoing-delegate"])
+@pytest.mark.parametrize("blocker", ["turn", "queued_run", "queued_input", "outgoing-report"])
 def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harness, blocker):
     h = harness
     run = _send(h)
@@ -286,8 +294,8 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     pair = _pair(h)
     if blocker == "queued_run":
         pending = _send(h, sender="sesD")
-    elif blocker in {"outgoing-report", "outgoing-delegate"}:
-        pending = _send(h, sender="sesB", recipient="sesA" if blocker == "outgoing-report" else "sesC")
+    elif blocker == "outgoing-report":
+        pending = _send(h, sender="sesB", recipient="sesA")
     elif blocker == "queued_input":
         with h.engine.begin() as conn:
             deliveries.insert_delivery(conn, delivery_id="user-queued", session_id="sesB", priority="p3", state="queued",
@@ -305,7 +313,7 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     assert next(item for item in items if item.partition_key == run.id).cursor_only
     if blocker == "turn":
         _finish(h, turn, [run])
-    elif blocker in {"queued_run", "outgoing-report", "outgoing-delegate"}:
+    elif blocker in {"queued_run", "outgoing-report"}:
         h.requests.cancel_run(pending.id)
     elif blocker == "queued_input":
         with h.engine.begin() as conn:
@@ -318,20 +326,50 @@ def test_only_real_pending_work_suppresses_then_releasing_it_allows_notice(harne
     assert h.lane._notify(pair)
 
 
-def test_three_level_chain_propagates_after_each_notice_is_processed(harness):
+@pytest.mark.parametrize("arranged", ["watch", "scheduled", "delegate", "delegate-working", "delegate-queued"])
+def test_a_dispatched_turn_that_ends_tells_the_dispatcher_however_it_arranged_to_continue(harness, arranged):
+    """A Watch or Task the recipient armed, or its own delegation still open, used to
+    hold the receipt back for hours (11-15 stall retro). The Turn ended: say so."""
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    if arranged in {"watch", "scheduled"}:
+        with h.engine.begin() as conn:
+            conn.execute(run_definitions.insert().values(id="future", definition_type=arranged, session_id="sesB",
+                enabled=1, created_at=NOW, updated_at=NOW, metadata_json="{}"))
+    elif arranged == "delegate":
+        _accept(h, _send(h, sender="sesB", recipient="sesC"))
+    elif arranged == "delegate-working":
+        _accept(h, _send(h, sender="sesB", recipient="sesC"), finish=False)  # C keeps working
+    else:
+        _send(h, sender="sesB", recipient="sesC")  # not accepted by C yet
+    assert h.lane._notify(_pair(h))
+    assert [row["session_id"] for row in _notices(h)] == ["sesA"]
+
+
+def test_the_receipt_quotes_the_dispatched_turn_not_the_sessions_latest_reply(harness):
+    """11-15 10:08: a receipt quoted an unrelated 04:33 reply of the recipient."""
+    h = harness
+    _reply(h, "sesB", "an old reply about something else")
+    run = _send(h)
+    turn = _accept(h, run, finish=False)
+    _finish(h, turn, [run])
+    _reply(h, "sesB", "a later reply in another Turn")
+    assert h.lane._notify(_pair(h))
+    assert _notices(h)[0]["prompt"] == (
+        "[The dispatched Turn ended without writing back. Follow up with "
+        + _notices(h)[0]["prompt"].split("Follow up with ", 1)[1]
+    )
+    assert "reply" not in _notices(h)[0]["prompt"].split("]", 1)[1]
+
+
+def test_three_level_chain_tells_each_dispatcher_when_its_turn_ends(harness):
     h = harness
     _accept(h, _send(h))
     _accept(h, _send(h, sender="sesB", recipient="sesC"))
-    assert not h.lane._notify(_pair(h))
+    assert h.lane._notify(_pair(h))  # B's Turn ended, though B still waits on C
     assert h.lane._notify(_pair(h, sender="sesB", recipient="sesC"))
-    assert not h.lane._notify(_pair(h))  # a queued notice will wake B
-    from core.scheduled_tasks import TaskExecutionRequest
-    returned = TaskExecutionRequest.from_dict(h.requests.get_run(_notices(h)[0]["id"]))
-    turn = _accept(h, returned, finish=False)
-    assert not h.lane._notify(_pair(h))  # B is handling C's notice
-    _finish(h, turn, [returned])
-    assert h.lane._notify(_pair(h))
-    assert [row["session_id"] for row in _notices(h)] == ["sesB", "sesA"]
+    assert [row["session_id"] for row in _notices(h)] == ["sesA", "sesB"]
 
 
 @pytest.mark.parametrize("failure_only,status", [(False, "succeeded"), (True, "failed"), (True, "canceled")])
@@ -745,7 +783,7 @@ def test_hot_queries_are_index_keyed_without_history_sort(harness):
     h = harness
     queries = [candidate_query(limit=32, cursor="old"), *pending_wake_queries("sesB"),
                *pending_return_queries("sesA", "sesB"),
-               *(latest_reply_query("sesB", kind) for kind in ("result", "error", "output"))]
+               dispatched_turn_query("run_x")]
     with h.engine.connect() as conn:
         for query in queries:
             sql = str(query.compile(dialect=conn.dialect, compile_kwargs={"literal_binds": True}))
@@ -770,6 +808,8 @@ def test_p1_acceptance_and_concurrent_notifiers_keep_one_notice(harness):
                 }}},
             ),
         )
+        # As production admission does: the Run is bound to its Delivery.
+        conn.execute(update(agent_runs).where(agent_runs.c.id == steer.id).values(delivery_id="steer"))
         deliveries.open_steer_attempt(conn, "steer", expected_version=delivery["version"], turn_id=turn,
                                      attempt_id="steer-attempt", expected_native_turn_id=turn)
         assert deliveries.materialize_steer_acceptance(conn, leader_delivery_id="steer",
@@ -788,7 +828,7 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
     h = harness
     queries = [candidate_query(limit=32, cursor="0"),
                *(select(exists(query)) for query in (*pending_wake_queries("sesB"), *pending_return_queries("sesA", "sesB"))),
-               latest_reply_query("sesB", "result")]
+               dispatched_turn_query("run_x")]
     with h.engine.begin() as conn:
         def probe_work():
             steps = 0
@@ -829,3 +869,173 @@ def test_owner_sized_history_does_not_expand_runtime_probe_work(harness):
         ) for i in range(5000)])
         grown = probe_work()
         assert grown < baseline + 100, (baseline, grown)
+
+
+
+@pytest.mark.parametrize("intermediate", [False, True])
+def test_the_receipt_quotes_the_turns_final_reply(harness, intermediate):
+    """A final reply lives in the Turn's terminal evidence, not in session_turn_replies (#4014 review)."""
+    h = harness
+    run = _send(h)
+    turn = _accept(h, run, finish=False)
+    if intermediate:
+        _turn_reply(h, turn, "an earlier progress note")
+    with h.engine.begin() as conn:
+        deliveries.terminalize_turn(conn, turn, outcome="completed", settled_by="terminal_result",
+                                    evidence_kind="terminal_result", evidence={"result_text": "the final answer"})
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="succeeded", completed_at=NOW))
+    assert h.lane._notify(_pair(h))
+    assert _notices(h)[0]["prompt"].split("\n", 1)[1] == "the final answer"
+
+
+def test_an_old_receipt_does_not_answer_a_newer_dispatch(harness):
+    """Receipt 1 is queued; B finishes dispatch 2; A accepting receipt 1 must not
+    close dispatch 2 (#4014 review)."""
+    from core.scheduled_tasks import TaskExecutionRequest
+    h = harness
+    _accept(h, _send(h))
+    assert h.lane._notify(_pair(h))
+    receipt = TaskExecutionRequest.from_dict(h.requests.get_run(_notices(h)[0]["id"]))
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["state"] == "open" and _pair(h)["run_id"] == second.id
+    _accept(h, receipt)
+    assert _pair(h)["state"] == "open"
+    assert h.lane._notify(_pair(h))
+    assert len(_notices(h)) == 2
+
+
+@pytest.mark.parametrize("returned", ["report", "receipt"])
+def test_a_return_the_dispatcher_already_accepted_does_not_hold_back_the_next_receipt(harness, returned):
+    """A accepts B's return in a Turn that is still live, sends B a new dispatch from
+    that Turn, and B finishes silently: A must not wait on its own Turn (#4014 review)."""
+    from core.scheduled_tasks import TaskExecutionRequest
+    h = harness
+    _accept(h, _send(h))
+    if returned == "report":
+        back = _send(h, sender="sesB", recipient="sesA")
+    else:
+        assert h.lane._notify(_pair(h))
+        back = TaskExecutionRequest.from_dict(h.requests.get_run(_notices(h)[0]["id"]))
+    _accept(h, back, finish=False)  # A's Turn that took the return is still live
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["run_id"] == second.id
+    assert h.lane._notify(_pair(h))
+
+
+
+def test_two_dispatches_that_end_before_the_receipt_get_one_receipt_with_the_later_reply(harness):
+    """Product decision (#4014): one receipt per sender and recipient pair in this case,
+    no per-dispatch rows; the earlier reply stays in the recipient's record."""
+    h = harness
+    first, second = _send(h), _send(h)
+    turn_1 = _accept(h, first, finish=False)
+    _turn_reply(h, turn_1, "first reply")
+    _finish(h, turn_1, [first])
+    turn_2 = _accept(h, second, finish=False)
+    _turn_reply(h, turn_2, "second reply")
+    _finish(h, turn_2, [second])
+    assert h.lane._notify(_pair(h))
+    assert not h.lane._notify(_pair(h))
+    [notice] = _notices(h)
+    assert notice["prompt"].split("\n", 1)[1] == "second reply"
+
+
+# ----- 3.2.8rc2 upgrade backfill (11-20 08:27: 24 receipts for old dispatches) -----
+
+def _ended_by_an_older_version(h, *run_ids):
+    """What an older release wrote: a Turn end without this version's mark."""
+    from storage.models import message_deliveries as delivery_rows, session_turns
+    with h.engine.begin() as conn:
+        for run_id in run_ids:
+            turn_id = conn.execute(select(delivery_rows.c.turn_id).select_from(
+                agent_runs.join(delivery_rows, delivery_rows.c.id == agent_runs.c.delivery_id),
+            ).where(agent_runs.c.id == run_id)).scalar_one()
+            conn.execute(update(session_turns).where(session_turns.c.id == turn_id).values(
+                terminal_evidence_json='{"kind":"terminal_result"}'))
+
+
+def test_an_upgraded_instance_sends_nothing_for_dispatches_that_ended_before_it(harness):
+    """Old open pairs (Turns an older version ended) are history: retired silently,
+    never answered with a receipt. No clock is compared."""
+    h = harness
+    old, other = _send(h), _send(h, sender="sesC", recipient="sesD")
+    _accept(h, old)
+    _accept(h, other)
+    _ended_by_an_older_version(h, old.id, other.id)
+    items, _ = h.lane.scan(limit=10, occupied=frozenset(), cursor=None)
+    for item in items:
+        h.lane._notify(item.observation)
+    assert _notices(h) == []
+    assert _pair(h)["state"] == "unavailable" and _pair(h, "sesC", "sesD")["state"] == "unavailable"
+    # A dispatch this version ends still gets its receipt.
+    fresh = _send(h)
+    _accept(h, fresh)
+    assert h.lane._notify(_pair(h))
+    assert len(_notices(h)) == 1
+
+
+def test_an_unresolvable_dispatch_fails_closed(harness):
+    """No Turn to read: no receipt, and the pair is left as it is."""
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(delivery_id=None))
+    assert not h.lane._notify(_pair(h)) and _pair(h)["state"] == "open"
+
+
+def test_a_carried_dispatch_keeps_the_answer_it_already_had(harness):
+    """B wrote back and A accepted (answered); B's next Turn takes a carried copy of the
+    same dispatch (#4010). That is not a new request: no receipt after it."""
+    h = harness
+    run = _send(h)
+    turn = _accept(h, run, finish=False)
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="queued"))
+    _finish(h, turn, [])
+    _accept(h, run, suffix="~carry")  # the same Run, accepted again by the successor Turn
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(_pair(h)) and _notices(h) == []
+
+
+def test_a_dispatch_its_sender_cancelled_gets_no_receipt(harness):
+    h = harness
+    run = _send(h)
+    _accept(h, run)
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == run.id).values(status="canceled", cancel_requested=1))
+    assert not h.lane._notify(_pair(h))
+    assert _notices(h) == [] and _pair(h)["state"] == "unavailable"
+
+
+def test_a_recipient_that_wrote_back_already_answered_the_pair(harness):
+    """Any report B sends back that A accepts answers the pair (``record_accepted_exchange``),
+    so no receipt follows; no separate look-back is needed."""
+    h = harness
+    _accept(h, _send(h))
+    _accept(h, _send(h, sender="sesB", recipient="sesA"))
+    assert _pair(h)["state"] == "answered"
+    assert not h.lane._notify(_pair(h)) and _notices(h) == []
+
+
+
+def test_a_carried_copy_of_an_old_report_does_not_answer_a_newer_dispatch(harness):
+    """A accepted B's report for dispatch 1, sent dispatch 2, and B finished it silently;
+    A's Turn failed and its successor took the carried copy of the OLD report (#4010).
+    The replay must not close dispatch 2."""
+    h = harness
+    _accept(h, _send(h))
+    report = _send(h, sender="sesB", recipient="sesA")
+    _accept(h, report)
+    second = _send(h)
+    _accept(h, second)
+    assert _pair(h)["state"] == "open" and _pair(h)["run_id"] == second.id
+    with h.engine.begin() as conn:
+        conn.execute(update(agent_runs).where(agent_runs.c.id == report.id).values(status="queued"))
+    _accept(h, report, suffix="~carry")
+    assert _pair(h)["state"] == "open"
+    assert h.lane._notify(_pair(h))

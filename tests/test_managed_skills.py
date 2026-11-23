@@ -2048,3 +2048,63 @@ def test_bound_builtin_root_survives_avibe_home_change(monkeypatch, tmp_path: Pa
     monkeypatch.setenv("AVIBE_HOME", str(home / "second-avibe"))
 
     assert [skill.name for skill in resolve_skills(cwd)] == ["builtin"]
+
+
+def _write_requiring_skill(root: Path, directory: str, name: str, requirement: str) -> Path:
+    skill_dir = root / directory
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        f"---\nname: {name}\ndescription: Needs {requirement}.\nrequires: {requirement}\n---\nBody\n",
+        encoding="utf-8",
+    )
+    return skill_file
+
+
+def test_builtin_skill_requiring_a_paired_phone_is_listed_only_while_one_is_paired(tmp_path: Path) -> None:
+    """#3989: an instance that never pairs a phone neither advertises nor pays for the Health Skill."""
+    from storage.mobile_store import MobileStore, mobile_store_path
+    from tests.test_mobile_health import pair_device
+
+    builtin_root = tmp_path / "builtin"
+    _write_requiring_skill(builtin_root, "phone", "phone-only", "mobile-device")
+    _write_requiring_skill(builtin_root, "future", "future-only", "not-a-known-capability")
+    _write_skill(builtin_root, "always", "always", "Always listed.")
+    cwd = tmp_path / "project"
+    cwd.mkdir()
+    # A third-party Skill cannot opt into, or be hidden by, a built-in availability condition.
+    _write_requiring_skill(cwd / ".agents" / "skills", "user", "user-skill", "mobile-device")
+
+    def listed() -> list[str]:
+        skills = _isolated_resolve(cwd, tmp_path, builtin_catalog_root=builtin_root)
+        return [skill.name for skill in catalog_page(skills, 1)[0]]
+
+    def loadable() -> set[str]:
+        return {skill.name for skill in _isolated_resolve(cwd, tmp_path, builtin_catalog_root=builtin_root)}
+
+    assert listed() == ["always", "user-skill"]
+    assert not mobile_store_path().parent.exists()  # listing never creates the Health store
+    assert {"phone-only", "future-only"} <= loadable()  # still loadable by name
+
+    store = MobileStore()
+    assert listed() == ["always", "user-skill"]  # a store without a device is not a paired phone
+    pair_device(store)
+    assert listed() == ["always", "phone-only", "user-skill"]
+    prompt = render_skill_catalog_prompt(_isolated_resolve(cwd, tmp_path, builtin_catalog_root=builtin_root))
+    assert "- phone-only: Needs mobile-device." in prompt and "future-only" not in prompt
+
+    store.revoke()
+    assert listed() == ["always", "user-skill"]
+
+
+def test_packaged_builtin_requirements_are_known_capabilities() -> None:
+    from core.managed_skills import BUILTIN_SKILL_REQUIREMENTS, builtin_skills_source, parse_skill_file
+
+    declared = {}
+    for skill_file in sorted(builtin_skills_source().glob("*/SKILL.md")):
+        skill = parse_skill_file(skill_file, priority=(0, 0, 0))
+        assert skill is not None
+        if skill.requires:
+            declared[skill.name] = skill.requires
+    assert declared == {"use-mobile-health": "mobile-device"}
+    assert set(declared.values()) <= set(BUILTIN_SKILL_REQUIREMENTS)

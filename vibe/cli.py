@@ -2114,7 +2114,7 @@ def _show_mark_examples_text() -> str:
         a value produced by @avibe/show-sdk's mark helpers.
 
         Examples:
-          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
+          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message 'Review this summary.'
           vibe show mark summary --session-id sesk8m4q2p7x --scope default --message-file ./comment.txt
         """
     )
@@ -6111,6 +6111,59 @@ def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskC
     )
 
 
+def _archive_deleted_bot_session(agent) -> dict:
+    """Archive the Session a deleted Agent's removed Bot left, through the service's own archive lifecycle.
+
+    No Bot can reconnect to it any more. The Agent is already deleted, so nothing here fails the command: the
+    returned payload fields say whether the Session is archived as stored, and how to finish when it is not.
+    """
+    from storage.resource_access_service import resolve_resource_access_context
+    from vibe import api, internal_client
+
+    session_id = api.deleted_bot_session_id(agent)
+    # A Bot's Session is its owner's (``docs/plans/bots.md`` D1): only the owner's deletion archives it.
+    if not session_id or not resolve_resource_access_context(None).is_instance_owner:
+        return {}
+    try:
+        result = asyncio.run(internal_client.archive_session(session_id))
+    except Exception as exc:  # noqa: BLE001 - the Agent is deleted; what is stored says what became of the Session
+        logger.warning("Archiving the Session %s of a deleted Agent had no answer: %s", session_id, exc)
+        result = None
+    body = result.get("body") if isinstance(result, dict) and isinstance(result.get("body"), dict) else {}
+    session = body.get("session") if isinstance(body.get("session"), dict) else {}
+    confirmed = isinstance(result, dict) and result.get("status_code") == 200 and session.get("status") == "archived"
+    stored = True if confirmed else api.session_is_archived(session_id)
+    if not stored:
+        return {
+            "bot_session": {"id": session_id, "archived": stored},
+            "hint": (
+                f"Its Bot's Session {session_id} may have been kept; `DELETE /api/sessions/{session_id}` on the Web "
+                "API archives it while the service runs."
+            ),
+        }
+    fields: dict = {"bot_session": {"id": session_id, "archived": True}}
+    if not confirmed:
+        fields["warnings"] = [
+            f"{session_id} is archived but its reply was lost, so Vault grants it revoked were not released from "
+            "the running agent."
+        ]
+    scopes = session.get("revoked_vault_grant_scopes") or []
+    try:
+        if scopes:
+            api.release_vault_agent_scopes(scopes, reason=f"archive_session:{session_id}")
+    except Exception as exc:  # noqa: BLE001 - the archive committed; the release is cleanup
+        logger.warning("Releasing the Vault grants of the archived Session %s failed: %s", session_id, exc)
+        fields.setdefault("warnings", []).append(
+            f"The Vault grants of {session_id} were revoked but not released from the running agent."
+        )
+    try:
+        # As the Web archive does: a Turn still running in it stops (best effort).
+        asyncio.run(internal_client.cancel_dispatch(session_id))
+    except Exception:  # noqa: BLE001 - best effort, as on the Web
+        logger.debug("Cancelling a running Turn of %s failed", session_id, exc_info=True)
+    return fields
+
+
 def cmd_agent_remove(args):
     from core.vibe_agents import AgentArchiveError, AgentReferenceRewriteError
 
@@ -6135,8 +6188,10 @@ def cmd_agent_remove(args):
             raise _agent_reference_rewrite_cli_error(exc) from exc
         if archived is None:
             raise TaskCliError(f"agent '{args.name}' not found", code="agent_not_found", details={"agent": args.name})
+        bot_session = _archive_deleted_bot_session(archived.agent)
         _print_cli_payload(
             "agent",
+            **bot_session,
             removed_agent=archived.original_name,
             archived_agent=_agent_payload(archived.agent, brief=True),
             references=archived.references,
@@ -8554,12 +8609,29 @@ def _query_records_text(result, page_fields: dict, *, rows: list[dict], cut_note
         lines.append("(0 rows)")
     if cut_note:
         lines.append(cut_note)
-    pagination = page_fields["pagination"]
-    if pagination.get("next_command"):
-        lines.append(f"next_command: {pagination['next_command']}")
-    elif page_fields.get("message"):
+    if page_fields.get("message"):
         lines.append(page_fields["message"])
     return "\n".join(lines)
+
+
+def _query_more_rows_message(result, shown: int, page_fields: dict, *, with_command: bool) -> str | None:
+    """The one line saying a page cut rows off: which rows it shows and how to read on.
+
+    Text output ends it with the next page's command; JSON keeps that command in
+    ``pagination.next_command`` alone.
+    """
+
+    pagination = page_fields["pagination"]
+    if not pagination.get("has_more"):
+        return None
+    limit = result.pagination.limit
+    first = (result.pagination.page - 1) * limit + 1
+    line = f"Rows {first}-{first + shown - 1} shown; more match."
+    if limit < MAX_PAGE_LIMIT:
+        line += f" --limit reads up to {MAX_PAGE_LIMIT} per page."
+    if not pagination.get("next_command"):
+        return f"{line} Add --page {pagination['next_page']} --limit {limit} to continue."
+    return f"{line} Next page: {pagination['next_command']}" if with_command else line
 
 
 def cmd_data_query(args):
@@ -8599,6 +8671,9 @@ def cmd_data_query(args):
             command=command,
             include_next_command=not omit_next_command,
         )
+        more = _query_more_rows_message(result, len(rows), page_fields, with_command=text_format)
+        if more:
+            page_fields["message"] = more
         if text_format:
             print(_query_records_text(result, page_fields, rows=rows, cut_note=cut_note))
             return 0
@@ -9823,6 +9898,30 @@ def _vault_page_payload(
     return result.items, _paginated_fields(result, command=command)["pagination"]
 
 
+_PROTECTED_BITCOIN_FORMS = (
+    ("p2tr", "Taproot key-path"),
+    ("p2pkh", "Legacy (with the parent transaction)"),
+    ("p2wpkh", "Native SegWit (with the BIP143 amount)"),
+)
+
+
+def _protected_bitcoin_signing_warning(secret: dict) -> str:
+    """Name only the input forms the projected, pin-derived ``bitcoin_address_types`` list."""
+
+    if secret.get("signer_kind") == "hd-seed":
+        listed = {kind for account in secret.get("accounts") or [] for kind in account.get("bitcoin_address_types") or []}
+    else:
+        listed = set(secret.get("bitcoin_address_types") or [])
+    forms = [label for kind, label in _PROTECTED_BITCOIN_FORMS if kind in listed]
+    if not forms:
+        return "No bitcoin_address_types are listed for this protected key; do not request Bitcoin signatures."
+    return (
+        f"Protected Bitcoin signing covers only the listed bitcoin_address_types: {', '.join(forms)}, "
+        "each with its typed, bounded signing context. Every request needs fresh browser approval; "
+        "the network is a requester-selected label, and signing does not broadcast."
+    )
+
+
 def _vault_secret_row(secret: dict) -> dict:
     """One ``vibe vault list`` / ``find`` row: what an Agent picks a secret by, never its value.
 
@@ -9872,7 +9971,7 @@ def _vault_secret_row(secret: dict) -> dict:
             "bitcoin_signing_warning": (
                 None
                 if secret.get("signing_curve") == "ed25519"
-                else "Protected Bitcoin signing is limited to typed, bounded Taproot key-path approvals in a compatible sandbox; legacy and SegWit-v0 inputs remain unsupported, and network labels are requester-selected metadata."
+                else _protected_bitcoin_signing_warning(secret)
                 if secret.get("kind") == "keypair" and secret.get("protection") == "protected"
                 else "Taproot requires schnorr-secp256k1-bip341-keypath and a supporting avault build; raw BIP340 cannot spend these Taproot addresses."
                 if secret.get("kind") == "keypair" and (secret.get("signing_addresses") or {}).get("btc_taproot")
@@ -11923,6 +12022,54 @@ def cmd_vault_await(args):
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
+        return 1
+    except Exception as exc:
+        _print_task_error(exc, help_command=help_command)
+        return 1
+
+
+def cmd_vault_withdraw(args):
+    """Withdraw a pending Vault request of this Session, made by mistake.
+
+    The caller is the Session running the command, never a ``--session-id`` it names, and it
+    withdraws only requests recorded under it; the user can still deny any card.
+    """
+    from vibe import api
+    from storage import vault_service
+
+    help_command = "vibe vault withdraw --help"
+    request_id = str(getattr(args, "request_id", "") or "").strip()
+    session_id = _default_session_id_from_caller(caller_context_from_env())
+    try:
+        engine = _open_vault_engine()
+        with engine.begin() as conn:
+            request = vault_service.withdraw_request(conn, request_id, session_id=session_id)
+        api._publish_vaults_updated(
+            scope="request", request_id=request_id, request_status=request.get("status"),
+            secret_name=request.get("secret_name"),
+        )
+        if not request.get("withdrawn"):
+            raise vault_service.InvalidRequestError("request has expired")
+        _print_cli_payload("vault_request_withdrawn", request_id=request_id, status=request.get("status"))
+        return 0
+    except vault_service.RequestNotFoundError:
+        _print_task_error(TaskCliError(f"request '{request_id}' not found", code="request_not_found", help_command=help_command))
+        return 1
+    except vault_service.RequestNotYoursError:
+        _print_task_error(TaskCliError(
+            f"request '{request_id}' does not belong to this Session",
+            code="request_not_yours",
+            hint="A Session withdraws only its own requests; the user can deny any request on its card.",
+            help_command=help_command,
+        ))
+        return 1
+    except vault_service.InvalidRequestError as exc:
+        _print_task_error(TaskCliError(
+            f"request '{request_id}' cannot be withdrawn: {exc}",
+            code="request_not_pending",
+            help_command=help_command,
+            details={"request_id": request_id},
+        ))
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command=help_command)
@@ -15625,6 +15772,8 @@ def cmd_start(
 ):
     from vibe import runtime
 
+    # A service failure recorded from here on belongs to this start.
+    invoked_at = time.time()
     _guard_cli_default_state_migration()
     paths.ensure_data_dirs()
     config = _ensure_config()
@@ -15774,7 +15923,7 @@ def cmd_start(
             detail = (
                 "service process is still starting"
                 if alive
-                else "service process exited before startup completed"
+                else runtime.service_exited_detail(service_pid)
             )
             runtime.write_status(
                 "starting" if alive else "error",
@@ -15786,8 +15935,13 @@ def cmd_start(
         elif runtime.pid_alive(service_pid):
             runtime.write_status("starting", "service process is still starting", service_pid, ui_pid)
         else:
-            runtime.write_status("error", "service process exited before startup completed", service_pid, ui_pid)
-            raise RuntimeError(f"Vibe service process pid={service_pid} exited before acquiring the service lock")
+            detail = runtime.service_exited_detail(service_pid)
+            runtime.write_status("error", detail, service_pid, ui_pid)
+            failure = runtime.service_start_failure(service_pid)
+            raise RuntimeError(
+                failure["detail"] if failure
+                else f"Vibe service process pid={service_pid} exited before acquiring the service lock"
+            )
 
         ui_url = "http://{}:{}".format(config.ui.setup_host, config.ui.setup_port)
 
@@ -15860,8 +16014,11 @@ def cmd_start(
         if not startup_committed:
             runtime.roll_back_start(service_start, ui_start)
         if desktop_receipt and not startup_committed:
+            failure = runtime.service_start_failure(since=invoked_at)
             reason = (
                 "runtime_claim_refused" if isinstance(exc, runtime.DesktopRuntimeClaimRefused)
+                # The Desktop window shows the same sentence the CLI prints.
+                else failure["receipt_reason"] if failure is not None
                 else "runtime_not_ready" if isinstance(exc, RuntimeError)
                 else "startup_failed"
             )
@@ -16551,6 +16708,30 @@ def cmd_remote_direct(args):
     from vibe import remote_access
 
     action = getattr(args, "direct_command", None)
+    if action == "relay":
+        from vibe.authorization import current_invocation_authority
+
+        if current_invocation_authority() is not None:
+            print("Run this command from the instance host shell.", file=sys.stderr)
+            return 1
+        enabled = args.trial_state == "on"
+        from vibe.connection_settings import ConnectionError, adopt_host_enrollment, enroll_from_host, journal as connection_journal
+        from config.v2_config import config_file_lock
+
+        with config_file_lock():
+            # Consume a released true *before* the first explicit off; neither
+            # CLI off nor a Web write can revoke or establish enrollment.
+            adopt_host_enrollment()
+            if enabled:
+                try:
+                    enroll_from_host(V2Config.load())
+                except ConnectionError as exc:
+                    print(exc.code, file=sys.stderr)
+                    return 1
+            config = update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "public_relay_trial", enabled))
+            connection_journal.legacy_supersede(config, {"public_relay_trial"})
+        print(f"Public relay trial setting: {args.trial_state}. Direct-path permission and installation are unchanged.")
+        return 0
     if action == "install":
         from core.direct_transport_runtime import DirectTransportRuntimeManager
 
@@ -16568,7 +16749,29 @@ def cmd_remote_direct(args):
         def apply(config) -> None:
             config.remote_access.vibe_cloud.direct = enabled
 
-        config = update_config_fields(apply)
+        from vibe.authorization import current_invocation_authority
+        from vibe.connection_settings import ConnectionError, journal as connection_journal
+        from config.v2_config import config_file_lock
+
+        authority = current_invocation_authority()
+        if authority is not None:
+            from vibe.connection_runtime import delegated_direct_change
+            try:
+                result = delegated_direct_change(authority, enabled)
+            except ConnectionError as exc:
+                print(exc.code, file=sys.stderr)
+                return 1
+            except (OSError, ValueError, KeyError, TimeoutError):
+                print('Connection change could not be confirmed. Read connection settings before retrying.', file=sys.stderr)
+                return 1
+            if getattr(args, 'json', False):
+                _print_cli_payload('remote_direct', **result)
+            else:
+                print('Direct setting accepted.' if result['accepted'] else 'Direct setting saved.')
+            return 0
+        with config_file_lock():
+            config = update_config_fields(apply)
+            connection_journal.legacy_supersede(config, {"direct"})
         result = remote_access.status(config)
         result["direct_setting_changed"] = enabled
     else:
@@ -17884,6 +18087,7 @@ def cmd_upgrade():
         get_safe_cwd,
         is_desktop_managed_runtime,
         launcher_is_current_process,
+        record_install_locked,
         restart_is_pending,
         should_skip_show_runtime_prepare,
         upgrade_download_help,
@@ -17946,6 +18150,7 @@ def cmd_upgrade():
             if plan.activation is not None and activation_block_reason(plan.activation) == "superseded":
                 print("\033[31mUpgrade was superseded by another activation; retry the upgrade.\033[0m")
                 return 1
+            record_install_locked(info.get("latest"))
             result = execute_upgrade_plan(
                 plan,
                 run=subprocess.run,
@@ -18814,6 +19019,9 @@ def _cmd_restart_with_delay(delay_seconds: float) -> int:
 def build_parser():
     parser = VibeArgumentParser(prog="vibe")
     subparsers = parser.add_subparsers(dest="command")
+    from vibe.cli_mobile import add_mobile_parser
+
+    add_mobile_parser(subparsers)
     # ``vibe mcp`` is dispatched from raw argv in ``main`` (server and tool names
     # are dynamic); this entry only lists it in ``vibe --help``.
     subparsers.add_parser("mcp", help="Discover and call generated MCP server tools (vibe mcp --help)", add_help=False)
@@ -18868,6 +19076,76 @@ def build_parser():
     # first. See `_dispatch_restart_supervisor`.
     status_parser = subparsers.add_parser("status", help="Show service status")
     _add_json_noop(status_parser)
+    schedule_parser = subparsers.add_parser(
+        "schedule",
+        help="Create, inspect, or cancel a system alarm or reminder on a connected iPhone",
+    )
+    schedule_subparsers = schedule_parser.add_subparsers(
+        dest="schedule_command",
+        metavar="{create,status,cancel}",
+    )
+    schedule_subparsers.required = True
+    schedule_create_parser = schedule_subparsers.add_parser(
+        "create",
+        help="Request a one-time system alarm or reminder",
+    )
+    schedule_create_parser.add_argument(
+        "--kind",
+        choices=("alarm", "reminder"),
+        required=True,
+        help="System item to create.",
+    )
+    schedule_create_parser.add_argument("--title", required=True, help="Title shown by the system item.")
+    schedule_create_parser.add_argument(
+        "--at",
+        dest="fire_at",
+        required=True,
+        help="Exact ISO-8601 time with a UTC offset.",
+    )
+    schedule_create_parser.add_argument(
+        "--time-zone",
+        required=True,
+        help="IANA time zone for the requested wall-clock time.",
+    )
+    schedule_create_parser.add_argument(
+        "--operation-id",
+        required=True,
+        help=(
+            "Stable idempotency key chosen by the Agent. Reuse it for status "
+            "and cancel; do not create a replacement while awaiting_device."
+        ),
+    )
+    schedule_create_parser.add_argument(
+        "--expires-in",
+        type=int,
+        default=300,
+        help=(
+            "Seconds the iPhone may first claim this request (30-900; default "
+            "300). Once claimed, its result may arrive after this window."
+        ),
+    )
+    _add_json_noop(schedule_create_parser)
+    for schedule_action, schedule_help in (
+        ("status", "Read one system schedule operation, including awaiting_device"),
+        ("cancel", "Cancel a system schedule by its existing operation ID"),
+    ):
+        schedule_leaf = schedule_subparsers.add_parser(
+            schedule_action,
+            help=schedule_help,
+        )
+        schedule_leaf.add_argument("operation_id", help="Operation ID returned by create.")
+        if schedule_action == "cancel":
+            schedule_leaf.add_argument(
+                "--expires-in",
+                type=int,
+                default=300,
+                help=(
+                    "Seconds the iPhone may first claim this cancellation "
+                    "(30-900; default 300). A claimed cancellation keeps "
+                    "waiting for its device result."
+                ),
+            )
+        _add_json_noop(schedule_leaf)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Run diagnostics and optional safe repairs",
@@ -19276,7 +19554,7 @@ def build_parser():
     )
     remote_direct_subparsers = remote_direct_parser.add_subparsers(
         dest="direct_command",
-        metavar="{on,off,status,install}",
+        metavar="{on,off,status,install,relay}",
         required=True,
     )
     for direct_action, direct_help in (
@@ -19292,6 +19570,10 @@ def build_parser():
                 error_help_command=f"vibe remote direct {direct_action} --help",
             )
         )
+
+    relay_parser = remote_direct_subparsers.add_parser("relay", help="Configure optional relay use on this host")
+    trial_parser = relay_parser.add_subparsers(dest="relay_command", required=True).add_parser("public-trial")
+    trial_parser.add_argument("trial_state", choices=("on", "off"))
 
     direct_install_parser = remote_direct_subparsers.add_parser(
         "install",
@@ -20121,14 +20403,14 @@ def build_parser():
         "sign",
         help="Sign a digest or a Solana message (protected and ask-first standard keys need approval)",
         description=(
-            "HD needs --chain. secp256k1 uses --digest; Solana uses exact --message-hex, not a hash. "
-            "Protected/ask-first keys need approval. For Solana, use a durable nonce "
-            "(use-avibe-vault recipe); the caller creates and funds the nonce account. "
-            'Protected Solana context: {"kind":"solana-transaction-v1","messageHex":"HEX"} '
-            "matching --message-hex."
+            "HD needs --chain. secp256k1 takes --digest; Solana takes exact --message-hex, not a hash. "
+            "Protected/ask-first keys need approval (Solana: use a durable nonce; the caller creates and funds the nonce account). "
+            'Protected contexts include {"kind":"solana-transaction-v1","messageHex":"HEX"} matching --message-hex; '
+            "bitcoin-taproot-keypath-v1 with schnorr-secp256k1-bip341-keypath; bitcoin-p2wpkh-v1/bitcoin-p2pkh-v1 "
+            "with ecdsa-secp256k1-der (p2pkh holds its parent tx: use --signing-context-file)."
         ),
         epilog=(
-            "Example ($MESSAGE_HEX: full serialized message, without signatures):\n"
+            "Example ($MESSAGE_HEX: unsigned serialized message):\n"
             '  vibe vault sign SOLANA_KEY --scheme ed25519 --message-hex "$MESSAGE_HEX"'
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -20137,7 +20419,7 @@ def build_parser():
     vault_sign_parser.add_argument("name", help="Keypair secret name")
     vault_sign_parser.add_argument("--chain", choices=["evm", "bitcoin", "solana"], help="HD only; selects chain and scheme")
     vault_sign_parser.add_argument("--account", type=int, help="HD index 0..19 (default: 0)")
-    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="Default p2tr; protected:p2tr only")
+    vault_sign_parser.add_argument("--address-type", choices=["p2pkh", "p2wpkh", "p2tr"], help="HD only, default p2tr; one of bitcoin_address_types")
     vault_sign_parser.add_argument("--digest", help="32-byte digest as hex (secp256k1 schemes)")
     vault_sign_parser.add_argument(
         "--message-hex",
@@ -20156,22 +20438,22 @@ def build_parser():
         help="Ordinary key scheme; HD chain/type fixes it",
     )
     vault_sign_parser.add_argument("--session-id", help="Session ID (Agent default: AVIBE_SESSION_ID)")
-    vault_sign_parser.add_argument("--skill", help="Skill requesting the signature")
+    vault_sign_parser.add_argument("--skill", help="Requesting Skill")
     vault_sign_parser.add_argument("--command", dest="operation_command", help="Operation shown to the user")
     vault_sign_parser.add_argument("--egress", help="Egress description shown to the user")
     vault_signing_context_input = vault_sign_parser.add_mutually_exclusive_group()
     vault_signing_context_input.add_argument(
         "--signing-context-json", metavar="JSON",
-        help="Protected signing context JSON",
+        help="Protected context JSON",
     )
     vault_signing_context_input.add_argument(
         "--signing-context-file", metavar="PATH",
-        help="Same context: regular UTF-8 file, max 2,162,688 bytes",
+        help="Same, as a regular UTF-8 file (max 2,162,688 bytes)",
     )
     vault_sign_parser.add_argument(
         "--no-callback",
         action="store_true",
-        help="Don't auto-resume; re-check the signature with 'vault await'",
+        help="Don't auto-resume; check later with 'vault await'",
     )
     _add_json_noop(vault_sign_parser)
 
@@ -20185,6 +20467,20 @@ def build_parser():
     vault_await_parser.add_argument("request_id", help="Vault request ID")
     vault_await_parser.add_argument("--wait", type=float, default=0, metavar="SECONDS", help="Poll for a decision up to SECONDS")
     _add_json_noop(vault_await_parser)
+
+    vault_withdraw_parser = vault_subparsers.add_parser(
+        "withdraw",
+        help="Withdraw a pending Vault request of this Session, made by mistake",
+        description=(
+            "End a still-pending request of this Session (provide, access, sign or delete), in either tier. "
+            "Its card leaves the pending list and a later approval is refused. A request being signed, "
+            "decided or expired is left as it is."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault withdraw --help",
+    )
+    vault_withdraw_parser.add_argument("request_id", help="Vault request ID")
+    _add_json_noop(vault_withdraw_parser)
 
     vault_export_parser = vault_subparsers.add_parser(
         "export",
@@ -20985,6 +21281,7 @@ def build_parser():
     watch_remove_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
     _add_json_noop(watch_remove_parser)
     _hide_subcommands(subparsers, "desktop")
+    subparsers.metavar = "COMMAND"
     return parser
 
 
@@ -21062,6 +21359,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
         activation_block_reason,
         atomic_upgrade_lock,
         discard_atomic_uv_install_generation,
+        resume_deferred_install_locked,
     )
 
     parser = argparse.ArgumentParser(add_help=False)
@@ -21106,6 +21404,7 @@ def _dispatch_deferred_upgrade_activation(argv: list[str]) -> int:
                 discard_atomic_uv_install_generation(activation.candidate_launcher)
                 print("deferred upgrade activation was superseded by another activation", file=sys.stderr)
                 return 1
+            resume_deferred_install_locked(activation.candidate_launcher)
             try:
                 activation_outcome = activate_upgrade_candidate(activation)
                 activated = True
@@ -21244,6 +21543,12 @@ def _dispatch_installer_activation(argv: list[str]) -> int:
 #: later fails closed until it is classified; ``test_cli_command_admission``
 #: walks the parser so that classification cannot be forgotten silently.
 _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
+    ("mobile", "health", "status"): None,
+    ("mobile", "health", "read"): None,
+    ("mobile", "health", "connect"): None,
+    ("mobile", "health", "revoke"): None,
+    ("mobile", "requests", "show"): None,
+    ("mobile", "requests", "await"): None,
     # Public facts, unchanged: a version and an update check answer the same
     # thing to anyone, and status is not gated merely because doctor is.
     ("version",): None,
@@ -21298,6 +21603,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "direct", "on"): "owner",
     ("remote", "direct", "off"): "owner",
     ("remote", "direct", "status"): "member",
+    ("remote", "direct", "relay", "public-trial"): "owner",
     ("remote", "direct", "install"): "owner",
     # Launch at login writes a login item on this machine, outside the instance.
     ("autostart", "on"): "owner",
@@ -21333,6 +21639,9 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("runs", "list"): "editor",
     ("runs", "show"): "editor",
     ("runs", "cancel"): "editor",
+    ("schedule", "create"): "editor",
+    ("schedule", "status"): "editor",
+    ("schedule", "cancel"): "editor",
     ("harness", "status"): "editor",
     ("task", "add"): "editor",
     ("task", "update"): "editor",
@@ -21372,6 +21681,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "access"): "editor",
     ("vault", "sign"): "editor",
     ("vault", "await"): "editor",
+    ("vault", "withdraw"): "editor",
     ("vault", "request"): "editor",
     ("vault", "inject"): "editor",
     ("vault", "export"): "editor",
@@ -21620,8 +21930,14 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
         sys.exit(_cmd_restart_with_delay(args.delay_seconds))
     if args.command == "status":
         sys.exit(cmd_status())
+    if args.command == "schedule":
+        sys.exit(_control_command(f"schedule.{args.schedule_command}", args))
     if args.command == "skill":
         sys.exit(cmd_skill(args))
+    if args.command == "mobile":
+        from vibe.cli_mobile import cmd_mobile
+
+        sys.exit(cmd_mobile(args))
     if args.command == "computer":
         try:
             sys.exit(cmd_computer(args))
@@ -21779,6 +22095,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_vault_sign(args))
         if args.vault_command == "await":
             sys.exit(cmd_vault_await(args))
+        if args.vault_command == "withdraw":
+            sys.exit(cmd_vault_withdraw(args))
         if args.vault_command == "request":
             sys.exit(cmd_vault_request(args))
         if args.vault_command == "export":

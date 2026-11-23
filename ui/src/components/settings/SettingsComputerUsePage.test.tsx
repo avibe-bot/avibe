@@ -566,17 +566,16 @@ describe('readComputerUseStatus host', () => {
 });
 
 describe('SettingsComputerUsePage on a Windows host', () => {
-  it('labels the feature Preview and shows one Computer Use switch, without macOS permission steps', async () => {
+  it('states the Windows limitations and shows one Computer Use switch, without macOS permission steps', async () => {
     enterSwitchShell();
     statusSequence({ ...windowsHost, enabled: false, status: 'off', reason: 'never_enabled' });
 
     render(<SettingsComputerUsePage />);
 
     expect((await switchControl()).getAttribute('aria-checked')).toBe('false');
-    expect(screen.getByTestId('computer-use-preview-badge').textContent)
-      .toBe('settings.computerUse.windows.previewBadge');
+    expect(screen.getByText('settings.computerUse.windows.limitations')).toBeTruthy();
     expect(screen.getByText('settings.computerUse.windows.subtitle')).toBeTruthy();
-    // The switch sits in the Preview card's header; there is no separate switch card.
+    // The switch sits in the Windows card's header; there is no separate switch card.
     expect(screen.getByTestId('computer-use-windows-notes').closest('section')
       ?.contains(screen.getByRole('switch'))).toBe(true);
     // The status band points at this switch, not only the native control.
@@ -599,7 +598,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     const control = await switchControl();
     expect(control.getAttribute('aria-checked')).toBe('true');
     expect((control as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId('computer-use-preview-badge')).toBeTruthy();
+    expect(screen.getByText('settings.computerUse.windows.limitations')).toBeTruthy();
     expect(screen.getByTestId('computer-use-remote-notice').textContent)
       .toBe('settings.computerUse.windows.remoteNotice');
     expect(screen.getByText('workbench.home.computerUse.sessionLockedDetail')).toBeTruthy();
@@ -614,7 +613,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
 
     await waitFor(() => expect(stepStates().accessibility).toBe('current'));
     expect(Object.keys(stepStates())).toEqual([...COMPUTER_USE_GUIDE_STEPS]);
-    expect(screen.queryByTestId('computer-use-preview-badge')).toBeNull();
+    expect(screen.queryByText('settings.computerUse.windows.limitations')).toBeNull();
     expect(screen.getByTestId('computer-use-remote-notice').textContent)
       .toBe('settings.computerUse.remoteNotice');
   });
@@ -627,7 +626,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     render(<SettingsComputerUsePage />);
 
     await waitFor(() => expect(stepStates().screenRecording).toBe('current'));
-    expect(screen.queryByTestId('computer-use-preview-badge')).toBeNull();
+    expect(screen.queryByText('settings.computerUse.windows.limitations')).toBeNull();
     expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
   });
 
@@ -868,7 +867,7 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     expect(screen.queryByText('settings.computerUse.windows.switch.offDetail')).toBeNull();
   });
 
-  it('keeps the unsupported notice for an unsupported Windows host, in Windows terms and in Preview', async () => {
+  it('keeps the unsupported notice for an unsupported Windows host, in Windows terms', async () => {
     enterActionableShell();
     statusSequence({ supported: false, host_platform: 'windows', status: 'unavailable', reason: 'unsupported_host' });
 
@@ -877,13 +876,12 @@ describe('SettingsComputerUsePage on a Windows host', () => {
     const notice = await screen.findByTestId('computer-use-unsupported');
     expect(notice.textContent).toContain('settings.computerUse.windows.unsupportedDetail');
     expect(notice.textContent).not.toContain('settings.computerUse.unsupportedDetail');
-    expect(screen.getByTestId('computer-use-preview-badge')).toBeTruthy();
     expect(screen.queryByTestId('computer-use-steps')).toBeNull();
   });
 
   it('ships the Windows copy in both locales without macOS permission guidance', () => {
-    expect(en.settings.computerUse.windows.previewBadge).toBe('Preview');
-    expect(zh.settings.computerUse.windows.previewBadge).toBe('预览');
+    expect(en.settings.computerUse.windows.limitations).toContain('multiple monitors');
+    expect(zh.settings.computerUse.windows.limitations).toContain('多显示器');
     for (const locale of [en, zh]) {
       const { switch: switchCopy, ...copy } = locale.settings.computerUse.windows;
       for (const text of [
@@ -893,10 +891,9 @@ describe('SettingsComputerUsePage on a Windows host', () => {
       ]) {
         expect(text).toBeTruthy();
         expect(text).not.toMatch(/\bMac\b|System Settings|系统设置|菜单栏|menu bar/);
+        expect(text).not.toMatch(/\bPreview\b|预览/);
       }
     }
-    expect(en.workbench.home.setup.computer_use_windows.title).toContain('Preview');
-    expect(zh.workbench.home.setup.computer_use_windows.title).toContain('预览');
     expect(en.settings.computerUse.windows.elevated).toContain('administrator');
     expect(zh.settings.computerUse.windows.elevated).toContain('管理员');
     expect(zh.settings.computerUse.windows.stop)

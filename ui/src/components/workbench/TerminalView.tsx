@@ -26,6 +26,7 @@ import {
   subscribeNativeDirectBaseline,
 } from '@/lib/native';
 import { useLatestRef } from '@/lib/useLatestRef';
+import { trackPageSocket } from '@/lib/pageConnections';
 import {
   REMOTE_AUTH_STATE_EVENT,
   reportRemoteAuthorizationState,
@@ -372,6 +373,7 @@ export const TerminalView: React.FC<{
     setExitCode(null);
     setMatches({ index: -1, count: 0 }); // a reconnect rebuilds the SearchAddon; drop the stale count
     const ws = new WebSocket(buildWsUrl(sessionId, cwd));
+    trackPageSocket(ws);
     ws.binaryType = 'arraybuffer';
     wsRef.current = ws;
     if (persistentSessionIdRef.current !== sessionId) {

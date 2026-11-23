@@ -276,22 +276,53 @@ def test_vault_skill_cli_examples_are_parser_backed():
         assert parsed.command == "vault"
 
 
-@pytest.mark.parametrize("protection", ["standard", "protected"])
+PROTECTED_BITCOIN_FORMS = {
+    "p2tr": "Taproot key-path",
+    "p2pkh": "Legacy (with the parent transaction)",
+    "p2wpkh": "Native SegWit (with the BIP143 amount)",
+}
+
+
+@pytest.mark.parametrize(
+    "protection,pin,types",
+    [
+        ("standard", "current", ["p2pkh", "p2wpkh", "p2tr"]),
+        ("protected", "current", ["p2pkh", "p2wpkh", "p2tr"]),
+        ("protected", "7f320bc014c0a2ee7d65f9c48c8b91b7e0c0fcc0effbfb3a36d3a3c30fa7c08b", ["p2tr"]),
+        ("protected", "9f1264cb022625f1d3880c16019cc4ddcf515fce252193ad482714fe30ad046a", ["p2tr"]),
+        ("protected", "unknown", []),
+    ],
+)
 @pytest.mark.parametrize("command", [cli.cmd_vault_list, cli.cmd_vault_find])
-def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, protection, command):
+def test_keypair_listing_warns_about_bitcoin_signing_capability(capfd, monkeypatch, protection, pin, types, command):
+    from vibe import vault_sandbox_release
+
+    if pin == "unknown":
+        monkeypatch.setattr(vault_sandbox_release, "CAPABILITIES_BY_PIN_ID", {})
+    elif pin != "current":
+        legacy_pins = json.loads((Path(__file__).parent / "fixtures" / "vault-sandbox-legacy-pins.json").read_text())
+        monkeypatch.setattr(vault_sandbox_release, "load_packaged_pin", lambda: legacy_pins[pin])
     _create_standard_secret("BTC_KEY", kind="keypair", protection=protection, public_meta=PROTECTED_SIGNING_PUBLIC_META)
     assert command(_ns()) == 0
     secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
+    assert secret.get("bitcoin_address_types", []) == types
     assert "solana_signing_note" not in secret
     warning = secret["bitcoin_signing_warning"]
-    if protection == "protected":
-        assert "typed" in warning
-        assert "legacy" in warning
-        assert "requester-selected metadata" in warning
-    else:
+    if protection == "standard":
+        assert secret["signing_addresses"]["btc_taproot"].startswith("bc1p")
         assert "schnorr-secp256k1-bip341-keypath" in warning
         assert "raw BIP340 cannot spend" in warning
+        return
+    assert "unsupported" not in warning
+    for address_type, form in PROTECTED_BITCOIN_FORMS.items():
+        assert (form in warning) == (address_type in types)
+    if types:
+        assert "typed, bounded" in warning
+        assert "fresh browser approval" in warning
+        assert "requester-selected label" in warning
+        assert "does not broadcast" in warning
+    else:
+        assert "do not request Bitcoin signatures" in warning
 
 
 def test_vault_parser_does_not_expose_plaintext_set_command():
@@ -309,6 +340,23 @@ def test_vault_access_command_flag_does_not_shadow_root_command():
     assert args.vault_command == "access"
     assert args.operation_command == "deploy sync"
     assert cli._vault_cli_delivery(args)["command"] == "deploy sync"
+
+
+def test_vault_sign_help_names_the_accepted_protected_contexts_and_hd_only_type(capfd):
+    """Agents copy context kinds, schemes and flags from `vault sign --help`; each must be one the signer accepts."""
+    from storage import vault_bitcoin, vault_solana
+
+    with pytest.raises(SystemExit) as exc:
+        cli.build_parser().parse_args(["vault", "sign", "--help"])
+    assert exc.value.code == 0
+    help_text = " ".join(capfd.readouterr().out.split())
+    for kind in (vault_solana.CONTEXT_KIND, *vault_bitcoin.ECDSA_CONTEXT_TYPES):
+        assert kind in help_text
+    taproot = f"{vault_bitcoin.BITCOIN_CONTEXT_KIND} with {vault_bitcoin.BITCOIN_SCHEME}"
+    ecdsa = f"bitcoin-p2wpkh-v1/bitcoin-p2pkh-v1 with {vault_bitcoin.ECDSA_SCHEME}"
+    assert taproot in help_text and ecdsa in help_text
+    assert "--signing-context-file" in help_text
+    assert "--address-type {p2pkh,p2wpkh,p2tr} HD only" in help_text
 
 
 def test_vault_sign_command_flag_does_not_shadow_root_command():
@@ -828,6 +876,94 @@ def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
     assert payload["request"]["delivery"]["skill"] == "deploy"
     assert payload["request"]["card"]["skill"] == "deploy"
     assert payload["request"]["status"] == "pending"
+
+
+@pytest.mark.parametrize("tier", ["protected", "standard"])
+def test_an_agent_withdraws_only_its_own_pending_request(tier, capfd, monkeypatch):
+    """3.2.8: an Agent withdraws a pending request of its own Session, in either tier; another Session
+    cannot, a request no longer pending stays, and an approval pressed after the withdrawal fails closed."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="OOPS_KEY", protection=tier, sealed=_sealed(tier))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    assert cli.cmd_vault_remove(cli.build_parser().parse_args(["vault", "remove", "OOPS_KEY"])) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+
+    def withdraw(session_id):
+        monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+        return cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))
+
+    assert withdraw("ses_other") == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+
+    assert withdraw("ses_cli") == 0
+    assert json.loads(capfd.readouterr().out)["status"] == "expired"
+    with cli._open_vault_engine().begin() as conn:
+        row = conn.execute(
+            vault_service.vault_requests.select().where(vault_service.vault_requests.c.id == request_id)
+        ).mappings().one()
+        assert (row["status"], row["callback_status"]) == ("expired", "skipped")
+        assert vault_service.list_requests(conn, status="pending") == []
+        # The user's Approve a moment later is refused, and nothing is deleted.
+        with pytest.raises(vault_service.InvalidRequestError):
+            vault_service.approve_delete_request(conn, request_id)
+        assert vault_service.get_secret_meta(conn, "OOPS_KEY")["name"] == "OOPS_KEY"
+
+    assert withdraw("ses_cli") == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+
+
+def test_a_request_made_for_another_session_is_that_sessions_to_withdraw(capfd, monkeypatch):
+    """A request made with --session-id belongs to that Session (its card and outcome are there); the
+    Session that typed the command and every other one is refused, as is a request with no Session."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("p"))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_cli")
+    args = cli.build_parser().parse_args(["vault", "access", "PROTECTED_KEY", "--session-id", "ses_target", "--no-callback"])
+    assert cli.cmd_vault_access(args) == 0
+    request_id = json.loads(capfd.readouterr().out)["request"]["id"]
+
+    def withdraw(session_id):
+        if session_id is None:
+            monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+        else:
+            monkeypatch.setenv("AVIBE_SESSION_ID", session_id)
+        return cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))
+
+    for other in ("ses_cli", "ses_other", None):
+        assert withdraw(other) == 1
+        assert json.loads(capfd.readouterr().err)["code"] == "request_not_yours"
+    assert withdraw("ses_target") == 0
+    assert json.loads(capfd.readouterr().out)["status"] == "expired"
+
+
+def test_withdraw_reads_the_session_as_the_card_and_callback_do_and_commits_an_overdue_expiry(capfd, monkeypatch):
+    """A request the Web intake recorded only in its delivery belongs to that Session too; one already past its
+    deadline is not withdrawn, but its expiry is committed as any overdue request's is."""
+    with cli._open_vault_engine().begin() as conn:
+        vault_service.create_secret(conn, name="PROTECTED_KEY", protection="protected", sealed=_sealed("p"))
+    monkeypatch.setenv("AVIBE_SESSION_ID", "ses_web")
+    ids = []
+    for _ in range(2):
+        assert cli.cmd_vault_access(cli.build_parser().parse_args(["vault", "access", "PROTECTED_KEY", "--no-callback"])) == 0
+        ids.append(json.loads(capfd.readouterr().out)["request"]["id"])
+    delivery_only, overdue = ids
+    table = vault_service.vault_requests
+    with cli._open_vault_engine().begin() as conn:
+        # The shape the Web intake writes when only ``delivery.session_id`` is given.
+        # A legacy empty container where the Session would be reads as none, as the card and callback read it.
+        conn.execute(table.update().where(table.c.id == delivery_only).values(
+            requester=json.dumps({"source": "web", "session_id": []})))
+        conn.execute(table.update().where(table.c.id == overdue).values(expires_at="2000-01-01T00:00:00+00:00"))
+
+    withdraw = lambda request_id: cli.cmd_vault_withdraw(cli.build_parser().parse_args(["vault", "withdraw", request_id]))  # noqa: E731
+    assert withdraw(delivery_only) == 0
+    capfd.readouterr()
+
+    assert withdraw(overdue) == 1
+    assert json.loads(capfd.readouterr().err)["code"] == "request_not_pending"
+    with cli._open_vault_engine().connect() as conn:
+        row = conn.execute(table.select().where(table.c.id == overdue)).mappings().one()
+        assert (row["status"], row["callback_status"]) == ("expired", "pending")
 
 
 def test_access_non_requestable_standard_secret_keeps_not_grantable_code(capfd):

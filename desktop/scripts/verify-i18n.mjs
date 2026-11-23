@@ -3,6 +3,8 @@ import { readFile } from 'node:fs/promises'
 
 const expectedNoticeCodes = [
   'adopted',
+  'database_disk_full',
+  'database_disk_full_unconfirmed',
   'invalid_origin',
   'launcher_exited',
   'preparing',
@@ -56,6 +58,19 @@ assert.deepEqual(
 assert.deepEqual(Object.keys(zh.notices).sort(), expectedNoticeCodes)
 
 const notificationKeys = [
+  'answer.alreadyChoice',
+  'answer.alreadyText',
+  'answer.answerAgain',
+  'answer.gone',
+  'answer.notDelivered',
+  'answer.notSent',
+  'answer.placeholder',
+  'answer.reply',
+  'answer.send',
+  'answer.stale',
+  'answer.unavailable',
+  'answerRequested.body',
+  'answerRequested.title',
   'approvalRequested.body',
   'approvalRequested.title',
   'runCanceled.body',

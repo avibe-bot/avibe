@@ -1902,6 +1902,14 @@ WATCH_HOOK_OUTCOME_METADATA_KEY = "watch_hook_outcome"
 WATCH_HOOK_OUTCOME_EVENT = "event"
 WATCH_HOOK_OUTCOME_WAITER_FAILURE = "waiter_failure"
 WATCH_HOOK_OUTCOME_CIRCUIT_REPAIR = "circuit_repair"
+#: A Watch that has kept retrying for long says so once (``core.watches``).
+WATCH_HOOK_OUTCOME_RETRYING = "retrying"
+#: The armed episode (``watch_lifetime_started_at``) a Watch's retrying notice was
+#: sent for: once per activation, across supervisor restarts and store retries.
+WATCH_RETRY_NOTICE_ACTIVATION_METADATA_KEY = "watch_retry_notice_activation"
+#: When the current run of consecutive retries began (the first retrying cycle's
+#: start); cleared by any other outcome and by a resume.
+WATCH_RETRYING_SINCE_METADATA_KEY = "watch_retrying_since"
 # Durable Watch admission state. These values move with the Agent Run outbox row,
 # so the definition owns them instead of the in-memory supervisor.
 WATCH_FOLLOW_UP_RUN_ID_METADATA_KEY = "watch_follow_up_run_id"
@@ -1973,6 +1981,21 @@ def _job_watch_id(conn: Any, job_id: Any) -> Optional[str]:
     return str(existing) if existing is not None else None
 
 
+def watch_activation_unchanged(activation: str):
+    """``run_definitions`` predicate: still the armed episode a cycle ran in."""
+    return func.coalesce(
+        func.json_extract(run_definitions.c.metadata_json, "$.watch_lifetime_started_at"), ""
+    ) == activation
+
+
+def _not_a_retrying_notice():
+    """A Watch's retrying notice informs; it fences neither its next cycle nor its
+    next report, read side or write side (#4015 review)."""
+    return func.coalesce(
+        func.json_extract(agent_runs.c.metadata_json, "$.watch_hook_outcome"), ""
+    ) != WATCH_HOOK_OUTCOME_RETRYING
+
+
 def watch_metadata_after_resume(
     metadata: dict[str, Any],
     *,
@@ -1988,6 +2011,7 @@ def watch_metadata_after_resume(
         raise JobWatchResumeRefused()
     updated = dict(metadata)
     updated.pop(WATCH_RECENT_EVENT_TIMESTAMPS_METADATA_KEY, None)
+    updated.pop(WATCH_RETRYING_SINCE_METADATA_KEY, None)
     updated[WATCH_LIFETIME_STARTED_AT_METADATA_KEY] = resumed_at
     incident = updated.get(WATCH_CIRCUIT_BREAKER_METADATA_KEY)
     if isinstance(incident, dict) and incident.get("status") == "tripped":
@@ -3860,6 +3884,7 @@ class SQLiteBackgroundTaskStore:
         expect: DefinitionWriteExpectation | None = None,
         expected_enabled_agent_id: Optional[str] = None,
         expected_reference_agent_id: Optional[str] = None,
+        extra_predicates: Sequence[Any] = (),
     ) -> bool:
         """Write a whole watch row. ``False`` means the write was REFUSED.
 
@@ -3874,6 +3899,7 @@ class SQLiteBackgroundTaskStore:
             definition_type="watch",
             expected_enabled_agent_id=expected_enabled_agent_id,
             expected_reference_agent_id=expected_reference_agent_id,
+            extra_predicates=extra_predicates,
         )
 
     def adopt_or_create_job_watch(self, payload: dict[str, Any]) -> str:
@@ -4032,6 +4058,7 @@ class SQLiteBackgroundTaskStore:
         *,
         expect: DefinitionWriteExpectation | None,
         run_payload: dict[str, Any],
+        extra_predicates: Sequence[Any] = (),
     ) -> bool:
         """A guarded watch stamp and the outbox row it authorises, ONE transaction.
 
@@ -4067,6 +4094,7 @@ class SQLiteBackgroundTaskStore:
                 select(agent_runs.c.id)
                 .where(agent_runs.c.definition_id == values["id"])
                 .where(agent_runs.c.run_type == "watch")
+                .where(_not_a_retrying_notice())
                 .where(
                     agent_runs.c.status.in_(
                         _status_query_values("queued")
@@ -4078,7 +4106,7 @@ class SQLiteBackgroundTaskStore:
             if unsettled is not None:
                 return False
             if not upsert_definition_in_connection(
-                conn, values, expect=expect, definition_type="watch"
+                conn, values, expect=expect, definition_type="watch", extra_predicates=extra_predicates,
             ):
                 return False
             _pin_run_to_definition_agent(
@@ -5308,6 +5336,8 @@ class SQLiteBackgroundTaskStore:
                 select(agent_runs)
                 .where(agent_runs.c.definition_id == definition_id)
                 .where(agent_runs.c.run_type == "watch")
+                # A retrying notice informs; it is not a follow-up the next cycle waits on.
+                .where(_not_a_retrying_notice())
                 .where(
                     agent_runs.c.status.in_(
                         _status_query_values("queued")
@@ -6689,6 +6719,17 @@ class SQLiteBackgroundTaskStore:
             }
             turn_id = str(terminal_provenance.get("turn_id") or "").strip()
             settles_failed_now = normalize_run_status(terminal_status) == "failed"
+            if turn_id and terminal_status:
+                from storage.message_deliveries import runs_carried_from_turn
+
+                # A Turn whose end carried an input on does not end its Run, whatever
+                # its output says, a steer accepted after it ended included (#4010 review).
+                carried = runs_carried_from_turn(
+                    conn, turn_id, rows.values(), terminal_provenance, predict=settles_failed_now,
+                )
+                loaded_run_ids = [run_id for run_id in loaded_run_ids if run_id not in carried]
+                if _durable_activity_blockers is not None:
+                    _durable_activity_blockers.difference_update(carried)
             # Project notice ownership in the same order as the terminal writes below.
             # A callback child whose earlier parent will acquire a notice is removed
             # before the remaining candidates use their stable lexical tie-breaker.

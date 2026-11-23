@@ -23,6 +23,7 @@ import type {
   RuntimeDependency,
   RuntimeHealth,
   Source,
+  SourceQuota,
   SourceQuotaValue,
   SourceState,
   SuppliedModel,
@@ -164,6 +165,8 @@ export type AgentSpec = {
   backend: AgentBackend;
   mode?: 'hub' | 'direct';
   cliPresent?: boolean;
+  /** Switched on in Settings · Backends; omitted reads as on. */
+  enabled?: boolean;
   menuKind?: 'fixed' | 'open';
   order?: Source[];
   routes?: Record<string, RouteSpec>;
@@ -182,16 +185,18 @@ export const eligible = (src: Source, backend: AgentBackend): boolean =>
 
 const modelSupply = (modelId: string, route: RouteSpec | undefined): ModelSupply => ({
   model_id: modelId,
-  route_origin: route?.origin ?? (route ? 'automatic' : null),
+  // The server's answer: an empty chain has no origin unless one was saved.
+  route_origin: route?.origin ?? (route && route.hops.length > 0 ? 'automatic' : null),
   chain_length: route?.hops.length ?? 0,
   has_runnable_hop: (route?.hops ?? []).some(([hop]) => runnable(route?.health?.[hop.id] ?? 'healthy')),
 });
 
-export const agent = ({ backend, mode = 'hub', cliPresent = true, menuKind, order = [], routes = {}, catalog, namedAgents = [] }: AgentSpec): AgentSupply => {
+export const agent = ({ backend, mode = 'hub', cliPresent = true, enabled, menuKind, order = [], routes = {}, catalog, namedAgents = [] }: AgentSpec): AgentSupply => {
   const catalogModels = catalog ?? Object.keys(routes).map((id) => backendModel(id, backend === 'opencode' ? { origin: 'provider', native_protocol: 'openai_responses' } : {}));
   return {
     backend,
     cli_present: cliPresent,
+    ...(enabled === undefined ? {} : { backend_enabled: enabled }),
     mode,
     menu_kind: menuKind ?? (backend === 'opencode' ? 'open' : 'fixed'),
     sources: mode === 'hub'
@@ -222,13 +227,13 @@ export const chain = (backend: AgentBackend, modelId: string, route: RouteSpec |
     };
   });
   const first = links.find((link) => link.runnable) ?? null;
-  const origin = route?.origin ?? 'automatic';
+  const origin = route?.origin ?? (route && route.hops.length > 0 ? 'automatic' : null);
   return {
     contract_version: 23,
     backend,
     model_id: modelId,
     manual_override: origin === 'manual' ? { hops: links.map(({ source_id, model_id }) => ({ source_id, model_id })) } : null,
-    route_origin: route ? origin : null,
+    route_origin: origin,
     current: first ? { source_id: first.source_id, model_id: first.model_id } : null,
     chain: links,
     supply_state: first ? 'ok' : links.length ? 'waiting' : 'interrupted',
@@ -462,6 +467,39 @@ export const quotaSummary = ({ claudeExpired = false } = {}): QuotaSummary => ({
   ],
   value: { currency: 'USD', price_table_date: '2026-10-30', week: priced(439.6), period: { sources: 2, fee_usd: 400, multiple: 3.97, ...priced(1587.5) } },
 });
+
+/**
+ * The other signed-in providers on the same card: Gemini through Antigravity
+ * (model-group 5-hour and weekly limits, one group spent), Grok's monthly credit,
+ * and Kimi, whose sign-in reports no quota.
+ */
+export const quotaProviders = (): QuotaSummary => {
+  const group = (id: string, model: string, kind: 'model_session' | 'model_weekly', used: number, resetsIn: number | null): QuotaWindow => quotaWindow({
+    id, kind, label: model, scope_model: model, used_pct: used,
+    window_seconds: kind === 'model_session' ? 18_000 : 604_800, resets_at: resetsIn === null ? null : at(resetsIn),
+  });
+  const source = (source_id: string, vendor: string, display_name: string, over: Partial<SourceQuota>): SourceQuota => ({
+    source_id, vendor, display_name, account_label: null, plan: null, fetched_at: at(-1), state: 'ok', windows: [], ...over,
+  });
+  return {
+    refresh_interval_seconds: 300,
+    sources: [
+      source('src_gemini', 'gemini', 'Gemini', {
+        account_label: 'alex@example.com',
+        windows: [
+          group('bucket:gemini-5h', 'Gemini Models', 'model_session', 100, 70),
+          group('bucket:gemini-weekly', 'Gemini Models', 'model_weekly', 38, 4 * 24 * 60 + 300),
+          group('bucket:3p-5h', 'Claude and GPT models', 'model_session', 12, 200),
+          group('bucket:3p-weekly', 'Claude and GPT models', 'model_weekly', 0, null),
+        ],
+      }),
+      source('src_grok', 'xai', 'Grok', {
+        windows: [quotaWindow({ id: 'credits', kind: 'monthly', label: 'monthly', used_pct: 37.5, window_seconds: 30 * 86_400, resets_at: at(11 * 24 * 60) })],
+      }),
+      source('src_kimi', 'kimi', 'Kimi', { fetched_at: null, state: 'unsupported', error_key: 'models.quota.error.unsupported' }),
+    ],
+  };
+};
 
 const event = (minutesAgo: number, over: Omit<ResolutionEvent, 'id' | 'ts'>): ResolutionEvent => ({ id: `evt_${minutesAgo}`, ts: at(-minutesAgo), ...over });
 

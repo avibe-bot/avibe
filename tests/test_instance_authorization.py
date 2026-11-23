@@ -104,7 +104,7 @@ def test_member_is_owner_minus_member_management() -> None:
     owner = _context("owner", remote=True).capability_projection()
     assert set(member) == set(owner)
     for key, value in owner.items():
-        if key in {"is_instance_owner", "can_manage_access_members"}:
+        if key in {"is_instance_owner", "can_manage_access_members", "can_use_model_hub_reset_cards"}:
             assert member[key] is False
         else:
             assert member[key] is value
@@ -236,8 +236,8 @@ def test_http_policy_is_role_only_and_unknown_api_routes_fail_closed() -> None:
 def test_advertised_capability_namespaces_cover_current_and_future_routes() -> None:
     """Every advertised Editor/Viewer surface is a namespace, not a case list.
 
-    A newly added Skills, Vault, Harness, Files, Dock, Terminal, or Web Push
-    route must inherit the same Instance role as the rest of that capability.
+    A newly added Skills, Vault, Harness, Files, Dock, Terminal, System Schedule,
+    or Web Push route must inherit the same Instance role as the rest of that capability.
     The member surface is the opposite shape: an explicit allow-list, so an
     unknown API fails closed to Owner along with allowlist mutation,
     pairing-identity writes, and bulk Agent onboarding.
@@ -250,6 +250,7 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         "/api/dock",
         "/api/harness",
         "/api/terminal",
+        "/api/system-schedule",
     )
     assert _VIEWER_HTTP_NAMESPACES == (
         "/api/web-push",
@@ -271,6 +272,9 @@ def test_advertised_capability_namespaces_cover_current_and_future_routes() -> N
         ("PATCH", "/api/vault/settings"),
         ("POST", "/api/vault/future-mutation"),
         ("POST", "/api/harness/tasks"),
+        ("POST", "/api/system-schedule/claim"),
+        ("POST", "/api/system-schedule/receipt"),
+        ("POST", "/api/system-schedule/future-mutation"),
         ("PATCH", "/api/harness/watches/watch-1"),
         ("GET", "/api/files/list"),
         ("PUT", "/api/files/write"),
@@ -519,7 +523,9 @@ def test_all_registered_model_hub_routes_follow_instance_management_roles() -> N
     for method, path in endpoints:
         picker = method == "GET" and re.fullmatch(r"/api/models/agents/[^/]+/models", path)
         minimum_role = http_authorization_policy(method, path).minimum_role
-        assert minimum_role == ("editor" if picker else "member"), (method, path)
+        # Using a reset card spends a consumable: the Owner role, not the Member role of other changes.
+        card_use = method == "POST" and path == "/api/models/sources/sample-1/reset-cards/use"
+        assert minimum_role == ("owner" if card_use else "editor" if picker else "member"), (method, path)
         for kind in ("personal", "organization"):
             for organization_role in ("owner", "admin", "member", None):
                 for role in ("owner", "member", "editor", "viewer", None):
@@ -529,7 +535,11 @@ def test_all_registered_model_hub_routes_follow_instance_management_roles() -> N
                         organization_role=organization_role,
                         is_remote=True,
                     )
-                    expected = role in {"owner", "member"} or bool(picker and role == "editor")
+                    expected = (
+                        role == "owner"
+                        if card_use
+                        else role in {"owner", "member"} or bool(picker and role == "editor")
+                    )
                     assert context.has_role(minimum_role) is expected, (
                         kind, organization_role, role, method, path,
                     )

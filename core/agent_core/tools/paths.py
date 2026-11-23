@@ -17,7 +17,7 @@ import re
 import stat
 import unicodedata
 from contextlib import asynccontextmanager
-from concurrent.futures import Executor
+from concurrent.futures import Executor, Future
 from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Optional, TypeVar
 from urllib.parse import unquote
 
@@ -299,6 +299,28 @@ async def file_mutation_lock(path: str) -> AsyncIterator[None]:
         entry.users -= 1
         if entry.users == 0:
             del _locks[key]
+
+
+async def read_in_worker(func: Callable[..., T], /, *args: Any) -> T:
+    """Cancel a queued read immediately, but join a running one before its owner releases the inputs."""
+    claim = Future()
+
+    def read() -> T:
+        if not claim.set_running_or_notify_cancel():
+            raise asyncio.CancelledError
+        return func(*args)
+
+    worker = asyncio.get_running_loop().run_in_executor(None, read)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        if claim.cancel():
+            # The executor may keep the cancelled work item in its queue. Drop its input graph now.
+            args = ()
+            worker.cancel()
+        else:
+            await run_to_end(asyncio.gather(worker, return_exceptions=True))
+        raise
 
 
 async def to_thread_joined(func: Callable[..., T], /, *args: Any) -> T:

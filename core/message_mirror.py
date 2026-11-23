@@ -74,7 +74,7 @@ _MIRROR_CONTEXT_KEYS = (
     "resolved_vibe_agent", "vibe_agent_name", "vibe_agent_backend",
     "task_trigger_kind", "task_execution_id", "turn_token", "task_definition_id",
     "source_kind", "source_actor", "vault_request_type", "vault_request_status",
-    "delivery_override",
+    "delivery_override", "mobile_request",
 )
 
 
@@ -1175,6 +1175,7 @@ def _mirror_harness_inbound_attempt(
             "source_actor",
             "vault_request_type",
             "vault_request_status",
+            "mobile_request",
         )
         if (value := spec.get(key)) not in (None, "")
     }

@@ -1,4 +1,6 @@
+import { isRetiredAddressResponse, noteRetiredAddressResponse } from './addressRetired';
 import { reportRemoteAuthorizationState } from './remoteAuth';
+import { inputTerminalHint } from './inputSource';
 
 const CSRF_COOKIE_NAME = 'vibe_csrf_token';
 const CSRF_HEADER_NAME = 'X-Vibe-CSRF-Token';
@@ -229,6 +231,10 @@ export async function apiFetch(
   const method = (init.method || 'GET').toUpperCase();
   const nextInit: RequestInit = { ...init };
   const headers = new Headers(init.headers || {});
+  const requestUrl = input instanceof Request ? input.url : String(input);
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/messages$/.test(requestUrl)) {
+    headers.set('X-Avibe-Input-Source', inputTerminalHint());
+  }
 
   // Be explicit about wanting JSON so endpoints that double as SPA
   // mountpoints (e.g. /agents) keep returning JSON for programmatic
@@ -267,6 +273,9 @@ export async function apiFetch(
   // answering /api/* with a remote login/authorization-refresh 401. Detect it
   // here and trigger the same full-page login redirect the guard uses, so the
   // user lands on the login flow instead of a wall of silently-failing fetches.
+  // This address is no longer this Avibe's: the page clears itself and leaves
+  // (docs/plans/instance-address-change.md D3).
+  if (isRetiredAddressResponse(response)) noteRetiredAddressResponse();
   if (response.status === 401 || response.status === 403 || response.status === 503) {
     void maybeReportRemoteAuthorizationResponse(response.clone());
   }

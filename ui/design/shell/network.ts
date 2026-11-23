@@ -16,8 +16,9 @@ export const UNANSWERED = Symbol('unanswered');
 
 /** A message a frame's WebSocket receives once open: text as is, `{ binary }` as UTF-8 bytes. */
 export type DesignSocketMessage = string | { binary: string };
-/** An event the page's event stream (`/api/events`) delivers `after` ms once the page opens it. */
-export type DesignStreamEvent = { after: number; event: string; data: unknown };
+/** An event the page's event stream (`/api/events`) delivers `after` ms once the page opens it. Its
+ *  data arrives as `{ type, data }`, or as is when `raw` (the stream's own `connected` handshake). */
+export type DesignStreamEvent = { after: number; event: string; data: unknown; raw?: boolean };
 
 const touched = new Set<string>();
 let responses: Record<string, unknown> = {};
@@ -137,8 +138,9 @@ export function installDesignNetwork() {
       // The event stream delivers the frame's events on their own clock (a reply arriving while the
       // frame is open); everything else stays silent.
       if (urlOf(this.url).pathname !== '/api/events') return;
-      for (const { after, event, data } of stream) {
-        setTimeout(() => this.dispatchEvent(new MessageEvent(event, { data: JSON.stringify({ type: event, data }) })), after);
+      for (const { after, event, data, raw } of stream) {
+        const body = JSON.stringify(raw ? data : { type: event, data });
+        setTimeout(() => this.dispatchEvent(new MessageEvent(event, { data: body })), after);
       }
     }
     close() {}

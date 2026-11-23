@@ -138,7 +138,14 @@ final class RealBundleCaptureUITests: XCTestCase {
                         }
                         // Synthetic data only; no credential UI is reachable. Neither
                         // native nor fallback clipboard paths are called by this flow.
-                        let attachment = XCTAttachment(screenshot: app.screenshot())
+                        // A text this state's page shows, as the checks above found it.
+                        let marker: String? = switch state {
+                        case "first-run": chinese ? "想从哪里开始？" : "Where shall we begin?"
+                        case "account": "alex@example.invalid"
+                        case "instances-named", "account-root": nil
+                        default: chinese ? "正在使用" : "You’re in"
+                        }
+                        let attachment = XCTAttachment(screenshot: settledScreenshot(of: app, showing: marker))
                         attachment.name = name
                         attachment.lifetime = .keepAlways
                         add(attachment)
@@ -205,6 +212,70 @@ final class RealBundleCaptureUITests: XCTestCase {
             predicate: NSPredicate { _, _ in matches() }, object: nil
         )
         XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 10), .completed, description)
+    }
+
+    /// For the SDK comparison (`ios-sdk-comparison`, which sets
+    /// `AVIBE_NATIVE_CAPTURES`): the screen once its picture has stopped
+    /// changing, two screenshots in a row with the same pixels, so a row
+    /// still expanding or a list still fading in is not caught mid-way,
+    /// differently on each run. And, when `text` is given, once that text
+    /// is drawn where the page says it is: the page can be ready while
+    /// WebKit has not painted it yet, and two blank pictures are also
+    /// equal. Elsewhere the first screenshot, as before.
+    private func settledScreenshot(of app: XCUIApplication, showing text: String?) -> XCUIScreenshot {
+        var shot = app.screenshot()
+        guard ProcessInfo.processInfo.environment["AVIBE_NATIVE_CAPTURES"] == "1" else {
+            return shot
+        }
+        let element = text.map {
+            app.webViews.firstMatch.staticTexts.matching(NSPredicate(format: "label == %@", $0)).firstMatch
+        }
+        for _ in 0..<30 {
+            Thread.sleep(forTimeInterval: 0.3)
+            let next = app.screenshot()
+            let settled = next.pngRepresentation == shot.pngRepresentation
+            shot = next
+            if settled, element.map({ $0.exists && isDrawn($0.frame, in: next) }) ?? true { break }
+        }
+        if let text, let element {
+            XCTAssertTrue(element.exists, "Not on the page: \(text)")
+            XCTAssertTrue(element.exists && isDrawn(element.frame, in: shot), "Not drawn: \(text)")
+        }
+        return shot
+    }
+
+    /// Whether the screenshot shows more than one colour inside `frame`
+    /// (window points): text drawn there, not an empty background.
+    private func isDrawn(_ frame: CGRect, in shot: XCUIScreenshot) -> Bool {
+        let image = shot.image
+        guard !frame.isEmpty, let cgImage = image.cgImage else { return false }
+        let scale = image.scale
+        let pixels = CGRect(
+            x: frame.minX * scale, y: frame.minY * scale,
+            width: frame.width * scale, height: frame.height * scale
+        ).integral.intersection(CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        guard !pixels.isEmpty, let crop = cgImage.cropping(to: pixels) else { return false }
+        let width = crop.width, height = crop.height
+        var buffer = [UInt8](repeating: 0, count: width * height * 4)
+        let drawn = buffer.withUnsafeMutableBytes { bytes -> Bool in
+            guard let context = CGContext(
+                data: bytes.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return false }
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return false }
+        let first = Array(buffer[0..<3])
+        var differing = 0
+        for index in stride(from: 0, to: buffer.count, by: 4)
+        where abs(Int(buffer[index]) - Int(first[0])) + abs(Int(buffer[index + 1]) - Int(first[1]))
+            + abs(Int(buffer[index + 2]) - Int(first[2])) > 60 {
+            differing += 1
+        }
+        // A line of text inks a good share of its box; noise or a gradient does not.
+        return differing * 50 > width * height
     }
 
     private func requireText(_ text: String, in app: XCUIApplication) {

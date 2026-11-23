@@ -147,7 +147,43 @@ interface AvibeNative {
 | `share` | - | `share.received({items})`, delivered after launch |
 | `intents` | `intents.donate({kind, sessionId})` | `intent.invoke({intent, params})`, e.g. `talkToMain`, `openSession`, `newSession` |
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
-| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`. Read-only, no parameters. | `direct.transportChanged({preferred, sequence, closure})` |
+| [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`, and for the selected instance's host, for diagnosis, `path` (`"relay" \| "ipv4" \| "ipv6" \| null`) and `attempts` (the last five: offered and local candidate counts by family, and the result; no address or identity). Read-only, no parameters. Version 2 adds `direct.handover()` → `{closed, kept, skipped?}`, no parameters (remote-direct-ios.md section 7). Version 3: `path` is also carried by `direct.transportChanged` when known, a change of it advances `sequence`, and the status adds `connections` (the last five CONNECT races: `direct` and `public` as ms or `none`/`failed`/`timeout`/`cancelled`, `winner`, `path`, `sticky`) and `losses` (the last five closes of direct relays for a path that is gone: `cause` (`lost`/`generation_replaced`/`background`), `relays`, `last_byte_ms`, `path`). With `path`, for display, the status may add `path_scope` (`"local"` when the selected path's remote address is private, shared address space (100.64/10), unique-local or link-local, else `"global"`; never for the relay) and `rtt_ms` (that path's measured round trip); neither is in the event, and a change of either is not a change of the status. For diagnosis it may also add `counts`, since the instance was selected: `verifications` (times a usable path was suspended to be checked again), `probes` (`path_update`, `candidate_failed`, `renewal`), `dials`, `path_updates` (updates of the system's network path acted on) and `path_updates_ignored` (updates that changed nothing the transport depends on). Numbers only; not in the event, and no change of the status. | `direct.transportChanged({preferred, sequence, closure})` |
+| `directPreference` | This device's path choice for the instance of the asking page, kept by the App per account and instance (the instance's Devices › Connection page). `direct.preference()` → `{mode: "automatic" \| "tunnel", reverted: null \| {at: <ms since epoch>, reason: "unreachable"}}`, no parameters. `direct.setPreference({mode})` takes exactly `mode`, `"automatic"` or `"tunnel"` (any other value is refused with `invalid_argument`, so later modes keep the shape), and answers the same object with `reverted: null`; a change of mode reopens the instance at the page's URL after the answer. `"tunnel"` (Cloudflare tunnel only): opens of that instance still prepare the route (a host loaded once without one keeps WebKit's pooled public connections on the store, so a later Automatic could not take effect), but select nothing, so nothing dials, every plan has only the public candidate, and nothing hands over. If such an open runs out of time or its document fails to load, while the device has a network, avibe.bot lists the instance online and the listener has not failed, the App sets the mode back to `"automatic"` once (it stays so until chosen again), records `reverted`, and opens the instance again. A stored mode this build does not know reads as `"automatic"`. Only in an App with a direct transport. | `direct.preferenceChanged({mode, reverted})` when the App sets it back itself |
+
+**The desktop app** answers `direct` (version 3) and `directPreference`, and
+nothing else, in the windows it opens for another computer's instance: that
+instance's view in the main window, and the app windows opened from it. The
+object there has `platform: "desktop"`, which the Web UI accepts for `direct`
+only; in every other respect such a page is not in a native shell. (Nothing
+in the Web UI calls the preference methods on Desktop yet: Devices ›
+Connection asks through the phone App's bridge.) An instance whose address
+the direct path does not serve gets no bridge. What differs from the phone
+App:
+
+- The status is the window's own. `preferred` is `"direct"` only while that
+  window has a session's route and the session's client prefers a direct
+  path; a window without a route is on the tunnel whatever another window
+  uses. The shell delivers the status to the document on every load and
+  every change, so `direct.status()` answers at once, with the tunnel before
+  anything was delivered.
+- `sequence` and `closure` are the window's and only grow; a document counts
+  `closure` from its own first delivery. `closure` also grows when the
+  window's route is taken off (the session ended), since the listener its
+  connections ran through is gone.
+- No `rtt_ms`, `attempts`, `connections`, `losses` or `counts`: the desktop
+  core measures and records none.
+- `direct.handover()` closes only when the asking window is the only open
+  one with the session's route (its instance view and app windows share one
+  listener); otherwise `skipped: "other_documents"`.
+- `direct.setPreference` changes the choice the app's own 「连接方式」 menu
+  shows, and reloads nothing. The desktop app never sets a choice back
+  itself, so `reverted` is always `null` and there is no
+  `direct.preferenceChanged`.
+- A request reaches the shell as a link to `avibe-app://direct` that the
+  shell refuses to follow, carrying a token only that window's bridge script
+  has. No command or message handler is given to the instance's origin. On
+  Windows, where the WebView puts a page's leave question before the shell
+  can refuse the link, the bridge keeps that one question from the page.
 
 Phase 0a PR 2 implements this v1 subset:
 
@@ -546,10 +582,11 @@ later), so that a bridge change and its Web UI consumer land in one PR.
   1. **Instance origins** (configured by the user) load in the WebView and get
      the native bridge and the microphone grant.
   2. **Authentication origins** load in the WebView without bridge or
-     microphone access: avibe.bot, the Supabase Auth host avibe.bot uses, and
-     GitHub's OAuth pages. Phase 0 sign-in depends on this class (see Signing
-     in). Google's authorization endpoint is intercepted instead, because
-     Google rejects embedded webviews.
+     microphone access: avibe.bot and the Supabase Auth host avibe.bot uses.
+     Phase 0 sign-in depends on this class (see Signing in). Google's and
+     GitHub's authorization endpoints are intercepted instead: the App signs
+     in only with avibe.bot's own accounts (guideline 4.8), and Google also
+     rejects embedded webviews.
   3. **Other HTTP(S) origins** open in `SFSafariViewController` only when the
      primary main frame navigates to them.
 
@@ -574,8 +611,8 @@ later), so that a bridge change and its Web UI consumer land in one PR.
 - The shell's browser behavior has a closed deviation list:
   1. External primary-main-frame HTTP(S) navigation uses
      `SFSafariViewController`.
-  2. Google authorization is intercepted because Google rejects embedded
-     browsers.
+  2. Google and GitHub authorization are intercepted: the App signs in only
+     with avibe.bot's own accounts, and Google rejects embedded browsers.
   3. User-initiated external application schemes use `UIApplication`; subframe
      navigation to them is cancelled.
   4. Instance-origin main frames receive the microphone grant.
@@ -976,7 +1013,7 @@ Push to APNs (section 8).
 | --- | --- | --- |
 | 4.2.7(e): "Thin clients for cloud-based apps are not appropriate" | Medium for managed Enterprise instances | Position the app as the companion to the user's own Avibe; personal instances run on the user's machine. |
 | 4.2.3(i): must work without installing another app | Medium | The app needs a running Avibe; provide the demo instance. |
-| 4.8 Login Services | High: avibe.bot offers Google and GitHub | Add Sign in with Apple to avibe.bot before App Store submission. |
+| 4.8 Login Services | High: avibe.bot offers Google and GitHub | The App intercepts Google and GitHub authorization and signs in only with avibe.bot's own accounts (email code, password, passkey), the guideline's own-account-system exception; Sign in with Apple is not needed. |
 | 5.1.1(v): account deletion in the app | High: email sign-in can create an account | Add account deletion to avibe.bot and an in-app entry that leads to it. |
 | 5.1.3 Health | Applies once HealthKit ships | Section 10. |
 | 2.5.14: recording indicator | Low | The system indicator plus the composer's recording state. |
@@ -1009,8 +1046,9 @@ Push to APNs (section 8).
   microphone capture, WebKit's file-picker camera path, and activity-sheet
   photo saving.
 - **Privacy**: a privacy manifest (`PrivacyInfo.xcprivacy`) and App Store
-  privacy labels covering the account email and audio sent for transcription
-  through avibe.bot.
+  privacy labels covering the account email and user ID, the push token the
+  avibe.bot relay stores, audio sent for transcription through avibe.bot, and
+  its voice usage records (`ios/README.md`, TestFlight).
 - **Export compliance**: standard HTTPS and CryptoKit only.
 
 ### Apple account and team access
@@ -1108,7 +1146,7 @@ Not built. Section 5 gives the reasons and the condition for reconsidering.
 | --- | --- | --- |
 | Native | Notification Service Extension with RFC 8291 decryption (CryptoKit P-256, HKDF, AES-GCM), `push` capability, tap routing, and badge | 2 weeks |
 | Instance | Payload byte budget, subscription label, and tests | 1 week |
-| Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; Sign in with Apple; account deletion | 1.5 weeks |
+| Backend | Relay registration and delivery routes, APNs HTTP/2 client, rate limits; account deletion | 1.5 weeks |
 | Reviews | Product and security review of the relay and the handoff | Before merge |
 
 ### Phase 2: deep native and App Store, about 3-4 weeks
@@ -1147,7 +1185,7 @@ Sogou), with the web composer in the shell.
 | 7 | Hold to talk on the composer and on the center button | Haptic on press and release; dictation reaches the real avibe.bot realtime socket and lands in the composer |
 | 8 | Recording indicator | Shown while capturing (App Review 2.5.14) |
 | 9 | `@` / `#` pickers and chips | Chips insert, delete atomically, and send the same markers as in Safari |
-| 10 | Sign-in | Email code, password, and GitHub complete inside the shell; the session survives a cold launch |
+| 10 | Sign-in | Email code and password complete inside the shell; Google and GitHub show the email-code alert; the session survives a cold launch |
 | 11 | Protected Vault passkey | Works, or the Safari fallback is confirmed |
 
 ## 16. Risks and open questions
@@ -1203,8 +1241,9 @@ Sogou), with the web composer in the shell.
 5. Approve the APNs relay on avibe.bot as a new backend path (product and
    security review), and provide the APNs `.p8` key.
 6. Approve the instance login handoff endpoints (security review).
-7. Add Sign in with Apple and account deletion to avibe.bot (needed for the App
-   Store, not for TestFlight).
+7. Add account deletion to avibe.bot (needed for the App Store, not for
+   TestFlight). Sign in with Apple is not needed: the App signs in only with
+   avibe.bot's own accounts.
 8. TestFlight only, or the App Store after Phase 2. For the App Store, a review
    demo instance and reviewer account are needed.
 9. **Settled 2026-11-04:** stay on the Individual membership. There is no

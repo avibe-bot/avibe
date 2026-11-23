@@ -1,4 +1,5 @@
 import AuthenticationServices
+import CryptoKit
 import WebKit
 import XCTest
 @testable import Avibe
@@ -546,11 +547,186 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.openExternal",
                 "app.dismiss",
                 "app.returnToInstance",
+                "app.openPage",
+                "auth.signInWithProvider",
+                "auth.signInWithPasskey",
+                "auth.providers",
             ]
         )
         XCTAssertThrowsError(
             try MobileBridgeRequest.parse(["method": "auth.fetch"])
         )
+    }
+
+    // The bundled page names a page, never an address: each page has one
+    // fixed address on the control plane.
+    func testAvibePagesOpenOnlyTheirFixedControlPlaneAddresses() {
+        let production = MobileControlPlaneConfiguration.productionURL
+        XCTAssertEqual(Set(AvibePage.allCases.map(\.rawValue)), ["accountDeletion", "privacyPolicy"])
+        XCTAssertEqual(
+            AvibePage.accountDeletion.url(controlPlane: production).absoluteString,
+            "https://avibe.bot/account/delete"
+        )
+        XCTAssertEqual(
+            AvibePage.privacyPolicy.url(controlPlane: production).absoluteString,
+            "https://avibe.bot/privacy"
+        )
+        XCTAssertEqual(
+            AvibePage.accountDeletion.url(
+                controlPlane: URL(string: "http://127.0.0.1:43127")!
+            ).absoluteString,
+            "http://127.0.0.1:43127/account/delete"
+        )
+        XCTAssertTrue(AvibePage.accountDeletion.usesAccountSignIn)
+        XCTAssertFalse(AvibePage.privacyPolicy.usesAccountSignIn)
+    }
+
+    func testAvibePagesStayOnTheControlPlaneAndOnlyDeletionFinishesAtDone() {
+        let origin = WebOrigin.parseConfigured("https://avibe.bot")!
+        let deletion = AvibePagePolicy(page: .accountDeletion, origin: origin)
+        let privacy = AvibePagePolicy(page: .privacyPolicy, origin: origin)
+        let cases: [(String, AvibePageNavigation, AvibePageNavigation)] = [
+            ("https://avibe.bot/account/delete", .allow, .allow),
+            ("https://avibe.bot/login?next=/account/delete", .allow, .allow),
+            ("https://avibe.bot/app/organizations/org-1/settings", .allow, .allow),
+            ("https://avibe.bot/account/delete/done", .finished, .allow),
+            ("https://avibe.bot/account/delete/done?lang=zh#top", .finished, .allow),
+            ("https://avibe.bot/account/delete/done/more", .allow, .allow),
+            ("https://avibe.bot/account/delete/doneish", .allow, .allow),
+            ("http://avibe.bot/account/delete/done", .openOutside, .openOutside),
+            ("https://evil.avibe.bot/account/delete/done", .openOutside, .openOutside),
+            ("https://github.com/login/oauth/authorize", .openOutside, .openOutside),
+            ("mailto:support@avibe.bot", .openOutside, .openOutside),
+            ("about:blank", .allow, .allow),
+            ("javascript:alert(1)", .cancel, .cancel),
+            ("file:///etc/hosts", .cancel, .cancel),
+        ]
+        for (raw, deletionExpected, privacyExpected) in cases {
+            let url = URL(string: raw)!
+            XCTAssertEqual(deletion.mainFrameNavigation(to: url), deletionExpected, raw)
+            XCTAssertEqual(privacy.mainFrameNavigation(to: url), privacyExpected, raw)
+        }
+        XCTAssertEqual(deletion.subframeNavigation(to: URL(string: "https://challenges.example.com/")!), .allow)
+        XCTAssertEqual(deletion.subframeNavigation(to: URL(string: "mailto:a@example.com")!), .cancel)
+        XCTAssertEqual(deletion.newWindow(to: URL(string: "https://avibe.bot/privacy")!), .openOutside)
+        XCTAssertEqual(deletion.newWindow(to: URL(string: "javascript:void(0)")!), .cancel)
+    }
+
+    // The deletion page is signed in with the account's own store, and the
+    // sign-out its completion causes waits for it like for the runtime.
+    func testAccountDeletionPageSharesTheSignedInStoreAndHoldsItsCleanup() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let transport = FakeMobileAuthTransport()
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        XCTAssertThrowsError(try coordinator.accountWebPageDataStore()) { error in
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.signedOut.code)
+        }
+
+        transport.session = snapshot(accountID: "account-1")
+        _ = try await coordinator.bootstrap()
+        XCTAssertTrue(try coordinator.accountWebPageDataStore() === store.dataStore)
+        let oldIdentifier = store.identifier
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        var page: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+        coordinator.beginAccountWebPage(try XCTUnwrap(page))
+
+        // The account is gone: the session reads signed out.
+        transport.session = nil
+        let state = try await coordinator.refresh()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNotEqual(store.identifier, oldIdentifier)
+        XCTAssertTrue(registry.removalAttempts.isEmpty, "The page still uses the old store")
+        XCTAssertThrowsError(try coordinator.accountWebPageDataStore())
+
+        page = nil
+        await store.sweepOrphans()
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
+    }
+
+    // A notification tap while the deletion page is open must not open an
+    // instance of an account the page may be deleting.
+    func testNoInstanceOpensWhileTheAccountPageIsOpen() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        let page = WKWebView(frame: .zero, configuration: configuration)
+
+        coordinator.beginAccountWebPage(page)
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id)) { error in
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.busy.code)
+        }
+        XCTAssertEqual(opened, 0)
+
+        coordinator.endAccountWebPage(page)
+        XCTAssertEqual(try coordinator.selectInstance(id: instance.id).id, instance.id)
+        XCTAssertEqual(opened, 1)
+    }
+
+    // `app.openPage` answers exactly once however the page closes: the
+    // deletion page's done navigation, or Done.
+    func testOpenPagePresentsTheDeletionPageAndAnswersOnceForEachClose() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(defaults: makeDefaults(), transports: [transport]),
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+
+        for closesWithDone in [false, true] {
+            let call = Task { @MainActor in
+                try await webView.callAsyncJavaScript(
+                    "return await window.avibeMobile.call('app.openPage', {page: 'accountDeletion'});",
+                    arguments: [:],
+                    in: nil,
+                    contentWorld: .page
+                ) as? [String: Any]
+            }
+            var page: AvibePageViewController?
+            for _ in 0..<100 where page == nil {
+                page = (controller.presentedViewController as? UINavigationController)?
+                    .topViewController as? AvibePageViewController
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            let shown = try XCTUnwrap(page)
+            XCTAssertEqual(
+                shown.webView.configuration.applicationNameForUserAgent,
+                NativeShellMetadata().userAgentSuffix
+            )
+            if closesWithDone {
+                let done = try XCTUnwrap(shown.navigationItem.leftBarButtonItem)
+                _ = done.target?.perform(done.action, with: done)
+            } else {
+                shown.webView.load(URLRequest(url: URL(string: "http://127.0.0.1:43127/account/delete/done")!))
+            }
+            let result = try await call.value
+            XCTAssertEqual(result?["completed"] as? Bool, !closesWithDone)
+            for _ in 0..<100 where controller.presentedViewController != nil {
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            XCTAssertNil(controller.presentedViewController)
+        }
     }
 
     func testNativeSheetUsesOneLargeDetentAndTheDocumentScrollView() async throws {
@@ -673,6 +849,1073 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(dismissCalls, 1)
     }
 
+    func testOpenPageAcceptsOnlyANamedPage() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport]
+            ),
+            startScreen: .sheet
+        )
+        let (window, webView) = try present(
+            controller,
+            size: CGSize(width: 390, height: 844)
+        )
+        defer { window.isHidden = true }
+
+        _ = try await waitForJavaScriptValue(in: webView) {
+            "document.body.textContent.includes(\"Personal Avibe\")"
+        }
+        for params in [
+            "{}",
+            "{page: 'https://avibe.bot/account/delete'}",
+            "{page: 'accountDeletion', url: 'https://example.com/'}",
+            "{page: 'settings'}",
+        ] {
+            let code = try await webView.callAsyncJavaScript(
+                """
+                try {
+                  await window.avibeMobile.call('app.openPage', \(params));
+                  return 'missing-error';
+                } catch (error) {
+                  return error.code;
+                }
+                """,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            ) as? String
+            XCTAssertEqual(code, "invalid_argument", params)
+        }
+        XCTAssertNil(controller.presentedViewController)
+    }
+
+    // MARK: Google and GitHub sign-in (contract: _tmp/ios-login/contract-backend.md)
+
+    // AUTH-SETUP-185: passkey sign-in with no email first, apart from the second-factor passkey.
+    func testPasskeySignInIsDiscoverableAndKeepsOneStoreThroughVerify() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        let request = MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+        transport.primaryPasskeyStartHandler = {
+            MobilePrimaryPasskeyStart(flow: "flow-1", request: request)
+        }
+        let fresh = snapshot(accountID: "account-1", instances: [])
+        transport.primaryPasskeyVerifyHandler = { _, _ in }
+        transport.session = fresh
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(
+            MobilePasskeyAssertion(
+                credentialID: Data("cred-1".utf8),
+                clientDataJSON: Data("{}".utf8),
+                authenticatorData: Data([1]),
+                signature: Data([2]),
+                userHandle: Data("account-1".utf8)
+            )
+        )
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            // The first store is not fresh: the attempt rotates and runs on the second transport.
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        XCTAssertEqual(authenticator.requests, [request])
+        XCTAssertTrue(authenticator.requests[0].allowedCredentialIDs.isEmpty)
+        let verify = try XCTUnwrap(transport.primaryPasskeyVerifications.first)
+        XCTAssertEqual(verify.flow, "flow-1")
+        XCTAssertNotNil(verify.response["response"])
+        XCTAssertTrue(transport.primaryPasskeyCancellations.isEmpty)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testPasskeySignInThatDoesNotSignInCancelsItsFlowAndRotatesTheStore() async throws {
+        for ending in [MobileAccountError.passkeyCancelled, .passkeyUnavailable] {
+            let defaults = makeDefaults()
+            let transport = FakeMobileAuthTransport()
+            transport.primaryPasskeyStartHandler = {
+                MobilePrimaryPasskeyStart(
+                    flow: "flow-1",
+                    request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+                )
+            }
+            let authenticator = FakePasskeyAuthenticator()
+            authenticator.result = .failure(ending)
+            let store = makeAccountStore(defaults: defaults)
+            // The store the attempt ran in, taken once options answered (after the start's own rotation).
+            var attemptStore: UUID?
+            let started = transport.primaryPasskeyStartHandler
+            transport.primaryPasskeyStartHandler = {
+                attemptStore = store.identifier
+                return try await started()
+            }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                passkeyAuthenticator: authenticator
+            )
+            coordinator.activateAccountSurface()
+            do {
+                _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+                XCTFail("Expected \(ending.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error, ending)
+            }
+            XCTAssertEqual(transport.primaryPasskeyCancellations, ["flow-1"])
+            XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
+            let attempted = try XCTUnwrap(attemptStore)
+            XCTAssertNotEqual(store.identifier, attempted, "a failed attempt leaves a fresh signed-out store")
+        }
+    }
+
+    func testPasskeySignInThatIsOffSaysSoWithoutOpeningTheSheet() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        let authenticator = FakePasskeyAuthenticator()
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+            XCTFail("Expected providerUnavailable")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .providerUnavailable)
+        }
+        XCTAssertTrue(authenticator.requests.isEmpty)
+    }
+
+    // avibe.bot's backend §6: never discard a store that holds an accepted passkey sign-in before
+    // its session is read. A failed read keeps it; trying again reads it again, in that store,
+    // without a second sheet or a second verify (each verify spends the account's grant budget).
+    func testAnAcceptedPasskeySignInWhoseSessionReadFailsKeepsItsStoreAndReadsItAgain() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        var attemptStore: UUID?
+        transport.primaryPasskeyStartHandler = {
+            attemptStore = store.identifier
+            return MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        acceptPasskeyButFailTheSessionRead(transport)
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+
+        do {
+            _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+            XCTFail("Expected network")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .network)
+        }
+        let attempted = try XCTUnwrap(attemptStore)
+        XCTAssertEqual(store.identifier, attempted, "the store holding the accepted session is kept")
+        XCTAssertNil(coordinator.currentAccount, "nothing is published before the session is read")
+
+        let fresh = snapshot(accountID: "account-1", instances: [])
+        letTheSessionReadSucceed(transport, fresh)
+        let state = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        XCTAssertEqual(store.identifier, attempted)
+        XCTAssertEqual(authenticator.requests.count, 1, "no second passkey sheet")
+        XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, "no second verify")
+    }
+
+    // A 401 after an accepted verify means the session did not hold: the store is not kept.
+    func testAnAcceptedPasskeySignInWhoseSessionIsGoneRetiresTheStore() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        var attemptStore: UUID?
+        transport.primaryPasskeyStartHandler = {
+            attemptStore = store.identifier
+            return MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        transport.primaryPasskeyVerifyHandler = { _, _ in }
+        // `nil`: the session read answered 401.
+        transport.fetchSessionHandler = { nil }
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+            XCTFail("Expected invalid_or_expired")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .invalidOrExpired)
+        }
+        XCTAssertNotEqual(store.identifier, try XCTUnwrap(attemptStore))
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    func testTheBundledPageReachesPasskeySignInOnlyWithNoArgumentsAndNeverFromTheSheet() async throws {
+        let signedOutTransport = FakeMobileAuthTransport()
+        let loginTransport = FakeMobileAuthTransport()
+        loginTransport.primaryPasskeyStartHandler = {
+            MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        loginTransport.primaryPasskeyVerifyHandler = { _, _ in }
+        loginTransport.session = snapshot(accountID: "account-1")
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedOutTransport, loginTransport, FakeMobileAuthTransport()],
+                passkeyAuthenticator: authenticator
+            ),
+            startScreen: .instances
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        // The page's own launch read (`session.bootstrap`) holds the account's one operation
+        // until Welcome shows; a sign-in sent before then is answered `busy`.
+        let welcome = try await waitForJavaScriptValue(in: webView) {
+            Self.enabledButtonScript("Continue with email")
+        }
+        XCTAssertTrue(welcome, "Welcome shows once the page's launch read has answered")
+        let refused = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.signInWithPasskey', {email: 'alex@example.com'});
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(refused, "invalid_argument")
+        XCTAssertTrue(authenticator.requests.isEmpty)
+        let status = try await webView.callAsyncJavaScript(
+            """
+            try {
+              const state = await window.avibeMobile.call('auth.signInWithPasskey');
+              return state.status;
+            } catch (error) {
+              // A refusal names its code in the assertion below.
+              return `error:${error.code}`;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(status, "signedIn")
+        XCTAssertEqual(authenticator.requests.count, 1)
+        XCTAssertEqual(loginTransport.primaryPasskeyVerifications.count, 1)
+    }
+
+    // AUTH-SETUP-185: avibe.bot accepted the passkey and the session read is still out when the
+    // person signs out. The read's late answer publishes nothing, and the store it ran in is not
+    // taken back: trying again starts over and never reads that store again.
+    func testALateSessionReadAfterAnAcceptedPasskeyAndASignOutIsDropped() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        var attemptStore: UUID?
+        transport.primaryPasskeyStartHandler = {
+            attemptStore = store.identifier
+            return MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        transport.primaryPasskeyVerifyHandler = { _, _ in }
+        let reading = expectation(description: "session read out")
+        var reads = 0
+        var answer: CheckedContinuation<MobileSessionDiscovery?, Error>?
+        transport.fetchSessionHandler = {
+            reads += 1
+            return try await withCheckedThrowingContinuation { continuation in
+                answer = continuation
+                reading.fulfill()
+            }
+        }
+        let authenticator = FakePasskeyAuthenticator()
+        authenticator.result = .success(passkeyAssertion())
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [
+                FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(), FakeMobileAuthTransport(),
+            ],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithPasskey(presentationAnchor: UIWindow()) }
+        await fulfillment(of: [reading], timeout: 30)
+        let attempted = try XCTUnwrap(attemptStore)
+        XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, "verify was accepted")
+
+        let state = try await coordinator.logout()
+        XCTAssertEqual(state, .signedOut)
+        answer?.resume(returning: .signedIn(snapshot(accountID: "account-1", instances: [])))
+        switch await attempt.result {
+        case .success:
+            XCTFail("A late session read must not sign in")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+        }
+        XCTAssertNil(coordinator.currentAccount)
+        XCTAssertNotEqual(store.identifier, attempted, "the accepted store is not taken back")
+
+        _ = try? await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+        XCTAssertEqual(reads, 1, "trying again does not read the old store")
+        XCTAssertNotEqual(store.identifier, attempted)
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    // AUTH-SETUP-185: the system sheet answered, but avibe.bot did not accept the passkey (or its
+    // answer did not arrive). Nothing was accepted, so no session is read and the attempt's store
+    // is retired like any sign-in that did not finish.
+    func testAPasskeyVerifyThatIsNotAcceptedRetiresTheStore() async throws {
+        for ending in [MobileAccountError.passkeyRejected, .network] {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            var attemptStore: UUID?
+            transport.primaryPasskeyStartHandler = {
+                attemptStore = store.identifier
+                return MobilePrimaryPasskeyStart(
+                    flow: "flow-1",
+                    request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+                )
+            }
+            transport.primaryPasskeyVerifyHandler = { _, _ in throw ending }
+            var reads = 0
+            transport.fetchSessionHandler = {
+                reads += 1
+                return nil
+            }
+            let authenticator = FakePasskeyAuthenticator()
+            authenticator.result = .success(passkeyAssertion())
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+                passkeyAuthenticator: authenticator
+            )
+            coordinator.activateAccountSurface()
+            do {
+                _ = try await coordinator.signInWithPasskey(presentationAnchor: UIWindow())
+                XCTFail("Expected \(ending.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error, ending)
+            }
+            XCTAssertEqual(authenticator.requests.count, 1, ending.code)
+            XCTAssertEqual(transport.primaryPasskeyVerifications.count, 1, ending.code)
+            XCTAssertEqual(reads, 0, "no session read follows a verify that was not accepted")
+            XCTAssertNotEqual(store.identifier, try XCTUnwrap(attemptStore), ending.code)
+            XCTAssertNil(coordinator.currentAccount)
+        }
+    }
+
+    // A late assertion after an account change is never verified.
+    func testALatePasskeyAssertionAfterSigningOutIsDropped() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.primaryPasskeyStartHandler = {
+            MobilePrimaryPasskeyStart(
+                flow: "flow-1",
+                request: MobilePasskeyRequest(challenge: Data([7]), allowedCredentialIDs: [])
+            )
+        }
+        let authenticator = FakePasskeyAuthenticator()
+        let opened = expectation(description: "sheet open")
+        var release: CheckedContinuation<MobilePasskeyAssertion, Error>?
+        authenticator.handler = { _ in
+            try await withCheckedThrowingContinuation { continuation in
+                release = continuation
+                opened.fulfill()
+            }
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            passkeyAuthenticator: authenticator
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithPasskey(presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+        // The account changes while the sheet is up; the sheet answers afterwards.
+        let state = try await coordinator.logout()
+        XCTAssertEqual(state, .signedOut)
+        release?.resume(returning: passkeyAssertion())
+        switch await attempt.result {
+        case .success:
+            XCTFail("A late assertion must not sign in")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+        }
+        XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    func testProviderSecretsAreRandomUnpaddedBase64URLWithAnS256Challenge() throws {
+        // RFC 7636, Appendix B.
+        XCTAssertEqual(
+            MobileProviderSecrets.challenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        )
+        let first = try MobileProviderSecrets.generate()
+        let second = try MobileProviderSecrets.generate()
+        for value in [first.verifier, first.state, second.verifier, second.state] {
+            XCTAssertEqual(value.count, 43)
+            XCTAssertNotNil(value.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression))
+        }
+        XCTAssertEqual(Set([first.verifier, first.state, second.verifier, second.state]).count, 4)
+    }
+
+    func testTheAppOpensOnlyTheControlPlaneLaunchRoute() {
+        let controlPlane = MobileControlPlaneConfiguration.productionURL
+        let launch = "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA"
+        XCTAssertTrue(MobileProviderRoute.isAllowedBrowserURL(
+            URL(string: "https://avibe.bot/api/mobile/auth/browser?launch=\(launch)")!, controlPlane: controlPlane
+        ))
+        for raw in [
+            "http://avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://evil.avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://avibe.bot:8443/api/mobile/auth/browser?launch=\(launch)",
+            "https://user@avibe.bot/api/mobile/auth/browser?launch=\(launch)",
+            "https://avibe.bot/api/mobile/auth/browser?launch=abc",
+            "https://avibe.bot/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLB",
+            "https://avibe.bot/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA=",
+            "https://avibe.bot:443/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA",
+            "https://avibe.bot/api/mobile/auth/%62rowser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA",
+            "https://avibe.bot/api/mobile/auth/browser?launch=\(launch)#x",
+            "https://avibe.bot/api/mobile/auth/browser?launch=",
+            "https://avibe.bot/api/mobile/auth/browser",
+            "https://avibe.bot/api/mobile/auth/browser?launch=a&launch=b",
+            "https://avibe.bot/api/mobile/auth/browser?launch=a&next=/",
+            "https://avibe.bot/api/mobile/auth/browser/?launch=\(launch)",
+            "https://accounts.google.com/o/oauth2/v2/auth?launch=\(launch)",
+        ] {
+            XCTAssertFalse(
+                MobileProviderRoute.isAllowedBrowserURL(URL(string: raw)!, controlPlane: controlPlane), raw
+            )
+        }
+    }
+
+    func testTheCallbackIsReadOnlyInItsExactShapeAndState() {
+        let controlPlane = MobileControlPlaneConfiguration.productionURL
+        let state = "state-123"
+        func read(_ raw: String) -> MobileProviderRoute.Callback {
+            MobileProviderRoute.callback(URL(string: raw)!, controlPlane: controlPlane, state: state)
+        }
+        let longCode = String(repeating: "c", count: 4096)
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?code=abc&state=state-123"), .code("abc"))
+        // An empty `#` keeps the browser from carrying an earlier hop's fragment along.
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?code=abc&state=state-123#"), .code("abc"))
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?state=state-123&code=\(longCode)"), .code(longCode))
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?error=cancelled&state=state-123"), .cancelled)
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?error=provider_email_unverified&state=state-123"), .emailUnverified)
+        XCTAssertEqual(read("https://avibe.bot/mobile/auth/complete?error=provider_unavailable&state=state-123"), .unavailable)
+        for raw in [
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-124",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-12",
+            "https://avibe.bot/mobile/auth/complete?code=abc",
+            "https://avibe.bot/mobile/auth/complete?state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&error=cancelled&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&code=abd&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-123&extra=1",
+            "https://avibe.bot/mobile/auth/complete?code=&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=\(longCode)c&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-123#fragment",
+            "https://avibe.bot/mobile/auth/complete?code=abc&state=state-123#error=access_denied",
+            "https://avibe.bot/mobile/auth/complete?error=invalid_or_expired&state=state-123",
+            "https://avibe.bot/mobile/auth/complete?error=something_else&state=state-123",
+            "https://avibe.bot:444/mobile/auth/complete?code=abc&state=state-123",
+            "https://evil.avibe.bot/mobile/auth/complete?code=abc&state=state-123",
+            "http://avibe.bot/mobile/auth/complete?code=abc&state=state-123",
+            "https://avibe.bot/mobile/auth/completed?code=abc&state=state-123",
+            "https://avibe.bot/auth/callback?code=abc&state=state-123",
+        ] {
+            XCTAssertEqual(read(raw), .invalid, raw)
+        }
+    }
+
+    func testProviderSignInExchangesTheCallbackCodeWithThisAttemptsVerifier() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        var openedState: String?
+        web.handler = { url, host, path in
+            XCTAssertEqual(url.absoluteString, "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")
+            XCTAssertEqual(host, "127.0.0.1")
+            XCTAssertEqual(path, "/mobile/auth/complete")
+            return URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(openedState!)")!
+        }
+        transport.providerStartHandler = { _, _, state in
+            openedState = state
+            return .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+        }
+        let fresh = snapshot(accountID: "account-1", instances: [])
+        transport.providerExchangeHandler = { _, _, _ in
+            MobileProviderExchange(discovery: .signedIn(fresh), accountCreated: true)
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            // The first store is not fresh: the attempt rotates and starts on the second transport.
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        let start = try XCTUnwrap(transport.providerStarts.first)
+        let exchange = try XCTUnwrap(transport.providerExchanges.first)
+        XCTAssertEqual(start.provider, .github)
+        XCTAssertEqual(exchange.transactionID, "transaction-1")
+        XCTAssertEqual(exchange.code, "one-time")
+        XCTAssertEqual(MobileProviderSecrets.challenge(for: exchange.verifier), start.challenge)
+        XCTAssertNotEqual(exchange.verifier, start.state)
+        XCTAssertTrue(coordinator.accountWasJustCreated)
+
+        // Any account transition retires the hint.
+        _ = try await coordinator.logout()
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAProviderSignInThatOwesTheSecondFactorKeepsItsStoreAndShowsNoNewAccountHint() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        var sentState = ""
+        transport.providerStartHandler = { _, _, state in
+            sentState = state
+            return .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+        }
+        web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
+        let requirement = MobileSecondFactorRequirement(email: "alex@example.com", gate: .challenge, methods: [.totp])
+        // The store that receives the first-factor cookies is the one in use at the exchange.
+        var exchangedIn: UUID?
+        transport.providerExchangeHandler = { _, _, _ in
+            exchangedIn = store.identifier
+            return MobileProviderExchange(discovery: .secondFactorRequired(requirement), accountCreated: true)
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+
+        guard case .twoFactorRequired = state else {
+            return XCTFail("Expected the second factor, got \(state)")
+        }
+        XCTAssertNotNil(exchangedIn)
+        XCTAssertEqual(store.identifier, exchangedIn)
+        XCTAssertEqual(transport.providerExchanges.count, 1)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAnExchangeThatFailsRotatesTheStoreAndIsNeverRetried() async throws {
+        for failure in [
+            MobileAccountError.invalidOrExpired,
+            .providerEmailUnverified,
+            MobileAccountError(code: "rate_limited", message: "slow down", retryAfterSeconds: 30),
+            .network,
+        ] {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let web = FakeWebAuthenticator()
+            var sentState = ""
+            transport.providerStartHandler = { _, _, state in
+                sentState = state
+                return .browser(
+                    transactionID: "transaction-1",
+                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+                )
+            }
+            web.handler = { _, _, _ in URL(string: "https://127.0.0.1/mobile/auth/complete?code=one-time&state=\(sentState)")! }
+            transport.providerExchangeHandler = { _, _, _ in throw failure }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+
+            do {
+                _ = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+                XCTFail("Expected \(failure.code)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, failure.code)
+            }
+            XCTAssertEqual(transport.providerExchanges.count, 1, failure.code)
+            XCTAssertNotEqual(store.identifier, started, failure.code)
+            XCTAssertNil(coordinator.currentAccount)
+        }
+    }
+
+    func testProviderSignInThatDoesNotSignInRotatesTheStoreAndNeverExchanges() async throws {
+        let cases: [(callback: (String) -> String, error: String)] = [
+            ({ _ in "cancel" }, MobileAccountError.providerCancelled.code),
+            ({ "https://127.0.0.1/mobile/auth/complete?error=cancelled&state=\($0)" }, MobileAccountError.providerCancelled.code),
+            ({ "https://127.0.0.1/mobile/auth/complete?error=provider_email_unverified&state=\($0)" }, MobileAccountError.providerEmailUnverified.code),
+            ({ "https://127.0.0.1/mobile/auth/complete?error=provider_unavailable&state=\($0)" }, MobileAccountError.providerUnavailable.code),
+            ({ _ in "https://127.0.0.1/mobile/auth/complete?code=one-time&state=someone-else" }, MobileAccountError.invalidOrExpired.code),
+        ]
+        for (callback, expected) in cases {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let web = FakeWebAuthenticator()
+            var sentState = ""
+            transport.providerStartHandler = { _, _, state in
+                sentState = state
+                return .browser(
+                    transactionID: "transaction-1",
+                    url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+                )
+            }
+            web.handler = { _, _, _ in
+                let raw = callback(sentState)
+                if raw == "cancel" { throw MobileAccountError.providerCancelled }
+                return URL(string: raw)!
+            }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+
+            do {
+                _ = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+                XCTFail("Expected \(expected)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, expected)
+            }
+            XCTAssertTrue(transport.providerExchanges.isEmpty, expected)
+            XCTAssertNotEqual(store.identifier, started, expected)
+            XCTAssertNil(coordinator.currentAccount)
+            XCTAssertFalse(coordinator.accountWasJustCreated)
+        }
+    }
+
+    func testProviderSignInRefusesABrowserAddressOffTheControlPlane() async throws {
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        transport.providerStartHandler = { _, _, _ in
+            .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "https://accounts.google.com/o/oauth2/v2/auth?launch=x")!
+            )
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        do {
+            _ = try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow())
+            XCTFail("Expected network")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, MobileAccountError.network.code)
+        }
+        XCTAssertTrue(web.opened.isEmpty)
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    func testAppleSignInSendsTheHashedServerNonceAndPostsTheTokenAndCode() async throws {
+        let transport = FakeMobileAuthTransport()
+        let apple = FakeAppleAuthorizer()
+        var sentState = ""
+        transport.providerStartHandler = { _, _, state in
+            sentState = state
+            return .apple(transactionID: "transaction-1", nonce: "server-nonce")
+        }
+        apple.handler = { nonce, state in
+            XCTAssertEqual(nonce, MobileAppleNonce.hashed("server-nonce"))
+            XCTAssertEqual(state, sentState)
+            return MobileAppleCredential(identityToken: "id-token", authorizationCode: "auth-code", state: state)
+        }
+        let fresh = snapshot(accountID: "account-1")
+        transport.appleExchangeHandler = { _, _, _, _ in
+            MobileProviderExchange(discovery: .signedIn(fresh), accountCreated: false)
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+            appleAuthorizer: apple
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.signInWithProvider(.apple, presentationAnchor: UIWindow())
+
+        XCTAssertEqual(state, .signedIn(snapshot: fresh, selectedInstanceID: nil))
+        // Lowercase hex of SHA256 over the raw nonce.
+        XCTAssertEqual(
+            MobileAppleNonce.hashed("server-nonce"),
+            SHA256.hash(data: Data("server-nonce".utf8)).map { String(format: "%02x", $0) }.joined()
+        )
+        let start = try XCTUnwrap(transport.providerStarts.first)
+        let exchange = try XCTUnwrap(transport.appleExchanges.first)
+        XCTAssertEqual(start.provider, .apple)
+        XCTAssertEqual(exchange.transactionID, "transaction-1")
+        XCTAssertEqual(exchange.identityToken, "id-token")
+        XCTAssertEqual(exchange.authorizationCode, "auth-code")
+        XCTAssertEqual(MobileProviderSecrets.challenge(for: exchange.verifier), start.challenge)
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+        XCTAssertFalse(coordinator.accountWasJustCreated)
+    }
+
+    func testAppleSignInThatDoesNotSignInRotatesTheStoreAndNeverExchanges() async throws {
+        let cases: [(answer: (String) throws -> MobileAppleCredential, start: MobileProviderStart, error: String)] = [
+            ({ _ in throw MobileAccountError.providerCancelled }, .apple(transactionID: "t", nonce: "n"), "provider_cancelled"),
+            ({ _ in throw MobileAccountError.network }, .apple(transactionID: "t", nonce: "n"), "network"),
+            ({ _ in MobileAppleCredential(identityToken: "i", authorizationCode: "c", state: "someone-else") }, .apple(transactionID: "t", nonce: "n"), "invalid_or_expired"),
+            ({ _ in MobileAppleCredential(identityToken: "i", authorizationCode: "c", state: nil) }, .apple(transactionID: "t", nonce: "n"), "invalid_or_expired"),
+            // The backend answered the browser class for Apple: nothing opens.
+            ({ MobileAppleCredential(identityToken: "i", authorizationCode: "c", state: $0) },
+             .browser(transactionID: "t", url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=l")!), "network"),
+        ]
+        for (answer, start, expected) in cases {
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let transport = FakeMobileAuthTransport()
+            let apple = FakeAppleAuthorizer()
+            let web = FakeWebAuthenticator()
+            transport.providerStartHandler = { _, _, _ in start }
+            apple.handler = { _, state in try answer(state) }
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                websiteDataStore: store,
+                transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport()],
+                webAuthenticator: web,
+                appleAuthorizer: apple
+            )
+            coordinator.activateAccountSurface()
+            let started = store.identifier
+            do {
+                _ = try await coordinator.signInWithProvider(.apple, presentationAnchor: UIWindow())
+                XCTFail("Expected \(expected)")
+            } catch let error as MobileAccountError {
+                XCTAssertEqual(error.code, expected)
+            }
+            XCTAssertTrue(transport.appleExchanges.isEmpty, expected)
+            XCTAssertTrue(web.opened.isEmpty, expected)
+            XCTAssertNotEqual(store.identifier, started, expected)
+        }
+    }
+
+    func testSigningOutWhileTheSignInWindowIsOpenClosesItAndDropsTheAttempt() async throws {
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        let opened = expectation(description: "window open")
+        var close: CheckedContinuation<URL, Error>?
+        web.handler = { _, _, _ in
+            try await withCheckedThrowingContinuation { continuation in
+                close = continuation
+                opened.fulfill()
+            }
+        }
+        web.onCancel = {
+            close?.resume(throwing: MobileAccountError.providerCancelled)
+            close = nil
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+
+        let state = try await coordinator.logout()
+
+        XCTAssertEqual(state, .signedOut)
+        // One at the attempt's own start, one from the sign-out.
+        XCTAssertGreaterThanOrEqual(web.cancels, 2)
+        switch await attempt.result {
+        case .success:
+            XCTFail("The open attempt must not sign in")
+        case .failure(let error):
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.providerCancelled.code)
+        }
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    // One token-owning operation at a time: while a sign-in window is open, no other sign-in
+    // may start, and the late result of an attempt never touches a newer generation's store.
+    func testAnOpenProviderAttemptHoldsTheCoordinatorAndItsLateResultLeavesTheNewerStore() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let transport = FakeMobileAuthTransport()
+        let web = FakeWebAuthenticator()
+        let opened = expectation(description: "window open")
+        var release: CheckedContinuation<URL, Error>?
+        web.handler = { _, _, _ in
+            try await withCheckedThrowingContinuation { continuation in
+                release = continuation
+                opened.fulfill()
+            }
+        }
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            webAuthenticator: web
+        )
+        coordinator.activateAccountSurface()
+        let attempt = Task { try await coordinator.signInWithProvider(.google, presentationAnchor: UIWindow()) }
+        await fulfillment(of: [opened], timeout: 30)
+
+        do {
+            _ = try await coordinator.signInWithProvider(.github, presentationAnchor: UIWindow())
+            XCTFail("A second attempt must not start")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        do {
+            _ = try await coordinator.requestOTP(email: "alex@example.com")
+            XCTFail("An email code must not start either")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        XCTAssertEqual(transport.providerStarts.count, 1)
+
+        // Sign-out wins; the attempt's window is closed, and its own late answer arrives after.
+        web.onCancel = {}
+        _ = try await coordinator.logout()
+        let afterSignOut = store.identifier
+        release?.resume(returning: URL(string: "https://127.0.0.1/mobile/auth/complete?code=late&state=x")!)
+        _ = await attempt.result
+        XCTAssertEqual(store.identifier, afterSignOut)
+        XCTAssertTrue(transport.providerExchanges.isEmpty)
+    }
+
+    // The advertised list decorates signed-out answers; a slow read never holds them up.
+    // P1 (TestFlight 37.1): after signing out, Welcome showed email alone. The
+    // signed-in start never read the list, and the fresh store's first read
+    // took longer than the sign-out answer waits. Welcome must show the
+    // advertised sign-ins at once and keep them current.
+    func testWelcomeAfterSignOutShowsTheAdvertisedSignInsBeforeTheFreshStoreAnswers() async throws {
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        signedIn.advertised = [.google, .github, .apple]
+        // The store after sign-out is new: its first read is slow.
+        let afterSignOut = FakeMobileAuthTransport()
+        afterSignOut.advertised = [.google, .github, .apple]
+        afterSignOut.advertisedDelay = 6_000_000_000
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [signedIn, afterSignOut, FakeMobileAuthTransport()]
+            ),
+            startScreen: .account
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+
+        let canSignOut = try await waitForJavaScriptValue(in: webView) {
+            Self.enabledButtonScript("Sign out on this device")
+        }
+        XCTAssertTrue(canSignOut)
+        _ = try await webView.evaluateJavaScript(Self.clickButtonScript("Sign out on this device"))
+
+        let shown = try await waitUntil(seconds: 4, in: webView) {
+            Self.welcomeMarksScript(["Continue with Google", "Continue with GitHub", "Continue with Apple"])
+        }
+        XCTAssertTrue(shown, "Welcome after sign-out shows the advertised sign-ins")
+    }
+
+    func testWelcomeOnAColdStartShowsTheLastAdvertisedSignInsWhenTheReadFails() async throws {
+        let defaults = makeDefaults()
+        // What an earlier launch read; this launch's read fails.
+        defaults.set(["github"], forKey: "avibe.mobile.advertisedProviders")
+        // A signed-out start may rotate to a fresh store: every store's read fails.
+        let transports = (0..<3).map { _ in FakeMobileAuthTransport() }
+        transports.forEach { $0.advertised = nil }
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(defaults: defaults, transports: transports)
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+
+        let shown = try await waitUntil(seconds: 4, in: webView) {
+            Self.welcomeMarksScript(["Continue with GitHub"])
+        }
+        XCTAssertTrue(shown)
+        let others = try await webView.evaluateJavaScript(
+            Self.welcomeMarksScript(["Continue with Google"])
+        ) as? Bool
+        XCTAssertEqual(others, false)
+    }
+
+    private static func enabledButtonScript(_ text: String) -> String {
+        """
+        Array.from(document.querySelectorAll('button')).some(b =>
+          b.textContent.trim() === '\(text)' && !b.disabled)
+        """
+    }
+
+    private static func clickButtonScript(_ text: String) -> String {
+        """
+        Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim() === '\(text)').click()
+        """
+    }
+
+    /// Welcome with exactly these provider marks, by their VoiceOver labels.
+    private static func welcomeMarksScript(_ labels: [String]) -> String {
+        let list = labels.map { "'\($0)'" }.joined(separator: ",")
+        return """
+        (() => {
+          const welcome = Array.from(document.querySelectorAll('button'))
+            .some(b => b.textContent.trim() === 'Continue with email');
+          const marks = Array.from(document.querySelectorAll('button[aria-label^="Continue with"]'))
+            .map(b => b.getAttribute('aria-label'));
+          return welcome && JSON.stringify(marks) === JSON.stringify([\(list)]);
+        })()
+        """
+    }
+
+    /// Polls `script` until it is true or `seconds` pass.
+    private func waitUntil(
+        seconds: Double,
+        in webView: WKWebView,
+        script: () -> String
+    ) async throws -> Bool {
+        try await WebKitReadiness.waitForDocument(in: webView)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .milliseconds(Int(seconds * 1000)))
+        while clock.now < deadline {
+            if try await webView.evaluateJavaScript(script()) as? Bool == true {
+                return true
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        return false
+    }
+
+    func testTheAdvertisedListIsReadWithinItsBoundOrTheLastOneServes() async throws {
+        let defaults = makeDefaults()
+        // Never read, and this read fails: none, so Welcome shows email alone.
+        let failing = FakeMobileAuthTransport()
+        failing.advertised = nil
+        let first = makeCoordinator(defaults: defaults, transports: [failing])
+        first.activateAccountSurface()
+        let none = await first.advertisedProviders(within: 5)
+        XCTAssertNil(none)
+
+        let transport = FakeMobileAuthTransport()
+        transport.advertised = [.github, .apple]
+        transport.passkeyAdvertised = true
+        let coordinator = makeCoordinator(defaults: defaults, transports: [transport])
+        coordinator.activateAccountSurface()
+        let quick = await coordinator.advertisedProviders(within: 5)
+        XCTAssertEqual(quick, [.github, .apple])
+        XCTAssertTrue(coordinator.lastAdvertisedPasskey, "passkey sign-in rides on the same read")
+
+        // A slow read never holds the answer up; the last list serves meanwhile.
+        transport.advertised = [.google]
+        transport.advertisedDelay = 5_000_000_000
+        let clock = ContinuousClock()
+        let started = clock.now
+        let slow = await coordinator.advertisedProviders(within: 0.05)
+        XCTAssertEqual(slow, [.github, .apple])
+        XCTAssertLessThan(clock.now - started, .seconds(2))
+
+        // The list outlives the process: a later launch whose read fails shows it.
+        let relaunched = makeCoordinator(defaults: defaults, transports: [failing])
+        relaunched.activateAccountSurface()
+        let remembered = await relaunched.advertisedProviders(within: 5)
+        XCTAssertEqual(remembered, [.github, .apple])
+        let rememberedMethods = await relaunched.signInMethods(within: 5)
+        XCTAssertEqual(rememberedMethods, MobileSignInMethods(providers: [.github, .apple], passkey: true))
+    }
+
+    func testSignInWithProviderAcceptsOnlyGoogleGitHubOrApple() async throws {
+        let controller = MobileOnboardingViewController(
+            coordinator: makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [FakeMobileAuthTransport(), FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+            ),
+            startScreen: .instances
+        )
+        let (window, webView) = try present(controller, size: CGSize(width: 390, height: 844))
+        defer { window.isHidden = true }
+        try await WebKitReadiness.waitForDocument(in: webView)
+        for params in [
+            "{}",
+            "{provider: 'microsoft'}",
+            "{provider: 'GOOGLE'}",
+            "{provider: 'google', url: 'https://example.com/'}",
+            "{provider: 1}",
+        ] {
+            let code = try await webView.callAsyncJavaScript(
+                """
+                try {
+                  await window.avibeMobile.call('auth.signInWithProvider', \(params));
+                  return 'missing-error';
+                } catch (error) {
+                  return error.code;
+                }
+                """,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+            ) as? String
+            XCTAssertEqual(code, "invalid_argument", params)
+        }
+    }
+
     func testSheetRejectsAuthMethodsWithoutMutatingTheRuntime() async throws {
         for mode in [MobileOnboardingStartScreen.sheet, .sheetInstances, .sheetAccount] {
             try await exerciseSheetAuthRestriction(mode)
@@ -719,6 +1962,50 @@ final class MobileOnboardingTests: XCTestCase {
         ) as? String
         XCTAssertEqual(result, MobileAccountError.forbidden.code)
         XCTAssertEqual(requestCount, 0)
+        let provider = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.signInWithProvider', {provider: 'google'});
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(provider, MobileAccountError.forbidden.code)
+        XCTAssertTrue(transport.providerStarts.isEmpty)
+        let passkey = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.signInWithPasskey');
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(passkey, MobileAccountError.forbidden.code)
+        XCTAssertTrue(transport.primaryPasskeyVerifications.isEmpty)
+        let providers = try await webView.callAsyncJavaScript(
+            """
+            try {
+              await window.avibeMobile.call('auth.providers');
+              return 'missing-error';
+            } catch (error) {
+              return error.code;
+            }
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        ) as? String
+        XCTAssertEqual(providers, MobileAccountError.forbidden.code)
         XCTAssertEqual(coordinator.currentAccount?.id, "account-1")
     }
 
@@ -923,6 +2210,11 @@ final class MobileOnboardingTests: XCTestCase {
         )
         XCTAssertEqual(historyRequest.method, .navigationHistoryChanged)
         XCTAssertNil(NativeShellMetadata.capabilities["navigation"])
+        XCTAssertEqual(NativeShellMetadata.capabilities["systemSchedule"], 1)
+        XCTAssertEqual(NativeShellMetadata.capabilities["device"], 1)
+        // Withdrawn (11-21): the methods stay recognized but refuse.
+        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
+        XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         XCTAssertEqual(
             Set(NativeBridgeMethod.allCases.map(\.rawValue)),
             [
@@ -930,21 +2222,46 @@ final class MobileOnboardingTests: XCTestCase {
                 "app.info",
                 "app.openExternal",
                 "app.setAccountActionAvailable",
+                "appLock.setPolicy",
+                "appLock.status",
                 "app.showAccount",
                 "app.showInstances",
                 "badge.set",
+                "device.describe",
+                "direct.handover",
+                "direct.preference",
+                "direct.setPreference",
                 "direct.status",
                 "haptics.impact",
                 "haptics.notify",
                 "haptics.selection",
+                "health.connect",
+                "liveActivity.openSettings",
+                "liveActivity.setting",
+                "liveActivity.setSetting",
+                "liveActivity.observe",
+                "liveActivity.start",
+                "liveActivity.status",
+                "liveActivity.stop",
                 "navigation.historyChanged",
                 "notifications.reconcile",
                 "push.status",
                 "push.subscribe",
                 "push.unsubscribe",
                 "push.openedAck",
+                "share.capabilities",
+                "share.present",
+                "systemSchedule.cancel",
+                "systemSchedule.capabilities",
+                "systemSchedule.request",
                 "viewport.setOuterScrollLocked",
                 "voice.permission",
+                "voice.capturePrepare",
+                "voice.captureStart",
+                "voice.captureStop",
+                "voice.holdAdopt",
+                "voice.holdReject",
+                "voice.holdSurfaces",
             ]
         )
     }
@@ -1113,6 +2430,35 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNil(otherAccount.restorableRuntime(from: otherState))
     }
 
+    /// `device.describe` answers only for a settled account: a session read
+    /// that answers signed-out keeps the selection while it revokes push.
+    func testNoAccountIsSettledWhileASignedOutReadRevokesPush() async throws {
+        let defaults = makeDefaults()
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var duringRevoke: [(account: String?, selected: String?)] = []
+        var coordinator: MobileSessionCoordinator!
+        coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onPreparePushLogout: { _ in
+                duringRevoke.append((coordinator.settledAccountID, coordinator.selectedInstance?.id))
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        XCTAssertEqual(coordinator.settledAccountID, "account-1")
+
+        transport.session = nil
+        _ = try? await coordinator.refresh()
+
+        XCTAssertEqual(duringRevoke.count, 1)
+        XCTAssertNil(duringRevoke.first?.account)
+        XCTAssertEqual(duringRevoke.first?.selected, instance.id)
+        XCTAssertNil(coordinator.settledAccountID)
+    }
+
     func testSignedOutBootstrapPreparesPushLogoutBeforeStoreReplacement()
         async throws
     {
@@ -1131,7 +2477,7 @@ final class MobileOnboardingTests: XCTestCase {
                 events.append("account.transition")
                 return []
             },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 events.append("push.logout")
                 _ = try? await coordinator.pushManagementRequest(
                     PushManagementRequest(
@@ -1151,6 +2497,846 @@ final class MobileOnboardingTests: XCTestCase {
             events,
             ["push.logout", "push.management", "account.transition"]
         )
+    }
+
+    /// The owner's morning, end to end below the view: notifications on with
+    /// a device token held, sign out, sign in again in the same process,
+    /// open the instance, and turn notifications on. The account
+    /// coordinator and the push coordinator are the real ones, wired as
+    /// `AppModel` wires them; the account transport, the push keychain, the
+    /// notification center, the system permission and APNs are stand-ins.
+    /// APNs answers the subscription's registration with a main-queue block
+    /// queued ahead of its provider reconciliation (#3837's race). The
+    /// subscription must still register.
+    func testEnableNotificationsAfterSignOutAndSignInInSameSessionSucceeds()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let token = Data(repeating: 41, count: 32)
+        let installationID = UUID()
+        let keychain = InMemoryPushKeychainStore()
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 12, count: 32),
+            accountID: "account-1",
+            bindGeneration: 1,
+            providerGeneration: 5,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "sandbox",
+                topic: "bot.avibe.ios",
+                generation: 5
+            ),
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        let generationStore = InMemoryPushGenerationStore()
+        generationStore.generation = 1
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "morning-key",
+            instanceOrigin: instance.url.absoluteString,
+            accountID: "account-1",
+            accountGeneration: 1,
+            bindGeneration: 1,
+            privateKey: P256.KeyAgreement.PrivateKey().rawRepresentation,
+            authSecret: Data(repeating: 3, count: 16),
+            vapidKeyHash: "morning",
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        ))
+        let marker = InMemoryPushInstallationMarkerStore()
+        marker.installationID = installationID
+
+        // Every account transport the coordinator makes reaches the same
+        // account and the same push service, which answers 200.
+        var requests: [String] = []
+        let transports = (0..<24).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            transport.pushManagementHandler = { request in
+                let kind = request.path.split(separator: "/").last.map(String.init) ?? ""
+                requests.append("\(request.method) \(request.path.contains("/registrations/") ? "registration" : kind)")
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return transport
+        }
+        var push: NativePushCoordinator!
+        var registrations = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: transports,
+            // `AppModel.openRuntime` resumes push registration on every open.
+            onOpen: { _ in push.resumeAfterAccountActivation() },
+            onPreparePushLogout: { reason in await push.prepareForLogout(reason: reason) }
+        )
+        push = NativePushCoordinator(
+            keychain: keychain,
+            generationStore: generationStore,
+            managementRequest: { request in
+                try await coordinator.pushManagementRequest(request)
+            },
+            accountProvider: { coordinator.currentAccount },
+            registerForRemoteNotifications: {
+                registrations += 1
+                // UIKit hands the token back as a main-queue block.
+                DispatchQueue.main.async {
+                    push.didRegister(deviceToken: token, environment: "sandbox")
+                }
+            },
+            requestNotificationAuthorization: { true },
+            notificationAuthorizationStatus: { .authorized },
+            installationMarker: marker,
+            notificationCenter: QuietPushNotificationCenter()
+        )
+
+        // Signed in, the instance open, notifications on.
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        try await settlePush()
+
+        // Sign out: the push installation is revoked for this account.
+        coordinator.activateAccountSurface()
+        let signedOut = try await coordinator.logout()
+        XCTAssertEqual(signedOut, .signedOut)
+        XCTAssertTrue(requests.contains { $0.hasPrefix("POST revoke") }, "\(requests)")
+
+        // Sign in again in the same process, and open the instance.
+        let signedIn = try await coordinator.verifyOTP(
+            email: "account-1@example.com",
+            code: "123456"
+        )
+        guard case .signedIn = signedIn else {
+            return XCTFail("Signing in again ended at \(signedIn).")
+        }
+        _ = try coordinator.selectInstance(id: instance.id)
+        try await settlePush()
+
+        // Turn notifications on.
+        let beforeEnable = requests.count
+        let registrationsBeforeEnable = registrations
+        let vapidPublicKey = PushBase64URL.encode(
+            P256.KeyAgreement.PrivateKey().publicKey.x963Representation
+        )
+        let subscription = try await push.subscribe(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instance.url.absoluteString
+        )
+        try await settlePush()
+
+        XCTAssertGreaterThan(registrations, registrationsBeforeEnable)
+        let enable = Array(requests[beforeEnable...])
+        XCTAssertEqual(enable.filter { $0 == "PUT binding" }.count, 1, "\(enable)")
+        XCTAssertEqual(enable.filter { $0 == "PUT registration" }.count, 1, "\(enable)")
+        XCTAssertTrue(enable.contains("PATCH provider"), "\(enable)")
+        XCTAssertNotNil(subscription["endpoint"] as? String)
+        let active = try keychain.listRecords().filter {
+            $0.state == .active && $0.accountID == "account-1"
+        }
+        XCTAssertEqual(active.count, 1)
+        XCTAssertFalse(keychain.installation?.providerPatchPending ?? true)
+    }
+
+    /// The owner's update morning (TestFlight 27.1 to 31.1): notifications on
+    /// for the instance, then the App is updated. Its first launch finds the
+    /// 24-hour account cookie gone, so avibe.bot asks the same account for
+    /// its second factor again (403 `two_factor_required`); the account page
+    /// reads the session once more while it still owes it, then the factor
+    /// passes and the instance opens. Nothing ended the account session and
+    /// the account did not change, so the instance's notification
+    /// registration must survive: no bulk revoke, the record still active
+    /// and the installation still bound. (Before, the page's refresh ran the
+    /// sign-out push cleanup on the owed factor, and every update cost the
+    /// owner his notifications.)
+    func testAnUpdateLaunchThatOwesTheSecondFactorKeepsNotifications()
+        async throws
+    {
+        let defaults = makeDefaults()
+        let token = Data(repeating: 43, count: 32)
+        let installationID = UUID()
+        let keychain = InMemoryPushKeychainStore()
+        keychain.installation = PushInstallationState(
+            installationID: installationID,
+            installationSecret: Data(repeating: 13, count: 32),
+            accountID: "account-1",
+            bindGeneration: 5,
+            providerGeneration: 1229,
+            provider: PushProviderState(
+                deviceToken: token,
+                environment: "production",
+                topic: "bot.avibe.ios",
+                generation: 1229
+            ),
+            providerPatchPending: false,
+            pendingBulkRevokeThroughGeneration: nil
+        )
+        let generationStore = InMemoryPushGenerationStore()
+        generationStore.generation = 7
+        let vapidPublicKey = PushBase64URL.encode(
+            P256.KeyAgreement.PrivateKey().publicKey.x963Representation
+        )
+        let vapidKeyHash = SHA256.hash(
+            data: try XCTUnwrap(PushBase64URL.decode(vapidPublicKey))
+        ).map { String(format: "%02x", $0) }.joined()
+        try keychain.saveRecord(PushKeyRecord(
+            kid: "studio-key",
+            instanceOrigin: instance.url.absoluteString,
+            accountID: "account-1",
+            accountGeneration: 7,
+            bindGeneration: 5,
+            privateKey: P256.KeyAgreement.PrivateKey().rawRepresentation,
+            authSecret: Data(repeating: 4, count: 16),
+            vapidKeyHash: vapidKeyHash,
+            state: .active,
+            pendingRevoke: false,
+            replacementRegistrationIDs: []
+        ))
+        let marker = InMemoryPushInstallationMarkerStore()
+        marker.installationID = installationID
+
+        // Before the update: signed in with the instance selected.
+        let before = FakeMobileAuthTransport()
+        before.session = snapshot(accountID: "account-1")
+        let previous = makeCoordinator(defaults: defaults, transports: [before])
+        previous.activateAccountSurface()
+        _ = try await previous.bootstrap()
+        _ = try previous.selectInstance(id: instance.id)
+
+        // The updated App's first launch: a new process over the same
+        // defaults, keychain and account store. avibe.bot owes the second
+        // factor until it passes.
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.passkey]
+        )
+        var requests: [String] = []
+        let transports = (0..<8).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.secondFactor = requirement
+            transport.pushManagementHandler = { request in
+                let kind = request.path.split(separator: "/").last.map(String.init) ?? ""
+                requests.append("\(request.method) \(request.path.contains("/registrations/") ? "registration" : kind)")
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return transport
+        }
+        var push: NativePushCoordinator!
+        let coordinator = makeCoordinator(
+            defaults: defaults,
+            transports: transports,
+            onOpen: { _ in push.resumeAfterAccountActivation() },
+            onPreparePushLogout: { reason in await push.prepareForLogout(reason: reason) },
+            onReconcileInstancePush: { live, accountID in
+                await push.revokeRegistrations(outside: live, accountID: accountID)
+            }
+        )
+        push = NativePushCoordinator(
+            keychain: keychain,
+            generationStore: generationStore,
+            managementRequest: { request in
+                try await coordinator.pushManagementRequest(request)
+            },
+            accountProvider: { coordinator.currentAccount },
+            registerForRemoteNotifications: {
+                DispatchQueue.main.async {
+                    push.didRegister(deviceToken: token, environment: "production")
+                }
+            },
+            requestNotificationAuthorization: { true },
+            notificationAuthorizationStatus: { .authorized },
+            installationMarker: marker,
+            notificationCenter: QuietPushNotificationCenter()
+        )
+
+        coordinator.activateAccountSurface()
+        let launch = try await coordinator.bootstrap()
+        XCTAssertEqual(launch, .twoFactorRequired(requirement))
+        // The account page reads the session while it still owes the factor.
+        let owed = try await coordinator.refresh()
+        XCTAssertEqual(owed, .twoFactorRequired(requirement))
+        try await settlePush()
+
+        // The factor passes; the page reads the session and the instance opens.
+        for transport in transports {
+            transport.secondFactor = nil
+            transport.session = snapshot(accountID: "account-1")
+        }
+        let passed = try await coordinator.refresh()
+        XCTAssertEqual(
+            passed,
+            .signedIn(
+                snapshot: snapshot(accountID: "account-1"),
+                selectedInstanceID: instance.id
+            )
+        )
+        _ = try coordinator.selectInstance(id: instance.id)
+        try await settlePush()
+
+        XCTAssertFalse(requests.contains { $0.hasPrefix("POST revoke") }, "\(requests)")
+        XCTAssertFalse(requests.contains("DELETE registration"), "\(requests)")
+        XCTAssertEqual(keychain.installation?.accountID, "account-1")
+        XCTAssertEqual(keychain.installation?.bindGeneration, 5)
+        XCTAssertNil(keychain.installation?.pendingBulkRevokeThroughGeneration)
+        let record = try XCTUnwrap(keychain.loadRecord(kid: "studio-key"))
+        XCTAssertEqual(record.state, .active)
+        XCTAssertFalse(record.pendingRevoke)
+        let status = try await push.status(
+            vapidPublicKey: vapidPublicKey,
+            instanceOrigin: instance.url.absoluteString
+        )
+        XCTAssertEqual(status["state"] as? String, "on", "\(status)")
+    }
+
+    /// Owing the second factor keeps push only for the account that owes it.
+    /// If a different account comes out of it, that account first gets the
+    /// sign-out push cleanup; the same account keeps its push, also across
+    /// a relaunch while the factor is still owed. With no account to name,
+    /// the cleanup runs as before.
+    func testAnOwedSecondFactorKeepsPushOnlyForTheSameAccount() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        for (name, passedAccount, expected) in [
+            ("same account", "account-1", 0),
+            ("other account", "account-2", 1),
+        ] {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1")
+            let owing = FakeMobileAuthTransport()
+            owing.secondFactor = requirement
+            owing.verifySecondFactorHandler = { _ in
+                .signedIn(self.snapshot(accountID: passedAccount))
+            }
+            var pushLogouts = 0
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                transports: [first, owing] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { _ in pushLogouts += 1 }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            coordinator.activateAccountSurface()
+
+            let answer1 = try await coordinator.refresh()
+            XCTAssertEqual(answer1, .twoFactorRequired(requirement), name)
+            XCTAssertEqual(pushLogouts, 0, name)
+
+            // A relaunch while the factor is still owed keeps the same answer.
+            let relaunchTransport = FakeMobileAuthTransport()
+            relaunchTransport.secondFactor = requirement
+            relaunchTransport.verifySecondFactorHandler = { _ in
+                .signedIn(self.snapshot(accountID: passedAccount))
+            }
+            var relaunchLogouts = 0
+            var relaunchReasons: [PushRevokeReason] = []
+            let relaunched = makeCoordinator(
+                defaults: defaults,
+                transports: [relaunchTransport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reason in
+                    relaunchLogouts += 1
+                    relaunchReasons.append(reason)
+                }
+            )
+            relaunched.activateAccountSurface()
+            let answer2 = try await relaunched.bootstrap()
+            XCTAssertEqual(answer2, .twoFactorRequired(requirement), name)
+            let answer3 = try await relaunched.refresh()
+            XCTAssertEqual(answer3, .twoFactorRequired(requirement), name)
+            XCTAssertEqual(relaunchLogouts, 0, name)
+
+            let passed = try await relaunched.verifySecondFactor(method: .totp, code: "123456")
+            guard case .signedIn(let signedIn, _) = passed else {
+                return XCTFail("Expected a signed-in account: \(name)")
+            }
+            XCTAssertEqual(signedIn.account.id, passedAccount, name)
+            XCTAssertEqual(relaunchLogouts, expected, name)
+            // The factor passed for another account: that account changed.
+            XCTAssertEqual(relaunchReasons, expected == 1 ? [.accountChanged] : [], name)
+            XCTAssertEqual(pushLogouts, 0, name)
+        }
+
+        // Nobody to name (a cold launch that owes the factor with no saved
+        // selection) is still no definite answer: nothing is revoked.
+        let unknown = FakeMobileAuthTransport()
+        unknown.secondFactor = requirement
+        var pushLogouts = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [unknown] + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onPreparePushLogout: { _ in pushLogouts += 1 }
+        )
+        coordinator.activateAccountSurface()
+        let answer4 = try await coordinator.bootstrap()
+        XCTAssertEqual(answer4, .twoFactorRequired(requirement))
+        let answer5 = try await coordinator.refresh()
+        XCTAssertEqual(answer5, .twoFactorRequired(requirement))
+        XCTAssertEqual(pushLogouts, 0)
+    }
+
+    /// Each account-level push revoke names why (docs/plans/ios-push-relay-contract.md,
+    /// revoke reasons): the person signed out, avibe.bot answered 401, or a different
+    /// account signed in. The relay records it for diagnosis only.
+    func testEachAccountPushRevokeNamesItsReason() async throws {
+        // Signed out in the App.
+        do {
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            var reasons: [PushRevokeReason] = []
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try await coordinator.logout()
+            XCTAssertEqual(reasons, [.signedOut])
+        }
+        // avibe.bot answered the session read 401.
+        do {
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            var reasons: [PushRevokeReason] = []
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            transport.session = nil
+            _ = try await coordinator.refresh()
+            XCTAssertEqual(reasons, [.sessionExpired])
+        }
+        // A relaunch whose session read answers 401.
+        do {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1")
+            let previous = makeCoordinator(defaults: defaults, transports: [first])
+            previous.activateAccountSurface()
+            _ = try await previous.bootstrap()
+            _ = try previous.selectInstance(id: instance.id)
+            var reasons: [PushRevokeReason] = []
+            let relaunched = makeCoordinator(
+                defaults: defaults,
+                transports: [FakeMobileAuthTransport()] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            relaunched.activateAccountSurface()
+            _ = try await relaunched.bootstrap()
+            XCTAssertEqual(reasons, [.sessionExpired])
+        }
+        // The session read names another account than the one signed in.
+        do {
+            let transport = FakeMobileAuthTransport()
+            transport.session = snapshot(accountID: "account-1")
+            var reasons: [PushRevokeReason] = []
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [transport] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            transport.session = snapshot(accountID: "account-2")
+            _ = try await coordinator.refresh()
+            XCTAssertEqual(reasons, [.accountChanged])
+        }
+        // A different account signed in.
+        do {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1")
+            let previous = makeCoordinator(defaults: defaults, transports: [first])
+            previous.activateAccountSurface()
+            _ = try await previous.bootstrap()
+            _ = try previous.selectInstance(id: instance.id)
+            let other = FakeMobileAuthTransport()
+            other.session = snapshot(accountID: "account-2")
+            var reasons: [PushRevokeReason] = []
+            let relaunched = makeCoordinator(
+                defaults: defaults,
+                transports: [other] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { reasons.append($0) }
+            )
+            relaunched.activateAccountSurface()
+            _ = try await relaunched.bootstrap()
+            XCTAssertEqual(reasons, [.accountChanged])
+        }
+    }
+
+    /// A launch whose session check fails (no network, a timeout, a 503 or
+    /// any 5xx: the transport's `network`), and the sheet's refresh failing
+    /// the same way over a live runtime, are no answer at all. The App stays
+    /// signed in: the account store is not replaced, the saved selection and
+    /// the open runtime stay, no account transition runs, and push stays.
+    /// Only a 401, another account or an explicit sign-out end the account.
+    func testAFailedSessionCheckKeepsTheAccountItsDataAndPush() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let storeIdentifier = store.identifier
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let previous = makeCoordinator(defaults: defaults, transports: [first])
+        previous.activateAccountSurface()
+        _ = try await previous.bootstrap()
+        _ = try previous.selectInstance(id: instance.id)
+
+        // Every transport the relaunched App makes reaches the same avibe.bot,
+        // which fails the check until `answer` is set.
+        var answer: MobileSessionDiscovery?
+        let transports = (0..<6).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.fetchSessionHandler = {
+                guard let answer else { throw MobileAccountError.network }
+                return answer
+            }
+            return transport
+        }
+        var pushLogouts = 0
+        var transitions = 0
+        var runtime: MobileRuntimeContext?
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            websiteDataStore: store,
+            transports: transports,
+            onOpen: { runtime = $0 },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return []
+            },
+            onPreparePushLogout: { _ in pushLogouts += 1 }
+        )
+        relaunched.activateAccountSurface()
+        do {
+            _ = try await relaunched.bootstrap()
+            XCTFail("A failed session check must be reported")
+        } catch {
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
+        }
+        do {
+            _ = try await relaunched.refresh()
+            XCTFail("A failed session check must be reported")
+        } catch {
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
+        }
+        XCTAssertEqual(pushLogouts, 0)
+        XCTAssertEqual(transitions, 0)
+        XCTAssertEqual(store.identifier, storeIdentifier)
+
+        // The check answers again for the same account: the saved selection
+        // is still there, nothing was revoked.
+        answer = .signedIn(snapshot(accountID: "account-1"))
+        let recovered = try await relaunched.refresh()
+        XCTAssertEqual(
+            recovered,
+            .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: instance.id)
+        )
+        XCTAssertEqual(pushLogouts, 0)
+
+        // Over a live runtime, the sheet's refresh fails the same way.
+        _ = try relaunched.selectInstance(id: instance.id)
+        let opened = try XCTUnwrap(runtime)
+        relaunched.activateAccountSurface()
+        answer = nil
+        do {
+            _ = try await relaunched.refresh()
+            XCTFail("A failed session check must be reported")
+        } catch {
+            XCTAssertEqual((error as? MobileAccountError)?.code, MobileAccountError.network.code)
+        }
+        XCTAssertTrue(relaunched.isCurrentRuntime(opened))
+        XCTAssertEqual(relaunched.currentAccount?.id, "account-1")
+        XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertEqual(transitions, 0)
+        XCTAssertEqual(pushLogouts, 0)
+    }
+
+    /// Every signed-in answer hands the push side the account's listed
+    /// origins once the operation has ended (it revokes the account's
+    /// registrations outside them, from its own records: see
+    /// NativePushCoordinatorTests). The account's push logout runs in no
+    /// case; the runtime goes only when its own instance left the list at
+    /// its address, and otherwise stays selected while the reconcile runs,
+    /// whose own request is accepted rather than refused as busy.
+    func testARefreshedListReconcilesPushAgainstTheListedOrigins() async throws {
+        func instance(_ id: String, _ host: String) -> MobileInstance {
+            MobileInstance(
+                id: id, name: id, host: host,
+                url: URL(string: "https://\(host)")!,
+                relationship: "owner", ownerEmail: nil, available: true
+            )
+        }
+        let selected = self.instance
+        let team = instance("instance-2", "team-app.avibe.bot")
+        let lab = instance("instance-3", "lab-app.avibe.bot")
+        let moved = instance(selected.id, "alex-new.avibe.bot")
+        let rows: [(name: String, before: [MobileInstance], after: [MobileInstance], live: Set<String>, keepsRuntime: Bool)] = [
+            ("selected removed", [selected], [], [], false),
+            ("selected moved", [selected], [moved], ["https://alex-new.avibe.bot"], false),
+            ("others removed", [selected, team, lab], [selected], ["https://alex-app.avibe.bot"], true),
+        ]
+        for row in rows {
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1", instances: row.before)
+            // How many transports the push requests borrow depends on when
+            // each pass runs against the account surface; every one after
+            // the first reaches avibe.bot listing the refreshed instances.
+            let later = (0..<8).map { _ in
+                let transport = FakeMobileAuthTransport()
+                transport.session = self.snapshot(accountID: "account-1", instances: row.after)
+                return transport
+            }
+            var pushLogouts = 0
+            var reconciles: [(Set<String>, String)] = []
+            var runtime: MobileRuntimeContext?
+            var selectedDuringReconcile: [Bool] = []
+            weak var weakCoordinator: MobileSessionCoordinator?
+            let coordinator = makeCoordinator(
+                defaults: makeDefaults(),
+                transports: [first] + later,
+                onOpen: { runtime = $0 },
+                onPreparePushLogout: { _ in pushLogouts += 1 },
+                onReconcileInstancePush: { live, accountID in
+                    reconciles.append((live, accountID))
+                    guard let weakCoordinator, let runtime else { return }
+                    selectedDuringReconcile.append(weakCoordinator.keepsSelectedRuntime(runtime))
+                    do {
+                        let response = try await weakCoordinator.pushManagementRequest(
+                            PushManagementRequest(
+                                method: "DELETE",
+                                path: "/api/push/apns/registrations/instance-key",
+                                headers: [:],
+                                body: nil
+                            )
+                        )
+                        XCTAssertEqual(response.statusCode, 200, row.name)
+                    } catch {
+                        XCTFail("The reconcile request was refused: \(error), \(row.name)")
+                    }
+                }
+            )
+            weakCoordinator = coordinator
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: selected.id)
+            let opened = try XCTUnwrap(runtime)
+            try await settlePush()
+            reconciles.removeAll()
+            selectedDuringReconcile.removeAll()
+            coordinator.activateAccountSurface()
+
+            let state = try await coordinator.refresh()
+            try await settlePush()
+
+            guard case .signedIn(_, let selectedID) = state else {
+                return XCTFail("Expected the account to stay: \(row.name)")
+            }
+            XCTAssertEqual(selectedID, row.keepsRuntime ? selected.id : nil, row.name)
+            XCTAssertEqual(coordinator.isSelectedRuntime(opened), row.keepsRuntime, row.name)
+            XCTAssertEqual(coordinator.currentAccount?.id, "account-1", row.name)
+            XCTAssertEqual(reconciles.map(\.0), [row.live], row.name)
+            XCTAssertEqual(reconciles.map(\.1), ["account-1"], row.name)
+            XCTAssertEqual(pushLogouts, 0, row.name)
+            if row.keepsRuntime {
+                XCTAssertEqual(selectedDuringReconcile, [true], row.name)
+            }
+        }
+    }
+
+    /// With no snapshot here (after a second factor, or a relaunch), the
+    /// account's next signed-in answer still reconciles push against what
+    /// it lists now, so an instance that left meanwhile loses its own
+    /// registration.
+    func testInstancesRemovedWhileUnseenAreReconciledOnceTheAccountIsKnown() async throws {
+        let team = MobileInstance(
+            id: "instance-2", name: "Team", host: "team-app.avibe.bot",
+            url: URL(string: "https://team-app.avibe.bot")!,
+            relationship: "owner", ownerEmail: nil, available: true
+        )
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        for path in ["second factor", "relaunch"] {
+            let defaults = makeDefaults()
+            let first = FakeMobileAuthTransport()
+            first.session = snapshot(accountID: "account-1", instances: [instance, team])
+            // Whichever transport a push request borrows, avibe.bot owes the
+            // factor and then lets the same account in with one instance.
+            let owing = (0..<8).map { _ in
+                let transport = FakeMobileAuthTransport()
+                transport.secondFactor = requirement
+                transport.verifySecondFactorHandler = { _ in
+                    .signedIn(self.snapshot(accountID: "account-1", instances: [self.instance]))
+                }
+                return transport
+            }
+            var reconciles: [Set<String>] = []
+            var pushLogouts = 0
+            let coordinator = makeCoordinator(
+                defaults: defaults,
+                transports: [first] + owing,
+                onPreparePushLogout: { _ in pushLogouts += 1 },
+                onReconcileInstancePush: { live, _ in reconciles.append(live) }
+            )
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            try await settlePush()
+            reconciles.removeAll()
+
+            if path == "second factor" {
+                coordinator.activateAccountSurface()
+                let owed = try await coordinator.refresh()
+                XCTAssertEqual(owed, .twoFactorRequired(requirement))
+                _ = try await coordinator.verifySecondFactor(method: .totp, code: "123456")
+            } else {
+                let relaunch = (0..<8).map { _ in
+                    let transport = FakeMobileAuthTransport()
+                    transport.session = self.snapshot(accountID: "account-1", instances: [self.instance])
+                    return transport
+                }
+                let relaunched = makeCoordinator(
+                    defaults: defaults,
+                    transports: relaunch,
+                    onPreparePushLogout: { _ in pushLogouts += 1 },
+                    onReconcileInstancePush: { live, _ in reconciles.append(live) }
+                )
+                relaunched.activateAccountSurface()
+                _ = try await relaunched.bootstrap()
+                // Its reconcile runs once the bootstrap has ended, while the
+                // coordinator is alive (the App holds it for its lifetime).
+                try await settlePush()
+                withExtendedLifetime(relaunched) {}
+            }
+            try await settlePush()
+
+            XCTAssertEqual(reconciles, [["https://alex-app.avibe.bot"]], path)
+            XCTAssertEqual(pushLogouts, 0, path)
+        }
+    }
+
+    /// The first launch of this build after one that never recorded
+    /// `pushAccountID`: the saved selection names the account its push may
+    /// be bound to, and that survives a sign-in clearing the selection.
+    /// Owing the factor, then signing in as someone else with an email code,
+    /// still cleans the previous account's push before publishing the new
+    /// one; the same account again does not.
+    func testTheFirstLaunchOfThisBuildRemembersThePushAccount() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        for (name, next, expected) in [("other account", "account-2", 1), ("same account", "account-1", 0)] {
+            let defaults = makeDefaults()
+            let before = FakeMobileAuthTransport()
+            before.session = snapshot(accountID: "account-1")
+            let previous = makeCoordinator(defaults: defaults, transports: [before])
+            previous.activateAccountSurface()
+            _ = try await previous.bootstrap()
+            _ = try previous.selectInstance(id: instance.id)
+            // As the previous build left it: a selection, no record.
+            defaults.removeObject(forKey: "avibe.mobile.pushAccount")
+
+            let owing = FakeMobileAuthTransport()
+            owing.secondFactor = requirement
+            let signingIn = FakeMobileAuthTransport()
+            signingIn.verifyOTPHandler = { _, _ in self.snapshot(accountID: next) }
+            var pushLogouts = 0
+            let updated = makeCoordinator(
+                defaults: defaults,
+                transports: [owing, signingIn] + (0..<3).map { _ in FakeMobileAuthTransport() },
+                onPreparePushLogout: { _ in pushLogouts += 1 }
+            )
+            updated.activateAccountSurface()
+            let answer7 = try await updated.bootstrap()
+            XCTAssertEqual(answer7, .twoFactorRequired(requirement), name)
+            _ = try await updated.requestOTP(email: "\(next)@example.com")
+            let state = try await updated.verifyOTP(email: "\(next)@example.com", code: "123456")
+            guard case .signedIn(let signedIn, _) = state else {
+                return XCTFail("Expected a signed-in account: \(name)")
+            }
+            XCTAssertEqual(signedIn.account.id, next, name)
+            XCTAssertEqual(pushLogouts, expected, name)
+        }
+    }
+
+    /// A sign-out that borrows an account cleanup still in flight, then a new
+    /// sign-in: when the old cleanup finally returns, it must not erase the
+    /// new account's record. That account later owes its factor, and the
+    /// next sign-in as someone else still gets the cleanup.
+    func testALateCleanupKeepsTheNewerAccountsPushRecord() async throws {
+        let requirement = MobileSecondFactorRequirement(
+            email: "account-2@example.com", gate: .challenge, methods: [.totp]
+        )
+        var discovery: MobileSessionDiscovery? = .signedIn(snapshot(accountID: "account-1"))
+        var otpAccount = "account-2"
+        let transports = (0..<12).map { _ in
+            let transport = FakeMobileAuthTransport()
+            transport.fetchSessionHandler = { discovery }
+            transport.verifyOTPHandler = { _, _ in self.snapshot(accountID: otpAccount) }
+            return transport
+        }
+        let oldCleanup = expectation(description: "account-1 cleanup")
+        let releaseOld = expectation(description: "release account-1 cleanup")
+        var cleanups = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: transports,
+            onPreparePushLogout: { _ in
+                cleanups += 1
+                if cleanups == 1 {
+                    oldCleanup.fulfill()
+                    await self.fulfillment(of: [releaseOld], timeout: 30)
+                }
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        coordinator.activateAccountSurface()
+
+        // account-1's session ends: its cleanup starts and is held.
+        discovery = nil
+        let ended = Task { try await coordinator.refresh() }
+        await fulfillment(of: [oldCleanup], timeout: 30)
+        // Sign out (borrowing it), then sign in as account-2.
+        let answer8 = try await coordinator.logout()
+        XCTAssertEqual(answer8, .signedOut)
+        discovery = .signedIn(snapshot(accountID: "account-2"))
+        _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-2")
+        releaseOld.fulfill()
+        _ = await ended.result
+        XCTAssertEqual(cleanups, 1)
+
+        // account-2 owes its factor; someone else signs in with a code.
+        coordinator.activateAccountSurface()
+        discovery = .secondFactorRequired(requirement)
+        let answer9 = try await coordinator.refresh()
+        XCTAssertEqual(answer9, .twoFactorRequired(requirement))
+        XCTAssertEqual(cleanups, 1)
+        otpAccount = "account-3"
+        _ = try await coordinator.requestOTP(email: "account-3@example.com")
+        discovery = .signedIn(snapshot(accountID: "account-3"))
+        _ = try await coordinator.verifyOTP(email: "account-3@example.com", code: "123456")
+        XCTAssertEqual(coordinator.currentAccount?.id, "account-3")
+        XCTAssertEqual(cleanups, 2)
+    }
+
+    /// Gives the push coordinator's queued main-actor work (resume,
+    /// recovery, a token callback and its reconciliation, all against
+    /// fakes) time to finish.
+    private func settlePush() async throws {
+        for _ in 0..<5 {
+            for _ in 0..<50 {
+                await Task.yield()
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
     }
 
     /// What the App icon badge checks before a runtime page sets it: an
@@ -1182,7 +3368,7 @@ final class MobileOnboardingTests: XCTestCase {
                 FakeMobileAuthTransport(),
             ],
             onOpen: { runtime = $0 },
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 duringPushLogout.append(coordinator.isSelectedRuntime(runtime!))
             }
         )
@@ -1260,6 +3446,267 @@ final class MobileOnboardingTests: XCTestCase {
             refused,
             ["refresh: \(MobileAccountError.busy.code)", "select: \(MobileAccountError.busy.code)"]
         )
+    }
+
+    /// The list's open (the current block after an open timed out, or any
+    /// row) made while a push request the App made on its own is running
+    /// waits for that request and then opens, instead of failing as busy.
+    func testTheListsOpenWaitsForAPushRequestAndOpensOnceItEnds() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened: [MobileRuntimeContext] = []
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { opened.append($0) }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        XCTAssertEqual(opened.count, 1)
+
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened.count, 1, "It opened while the request still ran.")
+
+        hold.release()
+        let reopened = try await reopen.value
+        try await request.value
+        XCTAssertEqual(reopened.id, instance.id)
+        XCTAssertEqual(opened.count, 2)
+        XCTAssertEqual(opened.last?.instance.id, instance.id)
+    }
+
+    /// Recovery can run push requests back to back, the next one starting
+    /// before the waiting open resumes: the open keeps waiting, within its
+    /// one bound, and opens once the last of them ends.
+    func testTheListsOpenWaitsThroughPushRequestsRunBackToBack() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let holds = [HeldCall(), HeldCall()]
+        let managements = holds.map { hold in
+            let management = FakeMobileAuthTransport()
+            management.pushManagementHandler = { _ in
+                await hold.wait()
+                return PushManagementResponse(statusCode: 200, body: [:])
+            }
+            return management
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first] + managements + [FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let patch = PushManagementRequest(
+            method: "PATCH",
+            path: "/api/push/apns/installations/current",
+            headers: [:],
+            body: nil
+        )
+        let requests = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(patch)
+            _ = try await coordinator.pushManagementRequest(patch)
+        }
+        try await holds[0].waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+
+        holds[0].release()
+        try await holds[1].waitUntilHeld()
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened, 1, "It opened, or gave up, during the second request.")
+
+        holds[1].release()
+        let reopened = try await reopen.value
+        try await requests.value
+        XCTAssertEqual(reopened.id, instance.id)
+        XCTAssertEqual(opened, 2)
+    }
+
+    /// An open that waited is dropped when the page that asked for it closed
+    /// meanwhile (the sheet swiped away over a live runtime): it must not
+    /// replace the runtime the user went back to.
+    func testTheListsOpenIsDroppedWhenItsPageClosesDuringTheWait() async throws {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        // The sheet over the runtime; the push request uses its transport.
+        coordinator.activateAccountSurface()
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+        let reopen = Task { @MainActor in
+            try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: self.instance.id
+            )
+        }
+        for _ in 0..<50 {
+            await Task.yield()
+        }
+        coordinator.leaveAccountSurface()
+
+        hold.release()
+        do {
+            _ = try await reopen.value
+            XCTFail("The open went ahead after its page closed.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        try await request.value
+        XCTAssertEqual(opened, 1)
+    }
+
+    /// Only an operation that keeps the selection is waited for: any other
+    /// one (here the first session read, before a list exists) still
+    /// answers busy at once.
+    func testTheListsOpenAnswersBusyAtOnceForAnOperationThatDoesNotKeepTheSelection()
+        async throws
+    {
+        let first = FakeMobileAuthTransport()
+        let session = snapshot(accountID: "account-1")
+        let hold = HeldCall()
+        first.fetchSessionHandler = {
+            await hold.wait()
+            return .signedIn(session)
+        }
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+        let bootstrap = Task { @MainActor in
+            _ = try await coordinator.bootstrap()
+        }
+        try await hold.waitUntilHeld()
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: instance.id
+            )
+            XCTFail("The open did not answer busy.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        XCTAssertLessThan(started.duration(to: clock.now), .seconds(2))
+
+        hold.release()
+        try await bootstrap.value
+    }
+
+    /// The wait is bounded: a push request that does not finish in time
+    /// leaves the open answering busy, not hanging.
+    func testTheListsOpenAnswersBusyWhenThePushRequestOutlastsTheWait()
+        async throws
+    {
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let management = FakeMobileAuthTransport()
+        let hold = HeldCall()
+        management.pushManagementHandler = { _ in
+            await hold.wait()
+            return PushManagementResponse(statusCode: 200, body: [:])
+        }
+        var opened = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [first, management, FakeMobileAuthTransport()],
+            onOpen: { _ in opened += 1 }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+        let request = Task { @MainActor in
+            _ = try await coordinator.pushManagementRequest(
+                PushManagementRequest(
+                    method: "PATCH",
+                    path: "/api/push/apns/installations/current",
+                    headers: [:],
+                    body: nil
+                )
+            )
+        }
+        try await hold.waitUntilHeld()
+
+        let clock = ContinuousClock()
+        let started = clock.now
+        do {
+            _ = try await coordinator.selectInstanceAfterSelectionKeepingOperation(
+                id: instance.id,
+                waitingAtMost: .milliseconds(300)
+            )
+            XCTFail("The open did not answer busy.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error, .busy)
+        }
+        let waited = started.duration(to: clock.now)
+        XCTAssertGreaterThanOrEqual(waited, .milliseconds(300))
+        XCTAssertLessThan(waited, .seconds(5))
+        XCTAssertEqual(opened, 1)
+
+        hold.release()
+        try await request.value
+        XCTAssertEqual(opened, 1)
     }
 
     /// The instance list: the current instance first, then the ones opened on
@@ -1396,7 +3843,7 @@ final class MobileOnboardingTests: XCTestCase {
         let other = makeCoordinator(
             defaults: defaults,
             transports: [otherTransport, FakeMobileAuthTransport()],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -1417,7 +3864,7 @@ final class MobileOnboardingTests: XCTestCase {
         let coordinator = makeCoordinator(
             defaults: defaults,
             transports: [transport, FakeMobileAuthTransport()],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -1443,7 +3890,7 @@ final class MobileOnboardingTests: XCTestCase {
         let coordinator = makeCoordinator(
             defaults: defaults,
             transports: [transport, FakeMobileAuthTransport()],
-            onPreparePushLogout: {
+            onPreparePushLogout: { _ in
                 pushLogoutCalls += 1
             }
         )
@@ -1489,6 +3936,7 @@ final class MobileOnboardingTests: XCTestCase {
         refreshTransport.secondFactor = requirement
         var runtime: MobileRuntimeContext?
         var transitions = 0
+        var healthEvents: [String] = []
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
@@ -1497,6 +3945,13 @@ final class MobileOnboardingTests: XCTestCase {
             onPrepareAccountTransition: {
                 transitions += 1
                 return []
+            },
+            onHealthAccountEvent: { event in
+                switch event {
+                case .signedOut: healthEvents.append("signedOut")
+                case .authorizationUnavailable: healthEvents.append("paused")
+                case .authenticated: healthEvents.append("authenticated")
+                }
             }
         )
         coordinator.activateAccountSurface()
@@ -1510,6 +3965,9 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertFalse(coordinator.isSelectedRuntime(selected))
         XCTAssertEqual(transitions, 1)
         XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertTrue(healthEvents.contains("paused"))
+        XCTAssertFalse(healthEvents.contains("signedOut"))
+        XCTAssertNil(coordinator.healthAccountID)
 
         refreshTransport.secondFactor = nil
         refreshTransport.session = snapshot(accountID: "account-1")
@@ -1519,6 +3977,8 @@ final class MobileOnboardingTests: XCTestCase {
             .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: nil)
         )
         XCTAssertEqual(store.identifier, storeIdentifier)
+        XCTAssertEqual(coordinator.healthAccountID, "account-1")
+        XCTAssertEqual(healthEvents.last, "authenticated")
     }
 
     func testRefreshNetworkFailureKeepsSelectedRuntimeAndSnapshot() async throws {
@@ -1732,9 +4192,11 @@ final class MobileOnboardingTests: XCTestCase {
         let requirement = MobileSecondFactorRequirement(
             email: "account-1@example.com", gate: .challenge, methods: [.totp]
         )
+        _ = requirement
+        // Only the definite answers run a push cleanup inside the refresh:
+        // an owed second factor keeps push, and a removed instance is
+        // reconciled after the operation, so neither has a window here.
         let discoveries: [(String, MobileSessionDiscovery?)] = [
-            ("removed origin", .signedIn(snapshot(accountID: "account-1", instances: []))),
-            ("second factor", .secondFactorRequired(requirement)),
             ("signed out", nil),
             ("other account", .signedIn(snapshot(accountID: "account-2"))),
         ]
@@ -1764,7 +4226,7 @@ final class MobileOnboardingTests: XCTestCase {
                         + (0..<4).map { _ in FakeMobileAuthTransport() },
                     onCreateTransport: { created += 1 },
                     onOpen: { opened = $0 },
-                    onPreparePushLogout: {
+                    onPreparePushLogout: { _ in
                         cleanupStarted.fulfill()
                         await self.fulfillment(of: [allowCleanup], timeout: 30)
                     }
@@ -1827,9 +4289,10 @@ final class MobileOnboardingTests: XCTestCase {
         let rows: [(String, MobileSessionDiscovery?, MobileSessionState)] = [
             ("signed out", nil, .signedOut),
             ("other account", .signedIn(snapshot(accountID: "account-2")), .signedOut),
-            ("removed origin", .signedIn(reduced), .signedIn(snapshot: reduced, selectedInstanceID: nil)),
-            ("second factor", .secondFactorRequired(requirement), .twoFactorRequired(requirement)),
         ]
+        // An owed second factor keeps push and a removed instance is
+        // reconciled after the operation: neither has a cleanup window.
+        _ = (requirement, reduced)
         for (name, discovery, expected) in rows {
             let first = FakeMobileAuthTransport()
             first.session = snapshot(accountID: "account-1")
@@ -1846,7 +4309,7 @@ final class MobileOnboardingTests: XCTestCase {
             let coordinator = makeCoordinator(
                 defaults: makeDefaults(),
                 transports: [first, refreshTransport, FakeMobileAuthTransport()],
-                onPreparePushLogout: {
+                onPreparePushLogout: { _ in
                     cleanupStarted.fulfill()
                     await self.fulfillment(of: [allowCleanup], timeout: 30)
                 }
@@ -1899,7 +4362,7 @@ final class MobileOnboardingTests: XCTestCase {
                 defaults: makeDefaults(),
                 transports: [original, replacement, FakeMobileAuthTransport()],
                 onCreateTransport: { created += 1 },
-                onPreparePushLogout: {
+                onPreparePushLogout: { _ in
                     started.fulfill()
                     await self.fulfillment(of: [release], timeout: 30)
                 }
@@ -2053,7 +4516,7 @@ final class MobileOnboardingTests: XCTestCase {
                 let coordinator = makeCoordinator(
                     defaults: defaults, websiteDataStore: store,
                     transports: [first, fetch, replacement, FakeMobileAuthTransport()],
-                    onPreparePushLogout: {
+                    onPreparePushLogout: { _ in
                         cleanup.fulfill()
                         await self.fulfillment(of: [releaseCleanup], timeout: 30)
                     }
@@ -2095,24 +4558,25 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
+    /// An older account's cleanup still in flight (its session ended) is
+    /// borrowed by the sign-out, and does not suppress the next account's.
     func testAnOlderCleanupDoesNotSuppressANewerAccountsCleanup() async throws {
-        let requirement = MobileSecondFactorRequirement(
-            email: "account-2@example.com", gate: .challenge, methods: [.totp]
-        )
         let initial = FakeMobileAuthTransport()
         initial.session = snapshot(accountID: "account-1")
         let oldRefresh = FakeMobileAuthTransport()
-        oldRefresh.session = snapshot(accountID: "account-1", instances: [])
+        oldRefresh.fetchSessionHandler = { nil }
         let replacement = FakeMobileAuthTransport()
         replacement.session = snapshot(accountID: "account-2")
         let newRefresh = FakeMobileAuthTransport()
-        newRefresh.secondFactor = requirement
+        newRefresh.fetchSessionHandler = { nil }
         let oldCleanup = expectation(description: "old account cleanup")
         let releaseOld = expectation(description: "release old account cleanup")
         var cleanups = 0
         let coordinator = makeCoordinator(
-            defaults: makeDefaults(), transports: [initial, oldRefresh, replacement, newRefresh],
-            onPreparePushLogout: {
+            defaults: makeDefaults(),
+            transports: [initial, oldRefresh, replacement, newRefresh]
+                + (0..<3).map { _ in FakeMobileAuthTransport() },
+            onPreparePushLogout: { _ in
                 cleanups += 1
                 if cleanups == 1 {
                     oldCleanup.fulfill()
@@ -2136,9 +4600,10 @@ final class MobileOnboardingTests: XCTestCase {
         case .failure(let error):
             XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
         }
+        // account-1's (borrowed by the sign-out), then account-2's.
         XCTAssertEqual(cleanups, 2)
-        XCTAssertEqual(state, .twoFactorRequired(requirement))
-        XCTAssertFalse(coordinator.isAccountSurfaceActive)
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNil(coordinator.currentAccount)
     }
 
     func testRefreshPushLogoutKeepsTheOuterTransportOwner() async throws {
@@ -2148,11 +4613,13 @@ final class MobileOnboardingTests: XCTestCase {
             methods: [.totp]
         )
         let removed = snapshot(accountID: "account-1", instances: [])
-        let rows: [(name: String, discovery: MobileSessionDiscovery?, state: MobileSessionState, transports: Int)] = [
-            ("second factor", .secondFactorRequired(requirement), .twoFactorRequired(requirement), 2),
-            ("selected origin removed", .signedIn(removed), .signedIn(snapshot: removed, selectedInstanceID: nil), 2),
-            ("signed out", nil, .signedOut, 3),
-            ("other account", .signedIn(snapshot(accountID: "account-2")), .signedOut, 3),
+        // `cleanup`: the account's push logout, or none (an owed second
+        // factor keeps push; a removed instance is reconciled afterwards).
+        let rows: [(name: String, discovery: MobileSessionDiscovery?, state: MobileSessionState, transports: Int, cleanup: String)] = [
+            ("second factor", .secondFactorRequired(requirement), .twoFactorRequired(requirement), 2, "none"),
+            ("selected origin removed", .signedIn(removed), .signedIn(snapshot: removed, selectedInstanceID: nil), 2, "none"),
+            ("signed out", nil, .signedOut, 3, "logout"),
+            ("other account", .signedIn(snapshot(accountID: "account-2")), .signedOut, 3, "logout"),
         ]
         for visible in [false, true] {
             for row in rows {
@@ -2173,7 +4640,7 @@ final class MobileOnboardingTests: XCTestCase {
                     transports: [first, refresh, replacement, FakeMobileAuthTransport()],
                     onCreateTransport: { created += 1 },
                     onOpen: { runtime = $0 },
-                    onPreparePushLogout: {
+                    onPreparePushLogout: { _ in
                         pushLogoutCalls += 1
                         guard let callbackCoordinator else {
                             return XCTFail("Missing push logout coordinator: \(name)")
@@ -2205,7 +4672,7 @@ final class MobileOnboardingTests: XCTestCase {
                 let state = try await coordinator.refresh()
 
                 XCTAssertEqual(state, row.state, name)
-                XCTAssertEqual(pushLogoutCalls, 1, name)
+                XCTAssertEqual(pushLogoutCalls, row.cleanup == "logout" ? 1 : 0, name)
                 XCTAssertEqual(created, row.transports, name)
                 XCTAssertFalse(coordinator.isSelectedRuntime(selected), name)
                 XCTAssertEqual(coordinator.isAccountSurfaceActive, visible, name)
@@ -2881,6 +5348,199 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertEqual(try coordinator.selectInstance(id: instance.id), instance)
     }
 
+    /// The stored session opens an instance first only while avibe.bot's
+    /// last confirmation of it is within its lifetime (14 days): an instance
+    /// address that left the account cannot be another account's sooner than
+    /// that. Past it, with no record of a confirmation (a session stored by
+    /// an earlier build), or with one dated in the future, nothing is
+    /// restored and the launch asks avibe.bot first. Only a signed-in answer
+    /// from avibe.bot dates the session: reading it back does not, and a
+    /// failed read does not.
+    func testTheLastGoodSessionOpensFirstOnlyWithinItsConfirmationsLifetime() async throws {
+        let confirmedAtKey = "avibe.mobile.lastGoodSessionConfirmedAt"
+        let lifetime = MobileSessionConfirmation.lifetime
+        XCTAssertEqual(lifetime, 14 * 24 * 60 * 60)
+        let defaults = makeDefaults()
+        let signedInAt = Date(timeIntervalSince1970: 1_800_000_000)
+        var clock = signedInAt
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        // Spare transports: an operation may open a new one.
+        let spares = { (0..<4).map { _ in FakeMobileAuthTransport() } }
+        let signedIn = makeCoordinator(defaults: defaults, transports: [first] + spares(), now: { clock })
+        XCTAssertFalse(signedIn.sessionConfirmationIsCurrent)
+        signedIn.activateAccountSurface()
+        _ = try await signedIn.bootstrap()
+        _ = try signedIn.selectInstance(id: instance.id)
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), signedInAt.timeIntervalSince1970)
+        XCTAssertTrue(signedIn.sessionConfirmationIsCurrent)
+
+        func relaunch(
+            at date: Date,
+            transports: [FakeMobileAuthTransport] = []
+        ) -> MobileSessionCoordinator {
+            clock = date
+            return makeCoordinator(defaults: defaults, transports: transports + spares(), now: { clock })
+        }
+        let renewalAge = MobileSessionConfirmation.renewalAge
+        XCTAssertEqual(renewalAge, 7 * 24 * 60 * 60)
+        let rows: [(name: String, after: TimeInterval, opensFirst: Bool, renews: Bool)] = [
+            ("at once", 0, true, false),
+            ("a moment before it is asked for again", renewalAge - 1, true, false),
+            ("old enough to be asked for again", renewalAge, true, true),
+            ("a moment before the lifetime ends", lifetime - 1, true, true),
+            ("as the lifetime ends", lifetime, false, false),
+            ("long after", 45 * 24 * 60 * 60, false, false),
+            ("the clock set back before the confirmation", -60, false, false),
+        ]
+        for row in rows {
+            let relaunched = relaunch(at: signedInAt.addingTimeInterval(row.after))
+            XCTAssertEqual(relaunched.restoreLastGoodSession() != nil, row.opensFirst, row.name)
+            XCTAssertEqual(relaunched.sessionConfirmationIsCurrent, row.opensFirst, row.name)
+            XCTAssertEqual(relaunched.sessionConfirmationIsDueForRenewal, row.renews, row.name)
+            // Refused, it leaves no account behind for anything to open.
+            XCTAssertEqual(relaunched.currentAccount?.id, row.opensFirst ? "account-1" : nil, row.name)
+            // Reading the session back never dates it.
+            XCTAssertEqual(defaults.double(forKey: confirmedAtKey), signedInAt.timeIntervalSince1970, row.name)
+        }
+
+        // A read that fails does not date it.
+        let stale = signedInAt.addingTimeInterval(lifetime + 60)
+        let failing = FakeMobileAuthTransport()
+        failing.fetchSessionError = URLError(.notConnectedToInternet)
+        let offline = relaunch(at: stale, transports: [failing])
+        offline.activateAccountSurface()
+        _ = try? await offline.bootstrap()
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), signedInAt.timeIntervalSince1970)
+        XCTAssertFalse(offline.sessionConfirmationIsCurrent)
+
+        // avibe.bot answering, signed in, dates it again: the next launch
+        // opens first.
+        let answering = FakeMobileAuthTransport()
+        answering.session = snapshot(accountID: "account-1")
+        let checked = relaunch(at: stale, transports: [answering])
+        checked.activateAccountSurface()
+        _ = try await checked.bootstrap()
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), stale.timeIntervalSince1970)
+        XCTAssertNotNil(relaunch(at: stale.addingTimeInterval(60)).restoreLastGoodSession())
+
+        // A session stored by a build from before the record: not opened
+        // first.
+        defaults.removeObject(forKey: confirmedAtKey)
+        XCTAssertNil(relaunch(at: stale).restoreLastGoodSession())
+        defaults.set(stale.timeIntervalSince1970, forKey: confirmedAtKey)
+
+        // A refresh that answers dates it too; a sign-out takes the record
+        // with the session.
+        let refreshing = FakeMobileAuthTransport()
+        refreshing.session = snapshot(accountID: "account-1")
+        let later = stale.addingTimeInterval(3_600)
+        let running = relaunch(at: later, transports: [refreshing])
+        XCTAssertNotNil(running.restoreLastGoodSession())
+        _ = try await running.refresh()
+        XCTAssertEqual(defaults.double(forKey: confirmedAtKey), later.timeIntervalSince1970)
+        running.activateAccountSurface()
+        _ = try await running.logout()
+        XCTAssertNil(defaults.object(forKey: confirmedAtKey))
+        XCTAssertNil(defaults.object(forKey: "avibe.mobile.lastGoodSession"))
+    }
+
+    /// The Action Button's background take reads the stored selection
+    /// without the account coordinator. It has a target only while
+    /// avibe.bot's confirmation of the stored session is current; past it,
+    /// or with no record, it has none (the take then asks for the App).
+    func testTheBackgroundTakeHasNoTargetPastTheConfirmationsLifetime() throws {
+        let defaults = makeDefaults()
+        let store = UUID()
+        defaults.set(
+            Data(#"{"accountID":"account-1","instanceID":"instance-1","url":"https://alex-app.avibe.bot"}"#.utf8),
+            forKey: VoiceCaptureTarget.selectionKey
+        )
+        defaults.set(store.uuidString, forKey: VoiceCaptureTarget.storeIdentifierKey)
+        let confirmed = { (daysAgo: Double) in
+            defaults.set(
+                Date().addingTimeInterval(-daysAgo * 24 * 60 * 60).timeIntervalSince1970,
+                forKey: MobileSessionConfirmation.key
+            )
+        }
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
+        confirmed(13)
+        let target = try XCTUnwrap(VoiceCaptureTarget.current(defaults: defaults))
+        XCTAssertEqual(target.accountID, "account-1")
+        XCTAssertEqual(target.storeIdentifier, store)
+        XCTAssertEqual(target.origin, WebOrigin.parseConfigured("https://alex-app.avibe.bot"))
+        confirmed(15)
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
+        confirmed(-1)
+        XCTAssertNil(VoiceCaptureTarget.current(defaults: defaults))
+    }
+
+    /// The last session avibe.bot confirmed, kept on the device so a cold
+    /// start can open the selected instance before checking again: restored
+    /// only for the account the selection belongs to, and gone with a
+    /// sign-out (no account data is kept past it).
+    func testTheLastGoodSessionRestoresTheSelectionAndGoesWithASignOut() async throws {
+        let defaults = makeDefaults()
+        let first = FakeMobileAuthTransport()
+        first.session = snapshot(accountID: "account-1")
+        let signedIn = makeCoordinator(defaults: defaults, transports: [first] + (0..<3).map { _ in FakeMobileAuthTransport() })
+        signedIn.activateAccountSurface()
+        _ = try await signedIn.bootstrap()
+        _ = try signedIn.selectInstance(id: instance.id)
+
+        let relaunched = makeCoordinator(defaults: defaults, transports: [FakeMobileAuthTransport()])
+        let restored = relaunched.restoreLastGoodSession()
+        XCTAssertEqual(
+            restored,
+            .signedIn(snapshot: snapshot(accountID: "account-1"), selectedInstanceID: instance.id)
+        )
+        XCTAssertEqual(relaunched.currentAccount?.id, "account-1")
+        let runtime = try XCTUnwrap(relaunched.restorableRuntime(from: try XCTUnwrap(restored)))
+        XCTAssertEqual(runtime.instance.id, instance.id)
+
+        // Another account's selection, or a selected instance the stored
+        // list shows unavailable: nothing opens first, and the stored
+        // session stays for the check to replace.
+        let stored = try XCTUnwrap(defaults.data(forKey: "avibe.mobile.lastGoodSession"))
+        let selection = try XCTUnwrap(defaults.data(forKey: "avibe.mobile.selection"))
+        defaults.set(
+            Data(#"{"accountID":"account-2","instanceID":"instance-1","url":"https://alex-app.avibe.bot"}"#.utf8),
+            forKey: "avibe.mobile.selection"
+        )
+        XCTAssertNil(makeCoordinator(defaults: defaults, transports: []).restoreLastGoodSession())
+        defaults.set(selection, forKey: "avibe.mobile.selection")
+        let offline = MobileSessionSnapshot(
+            account: snapshot(accountID: "account-1").account,
+            instances: [MobileInstance(
+                id: instance.id, name: instance.name, host: instance.host, url: instance.url,
+                relationship: "owner", ownerEmail: nil, available: false
+            )]
+        )
+        defaults.set(try JSONEncoder().encode(offline), forKey: "avibe.mobile.lastGoodSession")
+        let unavailable = makeCoordinator(defaults: defaults, transports: [])
+        XCTAssertNil(unavailable.restoreLastGoodSession())
+        XCTAssertNil(unavailable.currentAccount)
+        XCTAssertNotNil(defaults.data(forKey: "avibe.mobile.lastGoodSession"))
+        defaults.set(stored, forKey: "avibe.mobile.lastGoodSession")
+
+        // Without a selection there is nothing to open first.
+        let noSelection = makeDefaults()
+        let other = FakeMobileAuthTransport()
+        other.session = snapshot(accountID: "account-1")
+        let signedInOnly = makeCoordinator(defaults: noSelection, transports: [other])
+        signedInOnly.activateAccountSurface()
+        _ = try await signedInOnly.bootstrap()
+        XCTAssertNil(makeCoordinator(defaults: noSelection, transports: []).restoreLastGoodSession())
+
+        // A sign-out takes it with it.
+        signedIn.activateAccountSurface()
+        _ = try await signedIn.logout()
+        let afterSignOut = makeCoordinator(defaults: defaults, transports: [])
+        XCTAssertNil(afterSignOut.restoreLastGoodSession())
+        XCTAssertNil(afterSignOut.currentAccount)
+        XCTAssertNil(defaults.object(forKey: "avibe.mobile.lastGoodSession"))
+    }
+
     func testColdLaunchSecondFactorKeepsTheSelectionForTheSameAccount() async throws {
         let defaults = makeDefaults()
         let firstTransport = FakeMobileAuthTransport()
@@ -2956,13 +5616,13 @@ final class MobileOnboardingTests: XCTestCase {
             throw MobileAccountError.signedOut
         }
         let replacement = FakeMobileAuthTransport()
-        var pushLogoutCalls = 0
+        var pushLogouts: [PushRevokeReason] = []
         let coordinator = makeCoordinator(
             defaults: defaults,
             websiteDataStore: store,
             transports: [transport, replacement],
-            onPreparePushLogout: {
-                pushLogoutCalls += 1
+            onPreparePushLogout: { reason in
+                pushLogouts.append(reason)
             }
         )
         coordinator.activateAccountSurface()
@@ -2978,7 +5638,8 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertNotEqual(store.identifier, storeIdentifier)
         XCTAssertTrue(transport.invalidated)
         XCTAssertTrue(coordinator.isAccountSurfaceActive)
-        XCTAssertEqual(pushLogoutCalls, 1)
+        // The first factor lapsed while the second was owed: the session expired.
+        XCTAssertEqual(pushLogouts, [.sessionExpired])
     }
 
     func testPasskeyExchangeStaysBetweenTransportAndNativeCode() async throws {
@@ -3468,6 +6129,419 @@ final class MobileOnboardingTests: XCTestCase {
         )
     }
 
+    func testColdSecondFactorAuthenticationRestoresSavedHealthWithoutForegroundEntry() async throws {
+        let defaults = makeDefaults()
+        let store = makeAccountStore(defaults: defaults)
+        let health = try makeSavedHealthFixture(binding: store.identifier)
+        let transport = FakeMobileAuthTransport()
+        transport.secondFactor = MobileSecondFactorRequirement(
+            email: "account-1@example.com", gate: .challenge, methods: [.totp]
+        )
+        transport.verifySecondFactorHandler = { _ in .signedIn(self.snapshot(accountID: "account-1")) }
+        let coordinator = makeCoordinator(defaults: defaults, websiteDataStore: store, transports: [transport],
+            onHealthAccountEvent: { health.coordinator.accountEvent($0) })
+        health.coordinator.accountIDProvider = { [weak coordinator] in coordinator?.healthAccountID }
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        await health.coordinator.resume(foreground: false)
+        XCTAssertEqual(health.reader.starts, 0)
+        _ = try await coordinator.verifySecondFactor(method: .totp, code: "123456")
+        try await waitForHealthRestore(health)
+        XCTAssertEqual(health.reader.starts, 1)
+        XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+    }
+
+    func testHealthAuthenticationWaitsForPushCleanupAndLogoutRetiresIt() async throws {
+        // Since #3953 a refresh settles push first only when the persisted push account
+        // names another account; removing the selected instance runs no push cleanup.
+        for scenario in ["pushCleanup", "pushCleanupThenSignOut", "removedInstance"] {
+            let signOut = scenario == "pushCleanupThenSignOut"
+            let removedInstance = scenario == "removedInstance"
+            let defaults = makeDefaults()
+            let store = makeAccountStore(defaults: defaults)
+            let health = try makeSavedHealthFixture(binding: store.identifier)
+            let initial = FakeMobileAuthTransport()
+            initial.session = snapshot(accountID: "account-1")
+            let refreshTransport = FakeMobileAuthTransport()
+            refreshTransport.session = removedInstance
+                ? snapshot(accountID: "account-1", instances: []) : snapshot(accountID: "account-1")
+            // Not registered with the test: the removed-instance scenario never waits on them.
+            let started = XCTestExpectation(description: "push cleanup")
+            let release = XCTestExpectation(description: "release push cleanup")
+            var cleanups = 0
+            var forward = false
+            var authentications = 0
+            let coordinator = makeCoordinator(defaults: defaults, websiteDataStore: store,
+                transports: [initial, refreshTransport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+                onHealthAccountEvent: { event in
+                    guard forward else { return }
+                    if case .authenticated = event { authentications += 1 }
+                    health.coordinator.accountEvent(event)
+                }, onPreparePushLogout: { _ in
+                    cleanups += 1
+                    if cleanups == 1 {
+                        started.fulfill()
+                        await self.fulfillment(of: [release], timeout: 10)
+                    }
+                })
+            health.coordinator.accountIDProvider = { [weak coordinator] in coordinator?.healthAccountID }
+            coordinator.activateAccountSurface()
+            _ = try await coordinator.bootstrap()
+            _ = try coordinator.selectInstance(id: instance.id)
+            coordinator.activateAccountSurface()
+            if !removedInstance {
+                // The persisted push record names another account, so this refresh settles push first.
+                defaults.set("account-0", forKey: "avibe.mobile.pushAccount")
+            }
+            forward = true
+            let refresh = Task { try await coordinator.refresh() }
+            if removedInstance {
+                _ = try await refresh.value
+                try await waitForHealthRestore(health)
+                XCTAssertEqual(cleanups, 0)
+                XCTAssertEqual(authentications, 1)
+                XCTAssertEqual(health.reader.starts, 1)
+                XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+                continue
+            }
+            await fulfillment(of: [started], timeout: 10)
+            XCTAssertNil(coordinator.healthAccountID)
+            XCTAssertEqual(authentications, 0)
+            XCTAssertEqual(health.reader.starts, 0)
+            if signOut { _ = try await coordinator.logout() }
+            release.fulfill()
+            if signOut {
+                switch await refresh.result {
+                case .success: XCTFail("A superseded refresh must not authenticate Health")
+                case .failure(let error):
+                    XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session")
+                }
+                XCTAssertEqual(authentications, 0)
+                XCTAssertNil(coordinator.healthAccountID)
+                XCTAssertEqual(health.reader.starts, 0)
+                XCTAssertTrue(health.client.calls.allSatisfy { $0.method == "DELETE" })
+            } else {
+                _ = try await refresh.value
+                try await waitForHealthRestore(health)
+                XCTAssertEqual(authentications, 1)
+                XCTAssertEqual(health.reader.starts, 1)
+                XCTAssertEqual(health.client.calls.filter { $0.path.hasSuffix("/manifest") }.count, 1)
+            }
+        }
+    }
+
+    private func makeSavedHealthFixture(binding: UUID) throws -> HealthCoordinatorFixture {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MobileHealthConsumer.\(UUID().uuidString)", isDirectory: true)
+        let health = HealthCoordinatorFixture(directory: directory, savedIdentity: true)
+        health.credentials.identity?.websiteDataStoreID = binding
+        health.coordinator.websiteDataStoreIDProvider = { binding }
+        addTeardownBlock { @MainActor in
+            await health.coordinator.logout()
+            health.client.releasePending()
+        }
+        return health
+    }
+
+    private func waitForHealthRestore(_ health: HealthCoordinatorFixture) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while health.client.calls.filter({ $0.path.hasSuffix("/manifest") }).isEmpty {
+            guard ContinuousClock.now < deadline else {
+                return XCTFail("Authenticated Health restoration did not run")
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
+
+    func testLogoutRevokesAndDetachesBeforeAwaitingPushCleanup() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        let cleanupStarted = expectation(description: "push cleanup started")
+        let releaseCleanup = expectation(description: "release push cleanup")
+        var transitionPreparations = 0
+        var transitionEvents: [String] = []
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [
+                transport,
+                FakeMobileAuthTransport(),
+                FakeMobileAuthTransport(),
+            ],
+            onPrepareAccountTransition: {
+                transitionPreparations += 1
+                transitionEvents.append("runtime_revoked")
+                return []
+            },
+            onDetachActiveOwner: {
+                transitionEvents.append("detached")
+                return true
+            },
+            onHealthAccountEvent: { event in
+                if case .signedOut = event { transitionEvents.append("health_revoked") }
+            },
+            onPreparePushLogout: { _ in
+                transitionEvents.append("push_cleanup_started")
+                cleanupStarted.fulfill()
+                await self.fulfillment(of: [releaseCleanup], timeout: 30)
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [cleanupStarted], timeout: 30)
+        XCTAssertEqual(transitionPreparations, 1)
+        XCTAssertEqual(
+            transitionEvents,
+            [
+                "runtime_revoked",
+                "health_revoked",
+                "detached",
+                "push_cleanup_started",
+            ]
+        )
+        releaseCleanup.fulfill()
+        let logoutRoute = try await logout.value
+        XCTAssertEqual(logoutRoute, .signedOut)
+        XCTAssertEqual(transitionPreparations, 1)
+    }
+
+    // Route B: schedule persistence cannot retain an account's authorization.
+    // E1/E5 still require immediate detach notification before awaited cleanup;
+    // the file store owns its pending durable revocation, not this transaction.
+    func testDetachFailureStillCompletesLogoutAfterImmediateRevocation() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-1")
+        var transitionPreparations = 0
+        var pushCleanupCalls = 0
+        let cleanupStarted = expectation(description: "push cleanup after failed detach")
+        let releaseCleanup = expectation(description: "release push cleanup after failed detach")
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport, FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            onPrepareAccountTransition: {
+                transitionPreparations += 1
+                return []
+            },
+            onDetachActiveOwner: { false },
+            onPreparePushLogout: { _ in
+                pushCleanupCalls += 1
+                cleanupStarted.fulfill()
+                await self.fulfillment(of: [releaseCleanup], timeout: 30)
+            }
+        )
+        coordinator.activateAccountSurface()
+        _ = try await coordinator.bootstrap()
+        _ = try coordinator.selectInstance(id: instance.id)
+
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [cleanupStarted], timeout: 30)
+        XCTAssertEqual(transitionPreparations, 1)
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id))
+        let duringCleanup = try await coordinator.bootstrap()
+        XCTAssertEqual(duringCleanup, .signedOut)
+        releaseCleanup.fulfill()
+        let state = try await logout.value
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertEqual(transitionPreparations, 1)
+        XCTAssertEqual(pushCleanupCalls, 1)
+        XCTAssertNil(coordinator.currentAccount)
+        XCTAssertThrowsError(try coordinator.selectInstance(id: instance.id))
+    }
+
+    // I3 review E1: a new authenticated account is not exposed until owner sync commits.
+    func testAuthenticatedAccountWaitsWhenScheduleOwnerCommitFails() async throws {
+        let transport = FakeMobileAuthTransport()
+        transport.session = snapshot(accountID: "account-2")
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [transport],
+            onAuthenticatedAccount: { _ in false }
+        )
+        coordinator.activateAccountSurface()
+
+        do {
+            _ = try await coordinator.bootstrap()
+            XCTFail("Bootstrap should stop when the schedule owner cannot be committed.")
+        } catch let error as MobileAccountError {
+            XCTAssertEqual(error.code, "local_state_unavailable")
+        }
+        XCTAssertNil(coordinator.currentAccount)
+    }
+
+    // I3 review D2: server-signed-out bootstrap is not an explicit owner detach.
+    func testColdStartSignedOutPreservesThePersistedScheduleOwner() async throws {
+        let defaults = makeDefaults()
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [signedIn]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let signedOut = FakeMobileAuthTransport()
+        signedOut.session = nil
+        var detachedAccounts: [String] = []
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [signedOut, FakeMobileAuthTransport()],
+            onDetachActiveOwner: {
+                detachedAccounts.append("detached")
+                return true
+            }
+        )
+        relaunched.activateAccountSurface()
+
+        let relaunchedRoute = try await relaunched.bootstrap()
+        XCTAssertEqual(relaunchedRoute, .signedOut)
+        XCTAssertEqual(detachedAccounts, [])
+    }
+
+    // I3 simplification 2: stale selection cannot prove the persisted schedule owner changed.
+    func testColdStartStaleSelectionUsesAuthenticatedAccountOwnerFence() async throws {
+        let defaults = makeDefaults()
+        let staleTransport = FakeMobileAuthTransport()
+        staleTransport.session = snapshot(accountID: "account-2")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [staleTransport]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let matchingOwnerTransport = FakeMobileAuthTransport()
+        matchingOwnerTransport.session = snapshot(accountID: "account-1")
+        let matchingOwnerBootstrapTransport = FakeMobileAuthTransport()
+        matchingOwnerBootstrapTransport.session = snapshot(accountID: "account-1")
+        var explicitDetachCount = 0
+        var authenticatedAccounts: [String] = []
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [matchingOwnerTransport, matchingOwnerBootstrapTransport],
+            onDetachActiveOwner: {
+                explicitDetachCount += 1
+                return true
+            },
+            onDetachActiveOwnerForAuthenticatedAccount: { accountID in
+                authenticatedAccounts.append(accountID)
+                return true
+            }
+        )
+        relaunched.activateAccountSurface()
+
+        let relaunchedRoute = try await relaunched.bootstrap()
+        XCTAssertEqual(relaunchedRoute, .signedOut)
+        XCTAssertNil(relaunched.currentAccount)
+        XCTAssertEqual(explicitDetachCount, 0)
+        XCTAssertEqual(authenticatedAccounts, ["account-1"])
+    }
+
+    // I3 simplification 2: a proven different account detaches the persisted owner.
+    func testColdStartDifferentAccountDetachesThePersistedDepartingAccount() async throws {
+        let defaults = makeDefaults()
+        let firstTransport = FakeMobileAuthTransport()
+        firstTransport.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(
+            defaults: defaults,
+            transports: [firstTransport]
+        )
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let replacementTransport = FakeMobileAuthTransport()
+        replacementTransport.session = snapshot(accountID: "account-2")
+        let replacementBootstrapTransport = FakeMobileAuthTransport()
+        replacementBootstrapTransport.session = snapshot(accountID: "account-2")
+        var explicitDetachCount = 0
+        var authenticatedAccounts: [String] = []
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [replacementTransport, replacementBootstrapTransport],
+            onDetachActiveOwner: {
+                explicitDetachCount += 1
+                return true
+            },
+            onDetachActiveOwnerForAuthenticatedAccount: { accountID in
+                authenticatedAccounts.append(accountID)
+                return true
+            }
+        )
+        relaunched.activateAccountSurface()
+
+        let relaunchedRoute = try await relaunched.bootstrap()
+        XCTAssertEqual(relaunchedRoute, .signedOut)
+        XCTAssertNil(relaunched.currentAccount)
+        XCTAssertEqual(explicitDetachCount, 0)
+        XCTAssertEqual(authenticatedAccounts, ["account-2"])
+    }
+
+    // I3 review E4: 2FA is not an inferred logout and preserves the owner.
+    func testColdStartSecondFactorPreservesThePersistedScheduleOwner() async throws {
+        let defaults = makeDefaults()
+        let signedIn = FakeMobileAuthTransport()
+        signedIn.session = snapshot(accountID: "account-1")
+        let first = makeCoordinator(defaults: defaults, transports: [signedIn])
+        first.activateAccountSurface()
+        _ = try await first.bootstrap()
+        _ = try first.selectInstance(id: instance.id)
+
+        let owed = FakeMobileAuthTransport()
+        owed.secondFactor = MobileSecondFactorRequirement(
+            email: "account-1@example.com",
+            gate: .challenge,
+            methods: [.totp]
+        )
+        var detachCount = 0
+        let relaunched = makeCoordinator(
+            defaults: defaults,
+            transports: [owed],
+            onDetachActiveOwner: {
+                detachCount += 1
+                return true
+            }
+        )
+        relaunched.activateAccountSurface()
+
+        let state = try await relaunched.bootstrap()
+        guard case .twoFactorRequired = state else {
+            return XCTFail("Expected two-factor state")
+        }
+        XCTAssertEqual(detachCount, 0)
+    }
+
+    // I3 review E5: explicit logout detaches the ledger owner without snapshot or selection.
+    func testExplicitLogoutDetachesEvenWithoutSnapshotOrSelection() async throws {
+        let cleanupStarted = expectation(description: "push cleanup started")
+        let releaseCleanup = expectation(description: "release push cleanup")
+        var detachCount = 0
+        let coordinator = makeCoordinator(
+            defaults: makeDefaults(),
+            transports: [FakeMobileAuthTransport(), FakeMobileAuthTransport()],
+            onDetachActiveOwner: {
+                detachCount += 1
+                return true
+            },
+            onPreparePushLogout: { _ in
+                cleanupStarted.fulfill()
+                await self.fulfillment(of: [releaseCleanup], timeout: 30)
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        let logout = Task { try await coordinator.logout() }
+        await fulfillment(of: [cleanupStarted], timeout: 30)
+        XCTAssertEqual(detachCount, 1)
+        releaseCleanup.fulfill()
+        let state = try await logout.value
+        XCTAssertEqual(state, .signedOut)
+    }
+
     private func makeDefaults() -> UserDefaults {
         let suite = "MobileOnboardingTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -3483,12 +6557,20 @@ final class MobileOnboardingTests: XCTestCase {
         websiteDataStore: AccountWebsiteDataStore? = nil,
         transports: [FakeMobileAuthTransport],
         passkeyAuthenticator: MobilePasskeyAuthenticating? = nil,
+        webAuthenticator: MobileWebAuthenticating? = nil,
+        appleAuthorizer: MobileAppleAuthorizing? = nil,
         onCreateTransport: @escaping () -> Void = {},
         onOpen: @escaping (MobileRuntimeContext) -> Void = { _ in },
         onPrepareAccountTransition: @escaping () -> [
             WebsiteDataStoreReleaseBarrier
         ] = { [] },
-        onPreparePushLogout: @escaping @MainActor () async -> Void = {}
+        onDetachActiveOwner: @escaping @MainActor () -> Bool = { true },
+        onDetachActiveOwnerForAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onAuthenticatedAccount: @escaping @MainActor (String) -> Bool = { _ in true },
+        onHealthAccountEvent: @escaping @MainActor (HealthAccountEvent) -> Void = { _ in },
+        onPreparePushLogout: @escaping @MainActor (PushRevokeReason) async -> Void = { _ in },
+        onReconcileInstancePush: @escaping @MainActor (Set<String>, String) async -> Void = { _, _ in },
+        now: @escaping () -> Date = Date.init
     ) -> MobileSessionCoordinator {
         var queue = transports
         return MobileSessionCoordinator(
@@ -3504,9 +6586,17 @@ final class MobileOnboardingTests: XCTestCase {
                 return queue.removeFirst()
             },
             passkeyAuthenticator: passkeyAuthenticator ?? FakePasskeyAuthenticator(),
+            webAuthenticator: webAuthenticator ?? FakeWebAuthenticator(),
+            appleAuthorizer: appleAuthorizer ?? FakeAppleAuthorizer(),
             onOpenRuntime: onOpen,
             onPrepareAccountTransition: onPrepareAccountTransition,
-            onPreparePushLogout: onPreparePushLogout
+            onDetachActiveOwner: onDetachActiveOwner,
+            onDetachActiveOwnerForAuthenticatedAccount: onDetachActiveOwnerForAuthenticatedAccount,
+            onAuthenticatedAccount: onAuthenticatedAccount,
+            onHealthAccountEvent: onHealthAccountEvent,
+            onPreparePushLogout: onPreparePushLogout,
+            onReconcileInstancePush: onReconcileInstancePush,
+            now: now
         )
     }
 
@@ -3730,6 +6820,39 @@ private final class WeakObjectReference<Value: AnyObject> {
     }
 }
 
+/// A fake transport call that stays in flight until `release()`.
+@MainActor
+private final class HeldCall {
+    private var held = false
+    private var released = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        held = true
+        guard !released else {
+            return
+        }
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilHeld() async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(10))
+        while !held {
+            guard clock.now < deadline else {
+                throw MobileAccountError.network
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func release() {
+        released = true
+        continuation?.resume()
+        continuation = nil
+    }
+}
+
 @MainActor
 private final class FakeMobileAuthTransport: MobileAuthTransporting {
     var session: MobileSessionSnapshot?
@@ -3770,6 +6893,41 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
     private(set) var cancelled = false
     private(set) var invalidated = false
     var onInvalidate: () -> Void = {}
+    var providerStartHandler: (
+        MobileSignInProvider, String, String
+    ) async throws -> MobileProviderStart = { provider, _, _ in
+        provider == .apple
+            ? .apple(transactionID: "transaction-1", nonce: "server-nonce")
+            : .browser(
+                transactionID: "transaction-1",
+                url: URL(string: "http://127.0.0.1:43127/api/mobile/auth/browser?launch=LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLA")!
+            )
+    }
+    private(set) var providerStarts: [(provider: MobileSignInProvider, challenge: String, state: String)] = []
+    var providerExchangeHandler: (
+        String, String, String
+    ) async throws -> MobileProviderExchange = { _, _, _ in
+        throw MobileAccountError.invalidOrExpired
+    }
+    private(set) var providerExchanges: [(transactionID: String, code: String, verifier: String)] = []
+    var appleExchangeHandler: (
+        String, String, String, String
+    ) async throws -> MobileProviderExchange = { _, _, _, _ in
+        throw MobileAccountError.invalidOrExpired
+    }
+    private(set) var appleExchanges: [
+        (transactionID: String, identityToken: String, authorizationCode: String, verifier: String)
+    ] = []
+    var primaryPasskeyStartHandler: () async throws -> MobilePrimaryPasskeyStart = {
+        throw MobileAccountError.providerUnavailable
+    }
+    var primaryPasskeyVerifyHandler: (
+        String, [String: Any]
+    ) async throws -> Void = { _, _ in
+        throw MobileAccountError.passkeyRejected
+    }
+    private(set) var primaryPasskeyVerifications: [(flow: String, response: [String: Any])] = []
+    private(set) var primaryPasskeyCancellations: [String] = []
 
     func requestOTP(email: String) async throws -> Int {
         try await requestOTPHandler(email)
@@ -3820,6 +6978,61 @@ private final class FakeMobileAuthTransport: MobileAuthTransporting {
         return try await verifySecondFactorHandler(proof)
     }
 
+    var advertised: [MobileSignInProvider]? = []
+    var passkeyAdvertised = false
+    var advertisedDelay: UInt64 = 0
+
+    func signInMethods() async -> MobileSignInMethods? {
+        if advertisedDelay > 0 {
+            try? await Task.sleep(nanoseconds: advertisedDelay)
+        }
+        return advertised.map { MobileSignInMethods(providers: $0, passkey: passkeyAdvertised) }
+    }
+
+    func providerStart(
+        provider: MobileSignInProvider,
+        challenge: String,
+        state: String
+    ) async throws -> MobileProviderStart {
+        providerStarts.append((provider, challenge, state))
+        return try await providerStartHandler(provider, challenge, state)
+    }
+
+    func providerExchange(
+        transactionID: String,
+        code: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        providerExchanges.append((transactionID, code, verifier))
+        return try await providerExchangeHandler(transactionID, code, verifier)
+    }
+
+    func appleExchange(
+        transactionID: String,
+        identityToken: String,
+        authorizationCode: String,
+        verifier: String
+    ) async throws -> MobileProviderExchange {
+        appleExchanges.append((transactionID, identityToken, authorizationCode, verifier))
+        return try await appleExchangeHandler(transactionID, identityToken, authorizationCode, verifier)
+    }
+
+    func primaryPasskeyStart() async throws -> MobilePrimaryPasskeyStart {
+        try await primaryPasskeyStartHandler()
+    }
+
+    func primaryPasskeyVerify(
+        flow: String,
+        response: [String: Any]
+    ) async throws {
+        primaryPasskeyVerifications.append((flow, response))
+        try await primaryPasskeyVerifyHandler(flow, response)
+    }
+
+    func primaryPasskeyCancel(flow: String) async {
+        primaryPasskeyCancellations.append(flow)
+    }
+
     func logout() async throws {
         try await logoutHandler()
         if let logoutError {
@@ -3849,6 +7062,8 @@ private final class FakePasskeyAuthenticator: MobilePasskeyAuthenticating {
     var result: Result<MobilePasskeyAssertion, MobileAccountError> = .failure(
         .passkeyCancelled
     )
+    /// When set, answers instead of `result` (a sheet held open).
+    var handler: ((MobilePasskeyRequest) async throws -> MobilePasskeyAssertion)?
     private(set) var requests: [MobilePasskeyRequest] = []
 
     func assert(
@@ -3856,8 +7071,35 @@ private final class FakePasskeyAuthenticator: MobilePasskeyAuthenticating {
         presentationAnchor: ASPresentationAnchor
     ) async throws -> MobilePasskeyAssertion {
         requests.append(request)
+        if let handler {
+            return try await handler(request)
+        }
         return try result.get()
     }
+}
+
+private func passkeyAssertion() -> MobilePasskeyAssertion {
+    MobilePasskeyAssertion(
+        credentialID: Data("cred-1".utf8),
+        clientDataJSON: Data("{}".utf8),
+        authenticatorData: Data([1]),
+        signature: Data([2]),
+        userHandle: Data("account-1".utf8)
+    )
+}
+
+/// avibe.bot accepted the passkey (its cookies are in the store) but the session read after it
+/// failed (both reads the attempt makes).
+@MainActor
+private func acceptPasskeyButFailTheSessionRead(_ transport: FakeMobileAuthTransport) {
+    transport.primaryPasskeyVerifyHandler = { _, _ in }
+    transport.fetchSessionError = MobileAccountError.network
+}
+
+@MainActor
+private func letTheSessionReadSucceed(_ transport: FakeMobileAuthTransport, _ session: MobileSessionSnapshot) {
+    transport.fetchSessionError = nil
+    transport.session = session
 }
 
 private extension MobileSecondFactorProof {
@@ -3882,5 +7124,65 @@ private extension Result where Success == NativeBridgeRequest, Failure == Native
             return nil
         }
         return value
+    }
+}
+
+@MainActor
+private final class QuietPushNotificationCenter: PushNotificationCentering {
+    func deliveredNotifications() async -> [PushNotificationCenterEntry] {
+        []
+    }
+
+    func pendingNotificationRequests() async -> [PushNotificationCenterEntry] {
+        []
+    }
+
+    func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {}
+
+    func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {}
+}
+
+@MainActor
+private final class FakeWebAuthenticator: MobileWebAuthenticating {
+    var handler: (URL, String, String) async throws -> URL = { _, _, _ in
+        throw MobileAccountError.providerCancelled
+    }
+    var onCancel: () -> Void = {}
+    private(set) var opened: [URL] = []
+    private(set) var cancels = 0
+
+    func authenticate(
+        url: URL,
+        callbackHost: String,
+        callbackPath: String,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> URL {
+        opened.append(url)
+        return try await handler(url, callbackHost, callbackPath)
+    }
+
+    func cancel() {
+        cancels += 1
+        onCancel()
+    }
+}
+
+@MainActor
+private final class FakeAppleAuthorizer: MobileAppleAuthorizing {
+    var handler: (String, String) async throws -> MobileAppleCredential = { _, _ in
+        throw MobileAccountError.providerCancelled
+    }
+    private(set) var cancels = 0
+
+    func authorize(
+        nonce: String,
+        state: String,
+        presentationAnchor: ASPresentationAnchor
+    ) async throws -> MobileAppleCredential {
+        try await handler(nonce, state)
+    }
+
+    func cancel() {
+        cancels += 1
     }
 }

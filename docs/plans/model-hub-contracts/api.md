@@ -58,9 +58,9 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/agents/<backend>/chains/reorder` | `{order?: string[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{agent: AgentSupply}` | Compatibility default-order entry point with the same guards as Sources PUT. Never reorders manual arrays. Without order, returns the current projection. New UI uses Sources PUT. |
 | PATCH `/api/models/agents/<backend>/mode` | `{mode}` → `{agent: AgentSupply}` | Explicit `hub` / `direct` switch. Direct-to-Hub serializes with takeover under the shared migration guard, interrupts running work on that backend and retires the managed runtime, and returns `mode_switch_blocked` only for a native config the CLI cannot parse or a guard refusal. Native auth, including an importable login, stays native beside the Hub and remains a migration candidate; CLIs running outside Avibe do not block the switch because it changes no native credential. It does not auto-create or adopt a native Source; native custody takeover is the optional grouped migration transaction. Hub-to-Direct changes only the mode, but under the same guard: it interrupts running work on that backend and retires the managed runtime, so no turn keeps calling the Hub after the backend has left it, and a guard refusal returns `mode_switch_blocked`. |
 | GET `/api/models/agents/<backend>/models` | → `{agent: {backend, mode, catalog_models}}` | Picker-safe catalog read. It exposes no Source order, Route, or credential-bearing supplier data. Every OpenCode row carries required `native_protocol`; Claude and Codex rows omit it. Every row carries the response-only `effort_menu` (`backend-model.schema.json`): which of its `reasoning_efforts` routing refuses now, in the values the menu offers, so the picker omits or annotates them without reading Sources or Routes. |
-| GET `/api/models/agents/<backend>/models/candidates` | → `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` | Server-owned picker projection. It returns addable built-ins, deduplicated ordered-provider inventory, and every current menu row with the same exact supplier projection; it is independent of backend mode and contains no credentials. Every OpenCode Candidate carries server-derived `native_protocol`; other backends omit it. Only `in_list` candidates may carry optional `group_if_removed: "builtin" | "providers" | null`, naming the group where that id would be offered after removal. A `providers` candidate whose id names a cached models.dev model exactly also carries that match's `models_dev_id`, `context_window`, `max_output_tokens`, `input_modalities`, `output_modalities`, `supports_tools`, and `supports_reasoning` together; those seven are absent otherwise. |
-| PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[], expected_suppliers?: {<id>: [{source_id, model_id}]}, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, stale-candidate `409`, `{agent: AgentSupply}`, or `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` | Applies one full-list backend catalog edit with optimistic merge. OpenCode rows require a literal `native_protocol: openai_responses | anthropic`; rows for other backends forbid it. Each caller addition still absent from the latest list starts automatic without a route key. A listed supplier-projection mismatch refuses atomically with the separate exact shape `{ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed}`; a concurrently added row keeps its existing Route. A removal whose row has a Route, or whose row an enabled Agent selects, uses the exact echoed-plan guard and then atomically removes that Route (see **Model-list save** under Supply guard). Its success carries `removed_hops` and `interrupted` whenever either is nonempty; any other removal is ordinary `{agent}` success. Supplier inventory remains unchanged. |
-| GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, derive `native_protocol` from the model id's last path segment through the vendor map, cap results at 8, and never persist automatically. |
+| GET `/api/models/agents/<backend>/models/candidates` | → `{candidates: {builtin: Candidate[], providers: Candidate[], in_list: Candidate[]}}` | Server-owned picker projection. It returns addable built-ins, deduplicated ordered-provider inventory, and every current menu row with the same exact supplier projection; it is independent of backend mode and contains no credentials. Every OpenCode Candidate carries server-derived `native_protocol`; other backends omit it. Only `in_list` candidates may carry optional `group_if_removed: "builtin" | "providers" | null`, naming the group where that id would be offered after removal. A `providers` candidate whose id has an exact or guarded suffix match also carries `match_kind` (`exact` or `closest`) and that match's `models_dev_id`, `context_window`, `max_output_tokens`, `input_modalities`, `output_modalities`, `supports_tools`, and `supports_reasoning` together; those fields are absent otherwise. |
+| PUT `/api/models/agents/<backend>/models` | `{baseline: BackendModel[], models: BackendModel[], renames?: {<old_id>: <new_id>}, expected_suppliers?: {<id>: [{source_id, model_id}]}, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, stale-candidate `409`, `{agent: AgentSupply}`, or `{agent: AgentSupply, removed_hops: RouteHopRef[], interrupted: SupplyGap[]}` | Applies one full-list backend catalog edit with optimistic merge. OpenCode rows require a literal `native_protocol: openai_responses | anthropic`; rows for other backends forbid it. Each caller addition still absent from the latest list starts automatic without a route key. A listed supplier-projection mismatch refuses atomically with the separate exact shape `{ok: false, contract_version, error: "candidate_suppliers_changed", detail, changed}`; a concurrently added row keeps its existing Route. A removal whose row has a Route, or whose row an enabled Agent selects, uses the exact echoed-plan guard and then atomically removes that Route (see **Model-list save** under Supply guard). Its success carries `removed_hops` and `interrupted` whenever either is nonempty; any other removal is ordinary `{agent}` success. Supplier inventory remains unchanged. |
+| GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, derive `native_protocol` from the model id's last path segment through the vendor map, cap results at 8, and never persist automatically. Each result states `match_kind`: `exact` for a literal identity match, `closest` for an inferred base or a text suggestion. Without an exact identity a guarded suffix match leads the suggestions. Its selectable `model_id` is the requested ID, including any namespace; `models_dev_id` identifies the registered base supplying metadata. An exact qualified catalog identity uses that provider's own copy and precedes text suggestions. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
 | PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], cache_ttl?: "5m" | "30m" | "1h" | "12h" | null, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, `422 cache_ttl_unsupported`, or `{chain, removed_hops, interrupted}` | Nonempty hops save an exact manual override, including equal-to-automatic arrays. On Vibey routes, `cache_ttl` is a route-wide C-9 clearing override; omitted/null uses the built-in estimate. It is rejected on non-Vibey routes. Confirmed official OpenAI Responses GPT-5.6+ routes may explicitly request the 30m default or opt into 12h; both are wired as `prompt_cache_options.ttl` and usage accounting keeps their write lifetimes separate. Custom relays never receive OpenAI-specific cache options. Empty hops remain accepted and use DELETE Restore semantics with identical exact effective-removal/supply guards. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. Only nonempty replacement uses the protected-supply-only `mutation.route_replace` guard. |
@@ -70,8 +70,9 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
 | GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. Search-service requests are reported in `services[]`, never in `sources[]` (see Search-service usage). The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
+| POST `/api/models/sources/<source_id>/reset-cards/use` | `{kind, count}` → `{quota: QuotaSummary, use: {kind, outcome, reason, cleared}}` | Uses one reset card of `kind` on the Source's account (see Reset card use). Needs the Owner role: a signed-in Owner, or a caller the instance treats as its Owner by where the request comes from. The body is exactly `{kind, count}`, where `count` is the positive number of cards of that kind the page was showing; no card identifier is accepted or returned. `400 invalid_parameter` for any other body. Three refusals answer `409` with `quota`, the latest summary the server has, so the page can redraw: `reset_card_locked` while the account has a use being handled or an unknown outcome, `reset_card_count_changed` when the account now holds another number of cards of that kind than `count`, `reset_card_unavailable` when no card of that kind can be used now or its count cannot be read. No refusal uses a card. Not offered by the `vibe` CLI, an RPC operation, or any Agent or MCP tool. |
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
-| POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
+| POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. The forced read also resumes each Source paused for quota or rate (`cooldown` with `quota_exhausted` or `rate_limited`, or its live deadline) unless its fresh report shows an account-wide window (5-hour, weekly, or monthly) used up; an unreadable report lifts the pause so the next request asks the vendor, while `auth_expired` and a Source still `pending` are left as they are. Clients read Sources again afterwards. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
 | POST `/api/models/hosted-tools/web_fetch/services/<source_id>/retry` | `{}` → `{}` | Clears the same Source/service cooldown and generation as search for Exa (`src_exakeyless`, `exa/mcp`), or Jina's own. Member management role; no fetch is sent. Local has no whole-executor retry and returns `404 source_not_found`. |
 | POST `/api/models/hosted-tools/web_search/services/<source_id>/retry` | `{}` → `{}` | Clears the controller's `(Source, service)` cooldown, advances its generation, and leaves Source health unchanged. The Tools read is the follow-up source of truth. Member management role. |
@@ -338,19 +339,41 @@ with failed inventory discovery produces no Source unless this request explicitl
 existing uncertain health projection.
 
 The add dialog always uses `save_unverified: true`: it saves the catalog-pinned or user-declared
-interface without upstream observation as an admission gate. It attempts one bounded
-inventory discovery with the provisioned credential before committing the new Source;
-failure preserves manual entries and does not block saving. Custom Auto without a declaration
-is rejected before credential provisioning. Manual models remain manual; no inventory
-is invented. The Source carries an opaque `verification_pending` marker, independently of its
-routing health, and may be configured and invoked. List/detail surfaces label it
+interface without protocol observation as an admission gate. Before provisioning a new
+credential it runs the owned interface's models witness: list with the supplied key,
+then (only if listing succeeds) without a key. The three outcomes reuse the existing wire:
+
+- **Confirmed:** save and omit `source.verification_pending`; keep the new
+  `source.credential_generation` and the discovered models. This proves credential
+  admission, not support for every model or operation.
+- **Rejected:** an authenticated listing's `401`/`403` returns HTTP 422,
+  `error: "discovery_failed"`, `detail: "modelHub.errors.authentication_failed"`.
+  No Source or credential is persisted; the create nonce reservation is released.
+- **Unknown:** a public list, missing/invalid listing, transport error or timeout
+  saves with `source.verification_pending` equal to its new `credential_generation`.
+  Keep usable discovered inventory even if the keyless control fails or times out;
+  missing/invalid inventory preserves manual entries. No inference request is made.
+
+Each listing uses `_SOURCE_DISCOVERY_TIMEOUT_SECONDS` (15 seconds), so the extra
+keyless listing adds at most one such request budget. No extra inventory fetch follows
+this check. API-key replacement and Base URL changes use the same witness against the
+replacement credential/target: rejection refuses the whole change, preserves the old
+Source and credential, and rolls back the uncommitted replacement through the existing
+cleanup lifecycle. Unknown saves the change; unavailable inventory preserves existing
+models and their discovery timestamp. Valid inventory still passes the existing
+canonical-model and route-mutation guards. Tool-only search and Hub OAuth are unchanged.
+
+Custom Auto without a declaration is rejected before credential provisioning. Manual
+models remain manual; no inventory is invented. A Source still carrying the opaque
+`verification_pending` marker is independently routable and may be configured and invoked.
+List/detail surfaces label it
 Saved / 已保存 in neutral styling, not unverified, healthy or in use; real error,
 needs-action and cooldown states retain precedence. The accessible hint describes
 stored configuration, not a guaranteed connection or a universally available Test action.
-Successful inventory discovery never clears this flag.
-A newly stored Hub credential starts pending unless an add-time observation
-authenticated it, so an explicit unverified save and a native-config import always
-start pending while an observed api-key create does not. A call captures the persisted marker before invocation; any
+Plain inventory refresh never clears this flag.
+A newly stored Hub credential starts pending unless an add-time observation or the
+save-time gated models witness authenticated it. Native-config imports start pending
+while an observed api-key create does not. A call captures the persisted marker before invocation; any
 successful call using the same current credential and marker clears it through a
 fresh cross-process config transaction. Newer same-credential attempts do not negate
 success. Credential/endpoint replacement generates a new marker, including same-handle
@@ -520,6 +543,7 @@ every other existing field and enum meaning remains unchanged.
 | `Source.models[].retired` | discovered-model DELETE | Source detail inventory | Omission means false; only a discovered row may be true; true rows remain readable and never supply. |
 | `Source.adopted_by` | Source read assembler | Source cards and Source detail status | Complete unique persisted-reference projection for backends currently in Hub mode, sorted by backend then menu model; clients do not derive it from `hops`. Routes retained by Direct-mode backends are excluded because they bypass the gateway. |
 | `AgentSupply.cli_present` | backend CLI detector | zero-installed-backend state | Boolean installation fact only; it does not imply login or process readiness. |
+| `AgentSupply.backend_enabled` | controller's applied backend runtime config | Models page off-backend row, Source `in use` attribution | Optional additive boolean: switched on in Settings · Backends. Absent or unknown reads as true; Vibey is always true. Independent of `cli_present`. An off backend is drawn as one folded row with no routes or wires and is not named as a Source's consumer. |
 | `AgentSupply.model_supply[].has_runnable_hop` | exact-chain live annotator | backend-group collapse predicate | Uses the AgentChain runnability axiom rather than inferring liveness from configured membership. `chain_length: 0` forces false; a nonzero length may carry either value. |
 | `RuntimeDependency.enabled` | explicit runtime start/stop mutation | Gateway switch and service-start recovery | Persisted user intent, independent of observed process health. Fresh/default configuration is true; explicit Stop persists false. |
 | `model_hub.runtime_default_applied` | lock-owning service startup/default migration or explicit runtime Start/Stop | one-time legacy upgrade and runtime-start recovery | Additive persisted marker. Missing/false on disk remains pending through ordinary reads and unrelated writes; startup upgrades once to `enabled: true` and a true marker. Explicit Start/Stop consume the marker with their chosen intent; refused/failed Stop does not. Later explicit Stop remains disabled. |
@@ -695,9 +719,41 @@ Source order, sparse manual Routes, and effective supply summaries.
 
 ### Manual Route configuration and preview
 
-Owner decision `c1d398d5f` scopes unknown-model passthrough and inventory-independent
-manual invocation to Hub API-key Sources. Subscriptions retain known-model admission and
-automatic matching; unmatched subscription-only defaults yield an empty/null-origin plan.
+The 2026-11-17 routing amendment removes automatic unknown-model forwarding.
+Inherited routes contain only matching non-retired inventory from eligible defaults.
+No match yields `manual_override: null`, `route_origin: null`, `chain: []`,
+`current: null`, and `supply_state: interrupted`. The `passthrough` enum remains
+accepted for compatibility with older producers, but is no longer produced.
+`contract_version` and stored Route shapes are unchanged.
+
+Forwarding an unlisted id requires an explicit Hub API-key manual hop. Subscriptions
+retain known-model admission. For example, send:
+
+```http
+PUT /api/models/agents/codex/chain?model=gpt-6-astra
+Content-Type: application/json
+
+{"hops":[{"source_id":"src_relay9c1x","model_id":"gpt-6-astra"}]}
+```
+
+Preview sends `{"manual_override":{"hops":[{"source_id":"src_relay9c1x","model_id":"gpt-6-astra"}]}}`
+to the corresponding `/chain/preview?model=gpt-6-astra` endpoint. The result has
+`route_origin: manual` and the exact submitted `manual_override`; an otherwise
+healthy hop is runnable even when the Source does not list that id. No Source
+inventory mutation or provider-default membership change is required.
+
+Upgrade never rewrites a saved nonempty manual Route. Inherited results recompute:
+a previously passthrough-only model now has `chain_length: 0`,
+`has_runnable_hop: false`, and null origin. Its selected enabled Agents appear in
+`named_agents` with their unchanged `effective_model_id`,
+`route_reason: route_unconfigured`, and `supply_status: interrupted`. This includes
+the enabled Agent definition used by the main Bot; `named_agents` lists Agents,
+not Bot names. A different model override on a Bot's permanent Session is an
+existing reporting limitation: this callback reads the Agent model, not the Session
+override. Effective Bot-Session selection reporting (and its supply-guard consequences)
+is a separate follow-up; controller/store are unchanged here. For the reported
+Agent selections, existing issue reporting identifies the unsupplied selection
+instead of counting the relay as a supplier. No automatic model replacement is performed.
 
 `AgentSupply.routes` is the canonical sparse map of nonempty `{hops: RouteHop[]}`
 overrides. Missing and valid empty values both inherit. Nonempty PUT creates a manual
@@ -736,13 +792,41 @@ same pure planner with isolated draft configuration,
 returns the existing chain success envelope, and performs no persistent mutation,
 event, runtime startup/sync, credential access or upstream request. The returned
 `manual_override` describes normalized draft intent, not persisted intent. Empty input
-may therefore return Automatic or Passthrough; only an empty inherited plan has null
-origin. Removing the final manual hop uses this Restore preview and its existing
+may therefore return Automatic or an empty/null-origin plan. Removing the final manual hop uses this Restore preview and its existing
 Undo/Save/guard/Done flow; the old nonempty override stays saved until success. Preview is available
 while runtime is stopped. Save responses remain authoritative, and failed/ambiguous
 writes follow existing reconciliation using intent as well as effective hops.
 
-<!-- authority-consumer: route_plan.manual route_plan.automatic route_plan.passthrough route_plan.empty -->
+<!-- authority-consumer: route_plan.manual route_plan.automatic route_plan.empty -->
+
+## Request-scoped opaque HTTP failures
+
+An HTTP 4xx whose body yields no recognized classification, except 401/403/429,
+ends only that request: `upstream_request_invalid`, downstream status 400, terminal
+`request_nonfallback`. This includes HTML, plain text, empty bodies and unknown JSON
+codes at 400/404/422 and also opaque 402/408. It neither falls through to another
+provider nor writes Source health, cooldown, live backoff or a Source-state event.
+The route and the Source's prior state stay unchanged; another model on that Source
+can run immediately. The existing unlisted-model hint uses the failing hop's exact
+target and its admission-time inventory membership, not route origin; a mapped
+manual target therefore receives the unchanged hint, while a listed manual target
+does not. Raw HTML/text is not promoted into a code, detail key or log.
+
+Recognized machine codes retain precedence (including a named billing error and the
+existing 408 plus recognized request-code timeout rule). 401/403 retain credential
+handling; 429, 5xx, and actual network failures retain their existing recovery policy,
+except the unlisted-target server refusal below.
+`unclassified_error` remains for residual Source-level unknown failures outside this
+request-status rule. Unrecognized error frames inside 2xx still follow the existing
+turn-only rule. A request refusal alone is not evidence that every model supplied by
+the credential is broken, regardless of whether this particular target is listed.
+
+An HTTP 5xx classified as `server_error` on a hop whose actual target was absent from
+its Source's listed inventory at admission ends the same way: `upstream_request_invalid`,
+downstream 400, terminal `request_nonfallback`, with no fallback to another hop of the
+Route, no retry or recovery wait, and no Source health, cooldown, backoff or event
+(2026-11-17 amendment; supersedes the 2026-11-12 request-private 503 wait). Named
+auth, quota and rate-limit codes and transport failures keep their existing policy.
 
 ## Source creation outcome
 
@@ -841,12 +925,12 @@ state. It counts only runnable exact hops in that model's effective Route chain,
 eligible inventory or the backend Source order by itself. A pair with no runnable hop
 appears once in `would_interrupt` or `interrupted`.
 
-Inventory updates that refine an inherited `passthrough` plan into `automatic`
-matching do not report displaced speculative candidates as `would_remove_hops` or
-`removed_hops`, in either Hub or Direct mode. They leave saved route intent unchanged.
+Inventory updates may add matching inherited hops to a previously empty plan;
+there are no speculative candidates to displace. Saved route intent stays unchanged.
 Explicit manual-hop invalidations, lost inventory matches, and newly introduced
-protected-supply gaps still use the exact-plan guard. This exception does not apply
-to Source deletion, default-membership changes, or Restore.
+protected-supply gaps use the exact-plan guard. Losing the final automatic inventory
+match is now a real removal even when that API-key Source could still accept a
+manually forwarded target.
 
 **Model-list save.** For `PUT /api/models/agents/<backend>/models`, the producer
 `ModelHubService.set_agent_models` reports in `would_interrupt` exactly the removed menu
@@ -1039,7 +1123,8 @@ refresh a source whose global state is `needs_action` or `error`, even though no
 turn resolution and the chain probe exclude that source as non-runnable.
 
 On usable discovery it updates the discovered model set, clears the blocker, and
-sets the source to `standby`. The success response is the guarded Source-mutation
+sets the source to `standby`. A `cooldown` on a Source whose credential and
+endpoint are unchanged is kept: a listing is not inference evidence. The success response is the guarded Source-mutation
 envelope `{source, removed_hops, interrupted}`; clients render the complete updated
 Source and the exact route impact from that envelope. `last_discovered_at` advances
 only on this successful replacement. A classified failure updates the source-global
@@ -1143,7 +1228,8 @@ reference is created.
 
 In Hub mode, `AgentChain.chain` is the shared effective per-model route in planner
 order. `manual_override` reports a normalized nonempty manual override or null and
-`route_origin` reports `automatic | manual | passthrough | null`, independently of live
+`route_origin` reports `automatic | manual | passthrough | null` (`passthrough` is
+legacy-compatible and no longer generated), independently of live
 health. Valid empty input inherits; an empty effective chain therefore has both null
 manual_override and null origin. Live inspection annotates it: cooling, missing, model-unsupported,
 source-blocked, live connection-backoff, and process-unavailable native CLI hops stay at their effective-plan
@@ -1621,6 +1707,26 @@ tiers, new tiers, nor credential material.
 
 ## Subscription quota
 
+For Anthropic and ChatGPT the optional `reset_cards` block is independent of quota windows.
+`{"state":"ok","lock":null,"cards":[]}` means no cards; `state:"unread"` with an empty list
+means the inventory could not be read. Only the vendor's own recognised report says "no
+cards" or gives a count: it is recognised by what only that report carries (its card block,
+or the members its usage report always names), no member may be named twice, and a field
+that could remove a card from the count is read with its type checked. Nor may the answer
+contradict what was asked or itself in a field it carries: a ChatGPT usage answer that
+names an account names the one the grant is bound to (left out or null, it names none; the
+quota windows of that answer are shown either way), a total the card details carry
+themselves equals the usage report's count, one grant is one row, and no number is `NaN` or
+an infinity. Anything else, such as an empty object or a body that merely looks like
+usage, is `unread`.
+Other vendors omit the block. Each held kind
+(`all`, `fable`, `session`, `weekly`, or ChatGPT's `account`) has a positive `count`,
+`expires_at` (first known expiry or null), `stated` (vendor states the effect),
+`usable`, `blocked` (null, `needs_limit`, `cooldown`, `unavailable`) and `blocked_until`
+(cooldown end or null). Times are UTC. Reads never use cards. `lock` is null, or
+`{reason: "in_flight" | "unconfirmed", kind, since}` while the account's cards are locked
+(see Reset card use).
+
 Quota is a report, never a control input, exactly like usage metering: nothing in
 resolution, admission, or cooldown reads it. It covers hub-held subscription
 Sources (`kind: subscription`, `supply_channel: hub`, bound credential). Native-CLI
@@ -1633,6 +1739,14 @@ through its management `api-call`, so Avibe never handles the token:
 | --- | --- | --- |
 | `anthropic` | `GET https://api.anthropic.com/api/oauth/usage` | `anthropic-beta: oauth-2025-04-20` |
 | `openai` / `codex` | `GET https://chatgpt.com/backend-api/wham/usage` | `ChatGPT-Account-ID` when the grant carries one |
+| `gemini` (Antigravity) | `POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`, body `{"project": <auth project_id>}`; on 404, 408, or 5xx the same call on `https://cloudcode-pa.googleapis.com` | The engine's own Antigravity `User-Agent` |
+| `xai` (Grok) | `GET https://cli-chat-proxy.grok.com/v1/billing?format=credits` | The engine's own Grok CLI identity (`X-XAI-Token-Auth`, `x-grok-client-version`, `User-Agent`, `x-grok-client-identifier`) |
+
+`kimi` has no report the account sign-in can read (its usage endpoint takes an
+API key), so a Kimi Source is `unsupported`. The Antigravity project id comes
+from the engine's auth listing (`project_id`) and only ever travels inside the
+engine call; a grant without one is reported with no windows, as is an answer
+with no buckets.
 
 Only parsed fields cross the adapter boundary (`EngineAdapter.subscription_quota`);
 the raw body, headers, and grant never reach the service, a log line, or a
@@ -1646,6 +1760,17 @@ fall back to the fixed top-level keys (`five_hour`, `seven_day`,
 primary/secondary windows are classified by `limit_window_seconds`, and each
 `additional_rate_limits` entry is named by its metered feature (`codex_bengalfox`
 is Spark) or `limit_name`.
+Antigravity's `groups[]` (or an older answer's top-level `buckets[]`) name the
+models that share their buckets: a `5h` bucket is `model_session` and a `weekly`
+one `model_weekly`, scoped to the group's `displayName` (or, without one, the
+bucket id less its window suffix, marked `label_is_key`); none stops the whole
+account. Used is `(1 - remainingFraction) * 100`; proto3 omits a zero, so a
+bucket with a `resetTime` and no `remainingFraction` is spent. A full bucket
+reports a rolling reset that moves with each read, so it carries none. Disabled
+buckets are skipped. Grok's one credit window is `weekly` or `monthly` by
+`config.currentPeriod.type`, resets at the period's `end`, and lasts `end -
+start`; a missing `creditUsagePercent` reads as 0 only beside a well-formed
+weekly or monthly period, otherwise there is no window.
 
 The service caches the last good snapshot per Source. A read re-fetches a Source
 whose last attempt is older than `refresh_interval_seconds` (300); a forced
@@ -1660,6 +1785,70 @@ that misses it keeps running and lands in the cache. Those Sources are listed in
 the root `pending` array, and the settings page re-reads after about five seconds,
 with a bounded number of retries, showing them as loading rather than unavailable.
 It stops re-reading once `pending` is empty or absent.
+
+### Reset card use
+
+Using a card cannot be undone, so the server holds every guarantee and the page only shows
+them. No card was ever used to build or test this: the vendors' requests and answers follow
+other clients of the same endpoints.
+
+- **One request per press.** The use reads the inventory fresh, picks the usable card of
+  `kind` that expires first and sends the vendor one request. It is never repeated and never
+  replaced by another card. Anthropic may refuse a card that is not the one it would use
+  next; that is `not_used` with `reason: "refused"`.
+- **One card per intention.** A press is being handled from the moment it arrives until its
+  answer is assembled, whatever has been settled meanwhile; another press on that Source or
+  on another Source of the same account in that time answers `409 reset_card_locked`. A
+  press also carries `count`, the number of cards of that kind the page was showing. The
+  server reads the count fresh and, before anything is recorded or sent, answers
+  `409 reset_card_count_changed` when it differs: a second tab that still shows the count
+  from before the first tab's use spends nothing, redraws from `quota`, and its next
+  confirmation is a press of its own. That fresh count can itself lag behind the vendor, so
+  `count` is compared once more with the inventory the use reads last before its request;
+  if they differ nothing is sent, the lock is released, the Source is read again and the
+  answer is the same `409 reset_card_count_changed`.
+- **One use per account at a time.** While an account is locked, `reset_cards.lock` is set
+  on every Source of that account: `in_flight` while a use is being handled, `unconfirmed`
+  when its outcome is not known. Another use of that account answers `409 reset_card_locked`.
+  The lock is recorded on disk before the request is sent, so a reload, a second page and a
+  restart see it; a use found in flight at startup is `unconfirmed`. When the lock cannot be
+  recorded the use is refused with `reset_card_locked` and nothing is sent. A row whose account has
+  not been read yet, and every row when the record cannot be read, shows `unconfirmed`
+  rather than free.
+- **An outcome is the vendor's statement, confirmed by a count.** After the request the
+  account's cards are read again by themselves. `used` needs the vendor's acknowledgement
+  and fewer cards of that kind than before. `not_used` needs a stated refusal (`reason`:
+  `not_limited`, `cooldown`, `refused` or `unavailable`) and the same count. Everything else
+  is `unconfirmed` with `reason: null`, and the account stays locked: no answer, a timeout,
+  a status other than 200, a body that is not recognised, names a member twice or contradicts
+  itself, a refusal that carries anything that could be evidence of a redemption (a credit, a
+  cleared limit, or a member this client does not know), an acknowledgement that names
+  another account, organization, grant, credit or request than the one it answers or
+  carries a status other than `redeemed`, a count that
+  could not be read, that is another account's, or that disagrees with the statement.
+  `cleared` lists the known limits the vendor reported as cleared (`five_hour`, `seven_day`,
+  `seven_day_overage_included`) and is empty unless `used`.
+- **Only the user's refresh lifts an unknown outcome, and not at once.** `POST
+  /api/models/quota/refresh` reads each account with cards again. A reading that began at
+  least 60 seconds of elapsed time after that account's outcome became unknown (setting the
+  machine's clock does not change it), that the vendor's own report established
+  (`state: "ok"`) and that was made under the same account removes the lock. An earlier
+  refresh reads as usual and shows the count but leaves the lock: a vendor that did not
+  answer may still finish the request, and a count read seconds later would look untouched.
+  A read that was not forced, a reading that was already under way and an `unread` inventory
+  do not lift it either. Concurrent refreshes share one reading, and a vendor's rate-limit
+  cooldown is waited out with the lock in place. Nothing in the payload changes for the
+  wait: the lock simply stays. After a restart the wait counts from when the lock is found.
+- **What is taken as true from the provider.** An answer that is well formed, of the
+  expected shape, and does not contradict what was sent or itself in a field it carries. A
+  field it leaves out is not required. A provider that answers consistently but wrongly is
+  not defended against.
+- The `quota` returned with a use is read after it. The `quota` of a refusal is the latest
+  summary the server has when it refuses: `reset_card_count_changed` follows a fresh read
+  of that Source, `reset_card_locked` reads nothing, and a Source whose read failed shows
+  its cards as `unread`. Both report what is known at that moment without waiting for
+  another account's reading; a Source still being read is named in `pending`. After a use,
+  an account paused for quota or rate is resumed by the rule of a forced read.
 
 ### Subscription value
 
@@ -1881,6 +2070,19 @@ runtime. Failure settles at `not_installed` with
 carrier for the persisted failure; raw downloader or verifier text remains only in
 scrubbed logs. `/start` never performs installation.
 
+For a lifecycle-owned engine that the owner publishes as a settled running
+generation, `status.installed_version`, `status.verified` and `manifest` describe
+the exact launch. The owner verified those bytes against the manifest
+synchronously before spawn. `verified: true` therefore means the running
+process's input binary matched its exact manifest at launch. It is not a
+continuous disk audit or a memory attestation, and a later file change or a
+transient read obstruction does not turn a running `ok` into
+`installed_version: null` / `verified: false`. Every other state, including
+`not_started`, `down`, provisional, recovering and blocked, reports a fresh disk
+inspection. Every fresh start re-verifies. `installing` keeps its asynchronous
+shape above. There is no eventual-verification field; the Dependencies
+inspection is where on-disk drift is reported.
+
 On service bootstrap, persisted `installing` with no worker owned by the reconstructed
 process is an orphaned install, never a live-job proof. Recovery atomically replaces the
 claim generation before it re-resolves the pinned target through the shared installer
@@ -2015,3 +2217,11 @@ contract harness and API-boundary tests enforce:
 Serializer completeness follows the issue #939 pattern. Persisted fields must
 round-trip through config serialization. Derived fields are exempt from persistence
 but require an API-payload test.
+
+### Model-list rename (additive request field)
+
+`renames` maps baseline IDs to desired IDs in the same PUT. Pairs must be disjoint; neither swaps nor overwriting an existing ID is supported. A missing/stale source, collision or inconsistent mapping returns `409 backend_model_conflict`; a locked source returns `409 backend_model_locked`. Ordinary model admission, origin and guard checks still apply to the complete draft. Only unrelated removals participate in the removal guard. A rename preserves upstream hop targets and route mode. An automatic route matches the new ID, even when that leaves no supplier.
+
+Future SQLite selections move together before catalog publication. If concurrent database writes exhaust the bounded selection retries, the save returns `503 backend_model_store_busy` without changing either store. Retry the same draft; this is not a stale catalog baseline. On publication failure, retry the **same** baseline, desired rows and mapping; a conflicting catalog edit is not recovery. A stale selection written concurrently can still name the old ID. There is no cross-store lock or retained alias.
+
+Requests already sent and execution history do not change. A Session-following Vibey Turn resolves its next request using its current pin or inherited Agent model. An existing native CLI launch handle continues to name its launch model (which might no longer have a route); a new Turn uses the renamed selection.

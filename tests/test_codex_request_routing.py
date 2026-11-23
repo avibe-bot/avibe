@@ -274,14 +274,14 @@ async def test_codex_request_ownership_precedes_body_parse(runtime, malformed):
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def body(**_kwargs):
+    async def body():
         entered.set()
         await release.wait()
-        return {} if malformed else _body(launch)
+        return json.dumps({} if malformed else _body(launch)).encode("utf-8")
 
     request = SimpleNamespace(
         headers=_headers(launch), match_info={"backend": "codex", "endpoint": "responses"},
-        json=body,
+        charset=None, read=body,
     )
     running = asyncio.create_task(runtime.gateway._handle_request(request))
     completion = None

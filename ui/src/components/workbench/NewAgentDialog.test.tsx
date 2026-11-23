@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
@@ -12,6 +12,9 @@ import { modelsApi } from '../settings/models/modelsApi';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
 import { OWNER_INSTANCE_CAPABILITIES } from '../../lib/sessionInfo';
 import { NewAgentDialog } from './NewAgentDialog';
+
+// The Add model dialog loads on demand (lib/useAddModelDialog); have its code here before a case opens it.
+beforeAll(async () => { await import('../settings/models/AddModelsDialog'); });
 
 const apiRef = vi.hoisted(() => ({
   current: null as {

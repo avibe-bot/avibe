@@ -7,7 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { BotsContext, type BotsState } from '../../../context/BotsContext';
 import type { Bot } from '../../../lib/bots';
 import { BotHoldProvider } from './BotHold';
-import { useBotHold } from './BotHoldContext';
+import { holdOwnsTouch, useBotHold } from './BotHoldContext';
 
 // The hold's own path is useHoldToTalk's test, and the gesture on the strip is the browser's
 // (e2e/voice-shortcut/strip.spec.ts). Here: the one hold every avatar shares stays usable when the
@@ -82,6 +82,21 @@ const view = (bots: Bot[]) => (
     </BotsContext.Provider>
   </MemoryRouter>
 );
+
+describe('which touch moves the hold owns', () => {
+  const held = (phase: string, progress: number) =>
+    ({ handle: 'pm', phase, progress, pointer: 'touch' }) as unknown as Parameters<typeof holdOwnsTouch>[0];
+
+  it('is the page\'s before the hold is reached, and the hold\'s from then, while the microphone opens', () => {
+    expect(holdOwnsTouch(null)).toBe(false);
+    expect(holdOwnsTouch(held('pressing', 0.5))).toBe(false);
+    // Reached, the microphone still opening (11-20: the cue waits for capture).
+    expect(holdOwnsTouch(held('pressing', 1))).toBe(true);
+    expect(holdOwnsTouch(held('listening', 1))).toBe(true);
+    expect(holdOwnsTouch(held('armed', 1))).toBe(true);
+    expect(holdOwnsTouch(held('settling', 1))).toBe(false);
+  });
+});
 
 describe('the hold every Bot avatar shares', () => {
   afterEach(() => {

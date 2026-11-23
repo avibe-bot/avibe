@@ -83,12 +83,15 @@ def test_direct_transport_iroh_pin_is_not_an_automatic_group_update() -> None:
 
 
 def test_ui_refresh_hold_preserves_the_established_export_contract() -> None:
-    # 0.5.4 adds diagnostics for primitive aliases, lazy registry entries and
-    # deferred components. Keep only demonstrated incompatible releases out;
+    # All nine 0.5.0–0.5.8 candidates flag the established lazy registry and
+    # deferred component exports. Keep only those demonstrated releases out;
     # eslintConventions.test.mjs exercises the actual rule on those shapes.
     ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
     assert [item for item in ui["ignore"] if item["dependency-name"] == "eslint-plugin-react-refresh"] == [
-        {"dependency-name": "eslint-plugin-react-refresh", "versions": ["0.5.4", "0.5.5", "0.5.6", "0.5.7"]}
+        {
+            "dependency-name": "eslint-plugin-react-refresh",
+            "versions": ["0.5.0", "0.5.1", "0.5.2", "0.5.3", "0.5.4", "0.5.5", "0.5.6", "0.5.7", "0.5.8"],
+        }
     ]
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
@@ -97,20 +100,13 @@ def test_ui_refresh_hold_preserves_the_established_export_contract() -> None:
     assert lock["packages"]["node_modules/eslint-plugin-react-refresh"]["version"] == "0.4.26"
 
 
-def test_ui_vitest_hold_preserves_the_node20_toolchain() -> None:
-    # The candidate's engine contract drops Node20 even when a smoke test works.
-    # Hold that candidate, not unrelated UI packages or future reviewed releases.
-    ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
-    assert [item for item in ui["ignore"] if item["dependency-name"] == "vitest"] == [
-        {"dependency-name": "vitest", "versions": ["5.0.5", "5.1.0"]}
-    ]
+def test_ui_vitest_matches_the_supported_build_toolchain() -> None:
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    assert "^20." in package["engines"]["node"]
-    assert package["devDependencies"]["vitest"].startswith("^4.")
+    assert lock["packages"][""]["engines"] == package["engines"]
+    assert package["engines"]["node"] == "^22.13.0 || ^24.0.0 || >=26.0.0"
     assert lock["packages"][""]["devDependencies"]["vitest"] == package["devDependencies"]["vitest"]
-    assert lock["packages"]["node_modules/vitest"]["version"].startswith("4.")
-    assert "^20." in lock["packages"]["node_modules/vitest"]["engines"]["node"]
+    assert lock["packages"]["node_modules/vitest"]["version"].startswith("5.")
 
 
 @pytest.mark.parametrize("python_version,expected", [("3.10", "2.0.57"), ("3.11", "2.1.0"), ("3.12", "2.1.0")])
@@ -144,7 +140,7 @@ def test_sqlalchemy_requirements_and_lock_preserve_python_version_branches(
     assert any(item["name"] == "sqlalchemy" and item["version"] == expected for item in lock["package"])
 
 
-def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
+def test_ui_jsdom_hold_preserves_existing_dom_consumers() -> None:
     # 31.0.0 excludes Node20 and fails startup there. Keep this candidate out
     # without blocking later independently reviewed releases or changing tests.
     ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
@@ -153,7 +149,6 @@ def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
     ]
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    assert "^20." in package["engines"]["node"]
     assert package["devDependencies"]["jsdom"] == "^29.1.1"
     assert lock["packages"][""]["devDependencies"]["jsdom"] == package["devDependencies"]["jsdom"]
     assert lock["packages"]["node_modules/jsdom"]["version"] == "29.1.1"
@@ -161,15 +156,16 @@ def test_ui_jsdom_hold_preserves_node20_and_existing_dom_consumers() -> None:
 
 
 def test_ui_playwright_hold_keeps_the_test_runner_and_browser_driver_coherent() -> None:
-    # 1.65.0 regresses the unchanged activity-expiry consumer. Exclude only that
-    # tested candidate and retain one matching runner/driver set for npm ci.
+    # Retain a matching runner/driver set for npm ci and keep the tested
+    # activity-expiry failures out of automatic groups, not future versions.
     ui = next(item for item in _updates() if item["package-ecosystem"] == "npm" and item["directory"] == "/ui")
     assert [item for item in ui["ignore"] if item["dependency-name"] == "@playwright/test"] == [
-        {"dependency-name": "@playwright/test", "versions": ["1.65.0"]}
+        {"dependency-name": "@playwright/test", "versions": ["1.65.0", "1.65.1"]}
     ]
     package = json.loads((ROOT / "ui/package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "ui/package-lock.json").read_text(encoding="utf-8"))
-    assert package["devDependencies"]["@playwright/test"] == "1.64.1"
-    assert lock["packages"][""]["devDependencies"]["@playwright/test"] == "1.64.1"
+    expected = "1.64.1"
+    assert package["devDependencies"]["@playwright/test"] == expected
+    assert lock["packages"][""]["devDependencies"]["@playwright/test"] == expected
     for name in ("@playwright/test", "playwright", "playwright-core"):
-        assert lock["packages"][f"node_modules/{name}"]["version"] == "1.64.1"
+        assert lock["packages"][f"node_modules/{name}"]["version"] == expected

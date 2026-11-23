@@ -133,10 +133,18 @@ def test_list_directory_over_visible_cap_is_truncated_after_full_page(tmp_path, 
     assert result["limit"] == 3
 
 
-def test_entry_ops_handle_cyclic_symlink(tmp_path):
+def test_entry_ops_handle_cyclic_symlink(tmp_path, monkeypatch):
     link = tmp_path / "loop"
     link.symlink_to(link)
 
+    # Python <=3.12 raises for a cycle even with strict=False. Exercise that
+    # behavior on newer local interpreters as well as on the CI interpreter.
+    original_resolve = Path.resolve
+    def old_python_resolve(path, strict=False):
+        if path == link:
+            raise RuntimeError("Symlink loop")
+        return original_resolve(path, strict=strict)
+    monkeypatch.setattr(Path, "resolve", old_python_resolve)
     assert fs.metadata(str(link))["kind"] == "symlink"
 
     fs.delete_path(str(link))

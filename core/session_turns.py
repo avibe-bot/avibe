@@ -1069,6 +1069,12 @@ class SessionTurnManager:
         """
 
         run_ids = self._agent_run_ids_from_spec(getattr(context, "platform_specific", None))
+        turn_id = str((getattr(context, "platform_specific", None) or {}).get("turn_token") or "").strip()
+        if run_ids and turn_id and settled_by in SETTLEMENTS_WITHOUT_RESULT and self._durable_schema_available():
+            # A Stop's end carried the reports merged into the Turn on to the next
+            # one; their Runs go with them rather than ending ``canceled`` here.
+            with self._sqlite_engine().connect() as conn:
+                run_ids = set(run_ids) - delivery_store.run_ids_carried_from(conn, run_ids, turn_id)
         self._settle_agent_run_ids(run_ids, settled_by)
 
     def _reconcile_terminal_agent_runs(self) -> None:
@@ -2102,6 +2108,8 @@ class SessionTurnManager:
                     conn, session_id, str(delivery["id"]), reason=reason
                 )
             return None
+        if not delivery_store.can_start_carried_batch(conn, session_id, deliveries):
+            return None
         if not explicit_retry and any(
             delivery_store.requires_explicit_start_retry(delivery)
             for delivery in deliveries
@@ -2717,6 +2725,10 @@ class SessionTurnManager:
                         ),
                     }
                 harness_hints.append(harness_hint(hint_spec, receiver=receiver_session_id))
+            # Carried inputs say so first, in the same Harness lines (approved copy).
+            carry_line = delivery_store.turn_carry_line(payloads)
+            if carry_line:
+                harness_hints.insert(0, carry_line)
         context.files = file_attachments_from_specs(specs)
         context.platform_specific.update(
             {
@@ -3562,6 +3574,7 @@ class SessionTurnManager:
         }
         should_drain = False
         materialized = False
+        carried_late = False
         saved: dict[str, Any] | None = None
         accepted_run_ids: list[str] = []
         terminal_target: dict[str, Any] | None = None
@@ -3637,14 +3650,13 @@ class SessionTurnManager:
                             target_turn_id or None,
                             "receipt_cas_lost",
                         )
+                    carried_late = self._flush_late_carry_notices(conn, session_id)
                     saved = accepted_rows[0]
                     materialized = True
                     target_turn = delivery_store.get_turn(conn, target_turn_id)
-                    if (
-                        accepted_run_ids
-                        and target_turn is not None
-                        and target_turn["state"] == "terminal"
-                    ):
+                    # A receipt that lands after its Turn ended, with or without Runs:
+                    # it may have queued a carry or cleared the queue's fence (#4010).
+                    if target_turn is not None and target_turn["state"] == "terminal":
                         terminal_target = target_turn
                 if outcome_value == SteerOutcome.UNKNOWN.value:
                     unknown_rows = delivery_store.mark_attempt_receipt_batch(
@@ -3746,12 +3758,24 @@ class SessionTurnManager:
                 run_ids=accepted_run_ids,
                 context=context,
             )
-            if terminal_target is not None:
+            if terminal_target is not None and accepted_run_ids:
                 self._settle_agent_run_ids_from_terminal_turn(
                     accepted_run_ids,
                     terminal_target,
                 )
             self._publish_materialized_delivery(delivery_id)
+            if (
+                (carried_late or terminal_target is not None)
+                and getattr(self.controller, "shutdown_requested", False) is not True
+                and str((terminal_target or {}).get("backend") or "") not in self._draining_backends
+            ):
+                # The Turn and its queue drain are over. A receipt landing now may have
+                # queued a carry, or cleared the fence that held later inputs: resume the
+                # queue rather than leave it for the next input. A shutdown keeps it for
+                # startup recovery (#4010 review).
+                asyncio.create_task(
+                    self._resume_post_terminal(session_id), name=f"late-receipt-resume:{session_id}",
+                )
             return DeliveryResult(
                 delivery_id,
                 str((saved or {}).get("message_id") or delivery_id),
@@ -5188,6 +5212,130 @@ class SessionTurnManager:
             logger.exception("durable terminal completion deferred for Turn=%s", pending.turn_id)
             return {"defer_queue_resume": True}
 
+    def _flush_late_carry_notices(self, conn: Connection, session_id: str) -> bool:
+        """What a receipt accepted after its Turn ended owes, in the same transaction.
+
+        Returns whether it carried anything, which then needs a queue resume.
+        """
+        carried = bool(conn.info.pop(delivery_store.LATE_CARRY_CREATED_KEY, False))
+        owed = conn.info.pop(delivery_store.LATE_CARRY_NOTICES_KEY, None) or {}
+        for turn_id, notices in owed.items():
+            self._record_turn_carry_notices(conn, session_id, turn_id, notices)
+        return carried
+
+    def _record_turn_carry_notices(
+        self, conn: Connection, session_id: str, turn_id: str, settled: dict[str, Any],
+    ) -> None:
+        """In the terminal transaction, so each notice is written exactly once.
+
+        The Session's owner is told which inputs a second failure left. Each sender
+        is told once, with its own inputs only: that its input waits behind a failing
+        model (parked), or that it will not be retried (exhausted). A notice is itself
+        never a cause of another notice, nor new work that releases parked inputs.
+        """
+        from storage.background import definition_owner_session_id
+        from storage.resource_access_service import RESOURCE_USER_CONTEXT_METADATA_KEY
+
+        runs_by_kind = {
+            "parked": dict(settled.get("parked_runs") or {}),
+            "exhausted": dict(settled.get("exhausted_runs") or {}),
+        }
+        rows = {
+            str(run["id"]): run
+            for run in conn.execute(
+                select(
+                    agent_runs.c.id, agent_runs.c.callback_session_id, agent_runs.c.metadata_json,
+                    agent_runs.c.source_kind, agent_runs.c.source_actor,
+                ).where(agent_runs.c.id.in_([run_id for runs in runs_by_kind.values() for run_id in runs]))
+            ).mappings().all()
+        } if any(runs_by_kind.values()) else {}
+        # An internal notice is never named to anyone as something to resend.
+        notice_inputs = {
+            entry["input"] for runs in runs_by_kind.values() for run_id, entry in runs.items()
+            if run_id in rows and delivery_store.is_carry_notice_run(rows[run_id]["source_actor"])
+        }
+        exhausted = [
+            input_id for input_id in dict.fromkeys(settled.get("exhausted_input_ids") or [])
+            if input_id not in notice_inputs
+        ]
+        if exhausted:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == session_id)
+            ).scalar_one_or_none()
+            messages_service.append(
+                conn, scope_id=scope_id, session_id=session_id, platform="avibe", author="agent",
+                source="agent", message_type="notify",
+                text=i18n_t("harness.turnCarry.exhausted", self._controller_language(), inputs=", ".join(exhausted)),
+                metadata={"event": "turn_carry_exhausted", "turn_id": turn_id, "input_ids": exhausted},
+            )
+        # One notice per kind, sender and authority: a notice never carries more
+        # authority, or names more inputs, than each Run it answers (#4010 review).
+        owed: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for kind, runs in runs_by_kind.items():
+            for run_id, carried in runs.items():
+                input_id = carried["input"]
+                run = rows.get(run_id)
+                if run is None or delivery_store.is_carry_notice_run(run["source_actor"]):
+                    continue
+                try:
+                    run_metadata = json.loads(run["metadata_json"] or "{}")
+                except (TypeError, ValueError):
+                    run_metadata = {}
+                if not isinstance(run_metadata, dict):
+                    run_metadata = {}
+                # Who waits on it: the failure-callback target, else the Session that
+                # sent it: an Agent Run's actor, a callback's source Session, or the
+                # Session that created the Task or Watch.
+                sender = str(
+                    run["callback_session_id"]
+                    or (run["source_actor"] if run["source_kind"] == "agent" else "")
+                    or (run_metadata.get("source_session_id") if run["source_kind"] == "callback" else "")
+                    or definition_owner_session_id(run_metadata)
+                    or ""
+                ).strip()
+                if not sender or sender == session_id:
+                    continue
+                # The authority the input was admitted with (a scheduled Task's Run
+                # does not keep it), else its Run's own (#4010 review).
+                authority = carried.get("authority") or run_metadata.get(RESOURCE_USER_CONTEXT_METADATA_KEY)
+                authority = authority if isinstance(authority, dict) else None
+                key = (kind, sender, json.dumps(authority, sort_keys=True))
+                entry = owed.setdefault(key, {"run_ids": [], "inputs": [], "authority": authority})
+                entry["run_ids"].append(run_id)
+                entry["inputs"].append(input_id)
+        if not owed:
+            return
+        from core.scheduled_tasks import UnresolvableSessionTarget, resolve_session_id_target
+        from storage.background import enqueue_run_in_connection
+
+        now = datetime.now(timezone.utc).isoformat()
+        for (kind, sender, _authority_key), entry in owed.items():
+            try:
+                target = resolve_session_id_target(sender, db_path=Path(str(self._sqlite_engine().url.database)))
+            except UnresolvableSessionTarget:
+                continue
+            inputs = ", ".join(dict.fromkeys(entry["inputs"]))
+            prompt = (
+                f"{delivery_store.TURN_CARRY_PARKED_NOTICE}\n{inputs}" if kind == "parked"
+                else delivery_store.TURN_CARRY_EXHAUSTED_NOTICE.format(inputs=inputs)
+            )
+            metadata: dict[str, Any] = {"source_session_id": session_id, "turn_carry_run_ids": entry["run_ids"]}
+            if entry["authority"] is not None:
+                metadata[RESOURCE_USER_CONTEXT_METADATA_KEY] = entry["authority"]
+            first = entry["run_ids"][0]
+            enqueue_run_in_connection(conn, {
+                "id": uuid.uuid4().hex[:12], "run_type": "agent_run", "status": "queued",
+                "source_kind": "callback",
+                "source_actor": f"{first}{delivery_store.TURN_CARRY_NOTICE_ACTOR_MARKER}{kind}",
+                "parent_run_id": first, "session_policy": "existing",
+                "session_id": target.session_id, "legacy_session_key": target.session_key.to_key(),
+                "agent_id": target.agent_id, "agent_name": target.agent_name,
+                "agent_backend": target.agent_backend, "model": target.model,
+                "reasoning_effort": target.reasoning_effort,
+                "prompt": prompt,
+                "metadata_json": json.dumps(metadata), "created_at": now, "updated_at": now,
+            })
+
     def _terminalize_durable_turn(
         self,
         turn_id: str,
@@ -5489,6 +5637,8 @@ class SessionTurnManager:
                     evidence_kind=evidence_kind,
                     evidence=evidence,
                 )
+                if settled.get("changed"):
+                    self._record_turn_carry_notices(conn, session_id, turn_id, settled)
                 if not settled.get("changed"):
                     result = {
                         "changed": False,
@@ -8176,6 +8326,8 @@ class SessionTurnManager:
         start_attempt_id = ""
         with self._sqlite_engine().connect() as conn:
             observed_terminal = delivery_store.get_turn(conn, terminal_turn_id)
+            if not (observed_terminal or {}).get("control_successor_turn_id"):
+                return None  # Ordinary completions have no replacement to resume.
             observed_successor = delivery_store.get_turn(
                 conn,
                 str((observed_terminal or {}).get("control_successor_turn_id") or ""),
@@ -8198,7 +8350,7 @@ class SessionTurnManager:
                         session_turn_rows.c.control_successor_turn_id == successor_id,
                         session_turn_rows.c.control_successor_delivery_id
                         == successor_delivery_id,
-                    )
+                    ).limit(2)  # Two already disprove unique ownership.
                 ).scalars()
             )
             session_status = conn.execute(

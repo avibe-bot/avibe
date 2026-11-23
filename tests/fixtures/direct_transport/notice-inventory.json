@@ -1,5 +1,5 @@
 {
-  "source": "prior qualified five-target graphs; same Cargo.lock (Windows CRLF normalized)",
+  "source": "Prior qualified five-target inventory; verified identical normal/build package versions and features on all five targets after adding a direct edge to existing futures-core (no default features).",
   "packages": [
     {
       "name": "aead",
@@ -2974,5 +2974,5 @@
   ],
   "qualification_run_id": "43015205807",
   "source_sha": "39833a39b09c7ed2c2351ea9b472fe39c495ad0e",
-  "lockfile_sha256": "25e6e5cad04925237667ca7706f33fc369a7ed9abf28211a2f9f4e4440b99ce1"
+  "lockfile_sha256": "cb2bde6d8b7b4f03518c3fb3cd7301c1e7707d486050e02bfc765fd27b396112"
 }

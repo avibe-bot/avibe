@@ -5,7 +5,7 @@
 // it when they arrive there, which happens on every flush. So "on its own" is a
 // property of the open call, and these tests are what make it one.
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { RouteSurfaceActivityBoundary } from '../RouteSurfaceActivityBoundary';
 import en from '../../i18n/en.json';
+import { MotionPreferenceContext } from '@/lib/motion';
 import { ImageViewerProvider } from './image-viewer';
 import { useImageViewer, type ImageViewerOpenOptions } from './image-viewer-context';
 
@@ -300,5 +301,171 @@ describe('ImageViewerProvider — retained route activity owns global keys', () 
     expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[0]);
     fireEvent.keyDown(window, { key: 'ArrowRight' });
     expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[0]);
+  });
+});
+
+// Touch dismissal is tested through the real zoom wrapper and modal. The existing
+// paging suite cannot catch gesture ownership, release thresholds or cancellation.
+describe('ImageViewerProvider — touch dismissal', () => {
+  const touch = (target: Element, type: string, x: number, y: number, time: number, count = 1) => {
+    const point = { identifier: 1, clientX: x, clientY: y, pageX: x, pageY: y, target };
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperties(event, {
+      timeStamp: { value: time },
+      touches: { value: type === 'touchend' || type === 'touchcancel' ? [] : Array.from({ length: count }, (_, i) => ({ ...point, identifier: i + 1, clientX: x + i * 40 })) },
+      changedTouches: { value: [point] },
+    });
+    fireEvent(target, event);
+    return event;
+  };
+  const setup = (reduced = false) => {
+    render(<MotionPreferenceContext.Provider value={reduced}>
+      <I18nextProvider i18n={i18n}><ImageViewerProvider images={GALLERY}>
+        <Opener src={GALLERY[0]} />
+      </ImageViewerProvider></I18nextProvider>
+    </MotionPreferenceContext.Provider>);
+    screen.getByText('open').focus();
+    fireEvent.click(screen.getByText('open'));
+    const wrapper = document.querySelector('.react-transform-wrapper')!;
+    return { wrapper, stage: wrapper.parentElement! };
+  };
+  const finish = async () => {
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+    // Radix queues focus restoration after React commits the modal unmount.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  };
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('follows a vertical drag 1:1, shrinks, fades chrome and restores a short slow release', async () => {
+    const { wrapper, stage } = setup();
+    touch(wrapper, 'touchstart', 200, 200, 0);
+    touch(wrapper, 'touchmove', 200, 205, 50);
+    expect(stage.style.translate).toBe('0px 0px');
+    touch(wrapper, 'touchmove', 200, 240, 500);
+    expect(stage.style.translate).toBe('0px 40px');
+    expect(Number(stage.style.scale)).toBeLessThan(1);
+    expect(screen.getByLabelText('Close').parentElement!.style.opacity).toBe('0');
+    expect(screen.getByText('1 / 3').style.opacity).toBe('0');
+    expect(screen.getByText('1 / 3').style.transition).toContain('160ms');
+    touch(wrapper, 'touchend', 200, 240, 700);
+    expect(stage.style.translate).toBe('0px 0px');
+    expect(stage.style.transition).toContain('290ms');
+    expect(screen.getByText('1 / 3').style.opacity).toBe('1');
+    fireEvent.click(wrapper); // The synthesized click following a drag must not close it.
+    await finish();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it.each(['distance', 'velocity'])('dismisses by %s and restores focus', async (kind) => {
+    const { wrapper } = setup();
+    touch(wrapper, 'touchstart', 200, 100, 0);
+    const dy = kind === 'distance' ? window.innerHeight * 0.2 : 40;
+    const time = kind === 'distance' ? 1000 : 50;
+    touch(wrapper, 'touchmove', 200, 100 + dy, time);
+    touch(wrapper, 'touchend', 200, 100 + dy, time + 1);
+    await finish();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByText('open'));
+  });
+
+  it('does not turn an old fast movement into a flick after the finger pauses', async () => {
+    const { wrapper } = setup();
+    touch(wrapper, 'touchstart', 200, 100, 0);
+    touch(wrapper, 'touchmove', 200, 150, 20);
+    touch(wrapper, 'touchend', 200, 150, 500);
+    await finish();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it.each([10, window.innerWidth - 10, 20, window.innerWidth - 20])('yields the edge at x=%s', async (x) => {
+    const { wrapper, stage } = setup();
+    touch(wrapper, 'touchstart', x, 100, 0);
+    touch(wrapper, 'touchmove', x, 400, 40);
+    touch(wrapper, 'touchend', x, 400, 50);
+    await finish();
+    expect(stage.style.translate).toBe('0px 0px');
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('locks a horizontal start out for its whole sequence and never pages', async () => {
+    const { wrapper, stage } = setup();
+    touch(wrapper, 'touchstart', 100, 100, 0);
+    touch(wrapper, 'touchmove', 120, 110, 20);
+    touch(wrapper, 'touchmove', 120, 500, 50);
+    touch(wrapper, 'touchend', 120, 500, 60);
+    fireEvent.click(wrapper);
+    await finish();
+    expect(stage.style.translate).toBe('0px 0px');
+    expect(screen.getByText('1 / 3')).toBeTruthy();
+  });
+
+  it('rubber bands upward within 24px and never dismisses an upward drag', async () => {
+    const { wrapper, stage } = setup();
+    touch(wrapper, 'touchstart', 200, 500, 0);
+    touch(wrapper, 'touchmove', 200, 100, 40);
+    const y = Number.parseFloat(stage.style.translate.split(' ')[1]);
+    expect(y).toBeGreaterThanOrEqual(-24);
+    expect(y).toBeLessThan(0);
+    touch(wrapper, 'touchend', 200, 100, 50);
+    await finish();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it.each(['touchcancel', 'pinch'])('cancels dismissal on %s even past the threshold', async (kind) => {
+    const { wrapper, stage } = setup();
+    touch(wrapper, 'touchstart', 200, 100, 0);
+    touch(wrapper, 'touchmove', 200, 400, 50);
+    if (kind === 'pinch') touch(wrapper, 'touchstart', 200, 400, 60, 2);
+    else touch(wrapper, 'touchcancel', 200, 400, 60);
+    touch(wrapper, 'touchend', 200, 400, 80);
+    await finish();
+    expect(stage.style.translate).toBe('0px 0px');
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('leaves a zoomed image to the real zoom/pan library', async () => {
+    const { wrapper, stage } = setup();
+    fireEvent.click(screen.getByLabelText('Zoom in'));
+    await finish();
+    expect(transformScale(document.querySelector('.react-transform-component'))).toBeGreaterThan(1);
+    touch(wrapper, 'touchstart', 200, 100, 500);
+    touch(wrapper, 'touchmove', 200, 400, 550);
+    touch(wrapper, 'touchend', 200, 400, 560);
+    await finish();
+    expect(stage.style.translate).toBe('0px 0px');
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('reduces motion to following the finger and fading without shrink or exit travel', async () => {
+    const { wrapper, stage } = setup(true);
+    touch(wrapper, 'touchstart', 200, 100, 0);
+    touch(wrapper, 'touchmove', 200, 140, 500);
+    expect(stage.style.scale).toBe('1');
+    touch(wrapper, 'touchend', 200, 140, 700);
+    expect(stage.style.transition).toBe('none');
+    touch(wrapper, 'touchstart', 200, 100, 1000);
+    touch(wrapper, 'touchmove', 200, 400, 1050);
+    touch(wrapper, 'touchend', 200, 400, 1060);
+    expect(stage.style.translate).toBe('0px 300px');
+    expect(stage.style.transition).toBe('opacity 140ms linear');
+    await finish();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('keeps desktop mouse, arrow buttons and the backdrop click paths', async () => {
+    const { wrapper, stage } = setup();
+    fireEvent.mouseDown(wrapper, { clientX: 200, clientY: 100 });
+    fireEvent.mouseMove(window, { clientX: 200, clientY: 400 });
+    fireEvent.mouseUp(window);
+    expect(stage.style.translate).toBe('0px 0px');
+    fireEvent.click(screen.getByLabelText('Next'));
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+    fireEvent.keyDown(window, { key: 'ArrowLeft' });
+    expect(screen.getByText('1 / 3')).toBeTruthy();
+    fireEvent.pointerDown(screen.getByRole('dialog'));
+    fireEvent.click(screen.getByRole('dialog'), { clientX: 1, clientY: 1 });
+    await finish();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });

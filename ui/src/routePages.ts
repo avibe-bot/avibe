@@ -15,6 +15,7 @@ import { readLastPwaPath } from './lib/pwaRouteMemory';
 import { DeferredMentionEditor } from './components/workbench/deferredMentionEditor';
 import { DeferredInboxPreview } from './components/workbench/InboxHoverPopover';
 import { DeferredMarkdown } from './components/ui/deferredMarkdown';
+import { LazyNewProjectDialog } from './components/workbench/LazyNewProjectDialog';
 
 // The chat composer's editor arrives with the page, so the composer never waits on it.
 export const ChatPage = lazyPage(() => Promise.all([
@@ -28,6 +29,8 @@ export const SkillsPage = lazyPage(() => import('./components/workbench/SkillsPa
 export const HarnessPage = lazyPage(() => import('./components/workbench/HarnessPage').then((m) => m.HarnessPage));
 export const VaultsPage = lazyPage(() => import('./components/workbench/VaultsPage').then((m) => m.VaultsPage));
 export const Wizard = lazyPage(() => import('./components/Wizard').then((m) => m.Wizard));
+// The App routes' host: a native App window's body, or the page's own app route.
+export const StandaloneAppRoute = lazyPage(() => import('./components/apps/StandaloneAppRoute').then((m) => m.StandaloneAppRoute));
 
 // One chunk for all of Settings (settingsRoutePages.ts).
 const settings = () => import('./components/settings/settingsRoutePages');
@@ -36,6 +39,7 @@ export const SettingsLayout = lazyPage(() => settings().then((m) => m.SettingsLa
 export const SettingsGeneralPage = lazyPage(() => settings().then((m) => m.SettingsGeneralPage));
 export const SettingsNotificationsPage = lazyPage(() => settings().then((m) => m.SettingsNotificationsPage));
 export const SettingsShortcutsPage = lazyPage(() => settings().then((m) => m.SettingsShortcutsPage));
+export const SettingsMicrophonePage = lazyPage(() => settings().then((m) => m.SettingsMicrophonePage));
 export const SettingsComputerUsePage = lazyPage(() => settings().then((m) => m.SettingsComputerUsePage));
 export const SettingsServicePage = lazyPage(() => settings().then((m) => m.SettingsServicePage));
 export const SettingsPlatformsPage = lazyPage(() => settings().then((m) => m.SettingsPlatformsPage));
@@ -66,6 +70,7 @@ const EXACT_PAGES: Record<string, { preload: () => Promise<unknown> }> = {
 function pageForPath(pathname: string): { preload: () => Promise<unknown> } | null {
   if (pathname.startsWith('/chat/')) return ChatPage;
   if (pathname === '/settings' || pathname.startsWith('/settings/')) return SettingsLayout;
+  if (pathname.startsWith('/apps/')) return StandaloneAppRoute;
   return EXACT_PAGES[pathname] ?? null;
 }
 
@@ -88,7 +93,12 @@ export function preloadInitialRoute(): void {
 // The order a reader is likely to need them: a conversation from the home or
 // the Inbox first (and the Markdown the sidebar's Inbox peek and an editor's
 // preview draw, already downloaded with it), then the tabs, then Settings.
+// Before them, the new-project dialog: its button is on the first screen, its
+// code is small, and a press that finds it loaded opens at once (its own
+// preload, not only the module's arrival with the Projects page, is what
+// spares the first open a suspended frame).
 const PREFETCH_ORDER = [
+  LazyNewProjectDialog,
   ChatPage,
   DeferredInboxPreview,
   DeferredMarkdown,
@@ -99,6 +109,7 @@ const PREFETCH_ORDER = [
   HarnessPage,
   VaultsPage,
   SettingsLayout,
+  StandaloneAppRoute,
 ];
 
 // What is left to fetch, kept across starts: a shell that mounts again (React's

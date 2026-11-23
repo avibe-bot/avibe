@@ -5,12 +5,19 @@ import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 
 import { frames } from '../../frame';
 import { consolePage, phoneShell } from '../workbench/fixtures';
-import { vaultApi, vaultFixtures } from './fixtures';
+import { secret, vaultApi, vaultFixtures } from './fixtures';
 
 const page = consolePage(<VaultsPage />);
 const phone = phoneShell('/vaults', <VaultsPage />);
 const fixtures = vaultFixtures();
 const quiet = vaultFixtures(vaultApi({ grants: [], requests: [] }));
+// A protected login with several fields: its menu offers one View secret for the whole secret.
+const login = secret('EMAIL_LOGIN', { protection: 'protected', fields: ['username', 'password', 'totp'], default_field: 'password', description: '工作邮箱', tags: ['mail'] });
+const envelope = { ciphertext: 'c', nonce: 'n', wrap_meta: 'w' };
+const viewSecret = vaultFixtures({
+  ...vaultApi({ secrets: [login], grants: [], requests: [] }),
+  '/api/vault/secrets/EMAIL_LOGIN/reveal-context': { ok: true, context: {}, envelope },
+});
 const rowActions = (nth: number) => `role=button[name="{t:vaults.rowActions}"] >> nth=${nth}`;
 
 // An Editor of a shared instance: may use secrets but not manage them (no edit, delete, or settings).
@@ -90,6 +97,28 @@ const designFrames = frames([
     fixtures: quiet,
     click: [rowActions(0)],
     render: page,
+  },
+  {
+    name: 'view-secret',
+    title: '保险库 · 保护档密钥的更多操作：一个「查看密钥」（在安全窗口里显示所有字段）',
+    width: 1192,
+    height: 520,
+    status: 'shipped',
+    route: '/vaults',
+    fixtures: viewSecret,
+    click: [rowActions(0)],
+    render: page,
+  },
+  {
+    name: 'view-secret-phone',
+    title: '保险库 · 手机 · 保护档密钥的「查看密钥」',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: '/vaults',
+    fixtures: viewSecret,
+    click: [rowActions(0)],
+    render: phone,
   },
   {
     name: 'delete-keypair',

@@ -100,6 +100,11 @@ enum DirectPathReport: Equatable, Sendable {
     /// (`remote-direct-ios.md` section 9), whichever of the two heard the
     /// background first, so its closure waits for the return.
     case lostToBackground
+    /// The usable path's connection now runs on another kind of path:
+    /// through the relay, or straight to an IPv4 or IPv6 address. Nothing
+    /// is closed; the page is told, and new connections may stay on a direct
+    /// path (section 6, stickiness).
+    case pathChanged(DirectPathKind?)
 }
 
 /// One byte stream to the instance, as the strict ingress sees it
@@ -115,6 +120,289 @@ protocol DirectByteStream: AnyObject, Sendable {
     func closeWrite() async throws
     /// Ends both directions at once. A `read` or `write` in progress throws.
     func cancel()
+}
+
+/// The kind of path a direct connection runs on: through a relay, or
+/// straight to an IPv4 or IPv6 address. Families only, never an address.
+enum DirectPathKind: String, Equatable, Sendable {
+    case relay
+    case ipv4
+    case ipv6
+
+    /// The family of a numeric socket address (`a.b.c.d:port` or
+    /// `[x:...:x]:port`), or nil for anything else.
+    static func family(ofSocketAddress address: String) -> DirectPathKind? {
+        if address.hasPrefix("[") {
+            return .ipv6
+        }
+        let host = address.split(separator: ":").first.map(String.init) ?? ""
+        let octets = host.split(separator: ".")
+        return octets.count == 4 && octets.allSatisfy({ UInt8($0) != nil }) ? .ipv4 : nil
+    }
+}
+
+/// The path the App's direct connection has selected, for display: its
+/// kind, whether the far end is on a local network, and its round-trip time.
+/// A class and a number, never an address.
+struct DirectSelectedPath: Equatable, Sendable {
+    let kind: DirectPathKind
+    /// For a path to an IPv4 or IPv6 address: whether that address is
+    /// private, unique-local, or link-local (`true`), or anything else
+    /// (`false`). Nil through the relay.
+    let local: Bool?
+    /// The path's round-trip time in milliseconds; nil until measured.
+    let rttMs: Int?
+
+    /// From one of the connection's paths, as the binding reports it. Nil
+    /// for a path that is neither the relay nor a numeric address.
+    init?(isRelay: Bool, isIp: Bool, remoteAddress: String, rttMs: UInt64) {
+        if isRelay {
+            kind = .relay
+            local = nil
+        } else if isIp, let family = DirectPathKind.family(ofSocketAddress: remoteAddress) {
+            kind = family
+            local = Self.isLocalNetwork(socketAddress: remoteAddress)
+        } else {
+            return nil
+        }
+        // Zero is what the binding reports before a measurement.
+        self.rttMs = rttMs > 0 ? Int(min(rttMs, UInt64(Int.max))) : nil
+    }
+
+    init(kind: DirectPathKind, local: Bool?, rttMs: Int?) {
+        self.kind = kind
+        self.local = local
+        self.rttMs = rttMs
+    }
+
+    /// Whether a numeric socket address (`a.b.c.d:port` or `[x:...:x]:port`)
+    /// is on a local network: IPv4 10/8, 172.16/12, 192.168/16, 169.254/16,
+    /// and 100.64/10 (shared address space: Tailscale, or a carrier's NAT);
+    /// IPv6 fc00::/7 (unique local), fe80::/10 (link-local), or an
+    /// IPv4-mapped address of a local IPv4 one.
+    static func isLocalNetwork(socketAddress address: String) -> Bool {
+        if address.hasPrefix("[") {
+            let inner = address.dropFirst().prefix { $0 != "]" }
+            let host = inner.prefix { $0 != "%" }.lowercased()
+            if host.hasPrefix("::ffff:") {
+                return isLocalIPv4(String(host.dropFirst("::ffff:".count)))
+            }
+            guard
+                let first = host.split(separator: ":", omittingEmptySubsequences: false).first,
+                !first.isEmpty,
+                let hextet = UInt16(first, radix: 16)
+            else {
+                return false
+            }
+            return hextet & 0xFE00 == 0xFC00 || hextet & 0xFFC0 == 0xFE80
+        }
+        return isLocalIPv4(address.split(separator: ":").first.map(String.init) ?? "")
+    }
+
+    private static func isLocalIPv4(_ host: String) -> Bool {
+        let octets = host.split(separator: ".").compactMap { UInt8($0) }
+        guard octets.count == 4 else {
+            return false
+        }
+        switch (octets[0], octets[1]) {
+        case (10, _), (192, 168), (169, 254):
+            return true
+        case (172, let second):
+            return (16...31).contains(second)
+        case (100, let second):
+            return (64...127).contains(second)
+        default:
+            return false
+        }
+    }
+}
+
+/// How many candidate addresses of each family. Counts only.
+struct DirectAddressFamilies: Equatable, Sendable {
+    var ipv4 = 0
+    var ipv6 = 0
+
+    init(ipv4: Int = 0, ipv6: Int = 0) {
+        self.ipv4 = ipv4
+        self.ipv6 = ipv6
+    }
+
+    init(socketAddresses: [String]) {
+        for address in socketAddresses {
+            switch DirectPathKind.family(ofSocketAddress: address) {
+            case .ipv4: ipv4 += 1
+            case .ipv6: ipv6 += 1
+            default: break
+            }
+        }
+    }
+
+    var jsonObject: [String: Any] {
+        ["ipv4": ipv4, "ipv6": ipv6]
+    }
+}
+
+/// One connection attempt to the instance, for diagnosis: what the
+/// instance's answer offered, what this device could offer, and which path
+/// won. No address, key, or identity.
+struct DirectDialAttempt: Equatable, Sendable {
+    /// The instance's candidate addresses, by family.
+    let offered: DirectAddressFamilies
+    /// Whether the answer named a relay.
+    let offeredRelay: Bool
+    /// This device's own candidate addresses when the attempt ended, if
+    /// the endpoint was bound.
+    let local: DirectAddressFamilies?
+    /// The path the connection ran on when it was found usable; nil if the
+    /// attempt failed.
+    let path: DirectPathKind?
+
+    var jsonObject: [String: Any] {
+        var object: [String: Any] = [
+            "offered": offered.jsonObject,
+            "offered_relay": offeredRelay,
+            "result": path?.rawValue ?? "failed",
+        ]
+        if let local {
+            object["local"] = local.jsonObject
+        }
+        return object
+    }
+}
+
+/// One CONNECT's race between the direct path and the public origin, for
+/// diagnosis: how long each took from the CONNECT's plan to being ready, or
+/// what became of it, which won, and the App's path then. Timings and
+/// families only.
+struct DirectRaceRecord: Equatable, Sendable {
+    enum Leg: Equatable, Sendable {
+        /// Not part of this race: no direct candidate, or the public origin
+        /// was never dialled.
+        case none
+        /// Ready after this many milliseconds.
+        case ready(Int)
+        case failed
+        /// A sticky direct attempt that did not answer within its bound.
+        /// No failure of the path is claimed for it.
+        case timedOut
+        /// Started, and cancelled when the other won.
+        case cancelled
+
+        var jsonValue: Any {
+            switch self {
+            case .none: return "none"
+            case .ready(let ms): return ms
+            case .failed: return "failed"
+            case .timedOut: return "timeout"
+            case .cancelled: return "cancelled"
+            }
+        }
+    }
+
+    let direct: Leg
+    let publicOrigin: Leg
+    /// `direct`, `public`, or nil when neither won.
+    let winner: DirectRelayBackend?
+    let path: DirectPathKind?
+    /// The plan went straight to the direct path (section 6, stickiness).
+    let sticky: Bool
+
+    var jsonObject: [String: Any] {
+        [
+            "direct": direct.jsonValue,
+            "public": publicOrigin.jsonValue,
+            "winner": winner.map { $0 == .direct ? "direct" : "public" } ?? "none",
+            "path": path.map { $0.rawValue as Any } ?? NSNull(),
+            "sticky": sticky,
+        ]
+    }
+}
+
+/// Committed direct relays the App closed because their path was lost (or
+/// replaced, or the App went to the background), for diagnosis: how many,
+/// and for each how long it had carried no byte when it was closed. A short
+/// time means bytes were moving, so a request was probably cut; the listener
+/// cannot see requests themselves. Counts and durations only.
+struct DirectLossRecord: Equatable, Sendable {
+    enum Cause: String, Equatable, Sendable {
+        /// The transport reported the path lost. The one cause that says a
+        /// request in flight was probably cut.
+        case lost
+        /// A newer rendezvous answer replaced the endpoint the relays ran on.
+        case generationReplaced = "generation_replaced"
+        /// The App went to the background.
+        case background
+    }
+
+    let cause: Cause
+    let relays: Int
+    /// Milliseconds since each relay's last byte, shortest first, at most
+    /// `quietLimit` of them.
+    let quietMs: [Int]
+    /// The kind of path the App's connection ran on before the loss.
+    let path: DirectPathKind?
+
+    static let quietLimit = 8
+
+    var jsonObject: [String: Any] {
+        [
+            "cause": cause.rawValue,
+            "relays": relays,
+            "last_byte_ms": quietMs,
+            "path": path.map { $0.rawValue as Any } ?? NSNull(),
+        ]
+    }
+}
+
+/// How often the transport checked its path again, and why, since the
+/// instance was selected. For diagnosis: counts only.
+struct DirectPathCounts: Equatable, Sendable {
+    /// Times a usable path was suspended to be checked again (`verifying`).
+    var verifications = 0
+    /// Probes started after a network path update.
+    var probesAfterPathUpdate = 0
+    /// Probes started after a direct candidate failed.
+    var probesAfterCandidateFailure = 0
+    /// Probes started after an answer that had run out was renewed.
+    var probesAfterRenewal = 0
+    /// Connections to the instance attempted. One that connects sends one
+    /// probe of its own, not counted above.
+    var dials = 0
+    /// Updates of the system's network path that were acted on.
+    var pathUpdates = 0
+    /// Updates of the system's network path that changed nothing the
+    /// transport depends on, and were ignored.
+    var pathUpdatesIgnored = 0
+
+    static let zero = DirectPathCounts()
+
+    var jsonObject: [String: Any] {
+        [
+            "verifications": verifications,
+            "probes": [
+                "path_update": probesAfterPathUpdate,
+                "candidate_failed": probesAfterCandidateFailure,
+                "renewal": probesAfterRenewal,
+            ],
+            "dials": dials,
+            "path_updates": pathUpdates,
+            "path_updates_ignored": pathUpdatesIgnored,
+        ]
+    }
+}
+
+/// What the transport can say about its path, for diagnosis.
+struct DirectPathDiagnostics: Equatable, Sendable {
+    /// The path the live connection runs on now, if one is usable.
+    var current: DirectPathKind?
+    /// The last few attempts, oldest first.
+    var attempts: [DirectDialAttempt] = []
+    /// The selected path's class and round-trip time, read with `current`.
+    var selected: DirectSelectedPath? = nil
+
+    static let empty = DirectPathDiagnostics(current: nil, attempts: [])
+    /// How many attempts are kept.
+    static let attemptLimit = 5
 }
 
 /// "Open a byte stream to the selected instance."
@@ -144,4 +432,24 @@ protocol DirectTransporting: AnyObject, Sendable {
     /// Opens one stream over the path reported usable for `tag`. Throws when
     /// that path is gone, and promptly when its task is cancelled.
     func openStream(for tag: DirectStreamTag) async throws -> any DirectByteStream
+
+    /// The path the live connection runs on, and the last attempts.
+    @MainActor
+    var pathDiagnostics: DirectPathDiagnostics { get }
+
+    /// How often the path was checked again, and why.
+    @MainActor
+    var pathCounts: DirectPathCounts { get }
+}
+
+extension DirectTransporting {
+    @MainActor
+    var pathCounts: DirectPathCounts {
+        .zero
+    }
+
+    @MainActor
+    var pathDiagnostics: DirectPathDiagnostics {
+        .empty
+    }
 }

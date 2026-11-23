@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Any
 
+from core.warm_gc_baseline import observe_service_startup
 from config.paths import ensure_data_dirs, get_logs_dir
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -25,10 +26,14 @@ from vibe.shutdown_diagnostics import ShutdownDiagnostics
 from vibe.macos_session_diagnostics import start_macos_session_diagnostics
 from vibe.process_limits import raise_open_file_limit
 from vibe.runtime import (
+    SERVICE_START_FAILURE_DATABASE_DISK_FULL,
     ServiceAlreadyRunningError,
     acquire_service_instance_lock,
+    clear_service_start_failure,
     consume_shutdown_intent,
+    record_service_start_failure,
     release_service_instance_lock,
+    service_start_failure,
     shutdown_intent_required,
 )
 
@@ -61,32 +66,6 @@ def setup_logging(level: str = "INFO") -> None:
     )
 
 
-def apply_claude_sdk_patches():
-    """Apply runtime patches for third-party SDK limits."""
-    logger = logging.getLogger(__name__)
-    try:
-        from modules.claude_sdk_compat import CLAUDE_SDK_MAX_BUFFER_SIZE
-        from claude_agent_sdk._internal.transport import subprocess_cli
-    except Exception as exc:
-        logger.warning(f"Claude SDK patch skipped: {exc}")
-        return
-
-    patched = []
-    for attr in ("_DEFAULT_MAX_BUFFER_SIZE", "_MAX_BUFFER_SIZE"):
-        if not hasattr(subprocess_cli, attr):
-            continue
-        previous = getattr(subprocess_cli, attr)
-        setattr(subprocess_cli, attr, CLAUDE_SDK_MAX_BUFFER_SIZE)
-        if previous != CLAUDE_SDK_MAX_BUFFER_SIZE:
-            patched.append(f"{attr} from {previous} to {CLAUDE_SDK_MAX_BUFFER_SIZE} bytes")
-
-    if patched:
-        logger.info(
-            "Patched claude_agent_sdk buffer limits: %s",
-            ", ".join(patched),
-        )
-
-
 def load_config() -> Any:
     from config.v2_config import V2Config
 
@@ -107,6 +86,25 @@ def prepare_sqlite_state(config: Any):
 
     with service_database_preparation():
         return repair_sqlite_state(primary_platform=config.platform, include_counts=False)
+
+
+def _record_database_disk_full(exc: BaseException, logger: logging.Logger) -> None:
+    """Leave the user-facing reason behind when the database update ran out of disk."""
+
+    try:
+        from storage.migrations import DatabaseDiskFullError
+
+        if not isinstance(exc, DatabaseDiskFullError):
+            return
+        record_service_start_failure(
+            SERVICE_START_FAILURE_DATABASE_DISK_FULL,
+            rollback_confirmed=exc.rollback_confirmed is True,
+        )
+        failure = service_start_failure(os.getpid())
+        if failure:
+            logger.error(failure["detail"])
+    except Exception:
+        logger.warning("Could not record the database disk-full startup failure", exc_info=True)
 
 
 def _log_shutdown_signal(logger: logging.Logger, signum: int) -> None:
@@ -182,6 +180,7 @@ def _request_controller_loop_stop(controller: Any) -> bool:
 def main():
     """Main entry point"""
     process_started_at = time.monotonic()
+    observe_service_startup()
     lock_acquired = False
     macos_session_diagnostics = None
     controller = None
@@ -192,6 +191,8 @@ def main():
         raise_open_file_limit()
         acquire_service_instance_lock()
         lock_acquired = True
+        # Only this start's own failure may be reported for it.
+        clear_service_start_failure()
 
         # Load configuration
         config = load_config()
@@ -213,8 +214,6 @@ def main():
             os.environ[BUILTIN_SKILLS_ROOT_ENV] = ""
             logger.warning("Avibe built-in Skills are unavailable", exc_info=True)
 
-        apply_claude_sdk_patches()
-
         logger.info("Starting vibe-remote service...")
         logger.info(f"Working directory: {config.runtime.default_cwd}")
         logger.info(
@@ -228,7 +227,11 @@ def main():
 
             log_process_snapshot(logger, "service-start")
         sqlite_started_at = time.monotonic()
-        report = prepare_sqlite_state(config)
+        try:
+            report = prepare_sqlite_state(config)
+        except Exception as exc:
+            _record_database_disk_full(exc, logger)
+            raise
         logger.info(
             "SQLite state ready: imported=%s db_path=%s backup_path=%s",
             report.imported,

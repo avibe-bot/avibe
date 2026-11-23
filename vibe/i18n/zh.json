@@ -1,4 +1,13 @@
 {
+  "systemSchedule": {
+    "waitingForDevice": "正在等待设备返回结果。",
+    "enableOnDevice": "能接收这条的手机都关着「闹钟与提醒」。先请用户在「设备」中打开，再发新的闹钟或提醒。"
+  },
+  "storage": {
+    "notice": {
+      "epoch3BackupSkipped": "磁盘空间快满了，这次更新数据库时没有另存备份。你仍然可以装回 3.2.6；3.2.5 及更早的版本无法再打开这个数据库。建议腾出一些磁盘空间。"
+    }
+  },
   "mcp": {
     "configure_owned_only": "仅 Avibe 管理的服务器支持配置。",
     "discovery_failed": "MCP 发现失败；请检查服务器配置后重试。"
@@ -113,6 +122,9 @@
     }
   },
   "harness": {
+    "turnCarry": {
+      "exhausted": "这些输入已转交过一次，接下来那一轮也失败了。它们不会再自动重试；如果仍然需要，请重新发送：{inputs}"
+    },
     "agentInitiatedContinuation": "Agent 主动发起的续接",
     "promptEcho": {
       "scheduled": "⏰ 定时任务",
@@ -125,6 +137,9 @@
       "truncated": "…（已截断）"
     },
     "watch": {
+      "retryingNotice": "Watch {id} 已连续重试 {elapsed}（最近退出码：{code}），仍在运行。",
+      "elapsedHours": "{hours} 小时 {minutes} 分钟",
+      "elapsedMinutes": "{minutes} 分钟",
       "supervisorFailed": "Watch 监控进程失败：{detail}",
       "supervisorExitedDuringStartup": "Watch 监控进程在启动期间退出。",
       "unknownSupervisorFailure": "未知的监控进程错误。",
@@ -979,6 +994,8 @@
         "activeTurnRequired": "Computer Use 要求调用方当前有活动的 Avibe Turn。",
         "computerUseUnavailable": "Computer Use 当前不可用（状态={statusCode}：{status}；原因={reasonCode}：{reason}）。",
         "targetBusy": "请求的 Computer Use 目标正忙，请在当前操作完成后重试。",
+        "appDialogUnresolved": "能看到这个弹窗，但无法确认操作只会作用于它。请手动处理后再继续。",
+        "dockUnsupported": "电脑操作无法控制程序坞。若要移除图标，请手动将它拖出程序坞。",
         "genericDriverError": "Computer Use driver 返回了错误。",
         "invalidDriverArguments": "Computer Use 参数无效。",
         "observeFirst": "发送输入前，请重新观察精确窗口。",
@@ -1138,7 +1155,7 @@
       "adapter_error": "无法确认服务是否可连接，请重试。",
       "credential_replacement_unverified": "暂时无法验证新密钥，原密钥未改动，请稍后重试",
       "native_login_in_progress": "另一个 Agent 登录正在进行中，请先完成或取消后再重试。",
-      "native_subscription_exists": "该供应商已经有一个由 Agent 管理的订阅。",
+      "native_subscription_exists": "该供应商已经有一个后端自己登录的订阅。",
       "source_timeout": "连接超时，请检查网络后重试。",
       "invalid_source_order": "供应商优先级包含不可用、不适用或重复的供应商。",
       "mode_switch_blocked": "当前模型管理方式或选择阻止了此操作。",
@@ -1245,6 +1262,9 @@
     }
   },
   "remote_access": {
+    "address_retired": {
+      "line": "这个 Avibe 换了新地址。能访问它的人，在 avibe.bot 登录后可以打开。"
+    },
     "oauth_error": {
       "sign_in_again": "重新登录",
       "diagnostics_summary": "技术细节",
@@ -1252,6 +1272,8 @@
       "cookie_hint": "重试后仍然卡住?请确认浏览器允许本站使用 Cookie。",
       "default_title": "重新登录一下",
       "default_body": "登录未完成,请重试。",
+      "account_session_signed_out_title": "这台设备已被退出",
+      "account_session_signed_out_body": "请过几分钟再登录。一直不行的话，先在 avibe.bot 退出登录，再回来登录。",
       "invalid_oauth_state_title": "登录会话已过期",
       "invalid_oauth_state_body": "安全登录链接已过期,或无法与当前浏览器匹配。这通常是因为登录链接闲置了几分钟,或在另一个标签页/窗口中打开。重新登录即可继续。",
       "oauth_exchange_failed_title": "登录未能完成",
@@ -1265,6 +1287,10 @@
     }
   },
   "turn": {
+    "retiredRoute": {
+      "model": "模型 {old} 已不在 {backend} 的模型列表中，这个会话已改用 {new}。",
+      "effort": "{model} 已不提供推理强度 {old}，这个会话已改用 {new}。"
+    },
     "interrupted": {
       "backendRefresh": "⚠️ 本轮执行被中断——它运行期间 Agent 运行时不得不被替换（例如凭据迁移）。如果这项工作仍需完成，请重新发送请求。",
       "backendDisabled": "⏹ 本轮执行已停止，因为 {agent} 已被关闭。请在设置中重新开启它；如果这项工作仍需完成，再重新发送请求。",
@@ -1902,5 +1928,13 @@
   "mcp_oauth_callback_success": "MCP OAuth 登录已完成，可以关闭此标签页。",
   "mcp_oauth_callback_failure": "MCP OAuth 登录未完成，请返回 Avibe 重试。",
   "mcp_oauth_start_failure": "MCP OAuth 登录无法开始，请返回 Avibe 重试。",
-  "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。"
+  "mcp_oauth_start_rejected": "请从 Avibe 中打开此 MCP OAuth 链接。",
+  "mobile": {
+    "health": {
+      "requestCreated": "已向 iPhone 发起健康数据请求。",
+      "connectTitle": "{name} 请求读取你的健康数据",
+      "refreshTitle": "{name} 请求更新健康数据",
+      "notificationBody": "请在 iPhone 上打开 Avibe 处理。"
+    }
+  }
 }

@@ -532,9 +532,9 @@ def test_startup_failure_drains_error_and_cleanup_even_when_cleanup_raises(monke
     monkeypatch.setattr(main, "acquire_service_instance_lock", lambda: None)
     from types import SimpleNamespace
 
-    monkeypatch.setattr(main, "load_config", lambda: SimpleNamespace(runtime=SimpleNamespace(log_level="INFO")))
+    monkeypatch.setattr(main, "load_config", lambda: SimpleNamespace(runtime=SimpleNamespace(log_level="INFO", default_cwd="/tmp")))
 
-    def fail_startup():
+    def fail_startup(*_args):
         raise RuntimeError("startup failure after logging setup")
 
     def release():
@@ -551,7 +551,7 @@ def test_startup_failure_drains_error_and_cleanup_even_when_cleanup_raises(monke
         "_stop_macos_session_diagnostics",
         lambda _monitor, _diagnostics: logging.warning("final service diagnostics cleanup"),
     )
-    monkeypatch.setattr(main, "apply_claude_sdk_patches", fail_startup)
+    monkeypatch.setattr(main, "start_macos_session_diagnostics", fail_startup)
     monkeypatch.setattr(main, "release_service_instance_lock", release)
     import core.managed_skills
 

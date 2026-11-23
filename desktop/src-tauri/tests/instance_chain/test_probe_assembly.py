@@ -16,8 +16,8 @@ import pytest
 import build_native_probe
 
 
-@pytest.mark.parametrize("shell_consumers", [False, True])
-def test_current_native_probe_source_assembles_before_cargo(tmp_path, monkeypatch, shell_consumers):
+@pytest.mark.parametrize("mode", ["updater", "shell", "account", "update-consumers", "app-windows"])
+def test_current_native_probe_source_assembles_before_cargo(tmp_path, monkeypatch, mode):
     root = Path(__file__).resolve().parents[4]
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     bundle = tmp_path / "bundle.tar.gz"
@@ -31,8 +31,14 @@ def test_current_native_probe_source_assembles_before_cargo(tmp_path, monkeypatc
         "--bundle", str(bundle), "--bundle-sha256", hashlib.sha256(bundle.read_bytes()).hexdigest(),
         "--output", str(tmp_path / "assembly"), "--target-dir", str(tmp_path / "target"),
     ]
-    if shell_consumers:
+    if mode in ("shell", "update-consumers", "app-windows"):
         arguments.append("--shell-consumers")
+    if mode in ("account", "update-consumers", "app-windows"):
+        arguments.append("--account-feedback")
+    if mode == "update-consumers":
+        arguments.append("--update-consumers")
+    if mode == "app-windows":
+        arguments.append("--app-windows")
     monkeypatch.setattr(sys, "argv", arguments)
     run = subprocess.run
 

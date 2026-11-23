@@ -336,6 +336,21 @@ start resolves a previously authorized identity without network/recovery
 recursion under its lock. Recorded process identity and durable launch witnesses,
 not missing/malformed process records, settle survivor ownership.
 
+**Runtime status of a live launch.** When the lifecycle owner authorizes a
+launch, it synchronously verifies the exact generation's bytes against its
+manifest. It then captures that launch's installed fact, version and contract
+manifest. While the owner publishes a settled (recovered and committed) running
+generation, `GET /api/models/runtime/status` reports that launch snapshot and does
+not re-resolve the launch manifest or re-inspect the installed binary; it still
+reads the authoritative lifecycle journal and installation state. Publishing provenance can briefly obstruct a disk read,
+and changed files cannot relabel a process that is already running. Stopped,
+exited, provisional, recovering and blocked states still report a fresh disk
+inspection. The snapshot never authorizes execution: every fresh launch
+re-authorizes and re-verifies the installed identity and bytes (the existing
+verification cache may reuse a digest while file identity is unchanged), and journal, health and ownership gating are
+unchanged. The independent Dependencies inspection keeps reading the disk, so
+bytes that change under a running engine still surface there.
+
 The **activation journal**, independently of the single-file channel history,
 uses file fsync, atomic replacement and parent-directory fsync on POSIX, final
 native full flush on Darwin, and native flush/write-through publication on

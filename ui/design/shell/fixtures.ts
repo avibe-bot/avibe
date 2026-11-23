@@ -10,6 +10,12 @@ import type { DesignSocketMessage, DesignStreamEvent } from './network';
 
 /** What a frame can set. Everything is optional; omitted parts are empty, not loading. */
 export interface WorkbenchFixtures {
+  /** Design-only microphone preview; no capture or persisted preference. */
+  microphone?: {
+    platform: 'desktop' | 'ios';
+    state: import('@/components/settings/MicrophoneSettingsPage').MicrophoneSettingsState;
+    devices?: import('@/lib/voiceInput').VoiceInputDevice[];
+  };
   capabilities?: InstanceCapabilities;
   /** What every ask-before-signing switch shows for turning it off; frames never reach the sandbox,
    *  so it is 'unavailable' (this build can't) unless a frame draws another state. */
@@ -55,11 +61,20 @@ export interface WorkbenchFixtures {
   /** The desktop shell answers Computer Use's native actions: turning it on, or on and off
    *  (`computerUseShellActions()`). Its calls never settle, so a frame shows a change in flight. */
   desktopComputerUse?: 'on' | 'on-off';
+  /** The desktop app shares the Show this window displays (`__AVIBE_DESKTOP_SHOW_SHARE__`); with `desktopShell`.
+   *  The design browser has no Tauri command channel, so a share does not start. */
+  desktopShowShare?: boolean;
+  /** The page is a native Show window the desktop app opened (`__AVIBE_NATIVE_APP_WINDOW__`), which
+   *  shares its Show and exports it (`__AVIBE_DESKTOP_SHOW_EXPORT__`). */
+  nativeShowWindow?: boolean;
   /** The page runs in the Avibe phone app (`window.avibeNative`, `hasNativeCapability()`), with these
    *  capabilities and versions; its calls answer nothing and it sends no events. */
   nativeShell?: Record<string, number>;
   /** The selected instance's name the phone app's `app.info` gives (`instancePresentation`). */
   nativeInstanceName?: string;
+  /** What the phone app's `direct.status()` answers (with the `direct` capability): the status, and
+   *  what the shell adds for diagnosis (`path`, `connections`). */
+  nativeDirectStatus?: Record<string, unknown>;
   /** Web Storage entries the frame starts with (a remembered preference, such as a collapsed section). */
   storage?: Record<string, string>;
   /** API responses by path plus query (`/api/inbox?session=ses_pm&limit=1`) or by path, for anything else a frame fetches.

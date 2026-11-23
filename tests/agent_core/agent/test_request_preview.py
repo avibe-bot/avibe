@@ -3,7 +3,9 @@
 Existing loop tests exercise effects; they cannot establish that diagnostics are
 read-only or that exported bytes match the adapter's actual HTTPX request.
 """
+import json
 from copy import deepcopy
+from pathlib import Path
 from dataclasses import replace
 
 import httpx
@@ -14,7 +16,7 @@ from core.agent_core.agent.loop import Agent
 from core.agent_core.ai.provider import ModelCapabilities
 from core.agent_core.ai.registry import ADAPTERS, create_adapter
 from core.agent_core.harness.context import ContextConfig
-from core.agent_core.messages import ToolCallBlock, ToolResultMessage, text
+from core.agent_core.messages import ToolCallBlock, ToolResultMessage, message_from_dict, text
 from tests.agent_core.fakes import (
     SELECTION, FakeJobHost, FakeModelRouter, FakeTool, InMemoryTranscriptStore,
     ScriptedProvider, assistant, input_row, user,
@@ -40,6 +42,11 @@ async def test_dry_tick_matches_live_resume_transport_bytes_without_any_effect(p
     selected = replace(SELECTION, endpoint=replace(SELECTION.endpoint, protocol=protocol))
     store = InMemoryTranscriptStore()
     await store.consume_input("session", "input", user("Exact 中文 / quoted \" input"))
+    fixtures = Path(__file__).parents[1] / "fixtures"
+    fetched = message_from_dict(json.loads((fixtures / "web_fetch_v21.json").read_bytes()))
+    call = ToolCallBlock(fetched.tool_call_id, fetched.tool_name, {"url": "https://example.test/page"})
+    await store.append_response("session", assistant("", calls=[call]), final=False)
+    await store.append_tool_result("session", fetched, details={})
     tool = FakeTool("do_not_execute")
     before = deepcopy(store.__dict__)
     async with httpx.AsyncClient(transport=httpx.MockTransport(capture)) as client:
@@ -50,14 +57,16 @@ async def test_dry_tick_matches_live_resume_transport_bytes_without_any_effect(p
         preview = await agent.dry_tick(selected=selected)
         assert preview.status == "ready"
         assert preview.wire is not None
-        assert preview.snapshot.context_seq == 1
+        assert preview.snapshot.context_seq == 3
         assert router.resolutions == 0 and router.protocols == [] and sent == []
         assert store.__dict__ == before and agent.snapshot() == original_snapshot
         assert tool.calls == []
         events = [event async for event in agent.resume(input_row("control", "not consumed"), turn_id="debug-test")]
         assert events[-1].reason == "error"
-    assert len(sent) == 1
+    assert len(sent) == (2 if protocol == 'anthropic' else 1)
     assert sent[0].content == preview.wire.body
+    # A rejected Anthropic create replays the original full bytes, with no beta or thread field.
+    assert sent[-1].content == (fixtures / f"request_body_{protocol}.json").read_bytes()
     assert sent[0].url == httpx.URL(preview.wire.wire.url)
     assert tool.calls == []
 

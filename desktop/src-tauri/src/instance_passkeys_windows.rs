@@ -8,6 +8,14 @@ use windows::{
 };
 static PENDING: Mutex<Option<GUID>> = Mutex::new(None);
 
+/// Whether webauthn.dll answers the calls `perform` makes. Its assertion
+/// options are VERSION_3 (with `pCancellationId`), and webauthn.h lists
+/// options up to 4 and the cancellation calls in WEBAUTHN_API_VERSION_1.
+pub fn supported() -> bool {
+    // SAFETY: a version query with no arguments or retained state.
+    unsafe { WebAuthNGetApiVersionNumber() >= 1 }
+}
+
 pub fn cancel(_: &AppHandle) {
     if let Some(id) = *PENDING.lock().expect("passkey operation") {
         // This API cancels only the exact native operation ID we allocated.
@@ -16,7 +24,7 @@ pub fn cancel(_: &AppHandle) {
 }
 pub async fn perform(app: &AppHandle, input: Challenge, epoch: Epoch) -> Result<Value, ClientError> {
     let window = app
-        .get_webview_window(crate::MAIN_WINDOW)
+        .get_window(crate::MAIN_WINDOW)
         .ok_or_else(|| ClientError::new("passkey_unavailable"))?;
     let handle = window.hwnd().map_err(|_| ClientError::new("passkey_unavailable"))?.0 as usize;
     tokio::task::spawn_blocking(move || {

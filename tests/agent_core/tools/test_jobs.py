@@ -591,6 +591,39 @@ async def test_a_command_whose_record_would_be_unreadable_never_starts(tmp_path,
     assert host.meta(job_id)["command"] == command
 
 
+@pytest.mark.parametrize("stop", [False, True])
+async def test_blocked_spawn_allows_heartbeat_and_stop(tmp_path, monkeypatch, stop):
+    import threading
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    spawn = host._spawn
+
+    def slow_spawn(*args):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(2), "loop could not run a heartbeat during job setup"
+        return spawn(*args)
+
+    monkeypatch.setattr(host, "_spawn", slow_spawn)
+    ran = tmp_path / "ran"
+    task = asyncio.create_task(_start(host, tmp_path, f'echo ran > "{ran}"'))
+    await entered.wait()
+    if stop:
+        task.cancel()
+    release.set()
+    if stop:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        job = host.find_job(instance())
+        assert job and (Path(host.job_dir(job)) / "decision").read_text().strip() == "abandon"
+        assert not ran.exists()
+        assert _wait_until(lambda: _wrapper_gone(host.job_dir(job)))
+    else:
+        job = await task
+        assert (await host.wait(job, deadline_s=5)).state == "exited" and ran.exists()
+
+
 async def test_a_start_cancelled_before_its_decision_abandons_the_wrapper_at_once(tmp_path, monkeypatch):
     """The only await in ``start`` is the wait for the pid: a cancel there abandons the wrapper, so it
     exits now instead of waiting 30 s for a decision, and the command never runs."""
@@ -732,3 +765,105 @@ async def test_hand_over_gives_a_job_at_most_one_watch(tmp_path, monkeypatch):
     assert watches == {job_id: "wch_1"}
     assert recovery.meta(job_id)["watch_id"] == "wch_1"
     await recovery.kill(job_id)
+
+
+async def test_wait_polls_job_files_and_processes_off_the_event_loop(tmp_path, monkeypatch):
+    """A field stall sampled ``meta`` under ``enforce_deadline``/``wait`` on the
+    controller loop. Every poll's file reads and process checks run on a worker."""
+    import threading
+
+    from core.agent_core.tools.base import JobStatus
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+    states = iter(["running", "running", "exited"])
+
+    def meta(_job_id):
+        threads.append(threading.get_ident())
+        return {"deadline_at": None}
+
+    def status(_job_id):
+        threads.append(threading.get_ident())
+        state = next(states)
+        return JobStatus(state, 0 if state == "exited" else None)
+
+    monkeypatch.setattr(host, "meta", meta)
+    monkeypatch.setattr(host, "status", status)
+    assert (await host.wait("job", deadline_s=5)).state == "exited"
+    assert not await host.enforce_deadline("job")
+    assert threads and loop_thread not in threads
+
+
+async def test_a_cancel_during_an_overdue_probe_still_kills_and_a_queued_poll_is_withdrawn(tmp_path, monkeypatch):
+    """The owed timeout kill is not lost to a cancel that lands while the probe
+    runs; and a poll still queued behind busy probes withdraws at once, so a
+    Stop never waits on unrelated polling backlog."""
+    import threading
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    entered, release = threading.Event(), threading.Event()
+    killed: list[str] = []
+
+    def overdue(_job_id):
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    async def kill(job_id, *, reason):
+        killed.append(reason)
+
+    monkeypatch.setattr(host, "_overdue", overdue)
+    monkeypatch.setattr(host, "kill", kill)
+    enforcing = asyncio.ensure_future(host.enforce_deadline("job"))
+    assert await asyncio.to_thread(entered.wait, 5)
+    enforcing.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await enforcing
+    assert killed == [jobs_module.STOP_TIMEOUT]
+
+    # Saturate the polling pool, then cancel a wait whose poll is still queued.
+    block = threading.Event()
+    busy = [jobs_module._PROBE_IO.submit(block.wait, 5) for _ in range(jobs_module._PROBE_IO._max_workers)]
+    try:
+        waiting = asyncio.ensure_future(host.wait("job", deadline_s=5))
+        await asyncio.sleep(0.05)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(waiting), 1)
+    finally:
+        block.set()
+        for future in busy:
+            future.result(5)
+
+
+async def test_a_cancel_during_the_final_status_read_after_a_timeout_kill_propagates(tmp_path, monkeypatch):
+    import threading
+
+    from core.agent_core.tools.base import JobStatus
+
+    host = LocalJobHost(str(tmp_path / "jobs"))
+    entered, release = threading.Event(), threading.Event()
+    killed: list[str] = []
+
+    async def kill(job_id, *, reason):
+        killed.append(reason)
+
+    def status(_job_id):
+        entered.set()
+        assert release.wait(5)
+        return JobStatus("exited", 0)
+
+    monkeypatch.setattr(host, "_probe", lambda _job_id: (True, None))
+    monkeypatch.setattr(host, "kill", kill)
+    monkeypatch.setattr(host, "status", status)
+    waiting = asyncio.ensure_future(host.wait("job", deadline_s=5))
+    assert await asyncio.to_thread(entered.wait, 5)
+    waiting.cancel()
+    await asyncio.sleep(0)
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert killed == [jobs_module.STOP_TIMEOUT]

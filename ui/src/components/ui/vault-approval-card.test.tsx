@@ -234,14 +234,37 @@ describe('VaultApprovalCard signing-address contract', () => {
     for (const address of Object.values(addresses)) {
       expect(screen.queryByText(address) !== null).toBe(visible.some((value) => value === address));
     }
-    // The secure window's own review states the network caveat; this card keeps the general note.
-    expect(screen.queryByText(en.vaults.approval.protectedWarning) !== null).toBe(protection === 'protected');
+    // The key's custody is said once, in the bottom note, and only on a protected card.
+    expect(screen.queryByText(en.vaults.approval.signNote) !== null).toBe(protection === 'protected');
   });
 });
 
 // The sandbox signs a protected request against the daemon-signed operation context, and the
 // daemon then settles it. An exact-message (Ed25519) completion is checked against the context the
 // request stored, so dropping it from the completion makes every protected Solana signature fail.
+// Each protected sign card says once where its key stays: the bottom note, in the browser and in the
+// desktop app, which adds that the approval is finished in the browser.
+describe('VaultApprovalCard protected custody note', () => {
+  const protectedSign = {
+    ...standardSignRequest,
+    card: { ...standardSignRequest.card, protection: 'protected', secret_unlock_material: { name: 'ETH_KEY', kind: 'keypair', envelope } },
+  } as unknown as VaultRequest;
+  afterEach(() => { delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__; });
+
+  it.each([
+    ['in the browser', false],
+    ['in the desktop app', true],
+  ])('says it once %s', async (_label, desktop) => {
+    if (desktop) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    api.listVaultSecrets.mockResolvedValue({ secrets: [] });
+    await act(async () => {
+      render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={protectedSign} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    });
+    expect(screen.getAllByText(en.vaults.approval.signNote)).toHaveLength(1);
+    expect(Boolean(screen.queryByText(en.vaults.approval.browserNote))).toBe(desktop);
+  });
+});
+
 describe('VaultApprovalCard protected signing completion', () => {
   const operationContext = { v: 2, purpose: 'sign', requestId: 'vrq_protected_sign' };
   const material = { name: 'SIGNING_KEY', kind: 'keypair', envelope };
@@ -296,27 +319,130 @@ describe('VaultApprovalCard protected signing completion', () => {
   });
 });
 
+// The secure code did not finish downloading: the card says the network was too slow and offers a
+// Retry that runs the same step again; a real mismatch keeps the tamper warning and no Retry.
+describe('VaultApprovalCard secure code that did not load', () => {
+  const evmContext = { kind: 'evm-transaction', chainId: '1', unsignedTransaction: {}, digestAlgorithm: 'keccak256', digest: '00'.repeat(32) };
+  const request = {
+    ...protectedAccess, id: 'vrq_slow', request_type: 'sign', secret_name: 'SIGNING_KEY',
+    delivery: { scheme: 'ecdsa-secp256k1-recoverable', digest: '00'.repeat(32), signing_context: evmContext, operation_context: { v: 2, purpose: 'sign', requestId: 'vrq_slow' } },
+    card: { request_type: 'sign', secret_name: 'SIGNING_KEY', kind: 'keypair', protection: 'protected', secret_unlock_material: { name: 'SIGNING_KEY', kind: 'keypair', envelope } },
+  } as unknown as VaultRequest;
+  const fail = (code: string) => Object.assign(new Error(code), { code });
+  const start = async () => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.signVaultDigest.mockResolvedValue({ ok: true });
+    openWindow();
+    const onResolved = vi.fn();
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
+    const sign = screen.getByRole('button', { name: en.vaults.approval.sign }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(sign.disabled).toBe(false));
+    fireEvent.click(sign);
+    return onResolved;
+  };
+
+  it.each([
+    ['the network was too slow', 'sandbox_unreachable', en.errors.sandbox_unreachable],
+    // An offline device is told so, not that its network is slow (3.2.8).
+    ['the device is offline', 'sandbox_offline', en.errors.sandbox_offline],
+  ])('says %s and retries the same step in place', async (_label, code, copy) => {
+    vault.signProtectedRequest
+      .mockRejectedValueOnce(fail(code))
+      .mockResolvedValueOnce({ scheme: 'ecdsa-secp256k1-recoverable', signature: 'cd'.repeat(64), recovery_id: 1 });
+    const onResolved = await start();
+    expect(await screen.findByText(copy)).toBeTruthy();
+    expect(screen.queryByText(en.errors.sandbox_integrity_failed)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.requests.retry }));
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    expect(vault.signProtectedRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the tamper warning, with no Retry, for a real mismatch', async () => {
+    vault.signProtectedRequest.mockRejectedValueOnce(fail('sandbox_integrity_failed'));
+    await start();
+    expect(await screen.findByText(en.errors.sandbox_integrity_failed)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.vaults.requests.retry })).toBeNull();
+  });
+});
+
 // A protected seed-phrase wallet account (contract rev0.7 §5): the sandbox signs with the account
 // the signed release names, which must be the persisted one; the completion repeats it exactly.
+// A protected Bitcoin request names its input from the persisted, daemon-validated context: the type
+// it spends and the requester's network label, and that the amounts are reviewed in the secure window.
+// Nothing decoded from the transaction itself is shown here.
+describe('VaultApprovalCard protected Bitcoin input row', () => {
+  const a = en.vaults.approval;
+  const fill = (template: string, values: Record<string, string>) => template.replace(/\{\{(\w+)\}\}/g, (_m, key: string) => values[key]);
+  const btcSign = (context: unknown, protection: 'protected' | 'standard' = 'protected'): VaultRequest => ({
+    ...protectedAccess,
+    id: 'vrq_btc_input',
+    request_type: 'sign',
+    secret_name: 'BTC_KEY',
+    delivery: { digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-der', ...(context === undefined ? {} : { signing_context: context }) },
+    card: { request_type: 'sign', secret_name: 'BTC_KEY', kind: 'keypair', protection },
+  } as unknown as VaultRequest);
+  const show = (request: VaultRequest) => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+  };
+  const legacy = { kind: 'bitcoin-p2pkh-v1', addressType: 'p2pkh', network: 'testnet', unsignedTransaction: '02', prevout: {}, sighashType: 1, digestAlgorithm: 'bitcoin-legacy-sighash-all', digest: '11'.repeat(32) };
+  const segwit = { ...legacy, kind: 'bitcoin-p2wpkh-v1', addressType: 'p2wpkh', network: 'bitcoin', digestAlgorithm: 'bitcoin-bip143-sighash-all' };
+  const taproot = { kind: 'bitcoin-taproot-keypath-v1', network: 'signet', unsignedTransaction: '02', prevout: {}, digestAlgorithm: 'bip341-sighash-default-keypath', digest: '11'.repeat(32) };
+
+  it.each([
+    ['Legacy', legacy, `${en.vaults.addresses.typeLegacy} P2PKH`, 'testnet'],
+    ['SegWit', segwit, `${en.vaults.addresses.typeSegwit} P2WPKH`, 'bitcoin'],
+    ['Taproot', taproot, en.vaults.addresses.typeTaproot, 'signet'],
+  ])('names a %s input, the requester\'s network label, and where the amounts are checked', (_label, context, type, network) => {
+    show(btcSign(context));
+    expect(screen.getByText(a.btcInput)).toBeTruthy();
+    expect(screen.getByText(type)).toBeTruthy();
+    expect(screen.getByText(fill(a.btcInputNetwork, { network }))).toBeTruthy();
+    expect(screen.getByText(a.btcInputReview)).toBeTruthy();
+  });
+
+  it.each([
+    ['no context', undefined],
+    ['a type that disagrees with its kind', { ...legacy, addressType: 'p2wpkh' }],
+    ['an unknown network', { ...segwit, network: 'mainnet' }],
+    ['an unknown kind', { ...segwit, kind: 'bitcoin-p2sh-v1' }],
+    ['a Taproot context that names a type', { ...taproot, addressType: 'p2tr' }],
+    ['a context that is not an object', 'bitcoin-p2pkh-v1'],
+  ])('shows nothing for %s', (_label, context) => {
+    show(btcSign(context));
+    expect(screen.queryByText(a.btcInput)).toBeNull();
+    expect(screen.queryByText(a.btcInputReview)).toBeNull();
+  });
+
+  it('says nothing more for a standard request, whose context is never decoded', () => {
+    show(btcSign(segwit, 'standard'));
+    expect(screen.queryByText(a.btcInput)).toBeNull();
+  });
+});
+
 describe('VaultApprovalCard protected wallet account signing', () => {
   const material = { name: 'COLD_WALLET', kind: 'keypair', envelope };
   const derivation = { chain: 'bitcoin', account: 1, address_type: 'p2tr' };
   const btcContext = { kind: 'bitcoin-taproot-keypath-v1', network: 'bitcoin', digest: '11'.repeat(32) };
-  const walletSign = (released: unknown): VaultRequest => ({
+  const walletSign = (released: unknown, over: { delivery?: Record<string, unknown>; account?: Record<string, unknown> } = {}): VaultRequest => ({
     ...protectedAccess,
     id: 'vrq_wallet_sign',
     request_type: 'sign',
     secret_name: 'COLD_WALLET',
     delivery: {
       scheme: 'schnorr-secp256k1-bip341-keypath', digest: '11'.repeat(32), signing_context: btcContext, derivation,
+      ...over.delivery,
       operation_context: { v: 2, purpose: 'sign', requestId: 'vrq_wallet_sign', release: { name: 'COLD_WALLET', derivation: released } },
     },
-    card: { request_type: 'sign', secret_name: 'COLD_WALLET', kind: 'keypair', protection: 'protected', secret_unlock_material: material },
+    card: {
+      request_type: 'sign', secret_name: 'COLD_WALLET', kind: 'keypair', protection: 'protected', secret_unlock_material: material,
+      ...(over.account ? { derivation: over.delivery?.derivation ?? derivation, account: over.account } : {}),
+    },
   });
-  const approve = async (request: VaultRequest) => {
+  const approve = async (request: VaultRequest, result: Record<string, unknown> = { scheme: 'schnorr-secp256k1-bip341-keypath', signature: 'ef'.repeat(64), recovery_id: null }) => {
     api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
     api.signVaultDigest.mockResolvedValue({ ok: true });
-    vault.signProtectedRequest.mockResolvedValue({ scheme: 'schnorr-secp256k1-bip341-keypath', signature: 'ef'.repeat(64), recovery_id: null });
+    vault.signProtectedRequest.mockResolvedValue(result);
     openWindow();
     const onResolved = vi.fn();
     render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={onResolved} onCancel={vi.fn()} /></I18nextProvider>);
@@ -335,14 +461,58 @@ describe('VaultApprovalCard protected wallet account signing', () => {
     });
   });
 
+  // Legacy and SegWit (docs/plans/vault-protected-bitcoin-address-types.md): the card names the type and
+  // its own path from the request's account snapshot, and the sandbox gets the persisted type, scheme and
+  // context; the completion repeats them with the DER signature as the sandbox returned it.
+  const ecdsa = {
+    p2pkh: { label: en.vaults.addresses.typeLegacy, path: "m/44'/0'/0'/0/1", address: '1Ak8PffB2meyfYnbXZR9EGfLfFZVpzJvQP', field: 'btc_legacy' },
+    p2wpkh: { label: en.vaults.addresses.typeSegwit, path: "m/84'/0'/0'/0/1", address: 'bc1qnjg0jd8228aq7egyzacy8cys3knf9xvrerkf9g', field: 'btc_segwit' },
+  } as const;
+  const der = `3044022011${'11'.repeat(31)}022022${'22'.repeat(31)}`;
+  const accountSnapshot = (type: 'p2pkh' | 'p2wpkh', extra: Record<string, unknown> = {}) => ({
+    account: 1, name: 'cold', eth: '0x6Fac4D18c912343BF86fa7049364Dd4E424Ab9C0',
+    btc_taproot: 'bc1p4qhjn9zdvkux4e44uhx8tc55attvtyu358kutcqkudyccelu0was9fqzwh',
+    btc_segwit: ecdsa.p2wpkh.address, btc_legacy: ecdsa.p2pkh.address, solana: 'Hh8QwFUA6MtVu1qAoq12ucvFHNwCcVTV7hpWjeY1Hztb',
+    paths: { evm: "m/44'/60'/0'/0/1", bitcoin: "m/86'/0'/0'/0/1", solana: "m/44'/501'/1'/0'" }, always_ask: true, last_signer: null,
+    bitcoin_address_type: type, bitcoin_address: ecdsa[type].address, ...extra,
+  });
+  const ecdsaSign = (type: 'p2pkh' | 'p2wpkh', account: Record<string, unknown>, released?: unknown) => {
+    const typed = { chain: 'bitcoin', account: 1, address_type: type };
+    const context = { kind: `bitcoin-${type}-v1`, addressType: type, network: 'bitcoin', digest: '11'.repeat(32) };
+    return { typed, context, request: walletSign(released ?? typed, { delivery: { scheme: 'ecdsa-secp256k1-der', signing_context: context, derivation: typed }, account }) };
+  };
+
+  it.each(['p2pkh', 'p2wpkh'] as const)('a %s request names its type and path, then completes with them and the DER signature', async (type) => {
+    const { typed, context, request } = ecdsaSign(type, accountSnapshot(type, { bitcoin_path: ecdsa[type].path }));
+    const onResolved = await approve(request, { scheme: 'ecdsa-secp256k1-der', signature: der, recovery_id: null });
+    expect(screen.getByText(en.vaults.addresses.btcWithType.replace('{{type}}', ecdsa[type].label))).toBeTruthy();
+    expect(screen.getByText(en.vaults.approval.path.replace('{{path}}', ecdsa[type].path))).toBeTruthy();
+    await vi.waitFor(() => expect(onResolved).toHaveBeenCalledWith({ kind: 'approved', requestType: 'sign' }));
+    const [, sentContext, scheme] = vault.signProtectedRequest.mock.calls[0];
+    expect([sentContext, scheme]).toEqual([context, 'ecdsa-secp256k1-der']);
+    expect(api.signVaultDigest).toHaveBeenCalledExactlyOnceWith({
+      name: 'COLD_WALLET', request_id: 'vrq_wallet_sign', digest: '11'.repeat(32), scheme: 'ecdsa-secp256k1-der',
+      signature: { signature: der }, chain: 'bitcoin', account: 1, address_type: typed.address_type, signing_context: context,
+    });
+  });
+
+  it.each(['p2pkh', 'p2wpkh'] as const)('a %s request whose snapshot has no path of its own never shows Taproot\'s', (type) => {
+    const { request } = ecdsaSign(type, accountSnapshot(type));
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    render(<I18nextProvider i18n={i18n}><VaultApprovalCard request={request} onResolved={vi.fn()} onCancel={vi.fn()} /></I18nextProvider>);
+    expect(screen.getByText(en.vaults.addresses.btcWithType.replace('{{type}}', ecdsa[type].label))).toBeTruthy();
+    expect(screen.queryByText(/m\/86'/)).toBeNull();
+  });
+
   it.each([
     ['another account', { chain: 'bitcoin', account: 2, address_type: 'p2tr' }],
+    ['another Bitcoin type', { chain: 'bitcoin', account: 1, address_type: 'p2wpkh' }],
     ['no type', { chain: 'bitcoin', account: 1 }],
     ['no derivation at all', undefined],
     ['an extra field', { ...derivation, path: "m/86'/0'/0'/0/1" }],
   ])('refuses a signed release naming %s, before the sandbox is asked', async (_label, released) => {
     const onResolved = await approve(walletSign(released));
-    await vi.waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    await vi.waitFor(() => expect(screen.getByText(en.vaults.approval.errors.failed)).toBeTruthy());
     expect(vault.signProtectedRequest).not.toHaveBeenCalled();
     expect(api.signVaultDigest).not.toHaveBeenCalled();
     expect(onResolved).not.toHaveBeenCalled();
@@ -445,6 +615,27 @@ describe('VaultApprovalCard protected access approval', () => {
       deks: [{ name: 'PROTON_BRIDGE_SMTP_PASSWORD', approval: { nonce: `nonce-${duration}` } }],
     });
     expect(popup.close).toHaveBeenCalledOnce();
+  });
+
+  it('retries an access approval that could not load the secure code with the duration the card shows now', async () => {
+    api.getVaultSettings.mockResolvedValue({ ok: true, settings: { last_grant_ttl: 300 } });
+    vault.approveProtectedRelease.mockRejectedValueOnce(Object.assign(new Error('slow'), { code: 'sandbox_unreachable' }));
+    openWindow();
+    render(card());
+    await vi.waitFor(() => expect(api.createVaultAgentBindingsBatch).toHaveBeenCalled());
+    await approveWhenReady();
+    expect(await screen.findByText(en.errors.sandbox_unreachable)).toBeTruthy();
+    // Changed after the failure: Retry grants what the card shows now, not the first click's choice.
+    vault.approveProtectedRelease.mockResolvedValueOnce([blindBox]);
+    fireEvent.click(await screen.findByRole('radio', { name: /^15 min$/ }));
+    await vi.waitFor(() =>
+      expect(api.createVaultAgentBindingsBatch).toHaveBeenLastCalledWith({ request_id: 'vrq_access', grant_duration: 900 }),
+    );
+    const retry = screen.getByRole('button', { name: en.vaults.requests.retry }) as HTMLButtonElement;
+    await vi.waitFor(() => expect(retry.disabled).toBe(false));
+    fireEvent.click(retry);
+    await vi.waitFor(() => expect(api.fulfillVaultAccessRequest).toHaveBeenCalledOnce());
+    expect(api.fulfillVaultAccessRequest.mock.calls[0][1]).toMatchObject({ grant_duration: 900 });
   });
 
   it('shows a single custom field label in an access approval', () => {

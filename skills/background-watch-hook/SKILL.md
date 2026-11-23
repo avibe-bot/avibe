@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Run durable `vibe watch` waits for PR reviews, CI, files or external signals, then resume the Agent in the right Session.
-version: 0.20.2
+version: 0.20.4
 ---
 
 # Background Watch Hook
@@ -16,9 +16,9 @@ acts. A success candidate is not merge authorization.
 | Waiter exit | Meaning |
 | --- | --- |
 | `0` | One **new** reportable event; summary on stdout |
-| `75` (or configured retry code) | Still waiting; no Agent turn |
+| `75` (or configured retry code) | Still waiting; no Agent turn, except one notice per activation after an hour of consecutive retries (the Watch keeps checking) |
 | `64` plus `avibe-watch: no-event` on stderr | Quiet completed cycle: retire once, re-arm forever |
-| `124` or other terminal failure | Notify the Agent and stop |
+| `124` or other terminal failure | Notify the Agent and stop; a `124` listed as a retry code is a retry instead |
 
 A bare `64` is an error. Keep diagnostics on stderr. A once Watch waiting for its
 first event uses a retry code, not `64`. Forever waiters need durable cursors or
@@ -83,8 +83,8 @@ uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
   --state-file "$STATE_FILE" --seed-state
 
 vibe watch add \
-  --name "Watch PR 151 review and CI" --forever --timeout 0 \
-  --message "PR #151 has an event. Follow pr-delivery-loop; verify live gates, handle findings/errors, and keep half-success silent." \
+  --name 'Watch PR 151 review and CI' --forever --timeout 0 \
+  --message 'PR #151 has an event. Follow pr-delivery-loop; verify live gates, handle findings/errors, and keep half-success silent.' \
   -- \
   uv run --no-project "$BACKGROUND_WATCH_HOOK_DIR/scripts/wait_pr.py" \
     --repo avibe-bot/avibe --pr 151 --branch "$BRANCH" \

@@ -37,6 +37,9 @@ OPERATIONS: dict[str, tuple[str, ...]] = {
     "session.send-now": ("session", "send-now"),
     "session.queue.remove": ("session", "queue", "remove"),
     "runs.cancel": ("runs", "cancel"),
+    "schedule.create": ("schedule", "create"),
+    "schedule.status": ("schedule", "status"),
+    "schedule.cancel": ("schedule", "cancel"),
 }
 
 #: The live Session owner's bound, the transport bound its HTTP adapter had.

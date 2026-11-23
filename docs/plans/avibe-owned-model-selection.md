@@ -18,6 +18,24 @@ Direct mode.
 - Native authentication, provider configuration, model capability discovery,
   and explicit subagent definitions retain their independent responsibilities.
 
+## A Session on a model that left the list
+
+Decided 2026-11-19 (3.2.8): a Session's stored model or reasoning effort that
+its backend's Model Hub list no longer holds does not stop the Session. At the
+next Turn's dispatch (`core/session_route_succession.py`):
+
+- Only a fixed list in Model Hub mode is checked, the lists that refuse an
+  unlisted model (`turn.no_candidate.unlisted`). A model a manual Route still
+  serves stays.
+- The stored model moves to its Agent's current default when the list holds it;
+  otherwise it stays and Model Hub's refusal explains it. The list names no
+  successor of its own.
+- A stored effort the model no longer offers moves to the Agent's default
+  effort when the model offers it, else to the nearest offered one below it,
+  else above it.
+- The row is rewritten compare-and-set, so a choice the user made meanwhile
+  wins, and the Session posts one notice saying what it now uses.
+
 ## When a Session's change applies
 
 Owner decision, 2026-11-10: a change to a Session's model, reasoning effort, or

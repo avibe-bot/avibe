@@ -179,7 +179,7 @@ def stop_env(monkeypatch):
         "terminate_pid_tree_sync",
         lambda pid, timeout=5.0: effects["stop_pid"].append(pid) or False,
     )
-    monkeypatch.setattr(remote_access, "stop", lambda: effects["remote_access"].append(True) or {"ok": True})
+    monkeypatch.setattr(remote_access, "stop_connector", lambda: effects["remote_access"].append(True) or {"ok": True})
     # The full stop reaps the installers of this process's own Runtime id,
     # which here would be the host's; the scoped stop reaps those of its id.
     reap = desktop_backends.reap_abandoned_desktop_backend_installs
@@ -465,7 +465,7 @@ def test_no_service_can_take_the_lock_before_the_stop_s_connector_and_status_lan
         return {"ok": True}
 
     monkeypatch.setattr(cli, "_write_status", write)
-    monkeypatch.setattr(remote_access, "stop", stop_connector)
+    monkeypatch.setattr(remote_access, "stop_connector", stop_connector)
     ui = spawn(RUNTIME_ID, "ui")
     if late_role is not None:
         _after_first_scan(monkeypatch, lambda _found: spawn(RUNTIME_ID, late_role))
@@ -501,7 +501,7 @@ def _connector_stop_raises():
 )
 def test_a_tunnel_connector_that_does_not_stop_fails_the_stop(spawn, stop_env, capsys, monkeypatch, connector_stop):
     ui = spawn(RUNTIME_ID, "ui")
-    monkeypatch.setattr(remote_access, "stop", connector_stop)
+    monkeypatch.setattr(remote_access, "stop_connector", connector_stop)
 
     assert cli.cmd_stop(expect_runtime_id=RUNTIME_ID) == 2
 
@@ -521,6 +521,9 @@ def test_quit_takes_the_tunnel_down_and_the_next_ui_start_brings_it_back(spawn, 
     config.remote_access.vibe_cloud.tunnel_token = "tunnel-token"
     config.save()
     monkeypatch.setattr(remote_access, "_report_runtime_status_async", lambda *args, **kwargs: None)
+    request = remote_access._connector_requested_path()
+    request.parent.mkdir(parents=True, exist_ok=True)
+    request.touch()
     ui, connector = spawn(RUNTIME_ID, "ui"), spawn(RUNTIME_ID, "connector")
     remote_access._pid_path().write_text(str(connector.pid), encoding="utf-8")
 
@@ -533,12 +536,14 @@ def test_quit_takes_the_tunnel_down_and_the_next_ui_start_brings_it_back(spawn, 
     assert not [line for line in _stderr_lines(capsys) if "left_running" in line]
     relaunched = V2Config.load()
     assert relaunched.remote_access.vibe_cloud.enabled
-    starts: list[V2Config] = []
-    monkeypatch.setattr(remote_access, "start", lambda config=None: starts.append(config) or {"ok": True})
+    assert request.is_file()
+    starts = []
+    monkeypatch.setattr(remote_access, "_ensure_cloudflared_pin", lambda config: None)
+    monkeypatch.setattr(remote_access, "_start", lambda config, **kw: starts.append(kw) or {"ok": True})
 
     ui_server._reconcile_remote_access_for_ui_start(relaunched)
 
-    assert starts == [relaunched]
+    assert starts == [{"record_request": False, "install_failure": None}]
 
 
 def _lock_path_is_a_directory(monkeypatch):

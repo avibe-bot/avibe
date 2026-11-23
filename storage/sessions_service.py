@@ -21,6 +21,7 @@ from storage import loop_writers
 from storage import message_deliveries as delivery_store
 from storage.agent_session_rows import (
     SUPERSEDED_ANCHOR_INFIX,
+    UNOWNED_SESSION_BACKENDS,
     create_agent_session_row,
     decode_session_value,
     encode_session_value,
@@ -1172,6 +1173,44 @@ class SQLiteSessionsService:
                         == str(expected_route.get(field) or "")
                     )
             result = conn.execute(statement)
+            return bool(result.rowcount)
+
+    def succeed_retired_session_route(
+        self,
+        session_id: str,
+        *,
+        expected_route: Mapping[str, Any],
+        model: tuple[str, str] | None = None,
+        reasoning_effort: tuple[str, str] | None = None,
+    ) -> bool:
+        """Move a Session's stored model and effort, each a (stored, successor) pair, to their successors.
+
+        ``expected_route`` is the route the successors were chosen for: its ``model`` and the
+        Agent identity (``agent_id``, ``agent_name``, ``agent_backend``) it names. Only a row
+        that still holds that route and every value this moves changes, so a Session the user
+        switched meanwhile keeps the choice. Returns True when the row changed.
+        """
+        values: dict[str, Any] = {}
+        statement = agent_sessions.update().where(agent_sessions.c.id == str(session_id))
+        for column in ("model", "agent_id", "agent_name", "agent_backend"):
+            if column == "model" or column in expected_route:
+                statement = statement.where(
+                    func.coalesce(getattr(agent_sessions.c, column), "") == str(expected_route.get(column) or "")
+                )
+        for column, pair in (("model", model), ("reasoning_effort", reasoning_effort)):
+            if pair is None:
+                continue
+            values[column] = pair[1]
+            statement = statement.where(getattr(agent_sessions.c, column) == pair[0])
+        if not values:
+            return False
+        with self.engine.begin() as conn:
+            reserve_write_lock(conn)
+            result = conn.execute(
+                statement.where(agent_sessions.c.status != "archived").values(
+                    **values, updated_at=_utc_now_iso()
+                )
+            )
             return bool(result.rowcount)
 
     def bind_agent_session_by_id(
@@ -2551,7 +2590,7 @@ def _agent_backend(agent_name: str) -> str:
 
 
 def _is_owned_backend(agent_backend: str) -> bool:
-    return str(agent_backend or "").strip() not in {"", "default", "unknown"}
+    return str(agent_backend or "").strip() not in UNOWNED_SESSION_BACKENDS
 
 
 def _is_sentinel_variant(agent_variant: str) -> bool:

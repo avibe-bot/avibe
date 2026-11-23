@@ -1,4 +1,7 @@
+/* @vitest-environment jsdom */
 import { describe, expect, it, vi } from 'vitest';
+
+import { noteAppVoice } from './appVoice';
 
 import {
   ANNOTATION_VOICE_EVENT_MESSAGE,
@@ -135,6 +138,94 @@ describe('ShowPageVoiceHost', () => {
       requestId: 'voice-1',
       text: 'final words',
     }));
+  });
+
+  it('has the iOS App record the take where it does, and the page elsewhere', async () => {
+    const request = {
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-1',
+      before: '',
+      after: '',
+    } as const;
+    // An App that records with its microphone allowed; one still to be asked (WebKit asks);
+    // an App that does not record; and a browser.
+    const shells = [
+      [{ voice: 1, voiceCapture: 1 }, 'granted', true, true],
+      [{ voice: 1, voiceCapture: 1 }, 'prompt', true, undefined],
+      [{ voice: 1 }, 'granted', true, undefined],
+      [null, 'granted', true, undefined],
+      // The instance's off switch (`audio_asr.app_hold`): the page records, in the same App.
+      [{ voice: 1, voiceCapture: 1 }, 'granted', false, undefined],
+    ] as const;
+    try {
+      for (const [capabilities, permission, appHold, expected] of shells) {
+        noteAppVoice({ app_hold: appHold });
+        vi.unstubAllGlobals();
+        if (capabilities) {
+          vi.stubGlobal('window', {
+            avibeNative: {
+              contract: 1,
+              platform: 'ios',
+              shellVersion: '1.0 (1)',
+              capabilities,
+              call: async (method: string) => (method === 'voice.permission' ? { state: permission } : null),
+              on: () => () => undefined,
+            },
+          });
+        }
+        const inputs: { nativeCapture?: unknown }[] = [];
+        const events: ShowPageVoiceEvent[] = [];
+        const host = new ShowPageVoiceHost({
+          post: (event) => events.push(event),
+          availability: async () => ({ available: true, maxFileBytes: 1_000_000 }),
+          createSession: (input) => {
+            inputs.push(input);
+            return new FakeVoiceSession();
+          },
+        });
+        host.handle(request);
+        await vi.waitFor(() => expect(events).toContainEqual({ type: ANNOTATION_VOICE_EVENT_MESSAGE, kind: 'started', requestId: 'voice-1' }));
+        expect(inputs).toHaveLength(1);
+        expect(inputs[0].nativeCapture, `${JSON.stringify(capabilities)} ${permission}`).toBe(expected);
+        host.dispose();
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      noteAppVoice({ app_hold: true });
+    }
+  });
+
+  // ui/design: composer/voice-consent/*
+  it('records nothing for a page until the reader allowed voice input', async () => {
+    const events: ShowPageVoiceEvent[] = [];
+    const createSession = vi.fn();
+    const host = new ShowPageVoiceHost({
+      post: (event) => events.push(event),
+      availability: async () => ({ available: true, maxFileBytes: null }),
+      allowed: () => false,
+      createSession,
+    });
+
+    host.handle({
+      type: ANNOTATION_VOICE_REQUEST_MESSAGE,
+      action: 'start',
+      requestId: 'voice-1',
+      before: '',
+      after: '',
+    });
+    await vi.waitFor(() => expect(events).toContainEqual({
+      type: ANNOTATION_VOICE_EVENT_MESSAGE,
+      kind: 'error',
+      requestId: 'voice-1',
+      code: 'unavailable',
+      retryable: false,
+    }));
+    expect(createSession).not.toHaveBeenCalled();
+    // The microphone is free for the next owner.
+    const next = claimVoiceCapture(() => undefined);
+    expect(next.isCurrent()).toBe(true);
+    next.release();
   });
 
   it('cancels microphone startup while availability is still pending', async () => {
@@ -276,3 +367,87 @@ describe('ShowPageVoiceHost', () => {
   });
 });
 
+
+describe('Show voice App Lock lifetime', () => {
+  let revision = 10;
+  const signal = (locked: boolean) => {
+    Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
+    window.dispatchEvent(new Event('avibe:voice-lock'));
+  };
+  it.each([false, true])('retains the settled retry owner across lock (keeper=%s)', async (keep) => {
+    const session = new FakeVoiceSession();
+    const events: ShowPageVoiceEvent[] = [];
+    const host = new ShowPageVoiceHost({ post: (e) => events.push(e), availability: async () => ({ available: true, maxFileBytes: null }),
+      createSession: () => session, keep: () => keep ? { target: 'session-a', intent: 'insert' } : null });
+    const request = { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: 'start', requestId: 'retained', before: '', after: '' };
+    try {
+      signal(false); host.handle(request);
+      await vi.waitFor(() => expect(events.some((e) => e.kind === 'started')).toBe(true));
+      session.result.reject(new VoiceTranscriptionError('unavailable'));
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ retryable: true }));
+      signal(true); signal(true);
+      host.handle({ ...request, action: 'retry' });
+      expect(session.abort).not.toHaveBeenCalled();
+      expect(session.retry).not.toHaveBeenCalled();
+      signal(false); host.handle({ ...request, action: 'retry' });
+      await vi.waitFor(() => expect(session.retry).toHaveBeenCalledOnce());
+      session.retryResult.resolve('retained words');
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ kind: 'result', text: 'retained words' }));
+    } finally { host.dispose(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+
+  it('keeps successful late retry text for one explicit use without another transcription', async () => {
+    const session = new FakeVoiceSession();
+    const events: ShowPageVoiceEvent[] = [];
+    const host = new ShowPageVoiceHost({ post: (e) => events.push(e), availability: async () => ({ available: true, maxFileBytes: null }), createSession: () => session });
+    const request = { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: 'start', requestId: 'late', before: '', after: '' };
+    try {
+      signal(false); host.handle(request);
+      await vi.waitFor(() => expect(events.some((e) => e.kind === 'started')).toBe(true));
+      session.result.reject(new VoiceTranscriptionError('unavailable'));
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ retryable: true }));
+      host.handle({ ...request, action: 'retry' });
+      signal(true); session.retryResult.resolve('cached words');
+      await vi.waitFor(() => expect(session.retry).toHaveBeenCalledOnce());
+      await Promise.resolve(); await Promise.resolve();
+      expect(events.some((e) => e.kind === 'result')).toBe(false);
+      signal(false);
+      expect(events.some((e) => e.kind === 'result')).toBe(false);
+      host.handle({ ...request, action: 'retry' });
+      await vi.waitFor(() => expect(events.at(-1)).toMatchObject({ kind: 'result', text: 'cached words' }));
+      host.handle({ ...request, action: 'retry' });
+      expect(events.filter((e) => e.kind === 'result')).toHaveLength(1);
+      expect(session.retry).toHaveBeenCalledOnce();
+    } finally { host.dispose(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+
+  it.each(['availability', 'starting', 'listening', 'finishing'] as const)('cancels %s without late result or recovery and admits a new request', async (phase) => {
+    const availability = deferred<{ available: boolean; maxFileBytes: number | null }>();
+    const started = deferred<void>();
+    const old = new FakeVoiceSession(); old.start.mockImplementation(() => started.promise);
+    const fresh = new FakeVoiceSession();
+    const events: ShowPageVoiceEvent[] = [];
+    const createSession = vi.fn().mockReturnValueOnce(old).mockReturnValue(fresh);
+    const host = new ShowPageVoiceHost({ post: (e) => events.push(e), availability: () => availability.promise, createSession });
+    const request = { type: ANNOTATION_VOICE_REQUEST_MESSAGE, action: 'start', requestId: 'old', before: '', after: '' };
+    try {
+      signal(false); host.handle(request);
+      if (phase !== 'availability') { availability.resolve({ available: true, maxFileBytes: null }); await vi.waitFor(() => expect(old.start).toHaveBeenCalled()); }
+      if (phase === 'listening' || phase === 'finishing') { started.resolve(); await vi.waitFor(() => expect(events.some((e) => e.kind === 'started')).toBe(true)); }
+      if (phase === 'finishing') host.handle({ ...request, action: 'stop' });
+      signal(true);
+      host.handle({ ...request, requestId: 'locked' });
+      signal(false);
+      availability.resolve({ available: true, maxFileBytes: null }); started.resolve(); old.result.resolve('stale words');
+      await Promise.resolve(); await Promise.resolve();
+      expect(events.some((e) => e.kind === 'result')).toBe(false);
+      expect(events.some((e) => e.kind === 'error' && e.retryable)).toBe(false);
+      if (phase !== 'availability') expect(old.abort).toHaveBeenCalled();
+      if (phase === 'availability') createSession.mockReset().mockReturnValue(fresh);
+      host.handle({ ...request, requestId: 'fresh' });
+      await vi.waitFor(() => expect(fresh.start).toHaveBeenCalled());
+      fresh.result.resolve('new words');
+      await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ kind: 'result', requestId: 'fresh', text: 'new words' })));
+    } finally { host.dispose(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+});

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "model-hub/quota-summary.schema.json",
   "title": "Model Hub subscription quota",
-  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report only: no consumer may feed it back into resolution, admission, or cooldown. It carries parsed fields only, never a grant, token, or raw upstream body. The optional `value` blocks price the Source's own metered usage at list API prices for comparison with the subscription fee; they are a valuation, never an amount charged, and their absence means not reported, never zero.",
+  "description": "Rate-limit windows of every hub-held subscription Source, parsed from the vendor's own model-free usage report that the engine reads with the bound grant. A report: resolution and admission never read it. Its one consumer is the forced read the user asks for, which resumes a Source paused for quota or rate unless the fresh report still shows an account-wide window used up. It carries parsed fields only, never a grant, token, or raw upstream body. The optional `value` blocks price the Source's own metered usage at list API prices for comparison with the subscription fee; they are a valuation, never an amount charged, and their absence means not reported, never zero.",
   "type": "object",
   "required": [
     "refresh_interval_seconds",
@@ -112,6 +112,9 @@
         },
         "value": {
           "$ref": "#/definitions/SourceValue"
+        },
+        "reset_cards": {
+          "$ref": "#/definitions/ResetCards"
         }
       },
       "if": {
@@ -152,10 +155,12 @@
           "maxLength": 128
         },
         "kind": {
-          "description": "session: the shared short window. weekly: the shared weekly window. model_weekly: a weekly window only one model draws on, named by `scope_model`. other: any window the server does not recognise, rendered from `label`.",
+          "description": "session: the shared short (5-hour) window. weekly: the shared weekly window. monthly: the shared monthly window. Spent, each of these three stops the whole account. model_session: a 5-hour window only one model or model group draws on, named by `scope_model`. model_weekly: the same for a weekly window. other: any window the server does not recognise, rendered from `label`. Windows are ordered session, weekly, monthly, then the model-scoped windows model by model (5-hour before weekly), then other.",
           "enum": [
             "session",
             "weekly",
+            "monthly",
+            "model_session",
             "model_weekly",
             "other"
           ]
@@ -167,7 +172,7 @@
           "maxLength": 64
         },
         "scope_model": {
-          "description": "Present exactly for model_weekly: the upstream model name.",
+          "description": "Present exactly for model_session and model_weekly: the upstream model or model-group name (Antigravity's group `displayName`).",
           "type": "string",
           "minLength": 1,
           "maxLength": 64
@@ -199,7 +204,10 @@
       "if": {
         "properties": {
           "kind": {
-            "const": "model_weekly"
+            "enum": [
+              "model_session",
+              "model_weekly"
+            ]
           }
         }
       },
@@ -452,6 +460,117 @@
               }
             }
           ]
+        }
+      }
+    },
+    "ResetCards": {
+      "type": "object",
+      "required": [
+        "state",
+        "lock",
+        "cards"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "ok",
+            "unread"
+          ]
+        },
+        "lock": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "reason",
+                "since"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/definitions/ResetCard/properties/kind"
+                },
+                "reason": {
+                  "enum": [
+                    "in_flight",
+                    "unconfirmed"
+                  ]
+                },
+                "since": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          ]
+        },
+        "cards": {
+          "type": "array",
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/definitions/ResetCard"
+          }
+        }
+      }
+    },
+    "ResetCard": {
+      "type": "object",
+      "required": [
+        "kind",
+        "count",
+        "expires_at",
+        "stated",
+        "usable",
+        "blocked",
+        "blocked_until"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "all",
+            "fable",
+            "session",
+            "weekly",
+            "account"
+          ]
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "expires_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "stated": {
+          "type": "boolean"
+        },
+        "usable": {
+          "type": "boolean"
+        },
+        "blocked": {
+          "enum": [
+            null,
+            "needs_limit",
+            "cooldown",
+            "unavailable"
+          ]
+        },
+        "blocked_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
         }
       }
     }

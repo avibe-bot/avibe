@@ -26,6 +26,12 @@ const ULTRA = { width: 1920, height: 1000 };
 // its last block, must still clear the tab bar.
 const NARROW_SHORT = { width: 390, height: 380 };
 
+// One model provider, so the routes offer default routing (none is offered before the first provider).
+const MODEL_HUB_SOURCE = {
+  id: 'src_fixture', kind: 'api_key', vendor: 'custom', display_name: 'Fixture relay', protocol: 'openai_chat',
+  supply_channel: 'hub', billing: 'metered', state: { status: 'standby', retry_at: null, detail_key: null },
+  base_url: 'https://relay.example/v1', masked_credential: 'sk-…0000', last_discovered_at: null, models: [],
+};
 const MODEL_HUB_AGENT = {
   backend: 'codex',
   cli_present: true,
@@ -84,7 +90,7 @@ async function serveModelHub(page: import('@playwright/test').Page) {
   await page.route('**/api/models/**', (route) => {
     const path = new URL(route.request().url()).pathname;
     const query = new URL(route.request().url()).search;
-    if (path === '/api/models/sources' && !query) return getOnly(route, { sources: [] });
+    if (path === '/api/models/sources' && !query) return getOnly(route, { sources: [MODEL_HUB_SOURCE] });
     if (path === '/api/models/runtime/status' && !query) return getOnly(route, MODEL_HUB_RUNTIME);
     if (path === '/api/models/agents' && !query) return getOnly(route, { agents: [MODEL_HUB_AGENT] });
     if (path === '/api/models/agents' && query === '?refresh_cli_presence=1') {
@@ -949,7 +955,6 @@ test.describe('general settings geometry', () => {
         const { denied, unexpectedModelReads } = await serveModelHub(page);
         const backends = ['vibey', 'claude', 'codex', 'opencode'];
         const labels = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
-        let direct = false;
         await page.route('**/api/models/agents/*/chains', (route) => {
           expect(route.request().method()).toBe('GET');
           return route.fulfill({ json: { chains: [] } });
@@ -962,9 +967,8 @@ test.describe('general settings geometry', () => {
         await page.route(/\/api\/models\/agents(?:\?.*)?$/, (route) => {
           expect(route.request().method()).toBe('GET');
           return route.fulfill({ json: { agents: [...backends].reverse()
-            .filter((backend) => !direct || backend !== 'vibey')
             .map((backend) => ({
-              backend, cli_present: backend !== 'vibey', mode: direct ? 'direct' : 'hub',
+              backend, cli_present: backend !== 'vibey', mode: 'hub',
               menu_kind: 'fixed', catalog_models: [], named_agents: [],
             })) } });
         });
@@ -991,15 +995,6 @@ test.describe('general settings geometry', () => {
           await expect.poll(() => identity(icon)).toEqual(settingsIdentities[index]);
         }
         await page.screenshot({ path: `e2e/.artifacts/workbench-general/hub-${theme}-${viewport.width}.png`, fullPage: true });
-
-        direct = true;
-        await open(page, '/settings/models', { theme });
-        const nativeRows = page.locator('.model-hub-direct-row--backend');
-        await expect(nativeRows.locator('.model-hub-direct-backend-name')).toHaveText(labels.slice(1));
-        for (let index = 0; index < 3; index += 1) {
-          await expect.poll(() => identity(nativeRows.nth(index).locator('svg').first()))
-            .toEqual(settingsIdentities[index + 1]);
-        }
         expect(denied).toEqual([]);
         expect(unexpectedModelReads).toEqual([]);
       });

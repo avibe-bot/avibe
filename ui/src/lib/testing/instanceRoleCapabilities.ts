@@ -39,11 +39,12 @@ const EDITOR_CAPABILITIES: InstanceCapabilities = {
   can_use_files: true,
 };
 
-/** Owner minus member management and the owner flag itself. */
+/** Owner minus member management, spending reset cards, and the owner flag itself. */
 const MEMBER_CAPABILITIES: InstanceCapabilities = {
   ...OWNER_INSTANCE_CAPABILITIES,
   is_instance_owner: false,
   can_manage_access_members: false,
+  can_use_model_hub_reset_cards: false,
 };
 
 export const ROLE_CAPABILITIES: Record<InstanceRole, InstanceCapabilities> = {

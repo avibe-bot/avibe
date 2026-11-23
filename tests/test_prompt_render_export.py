@@ -76,7 +76,8 @@ _PREVIOUS_SESSION_TITLE_STEPS = (
     '`vibe session update --title "<short title>"`\n\nDo not mention'
 )
 _SESSION_TITLE_STEPS = (
-    'without waiting for the user:\n`vibe session update --title "<short title>" --if-untitled`\n\n'
+    "without waiting for the user:\n`vibe session update --title '<short title>' --if-untitled` "
+    "(single quotes stop shell expansion; write a `'` in the title as `'\\''` in bash, `''` in PowerShell)\n\n"
     "It keeps a title the user or an Agent already set. Do not mention"
 )
 _PREVIOUS_PREFERENCES_CONTEXT = (
@@ -109,8 +110,10 @@ _PREVIOUS_CONTINUE_SESSION_RULE = (
     "only when the work should continue that same existing Session. Async callbacks return to this conversation by default.\n"
 )
 _CALLBACK_RULES = (
-    "- If a dispatched Session handles your message without writing back, Avibe sends a read receipt with its last reply "
-    "once it is idle with no pending work; a run that does not complete still reports immediately.\n"
+    "- If a dispatched Session handles your message without writing back, Avibe sends one read receipt with the last "
+    "reply of the Turn that took it once that Turn ends with no input pending, even if it armed a Task or Watch or "
+    "delegated onward (two such dispatches that end together get one receipt, with the later reply); a run that "
+    "does not complete still reports immediately.\n"
     "- Add `--no-reply` to an existing `--session-id` or `--bot` message that needs no answer or read receipt; "
     "not with `--sync` or a new/forked Session.\n"
     "- `--sync` changes waiting behavior, not session identity: runs are async by default; "

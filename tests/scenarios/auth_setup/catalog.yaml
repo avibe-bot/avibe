@@ -207,6 +207,37 @@ scenarios:
     layer: contract
     backend: web
     test: ui/src/context/ApiContext.bootSession.test.tsx::AUTH-SETUP-143 forgets the boot session and refuses a late guard check that would record it again
+  - id: AUTH-SETUP-187
+    name: In the native App, a replayed shell stays when the session check cannot reach the instance, and is checked again on reconnect
+    status: covered
+    kind: retry
+    layer: contract
+    backend: web
+    test:
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on no network and checks again on reconnect
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on a down tunnel (530) and checks again on reconnect
+      - ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-187 keeps the replayed shell on a server error (503) and checks again on reconnect
+    reason: >-
+      The App may show the instance's last page from its cache; no network, a
+      timeout or a 5xx (a down tunnel's 530) on the read and its retry is no
+      answer, so the provisional shell and the boot session stay and the next
+      reconnect reads the session once more.
+  - id: AUTH-SETUP-188
+    name: In the native App, an owner's replayed shell stays when only the setup check cannot reach the instance, across repeated checks
+    status: covered
+    kind: retry
+    layer: contract
+    backend: web
+    test:
+      - "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-188 keeps the owner's replayed shell when only the setup check could not reach the instance"
+      - "ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-188 keeps the owner's shell across repeated unreachable checks, and answers a refusal already received"
+  - id: AUTH-SETUP-189
+    name: Setup still follows from an answer, and nothing changes in a browser or without a replayed shell
+    status: covered
+    kind: negative_path
+    layer: contract
+    backend: web
+    test: ui/src/App.remoteAuth.test.tsx::AUTH-SETUP-189 still goes to setup in a browser, without a replayed shell, and on a definite refusal
   - id: AUTH-SETUP-201
     name: Re-entering setup replaces the active flow
     status: covered
@@ -831,19 +862,23 @@ scenarios:
       - ui/src/components/onboarding/useSetupModelChoice.test.ts
       - ui/e2e/onboarding-fidelity/pm-main-flow.spec.ts
   - id: AUTH-SETUP-166
-    name: Setup picks a model no provider lists (a catalog model or a typed ID) and completes on it
+    name: Setup offers no model that no provider lists (a catalog model or a typed ID), so it cannot finish on one
     status: covered
-    kind: happy_path
+    kind: negative_path
     layer: scenario
     backend: vibey
-    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_picks_a_model_no_provider_lists_and_completes
-    # The scenario owns the server boundary for an unlisted pick: the catalog write
-    # with no supplier promise, the Agent's model, the runnable named route and
-    # completion. The browser side (which rows the picker offers for a search, the
-    # row a catalog or typed pick carries, and that it promises no suppliers) is the
-    # supporting tests.
+    test:
+      - tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_setup_cannot_finish_on_a_model_no_provider_lists
+      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx::AUTH-SETUP-166 offers only supplied models when asked to (setup), with no catalog rows or typed ID
+      - "ui/src/components/onboarding/BuiltinAssistant.test.tsx::AUTH-SETUP-166 offers only supplied candidates behind All models: no catalog row and no typed ID"
+    # Setup's picker is supplied-only: it offers no catalog row and no typed ID, since
+    # setup has no step to route a model no Source lists. The picker case proves the
+    # offer and the setup card case proves setup wires it; the server case proves such
+    # a selection is unsupplied (route_unconfigured, interrupted) with no automatic
+    # forwarding, which the entry gate refuses. Settings
+    # still offers both, where the model's route is set by hand.
     supporting_tests:
-      - ui/src/components/settings/models/BackendModelPickerDialog.test.tsx
+      - ui/src/components/onboarding/entryGate.test.ts::still needs its applied connection and a runnable route
       - ui/src/components/settings/models/BackendModelCatalogDialog.test.tsx
       - ui/src/components/onboarding/useSetupModelChoice.test.ts
   - id: AUTH-SETUP-132
@@ -1036,11 +1071,13 @@ scenarios:
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 removes a key from its card after a confirmation
       - ui/src/components/onboarding/providers/ProvidersScreen.test.tsx::AUTH-SETUP-164 asks once more before removing a key assistants still route to
     reason: >-
-      The closed loop carries one saved key through real credential custody and
-      real model listing against a local upstream: saved unverified, checked and
-      refused with its 401 and bounded provider message (invalid or insufficient
-      permission, not proof of revocation), a refused replacement that keeps the stored key, the
-      right key, a passing check and removal. The provider screen cases pin what
+      The backend closed loop refuses a known-bad key at save, then carries an
+      offline-saved pending key through real credential custody and model listing
+      against a local upstream: later refused with its 401 and bounded provider
+      message (invalid or insufficient permission, not proof of revocation),
+      a refused replacement that keeps the stored key, the right replacement
+      confirmed by a gated model list, a passing refresh and removal. The provider
+      screen cases pin what
       the wizard shows for each answer against a controlled source API. Engine
       lifecycle stays simulated; the live journey was also run once in a
       fresh-install Incus environment.
@@ -1172,7 +1209,11 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Actual backend session and native account producer-consumer evidence is pending.
+    reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_during_actual_finalize_preserves_late_material
   - id: AUTH-SETUP-172
     name: One Desktop installation retains one instance and device across concurrency, lost replies, and restart
     status: partial
@@ -1219,32 +1260,249 @@ scenarios:
     partial_evidence:
       covers: The real session endpoint projects instance_id only with current authorization, never in unavailable or revoked states.
       test: tests/test_remote_authorization_revision.py::test_session_endpoint_only_adds_fields_to_its_released_shape
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_terminal_selection_failure_converges_without_success_or_recency
   - id: AUTH-SETUP-176
     name: Desktop switch, cancel, logout, and restart fence late callbacks while local work continues
     status: gap
     kind: concurrency
     layer: scenario
     backend: desktop
-    reason: Native coordinator and lifecycle integration evidence is pending.
+    reason: Native coordinator and isolated WebView receipt/cleanup consumers exist; these are owning-layer tests, not execution by the canonical Python harness or installed acceptance.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_plain_admitted_signout_returns_native_receipt
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_receipt_cleanup_failure_is_visible_and_only_explicit_current_action_retries
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_back_preserves_actual_workbench_document
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_held_candidate_never_gets_authority_and_escape_retires_only_its_roles
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_preserves_receiver_and_foregrounds_then_requires_fresh_request
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_approved_before_finalize_cannot_discard_new_material
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_presentation_same_url_delivery_retires_only_old_approval
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_lifecycle_returns_through_actual_account_action
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_cannot_reauthorize_a_navigated_return_receipt
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_replacement_new_owner_retires_only_the_held_candidate
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_local_return_receipt_survives_lifecycle_retry_after_retirement
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_remote_update_popup_requires_recovery_acknowledgement_and_fresh_request
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_popup_delayed_native_work_cannot_show_after_source_retirement
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_finalization_retires_an_approved_loading_remote_popup
   - id: AUTH-SETUP-177
     name: Remote and embedded documents gain no Desktop local capability or account credentials
     status: gap
     kind: authorization
     layer: contract
     backend: desktop
-    reason: Native caller admission, store isolation, and bundled UI integration evidence is pending.
+    reason: Isolated native transport and real document admission consumers exist; live account and installed OS credential acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_menu_guard_receipt_keeps_actual_source_and_owner
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovery_material_stays_in_owned_receiver_until_ack_and_late_full_event_dies_on_reload
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_remote_update_popup_retains_document_and_owns_only_update_actions
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_popup_get_state_reply_cannot_cross_same_label_rebuild
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_candidate_cannot_borrow_a_live_popup_receiver
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retired_version_document_cannot_apply_a_delayed_success_to_remote
   - id: AUTH-SETUP-178
     name: Desktop footer geometry and local updater scope hold across locale, theme, window size, and target
     status: gap
     kind: accessibility
     layer: contract
     backend: desktop
-    reason: Production UI geometry and bundled asset evidence is owned by the Phase 1 UI PR.
+    reason: Real UI geometry and isolated native popup/VersionBadge consumers exist; the narrow component/native loop is not full Workbench, canonical scenario-harness or installed acceptance.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_remote_update_popup_retains_document_and_owns_only_update_actions
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_actual_version_badge_recovers_after_candidate_publication
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_recovered_version_badge_consumes_only_the_correlated_pending_open
   - id: AUTH-SETUP-179
     name: Remote Phase 1 disables local Mini and notifications visibly and local return restores local sources
     status: gap
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Native auxiliary lifecycle and UI limitation evidence is pending.
+    reason: Isolated native lifecycle and actual retained Settings consumer evidence exists; installed and canonical scenario-harness acceptance remain separate.
+    supporting_tests:
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_notifications_page_replays_native_preference_on_reveal
+      - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_retained_remote_document_ignores_local_rebind_and_preference_replay
+  - id: AUTH-SETUP-180
+    name: Bundled iOS sign-in with Google, GitHub or Apple reaches the instances
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: ios
+    test: ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-180 signs in with a provider natively under the lock and reaches the instances
+    reason: >-
+      The bundled Welcome owns the approved provider row (layout B) and
+      consumes the native auth.signInWithProvider state, which answers like
+      the email code. The collected Vitest case drives a provider mark under
+      the page lock, session discovery, and authorized instance selection. As
+      for AUTH-SETUP-148, the Python auth_setup harness drives IM backend
+      auth and cannot reach the bundled page, the system sign-in window, or
+      Apple's sheet, so this case is the iOS provider sign-in closed loop.
+      Focused cases in the same file own each failure line naming the
+      provider, silence on cancel and on an ended attempt, and the
+      new-account line with sign-out.
+  - id: AUTH-SETUP-181
+    name: Native provider sign-in keeps its secrets, callback and store inside their boundaries
+    status: partial
+    kind: authorization
+    layer: contract
+    missing_layer: signed-build-and-hosted-providers
+    backend: ios
+    reason: >-
+      XCTest owns the boundary: the PKCE vector, the exact launch-route and
+      callback tables (state, keys, fragment, bounds), the canonical start
+      values, Apple's hashed nonce and state check, coordinator store
+      rotation on every non-success with the store kept for a second factor,
+      exclusivity and late results, the fixed start/exchange/apple scripts
+      with their Origin and account-created bit, and the bridge's strictness.
+      The catalog citation checker does not collect Swift XCTest. The https
+      callback on a signed build, the real providers and Apple's sheet remain
+      device checks after the backend exchange is deployed.
+    owning_layer: iOS XCTest plus physical-device acceptance
+  - id: AUTH-SETUP-182
+    name: One sign-in flow gives the iPhone and Desktop apps the same steps, words and errors
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: shared
+    test:
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: signs in with an email code on the same steps"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: signs in with an email code on the same steps"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: drops a verification an account change ended while it ran"
+      - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: drops a verification an account change ended while it ran"
+    reason: >-
+      #3946 moved the sign-in steps into ui/src/sign-in, reached through one
+      adapter per app. The matrix runs every case against both adapters: the
+      iPhone's through the real avibeMobile bridge over a fake native
+      coordinator, the Desktop's through DesktopSignIn over a fake native
+      client that publishes state before replying, as the runtime host may.
+      Cases cover email code, wrong code, send cooldown, password with an
+      authenticator code, wrong password, a closed passkey prompt then a
+      recovery code, the second-factor wait, leaving for another account, a
+      late result after an account change, passkey sign-in with no email, a
+      refused resend or a wrong password after stepping back from a sent code
+      (native commits a first factor only when it succeeds, so a refusal
+      leaves the code already sent and the step as they were;
+      desktop/runtime-host tests/instance_coordinator.rs and
+      instance_sign_in.rs own that side, including escapes and a later first
+      factor winning), and one capability matrix: each app offers exactly the ways its native side
+      reports avibe.bot switched on (only Google, Apple off, all off, missing,
+      only passkey, every way). Fakes prove the wiring, not real accounts, providers
+      or devices; the existing MobileOnboarding cases still own the iPhone
+      shell.
+  - id: AUTH-SETUP-183
+    name: Desktop signs in with Google, GitHub or Apple through the default browser and loopback PKCE
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: hosted-auth-config-and-real-browser
+    reason: >-
+      Native runs Supabase PKCE in the default browser and returns through a
+      one-transaction listener on 127.0.0.1:0 (RFC 8252 7.3), then redeems the
+      code with its own verifier and reuses the email code's session endpoint
+      and two-step gate. Rust tests in desktop/runtime-host own the boundary:
+      loopback.rs (exact GET /callback with this Host and state, the fixed
+      Supabase callback grammar, bounds, single consumption, port release on
+      success, generation change and timeout) and tests/instance_sign_in.rs
+      (the forged callback is never redeemed, the verifier matches the
+      challenge, tokens never reach published state, each ending's code, abort
+      frees the port and cannot sign a signed-in account out). The browser's
+      last page speaks the asking page's language, from the product catalogs
+      (desktopBootstrap.providerCallback), one language at a time. The public
+      switches are avibe.bot's, not the account's: an account change during
+      the read does not drop them, a commit or rollback that began earlier
+      keeps them, and reads show in the order they started. "Use a different
+      account" forgets an account restored at launch that still owes its second
+      factor (record, then keychain entry); another sign-in keeps that stored
+      account until a different account signs in, then retires its key, and no
+      unfinished sign-in is saved under another account's key. The citation checker does not collect Rust
+      tests. The hosted project's actual
+      redirect handling, real providers, Apple's enablement and a signed
+      Desktop build remain acceptance checks.
+    owning_layer: Rust runtime-host tests plus signed-build acceptance
+    partial_evidence:
+      covers: the page side against a fake native client that holds the browser wait, Cancel sending abort_sign_in, and silence after the abort
+      test: "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-183 Desktop: ends a browser sign-in from the page and says nothing"
+  - id: AUTH-SETUP-184
+    name: Desktop signs in with a passkey and no email, apart from the passkey second factor
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: desktop
+    missing_layer: hosted-passkey-switch-and-real-authenticator
+    reason: >-
+      Native calls avibe.bot's primary passkey options and verify with the
+      boundary's own Accept and Origin, asks the system sheet for a
+      discoverable credential (no allow-list), keeps the binding cookie in the
+      native jar, cancels the flow when the sheet closes, and then discovers
+      the session. A verify avibe.bot accepted whose session read failed is
+      kept in that jar, so trying again reads it without a second sheet or
+      verify; a 401 there, or any other first factor, ends it (backend 884a13c
+      §6, as on the iPhone). It is offered, and runs, only where this system can: macOS
+      13 with the running signature's webcredentials:avibe.bot association
+      (the Developer ID build), Windows with webauthn.dll's API version 1, no
+      other platform; elsewhere native refuses before any request, and the
+      second factor offers no passkey step (no challenge is requested). Rust tests
+      (tests/instance_sign_in.rs, and the macOS rule in the shell's
+      instance_passkeys) own the wire, each ending's code, the refusal, a
+      late assertion dropped after an abort, and the accepted session read
+      again. An older macOS, Windows itself
+      and a signed build were not run. Whether
+      production enables primary passkeys for all accounts, and a real
+      authenticator on a signed build, remain acceptance checks.
+    owning_layer: Rust runtime-host tests plus signed-build acceptance
+    partial_evidence:
+      covers: the page side, from the first step's passkey link through the dedicated passkey step to the session, against a fake native client
+      test: "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-184 Desktop: signs in with a passkey and no email"
+  - id: AUTH-SETUP-185
+    name: iPhone signs in with a passkey and no email, apart from the passkey second factor
+    status: partial
+    kind: authorization
+    layer: contract
+    backend: ios
+    missing_layer: hosted-passkey-switch-and-real-authenticator
+    reason: >-
+      auth.signInWithPasskey is a closed bridge method (no arguments, refused
+      in the instance sheet). The coordinator runs avibe.bot's primary passkey
+      options, the system sheet with no allow-list and verify in one fresh
+      store, then reads the session separately; a closed sheet cancels the
+      flow and a failed attempt retires the store, but a store that holds an
+      accepted verify is kept until its session is read (backend 884a13c §6),
+      so trying again reads it without a second sheet or verify; a sign-out
+      while that read is out publishes nothing and never reads the store again,
+      and a verify avibe.bot does not accept retires it. Welcome offers passkey
+      sign-in only when avibe.bot's latest answer carries passkey: true
+      (passkey_login_enabled, from the same read as mobile_providers and kept
+      with that last-known list, in signed-out answers and auth.providers). XCTest owns the native side
+      (MobileOnboardingTests, and the WebKit fixture-server tests for the
+      options, verify and cancel scripts in MobileAuthTransportIntegrationTests);
+      the catalog citation checker does not collect Swift XCTest. Production's
+      passkey switch, a real authenticator and a signed build remain device
+      checks.
+    owning_layer: iOS XCTest plus physical-device acceptance
+    partial_evidence:
+      covers: the page side, offering exactly the ways an answer names, email alone before any read, and the last ones kept when an answer names none
+      test: "ui/src/mobile/MobileOnboarding.test.tsx::AUTH-SETUP-185 not read"
+  - id: AUTH-SETUP-186
+    name: A personal or shared organization instance owner pairs a fake health device with route-scoped credentials and local-only reads
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: mobile
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
+    reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
+  - id: AUTH-SETUP-914
+    name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_claim_redirect_through_pairing_journal
+    reason: Owner browser on loopback or an admitted private-network origin. Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
+  - id: AUTH-SETUP-915
+    name: Signing out a device revokes its Runtime cookie before the issuer accepts its account sign-out
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_device_account_signout_from_verified_exchange
+    reason: Two signed exchanges, real callbacks, local sign-out, pending fence and receipt; fake issuer wire response, not evidence of provider deletion.
 next_priority: []

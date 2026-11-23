@@ -107,6 +107,59 @@ Taking a Show Page offline revokes URL access only. It does not delete local
 files. User-facing copy should consistently say that the page is "offline" or
 "taken down" so users do not assume the agent removed local code.
 
+### A page's script acts as the person viewing it
+
+Show Pages are served from the Workbench's own origin, and the Workbench frames
+them with `allow-same-origin`. This is deliberate: a page signs in with the
+Workbench session, calls its own handlers, and may interact with the Workbench
+around it. The consequence is a residual that is accepted, not defended:
+
+- A Show Page's script has the power of the person whose browser opens it.
+  Opened on the machine itself, or by a signed-in Owner, Member or Editor, it
+  can call the Workbench API as that person: write files, message an Agent, and
+  open the web terminal, which is on by default and asks for nothing more.
+  Opened by a Viewer it has a Viewer's read access.
+- This holds on `/p/` as on `/show`. A public page opened by a signed-in person
+  runs with that person's power.
+- An anonymous visitor of a public link gives the script nothing on this
+  instance, and the script cannot act on the visitor's own Avibe: that instance
+  refuses writes and sockets from another origin, and the browser keeps its
+  answers unreadable.
+- Protected Vault keys are outside it. Unlocking, signing and release happen in
+  the Vault sandbox origin and need the person's confirmation there. A page can
+  ask; it cannot complete. It can still draw an imitation of an approval card,
+  which the Vault sandbox plans record as a residual of their own.
+- Guarding one interface does not change it. A terminal that asks for a gesture
+  leaves file writes and Agent messages open, and on a shared origin there is
+  no token the Workbench can read that a page cannot.
+
+Who can author a page today:
+
+- The Agent of the page's Session writes its files, so the authors are the
+  people who can direct that Agent: the Owner, members with the Editor role or
+  above, and IM users bound to the instance. Each of them can already have the
+  Agent run commands, and an Editor can open the terminal directly.
+- A Viewer cannot chat or change a page. A visitor of a public link cannot
+  change it either; writing page events through a public link needs a
+  signed-in Editor.
+- Anyone else reaches a page only through the page's own code: a handler under
+  `api/` that a public link exposes, content the page fetches or stores and
+  then inserts as HTML, or a script it loads from another host. A page that
+  passes outside content through unchecked hands its viewer's power to whoever
+  wrote that content.
+
+This residual covers the scripts a page's author wrote: they keep the opener's
+authority. What an `api/` handler returns is a separate matter that the
+platform handles, and is not part of what is accepted here.
+
+Show Pages move to a separate origin when any one of these becomes true:
+
+1. A page written by someone else can be installed on, or opened under, this
+   instance's origin.
+2. A role exists that can author pages but must not have a shell.
+3. Existing pages are found to let outside content reach their HTML or script,
+   and fixing those pages one by one does not hold.
+
 ## Confirmed Product Decisions
 
 - One Agent Session has at most one Show Page.

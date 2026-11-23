@@ -53,6 +53,15 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
 
+      # Release builds rely on this image killing code that claims restricted
+      # entitlements without a provisioning profile: their launch smoke test
+      # only proves the Developer ID profile if it does. Checked here, without
+      # credentials, so an image that stops refusing fails a pull request
+      # instead of a release.
+      - name: Verify the runner refuses unauthorized restricted entitlements
+        if: runner.os == 'macOS'
+        run: sh scripts/check-restricted-entitlement-refusal.sh
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: "22.23.4"
@@ -87,6 +96,15 @@ jobs:
       - name: Verify bootstrap localization contract
         run: npm run test:i18n
 
+      - name: Test the bootstrap page's connection rule
+        run: npm run test:bootstrap
+
+      # Pin the interpreter before the first pip install: the runner image's own Python moves
+      # ahead of the wheels this job pins (macos-26's `python` is now 3.15; PyYAML 6.0.3 has wheels only up to 3.14).
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+
       - name: Install pinned driver validation dependency
         working-directory: .
         run: >-
@@ -119,6 +137,69 @@ jobs:
       - name: Test Rust
         run: cargo test --locked --workspace --all-features
 
+      - name: Verify real Windows account credential storage (must run exactly once)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        shell: pwsh
+        run: |
+          $case = 'instance_credentials::windows::tests::windows_native_account_jar_lifecycle'
+          $output = cargo test --locked -p avibe-desktop --lib --all-features $case -- --ignored --exact 2>&1
+          $code = $LASTEXITCODE
+          $output | Write-Output
+          if ($code -ne 0) { exit $code }
+          $lines = @($output | ForEach-Object { $_.ToString() })
+          if (@($lines | Where-Object { $_ -ceq "test $case ... ok" }).Count -ne 1 -or
+              -not ($lines -match '^test result: ok\. 1 passed; 0 failed; 0 ignored;')) {
+            throw 'The native account credential case did not run and pass exactly once.'
+          }
+
+      - name: Verify released direct sidecar interop on loopback
+        timeout-minutes: 5
+        run: python src-tauri/tests/direct_sidecar_fixture.py
+
+      - name: Test authenticated Desktop CONNECT against the verified sidecar
+        timeout-minutes: 5
+        run: cargo test --locked -p avibe-desktop --all-features direct::interop::desktop_direct_real_sidecar -- --ignored --exact
+
+      # A real WebView with no window (WKWebView on macOS, WebView2 on
+      # Windows) on loopback pages: the rendezvous is the instance's own and
+      # out of page script's reach, a service worker and a redirect are
+      # refused, only the instance's host reaches the listener, and the
+      # listener's credential reaches nothing else.
+      - name: Verify the direct path's WebView adapters in a real WebView
+        timeout-minutes: 10
+        run: cargo run --locked -p avibe-desktop --example direct_webview_probe --all-features
+
+      # Real WebKit windows on loopback pages, with disposable browsing data.
+      # The first run activates the app, as a user in the Workbench has: sandbox
+      # windows may appear, and everything a window on screen must satisfy is
+      # checked. The second leaves the app inactive, where a sandbox window must
+      # be closed instead. The third runs the shell's own install on this
+      # unsigned build.
+      - name: Verify the Vault sandbox window boundary in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example vault_window_probe --all-features
+          # The probe compiles macos_vault_window.rs into itself. If it also
+          # links the library, the process holds two copies of the module and
+          # of its Objective-C classes, and what it then shows is not the
+          # module's behavior. Nothing of the library may be in the binary.
+          nm target/debug/examples/vault_window_probe > "$RUNNER_TEMP/vault-window-probe-symbols.txt"
+          library_symbols="$(grep -c 'avibe_desktop_lib' "$RUNNER_TEMP/vault-window-probe-symbols.txt" || true)"
+          if [ "$library_symbols" != "0" ]; then
+            echo "::error::vault_window_probe links avibe_desktop_lib next to its own copy of macos_vault_window.rs ($library_symbols symbols)"
+            exit 1
+          fi
+          probe() {
+            python src-tauri/tests/run_cookie_probe.py target/debug/examples/vault_window_probe \
+              --root-env AVIBE_VAULT_WINDOW_PROBE_ROOT --timeout 240 --log "$RUNNER_TEMP/vault-window-probe-$1.log" "${@:2}"
+          }
+          probe active --set AVIBE_VAULT_WINDOW_PROBE_FOCUS=1
+          probe inactive
+          probe shipping --set AVIBE_VAULT_WINDOW_PROBE_SHIPPING=1
+
       # Hosted Windows runs elevated. Prove ordinary-user admission refuses
       # that token; this does not substitute for non-elevated lifecycle tests.
       - name: Verify elevated shell cannot start the Computer Use driver
@@ -133,10 +214,6 @@ jobs:
         timeout-minutes: 10
         shell: pwsh
         run: ./scripts/test-windows-computer-use-process.ps1
-
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        with:
-          python-version: "3.12"
 
       - name: Install startup fixture dependencies
         working-directory: .
@@ -199,3 +276,37 @@ jobs:
           python ../scripts/desktop_release.py verify-macos-build-version
           --binary target/debug/avibe-desktop=11.0
           --minimum-sdk 26.0
+
+      # Real WebViews on loopback pages, with disposable browsing data: a
+      # Workbench web view retired through the shell's own helpers must stop its
+      # page, its iframe and its event stream, while a hidden control page runs on.
+      - name: Verify retired Workbench web views stop in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example retired_workbench_probe --all-features
+          python src-tauri/tests/run_cookie_probe.py target/debug/examples/retired_workbench_probe \
+            --timeout 120 --log "$RUNNER_TEMP/retired-workbench-probe.log"
+
+      # A real WebKit window, clicked with AppKit events and read from its own
+      # capture: the empty chat composer below a scrolled conversation must
+      # draw its caret after a click. WebKit can keep the caret's state and not
+      # draw it, which neither the DOM nor Playwright's WebKit shows.
+      - name: Verify the composer draws its caret in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example composer_caret_probe --all-features
+          (cd ../ui && VIBE_UI_BACKEND=http://127.0.0.1:9 node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5219 --strictPort \
+            > "$RUNNER_TEMP/composer-caret-ui.log" 2>&1 & echo $! > "$RUNNER_TEMP/composer-caret-ui.pid")
+          page='http://127.0.0.1:5219/e2e/voice-shortcut/fixture.html?transcript=long'
+          for _ in $(seq 1 60); do curl -sf "$page" > /dev/null && break; sleep 1; done
+          curl -sf "$page" > /dev/null || { cat "$RUNNER_TEMP/composer-caret-ui.log"; exit 1; }
+          status=0
+          python src-tauri/tests/run_cookie_probe.py target/debug/examples/composer_caret_probe \
+            --timeout 120 --log "$RUNNER_TEMP/composer-caret-probe.log" \
+            --set "AVIBE_CARET_PROBE_URL=$page" || status=$?
+          kill "$(cat "$RUNNER_TEMP/composer-caret-ui.pid")" || true
+          exit "$status"

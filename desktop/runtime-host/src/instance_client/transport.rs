@@ -55,6 +55,9 @@ pub trait Transport: Send + Sync {
     async fn send(&self, request: Request) -> Result<Response, ClientError>;
 }
 
+/// The longest a standalone install request may stay open.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 pub struct HttpTransport {
     client: reqwest::Client,
 }
@@ -64,7 +67,7 @@ impl HttpTransport {
             client: reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(20))
+                .connect_timeout(Duration::from_secs(20))
                 .build()?,
         })
     }
@@ -72,10 +75,20 @@ impl HttpTransport {
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send(&self, request: Request) -> Result<Response, ClientError> {
-        let mut builder = self
+        // The released standalone upgrade endpoint answers only after the
+        // installer finishes (about a minute). Give it a long, finite limit
+        // rather than the 20 s every other request has.
+        let long_install = request.method == Method::POST && request.url.path() == "/api/upgrade";
+        let builder = self
             .client
             .request(request.method, request.url)
-            .headers(request.headers);
+            .headers(request.headers)
+            .timeout(if long_install {
+                INSTALL_TIMEOUT
+            } else {
+                Duration::from_secs(20)
+            });
+        let mut builder = builder;
         if let Some(body) = request.body {
             builder = builder.json(&body);
         }
@@ -121,6 +134,29 @@ impl Epoch {
         }
     }
 }
+// Filter by name at every stored path, including expired entries. Never edit the live jar on save.
+fn remove_memory_only_cookies(store: &mut CookieStore) {
+    let keys: Vec<_> = store
+        .iter_any()
+        .filter(|cookie| {
+            matches!(
+                cookie.name(),
+                "__Host-avibe-sign-in-proof" | "__Host-avibe-sign-in-start"
+            )
+        })
+        .map(|cookie| {
+            (
+                String::from(&cookie.domain),
+                String::from(&cookie.path),
+                cookie.name().to_owned(),
+            )
+        })
+        .collect();
+    for (domain, path, name) in keys {
+        store.remove(&domain, &path, &name);
+    }
+}
+
 impl NativeSession {
     pub fn new(origin: Url, transport: Arc<dyn Transport>) -> Self {
         Self {
@@ -131,6 +167,15 @@ impl NativeSession {
         }
     }
     pub fn restore(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
+        let mut result = Self::decode_released_jar(origin, transport, bytes)?;
+        // Older versions may have saved a proof or an unfinished ceremony.
+        remove_memory_only_cookies(&mut result.cookies);
+        Ok(result)
+    }
+
+    // The released restore implementation. Keep its input and error semantics for downgrade
+    // checks. This is private so callers cannot bypass the post-restore proof filter above.
+    fn decode_released_jar(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
         let cookies =
             cookie_store::serde::json::load(bytes).map_err(|_| ClientError::new("credentials_unavailable"))?;
         let result = Self {
@@ -159,9 +204,28 @@ impl NativeSession {
     }
     pub fn persist(&self) -> Result<Vec<u8>, ClientError> {
         let mut bytes = Vec::new();
-        cookie_store::serde::json::save_incl_expired_and_nonpersistent(&self.cookies, &mut bytes)
+        let mut eligible = self.cookies.clone();
+        remove_memory_only_cookies(&mut eligible);
+        cookie_store::serde::json::save_incl_expired_and_nonpersistent(&eligible, &mut bytes)
             .map_err(|_| ClientError::new("credentials_unavailable"))?;
         Ok(bytes)
+    }
+    /// Adopt cookies another store of this same origin holds (the selected
+    /// instance's WebView). Each is narrowed to this exact host, as responses are.
+    pub fn store_cookies(&mut self, cookies: Vec<cookie::Cookie<'static>>, url: &Url) {
+        if url.origin() != self.origin.origin() {
+            return;
+        }
+        for mut cookie in cookies {
+            if cookie
+                .domain()
+                .is_some_and(|domain| Some(domain.trim_start_matches('.')) != self.origin.host_str())
+            {
+                continue;
+            }
+            cookie.unset_domain();
+            self.cookies.store_response_cookies(std::iter::once(cookie), url);
+        }
     }
     pub fn cookie_value(&self, name: &str) -> Option<String> {
         self.cookies

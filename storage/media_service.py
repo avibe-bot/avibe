@@ -21,6 +21,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 import core.media_types  # noqa: F401 — registers audio/video types before guess_type
+from core.mobile_storage_boundary import is_mobile_private_path
 from storage.models import media_object_references, media_objects
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,8 @@ def register(
     derived from the path when not supplied so the proxy response and UI card
     don't re-compute them.
     """
+    if is_mobile_private_path(local_path):
+        raise ValueError("Private mobile storage is unavailable to media")
     path = Path(local_path)
     name = file_name or path.name
     ext = (path.suffix.lower().lstrip(".") or None)

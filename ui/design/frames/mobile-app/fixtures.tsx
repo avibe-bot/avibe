@@ -27,17 +27,6 @@ export const loginStates: { name: string; title: string; fixture: MobileLoginFix
 ];
 export const smallCodeFixture: MobileLoginFixture = { ...codeSent, email: 'alexandra.chen+research-and-product-planning@international.example.com', compact: true, cooldown: 15, error: 'resend-failed' };
 export const personal: MobileInstance = { id: 'personal', name: 'Personal Workbench', host: 'personal-app.avibe.bot', online: true };
-const lab: MobileInstance = { id: 'lab', name: 'Lab', host: 'lab-app.avibe.bot', online: true };
-export const ownInstances = [personal, lab];
-export const mixedInstances: MobileInstance[] = [
-  personal,
-  { id: 'team', name: 'Product team', host: 'team-app.avibe.bot', owner: 'Zhou Min', online: true },
-  { id: 'weekend', name: 'Weekend lab', host: 'weekend-app.avibe.bot', online: false },
-];
-export const longInstances: MobileInstance[] = [
-  { ...personal, name: 'Personal Workbench for research and product planning' },
-  { ...mixedInstances[1], owner: 'Alexandra Chen · Product Research' },
-];
 
 /** Locale is explicit so both translations survive the exporter's id+theme key. */
 export function bilingual(name: string, title: string, render: () => ReactNode, size: [number, number] = [390, 844]): FrameSpec[] {
@@ -49,10 +38,16 @@ export function bilingual(name: string, title: string, render: () => ReactNode, 
       api: { '/api/session': { remote: true, authenticated: true, email: account.email } },
       // Locale-specific ids must carry the same locale into shipped component strings,
       // even when the canvas itself is opened in the other language.
-      copy: Object.fromEntries(['signedInAs', 'signOut', 'signingOut', 'logoAlt'].map(key => {
-        const copy = (lang === 'en' ? en : zh).appShell[key as keyof typeof en.appShell] as string;
-        return [`appShell.${key}`, { zh: copy, en: copy }];
-      })),
+      copy: {
+        ...Object.fromEntries(['signedInAs', 'signOut', 'signingOut', 'logoAlt'].map(key => {
+          const copy = (lang === 'en' ? en : zh).appShell[key as keyof typeof en.appShell] as string;
+          return [`appShell.${key}`, { zh: copy, en: copy }];
+        })),
+        // Account's shipped rows, its Account and data page, and About.
+        ...Object.fromEntries((['account', 'accountData', 'licenses', 'welcome', 'provider', 'empty'] as const).flatMap(section =>
+          Object.entries((lang === 'en' ? en : zh).mobileApp[section]).map(([key, text]) =>
+            [`mobileApp.${section}.${key}`, { zh: text, en: text }]))),
+      },
     },
     render: () => <MobileLanguage lang={lang}>{render()}</MobileLanguage>,
   }));

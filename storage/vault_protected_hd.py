@@ -12,7 +12,7 @@ import math
 import re
 from typing import Any
 
-from storage import vault_hd, vault_policy, vault_setup, vault_signatures, vault_solana
+from storage import vault_bitcoin, vault_hd, vault_policy, vault_setup, vault_signatures, vault_solana
 from storage.vault_crypto import Sealed, is_valid_secret_name
 
 MAX_WRAP_BYTES = 65_536
@@ -196,18 +196,24 @@ def selection(value: Any, *, intake: bool = False) -> dict[str, Any]:
     if checked["chain"] == "bitcoin":
         if intake and "address_type" not in checked:
             checked["address_type"] = "p2tr"
-        if checked.get("address_type") != "p2tr":
-            raise ValueError("protected HD Bitcoin supports only explicit p2tr")
+        if "address_type" not in checked:
+            raise ValueError("protected HD Bitcoin requires an explicit persisted address type")
     return checked
 
 
 def validate_context(derivation: Any, context: Any, *, digest: str | None, message_hex: str | None) -> None:
     checked = selection(derivation)
+    bitcoin_kind = {"p2pkh": "bitcoin-p2pkh-v1", "p2wpkh": "bitcoin-p2wpkh-v1", "p2tr": "bitcoin-taproot-keypath-v1"}
     allowed = {"evm": {"evm-transaction", "eip-712-typed-data"},
-               "bitcoin": {"bitcoin-taproot-keypath-v1"}, "solana": {"solana-transaction-v1"}}
+               "bitcoin": {bitcoin_kind[checked["address_type"]]} if checked["chain"] == "bitcoin" else set(),
+               "solana": {"solana-transaction-v1"}}
     if not isinstance(context, dict) or not isinstance(context.get("kind"), str) or context["kind"] not in allowed[checked["chain"]]:
         raise ValueError("protected HD requires the verifiable signing context for its selected chain")
-    if checked["chain"] == "solana":
+    if checked["chain"] == "bitcoin" and checked["address_type"] != "p2tr":
+        if message_hex is not None or context.get("addressType") != checked["address_type"]:
+            raise ValueError("protected HD Bitcoin context must match its selected address type")
+        vault_bitcoin.validate_ecdsa_context_shape(context, expected_digest=digest or "")
+    elif checked["chain"] == "solana":
         vault_solana.validate_context(context, message_hex=message_hex or "")
     elif checked["chain"] == "evm":
         fields = ({"kind", "digestAlgorithm", "chainId", "unsignedTransaction", "digest"}
@@ -224,11 +230,17 @@ def validate_context(derivation: Any, context: Any, *, digest: str | None, messa
 def verify_signature(public_key: dict[str, Any], derivation: Any, *, digest: str | None,
                      message_hex: str | None, signature: Any) -> None:
     checked = selection(derivation)
+    der = checked["chain"] == "bitcoin" and checked["address_type"] != "p2tr"
+    encoded = signature.get("signature") if isinstance(signature, dict) else None
+    pattern = r"[0-9a-f]{16,142}" if der else r"[0-9a-f]{128}"
     if (not isinstance(signature, dict) or set(signature) - {"signature", "recovery_id"}
-            or not isinstance(signature.get("signature"), str)
-            or re.fullmatch(r"[0-9a-f]{128}", signature["signature"]) is None):
+            or not isinstance(encoded, str) or re.fullmatch(pattern, encoded) is None
+            or len(encoded) % 2):
         raise ValueError("protected HD requires an exact canonical public signature")
-    if checked["chain"] == "solana":
+    if der:
+        vault_signatures.verify_ecdsa(public_key_bytes=bytes.fromhex(public_key["public_key"]),
+            digest_bytes=bytes.fromhex(digest or ""), signature=signature, scheme=vault_bitcoin.ECDSA_SCHEME)
+    elif checked["chain"] == "solana":
         if signature.get("recovery_id") is not None:
             raise ValueError("Ed25519 signatures have no recovery id")
         vault_solana.verify_signature(vault_solana.require_public_key(public_key), message_hex or "", signature["signature"])
@@ -248,15 +260,23 @@ def account_addresses(item: dict[str, Any]) -> dict[str, str]:
 
 
 def public_accounts(name: str, sealed: Sealed, meta: dict[str, Any]) -> list[dict[str, Any]]:
+    from vibe import vault_sandbox_release
+
+    support = vault_sandbox_release.current_support()
+    # Existing Taproot stays compatible with historical pins; new choices require
+    # the complete reviewed pin, never just the authenticated precommitments.
+    types = [kind for kind in vault_hd.BITCOIN_TYPES
+             if kind == "p2tr" or (support is not None and kind in support.hd_input_types)]
+    fields = {"p2pkh": "btc_legacy", "p2wpkh": "btc_segwit", "p2tr": "btc_taproot"}
     result = []
     for item in stored_accounts(name, sealed, meta):
         if item["enabled"]:
             addresses = account_addresses(item)
-            # Extra BTC keys are immutable precommitments, not enabled receive choices.
             result.append({"account": item["account"], "name": item["name"],
-                           **{key: addresses[key] for key in ("eth", "btc_taproot", "solana")},
+                           **{key: addresses[key] for key in ("eth", "solana", *(fields[kind] for kind in types))},
                            "paths": vault_hd.paths(item["account"]), "always_ask": True,
-                           "last_signer": item["last_signer"], "bitcoin_address_types": ["p2tr"]})
+                           "bitcoin_paths": {kind: vault_hd.bitcoin_paths(item["account"])[kind] for kind in types},
+                           "last_signer": item["last_signer"], "bitcoin_address_types": types})
     return result
 
 
@@ -272,6 +292,7 @@ def signing_public_key(name: str, sealed: Sealed, meta: dict[str, Any], derivati
     checked = selection(derivation)
     item = selected_account(name, sealed, meta, checked)
     chain = checked["chain"]
-    return {"curve": "ed25519", "chain": "solana", "public_key": item[chain]} if chain == "solana" else {
-        "curve": "secp256k1", "public_key": item[chain],
+    field = vault_hd.BITCOIN_KEYS[checked["address_type"]] if chain == "bitcoin" else chain
+    return {"curve": "ed25519", "chain": "solana", "public_key": item[field]} if chain == "solana" else {
+        "curve": "secp256k1", "public_key": item[field],
     }

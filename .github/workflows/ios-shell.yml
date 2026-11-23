@@ -15,7 +15,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+  # GitHub's hosted `xcode-27` image (macOS 27): Xcode 27.2, the stable
+  # release; its default is 27.1. Apple requires the iOS 27 SDK from April 2027.
+  DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
 
 jobs:
   route:
@@ -36,30 +38,35 @@ jobs:
     if: >-
       !cancelled() && (github.event_name != 'pull_request' ||
       (needs.route.result == 'success' && needs.route.outputs.ios == 'run'))
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Report pinned Apple toolchain
         run: |
           set -euo pipefail
+          # The image's installed Xcodes, so the pinned path is confirmed at run time.
+          ls -d /Applications/Xcode*.app
           [ -d "$DEVELOPER_DIR" ] || {
             echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
             exit 1
           }
           xcodebuild -version
-          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 26.6" ] || {
-            echo "Expected Xcode 26.6 from $DEVELOPER_DIR" >&2
+          [ "$(xcodebuild -version | sed -n '1p')" = "Xcode 27.2" ] || {
+            echo "Expected Xcode 27.2 from $DEVELOPER_DIR" >&2
             exit 1
           }
-          xcrun --sdk iphonesimulator --show-sdk-version
+          [ "$(xcrun --sdk iphonesimulator --show-sdk-version)" = "27.2" ] || {
+            echo "Expected the iOS 27.2 SDK" >&2
+            exit 1
+          }
 
       - name: Prepare published iroh App artifact
         run: python3 ios/scripts/prepare_iroh_app.py stage --staging ios/Avibe/IrohLib
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: "22.23.4"
+          node-version: "26.13.1"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
@@ -97,7 +104,7 @@ jobs:
             "$RUNNER_TEMP/AvibeDerivedData/Build/Products/Debug-iphonesimulator/Avibe.app/Avibe.debug.dylib" \
             YES
 
-      - name: Select the pinned iPhone 17 Pro simulator
+      - name: Select the pinned iPhone 18 Pro / iOS 27.2 simulator
         run: |
           set -euo pipefail
           xcrun simctl list devices available --json > "$RUNNER_TEMP/ios-simulators.json"
@@ -106,8 +113,8 @@ jobs:
           import json
           import sys
 
-          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
-          device_name = "iPhone 17 Pro"
+          runtime = "com.apple.CoreSimulator.SimRuntime.iOS-27-2"
+          device_name = "iPhone 18 Pro"
           with open(sys.argv[1], encoding="utf-8") as source:
               devices = json.load(source)["devices"].get(runtime, [])
           matches = sorted(
@@ -162,6 +169,12 @@ jobs:
           path: ${{ runner.temp }}/AvibeTests.xcresult
           if-no-files-found: ignore
           retention-days: 7
+
+      # The fixture's hold-to-talk page (HoldTouchUITests): the App follows a
+      # press only with the microphone allowed.
+      - name: Allow the fixture the simulator's microphone
+        if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}
+        run: xcrun simctl privacy "$SIMULATOR_ID" grant microphone bot.avibe.ios.sheet-fixture
 
       - name: Run sheet gesture XCUITest fixture
         if: ${{ always() && !cancelled() && steps.sheet-fixture-build.outcome == 'success' }}

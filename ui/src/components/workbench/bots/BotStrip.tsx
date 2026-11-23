@@ -14,7 +14,7 @@ import { Popover, PopoverAnchor, PopoverContent } from '../../ui/popover';
 import { BotAvatar } from '../../ui/bot-avatar';
 import { PageSectionTitle } from '../PageSectionTitle';
 import { PressRing } from '../../voice/ComposerHold';
-import { holdIsLive, useBotHold, type HeldBot } from './BotHoldContext';
+import { holdIsLive, holdOwnsTouch, useBotHold, type HeldBot } from './BotHoldContext';
 import { RemoveBotDialog } from './RemoveBotDialog';
 
 // A slot is 50px wide (the 40px avatar, its 2px ring, and room for the name) with
@@ -95,14 +95,15 @@ export const BotStrip: React.FC<{
   // The pointer on the strip holds the order (D13): nothing moves under it.
   const [pointerInside, setPointerInside] = useState(false);
   useBotOrderHold(pointerInside);
-  // Once a hold has the microphone, the finger moving is the hold's (slide up to cancel), not a
-  // scroll of the strip or the page. Before that, a move is the page's: it scrolls, and the hold
-  // gives the press back. React's touch listeners are passive, so this one is attached here.
+  // Once a hold is reached (its ring full, the microphone opening or open), the finger moving is
+  // the hold's (slide up to cancel), not a scroll of the strip or the page. Before that, a move is
+  // the page's: it scrolls, and the hold gives the press back. React's touch listeners are
+  // passive, so this one is attached here.
   const { held } = useBotHold();
   const sectionRef = useRef<HTMLElement | null>(null);
   const recordingRef = useRef(false);
   useEffect(() => {
-    recordingRef.current = held !== null && held.phase !== 'pressing' && holdIsLive(held.phase);
+    recordingRef.current = holdOwnsTouch(held);
   }, [held]);
   useEffect(() => {
     const section = sectionRef.current;

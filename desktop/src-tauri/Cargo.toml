@@ -18,6 +18,8 @@ bundled-runtime = []
 # Test-only builds may redirect Computer Use state and assets to a hermetic lane.
 # Release packaging never enables this feature.
 computer-use-test-overrides = []
+# Hermetic App Lock peer used by desktop-client tests; forbidden in release builds.
+app-lock-e2e = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -28,13 +30,17 @@ base64 = "0.23"
 avibe-runtime-host = { path = "../runtime-host" }
 cookie = "0.18"
 flate2 = "1"
+getrandom = "0.4"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring"] }
 reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle = { version = "=2.6.1", default-features = false }
 sys-locale.workspace = true
 tar = "0.4"
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "unstable"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-deep-link = "2"
 tauri-plugin-dialog = "2"
@@ -60,11 +66,14 @@ tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 webview2-com = "0.39"
 windows = { version = "0.62", features = ["Win32_Networking_WindowsWebServices", "Win32_Foundation", "Data_Xml_Dom", "UI_Notifications"] }
 keyring = { version = "3.6", features = ["windows-native"] }
+zeroize = "1"
 # Match Tauri's Known Folder lookup without initializing the GUI.
 dirs = "7"
 # The pet's drag: the primary button's state and a one-step window frame.
 uuid = { version = "1", features = ["v4"] }
 windows-sys = { version = "0.61", features = [
+  "Win32_Security_Credentials",
+  "Win32_Security_Cryptography",
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_WindowsAndMessaging",
   # Computer Use's inactive Windows x64 process-ownership foundation.
@@ -83,47 +92,126 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Reuse the plugin sender's application-identity setup with the same legacy center.
-notify-rust = "4"
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError", "LABiometryType"] }
 objc2-authentication-services = { version = "0.3.2", default-features = false, features = ["std", "ASFoundation", "ASPublicKeyCredential", "ASAuthorization", "ASAuthorizationController", "ASAuthorizationCredential", "ASAuthorizationProvider", "ASAuthorizationRequest", "ASAuthorizationPublicKeyCredentialAssertion", "ASAuthorizationPublicKeyCredentialAssertionRequest", "ASAuthorizationPublicKeyCredentialConstants", "ASAuthorizationPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialAssertion", "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest", "ASAuthorizationPlatformPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialProvider"] }
 keyring = { version = "3.6", features = ["apple-native"] }
 block2 = "0.6.2"
 objc2 = "0.6.4"
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "block2",
+  "FoundationErrors",
   "NSAppleEventDescriptor",
+  "NSBundle",
   "NSAppleEventManager",
   "NSArray",
   "NSDate",
   "NSData",
+  "NSAttributedString",
+  "NSDictionary",
   "NSSet",
   "NSEnumerator",
   "NSError",
   "NSGeometry",
   "NSNotification",
+  "NSDistributedNotificationCenter", "NSRunLoop", "NSTimer",
   "NSOperation",
+  "NSProcessInfo",
   "NSString",
   "NSURL",
   "NSURLRequest",
+  "NSURLResponse",
   "NSUserDefaults",
-  "NSUserNotification",
+  "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "std",
+  "NSAccessibilityProtocols",
   "NSApplication",
+  "NSBitmapImageRep",
+  "NSButton",
+  "NSButtonCell",
+  "NSBezierPath",
+  "NSTrackingArea",
+  "NSColor",
+  "NSControl",
+  "NSFont",
+  "NSFontDescriptor",
+  "NSImage",
+  "NSKeyValueBinding",
+  "NSParagraphStyle",
+  "NSTextField",
+  "NSImageRep",
+  "NSImageView",
+  "NSLayoutConstraint",
+  "NSSharingService",
+  "NSTitlebarAccessoryViewController",
+  "NSToolbar",
+  "NSViewController",
+  "NSAlert",
+  "NSAppearance",
+  "NSWorkspace",
+  "NSRunningApplication",
+  "libc",
+  "NSBezierPath",
+  "NSButtonCell",
+  "NSText",
+  "NSCell",
   "NSEvent",
   "NSGraphics",
+  "NSPasteboard",
+  "NSPasteboardItem",
   "NSResponder",
   "NSView",
   "NSWindow",
+  "NSStatusBar",
+  "NSStatusItem",
+  "NSStatusBarButton",
+  "NSMenu",
+  "NSMenuItem",
 ] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
   "block2",
   "objc2-app-kit",
+  "objc2-core-foundation",
+  "WKContentWorld",
   "WKFrameInfo",
+  "WKNavigation",
   "WKNavigationAction",
   "WKNavigationDelegate",
+  "WKNavigationResponse",
+  "WKPreferences",
+  "WKSecurityOrigin",
+  "WKSnapshotConfiguration",
+  "WKUIDelegate",
+  "WKURLSchemeHandler",
+  "WKURLSchemeTask",
+  "WKUserContentController",
+  "WKUserScript",
   "WKWebView",
   "WKWebViewConfiguration",
   "WKWebsiteDataStore",
+  "WKWindowFeatures",
 ] }
+# The macOS notification center: authorization, posts, withdrawal and responses.
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "UNNotification",
+  "UNNotificationAction",
+  "UNNotificationCategory",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationResponse",
+  "UNNotificationSettings",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
+# Reads the running app's own signed entitlements for the Vault passkey marker.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecTask"] }
+
+[[example]]
+name = "app-lock-peer"
+path = "examples/app-lock-peer.rs"
+required-features = ["app-lock-e2e"]

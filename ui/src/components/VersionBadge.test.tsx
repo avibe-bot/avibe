@@ -8,6 +8,8 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { VersionBadge } from './VersionBadge';
+import { DESKTOP_CLIENT_STATE_EVENT } from '../desktop/bridge';
+import clientStates from '../desktop/__fixtures__/instance-client-v1/states.json';
 import type { DesktopRemoteUpdateResult, UpdateControlResult, VersionInfo, UpgradeResult } from '../context/ApiContext';
 import {
   DESKTOP_OPEN_UPDATES_EVENT,
@@ -23,7 +25,7 @@ const api = vi.hoisted(() => ({
   doUpgrade: vi.fn<(...args: unknown[]) => Promise<UpgradeResult>>(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
   requestUpdateControl: vi.fn<(...args: unknown[]) => Promise<UpdateControlResult>>(async () => ({ ok: true, request_id: 'control-1' })),
 }));
-const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
+const defaultDesktopInvoke = vi.hoisted(() => async (command: string): Promise<unknown> => {
   if (command === 'desktop_update_state') {
     return { phase: 'available', latest: '10.0.0', channel: 'stable', skippedVersion: null, interactive: true };
   }
@@ -40,9 +42,20 @@ const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 const authorization = vi.hoisted(() => ({ remote: true, capabilities: { can_manage_instance: true, is_instance_owner: true } }));
 vi.mock('../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
-vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
+const viewport = vi.hoisted(() => ({ desktop: true }));
+vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => viewport.desktop }));
+// The page's request to the shell to present a view, past the unsaved-changes guard.
+const presented = vi.hoisted(() => vi.fn());
+vi.mock('../context/useUnsavedChangesActionGuard', () => ({
+  useUnsavedChangesActionGuard: () => () => ({ runNavigation: (callback: () => void) => callback() }),
+}));
+vi.mock('../desktop/bridge', async (original) => ({
+  ...(await original<typeof import('../desktop/bridge')>()),
+  presentDesktopClient: presented,
+}));
 
 beforeEach(() => {
+  viewport.desktop = true;
   authorization.capabilities.can_manage_instance = true;
   authorization.capabilities.is_instance_owner = true;
   api.getVersion.mockReset().mockResolvedValue({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' });
@@ -53,6 +66,7 @@ afterEach(() => {
   vi.useRealTimers();
   cleanup();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
   desktopInvoke.mockImplementation(defaultDesktopInvoke);
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_VERSION__?: string }).__AVIBE_DESKTOP_VERSION__;
@@ -112,6 +126,142 @@ function expectNoRuntimeControls() {
   expect(api.mutateConfig).not.toHaveBeenCalled();
   expect(screen.queryByText(i18n.t('update.status.checkFailed'))).toBeNull();
 }
+
+// A legitimate candidate refusal used to erase the only probe source forever.
+// These exercise the real badge/bridge and native open-delivery script; lifecycle
+// projections trigger a read but cannot supply updater authority themselves.
+const localCompletion = { ...clientStates.signed_in, generation: 20, revision: 7 };
+function publishClient(detail: unknown) {
+  act(() => { window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail })); });
+}
+function enableClient() {
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+  vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', localCompletion);
+}
+function deferredState() {
+  let resolve!: (value: DesktopUpdateState) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<DesktopUpdateState>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const admittedUpdate: DesktopUpdateState = { phase: 'current', latest: '3.2.2', channel: 'stable', skippedVersion: null, interactive: false };
+const reads = () => desktopInvoke.mock.calls.filter(([command]) => command === 'desktop_update_state').length;
+const readiness = () => desktopInvoke.mock.calls.filter(([command]) => command === 'desktop_update_panel_ready').length;
+
+describe('desktop updater admission recovery', () => {
+  it.each([false, true])('recovers after refusal on equal completion, read-only until retained open (StrictMode=%s)', async (strictMode) => {
+    enableClient();
+    let admitted = false;
+    const receipts: string[] = [];
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') {
+        if (!admitted) throw new Error('untrusted_desktop_caller');
+        return admittedUpdate;
+      }
+      if (command === 'desktop_update_panel_ready') receipts.push(deliverNativeUpdateOpen('recovery-open', false));
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.2', '3.2.2', null, true, undefined, strictMode);
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalled());
+    expect(readiness()).toBe(0);
+    expect(desktopInvoke).not.toHaveBeenCalledWith('plugin:event|listen', expect.anything());
+    admitted = true;
+    publishClient(localCompletion);
+    await vi.waitFor(() => expect(readiness()).toBe(1));
+    expect(receipts).toEqual(['handled']);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('plugin:event|listen', expect.anything()));
+    await vi.waitFor(() => expect(desktopInvoke.mock.calls.filter(([c]) => c === 'desktop_update_check')).toHaveLength(1));
+    expect(deliverNativeUpdateOpen('recovery-open', false)).toBe('handled');
+    publishClient(localCompletion);
+    await vi.waitFor(() => expect(reads()).toBeGreaterThanOrEqual(4));
+    expect(readiness()).toBe(1);
+    expect(desktopInvoke.mock.calls.filter(([c]) => c === 'desktop_update_check')).toHaveLength(1);
+    for (const command of ['desktop_update_install', 'desktop_update_auto_update_set', 'desktop_update_prereleases_set']) expect(desktopInvoke).not.toHaveBeenCalledWith(command, expect.anything());
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('restores read-only snapshots and subscription fallback (plugin unavailable=%s)', async (pluginUnavailable) => {
+    enableClient(); let admitted = false;
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') {
+        if (!admitted) throw new Error('untrusted_desktop_caller');
+        return admittedUpdate;
+      }
+      if (command === 'plugin:event|listen' && pluginUnavailable) throw new Error('event plugin unavailable');
+      return defaultDesktopInvoke(command);
+    });
+    renderInShell('3.2.2', '3.2.2', null, true);
+    let listener: ((event: unknown) => void) | undefined;
+    const internals = (window as unknown as { __TAURI_INTERNALS__: { transformCallback: (callback: (event: unknown) => void) => number } }).__TAURI_INTERNALS__;
+    internals.transformCallback = (callback) => { listener = callback; return 1; };
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalled());
+    admitted = true; publishClient(localCompletion);
+    await vi.waitFor(() => expect(readiness()).toBe(1));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('plugin:event|listen', expect.anything()));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_check');
+    if (!pluginUnavailable) act(() => listener?.({ payload: { ...admittedUpdate, phase: 'available', latest: '3.2.3' } }));
+    fireEvent.click(screen.getByTitle('v3.2.2'));
+    expect(await screen.findByText(i18n.t(pluginUnavailable ? 'update.status.current' : 'update.status.available'))).toBeTruthy();
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_check');
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+
+  it.each(['reject', 'resolve'] as const)('coalesces completion during an in-flight read (%s)', async (settle) => {
+    enableClient(); const held = deferredState(); let count = 0;
+    desktopInvoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
+      ? (++count === 1 ? held.promise : admittedUpdate) : defaultDesktopInvoke(command));
+    renderInShell('3.2.2', '3.2.2', null, true);
+    await vi.waitFor(() => expect(reads()).toBe(1));
+    publishClient(localCompletion); publishClient(localCompletion);
+    await act(async () => { if (settle === 'reject') held.reject(new Error('untrusted_desktop_caller')); else held.resolve(admittedUpdate); });
+    await vi.waitFor(() => expect(reads()).toBe(2));
+    await vi.waitFor(() => expect(readiness()).toBe(1));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_check');
+  });
+
+  it.each([{ settle: 'reject', retirement: 'remote' }, { settle: 'resolve', retirement: 'remote' },
+    { settle: 'reject', retirement: 'generation' }, { settle: 'resolve', retirement: 'generation' }] as const)('fences retired $settle after $retirement admission', async ({ settle, retirement }) => {
+    enableClient(); const held = deferredState(); let count = 0;
+    desktopInvoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
+      ? (++count === 1 ? held.promise : admittedUpdate) : defaultDesktopInvoke(command));
+    const mounted = renderInShell('3.2.2', '3.2.2', null, true);
+    await vi.waitFor(() => expect(reads()).toBe(1));
+    const away = { ...localCompletion, revision: 8, connection: { ...localCompletion.connection,
+      committed: { kind: 'remote', name: 'Remote', instance_id: 'remote', canonical_origin: 'https://remote.example' } } };
+    if (retirement === 'remote') publishClient(away);
+    publishClient({ ...localCompletion, generation: retirement === 'generation' ? 21 : 20, revision: 9 });
+    await vi.waitFor(() => expect(readiness()).toBe(1));
+    await act(async () => { if (settle === 'reject') held.reject(new Error('retired')); else held.resolve({ ...admittedUpdate, phase: 'available', latest: '99.0.0' }); });
+    expect(readiness()).toBe(1);
+    expect(screen.queryByText('99.0.0')).toBeNull();
+    const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
+    act(() => { window.dispatchEvent(event); });
+    expect(event.defaultPrevented).toBe(true);
+    mounted.unmount();
+    const before = reads(); publishClient({ ...localCompletion, revision: 10 });
+    expect(reads()).toBe(before);
+  });
+
+  it('ignores malformed, stale, embedded and remote projections without granting actions', async () => {
+    enableClient();
+    desktopInvoke.mockImplementation(async (command: string) => { if (command === 'desktop_update_state') throw new Error('untrusted_desktop_caller'); return defaultDesktopInvoke(command); });
+    renderInShell('3.2.2', '3.2.2', null, true);
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalled());
+    const before = reads();
+    for (const detail of [null, {}, { ...localCompletion, version: 2 }, { ...localCompletion, revision: 6 }, { ...localCompletion, generation: 19, revision: 999 }]) publishClient(detail);
+    const original = window;
+    vi.stubGlobal('window', new Proxy(original, { get(target, key) { if (key === 'top') return {}; const value = Reflect.get(target, key, target); return typeof value === 'function' ? value.bind(target) : value; } }));
+    publishClient(localCompletion); vi.unstubAllGlobals(); enableClient();
+    publishClient({ ...localCompletion, revision: 8, connection: { ...localCompletion.connection, committed: { kind: 'remote' } } });
+    await act(async () => {});
+    expect(reads()).toBe(before); expect(readiness()).toBe(0);
+    const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true }); window.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
 
 describe('desktop version ownership', () => {
   it('uses the stamped app version and never starts the Python updater', async () => {
@@ -1040,3 +1190,55 @@ describe('one panel on a desktop-managed host', () => {
     expect(api.requestUpdateControl).not.toHaveBeenCalled();
   });
 });
+
+// ui/design: update/instance-and-app. The owner updated this computer's desktop app while meaning to update
+// the instance whose name the version stood beside.
+describe("another computer's instance in the desktop app", () => {
+  const remote = { ...localCompletion, connection: { ...localCompletion.connection, status: 'remote_connected',
+    committed: { kind: 'remote', name: 'alex', instance_id: 'alex', canonical_origin: 'https://alex.example' } } };
+
+  it('draws nothing at desktop width, where the bottom row carries the chip and this badge is only kept mounted', async () => {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', remote);
+    api.getVersion.mockResolvedValue({ current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true });
+    renderInShell('3.2.8-rc.4', '3.2.8rc2', null, true);
+    await act(async () => {});
+    expect(document.querySelector('[data-version-chip]')).toBeNull();
+  });
+
+  it("shows the instance's own version under its name and leaves the panel to the shell", async () => {
+    // A narrow window: the sidebar and its bottom row are gone, and the Settings header's badge is what is left.
+    viewport.desktop = false;
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_STATE__', remote);
+    api.getVersion.mockResolvedValue({ current: '3.2.8rc2', latest: '3.2.8rc4', has_update: true });
+    renderInShell('3.2.8-rc.4', '3.2.8rc2', null, true);
+    // Not the app's 3.2.8rc4, and named: no version is shown without saying whose it is.
+    const chip = await screen.findByRole('button', { name: i18n.t('desktopClient.instanceVersion', { name: 'alex', version: 'v3.2.8rc2' }) });
+    expect(screen.queryByText(/3\.2\.8-?rc\.?4/)).toBeNull();
+    fireEvent.click(chip);
+    // The page asks the shell for the panel and opens none of its own; it has no way to install anything here.
+    expect(presented).toHaveBeenCalledExactlyOnceWith('updates', undefined, expect.anything());
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(desktopInvoke.mock.calls.filter(([command]) => String(command).startsWith('desktop_update_'))).toEqual([]);
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+    expect(api.requestDesktopUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('an install the standalone Runtime reports', () => {
+  it.each([
+    ['installing', 'update.status.installing'],
+    ['restarting', 'update.status.restarting'],
+  ] as const)('shows a %s install started elsewhere as running, with no Update to click', async (phase, copy) => {
+    api.getVersion.mockResolvedValue({
+      current: '9.9.9', latest: '10.0.0', has_update: true,
+      install: { phase, target: '10.0.0', started_at: '2026-11-20T07:03:17Z' },
+    });
+    await openBrowserPopup('v9.9.9');
+    expect(await screen.findByText(i18n.t(copy))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: i18n.t('update.action.update') })).toBeNull();
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+});
+

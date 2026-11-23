@@ -461,12 +461,20 @@ async fn a_cold_link_is_consumed_only_after_ready_navigation_commits_and_never_r
     }
     assert_eq!(ready.phase, BootstrapPhase::Ready);
     let destination = links.bootstrap_navigation(&ready).unwrap();
-    assert_eq!(
-        destination.url().as_str(),
-        format!("{}/apps/show/cold.session", ready.origin)
-    );
+    assert_eq!(destination.url().as_str(), format!("{}/", ready.origin));
     assert_eq!(links.bootstrap_navigation(&ready).unwrap().url(), destination.url());
-    assert!(links.commit_navigation(&destination, true, 1, 1));
+    assert!(!links.commit_navigation(&destination, true, 1, 1));
+    assert!(links.has_pending(), "root readiness must not consume the Show delivery");
+    let origin = LoopbackOrigin::parse(&ready.origin).unwrap();
+    let app = links.workbench_navigation(&origin, destination.url()).unwrap();
+    assert_eq!(app.show_session(), Some("cold.session"));
+    assert!(links.claim_app_launch(&app));
+    assert!(!links.claim_app_launch(&app), "one launch for this exact delivery");
+    assert!(!links.commit_navigation(&app, false, 1, 1));
+    assert!(links.owns_app_launch(&app));
+    assert!(links.commit_navigation(&app, true, 1, 1));
+    assert!(!links.has_pending());
+    assert!(!links.claim_app_launch(&app), "completed delivery cannot replay");
     assert_eq!(links.bootstrap_navigation(&ready).unwrap().url().path(), "/");
     assert_eq!(launcher.calls(), 1);
 }

@@ -14,6 +14,22 @@ final class DirectIrohBindingTests: XCTestCase {
     // Full native endpoint drain is separate from pending-call settlement.
     private static let endpointDrainBound: Duration = .seconds(5)
 
+    /// The real binding's relay map takes the four pinned URLs exactly as
+    /// the custom-relay branch of `DirectIrohBinding.bind` passes them.
+    /// Building a map and a mode opens no socket.
+    func testRealRelayMapTakesTheFourPinnedRelaysExactly() throws {
+        let urls = DirectTrialRelay.publicTrialRelayURLs
+        let map = try IrohLib.RelayMap.fromUrls(urls: urls)
+        for url in urls {
+            XCTAssertEqual(try map.get(url: url)?.url, url)
+        }
+        XCTAssertNil(try map.get(url: "https://relay.example./"))
+        let mode = IrohLib.RelayMode.custom(map: map)
+        for url in urls {
+            XCTAssertNotNil(try mode.relayMap().get(url: url))
+        }
+    }
+
     func testRealBindingLoopbackEchoAndCleanHalfClose() async throws {
         let pair = try await makePair()
         defer {
@@ -53,7 +69,7 @@ final class DirectIrohBindingTests: XCTestCase {
         let peer = try await makePeer()
         let binding = DirectIrohBinding()
         let key = try binding.makeLaunchKey()
-        let endpoint = try await binding.bind(secretKey: key.secret)
+        let endpoint = try await binding.bind(secretKey: key.secret, relayURLs: [])
 
         let completions = CompletionCounter()
         let connectTask = Task {
@@ -61,6 +77,7 @@ final class DirectIrohBindingTests: XCTestCase {
             return try await endpoint.connect(
                 to: peer.id,
                 addresses: [peer.address],
+                relayURL: nil,
                 alpn: Self.alpn
             )
         }
@@ -348,13 +365,14 @@ final class DirectIrohBindingTests: XCTestCase {
         let peer = try await makePeer()
         let binding = DirectIrohBinding()
         let key = try binding.makeLaunchKey()
-        let endpoint = try await binding.bind(secretKey: key.secret)
+        let endpoint = try await binding.bind(secretKey: key.secret, relayURLs: [])
         let accepting = Task {
             try await peer.acceptConnection()
         }
         let client = try await endpoint.connect(
             to: peer.id,
             addresses: [peer.address],
+            relayURL: nil,
             alpn: Self.alpn
         )
         let server = try await accepting.value

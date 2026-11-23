@@ -43,6 +43,9 @@ import {
   VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS,
 } from './vaultSandboxManifest';
 import { assertVaultEntryAvailable } from './vaultEntry';
+import { recordVaultPasskeyOutcome, vaultPasskeyHandoff } from './vaultBrowserHandoff';
+import i18next from 'i18next';
+
 import { openLinkInNewContext } from './pwaNavigation';
 import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
@@ -60,6 +63,9 @@ const VERSION = 2;
 // Protocol v2 operation surface (vault-sandbox #9): `unseal`→`reveal`, `releaseDEK`→`approveRelease`.
 const REQUIRED_OPS = ['status', 'setup', 'unlock', 'lock', 'seal', 'reveal', 'sign', 'approveRelease'] as const;
 const DEFAULT_TIMEOUT_MS = 15_000;
+// Downloading and hashing the pinned sandbox release before a frame or window opens. Its own bound,
+// longer than an RPC's: the bundle is large and a slow link is not tampering.
+const INTEGRITY_TIMEOUT_MS = 60_000;
 // Ops that may raise an in-sandbox card (confirm / passkey / plaintext display) can sit open for
 // as long as the user takes to act, so they get the long ceremony timeout regardless of tier.
 const INTERACTIVE_TIMEOUT_MS = 5 * 60_000;
@@ -78,6 +84,37 @@ export const PROTECTED_HD_OP = 'sealHdWallet' as const;
 const PROTECTED_HD_TIMEOUT_MS = 2_105_000;
 type VaultSandboxOp = (typeof REQUIRED_OPS)[number] | OptionalSandboxOp | 'handshake';
 type ParentOnlySandboxOp = 'set-appearance';
+// The operations that may open a sandbox window or ask for the passkey; how each ends tells whether
+// a desktop shell that runs them itself still can (`recordVaultPasskeyOutcome`).
+const PASSKEY_OPS: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>([
+  'setup', 'unlock', 'seal', 'reveal', 'sign', 'approveRelease', POLICY_DOWNGRADE_OP, PROTECTED_HD_OP,
+]);
+// Cancels that an in-app failure produces too, so they count toward the same in-a-row rule as a
+// passkey cancel: the protected seed-phrase window turns every WebAuthn refusal into its own cancel,
+// and a window this page reserved that the sandbox never loads into ends, at the frame's pairing
+// timeout, as a closed window. That window is still open then (the app gives up on it only later);
+// one that reads closed was closed by the user or declined by the app while it was not in front,
+// and either is a plain cancel: trying again works.
+function cancelMayBeFailure(op: VaultSandboxOp, reserved: ReservedWindow | undefined, error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return (op === PROTECTED_HD_OP && code === 'authorization_cancelled')
+    || (reserved !== undefined && code === 'authorization_window_closed' && !reserved.windowClosed());
+}
+
+// Steps that end early once their reserved window has closed and no answer came within the grace,
+// instead of waiting out the frame's 30-second pairing timeout. Each of these finishes as soon as
+// its window confirms (the sandbox then only computes and answers, nothing more on screen or from
+// the user), and dropping a late answer is safe: their signed contexts are minted per attempt, so
+// a retry starts clean.
+// - A reveal is not one of them: after its window confirms, the value is shown (in the frame, or in
+//   that window kept open), and the answer comes only after the user is done with it.
+// - Nor a signature: its context is the request's own and the sandbox records it as used when it
+//   signs, so dropping a late signature would leave a request this page can no longer sign.
+// - Nor a seed-phrase wallet, whose late answer may follow words the user has already written down.
+const ENDS_WITH_ITS_WINDOW: ReadonlySet<VaultSandboxOp> = new Set<VaultSandboxOp>(['approveRelease', POLICY_DOWNGRADE_OP]);
+// The sandbox window closes itself after a confirmed step, just before its answer reaches this page.
+const WINDOW_CLOSED_GRACE_MS = 3_000;
+const WINDOW_CLOSED_POLL_MS = 250;
 type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
@@ -175,7 +212,13 @@ export class VaultSandboxError extends Error {
 
 let generationController = new AbortController();
 const clients = new Set<VaultSandboxClient>();
-const authorizationWindows = new Map<string, VaultAuthorizationWindow & { ready: Promise<void>; assertOpen: () => void }>();
+type ReservedWindow = VaultAuthorizationWindow & {
+  ready: Promise<void>;
+  assertOpen: () => void;
+  /** The window itself reads closed: the user closed it, or the app declined to show it. */
+  windowClosed: () => boolean;
+};
+const authorizationWindows = new Map<string, ReservedWindow>();
 let singleton: Promise<VaultSandboxClient> | null = null;
 let activeClient: VaultSandboxClient | null = null;
 // Bumped on every reset. A create() that started before a reset checks this after its handshake:
@@ -213,6 +256,46 @@ export type VaultAuthorizationWindow = {
   close: () => void;
 };
 
+const AUTHORIZATION_WINDOW = { width: 520, height: 760 };
+
+/** The secure window's size and place: always the same size, centered over the Avibe window and kept
+ *  on that window's screen (screen coordinates are negative on a display left of or above the primary
+ *  one), so it opens where the person looks. A browser may still nudge it. */
+export function authorizationWindowFeatures(): string {
+  const { width, height } = AUTHORIZATION_WINDOW;
+  const outerWidth = window.outerWidth || window.innerWidth || width;
+  const outerHeight = window.outerHeight || window.innerHeight || height;
+  const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const minX = screen?.availLeft ?? 0;
+  const minY = screen?.availTop ?? 0;
+  const maxX = screen?.availWidth ? minX + screen.availWidth - width : Number.POSITIVE_INFINITY;
+  const maxY = screen?.availHeight ? minY + screen.availHeight - height : Number.POSITIVE_INFINITY;
+  const clamp = (value: number, min: number, max: number) => Math.round(Math.max(min, Math.min(value, Math.max(min, max))));
+  const left = clamp((window.screenX ?? 0) + (outerWidth - width) / 2, minX, maxX);
+  const top = clamp((window.screenY ?? 0) + (outerHeight - height) / 2, minY, maxY);
+  return `popup,width=${width},height=${height},left=${left},top=${top}`;
+}
+
+/** While the reserved blank window waits for verification, it says so instead of staying empty.
+ *  Plain text in our own about:blank document; it is replaced by the pinned sandbox on navigation. */
+function showWindowLoading(popup: Window): void {
+  try {
+    const doc = popup.document;
+    const text = i18next.t('vaults.sandboxLoading');
+    doc.title = text;
+    const dark = getVaultSandboxAppearance().theme === 'dark';
+    doc.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    const body = doc.body ?? doc.documentElement.appendChild(doc.createElement('body'));
+    body.style.cssText = 'margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+      + 'font:14px system-ui,sans-serif;background:Canvas;color:GrayText';
+    const line = doc.createElement('p');
+    line.textContent = text;
+    body.replaceChildren(line);
+  } catch {
+    // A window this page cannot write to stays blank; verification is unaffected.
+  }
+}
+
 /** Reserve user activation without loading protected code. Each popup is inert
  * until its own verification finishes. The RPC awaits that result by id, so a
  * failed/cancelled popup can never silently fall back to an unverified window. */
@@ -221,8 +304,13 @@ export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null 
   const id = randomId();
   const generation = clientGeneration;
   const signal = generationController.signal;
-  const popup = openLinkInNewContext('about:blank', 'popup,width=520,height=760');
-  if (!popup) return null;
+  const popup = openLinkInNewContext('about:blank', authorizationWindowFeatures());
+  if (!popup) {
+    // A desktop shell that hosts these windows refused one: its passkey steps can't run here.
+    recordVaultPasskeyOutcome(new VaultSandboxError('authorization_popup_blocked', 'The app did not open the sandbox window'));
+    return null;
+  }
+  showWindowLoading(popup);
   let closed = false;
   const close = (): void => {
     closed = true;
@@ -248,7 +336,10 @@ export function openVaultAuthorizationWindow(): VaultAuthorizationWindow | null 
     throw error;
   });
   void ready.catch(() => undefined); // The eventual RPC observes this rejection.
-  const handle = { id, close, ready, assertOpen };
+  const windowClosed = (): boolean => {
+    try { return popup.closed; } catch { return true; }
+  };
+  const handle = { id, close, ready, assertOpen, windowClosed };
   authorizationWindows.set(id, handle);
   return handle;
 }
@@ -265,15 +356,38 @@ function failIntegrity(message: string): never {
   throw new VaultSandboxError('sandbox_integrity_failed', message);
 }
 
-/** No successful cache: every new frame or parent-created popup checks again.
- * Hash the manifest bytes too; redirects, CORS/network/parse failures are never
- * an invitation to trust a mutable endpoint or downgrade protected custody. */
+/** The release could not be downloaded in time, or at all. Nothing was verified or opened; trying
+ *  again verifies afresh. A device the browser reports offline is `sandbox_offline`, so it is not told
+ *  its network is slow; any other failure (slow, lost or blocked) is `sandbox_unreachable`. Never used
+ *  for a byte or identity mismatch. */
+function failUnreachable(message: string): never {
+  const offline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  throw new VaultSandboxError(offline ? 'sandbox_offline' : 'sandbox_unreachable', message, true);
+}
+
+/** The pinned resources the verified document itself loads under browser-enforced SRI (its script
+ *  and stylesheet): every one except the document. A test over the pinned release checks that the
+ *  document names each with the pin's integrity. Only these may be revalidated from the HTTP cache
+ *  (`no-cache`: the host is still asked each time and answers 304, without a second download); the
+ *  manifest and the document stay `no-store`, so a build that is not published yet, or a changed
+ *  document, is never answered from a cache. */
+const SRI_LOADED_RESOURCE_PATHS: ReadonlySet<string> = new Set(
+  VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.filter((path) => path !== VAULT_SANDBOX_IFRAME_RESOURCE_PATH),
+);
+
+/** No successful cache: every new frame or parent-created popup checks again,
+ * hashing every byte against the pin. Hash the manifest bytes too; redirects,
+ * CORS/parse/identity failures are never an invitation to trust a mutable endpoint
+ * or downgrade protected custody. A download that fails or runs out of time is
+ * `sandbox_unreachable`, or `sandbox_offline` when the browser reports the device offline (both
+ * retryable), never reported as a mismatch. */
 export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise<void> {
   const controller = new AbortController();
   const abort = (): void => controller.abort();
   signal?.addEventListener('abort', abort, { once: true });
   if (signal?.aborted) abort();
-  const timer = setTimeout(abort, DEFAULT_TIMEOUT_MS);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; abort(); }, INTEGRITY_TIMEOUT_MS);
   try {
     if (typeof window === 'undefined' || typeof crypto === 'undefined' || !crypto.subtle) {
       failIntegrity('Sandbox integrity requires Web Crypto in a browser context');
@@ -289,13 +403,26 @@ export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise
     }
     const verify = async (path: string, expected: string): Promise<ArrayBuffer> => {
       const url = `${VAULT_SANDBOX_ORIGIN}${path}`;
-      const response = await fetch(url, {
-        cache: 'no-store', mode: 'cors', credentials: 'omit', redirect: 'error', signal: controller.signal,
-      });
+      let response: Response;
+      let bytes: ArrayBuffer;
+      try {
+        // A redirect is never followed: `manual` returns it as an opaque response, refused below
+        // as a mismatch, where `error` would be indistinguishable from a lost connection.
+        response = await fetch(url, {
+          cache: SRI_LOADED_RESOURCE_PATHS.has(path) ? 'no-cache' : 'no-store',
+          mode: 'cors', credentials: 'omit', redirect: 'manual', signal: controller.signal,
+        });
+      } catch {
+        failUnreachable(`Sandbox resource could not be downloaded: ${path}`);
+      }
       if (response.status !== 200 || response.redirected || response.url !== url || response.type !== 'cors') {
         failIntegrity(`Sandbox resource was missing, redirected, or not CORS-readable: ${path}`);
       }
-      const bytes = await response.arrayBuffer();
+      try {
+        bytes = await response.arrayBuffer();
+      } catch {
+        failUnreachable(`Sandbox resource download did not finish: ${path}`);
+      }
       if (await sha256Subresource(bytes) !== expected) failIntegrity(`Sandbox resource hash mismatch: ${path}`);
       return bytes;
     };
@@ -305,10 +432,13 @@ export async function verifyVaultSandboxIntegrity(signal?: AbortSignal): Promise
       || manifest.schema !== pin.schema || manifest.algorithm !== pin.algorithm
       || JSON.stringify(manifest.resources) !== JSON.stringify(pin.resources)) failIntegrity('Sandbox manifest identity mismatch');
     await Promise.all(VAULT_SANDBOX_REQUIRED_RESOURCE_PATHS.map((path) => verify(path, resources[path])));
-    if (controller.signal.aborted) failIntegrity('Sandbox verification was cancelled or timed out');
+    if (controller.signal.aborted) failUnreachable('Sandbox verification timed out');
   } catch (error) {
     if (signal?.aborted) throw new VaultSandboxError('sandbox_reset', 'Sandbox verification was cancelled', true);
+    // A mismatch found before the deadline stays a mismatch; anything else the deadline cut short
+    // (a body still being read or parsed) is a slow connection.
     if (error instanceof VaultSandboxError) throw error;
+    if (timedOut) failUnreachable('Sandbox verification timed out');
     failIntegrity('Unable to verify the pinned sandbox release. Check connectivity and update Avibe if necessary.');
   } finally {
     clearTimeout(timer);
@@ -702,6 +832,28 @@ export class VaultSandboxClient {
     payload?: unknown,
     options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string } = {},
   ): Promise<T> {
+    if (!PASSKEY_OPS.has(op)) return this.send<T>(op, payload, options);
+    // The page already moved to the browser: never start a step that can only fail again.
+    if (vaultPasskeyHandoff() === 'fallback') {
+      throw new VaultSandboxError('sandbox_browser_required', 'Continue this protected Vault step in the browser');
+    }
+    const reserved = options.authorizationWindow ? authorizationWindows.get(options.authorizationWindow) : undefined;
+    let result: T;
+    try {
+      result = await this.send<T>(op, payload, options);
+    } catch (error) {
+      recordVaultPasskeyOutcome(error, cancelMayBeFailure(op, reserved, error));
+      throw error;
+    }
+    recordVaultPasskeyOutcome(null);
+    return result;
+  }
+
+  private async send<T>(
+    op: VaultSandboxOp,
+    payload: unknown,
+    options: { timeoutMs?: number; interactive?: boolean; authorizationWindow?: string },
+  ): Promise<T> {
     await this.readyPromise;
     this.assertLive();
     if (options.authorizationWindow) {
@@ -771,7 +923,34 @@ export class VaultSandboxClient {
         pending.reject(error instanceof Error ? error : new Error('Sandbox message could not be sent'));
       }
     }
+    const authorization = options.authorizationWindow ? authorizationWindows.get(options.authorizationWindow) : undefined;
+    if (authorization && ENDS_WITH_ITS_WINDOW.has(op)) this.endWhenWindowCloses(id, authorization, promise);
     return promise;
+  }
+
+  /** Ends request `id` as a closed window once its reserved window has closed and no answer came
+   *  within the grace. An answer that arrives after that is dropped: nothing is forwarded. */
+  private endWhenWindowCloses(id: string, authorization: ReservedWindow, settled: Promise<unknown>): void {
+    let grace: number | null = null;
+    const poll = window.setInterval(() => {
+      if (grace !== null || !authorization.windowClosed()) return;
+      grace = window.setTimeout(() => {
+        const pending = this.pending.get(id);
+        // The frame asked for its slot (`ui.show`): the sandbox is showing something or waiting on
+        // the user there, so this step is not over and is never cut short.
+        if (!pending || this.modalVisible) return;
+        window.clearTimeout(pending.timer);
+        this.pending.delete(id);
+        this.interactiveRequests.delete(id);
+        if (this.pending.size === 0 && this.modalVisible) this.setModalVisible(false);
+        pending.reject(new VaultSandboxError('authorization_window_closed', 'The sandbox window closed before the step finished', true));
+      }, WINDOW_CLOSED_GRACE_MS);
+    }, WINDOW_CLOSED_POLL_MS);
+    const stop = (): void => {
+      window.clearInterval(poll);
+      if (grace !== null) window.clearTimeout(grace);
+    };
+    settled.then(stop, stop);
   }
 
   status(wrapMeta?: string | null): Promise<VaultSandboxStatusResult> {
@@ -834,8 +1013,13 @@ export class VaultSandboxClient {
     return solana ? assertEd25519Record(sealed) : sealed;
   }
 
+  /** Shows a protected value in the secure window. One record is the original shape; several (a
+   *  whole secret's fields, from a build that lists them) go as `items` with the default field's label
+   *  as display text, since the default record name is the secret's own name. */
   reveal(
-    payload: { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext },
+    payload:
+      | { material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }
+      | { items: Array<{ material: ProtectedUnlockMaterialLike; context: VaultSignedOperationContext }>; defaultFieldLabel: string },
     authorizationWindow?: string,
   ): Promise<{ completed: boolean }> {
     return this.request<{ completed: boolean }>('reveal', payload, {

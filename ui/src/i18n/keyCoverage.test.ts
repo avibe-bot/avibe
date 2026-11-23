@@ -874,6 +874,9 @@ const KEY_PREFIXES = [
  * `resolvesIn`, so a stem whose family exists resolves and never reaches here.
  */
 const NON_KEY_LITERALS = [
+  // Mobile request operations / native bridge method, never translation keys.
+  'health.connect',
+  'health.refresh',
   // Monaco theme tokens and editor actions. Read by the editor, never by i18next.
   'editor.action.selectAll',
   'editor.background',
@@ -906,6 +909,7 @@ const NON_KEY_LITERALS = [
   'turn.start',
   'vaults.updated',
   'workbench.events.bridge.status',
+  'voice.consent.updated',
   // Event-channel names on the vault sandbox bridge and the permissions surface.
   'confirm.surface',
   'instance.permissions.mutate',
@@ -917,32 +921,59 @@ const NON_KEY_LITERALS = [
   'app.info',
   'app.dismiss',
   'app.openExternal',
+  'app.openPage',
   'app.returnToInstance',
   'app.setAccountActionAvailable',
   'app.showAccount',
   'app.showInstances',
+  'appLock.setPolicy',
+  'appLock.status',
+  'auth.signInWithProvider',
+  'auth.signInWithPasskey',
+  'auth.providers',
   'auth.requestOtp',
   'auth.signInWithPassword',
   'auth.verifyOtp',
   'auth.verifyPasskey',
   'auth.verifySecondFactor',
   'badge.set',
+  // A native capability key; the shell advertises it beside the method names.
+  'c1.share_draft',
+  'device.describe',
+  'direct.handover',
   'direct.status',
   'direct.transportChanged',
   'haptics.impact',
   'haptics.notify',
   'haptics.selection',
+  'liveActivity.openSettings',
+  'liveActivity.observe',
+  'liveActivity.setting',
+  'liveActivity.setSetting',
   'notifications.reconcile',
   'session.bootstrap',
   'session.logout',
   'session.refresh',
   'session.selectInstance',
+  'systemSchedule.request',
+  'systemSchedule.cancel',
+  'systemSchedule.capabilities',
   'push.opened',
   'push.status',
   'push.subscribe',
   'push.unsubscribe',
+  'share.capabilities',
+  'share.present',
   'viewport.setOuterScrollLocked',
   'voice.permission',
+  'voice.capture',
+  'voice.capturePrepare',
+  'voice.captureStart',
+  'voice.captureStop',
+  'voice.hold',
+  'voice.holdSurfaces',
+  'voice.holdAdopt',
+  'voice.holdReject',
 
   // Server error codes. `serverCopy.ts` renders these through a `defaultValue`,
   // so the server's own message shows when the client has no copy for the code.
@@ -972,6 +1003,7 @@ const NON_KEY_LITERALS = [
   'avibe.vault.addTier',
   'avibe.vault.crypto',
   'avibe.vault.hdAddressCheckFailed',
+  'avibe.voiceInput.deviceId',
   'avibe.workbench.windows.v1',
   'vibe.nativePush.pendingRegistration',
   'vibe.nativePush.disabledIntent',
@@ -1333,14 +1365,6 @@ describe('app i18n key coverage', () => {
         'remoteAuthorization.unavailable.body',
       ]),
     );
-    // DirectHome is native-only. Widening its props to every backend made the
-    // checker demand nonexistent Avibe Direct prose. Brand names themselves
-    // now belong to catalog metadata; exact/defaulted dedup stays covered by
-    // fixture.both in the collector test above.
-    for (const backend of ['claude', 'codex', 'opencode']) {
-      expect(referenced).toContainEqual({ key: `settings.models.direct.backend.${backend}.detail`, counted: false, listed: false, demand: 'exact' });
-    }
-    expect(referenced.some(({ key }) => key === 'settings.models.direct.backend.vibey.detail')).toBe(false);
   });
 
   // A name the bundles never had is not an existence gap: nothing here can tell
