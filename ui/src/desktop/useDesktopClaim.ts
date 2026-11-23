@@ -48,7 +48,7 @@ const PROBLEMS: Record<string, BindProblem> = {
   // avibe.bot answered, but not with a verdict this page can name: say only that it did not finish.
   code_delivery_unknown: 'unknown', factor_delivery_unknown: 'unknown',
   bridge_unavailable: 'unreachable',
-  authentication_required: 'signedOut', account_changed: 'signedOut', signed_out: 'signedOut',
+  authentication_required: 'signedOut', account_changed: 'signedOut', signed_out: 'signedOut', subject_mismatch: 'signedOut',
   rate_limited: 'rateLimited',
   expired: 'expired', decision_changed: 'expired', stale_generation: 'expired', invalid_or_expired: 'expired',
   claim_in_progress: 'busy', busy: 'busy', operation_in_progress: 'busy',
@@ -57,7 +57,10 @@ const PROBLEMS: Record<string, BindProblem> = {
   // avibe.bot no longer accepts this computer (a deleted, never-paired one; or one whose earlier
   // pairing needs a browser on it): trying again cannot change it, so it is a dead end.
   binding_unavailable: 'unavailable', paired_installation_loopback_required: 'unavailable',
-  already_bound: 'changed', local_binding_changed: 'changed', local_instance_conflict: 'changed',
+  already_bound: 'changed', local_binding_changed: 'changed',
+  // An older Desktop's attempt still holds this computer (shown as not bound): it is still running,
+  // or still publishing. Pressing again gets the same refusal, so the sentence says to wait.
+  local_instance_conflict: 'busy', pairing_recovery_required: 'busy',
   local_binding_unavailable: 'notResponding', local_claim_unavailable: 'notResponding',
   claim_unavailable: 'expired',
   reauthentication_failed: 'reauth',

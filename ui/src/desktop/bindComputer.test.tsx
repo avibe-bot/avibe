@@ -457,3 +457,18 @@ it('offers held names other than the one already typed', async () => {
   expect(screen.queryByRole('button', { name: 'maxlab' })).toBeNull();
   expect(screen.getByRole('button', { name: 'maxhome' })).toBeTruthy();
 });
+
+it.each(['local_instance_conflict', 'pairing_recovery_required'])('an older attempt still holding this computer (%s) says to wait, not to start again', async (code) => {
+  mount({ observe_current_binding: { state: code === 'local_instance_conflict' ? 'legacy_wait' : 'legacy_publication_pending' },
+    open: { receipt: 'r' }, read: refuse(code) });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  await screen.findByText(copy.problem.busy);
+  expect(screen.queryByRole('button', { name: copy.restart })).toBeNull();
+});
+
+it('a sign-in that no longer matches the account asks to sign in again', async () => {
+  mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')), confirm: refuse('subject_mismatch') });
+  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+  fireEvent.click(await screen.findByRole('button', { name: copy.confirm }));
+  await screen.findByText(copy.problem.signedOut);
+});

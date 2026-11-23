@@ -141,7 +141,7 @@
         "signedOut": "Your sign-in has expired. Sign in again, then bind.",
         "rateLimited": "Too many attempts. Wait a moment, then try again.",
         "expired": "This step expired and did not finish.",
-        "busy": "An earlier binding of this computer is still running. Wait a moment, then open this again.",
+        "busy": "An earlier binding of this computer is still running. Wait a moment, then try again.",
         "notResponding": "Avibe on this computer is not responding. This did not finish.",
         "changed": "This computer’s binding has just changed. Nothing more was done here.",
         "codeInvalid": "That code is wrong or has expired.",
@@ -151,7 +151,7 @@
         "storage": "This computer cannot save the sign-in right now. Sign in again later.",
         "unavailable": "This computer cannot be bound right now. Please contact <mail>{{support}}</mail>."
       },
-      "changed": "Verified, but these changed since you confirmed: {{fields}}. Check them, then press Bind again.",
+      "changed": "Verified, but these changed since you confirmed: {{fields}}. Check them, then press it again.",
       "field": {
         "account": "account",
         "computer": "computer",
@@ -159,7 +159,7 @@
         "availability": "whether the name is available"
       },
       "saving": "Verified. Saving the sign-in…",
-      "changedPlain": "Verified, but something changed at avibe.bot, so press Bind once more.",
+      "changedPlain": "Verified, but something changed at avibe.bot, so press it once more.",
       "otherAccount": "This computer is bound to another account.",
       "signInOther": "Sign in with that account",
       "existingTitle": "Bind this computer",
