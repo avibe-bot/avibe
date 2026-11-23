@@ -12,8 +12,6 @@ mod connect;
 #[path = "../../tests/direct/windows_credentials.rs"]
 mod credential_tests;
 mod credentials;
-#[cfg(test)]
-use credentials::Credential;
 pub use credentials::WindowRegistration;
 pub use quiet::PublicCensus;
 #[cfg(test)]
@@ -72,13 +70,10 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use transport::Link;
 
-/// Borrowed native route material, deliberately neither serializable nor Debug.
-/// Never put the proxy credential in a URL, browser argument, page bridge or log.
+/// Listener location only. Each routed window supplies its own registration.
 pub struct Route<'a> {
     pub host: &'a str,
     pub proxy: std::net::SocketAddrV4,
-    pub username: &'a str,
-    pub password: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -211,19 +206,16 @@ impl Client {
         }
     }
 
-    /// The route describes the proxy, not direct-path readiness. Its port and
-    /// credential survive loss of direct. Drop the client only after native detach.
+    /// The route describes the proxy, not direct-path readiness. Its port
+    /// survives loss of direct. Drop the client only after native detach.
     pub fn route(&self) -> Option<Route<'_>> {
         let listener = &self.listener;
         if !listener.is_alive() {
             return None;
         }
-        let (username, password) = listener.access.windows.legacy().native_login();
         Some(Route {
             host: self.host.host(),
             proxy: std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, listener.port),
-            username,
-            password,
         })
     }
 
@@ -247,14 +239,6 @@ impl Client {
 
     pub fn path_changes(&self) -> watch::Receiver<PathStatus> {
         self.status.subscribe()
-    }
-    /// Trusted shell window identity. Idempotent until revoked; reopening a
-    /// window with the same label gets an unrelated secret and census.
-    pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {
-        self.listener.access.window_credential(window)
-    }
-    pub fn revoke_window(&self, registration: &WindowRegistration) {
-        self.listener.access.windows.revoke(registration)
     }
     pub fn handover(&self) -> Handover {
         Handover {
