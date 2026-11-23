@@ -81,6 +81,7 @@ const HOP_REF: RouteHopRef = {
 /** Every field the projection states, optional one included — so the schema's
  *  closed-object set equality below is a relation in both directions. */
 const CANDIDATE: Required<ModelCandidate> = {
+  match_kind: 'closest',
   id: 'glm-5.2',
   display_name: 'GLM 5.2',
   reasoning_efforts: ['low', 'high'],
@@ -99,11 +100,12 @@ const CANDIDATE: Required<ModelCandidate> = {
 
 /** The fields an exact models.dev match adds to a provider candidate. */
 const MODELS_DEV_FIELDS = [
-  'models_dev_id', 'context_window', 'max_output_tokens', 'input_modalities',
+  'match_kind', 'models_dev_id', 'context_window', 'max_output_tokens', 'input_modalities',
   'output_modalities', 'supports_tools', 'supports_reasoning',
 ];
 
 const MATCH: ModelsDevMatch = {
+  match_kind: 'exact',
   provider_id: 'zhipuai',
   provider_name: 'Zhipu AI',
   model_id: 'glm-5.2',

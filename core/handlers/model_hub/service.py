@@ -6622,7 +6622,7 @@ class ModelHubService:
         return suppliers, display_name, reasoning_efforts
 
     def _models_dev_descriptions(self, model_ids: list[str], *, fetch_catalog: bool = True) -> dict[str, dict]:
-        """Exact models.dev matches for provider candidates; empty when unknown.
+        """Conservative models.dev descriptions for provider candidates; empty when unknown.
 
         The description is optional: an unreadable catalog leaves every
         candidate as its suppliers describe it rather than failing the picker.
@@ -6630,11 +6630,11 @@ class ModelHubService:
 
         if not model_ids:
             return {}
-        from vibe.models_dev_catalog import cached_models_dev_catalog, exact_models_dev_matches
+        from vibe.models_dev_catalog import cached_models_dev_catalog, models_dev_metadata_matches
 
         try:
             catalog = self.models_dev_catalog() if fetch_catalog else cached_models_dev_catalog()
-            return exact_models_dev_matches(model_ids, dict(catalog))
+            return models_dev_metadata_matches(model_ids, dict(catalog))
         except Exception as exc:  # noqa: BLE001 - optional metadata never fails a read
             logger.info("Model Hub candidates have no models.dev metadata: %s", type(exc).__name__)
             return {}
@@ -6804,6 +6804,7 @@ class ModelHubService:
                         field: getattr(admitted, field)
                         for field in enriched_fields
                     },
+                    **({"match_kind": described[model_id]["match_kind"]} if enriched_fields else {}),
                     **protocol_payload(admitted.id),
                 }
             )
@@ -7215,7 +7216,7 @@ class ModelHubService:
         A provider row takes models.dev's description as it is written (see
         ``_provider_candidate``). Written before any copy was cached, by the
         picker or a seed, it has none, and an Agent budgets it with default
-        limits. Once a copy names its id exactly, the row gets each limit it
+        limits. Once a copy describes its id, the row gets each limit it
         lacks and the ``models_dev_id`` they came from. A limit already set
         stands, and a row models.dev has described is not described again, so
         a limit its user cleared stays cleared. Built-in rows are their CLI's
@@ -8230,6 +8231,10 @@ class ModelHubService:
             raise ModelHubError("backend_model_catalog_invalid")
         rows: list[ModelHubBackendModelConfig] = []
         for item in payload:
+            # A caller may echo the candidate projection. Provenance describes
+            # the lookup, not the stored backend row (which keeps models_dev_id).
+            if isinstance(item, dict) and "match_kind" in item:
+                item = {key: value for key, value in item.items() if key != "match_kind"}
             if backend == "claude" and isinstance(item, dict) and item.get("id") == "default":
                 raise ModelHubError("backend_model_id_invalid")
             try:
