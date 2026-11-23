@@ -3793,10 +3793,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 }
 .model-hub-model-preset:hover { border-color: var(--border-strong); color: var(--foreground); }
 
-.model-hub-model-note {
-  font-size: var(--model-hub-model-note-size);
-  color: var(--muted);
-}
 .model-hub-model-error {
   font-size: var(--model-hub-model-note-size);
   font-weight: 600;

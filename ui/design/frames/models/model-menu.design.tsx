@@ -224,6 +224,27 @@ const designFrames = frames([
     ),
   },
   {
+    name: 'edit-model-effort-info',
+    title: '编辑模型 · 推理强度怎么填（ⓘ）',
+    width: 1000,
+    height: 900,
+    themes: ['light'],
+    status: 'shipped',
+    fixtures: { api: customApi },
+    click: ['[aria-label="{t:settings.models.gateway.modelEditor.effortInfoLabel}"]'],
+    render: () => (
+      <BackendModelEditorDialog
+        open
+        backend="claude"
+        model={editing}
+        takenIds={claudeTaken}
+        effortSuggestions={claudeEfforts}
+        onCancel={() => {}}
+        onCommit={() => {}}
+      />
+    ),
+  },
+  {
     name: 'custom-model',
     title: '添加自定义模型（OpenCode）',
     width: 1000,
