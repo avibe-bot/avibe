@@ -26,7 +26,8 @@ export type ComputerBinding =
   /** Bound here and owned by this account (`owner_observed`), or bound here and not readable
    *  right now: shown as bound while it is read again quietly. Not a connection report. */
   | { state: 'bound'; host: string | null; url: string | null }
-  /** Bound here, and avibe.bot lists it under another account (`bound_owner_unconfirmed`). */
+  /** Bound here, and this account's list does not show it as its own (`bound_owner_unconfirmed`:
+   *  shared with this account, owned by another, or no longer listed). Not proof of another owner. */
   | { state: 'otherAccount' }
   /** The read failed and nothing here says this computer is bound. */
   | { state: 'unknown' }
@@ -62,7 +63,11 @@ export function ComputerBindingCard({ binding, computer, busy = false, onBind, o
       {binding.url ? <a className="underline underline-offset-4" href={binding.url} target="_blank" rel="noreferrer">{binding.host}</a> : binding.host}
     </p>}
     {binding.state === 'unbound' && <>{line(t('desktopAccount.bind.notBound'))}{action(t('desktopAccount.bind.action'), onBind, true)}</>}
-    {binding.state === 'otherAccount' && <>{line(t('desktopAccount.bind.otherAccount'))}{action(t('desktopAccount.bind.signInOther'), onSignInOther)}</>}
+    {binding.state === 'otherAccount' && <>{line(t('desktopAccount.bind.otherAccount'))}
+      <div className="mt-4 flex flex-wrap gap-3">
+        <Button variant="outline" disabled={busy} onClick={onSignInOther}>{t('desktopAccount.bind.signInOther')}</Button>
+        <Button variant="ghost" disabled={busy} onClick={onRefresh}>{t('desktopAccount.bind.checkAgain')}</Button>
+      </div></>}
     {binding.state === 'unknown' && <>{line(t('desktopAccount.bind.unknown'))}{action(t('desktopAccount.bind.checkAgain'), onRefresh)}</>}
     {binding.state === 'upgrade' && <>{line(t('desktopAccount.bind.upgrade'))}{action(t('update.action.check'), onUpdates)}</>}
     {binding.state === 'repair' && line(t('desktopAccount.bind.repair'))}
@@ -148,8 +153,11 @@ const BIND_CHROME: SignInChromeValue = { Frame: BindSignInFrame, platform: 'desk
  */
 export function BindDialog(props: BindDialogProps) {
   const { t } = useTranslation();
-  return <Dialog open onOpenChange={(open) => { if (!open) props.onClose(); }}>
-    <DialogContent data-bind-dialog className="max-w-lg" closeLabel={t('common.close')}>
+  // Recovery codes are shown once: the dialog does not close until the person says they saved them.
+  const held = props.step.kind === 'codes';
+  return <Dialog open onOpenChange={(open) => { if (!open && !held) props.onClose(); }}>
+    <DialogContent data-bind-dialog className={held ? 'max-w-lg [&>button:last-child]:hidden' : 'max-w-lg'} closeLabel={t('common.close')}
+      keepOnOutsideClick={held} onEscapeKeyDown={(event) => { if (held) event.preventDefault(); }}>
       <BindDialogBody {...props} />
     </DialogContent>
   </Dialog>;

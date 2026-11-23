@@ -160,8 +160,8 @@
       },
       "saving": "Verified. Saving the sign-in…",
       "changedPlain": "Verified, but something changed at avibe.bot, so press it once more.",
-      "otherAccount": "This computer is bound to another account.",
-      "signInOther": "Sign in with that account",
+      "otherAccount": "This computer’s binding is not under this account.",
+      "signInOther": "Sign in with the account it is bound to",
       "existingTitle": "Bind this computer",
       "boundTo": "Binds to",
       "confirmExisting": "Bind"

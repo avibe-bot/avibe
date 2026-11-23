@@ -160,8 +160,8 @@
       },
       "saving": "验证好了，正在保存登录…",
       "changedPlain": "验证好了，但 avibe.bot 那边有了变化，要再按一次。",
-      "otherAccount": "这台电脑绑定在另一个账号下。",
-      "signInOther": "用那个账号登录",
+      "otherAccount": "这台电脑的绑定不在这个账号名下。",
+      "signInOther": "用绑定它的账号登录",
       "existingTitle": "绑定这台电脑",
       "boundTo": "绑定到",
       "confirmExisting": "绑定"

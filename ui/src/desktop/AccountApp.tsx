@@ -200,7 +200,12 @@ export function AccountApp() {
   // commits material. Native still owns authoritative invalidation/cleanup.
   const recoveryProtection = useRef<{ generation: number } | null>(null);
   const direct = material && material.generation === state?.generation ? material.result : null;
-  const awaitingRecoveryAcknowledgement = direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length;
+  // Recovery codes a binding's authenticator setup returned are shown once, like the ordinary ones:
+  // nothing leaves the document until the person says they saved them.
+  const claimCodes = claim.step?.kind === 'codes';
+  const claimCodesShown = useRef(false);
+  useLayoutEffect(() => { claimCodesShown.current = claimCodes; }, [claimCodes]);
+  const awaitingRecoveryAcknowledgement = (direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length) || claimCodes;
   const [inputGeneration, setInputGeneration] = useState(state?.generation);
   if (inputGeneration !== state?.generation) {
     setInputGeneration(state?.generation);
@@ -221,7 +226,7 @@ export function AccountApp() {
       const view: unknown = (detail as { view?: unknown } | null)?.view;
       const token: unknown = (detail as { presentationToken?: unknown } | null)?.presentationToken;
       if (!isDesktopClientView(view) || typeof token !== 'string' || !token.length
-        || new TextEncoder().encode(token).length > 128 || recoveryProtection.current) return;
+        || new TextEncoder().encode(token).length > 128 || recoveryProtection.current || claimCodesShown.current) return;
       presentDesktopClient(view, token, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
     };
     window.addEventListener(DESKTOP_PRESENT_EVENT, present);
@@ -267,7 +272,7 @@ export function AccountApp() {
   }, [send, state?.generation, state?.consent?.instance_id]);
   const leave = useCallback((type: 'cancel' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
     // Only the saved-codes action acknowledges; native invalidation remains independent.
-    if (recoveryProtection.current && !recoveryAcknowledged) return;
+    if ((recoveryProtection.current || claimCodesShown.current) && !recoveryAcknowledged) return;
     epoch.current += 1;
     recoveryProtection.current = null;
     setMaterial(null);

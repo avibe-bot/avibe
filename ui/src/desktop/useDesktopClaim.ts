@@ -143,8 +143,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     saving.current = null;
   }, []);
   const [binding, setBinding] = useState<ComputerBinding>({ state: 'reading' });
-  // An accepted sign-in waiting to be saved: not shown on the page; Bind continues it first.
+  // An accepted sign-in waiting to be saved: Bind continues it first.
   const recovery = useRef<string | null>(null);
+  // Closing the flow reads again itself (close()); a flow opening or ending is not a new showing.
+  const flowOpen = useRef(false);
   const quiet = useRef<number | null>(null);
   // The flow belongs to the generation it started in: a changed account or document generation
   // ends it (native has fenced it already), without a state update from an effect.
@@ -205,12 +207,19 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }, [call]);
   useEffect(() => () => { if (quiet.current !== null) window.clearTimeout(quiet.current); }, []);
 
+  // An accepted sign-in waiting to be saved is the one thing to do here, whatever the card can read
+  // (an occupied binding slot blocks observation; an owed factor shows no card): show it as the
+  // dialog's Continue. Showing it decides nothing; only the press resumes.
   const inspect = useCallback(async () => {
     const reply = await call('desktop_account_recovery', { type: 'inspect' });
     if (!reply) return;
-    const receipt = reply.ok ? str(reply.value?.receipt) : null;
-    recovery.current = reply.ok && reply.value?.state === 'available' && receipt ? receipt : null;
-  }, [call]);
+    const receipt = reply.ok && reply.value?.state === 'available' ? str(reply.value?.receipt) : null;
+    recovery.current = null;
+    if (!receipt || flowOpen.current) { recovery.current = receipt; return; }
+    if (saving.current?.timer) window.clearTimeout(saving.current.timer);
+    saving.current = { tries: 0, running: false, recover: receipt, timer: null, published: false, thenOpen: false };
+    setStep({ kind: 'saving', recover: true });
+  }, [call, setStep]);
 
   // The two reads, once per showing of the Account page and per account generation.
   // A changed generation drops the old flow's handles and any reply still on its way.
@@ -223,14 +232,18 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   }, [generation]);
   // (Before the reads below, so a new generation's read is not dropped as the old one's.)
   const showing = enabled && state?.account.status === 'signed_in';
-  // Closing the flow reads again itself (close()); a flow opening or ending is not a new showing.
-  const flowOpen = useRef(false);
+  // A sign-in accepted while binding may publish an account that still owes a second factor; its
+  // recovery must stay reachable then too.
   useEffect(() => { flowOpen.current = step !== null; }, [step]);
+  const recoverable = enabled && (state?.account.status === 'signed_in' || state?.account.status === 'second_factor_required');
   useEffect(() => {
     if (!showing || flowOpen.current) return;
     void observe();
+  }, [showing, generation, observe]);
+  useEffect(() => {
+    if (!recoverable || flowOpen.current) return;
     void inspect();
-  }, [showing, generation, observe, inspect]);
+  }, [recoverable, generation, inspect]);
 
 
   // Leaving the page ends the review it held. Cancelling only attenuates this receipt.
@@ -520,6 +533,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (answer === 'saved' && current.thenOpen) {
       stopSaving();
       await openReview();
+    } else if (answer === 'saved' && !handles.current.submission) {
+      // Continued from the page, not from a binding: done; read this computer again.
+      stopSaving();
+      reset();
+      void observe();
     } else if (answer === 'saved') {
       current.recover = null;
       current.tries = 0;
@@ -532,7 +550,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       stopSaving();
       setStep({ kind: 'problem', problem: answer === 'storage_blocked' ? 'storage' : 'expired' });
     }
-  }), [run, call, openReview, setStep, stopSaving]);
+  }), [run, call, openReview, setStep, stopSaving, reset, observe]);
 
   const submissionFrom = (reply: Reply | null): string | null => reply?.ok ? str(reply.value?.submission) : null;
 
@@ -564,6 +582,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       if (!submission) { setStep(problemFor('invalid_response')); return; }
       afterVerification(submission);
     } else if (step?.kind === 'factorSetup' && h.setup) {
+      // Native takes six ASCII digits only and ends the claim on anything else: correct it here.
+      const digits = code.replace(/\s/g, '');
+      if (!/^\d{6}$/.test(digits)) { setStep({ ...step, invalid: true }); return; }
+      code = digits;
       const reply = await call('desktop_claim_review', { type: 'finish_totp_setup', receipt: h.receipt, setup: h.setup, code });
       if (!reply) return;
       if (!reply.ok) {

@@ -52,14 +52,14 @@ function mount(answers: Record<string, Answer>, state: DesktopClientState = sign
 it('mounting, re-showing and reconnecting only read; nothing decides without a press', async () => {
   const deciding = Object.fromEntries(DECIDING.map((type) => [type, () => { throw new Error(`${type} without a press`); }]));
   const page = mount({ ...deciding, 'recovery:inspect': { state: 'available', receipt: 'rec-1' } });
-  await screen.findByRole('button', { name: copy.action });
+  await screen.findByRole('button', { name: en.common.continue });
   expect(page.types().sort()).toEqual(['inspect', 'observe_current_binding']);
   // A newer snapshot of the same account (a reconnect, a broadcast) reads nothing again.
   await act(async () => { window.dispatchEvent(new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...signedIn, revision: signedIn.revision + 1 } })); });
   // Showing the page again is a new document: it reads again, and still decides nothing.
   cleanup();
   const again = mount({ ...deciding, 'recovery:inspect': { state: 'available', receipt: 'rec-1' } });
-  await screen.findByRole('button', { name: copy.action });
+  await screen.findByRole('button', { name: en.common.continue });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
   expect([...page.types(), ...again.types()].filter((type) => DECIDING.includes(type))).toEqual([]);
   expect(again.types().filter((type) => type === 'open' || type === 'read')).toEqual([]);
@@ -169,18 +169,19 @@ it('an error is one sentence and one next step, never a code', async () => {
   expect(screen.getAllByRole('button', { name: en.common.close }).length).toBeGreaterThan(0);
 });
 
-it('an accepted sign-in waiting to be saved is continued from Bind, on a press, then the name opens', async () => {
+it('an accepted sign-in waiting to be saved shows as Continue, resumes only on the press, then reads this computer again', async () => {
+  let observes = 0;
   const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-1' }, 'recovery:resume': { state: 'saved' },
-    open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+    observe_current_binding: () => { observes += 1; return { state: 'no_published_binding' }; } });
   const button = await screen.findByRole('button', { name: en.common.continue });
   expect(screen.getByText(copy.recovery)).toBeTruthy();
   expect(page.types()).not.toContain('resume');
-  expect(page.types()).not.toContain('open');
+  const before = observes;
   fireEvent.click(button);
   await waitFor(() => expect(page.actions.find((each) => each.type === 'resume')).toEqual({ type: 'resume', receipt: 'rec-1' }));
-  await screen.findByText(en.domainField.free);
-  expect(page.types().indexOf('resume')).toBeLessThan(page.types().indexOf('open'));
+  await screen.findByRole('button', { name: copy.action });
+  expect(observes).toBeGreaterThan(before);
+  expect(page.types()).not.toContain('open');
 });
 
 /** Opens binding and verifies a code, up to the moment avibe.bot accepted it. */
@@ -246,14 +247,67 @@ it.each(['a', 'ab--cd', `${'a'.repeat(47)}`, '-ab', 'ab-'])('keeps %s in the fie
 it('a resumed sign-in that still needs saving keeps its new receipt for the next press', async () => {
   let resumes = 0;
   const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-1' },
-    'recovery:resume': () => (++resumes === 1 ? { state: 'available', receipt: 'rec-2' } : { state: 'saved' }),
-    open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
-  fireEvent.click(await screen.findByRole('button', { name: copy.action }));
+    'recovery:resume': () => (++resumes === 1 ? { state: 'available', receipt: 'rec-2' } : { state: 'saved' }) });
   fireEvent.click(await screen.findByRole('button', { name: en.common.continue }));
   await waitFor(() => expect(resumes).toBe(1));
   fireEvent.click(await screen.findByRole('button', { name: en.common.continue }));
   await waitFor(() => expect(page.actions.filter((each) => each.type === 'resume')).toEqual([
     { type: 'resume', receipt: 'rec-1' }, { type: 'resume', receipt: 'rec-2' }]));
+});
+
+it('an accepted sign-in stays reachable while its account still owes a second factor', async () => {
+  const owing = { ...signedIn, account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp'] } } as DesktopClientState;
+  const page = mount({ 'recovery:inspect': { state: 'available', receipt: 'rec-3' } }, owing);
+  await screen.findByRole('button', { name: en.common.continue });
+  expect(page.types()).toContain('inspect');
+  expect(page.types()).not.toContain('observe_current_binding');
+});
+
+it('an accepted sign-in stays reachable when the binding cannot be observed', async () => {
+  mount({ observe_current_binding: refuse('claim_in_progress'), 'recovery:inspect': { state: 'available', receipt: 'rec-4' } });
+  await screen.findByRole('button', { name: en.common.continue });
+});
+
+it('recovery codes from a binding hold the document until they are saved', async () => {
+  const page = mount({ ...proofAnswers,
+    review_after_proof: (action: Action) => (action.submission === 's' ? refuse('authentication_required')() : { state: 'bound' }),
+    prepare_totp_setup: { state: 'totp_setup', setup: 'setup-1', manual_key: 'KEY-FIXTURE', qr_payload: 'otpauth://totp/fixture' },
+    finish_totp_setup: { state: 'enrollment_accepted', submission: 's2', recovery: { state: 'issued', codes: ['•••••-••001', '•••••-••002'] } } });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'enroll', methods: [] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.desktopAccount.addAuthenticator }, { timeout: 5000 }));
+  fireEvent.change(await screen.findByLabelText(en.desktopAccount.authenticatorCode), { target: { value: '123456' } });
+  fireEvent.click(screen.getByRole('button', { name: en.desktopAccount.finishFactor }));
+  await screen.findByText('•••••-••001');
+  expect(screen.queryByRole('button', { name: en.desktopAccount.backWorkbench })).toBeNull();
+  fireEvent.keyDown(window, { key: 'Escape' });
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+  expect(screen.getByText('•••••-••001')).toBeTruthy();
+  expect(page.actions.some((each) => each.type === 'cancel')).toBe(false);
+  fireEvent.click(screen.getByRole('button', { name: en.desktopAccount.savedCodes }));
+  await screen.findByRole('heading', { name: copy.boundTitle }, { timeout: 5000 });
+});
+
+it('an authenticator code that is not six digits stays in place and is never sent', async () => {
+  const page = mount({ ...proofAnswers,
+    review_after_proof: refuse('authentication_required'),
+    prepare_totp_setup: { state: 'totp_setup', setup: 'setup-1', manual_key: 'KEY-FIXTURE', qr_payload: 'otpauth://totp/fixture' } });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'enroll', methods: [] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.desktopAccount.addAuthenticator }, { timeout: 5000 }));
+  fireEvent.change(await screen.findByLabelText(en.desktopAccount.authenticatorCode), { target: { value: '12 34' } });
+  fireEvent.click(screen.getByRole('button', { name: en.desktopAccount.finishFactor }));
+  await screen.findByText(copy.problem.codeInvalid);
+  expect(screen.getByText('KEY-FIXTURE')).toBeTruthy();
+  expect(page.types()).not.toContain('finish_totp_setup');
+});
+
+it('a binding not under this account offers signing in with that account, or checking again', async () => {
+  mount({ observe_current_binding: { state: 'bound_owner_unconfirmed' } });
+  await screen.findByRole('button', { name: copy.signInOther });
+  expect(screen.getByRole('button', { name: copy.checkAgain })).toBeTruthy();
 });
 
 it('another document never sends claim commands; its Account card opens a real Account document', async () => {
