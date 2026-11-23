@@ -1318,7 +1318,7 @@ def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys, consu
         else:
             client = app.test_client()
             pending = client.get("/api/remote-access/status").get_json()["pending_pairing"]
-            assert pending == {"phase": "redeemed", "can_resume": True}
+            assert pending == {"phase": "redeemed", "can_resume": True, "replay_state": "local_archive"}
             response = client.post(
                 "/api/remote-access/vibe-cloud/pair",
                 json={"pairing_key": ""},
@@ -6510,6 +6510,9 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
         return _response("唯一实例")
 
     monkeypatch.setattr(remote_access, "_json_request", redeem)
+    from vibe import pairing_replay
+    clock = [time.time()]
+    monkeypatch.setattr(pairing_replay, '_now', lambda: clock[0])
     first = desktop_host.post("/api/remote-access/vibe-cloud/pair",
                               json=_pair_body(prepared), headers=csrf_headers(desktop_host))
     assert first.get_json()["pairing"]["recoverable"] is True
@@ -6517,7 +6520,7 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     if first_outcome == "pending":
         assert first.get_json() == {
             "ok": False, "error": "pairing_redeem_pending", "status": 409,
-            "retry_after_seconds": 1,
+            "retry_after_seconds": 1, "replay_state": "scheduled", "next_retry_at": clock[0] + 1,
             "pairing": {"ok": False, "recoverable": True, "cause": "pairing_redeem_pending"},
         }
     snapshot = desktop_host.get("/api/desktop/local-instance").get_json()
@@ -6527,8 +6530,7 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     # No UI-provided key, no memory cache, and no recomputed device/origin inputs.
     client = ui_server.app.test_client()
     if first_outcome == 'pending':
-        from vibe import pairing_replay
-        monkeypatch.setattr(pairing_replay, '_now', lambda: time.time() + 2)
+        clock[0] += 1
     resumed = client.post("/api/remote-access/vibe-cloud/pair", json={"pairing_key": ""},
                           headers=csrf_headers(client))
     assert resumed.status_code == 200, resumed.get_json()

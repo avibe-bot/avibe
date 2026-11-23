@@ -1335,7 +1335,11 @@ def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(mo
             captured["timeout"] = timeout
             captured["context"] = context
 
+        def connect(self):
+            captured['connected'] = True
+
         def request(self, method: str, path: str, body: bytes | None = None, headers: dict | None = None):
+            assert captured['connected']
             captured["method"] = method
             captured["path"] = path
             captured["body"] = body
@@ -1372,6 +1376,7 @@ def test_validated_backend_request_connects_to_pinned_ip_without_hostname_dns(mo
 
 
 def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> None:
+    sends: list[str] = []
     attempts: list[str] = []
     monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda _url: None)
 
@@ -1384,11 +1389,13 @@ def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> N
     class FakeConnection:
         def __init__(self, host: str, port: int, *, server_hostname: str, timeout: float, context):
             self.host = host
-            attempts.append(host)
+        def connect(self):
+            attempts.append(self.host)
+            if self.host == "93.184.216.34":
+                raise OSError("first address unavailable before dispatch")
 
         def request(self, method: str, path: str, body: bytes | None = None, headers: dict | None = None):
-            if self.host == "93.184.216.34":
-                raise OSError("first address unavailable")
+            sends.append(self.host)
 
         def getresponse(self):
             return FakeResponse()
@@ -1414,6 +1421,7 @@ def test_validated_backend_request_retries_next_pinned_address(monkeypatch) -> N
 
     assert result == {"ok": True}
     assert attempts == ["93.184.216.34", "93.184.216.35"]
+    assert sends == ["93.184.216.35"]
 
 
 def test_validated_backend_request_uses_https_proxy_connect_to_pinned_ip(monkeypatch) -> None:
@@ -1451,7 +1459,11 @@ def test_validated_backend_request_uses_https_proxy_connect_to_pinned_ip(monkeyp
             captured["timeout"] = timeout
             captured["context"] = context
 
+        def connect(self):
+            captured['connected'] = True
+
         def request(self, method: str, path: str, body: bytes | None = None, headers: dict | None = None):
+            assert captured['connected']
             captured["method"] = method
             captured["path"] = path
             captured["headers"] = headers
@@ -2536,7 +2548,7 @@ def test_pair_preserves_backend_error_response(monkeypatch) -> None:
 
     result = remote_access.pair("vrp_test", "https://backend.test")
 
-    assert result == {"ok": False, "error": "invalid_pairing_key", "status": 400}
+    assert result == {"ok": False, "error": "pairing_input_rejected", "cause": "invalid_pairing_key", "status": 400}
 
 
 def test_pair_queues_lifecycle_status_for_drain(monkeypatch, tmp_path) -> None:
