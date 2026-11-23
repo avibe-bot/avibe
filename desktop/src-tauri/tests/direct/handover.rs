@@ -24,7 +24,8 @@ pub(super) async fn public_browser(client: &mut super::Client) -> tokio::net::Tc
     client.listener = Listener::bind_via(client.host.clone(), client.links.subscribe(), |_| echo_socket())
         .await
         .unwrap();
-    let mut s = super::lifecycle_tests::connect(client.route().unwrap()).await;
+    let window = client.handover().window_credential("instance-view").unwrap();
+    let mut s = super::credential_tests::connect_as(client, &window, 200).await;
     s.write_all(b"x").await.unwrap();
     assert_eq!(s.read_u8().await.unwrap(), b'x');
     s
