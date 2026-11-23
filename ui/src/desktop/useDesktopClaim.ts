@@ -14,7 +14,7 @@ import type { AccountRecovery, BindField, BindProblem, BindStep, ComputerBinding
  * it; mounting, re-showing or reconnecting never calls them.
  */
 
-type Reply = { ok: true; value: Record<string, unknown> | null } | { ok: false; code: string };
+type Reply = { ok: true; value: Record<string, unknown> | null } | { ok: false; code: string; retryAfter?: number };
 type Command = 'desktop_claim_review' | 'desktop_account_recovery';
 
 async function invoke(command: Command, generation: number, action: Record<string, unknown>): Promise<Reply> {
@@ -27,7 +27,8 @@ async function invoke(command: Command, generation: number, action: Record<strin
     return { ok: true, value: value && typeof value === 'object' ? value as Record<string, unknown> : null };
   } catch (error) {
     const code = (error as { code?: unknown } | null)?.code;
-    return { ok: false, code: typeof code === 'string' ? code : 'request_failed' };
+    const retryAfter = (error as { retry_after_seconds?: unknown } | null)?.retry_after_seconds;
+    return { ok: false, code: typeof code === 'string' ? code : 'request_failed', ...(typeof retryAfter === 'number' ? { retryAfter } : {}) };
   }
 }
 
@@ -61,7 +62,10 @@ const WRONG_CODE = new Set(['invalid_or_expired', 'invalid_code', 'invalid_otp',
 const WRONG_SETUP_CODE = new Set(['invalid_code', 'invalid_otp', 'verification_invalid']);
 const SAVE_TRIES = 20;
 const SAVE_WAIT_MS = 1500;
-const PASSKEY_FAILED = new Set(['passkey_unavailable', 'invalid_passkey_assertion', 'invalid_passkey_challenge']);
+/** A passkey that did not finish (cancelled, unavailable, no valid assertion, or one avibe.bot
+ *  refused): native keeps the submission, so the person may try again or use a code. An
+ *  unverifiable challenge or reply is final and starts again. */
+const PASSKEY_FAILED = new Set(['passkey_cancelled', 'passkey_unavailable', 'invalid_passkey_assertion']);
 
 const OBSERVED: Record<string, ComputerBinding['state']> = {
   no_published_binding: 'unbound', legacy_review_required: 'unbound', owner_observed: 'bound',
@@ -471,7 +475,12 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     } else if (step?.kind === 'factor' && step.method !== 'passkey' && h.submission) {
       const reply = await call('desktop_claim_review', { type: 'submit_factor_code', receipt: h.receipt, submission: h.submission, method: step.method, code });
       if (!reply) return;
-      if (!reply.ok) { setStep(WRONG_CODE.has(reply.code) ? { ...step, code: '', error: 'code' } : problemFor(reply.code)); return; }
+      if (!reply.ok) {
+        setStep(WRONG_CODE.has(reply.code) ? { ...step, code: '', error: 'code' }
+          : reply.code === 'rate_limited' ? { ...step, code: '', error: 'rateLimited', retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)) }
+            : problemFor(reply.code));
+        return;
+      }
       const submission = submissionFrom(reply);
       if (!submission) { setStep(problemFor('invalid_response')); return; }
       afterVerification(submission);
@@ -496,7 +505,12 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     setStep({ ...step, error: null });
     const reply = await call('desktop_claim_review', { type: 'submit_factor_passkey', receipt: h.receipt, submission: h.submission });
     if (!reply) return;
-    if (!reply.ok) { setStep(PASSKEY_FAILED.has(reply.code) ? { ...step, error: 'passkey' } : problemFor(reply.code)); return; }
+    if (!reply.ok) {
+      setStep(PASSKEY_FAILED.has(reply.code) ? { ...step, error: 'passkey' }
+        : reply.code === 'rate_limited' ? { ...step, error: 'rateLimited', retryMinutes: Math.max(1, Math.ceil((reply.retryAfter ?? 60) / 60)) }
+          : problemFor(reply.code));
+      return;
+    }
     const submission = submissionFrom(reply);
     if (!submission) { setStep(problemFor('invalid_response')); return; }
     afterVerification(submission);

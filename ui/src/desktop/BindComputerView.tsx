@@ -122,7 +122,8 @@ export type BindStep =
   | { kind: 'saving'; recover?: boolean }
   /** `invalid`: avibe.bot said the code typed was wrong or expired; the same email's code may be typed again. */
   | { kind: 'code'; code: string; invalid?: boolean }
-  | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | null }
+  /** `error`: what the last try said, in place. `rateLimited` waits `retryMinutes` here. */
+  | { kind: 'factor'; method: SecondFactorMethod | 'recovery'; methods: SecondFactorMethod[]; code: string; error?: 'code' | 'passkey' | 'rateLimited' | null; retryMinutes?: number }
   /** The account must add an authenticator first. `material` once native issued it. */
   | { kind: 'factorSetup'; material: { uri: string; secret: string } | null; code: string; invalid?: boolean }
   /** Recovery codes that setup returned, shown once. */
@@ -191,8 +192,9 @@ export function BindComputerView({ step, account, computer, busy = false, onName
           invalidText={step.invalid ? t('desktopAccount.bind.problem.codeInvalid') : undefined} cooldown={0} providerCooldownActive={false} resent={false}
           onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} />
         : <SecondFactor session={{ status: 'secondFactor', email: account, gate: 'challenge', methods: step.methods }} step={step.method} code={step.code}
-          busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} retryMinutes={0}
-          errorKey={step.error === 'passkey' ? 'mobileApp.twoFactor.passkeyFailed' : step.error === 'code' ? (step.method === 'recovery' ? 'mobileApp.twoFactor.recoveryInvalid' : 'mobileApp.twoFactor.codeInvalid') : null}
+          busy={busy ? (step.method === 'passkey' ? 'passkey' : 'verify') : null} locked={busy} retryMinutes={step.retryMinutes ?? 1}
+          errorKey={step.error === 'passkey' ? 'mobileApp.twoFactor.passkeyFailed' : step.error === 'rateLimited' ? 'mobileApp.twoFactor.rateLimited'
+            : step.error === 'code' ? (step.method === 'recovery' ? 'mobileApp.twoFactor.recoveryInvalid' : 'mobileApp.twoFactor.codeInvalid') : null}
           onStep={(next) => { if (next !== 'setup') onFactorStep(next); }} onCodeChange={onCodeChange} onVerify={() => onSubmitCode(step.code)} onPasskey={onPasskey} />}
     </SignInChrome></Close.Provider>;
   }

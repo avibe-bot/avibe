@@ -316,3 +316,41 @@ it('a factor accepted while an earlier snapshot still owes one waits for this si
   expect(page.types().filter((type) => type === 'submit_factor_code')).toHaveLength(1);
   expect(afterSave).toBe(1);
 });
+
+it.each(['passkey_cancelled', 'passkey_unavailable', 'invalid_passkey_assertion'])('a passkey that did not finish (%s) stays for another try with the same submission', async (code) => {
+  let tries = 0;
+  const page = mount({ ...proofAnswers,
+    review_after_proof: (action: Action) => (action.submission === 's' ? refuse('authentication_required')() : { state: 'bound' }),
+    submit_factor_passkey: () => (++tries === 1 ? refuse(code)() : { state: 'verification_accepted', submission: 's2' }) });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['passkey', 'totp'] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.usePasskey }, { timeout: 5000 }));
+  await screen.findByText(en.mobileApp.twoFactor.passkeyFailed);
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.usePasskey }));
+  await screen.findByRole('heading', { name: copy.boundTitle }, { timeout: 5000 });
+  expect(page.actions.filter((each) => each.type === 'submit_factor_passkey').map((each) => each.submission)).toEqual(['s', 's']);
+});
+
+it('an unverifiable passkey challenge is final and starts again', async () => {
+  mount({ ...proofAnswers,
+    review_after_proof: refuse('authentication_required'),
+    submit_factor_passkey: refuse('invalid_passkey_challenge') });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['passkey'] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.usePasskey }, { timeout: 5000 }));
+  await screen.findByRole('button', { name: copy.restart });
+});
+
+it('a real 429 on a second factor waits in place with its own time', async () => {
+  mount({ ...proofAnswers,
+    review_after_proof: refuse('authentication_required'),
+    submit_factor_passkey: () => { throw { code: 'rate_limited', retry_after_seconds: 120 }; } });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['passkey', 'totp'] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.usePasskey }, { timeout: 5000 }));
+  await screen.findByText(en.mobileApp.twoFactor.rateLimited.replace('{{count}}', '2'));
+  expect(screen.getByRole('button', { name: en.mobileApp.twoFactor.usePasskey })).toBeTruthy();
+});
