@@ -43,7 +43,7 @@ fn open_script(route: &str, event: &str) -> String {
 
 /// The symbol's point size: a toolbar symbol's, as Safari's and Preview's.
 const SYMBOL: f64 = 14.0;
-const WASH: f64 = 20.0;
+const WASH: f64 = 28.0;
 const GAP: f64 = 4.0;
 /// The button, square, in points.
 const BUTTON: f64 = 28.0;
