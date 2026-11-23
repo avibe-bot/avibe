@@ -141,6 +141,9 @@ impl Coordinator {
         let epoch = Epoch::new(self.generation.clone(), expected_generation);
         let (wake, mut interrupted) = oneshot::channel();
         let (mut claim, mut flow, state, previous) = {
+            // Queue only behind descriptor reads. The revision is still untouched;
+            // admission, including the continuation's deadline, is checked below.
+            let _monitor = self.descriptor_refresh.lock().await;
             let _operation = self.operation.try_lock().map_err(|_| busy())?;
             self.check_claim_admission()?;
             let inner = self.inner.lock().expect("client state");

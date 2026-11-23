@@ -652,6 +652,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
     for cut in [
         "http",
         "busy_after_grant",
+        "monitor_confirm_live",
+        "monitor_confirm_retired",
         "monitor_grant_live",
         "monitor_grant_retired",
         "no_saved_owner_at_confirm",
@@ -1238,6 +1240,25 @@ async fn check_cut(cut: &'static str) {
     }
     let decision = confirm(receipt);
     tokio::pin!(decision);
+    if cut.starts_with("monitor_confirm_") {
+        let refresh = c.refresh_local();
+        tokio::pin!(refresh);
+        tokio::select! { _ = &mut refresh => panic!("descriptor read was not held"), _ = hosted.observing.notified() => () }
+        tokio::select! { biased; _ = &mut decision => panic!("confirm did not wait"), _ = tokio::task::yield_now() => () }
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 0);
+        peer.assert_unarmed();
+        if cut == "monitor_confirm_retired" {
+            caller.retire();
+        }
+        hosted.resume_observation.notify_one();
+        refresh.await;
+        if cut == "monitor_confirm_retired" {
+            assert!(decision.await.is_err());
+            assert_eq!(hosted.grants.load(Ordering::SeqCst), 0);
+            assert!(peer.arm().await.is_err());
+            return;
+        }
+    }
     tokio::select! { _ = &mut decision => panic!("grant response was held"), _ = hosted.sent.notified() => () }
     let unlocked = || {
         assert!(c.operation.try_lock().is_ok());
@@ -1850,7 +1871,7 @@ async fn check_cut(cut: &'static str) {
             if cut == "publication_drop" {
                 drop(reply);
             } else {
-                if cut == "complete" {
+                if matches!(cut, "complete" | "monitor_confirm_live") {
                     assert_eq!(reply.deliver().unwrap().unwrap(), json!({"state":"bound"}));
                 } else {
                     assert!(reply.deliver().is_err());
