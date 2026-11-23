@@ -146,6 +146,9 @@ export const BackendModelEditorDialog: React.FC<{
   draftSeed?: BackendModel;
   /** Ids the draft catalog already holds; a second row may not claim one. */
   takenIds: ReadonlySet<string>;
+  /** Ids no row holds in the draft, yet none may take until the list is saved:
+   *  a rename or a removal still pending on them. */
+  reservedIds?: ReadonlySet<string>;
   /** Effort values this backend's other rows already use. Suggestions, never a
    *  vocabulary — every effort is sent verbatim and any string is equally valid. */
   effortSuggestions: readonly string[];
@@ -158,9 +161,14 @@ export const BackendModelEditorDialog: React.FC<{
    *  actually changed; without an answer the editor says nothing about it. */
   ownRoute?: boolean;
   readListedIds?: () => Promise<ReadonlySet<string>>;
+  /** The ID the server knows this row by: its own, the one it was renamed from
+   *  earlier in this draft, or null for a row the draft added. Saving under any
+   *  other ID is a rename, and that is when its consequence is stated. Absent:
+   *  the row's own ID. */
+  savedId?: string | null;
   onCancel: () => void;
   onCommit: (model: BackendModel) => void;
-}> = ({ open, backend, model, seedId, draftSeed, takenIds, effortSuggestions, busy = false, ownRoute = false, readListedIds, onCancel, onCommit }) => {
+}> = ({ open, backend, model, seedId, draftSeed, takenIds, reservedIds, effortSuggestions, busy = false, ownRoute = false, readListedIds, savedId, onCancel, onCommit }) => {
   const { t } = useTranslation();
   const creating = model === null;
   const [draft, setDraft] = React.useState<BackendModel>(() => model ?? blankBackendModel());
@@ -283,14 +291,6 @@ export const BackendModelEditorDialog: React.FC<{
   const output = parseTokens(outputText);
   const trimmedId = draft.id.trim();
   const renamed = !creating && trimmedId !== model.id;
-  const [listedIds, setListedIds] = React.useState<ReadonlySet<string> | null>(null);
-  const asksListed = renamed && !ownRoute && readListedIds !== undefined;
-  React.useEffect(() => {
-    if (!asksListed || !readListedIds) return;
-    let live = true;
-    void readListedIds().then((ids) => { if (live) setListedIds(ids); }, () => {});
-    return () => { live = false; };
-  }, [asksListed, readListedIds]);
   // A saved row that already has its limits is not asked to reconsider them each
   // time it is opened: the catalog speaks up about a row being added, an ID that
   // was just changed, or limits nobody has filled in.
@@ -321,7 +321,8 @@ export const BackendModelEditorDialog: React.FC<{
    */
   // A saved row's ID can be changed at any time. Left as it is, it is not
   // resolved again: that would rename a row whose ID predates the rule.
-  const resolved = creating || renamed ? draftWithId(draft, trimmedId, backend) : draft;
+  // An ID typed back to the row's own, spaces and all, is the row's own ID.
+  const resolved = creating || renamed ? draftWithId(draft, trimmedId, backend) : { ...draft, id: model.id };
   // Existing IDs are read-only; only a newly entered identity needs these checks.
   const idError = !creating && !renamed
     ? null
@@ -329,8 +330,22 @@ export const BackendModelEditorDialog: React.FC<{
       ? 'required'
       : takenIds.has(resolved.id) && resolved.id !== model?.id
         ? 'duplicate'
-        : null;
+        : reservedIds?.has(resolved.id)
+          ? 'reserved'
+          : null;
   const valid = idError === null && context.ok && output.ok;
+  /** Saving would move this model to another ID on the server: the row is a saved
+   *  one, and the ID it would be saved under is not the one the server knows. */
+  const knownAs = savedId === undefined ? model?.id ?? null : savedId;
+  const renames = !creating && knownAs !== null && idError === null && resolved.id !== knownAs;
+  const [listedIds, setListedIds] = React.useState<ReadonlySet<string> | null>(null);
+  const asksListed = renames && !ownRoute && readListedIds !== undefined;
+  React.useEffect(() => {
+    if (!asksListed || !readListedIds) return;
+    let live = true;
+    void readListedIds().then((ids) => { if (live) setListedIds(ids); }, () => {});
+    return () => { live = false; };
+  }, [asksListed, readListedIds]);
 
   const patch = (next: Partial<BackendModel>) => setDraft((current) => ({ ...current, ...next }));
   /** A parameter set by hand: from here on the catalog offers, it does not fill. */
@@ -479,16 +494,19 @@ export const BackendModelEditorDialog: React.FC<{
             {idHint && <p className="model-hub-model-error" role="alert">{idHint}</p>}
             {/* What changing the ID carries along, and what it cannot: said once
                 the ID differs, where the change is made. ui/design: models/model-menu/rename-model */}
-            {renamed && idError === null && (
-              <p className="model-hub-model-rename" role="status">
-                {t('settings.models.gateway.modelEditor.id.renameNote')}
-                {/* A native CLI that is already running holds the old name; Vibey reads the ID again at each request. */}
-                {backend !== 'vibey' && t('settings.models.gateway.modelEditor.id.renameRunning')}
-                {asksListed && listedIds !== null && !listedIds.has(resolved.id) && (
-                  <span className="model-hub-model-rename-warn">{t('settings.models.gateway.modelEditor.id.renameNoRoute')}</span>
-                )}
-              </p>
-            )}
+            {/* Always mounted, so a screen reader hears the line when it appears. */}
+            <p className="model-hub-model-rename" role="status">
+              {renames && (
+                <>
+                  {t('settings.models.gateway.modelEditor.id.renameNote')}
+                  {/* A native CLI that is already running holds the old name; Vibey reads the ID again at each request. */}
+                  {backend !== 'vibey' && t('settings.models.gateway.modelEditor.id.renameRunning')}
+                  {asksListed && listedIds !== null && !listedIds.has(resolved.id) && (
+                    <span className="model-hub-model-rename-warn">{t('settings.models.gateway.modelEditor.id.renameNoRoute')}</span>
+                  )}
+                </>
+              )}
+            </p>
 
             <Field
               label={t('settings.models.gateway.modelEditor.displayName.label')}

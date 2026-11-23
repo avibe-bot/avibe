@@ -135,7 +135,8 @@ export const BackendModelCatalogDialog: React.FC<{
   sourceNames: Readonly<Record<string, string>>;
   /** `removed` says the focused model left the saved list, so an opener that
    *  was showing it has nothing to return to. */
-  onClose: (result?: { removed: boolean }) => void;
+  /** `removed`: the opener's row is gone. `renamedTo`: it is still there, under this ID. */
+  onClose: (result?: { removed: boolean; renamedTo?: string }) => void;
   onSaved: (echoed: AgentSupply) => void | Promise<void>;
   onObserved: (observed: AgentSupply) => void | Promise<void>;
   catalogWrite: PendingWrite;
@@ -239,7 +240,8 @@ export const BackendModelCatalogDialog: React.FC<{
    *  once an ID is actually changed. */
   const readListedIds = React.useCallback(async (): Promise<ReadonlySet<string>> => {
     const read = await modelsApi.getAgentModelCandidates(backend);
-    return new Set([...read.providers, ...read.in_list].filter((candidate) => candidate.suppliers.length > 0).map((candidate) => candidate.id));
+    // Built-in models a provider supplies are listed too; they only sit in their own group.
+    return new Set([...read.builtin, ...read.providers, ...read.in_list].filter((candidate) => candidate.suppliers.length > 0).map((candidate) => candidate.id));
   }, [backend]);
   /** Whether the row open in the editor has a route of its own, which moves with it. */
   const editingOwnRoute = (() => {
@@ -273,7 +275,35 @@ export const BackendModelCatalogDialog: React.FC<{
   const displayLabel = (model: BackendModel): string => model.display_name ?? model.id;
   const visible = draft.filter((model) => matchesQuery(model, query.trim(), displayLabel(model)));
   const movableIds = draft.filter((model) => !model.locked).map((model) => model.id);
-  const takenIds = new Set(draft.map((model) => model.id));
+  // An ID a row was renamed away from is still that row's on the server until
+  // the list is saved: nothing else may take it in the same draft, or the save
+  // could no longer be said as a rename.
+  const renamedAway = new Set(renamedRows.values());
+  const takenIds = new Set([...draft.map((model) => model.id), ...renamedAway]);
+  /** IDs the row open in the editor may not be given until the list is saved:
+   *  for a saved row, the IDs other rows were renamed away from and the IDs of
+   *  rows removed in this draft (renaming onto one would overwrite, which is
+   *  not a rename); its own saved ID is always its to return to. */
+  const editingReserved = (() => {
+    const row = editing?.model ?? savingEdit?.model;
+    if (!row) return renamedAway;
+    const baselineIds = (baseline?.models ?? []).map((model) => model.id);
+    const own = renamedRows.get(row.id) ?? (baselineIds.includes(row.id) ? row.id : null);
+    const reserved = new Set(renamedAway);
+    if (own !== null) {
+      const drafted = new Set(draft.map((model) => model.id));
+      for (const id of baselineIds) if (!drafted.has(id)) reserved.add(id);
+      reserved.delete(own);
+    }
+    return reserved;
+  })();
+  const draftedIds = new Set(draft.map((model) => model.id));
+  /** The ID the server knows the open row by; null for a row this draft added. */
+  const editingSavedId = (() => {
+    const row = editing?.model ?? savingEdit?.model;
+    if (!row) return null;
+    return renamedRows.get(row.id) ?? ((baseline?.models ?? []).some((model) => model.id === row.id) ? row.id : null);
+  })();
   const effortSuggestions = [...new Set(draft.flatMap((model) => model.reasoning_efforts))];
   /** Reordering permutes which movable row sits in which movable slot; a locked
    *  row keeps its absolute index, so the order sent never moves one. */
@@ -384,6 +414,13 @@ export const BackendModelCatalogDialog: React.FC<{
    *  after the one confirmation the save asks if the server says it has one. */
   const dropModel = (modelId: string) => {
     chosenRef.current.delete(modelId);
+    // A removed row is no longer a rename: what is left is the removal of the
+    // model it was saved as, and a later row under this ID is a new one.
+    if (renamedFrom.current.has(modelId)) {
+      const next = new Map(renamedFrom.current);
+      next.delete(modelId);
+      setRenames(next);
+    }
     mutate(draftRef.current.filter((entry) => entry.id !== modelId));
   };
 
@@ -422,7 +459,14 @@ export const BackendModelCatalogDialog: React.FC<{
   }, [direct, needsList]);
   /** A save closes the dialog; a focused opener learns whether its row survived. */
   const closeSaved = () => {
-    onClose(focus !== null && !draftRef.current.some((entry) => entry.id === focus.modelId) ? { removed: true } : undefined);
+    const held = (id: string) => draftRef.current.some((entry) => entry.id === id);
+    if (focus === null || held(focus.modelId)) {
+      onClose(undefined);
+      return;
+    }
+    // The opener's row may have been renamed rather than removed: it goes back to it under its new ID.
+    const renamedTo = [...renamedFrom.current].find(([to, from]) => from === focus.modelId && held(to))?.[0];
+    onClose(renamedTo ? { removed: false, renamedTo } : { removed: true });
   };
 
   const commitEdit = (model: BackendModel) => {
@@ -1015,7 +1059,9 @@ export const BackendModelCatalogDialog: React.FC<{
               backend={backend}
               model={editing.model}
               seedId={editing.seedId}
-              takenIds={takenIds}
+              takenIds={draftedIds}
+              reservedIds={editingReserved}
+              savedId={editingSavedId}
               effortSuggestions={effortSuggestions}
               ownRoute={editingOwnRoute}
           readListedIds={readListedIds}
@@ -1050,7 +1096,9 @@ export const BackendModelCatalogDialog: React.FC<{
           backend={backend}
           model={(editing ?? savingEdit)!.model}
           seedId={(editing ?? savingEdit)!.seedId}
-          takenIds={takenIds}
+          takenIds={draftedIds}
+          reservedIds={editingReserved}
+          savedId={editingSavedId}
           effortSuggestions={effortSuggestions}
           busy={busy || savingEdit !== null}
           ownRoute={editingOwnRoute}

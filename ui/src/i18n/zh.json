@@ -1588,7 +1588,8 @@
             "duplicate": "列表中已存在相同 ID 的模型。",
             "renameNote": "保存后，用这个模型的 Agent 和会话改用新 ID。命令或脚本里写的旧 ID 不会改。",
             "renameRunning": "正在进行的对话可能中断。",
-            "renameNoRoute": "没有供应商列出这个 ID，保存后要为它单独设置路由。"
+            "renameNoRoute": "没有供应商列出这个 ID，保存后要为它单独设置路由。",
+            "reserved": "这个 ID 现在还不能用：先保存模型列表，再改成它。"
           },
           "displayName": {
             "label": "显示名称",

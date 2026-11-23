@@ -315,6 +315,65 @@ describe('BackendModelEditorDialog', () => {
       expect(readListedIds).not.toHaveBeenCalled();
       expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
     });
+
+    it('takes the row\'s own ID typed back with spaces around it as no change', async () => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ model: saved, takenIds: new Set([saved.id]) });
+
+      await rename(user, `  ${saved.id} `);
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledTimes(1);
+      expect(onCommit.mock.calls[0][0].id).toBe(saved.id);
+    });
+
+    it('refuses an ID that is waiting on a save of the list, and says to save first', async () => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ model: saved, takenIds: new Set([saved.id]), reservedIds: new Set(['held-until-saved']) });
+
+      await rename(user, 'held-until-saved');
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(screen.getByRole('alert').textContent).toBe('This ID can’t be used yet. Save the model list first, then use it.');
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      expect(onCommit).not.toHaveBeenCalled();
+    });
+
+    it('says nothing of Agents and Sessions for a row the list has not saved yet', async () => {
+      const user = userEvent.setup();
+      const readListedIds = vi.fn().mockResolvedValue(new Set<string>());
+      const { onCommit } = renderEditor({ model: saved, savedId: null, takenIds: new Set([saved.id]), readListedIds });
+
+      await rename(user, 'relay-opus-2');
+      // Nothing uses a row that was never saved, so nothing is carried along or interrupted.
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+      expect(readListedIds).not.toHaveBeenCalled();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'relay-opus-2' }));
+    });
+
+    it('keeps saying it for a row already renamed in this draft, until it is back at the ID the server knows', async () => {
+      const user = userEvent.setup();
+      renderEditor({ model: { ...saved, id: 'relay-opus-2' }, savedId: saved.id, takenIds: new Set(['relay-opus-2']) });
+
+      // Opened again before the list was saved: saving still moves the model.
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+      await rename(user, saved.id);
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+    });
+
+    it('keeps one status region mounted, empty until there is something to say', async () => {
+      const user = userEvent.setup();
+      renderEditor({ model: saved, takenIds: new Set([saved.id]) });
+
+      // Mounted before it speaks: a region that arrives with its text is not announced.
+      const status = screen.getByRole('status');
+      expect(status.textContent).toBe('');
+      expect(status.childNodes.length).toBe(0);
+      await rename(user, 'relay-opus-2');
+      expect(screen.getByRole('status')).toBe(status);
+      expect(status.textContent).toContain('switch to the new ID');
+    });
   });
 
   it('refuses a token count that is not a whole number', async () => {
