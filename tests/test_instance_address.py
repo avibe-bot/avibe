@@ -6,6 +6,7 @@ side of it is the real code, config file and SQLite state.
 """
 
 import json
+import re
 import sqlite3
 import time
 
@@ -712,7 +713,14 @@ def test_b1_a_pending_answer_repeats_the_same_request_and_a_refusal_changes_noth
     ((401, {"error": "invalid_device_secret"}), "pairing_invalid", 409),
     ((409, {"error": "remote_access_configuration_mismatch"}), "remote_access_configuration_mismatch", 409),
     ((409, {"error": "rebind_required"}), "rebind_required", 409),
-    ((404, {}), "unavailable", 503),
+    # Definitive refusals without an own word on the page: said as what they are, never as "unavailable".
+    ((400, {"error": "invalid_request"}), "invalid_request", 409),
+    ((405, {"error": "method_not_allowed"}), "method_not_allowed", 409),
+    ((415, {"error": "unsupported_media_type"}), "unsupported_media_type", 409),
+    ((400, {"error": "resource_acl_device_rejected"}), "rename_refused", 409),  # a body that was not JSON
+    ((400, {"error": "Not A Code!"}), "rename_refused", 409),
+    ((400, {}), "rename_refused", 409),
+    ((404, {}), "rename_ineligible", 409),
 ])
 def test_refusals_reach_the_page_as_stable_codes(address, monkeypatch, reply, code, status):
     plane, _ = address
@@ -940,7 +948,7 @@ def test_a_refusal_whose_code_is_not_a_string_names_nothing(address, status, err
     rename_to("third")
     run()
     assert instance_address._journal(binding()) is None and binding().active_host == OLD
-    expected = "pairing_invalid" if status == 401 else "unavailable"
+    expected = "pairing_invalid" if status == 401 else "rename_refused"  # a refusal, never "unavailable"
     assert instance_address.describe()["operation"]["error"] == expected
     assert instance_address._standing_refusal is None
 
@@ -1175,6 +1183,45 @@ def test_a_committed_change_waits_for_a_new_binding_without_asking(address):
     run()
     assert binding().active_host == NEW and instance_address._journal(binding()) is None
     assert instance_address.describe()["state_error"] is None
+
+
+# avibe.bot's rule for a rename request, copied from avibe-bot-backend
+# lib/hostnames/wire.ts (``renameTuple``, at 8d805492): ``operation_id`` is
+# ``z.string().uuid()`` with zod 3.25.76, whose test is this expression
+# (node_modules/zod/v3/types.js:368); the other three fields as below; and
+# ``.strict()``: no other field.
+BACKEND_UUID = re.compile(r"^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$", re.I)
+
+
+def renames_sent(plane):
+    return [call[2] for call in plane.calls if call[1] == "hostname-renames"]
+
+
+def test_the_rename_request_passes_avibe_bots_rule_and_a_repeat_sends_the_same_id(address, monkeypatch):
+    plane, _ = address
+    plane.pending_answers = 2
+    rename_to("new")
+    run()
+    sent = renames_sent(plane)
+    assert len(sent) == 3 and binding().active_host == NEW
+    for body in sent:
+        assert set(body) == {"operation_id", "expected_generation", "expected_hostname", "new_prefix"}
+        assert isinstance(body["operation_id"], str) and BACKEND_UUID.match(body["operation_id"])
+        generation = body["expected_generation"]
+        assert isinstance(generation, int) and not isinstance(generation, bool) and 0 <= generation <= 2**53 - 1
+        assert isinstance(body["expected_hostname"], str) and 1 <= len(body["expected_hostname"]) <= 253
+        assert isinstance(body["new_prefix"], str)
+    assert len({body["operation_id"] for body in sent}) == 1  # one intent, one id, however often it is sent
+    # Each new intent gets its own; across a restart a repeat keeps the one in the journal.
+    plane.pending_answers = 1
+    rename_to("third")
+    assert instance_address._advance_operation() > 0
+    for name, value in (("_authority", None), ("_BINDING_CACHE", None)):
+        monkeypatch.setattr(instance_address, name, value)
+    run()
+    later = renames_sent(plane)[3:]
+    assert len(later) == 2 and later[0]["operation_id"] == later[1]["operation_id"] != sent[0]["operation_id"]
+    assert BACKEND_UUID.match(later[0]["operation_id"]) and binding().active_host == THIRD
 
 
 def test_c4_a_phone_paired_on_the_new_address_before_the_health_step_is_kept(address):

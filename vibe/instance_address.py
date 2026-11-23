@@ -21,6 +21,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1119,7 +1120,9 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
             or entry["generation"] != state.get("generation")
         ):
             raise AddressError(409, "address_changed")
-        operation_id = secrets.token_urlsafe(32)
+        # avibe.bot accepts only a UUID here (its ``renameTuple``); a repeat sends
+        # this same id from the journal, so it is made once, with the intent.
+        operation_id = str(uuid.uuid4())
         journal = {
             "origin": "local",
             "phase": "intent",
@@ -1370,6 +1373,9 @@ _PAGE_ERRORS: dict[str, tuple[int, str]] = {
     "rebind_required": (409, "rebind_required"),
 }
 _LIMIT_FIELDS = ("limit", "held_count", "earliest_release_at")
+# A code avibe.bot sends that the page has no own word for is passed on as it is,
+# when it looks like one; the page says the change was not made, with the code.
+_WIRE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
@@ -1395,7 +1401,20 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
             retry = payload.get("retry_after_seconds")
             return float(min(max(retry, 1), 600)) if isinstance(retry, (int, float)) else 30.0
         code = payload.get("error") if isinstance(payload.get("error"), str) else ""
-        page_status, page_code = _PAGE_ERRORS.get(code, (503, "unavailable"))
+        if code in _PAGE_ERRORS:
+            page_status, page_code = _PAGE_ERRORS[code]
+        elif status == 404:
+            # No such endpoint at avibe.bot: the address cannot be changed from here now.
+            page_status, page_code = 409, "rename_ineligible"
+        elif 400 <= status < 500:
+            # A definitive refusal: said as what it is, never as "unavailable",
+            # which means a fault that passes. The request is not sent again.
+            # ``resource_acl_device_rejected`` is the request helper's own word
+            # for a body that was not JSON, not a code avibe.bot sent.
+            named = _WIRE_CODE.fullmatch(code) and code != "resource_acl_device_rejected"
+            page_status, page_code = 409, code if named else "rename_refused"
+        else:
+            page_status, page_code = 503, "unavailable"
         if status == 401:
             # The binding is refused: no cleaning anywhere from this moment, and
             # no state read still on its way may bring it back, whatever the
