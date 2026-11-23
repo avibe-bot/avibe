@@ -176,18 +176,29 @@ export function activityFromWire(raw: unknown, nameOf: (deviceId: string | undef
 
 /**
  * The tunnel, said only as strongly as the status supports. "Not connected" needs evidence that
- * there is no connection: the connector is not running, it registered none, or requests through
- * it are failing. Slow, short of its connections or still settling is a connected tunnel. A
- * connector whose process cannot be read, or a sample too old to speak for now, is unknown.
+ * there is no connection: the connector is not running, it registered none while its metrics were
+ * read, or requests through it are failing. A connector just started gives no such evidence: its
+ * first samples carry no reading (`state: unknown`, no connections yet), and a connector this page
+ * itself started a moment ago (`justStarted`) is still registering. Slow, short of its connections
+ * or still settling is a connected tunnel; connected with no round trip measured yet is connected.
+ * A connector whose process or metrics cannot be read, or a sample too old to speak for now, is
+ * unknown.
  */
-export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number = Date.now()): TunnelStatus {
+export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number = Date.now(), justStarted = false): TunnelStatus {
   if (!status || !status.paired || status.pid_state === 'unknown') return { state: 'unknown' };
   if (!status.running) return { state: 'down' };
   const quality = status.tunnel_quality;
-  if (!quality || !(now - Date.parse(quality.sampled_at) <= 150_000)) return { state: 'unknown' };
+  if (!quality) return { state: justStarted ? 'connecting' : 'unknown' };
+  if (!(now - Date.parse(quality.sampled_at) <= 150_000)) return { state: 'unknown' };
   const effective = quality.transport?.effective || quality.protocol;
   const active = effective === 'quic' || effective === 'http2' ? effective : null;
-  if (quality.ha_connections === 0 || getTunnelRequestPathDisplayState(quality.request_path) === 'unavailable') return { state: 'down', active };
+  const connections = quality.ha_connections ?? 0;
+  // Nothing has been read from this connector since it started: no evidence either way.
+  if (quality.state === 'unknown' && connections === 0) return { state: 'connecting', active };
+  if (connections === 0) return { state: justStarted ? 'connecting' : 'down', active };
+  if (getTunnelRequestPathDisplayState(quality.request_path) === 'unavailable') return { state: 'down', active };
+  // Its metrics could not be read for a while: the connections it last had say nothing about now.
+  if (quality.state === 'unknown') return { state: 'unknown', active };
   // An optimization that is running (`recovering`) is not a fault: the tunnel is connected and a
   // better route is being evaluated, which is what the page says.
   const grade = getTunnelQualityDisplayState(quality, true);
@@ -196,7 +207,7 @@ export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number 
     state: grade === 'good' || grade === 'fair' ? 'up'
       : grade === 'poor' || grade === 'critical' ? 'slow'
         : grade === 'degraded' ? 'unsteady'
-          : grade === 'recovering' ? 'optimizing' : 'unknown',
+          : grade === 'recovering' ? 'optimizing' : 'connected',
     ms: typeof latency === 'number' ? Math.round(latency) : undefined,
     active,
   };

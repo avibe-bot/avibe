@@ -247,10 +247,13 @@ function ReachCard({ reach, operate = false, optimize, terminal = true, actions 
       ? t('devices.reach.down')
       : reach.tunnel === 'unknown'
         ? t('devices.reach.tunnelUnknown')
-        : joinParts(t, [
+        : reach.tunnel === 'connecting'
+          ? t('devices.reach.connecting')
+          : joinParts(t, [
             t(reach.tunnel === 'slow' ? 'devices.reach.slow'
               : reach.tunnel === 'unsteady' ? 'devices.reach.unsteady'
-                : reach.tunnel === 'optimizing' ? 'devices.reach.optimizing' : 'devices.reach.good'),
+                : reach.tunnel === 'optimizing' ? 'devices.reach.optimizing'
+                  : reach.tunnel === 'connected' ? 'devices.reach.connected' : 'devices.reach.good'),
             reach.ms ? t('remoteAccess.direct.legMs', { ms: reach.ms }) : null,
             reach.direct ? t('devices.reach.directOn') : null,
           ]);
@@ -629,7 +632,7 @@ function SignOutNoticeCard({ notice, rebindOffered, onDismiss }: { notice: SignO
         {notice.device ? t('devices.signedOut.justNow', { device: notice.device }) : t('devices.signedOut.justNowMany')}
       </div>
       {accountResultTexts(t, notice, rebindOffered).map((line) => <div key={line}><KeptTail text={line} /></div>)}
-      {notice.healthCleanupPending && (
+      {notice.healthCleanupPending && !notice.withoutHealth && (
         <div className="text-muted"><KeptTail text={t(notice.hadHealth ? 'devices.signedOut.healthPending' : 'devices.signedOut.healthPendingIfAny')} /></div>
       )}
     </Notice>

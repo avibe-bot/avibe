@@ -375,7 +375,7 @@ export function ConnectionPageView({
   const pending = Boolean(change && (change.state === 'applying' || change.state === 'verifying' || change.state === 'restoring' || change.state === 'unknown'));
   const statusFor = (setting: TunnelSetting) => (change?.setting === setting ? <ChangeLine change={change} /> : null);
   const set = actions.onSettingChange;
-  const connected = tunnel.state === 'up' || tunnel.state === 'slow' || tunnel.state === 'unsteady' || tunnel.state === 'optimizing';
+  const connected = tunnel.state === 'up' || tunnel.state === 'slow' || tunnel.state === 'unsteady' || tunnel.state === 'optimizing' || tunnel.state === 'connected';
   const tunnelInUse = remote && via === 'tunnel' && connected;
   // Which path is in use. A stream that came in by the direct ingress may be relayed, and a
   // relayed path is never called direct: inside a shell that names its path (`path` is given),
@@ -443,6 +443,8 @@ export function ConnectionPageView({
             ? <Badge variant="warning">{t('devices.connection.notConnected')}</Badge>
             : tunnel.state === 'unknown'
               ? <Badge variant="secondary">{t('devices.connection.stateUnknown')}</Badge>
+              : tunnel.state === 'connecting'
+                ? <Badge variant="secondary">{t('devices.reach.connecting')}</Badge>
               : <Badge variant={tunnelInUse ? 'info' : 'success'}>{t(tunnelInUse ? 'devices.connection.inUse' : 'devices.connection.available')}</Badge>}
         />
         <Row

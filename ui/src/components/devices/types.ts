@@ -108,6 +108,9 @@ export type SignOutNotice = {
   healthCleanupPending: boolean;
   /** The signed-out row showed Health on this page. */
   hadHealth: boolean;
+  /** The row listed what the device does and Health was not among it: nothing is said about
+   *  Health's clean-up, which cannot concern it. */
+  withoutHealth?: boolean;
 };
 
 /** Why a claim (turning remote access on) did not go through: the local outcome names of
@@ -227,7 +230,13 @@ export type SwitchRefusal = { row: 'direct' | 'relay' | 'autoRecovery' | 'profil
  * or still settling after a recovery is `unsteady`; one being evaluated for a better route is
  * `optimizing`, connected like the others. What cannot be read is `unknown`.
  */
-export type TunnelStatus = { state: 'up' | 'slow' | 'unsteady' | 'optimizing' | 'down' | 'unknown'; ms?: number; active?: 'quic' | 'http2' | null };
+export type TunnelStatus = {
+  /** `connecting`: started, and nothing read from it yet that says either way. `connected`: at least
+   *  one connection, its round trip not measured yet. */
+  state: 'up' | 'slow' | 'unsteady' | 'optimizing' | 'connected' | 'connecting' | 'down' | 'unknown';
+  ms?: number;
+  active?: 'quic' | 'http2' | null;
+};
 
 // ── Changing the domain (docs/plans/instance-address-change.md) ────────────────────────────────
 

@@ -27,6 +27,9 @@ export class DevicesApiError extends Error {
 }
 
 /** The request left and no answer came back: the outcome is not known. */
+/** A status a gateway (Cloudflare's edge, a proxy) gives when the instance did not answer. */
+const GATEWAY_STATUS = (status: number) => (status >= 502 && status <= 504) || (status >= 520 && status <= 530);
+
 export class LostAnswer extends Error {
   constructor() {
     super('lost_answer');
@@ -51,8 +54,11 @@ async function call<T = Record<string, unknown>>(path: string, init: { method?: 
     const parsed: unknown = await response.json();
     if (parsed && typeof parsed === 'object') body = parsed as Record<string, unknown>;
   } catch {
-    // A truncated or non-JSON answer to a successful status is a lost answer; to a failure, a bare status.
-    if (response.ok) throw new LostAnswer();
+    // A truncated or non-JSON answer to a successful status is a lost answer. So is a gateway's own
+    // error page: Cloudflare answers 502–504 or 520–530 in HTML when the instance's answer did not
+    // reach it (a tunnel that was just stopped, by this very request or otherwise). The instance's
+    // own refusals are JSON, and stay refusals.
+    if (response.ok || GATEWAY_STATUS(response.status)) throw new LostAnswer();
   }
   if (!response.ok) {
     const code = typeof body.error === 'string' ? body.error : typeof body.code === 'string' ? body.code : `http_${response.status}`;

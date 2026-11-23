@@ -132,6 +132,10 @@ const slow = reported({ tunnel_quality: quality({ grade: 'critical', rtt_ms: { m
 const unsteady = reported({ tunnel_quality: quality({ state: 'degraded', grade: 'fair', ha_connections: 2 }) });
 /** A better route is being evaluated on a tunnel that is up: said as that, not as a fault. */
 const optimizing = reported({ tunnel_quality: quality({ state: 'recovering', recovery: { state: 'evaluating', last_attempt_at: null, next_attempt_at: null } }) });
+/** Just started: nothing read from the connector yet (no reading, and the zero it began with). */
+const connecting = reported({ tunnel_quality: quality({ state: 'unknown', grade: 'unknown', ha_connections: 0, rtt_ms: null }) });
+/** Connected, its round trip not measured yet. */
+const measuring = reported({ tunnel_quality: quality({ grade: 'unknown', ha_connections: 2, rtt_ms: null }) });
 /** The connector's process cannot be read: unknown, said as unknown. */
 const unreadable = reported({ running: false, pid_state: 'unknown' });
 const all = (self: string): Device[] => [macbook(), iphone(), macMini, safari, chrome].map((each) => (each.id === self ? { ...each, self: true } : each));
@@ -261,6 +265,8 @@ const designFrames = frames([
   frame('tunnel-slow-phone', '隧道慢 · 375 宽', PHONE, { reach: slow, devices: all('host') }),
   frame('tunnel-unsteady', '已开启 · 隧道连着但四条连接没连满：说不太稳定', at(760), { reach: unsteady, devices: all('host') }),
   frame('tunnel-optimizing', '已开启 · 正在优化线路：隧道连着，照实说在优化', at(760), { reach: optimizing, devices: all('host') }),
+  frame('tunnel-connecting', '已开启 · 刚开启或刚绑定，连接器还没读到：说正在连接，不说连不上、不给重试', at(760), { reach: connecting, devices: all('host') }),
+  frame('tunnel-measuring', '已开启 · 连上了，延迟还没测出来：说已连接，不带数字，不说读不到', at(760), { reach: measuring, devices: all('host') }),
   frame('tunnel-down', '已开启 · 连接器一条连接都没有登记上：这才是连不上 Cloudflare', at(760),
     { reach: down, devices: [macbook({ self: true }), iphone({ online: undefined, lastActiveAt: ago(12) }), { ...macMini, online: undefined, lastActiveAt: ago(12) }] }),
   frame('tunnel-down-phone', '连不上 Cloudflare · 375 宽：域名完整显示，按钮和开关换到下一行', PHONE,

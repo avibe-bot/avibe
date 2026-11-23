@@ -60,7 +60,10 @@ function joinNewest(current: ActivityFeed, page: { items: DeviceActivity[]; next
 
 /** What a sign-out's answer says about whose devices they were: the instance's word when it
  *  gives one, else what the page itself knows without guessing. */
-function noticeFrom(answer: SignOutAnswer, known: { device: string | null; owner: SignOutNotice['owner']; hadHealth: boolean }): SignOutNotice {
+/** The row listed what the device does, and Health was not among it (Product, 2026-11-23). */
+const listedWithoutHealth = (device: Device) => device.functions.length > 0 && !device.functions.some((each) => each.kind === 'health');
+
+function noticeFrom(answer: SignOutAnswer, known: { device: string | null; owner: SignOutNotice['owner']; hadHealth: boolean; withoutHealth: boolean }): SignOutNotice {
   const owners = new Set(answer.signedOut.map((each) => each.owner));
   const said = owners.size === 1 ? [...owners][0] : 'unknown';
   const results = [...new Set(answer.signedOut.flatMap((each) => each.results))] as AccountResult[];
@@ -70,6 +73,7 @@ function noticeFrom(answer: SignOutAnswer, known: { device: string | null; owner
     results,
     healthCleanupPending: answer.healthCleanupPending,
     hadHealth: known.hadHealth,
+    withoutHealth: known.withoutHealth || undefined,
   };
 }
 
@@ -93,6 +97,10 @@ export function DevicesPage() {
   const [snapshot, setSnapshot] = useState<DevicesSnapshot>(EMPTY);
   const [listRead, setListRead] = useState<'loading' | 'known' | 'unknown'>('loading');
   const now = useNow();
+  /** When this page itself turned remote access on or finished binding: for a minute after, a
+   *  connector with no connection yet is still registering, not lost. */
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const justStarted = startedAt !== null && now - startedAt < 60_000;
   // Everything read so far, newest first, with the cursor that continues it. A refresh reads the
   // newest page again and joins it to what is already listed, so no entry between them is lost.
   const [feed, setFeed] = useState<{ items: DeviceActivity[]; cursor: string | null; extended: boolean }>({ items: [], cursor: null, extended: false });
@@ -144,7 +152,10 @@ export function DevicesPage() {
       }
     }
     if (!owner || devices.status !== 'fulfilled') return;
-    const byId = new Map(devices.value.devices.map((each) => [each.id, deviceName(t, each)]));
+    // A device signed out lately is no longer listed: its sign-out receipt still has its name, so the
+    // activity says the same name as 「最近退出的设备」 on the same page.
+    const byId = new Map<string, string>(devices.value.signedOut.flatMap((each) => (each.deviceId && each.device ? [[each.deviceId, each.device] as const] : [])));
+    for (const each of devices.value.devices) byId.set(each.id, deviceName(t, each));
     const nameOf = (id: string | undefined) => (id ? byId.get(id) ?? null : null);
     names.current = nameOf;
     const [events, address] = await Promise.allSettled([api.activity(nameOf), api.address()]);
@@ -161,6 +172,7 @@ export function DevicesPage() {
 
   const onEnd = useCallback((end: ClaimEnd) => {
     if (end.state === 'bound' || end.code === 'already_bound') {
+      if (end.state === 'bound') setStartedAt(Date.now());
       setClaimIssue(undefined);
     } else {
       setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, { claimId: end.claimId, seconds: end.seconds }));
@@ -201,12 +213,13 @@ export function DevicesPage() {
     setStatus(next);
   }, []);
   const { optimize, recovering, run: optimizeRoute } = useOptimizeRoute({ status, now, onStatus, refresh: load });
-  // An evaluation that is running is followed until it ends.
+  // An evaluation that is running, and a connector still connecting, are followed until they end.
+  const connecting = Boolean(status?.running) && tunnelFromStatus(status, now, justStarted).state === 'connecting';
   useEffect(() => {
-    if (!operate || !recovering) return undefined;
+    if (!recovering && !connecting) return undefined;
     const timer = window.setInterval(() => { void load(); }, FOLLOW_MS);
     return () => window.clearInterval(timer);
-  }, [load, operate, recovering]);
+  }, [connecting, load, recovering]);
 
   const activity = feed.items;
   const nextCursor = feed.cursor;
@@ -257,7 +270,7 @@ export function DevicesPage() {
   else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', account: null, name: '' };
   else if (!status.paired || !host) reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue };
   else if (status.running || status.pid_state === 'unknown') {
-    const tunnel = tunnelFromStatus(status, now);
+    const tunnel = tunnelFromStatus(status, now, justStarted);
     reach = {
       state: 'on',
       host,
@@ -300,6 +313,7 @@ export function DevicesPage() {
     try {
       const answer = on ? await api.start() : await api.stop();
       if (answer.ok === false) setProblem('failed');
+      else if (on) setStartedAt(Date.now());
     } catch (error) {
       // Turning it off stops the tunnel before the answer leaves: from a remote device, hearing
       // nothing back is what success looks like.
@@ -323,6 +337,7 @@ export function DevicesPage() {
       // The row the page just acted on says whose it was: no guess.
       owner: device.group === 'mine' ? 'mine' : device.group === 'others' ? 'others' : 'unknown',
       hadHealth: signOutNeedsConfirm(device),
+      withoutHealth: listedWithoutHealth(device),
     }));
   }), [act, t]);
 
@@ -341,6 +356,7 @@ export function DevicesPage() {
           // "My other devices" are the viewer's own; every remote device may be anyone's.
           owner: all ? 'unknown' : 'mine',
           hadHealth: devices.some((each) => !each.self && each.kind !== 'host' && signOutNeedsConfirm(each)),
+          withoutHealth: ((left) => left.length > 0 && left.every(listedWithoutHealth))(devices.filter((each) => !each.self && each.kind !== 'host')),
         }));
       });
     }

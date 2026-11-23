@@ -8053,7 +8053,9 @@
       "slow": "已连接，但比较慢",
       "unsteady": "已连接，但不太稳定",
       "tunnelUnknown": "现在读不到连接的状态",
-      "optimizing": "已连接，正在优化线路"
+      "optimizing": "已连接，正在优化线路",
+      "connecting": "正在连接…",
+      "connected": "已连接"
     },
     "claim": {
       "account": "账号",

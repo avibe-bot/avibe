@@ -296,6 +296,34 @@ describe('DevicesPage · devices', () => {
     expect(document.body.textContent).not.toContain('已结束');
   });
 
+  it('says nothing about Health after signing out a device whose functions are listed without it', async () => {
+    const browser: Device = { ...chrome, functions: [{ kind: 'notifications', on: false, canChange: false }] };
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, browser]));
+    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
+      signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'mine', results: ['queued'] }], healthCleanupPending: true,
+    });
+    mount();
+    fireEvent.click(await screen.findByText('Chrome'));
+    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+    const notice = await screen.findByRole('status');
+    expect(within(notice).getByText('已在这个 Avibe 上退出 Chrome')).toBeTruthy();
+    expect(notice.textContent).not.toContain('健康');
+  });
+
+  it('names a device signed out lately in the activity as its sign-out receipt does', async () => {
+    const receipt = { id: 'o1', deviceId: 'gone', device: 'Chrome · macOS', kind: 'browser' as const, owner: 'mine' as const, results: ['accepted' as const] };
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook], { signedOut: [receipt] }));
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    vi.spyOn(devicesApi, 'activity').mockImplementation(async (nameOf) => ({
+      items: [{ id: 'e1', deviceId: 'gone', at: new Date().toISOString(), device: nameOf('gone'), event: { kind: 'signedIn' } }],
+      nextCursor: null,
+    }));
+    mount();
+    const panel = (await screen.findByText('最近活动')).closest('section') ?? document.body;
+    await waitFor(() => expect(panel.textContent).toContain('Chrome · macOS'));
+    expect(document.body.textContent).not.toContain('一台已不在列表里的设备');
+  });
+
   it('asks before signing out a device that synced Health, and names the local-only half for whose device it was', async () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone, sara]));
     const signOut = vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
@@ -312,6 +340,7 @@ describe('DevicesPage · devices', () => {
     const asked = screen.getByRole('dialog');
     expect(asked.textContent).toContain('这台设备同步过来的健康数据，会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，之后可以在这里单独断开健康。');
     expect(within(asked).queryByRole('button', { name: '退出并删除健康数据' })).toBeNull();
+    // (The notice afterwards keeps its Health line: this device listed Health.)
     fireEvent.click(within(asked).getByRole('button', { name: '退出' }));
     await waitFor(() => expect(signOut).toHaveBeenCalledWith('iphone'));
     // The row the page acted on was one of the viewer's own: only that half is said.
@@ -362,6 +391,27 @@ describe('DevicesPage · devices', () => {
     expect(await screen.findByText(said('没有收到结果，不确定有没有完成。下面是重新读取到的状态。'))).toBeTruthy();
     expect(screen.queryByText(said('没有完成，请再试一次。'))).toBeNull();
     expect(api.devices.mock.calls.length).toBeGreaterThan(reads);
+  });
+
+  it('says a tunnel it has just bound as connecting, with no retry, until a connection is read', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'bound', hostname: host } as never);
+    const registering = { ...paired, tunnel_quality: {
+      schema_version: 2, state: 'degraded', grade: 'unknown', sampled_at: new Date().toISOString(), protocol: 'quic',
+      connector_count: 1, ha_connections: 0, rtt_ms: null, recovery: { state: 'idle', last_attempt_at: null, next_attempt_at: null },
+    } };
+    const status = vi.spyOn(devicesApi, 'status').mockResolvedValue(registering as never);
+    mount();
+    expect(await screen.findByText('正在连接…')).toBeTruthy();
+    expect(screen.queryByText('连不上 Cloudflare，其他设备暂时打不开')).toBeNull();
+    expect(screen.queryByRole('button', { name: '重试' })).toBeNull();
+    // Registered: the next read, soon after, says so.
+    status.mockResolvedValue({ ...registering, tunnel_quality: { ...registering.tunnel_quality, state: 'healthy', grade: 'good', ha_connections: 4, rtt_ms: { min: 180, median: 202, max: 240 } } } as never);
+    for (let second = 0; second < 3; second += 1) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    }
+    expect(await screen.findByText(said('连接良好'))).toBeTruthy();
   });
 
   it('says turning remote access off from afar as what it is: no answer comes back when it worked', async () => {

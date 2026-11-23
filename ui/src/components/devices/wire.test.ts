@@ -158,10 +158,27 @@ describe('tunnelFromStatus', () => {
     expect(read({ tunnel_quality: sample({ grade: 'fair' }) }).state).toBe('up');
   });
 
+  it('never says a tunnel that has just started is lost: connecting until something is read from it', () => {
+    // Started, metrics not read yet: the sample carries no reading and the zero it began with.
+    expect(read({ tunnel_quality: sample({ state: 'unknown', grade: 'unknown', ha_connections: 0, rtt_ms: null }) }).state).toBe('connecting');
+    // Metrics read, still registering: lost, unless this page started it a moment ago.
+    const registering = { tunnel_quality: sample({ state: 'degraded', grade: 'unknown', ha_connections: 0, rtt_ms: null }) };
+    expect(read(registering).state).toBe('down');
+    expect(tunnelFromStatus({ ok: true, enabled: true, paired: true, running: true, ...registering } as unknown as RemoteAccessStatus, NOW, true).state).toBe('connecting');
+    // No sample yet: unknown, or connecting where this page started it.
+    expect(tunnelFromStatus({ ok: true, enabled: true, paired: true, running: true } as unknown as RemoteAccessStatus, NOW, true).state).toBe('connecting');
+    // Connected, its round trip not measured yet: connected, with no number.
+    expect(read({ tunnel_quality: sample({ grade: 'unknown', ha_connections: 2, rtt_ms: null }) })).toEqual({ state: 'connected', ms: undefined, active: 'quic' });
+    // Requests failing through it is lost however recent the start.
+    const failing = { tunnel_quality: sample({ request_path: { status: 'unavailable', confidence: 'high', success_count: 0, sample_count: 12 } }) };
+    expect(tunnelFromStatus({ ok: true, enabled: true, paired: true, running: true, ...failing } as unknown as RemoteAccessStatus, NOW, true).state).toBe('down');
+  });
+
   it('says unknown where the state cannot be read, and lets an old sample stop speaking for now', () => {
     expect(read({ running: false, pid_state: 'unknown' }).state).toBe('unknown');
     expect(read({}).state).toBe('unknown');
-    expect(read({ tunnel_quality: sample({ grade: 'unknown' }) }).state).toBe('unknown');
+    // Its metrics have not been read for a while: the connections it last had say nothing now.
+    expect(read({ tunnel_quality: sample({ state: 'unknown', grade: 'unknown' }) }).state).toBe('unknown');
     expect(read({ tunnel_quality: sample() }, NOW + 200_000).state).toBe('unknown');
     expect(read({ paired: false, running: false }).state).toBe('unknown');
     expect(tunnelFromStatus(null).state).toBe('unknown');

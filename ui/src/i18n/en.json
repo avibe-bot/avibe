@@ -8053,7 +8053,9 @@
       "slow": "Connected, but slow",
       "unsteady": "Connected, but unsteady",
       "tunnelUnknown": "The connection's state cannot be read right now",
-      "optimizing": "Connected; optimizing the route"
+      "optimizing": "Connected; optimizing the route",
+      "connecting": "Connecting…",
+      "connected": "Connected"
     },
     "claim": {
       "account": "Account",
