@@ -297,6 +297,53 @@ def test_default_change_replans_included_and_excluded_sessions(initial, final, e
         assert c.scalar(select(agent_sessions.c.model).where(agent_sessions.c.id == "floating")) == expected
 
 
+@pytest.mark.asyncio
+async def test_unrelated_commits_exhaust_replans_without_invalidating_catalog_draft(tmp_path):
+    from sqlalchemy import event
+
+    ensure_sqlite_state()
+    engine = get_cached_sqlite_engine()
+    service, store, _ = _service(tmp_path)
+    agent = store.config.agents["claude"]
+    agent.models = [ModelHubBackendModelConfig(id="old")]
+    baseline = [agent.models[0].to_payload()]
+    desired = [{**baseline[0], "id": "new"}]
+    with engine.begin() as c:
+        _add_agent(c, "selected", "old")
+        revision = read_runtime_settings_revision(c)
+
+    attempts = 0
+
+    def write_unrelated_state(conn, cursor, sql, params, context, many):
+        nonlocal attempts
+        if sql == "BEGIN IMMEDIATE":
+            attempts += 1
+            with engine.begin() as other:
+                other.exec_driver_sql(
+                    "INSERT OR REPLACE INTO state_meta(key,value_json,updated_at) VALUES ('unrelated-counter',?,'test')",
+                    (str(attempts),),
+                )
+
+    event.listen(engine, "before_cursor_execute", write_unrelated_state)
+    try:
+        with pytest.raises(ModelHubError) as refused:
+            await service.set_agent_models("claude", baseline, desired, renames={"old": "new"})
+    finally:
+        event.remove(engine, "before_cursor_execute", write_unrelated_state)
+    assert attempts == 3
+    assert (refused.value.status, refused.value.code) == (503, "backend_model_store_busy")
+    assert store.load().agents["claude"].models[0].id == "old"
+    selection = select(agents.c.model).where(agents.c.id == "selected")
+    with engine.connect() as c:
+        assert c.scalar(selection) == "old"
+        assert read_runtime_settings_revision(c) == revision
+
+    await service.set_agent_models("claude", baseline, desired, renames={"old": "new"})
+    assert store.load().agents["claude"].models[0].id == "new"
+    with engine.connect() as c:
+        assert c.scalar(selection) == "new"
+
+
 def test_stale_candidate_cannot_overwrite_a_later_selection():
     from sqlalchemy import event
     from storage.model_selection_rename import rename_selections

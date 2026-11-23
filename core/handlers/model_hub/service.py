@@ -8896,7 +8896,9 @@ class ModelHubService:
                 try:
                     await run_owned_in_thread(move_selections)
                 except SelectionChanged:
-                    raise ModelHubError("backend_model_conflict", status=409) from None
+                    # Concurrent SQLite writes exhausted the bounded replans.
+                    # The catalog baseline is still valid; retry the same draft.
+                    raise ModelHubError("backend_model_store_busy", status=503) from None
             # SQLite selections now refer to the new catalog. Engine sync failure
             # must not roll the file back over them; reconcile on next demand.
             await self._commit_synced(previous, config, rollback_on_sync_failure=not moves)
