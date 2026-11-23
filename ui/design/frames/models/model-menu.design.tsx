@@ -118,6 +118,8 @@ const unknownId = 'my-private-model-v2';
 const lookup = (query: string) => `/api/models/catalog/models-dev?query=${encodeURIComponent(query)}&refresh=if-stale`;
 const customApi = {
   ...api,
+  // The edit-model frame's row: the catalog is asked about a saved row's ID too, and here has nothing to add.
+  [lookup('claude-opus-4-8')]: ok({ matches: [] }),
   [lookup(exactId)]: ok({ matches: [fable51, fableLite, fable5] }),
   [lookup(variantId)]: ok({ matches: [{ ...fable51, match_kind: 'closest', model_id: variantId }] }),
   [lookup(unknownId)]: ok({ matches: [] }),
@@ -208,7 +210,7 @@ const designFrames = frames([
     width: 1000,
     height: 900,
     status: 'shipped',
-    fixtures: { api },
+    fixtures: { api: customApi },
     render: () => (
       <BackendModelEditorDialog
         open

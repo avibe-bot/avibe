@@ -679,7 +679,7 @@ describe('SettingsModelsPage surface branches', () => {
     await userEvent.click(await screen.findByRole('button', { name: /^Manage models$|^管理模型$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Add models$|^添加模型$/i }));
     await userEvent.click(await screen.findByRole('button', { name: /^Add custom model…$|^添加自定义模型…$/i }));
-    await userEvent.type(await screen.findByLabelText(/^Model$|^模型$/i), addedId);
+    await userEvent.type(await screen.findByLabelText(/^Model ID$|^模型 ID$/i), addedId);
     await userEvent.click(screen.getByRole('button', { name: /^Add model$|^添加模型$/i }));
     await userEvent.click(screen.getByRole('button', { name: /^Save$|^保存$/i }));
 

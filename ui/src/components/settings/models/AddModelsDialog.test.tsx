@@ -79,7 +79,7 @@ describe('AddModelsDialog', () => {
     expect(screen.getByRole('checkbox', { name: /opus-x/ }).getAttribute('aria-checked')).toBe('true');
 
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
-    await user.type(within(editor()).getByLabelText('Model'), 'my-finetune');
+    await user.type(within(editor()).getByLabelText('Model ID'), 'my-finetune');
     await user.click(within(editor()).getByRole('button', { name: 'Add model' }));
 
     await waitFor(() => expect(onAdded).toHaveBeenCalled());
@@ -108,7 +108,7 @@ describe('AddModelsDialog', () => {
 
     await user.click(await screen.findByRole('checkbox', { name: /opus-x/ }));
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
-    await user.type(within(editor()).getByLabelText('Model'), 'my-finetune');
+    await user.type(within(editor()).getByLabelText('Model ID'), 'my-finetune');
     await user.click(within(editor()).getByRole('button', { name: 'Add model' }));
 
     // Refused: the editor steps aside so today's supplier can be seen, still ticked.
@@ -119,7 +119,7 @@ describe('AddModelsDialog', () => {
 
     // The written model comes back as it was left, and goes out with today's supplier.
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
-    expect((within(editor()).getByLabelText('Model') as HTMLInputElement).value).toBe('my-finetune');
+    expect((within(editor()).getByLabelText('Model ID') as HTMLInputElement).value).toBe('my-finetune');
     await user.click(within(editor()).getByRole('button', { name: 'Add model' }));
     await waitFor(() => expect(onAdded).toHaveBeenCalled());
     expect(write.mock.calls[1][1].models.map((model: { id: string }) => model.id)).toEqual(['opus-x', 'my-finetune']);

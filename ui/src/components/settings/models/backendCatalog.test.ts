@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyBackendCatalogIntent,
   applyModelsDevMatch,
+  applyModelsDevParameters,
   backendCatalogIntent,
   backendCatalogIntentApplied,
   blankBackendModel,
@@ -20,6 +21,7 @@ import {
   offeredCandidates,
   MODELS_DEV_FIELDS,
   clearModelsDevParameters,
+  modelsDevBaseId,
   pickerGroups,
   readBackendCatalogBaseline,
   sameBackendModel,
@@ -141,6 +143,42 @@ describe('applyModelsDevMatch', () => {
     filled.reasoning_efforts.push('mutated');
 
     expect(match.reasoning_efforts).toEqual(['low', 'high']);
+  });
+});
+
+describe('applyModelsDevParameters', () => {
+  it('describes the row from the match and leaves its ID and its name alone', () => {
+    const draft = model('relay/house-name', { display_name: 'House name', origin: 'provider', locked: true });
+
+    const described = applyModelsDevParameters(draft, match, draft.origin, null);
+
+    // Asserted as the whole row: everything the catalog decides arrives, and the
+    // two things that say WHICH model this is — and how the row was created —
+    // stay as they were. A saved row is passed no backend, so the API it is
+    // answered on is not the catalog's to change either.
+    expect(described).toEqual({
+      ...draft,
+      models_dev_id: match.models_dev_id,
+      context_window: match.context_window,
+      max_output_tokens: match.max_output_tokens,
+      input_modalities: match.input_modalities,
+      output_modalities: match.output_modalities,
+      supports_tools: match.supports_tools,
+      supports_reasoning: match.supports_reasoning,
+      reasoning_efforts: match.reasoning_efforts,
+    });
+    expect('native_protocol' in described).toBe('native_protocol' in draft);
+  });
+
+  it('brings the API with the description only for an OpenCode row being added', () => {
+    const answered = { ...match, native_protocol: 'anthropic' as const };
+    expect(applyModelsDevParameters(blankBackendModel(), answered, 'models_dev', 'opencode').native_protocol).toBe('anthropic');
+    expect('native_protocol' in applyModelsDevParameters(blankBackendModel(), answered, 'models_dev', 'codex')).toBe(false);
+  });
+
+  it('reads a catalog key, or a prefixed model ID, as the registered name', () => {
+    expect(modelsDevBaseId('anthropic/claude-opus-4')).toBe('claude-opus-4');
+    expect(modelsDevBaseId('claude-opus-4')).toBe('claude-opus-4');
   });
 });
 

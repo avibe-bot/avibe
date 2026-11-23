@@ -3697,21 +3697,7 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-chip--add { border-style: dashed; }
 .model-hub-model-chip--custom { padding-right: 6px; }
 
-/* The 「Model」 typeahead. It floats over the fields below it rather than
- * displacing them: the frame draws it in layout flow, but every field it can
- * fill sits underneath, and pushing them down on each keystroke moves the very
- * values the user is about to check. Same metrics, overlay layering. */
-.model-hub-model-match-list {
-  /* Nine rows: the ranked read returns at most eight matches, and the 「use what
-   * I typed」 escape is always one more, so the cap is reached rather than
-   * guessed — and a shorter list is still exactly as tall as its rows. */
-  max-height: calc(var(--model-hub-model-match-height) * 9);
-  overflow: hidden auto;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--model-hub-model-control-radius);
-  background: var(--surface-2);
-  box-shadow: var(--model-hub-menu-shadow);
-}
+/* One catalog model in the search under 「更换」. */
 .model-hub-model-match {
   min-height: var(--model-hub-model-match-height);
   padding: 8px 12px;
@@ -3720,11 +3706,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-match:last-child { border-bottom: none; }
 .model-hub-model-match:hover { background: var(--model-hub-wash-05); }
 .model-hub-model-match.is-selected { background: var(--model-hub-mint-14); }
-/* The 「use what I typed」 row as the escape under the suggestions: no fill, so it
- * reads as the plain sentence the frame draws. (First in the list, once a
- * catalog model is the base, it is drawn as a plain match row instead.) */
-.model-hub-model-match--literal { border-bottom: none; }
-.model-hub-model-match--literal.is-selected { background: var(--model-hub-wash-08); }
 .model-hub-model-match-name {
   font-size: 12.5px;
   font-weight: 600;
@@ -3736,11 +3717,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-match-meta {
   font-size: 11px;
   color: var(--muted);
-}
-.model-hub-model-match-literal {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--foreground);
 }
 .model-hub-model-match-state {
   min-height: var(--model-hub-model-match-height);
