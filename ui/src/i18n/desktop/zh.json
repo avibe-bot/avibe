@@ -145,7 +145,7 @@
       "sendCode": "发送验证码",
       "boundTitle": "已绑定",
       "conflictTitle": "这台电脑属于另一个账号",
-      "conflictBody": "在 avibe.bot 上，这台电脑登记在另一个账号名下，什么都没有改变。要用它，就在这里退出，再用那个账号登录。",
+      "conflictBody": "在 avibe.bot 上，这台电脑绑定在另一个账号名下，什么都没有改变。要用它，就在这里退出，再用那个账号登录。",
       "restart": "重新开始",
       "problem": {
         "unreachable": "暂时连不上 avibe.bot，这次没有完成。",
@@ -161,15 +161,15 @@
         "reauth": "avibe.bot 还是要求重新验证，这次没有完成。",
         "storage": "这台电脑现在保存不了登录。稍后重新登录。"
       },
-      "changed": "验证好了，但{{fields}}和刚才不一样了。看一下，再按「绑定」。",
+      "changed": "验证好了，但这几项和刚才不一样了：{{fields}}。看一下，再按「绑定」。",
       "field": {
         "account": "账号",
         "computer": "电脑",
         "name": "名称",
-        "availability": "名称是否可用"
+        "availability": "名称能否使用"
       },
       "saving": "验证好了，正在保存登录…",
-      "changedPlain": "验证好了，但这一屏和刚才不一样了。看一下，再按「绑定」。"
+      "changedPlain": "验证好了，但 avibe.bot 那边有了变化，要再按一次「绑定」。"
     }
   }
 }

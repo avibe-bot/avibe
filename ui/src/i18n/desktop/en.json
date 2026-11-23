@@ -145,7 +145,7 @@
       "sendCode": "Send code",
       "boundTitle": "Bound",
       "conflictTitle": "This computer belongs to another account",
-      "conflictBody": "On avibe.bot, this computer is registered to another account. Nothing changed. To use it, sign out here and sign in with that account.",
+      "conflictBody": "On avibe.bot, this computer is bound to another account. Nothing changed. To use it, sign out here and sign in with that account.",
       "restart": "Start again",
       "problem": {
         "unreachable": "avibe.bot cannot be reached right now. This did not finish.",
@@ -161,15 +161,15 @@
         "reauth": "avibe.bot still asked to verify again. This did not finish.",
         "storage": "This computer cannot save the sign-in right now. Sign in again later."
       },
-      "changed": "Verified, but the {{fields}} changed since you confirmed. Check it, then press Bind again.",
+      "changed": "Verified, but these changed since you confirmed: {{fields}}. Check them, then press Bind again.",
       "field": {
         "account": "account",
         "computer": "computer",
         "name": "name",
-        "availability": "name’s availability"
+        "availability": "whether the name is available"
       },
       "saving": "Verified. Saving the sign-in…",
-      "changedPlain": "Verified, but this screen changed since you confirmed. Check it, then press Bind again."
+      "changedPlain": "Verified, but something changed at avibe.bot, so press Bind once more."
     }
   }
 }
