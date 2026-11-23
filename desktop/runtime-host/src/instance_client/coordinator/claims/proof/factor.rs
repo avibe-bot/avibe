@@ -56,7 +56,7 @@ impl FactorOwner {
         if !Arc::ptr_eq(&c.claims, &self.caller.owner) {
             return Err(stale());
         }
-        let _operation = c.operation.try_lock().map_err(|_| busy())?;
+        let _operation = c.operation.claim.try_lock().map_err(|_| busy())?;
         c.check_claim_admission()?;
         let inner = c.inner.try_lock().map_err(|_| busy())?;
         let mut owner = c.claims.lock().expect("claim owner");

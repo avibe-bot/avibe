@@ -565,7 +565,7 @@ impl Coordinator {
     /// No network, host or helper is available to this phase. Only an explicit Read
     /// with the returned native receipt can consume the reservation.
     fn reserve_claim(&self, caller: &ClaimCaller, account_epoch: Epoch) -> Result<ClaimReply<'static>> {
-        let _operation = self.operation.try_lock().map_err(|_| busy())?;
+        let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
         self.check_claim_admission()?;
         let inner = self.inner.try_lock().map_err(|_| busy())?;
         let mut owner = self.claims.lock().expect("claim owner");
@@ -744,7 +744,7 @@ impl Coordinator {
             // A descriptor poll is not a competing user operation. Wait without owning
             // the review, then repeat admission against the current document and account.
             let _monitor = self.descriptor_refresh.lock().await;
-            let _operation = self.operation.try_lock().map_err(|_| busy())?;
+            let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
             self.check_claim_admission()?;
             let inner = self.inner.lock().expect("client state");
             let mut owner = self.claims.lock().expect("claim owner");
@@ -819,7 +819,7 @@ impl Coordinator {
     ) -> Result<ClaimReply<'static>> {
         // No operation lock over HTTP. A concurrent ordinary transaction either owns
         // this lock or has retired the document at commit; never overwrite its jar.
-        let _operation = self.operation.try_lock().map_err(|_| busy())?;
+        let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
         self.check_claim_admission()?;
         let mut inner = self.inner.lock().expect("client state");
         let mut owner = self.claims.lock().expect("claim owner");

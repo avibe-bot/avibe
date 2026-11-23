@@ -348,7 +348,7 @@ impl Coordinator {
         if !Arc::ptr_eq(&self.claims, &caller.owner) {
             return Err(stale());
         }
-        let _operation = self.operation.try_lock().map_err(|_| busy())?;
+        let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
         self.check_claim_admission()?;
         let inner = self.inner.try_lock().map_err(|_| busy())?;
         let mut owner = self.claims.lock().expect("claim owner");
@@ -419,6 +419,13 @@ impl Coordinator {
             _ = &mut interrupted => return Err(stale()),
             _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
             r = flow.prepare_claim_code(&account, code) => r,
+        };
+        // Wait for the background poll with the original result in hand. Do not
+        // reissue start, and do not let this wait extend the ticket or document.
+        let _monitor = tokio::select! { biased;
+            _ = &mut interrupted => return Err(stale()),
+            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
+            guard = self.descriptor_refresh.lock() => guard,
         };
         let prepared = match prepared {
             Err(error) if error.code == "rate_limited" && error.retry_until.is_some() => {
@@ -541,7 +548,7 @@ impl Coordinator {
             // Wait before taking the submission. All account/document checks below
             // use live state after the monitor releases its operation lock.
             let _monitor = self.descriptor_refresh.lock().await;
-            let _operation = self.operation.try_lock().map_err(|_| busy())?;
+            let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
             if self.signing_out.load(Ordering::SeqCst) {
                 return Err(stale());
             }

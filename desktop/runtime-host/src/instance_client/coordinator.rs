@@ -89,6 +89,24 @@ struct Inner {
     display_account: Option<String>,
 }
 
+/// An ordinary transaction publishes a working copy, so it excludes both descriptor
+/// publication and claim transitions. A descriptor poll publishes only local display
+/// fields: it is not a competing writer of the account, claim or credential slot.
+#[derive(Default)]
+struct Operations {
+    descriptor: tokio::sync::Mutex<()>,
+    claim: tokio::sync::Mutex<()>,
+}
+type OperationGuard<'a> = (tokio::sync::MutexGuard<'a, ()>, tokio::sync::MutexGuard<'a, ()>);
+impl Operations {
+    async fn lock(&self) -> OperationGuard<'_> {
+        (self.descriptor.lock().await, self.claim.lock().await)
+    }
+    fn try_lock(&self) -> Result<OperationGuard<'_>, tokio::sync::TryLockError> {
+        Ok((self.descriptor.try_lock()?, self.claim.try_lock()?))
+    }
+}
+
 pub struct Coordinator {
     inner: Arc<Mutex<Inner>>,
     // A live private helper is never copied into a Working account transaction.
@@ -98,7 +116,7 @@ pub struct Coordinator {
     action_generation: Arc<AtomicU64>,
     // Read/check may queue behind the descriptor monitor, never behind a grant as authority to retry it.
     descriptor_refresh: tokio::sync::Mutex<()>,
-    operation: tokio::sync::Mutex<()>,
+    operation: Operations,
     credential_io: Arc<tokio::sync::Mutex<CredentialWrites>>,
     signing_out: Arc<AtomicBool>,
     restore_started: AtomicBool,
@@ -163,7 +181,7 @@ impl Coordinator {
             generation,
             action_generation,
             descriptor_refresh: tokio::sync::Mutex::new(()),
-            operation: tokio::sync::Mutex::new(()),
+            operation: Operations::default(),
             credential_io: Arc::new(tokio::sync::Mutex::new(CredentialWrites {
                 ids: credential_ids,
                 cleanup_error: None,
@@ -399,19 +417,21 @@ impl Coordinator {
         self.view.local_rebound(Epoch::new(self.generation.clone(), value));
     }
     pub async fn refresh_local(&self) {
-        // Always acquire this before operation. Only the descriptor monitor and the
-        // two short read/check admission sections participate in this queue.
+        // Order: monitor queue, then descriptor exclusion. Never hold the claim
+        // permit across descriptor HTTP: synchronous direct replies cannot queue.
         let _monitor = self.descriptor_refresh.lock().await;
-        // Share transaction ownership with account/enrollment publication.
-        // Otherwise an older account clone can resurrect invalidated proof.
-        let _operation = self.operation.lock().await;
-        let mut working = self.inner.lock().expect("client state").clone();
-        let epoch = Epoch::new(self.generation.clone(), working.state.generation);
-        let Some(local) = &mut working.local else {
-            return;
+        let _descriptor = self.operation.descriptor.lock().await;
+        let (mut local, mut sample, epoch) = {
+            let current = self.inner.lock().expect("client state");
+            let Some(local) = current.local.clone() else { return };
+            (
+                local,
+                current.state.clone(),
+                Epoch::new(self.generation.clone(), current.state.generation),
+            )
         };
         local.fence(epoch.clone());
-        let result = EnrollmentFlow::read(local, &mut working.state).await;
+        let result = EnrollmentFlow::read(&mut local, &mut sample).await;
         let state = {
             let mut current = self.inner.lock().expect("client state");
             if epoch.check().is_err() {
@@ -419,9 +439,9 @@ impl Coordinator {
             }
             match result {
                 Ok(_) => {
-                    current.state.local = working.state.local;
+                    current.state.local = sample.local;
                     if current.state.connection.committed.is_local() {
-                        current.state.connection.committed = working.state.connection.committed;
+                        current.state.connection.committed = sample.connection.committed;
                     }
                 }
                 Err(_) => {

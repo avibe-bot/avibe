@@ -70,7 +70,7 @@ impl Coordinator {
         if !Arc::ptr_eq(&self.claims, &caller.owner) {
             return Err(stale());
         }
-        let _operation = self.operation.try_lock().map_err(|_| busy())?;
+        let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
         self.check_claim_admission()?;
         let inner = self.inner.try_lock().map_err(|_| busy())?;
         let mut claims = self.claims.lock().expect("claim owner");

@@ -26,7 +26,7 @@ impl Confirming {
         if !Arc::ptr_eq(&self.caller.owner, &c.claims) {
             return Err(stale());
         }
-        let _operation = c.operation.try_lock().map_err(|_| busy())?;
+        let _operation = c.operation.claim.try_lock().map_err(|_| busy())?;
         c.check_claim_admission()?;
         let inner = c.inner.try_lock().map_err(|_| busy())?;
         let mut owner = c.claims.lock().expect("claim owner");
@@ -144,7 +144,7 @@ impl Coordinator {
             // Queue only behind descriptor reads. The revision is still untouched;
             // admission, including the continuation's deadline, is checked below.
             let _monitor = self.descriptor_refresh.lock().await;
-            let _operation = self.operation.try_lock().map_err(|_| busy())?;
+            let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
             self.check_claim_admission()?;
             let inner = self.inner.lock().expect("client state");
             let mut owner = self.claims.lock().expect("claim owner");
@@ -218,7 +218,7 @@ impl Coordinator {
         };
         let (completion, jar) = {
             // A submission has already been dispatched. Contention never permits a replay.
-            let _operation = self.operation.try_lock().map_err(|_| stale())?;
+            let _operation = self.operation.claim.try_lock().map_err(|_| stale())?;
             self.check_claim_admission().map_err(|_| stale())?;
             let mut inner = self.inner.lock().expect("client state");
             let mut owner = self.claims.lock().expect("claim owner");

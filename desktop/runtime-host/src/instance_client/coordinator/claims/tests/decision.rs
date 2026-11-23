@@ -93,7 +93,9 @@ impl Transport for Hosted {
     async fn send(&self, req: Request) -> Result<Response> {
         let mut status = 200;
         let mut headers = reqwest::header::HeaderMap::new();
-        if self.publication_case.starts_with("monitor_") && req.url.path() == "/api/desktop/local-instance" {
+        if (self.publication_case.starts_with("monitor_") || self.publication_case.starts_with("proof_start_monitor_"))
+            && req.url.path() == "/api/desktop/local-instance"
+        {
             assert_eq!(req.method, reqwest::Method::GET);
             self.observing.notify_one();
             self.resume_observation.notified().await;
@@ -685,6 +687,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
         "proof_busy",
         "proof_start_cancel",
         "proof_start_busy",
+        "proof_start_monitor_live",
+        "proof_start_monitor_retired",
         "proof_start_drop",
         "proof_start_no_owner",
         "proof_start_retired",
@@ -932,7 +936,7 @@ async fn check_cut(cut: &'static str) {
         },
         view,
     ));
-    if cut.starts_with("monitor_") {
+    if cut.starts_with("monitor_") || cut.starts_with("proof_start_monitor_") {
         // Seed the fixture before its first document; no navigation or view invalidation.
         c.inner.lock().unwrap().local = Some(NativeSession::new(
             "http://127.0.0.1:1984".parse().unwrap(),
@@ -1510,7 +1514,19 @@ async fn check_cut(cut: &'static str) {
                 assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
                 return;
             }
-            let accepted = mail.deliver().unwrap().unwrap();
+            let accepted = if cut == "proof_start_monitor_live" {
+                let refresh = c.refresh_local();
+                tokio::pin!(refresh);
+                tokio::select! { _ = &mut refresh => panic!("descriptor not held"), _ = hosted.observing.notified() => () }
+                // Direct delivery is synchronous. A monitor does not write the
+                // account and must not make this original reply undeliverable.
+                let accepted = mail.deliver().unwrap().unwrap();
+                hosted.resume_observation.notify_one();
+                refresh.await;
+                accepted
+            } else {
+                mail.deliver().unwrap().unwrap()
+            };
             let delivery = opaque(accepted["delivery"].as_str().unwrap()).unwrap();
             assert_eq!(
                 accepted,
@@ -1615,6 +1631,34 @@ async fn check_cut(cut: &'static str) {
                         assert!(start.await.is_err());
                         assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
                         drop(next);
+                    }
+                    "proof_start_monitor_live" | "proof_start_monitor_retired" => {
+                        let refresh = c.refresh_local();
+                        tokio::pin!(refresh);
+                        tokio::select! { _ = &mut refresh => panic!("descriptor not held"), _ = hosted.observing.notified() => () }
+                        assert!(c.operation.try_lock().is_err()); // still excludes an ordinary transaction
+                        assert!(c.operation.claim.try_lock().is_ok()); // not an account writer
+                        start_reply.send(()).unwrap();
+                        tokio::select! { biased; _ = &mut start => panic!("prepared result did not wait"), _ = tokio::task::yield_now() => () }
+                        assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 0);
+                        if cut == "proof_start_monitor_retired" {
+                            caller.retire();
+                            assert!(start.await.is_err());
+                            hosted.resume_observation.notify_one();
+                            refresh.await;
+                            assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 0);
+                        } else {
+                            hosted.resume_observation.notify_one();
+                            refresh.await;
+                            tokio::select! { _ = &mut start => panic!("forward not held"), _ = hosted.forwarding.notified() => () }
+                            forward_reply.send(()).unwrap();
+                            drop(start.await.unwrap());
+                            assert_eq!(hosted.codes_sent.load(Ordering::SeqCst), 1);
+                        }
+                        assert_eq!(hosted.starts_sent.load(Ordering::SeqCst), 1);
+                        assert_eq!(hosted.mails.load(Ordering::SeqCst), 1);
+                        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
+                        return;
                     }
                     "proof_start_busy" => {
                         let _ordinary = c.operation.try_lock().unwrap();
