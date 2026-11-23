@@ -95,7 +95,7 @@ def test_server_pending_is_a_floor_for_manual_and_auto_then_expiry_stops(setup_r
     wire.status, wire.body = 400, b'{"error":"pairing_key_expired"}'
     clock[0] += 4
     replay.tick()
-    assert view() == dict(phase='prepared', can_resume=False, replay_state='terminated')
+    assert view() == dict(phase='prepared', can_resume=False, replay_state='terminated', operation_owner='desktop_app')
     assert post({}).get_json()['error'] == 'pairing_key_expired'
     clock[0] += 60
     replay.tick()

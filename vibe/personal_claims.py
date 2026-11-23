@@ -129,6 +129,15 @@ def _binding_stamp(identity):
     return remote_access._pairing_identity_fingerprint({k: identity[k] for k in ("backend_url", "instance_id", "instance_secret")})
 
 
+def retire_expired_attempt(claim_id):
+    """Under the journal lock, disarm only the attempt whose unused grant expired."""
+    saved = _outcome()
+    if saved.get('claim_id') == claim_id:
+        saved.pop('claim_id')
+        saved.pop('expires_at', None)
+        write_atomic(_marker(), json.dumps(saved))
+
+
 def record_bound(claim_id, identity):
     """Called under the publication lock before retirement, including by legacy Resume."""
     saved = _outcome()

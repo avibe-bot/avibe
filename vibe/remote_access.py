@@ -5141,7 +5141,7 @@ def _json_request_to_validated_backend(
     if connection_target.requires_proxy and not proxy_url:
         raise RuntimeError("pairing_backend_proxy_required")
     last_network_error: Exception | None = None
-    single_delivery = 'redeem_request_id' in payload and request_path.endswith('/api/v1/pairing/redeem')
+    single_delivery = request_path.endswith('/api/v1/pairing/redeem')
     for connection in _validated_backend_connections(connection_target, timeout, proxy_url):
         may_have_sent = False
         try:
@@ -5734,9 +5734,12 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
     try:
         from vibe import pairing_replay
         pairing_replay.retire_schedule(record)
-        path.unlink()
-        return True
-    except FileNotFoundError:
+        if (record.get('personal_claim') and record['phase'] == 'retirement_pending'
+                and record.get('retirement') == {'kind': 'definitive_redeem_failure', 'error': 'pairing_key_expired'}):
+            from vibe import personal_claims
+            personal_claims.retire_expired_attempt(record['personal_claim']['claim_id'])
+        # A failed marker write must leave the terminal journal for local retry.
+        path.unlink(missing_ok=True)
         return True
     except Exception:
         logger.warning("Discarding the sealed pairing response failed", exc_info=True)
@@ -5820,6 +5823,9 @@ def _pairing_failure_after_claim(
         cause=str(result.get("error") or "pairing_failed"),
     )
     if retired:
+        if (marker_persisted and not claim.get('redeem_request') and not claim.get('personal_claim')
+                and result.get('status') == 400 and result.get('error') in ('invalid_pairing_key', 'pairing_key_used')):
+            return {'ok': False, 'status': 400, 'error': 'pairing_input_rejected', 'cause': result['error']}
         return result
     return {
         **result,
@@ -5939,6 +5945,9 @@ def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
         can_resume = current_fingerprint == record["target_fingerprint"] or (
             phase == "redeemed" and current_fingerprint == record["source_fingerprint"]
         )
+    if replay.get('replay_state') == 'terminated':
+        replay['operation_owner'] = ('desktop_app' if record.get('desktop_enrollment') else
+                                     'personal_claim' if record.get('personal_claim') else 'cli')
     if can_resume and phase in {'redeemed', 'applied', 'retirement_pending'}:
         replay['replay_state'] = 'local_archive'
     return {

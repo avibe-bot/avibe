@@ -12,6 +12,21 @@ def _claim(subject="owner-id"):
     return claims.run_link(expected_subject=subject, show_link=lambda _: None)
 
 
+def test_expired_unconsumed_grant_retires_only_its_claim_attempt(claim_peer, monkeypatch):
+    from vibe import pairing_replay
+
+    def expired(*args, **kwargs):
+        raise remote_access.BackendRequestError(400, {'error': 'pairing_key_expired'})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(remote_access, '_json_request', expired)
+        _claim()
+    assert remote_access._read_pending_pairing_record() == (None, None)
+    assert 'claim_id' not in claims._outcome()
+    assert not pairing_replay.orphaned_delivery()
+    assert _claim()['state'] == 'bound'
+
+
 def test_off_binding_is_not_repaired_or_replaced(claim_peer):
     assert _claim()["state"] == "bound"
     cfg = V2Config.load()

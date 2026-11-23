@@ -564,7 +564,7 @@ def test_definitive_redeem_failure_retires_prepared_claim(pairing_host, monkeypa
         ),
     )
     result = remote_access.pair("key_bad", "https://backend.test")
-    assert result["error"] == "invalid_pairing_key"
+    assert result['error'] == 'pairing_input_rejected' and result['cause'] == 'invalid_pairing_key'
     assert not (root / "state/pending-pairing.json").exists()
 
 
@@ -586,7 +586,10 @@ def test_only_known_redeem_rejections_retire_prepared_claim(
 
     result = remote_access.pair("key_bad", "https://backend.test")
 
-    assert result["error"] == error_code
+    if error_code in ('invalid_pairing_key', 'pairing_key_used'):
+        assert result == {'ok': False, 'status': 400, 'error': 'pairing_input_rejected', 'cause': error_code}
+    else:
+        assert result['error'] == error_code
     assert not (root / "state/pending-pairing.json").exists()
 
 
