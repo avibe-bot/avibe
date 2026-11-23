@@ -295,7 +295,8 @@ export function AccountApp() {
     closeClaim();
     leave('cancel');
   }, [closeClaim, leave]);
-  const exit = claimDocument && view === 'claim' ? exitClaim : () => leave('cancel');
+  // Every way out of a claim document ends its review first, from any of its views (updates too).
+  const exit = claimDocument ? exitClaim : () => leave('cancel');
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
@@ -304,11 +305,12 @@ export function AccountApp() {
       if (popover) { closeUpdatePopover(); return; }
       // The claim dialog closes itself on Escape (and leaves through exitClaim).
       if (claimDocument && view === 'claim') return;
+      if (claimDocument) { exitClaim(); return; }
       leave('cancel');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [leave, popover, claimDocument, view]);
+  }, [leave, exitClaim, popover, claimDocument, view]);
   useEffect(() => {
     if (popover || !signOutIntent || signOutIntent.generation !== state?.generation || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
     // Like the hook's initial native read, defer dispatch until this effect is
@@ -386,7 +388,7 @@ export function AccountApp() {
     // ui/design: update/panel/trusted-view
     // With the instance's section beside the app's, the panel says whose each is; the heading only names the page.
     const both = state.connection.committed.kind === 'remote' && Boolean(state.instance_update);
-    content = <div className="mx-auto w-full max-w-md pt-12">{both ? <Heading title={t('dashboard.versionAndUpdate')} /> : <Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading>}<div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
+    content = <div className="mx-auto w-full max-w-md pt-12">{both ? <Heading title={t('dashboard.versionAndUpdate')} /> : <Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading>}<div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={exit} /></div>{failure}</div>;
   } else if (view === 'sign-out') {
     content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
   } else if (view === 'setup-complete') {

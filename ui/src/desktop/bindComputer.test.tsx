@@ -153,6 +153,16 @@ it('closing the claim dialog cancels its review and returns to the Workbench', a
   await waitFor(() => expect(page.leaves()).toEqual(['cancel']));
 });
 
+it.each(['header', 'Escape'])('leaving a claim document from its update view (%s) still cancels the review', async (how) => {
+  const page = mount({ open: { receipt: 'r-up' }, read: review({ state: 'local_runtime_upgrade_required' }) });
+  fireEvent.click(await screen.findByRole('button', { name: en.update.action.check }));
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  if (how === 'header') fireEvent.click(screen.getByRole('button', { name: en.desktopAccount.backWorkbench }));
+  else fireEvent.keyDown(window, { key: 'Escape' });
+  await waitFor(() => expect(page.actions.find((each) => each.type === 'cancel')).toEqual({ type: 'cancel', receipt: 'r-up' }));
+  await waitFor(() => expect(page.leaves()).toEqual(['cancel']));
+});
+
 it('the Account page only reads, and shows this computer only when bound', async () => {
   const page = mount({ observe_current_binding: { state: 'owner_observed' } }, signedIn, 'account');
   await waitFor(() => expect(document.querySelector('[data-computer-binding="bound"]')).toBeTruthy());
