@@ -1,9 +1,19 @@
 //! One controller per native-selected remote origin and signed-in session.
 //! Dropping it on a selection change retires the proxy and the peer. Never
 //! identify an instance or session by its installation ID.
+mod bridge;
+#[cfg(test)]
+#[path = "../../tests/direct/bridge.rs"]
+mod bridge_tests;
 pub(crate) mod choices;
 mod clock;
 mod connect;
+#[cfg(test)]
+#[path = "../../tests/direct/windows_credentials.rs"]
+mod credential_tests;
+mod credentials;
+pub use credentials::WindowRegistration;
+pub use quiet::PublicCensus;
 #[cfg(test)]
 #[path = "../../tests/direct/cross_network.rs"]
 mod cross_network_tests;
@@ -30,6 +40,10 @@ mod offer_tests;
 mod path;
 pub use path::{AddressFamily, SelectedPath};
 mod public;
+mod registered;
+#[cfg(test)]
+#[path = "../../tests/direct/registered.rs"]
+mod registered_tests;
 pub mod rendezvous;
 #[cfg(test)]
 #[path = "../../tests/direct/rendezvous.rs"]
@@ -60,13 +74,10 @@ use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, task::JoinHandle};
 use transport::Link;
 
-/// Borrowed native route material, deliberately neither serializable nor Debug.
-/// Never put the proxy credential in a URL, browser argument, page bridge or log.
+/// Listener location only. Each routed window supplies its own registration.
 pub struct Route<'a> {
     pub host: &'a str,
     pub proxy: std::net::SocketAddrV4,
-    pub username: &'a str,
-    pub password: &'a str,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -199,19 +210,16 @@ impl Client {
         }
     }
 
-    /// The route describes the proxy, not direct-path readiness. Its port and
-    /// credential survive loss of direct. Drop the client only after native detach.
+    /// The route describes the proxy, not direct-path readiness. Its port
+    /// survives loss of direct. Drop the client only after native detach.
     pub fn route(&self) -> Option<Route<'_>> {
         let listener = &self.listener;
         if !listener.is_alive() {
             return None;
         }
-        let (username, password) = listener.credential.native_login();
         Some(Route {
             host: self.host.host(),
             proxy: std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, listener.port),
-            username,
-            password,
         })
     }
 
@@ -241,7 +249,7 @@ impl Client {
             host: self.host.clone(),
             links: self.links.subscribe(),
             health: self.listener.health(),
-            public: self.listener.public_legs.clone(),
+            listener: Arc::downgrade(&self.listener.access),
         }
     }
 
@@ -374,6 +382,7 @@ impl Client {
 }
 impl Drop for Client {
     fn drop(&mut self) {
+        self.listener.retire();
         // Detach rather than abort: the signalled monitor and drain own shutdown.
         drop(self.withdraw(false));
     }

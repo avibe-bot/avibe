@@ -39,8 +39,6 @@ fn away(origin: &str, runtime: &str) -> Published {
 fn material(port: u16) -> Material {
     Material {
         proxy: format!("127.0.0.1:{port}").parse().unwrap(),
-        username: "avibe".to_owned(),
-        password: "listener-credential".to_owned(),
     }
 }
 
@@ -943,4 +941,197 @@ fn a_window_does_not_join_a_session_that_is_about_to_end() {
         [retire(next, &["main-runtime-1", "show-1"])]
     );
     assert_eq!(wiring.app_window_created("show-2", ACCOUNT, ONE, None), []);
+}
+
+#[test]
+fn every_routed_window_of_a_session_is_on_its_route_by_its_own_label() {
+    let now = Instant::now();
+    let mut wiring = live();
+    let session = opened(&mut wiring, ONE, "main-runtime-1", now);
+    wiring.app_window_created("show-1", ACCOUNT, ONE, None);
+    // Before the first answer no window has the route: none is on it.
+    assert_eq!(wiring.routed_by("main-runtime-1"), None);
+
+    wiring.probed(session, true);
+    // The instance view and an app window are each on the session's route:
+    // each is registered with its listener for itself, and neither's page
+    // waits for the other before it hands over.
+    assert_eq!(wiring.routed_by("main-runtime-1"), Some(session));
+    assert_eq!(wiring.routed_by("show-1"), Some(session));
+    assert_eq!(wiring.routed_by("editor-9"), None);
+    assert!(wiring.routes(session, "show-1") && !wiring.routes(session + 1, "show-1"));
+    // A window that closed is not routed any more, so its registration goes.
+    wiring.reconcile(Some(&shown(ONE, "main-runtime-1")), |window| window != "show-1", now);
+    assert!(!wiring.routes(session, "show-1"));
+    assert!(wiring.routes(session, "main-runtime-1"));
+
+    // The choice of the tunnel ends the session: no window is on a route.
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert_eq!(wiring.routed_by("main-runtime-1"), None);
+}
+
+#[test]
+fn an_app_window_joins_the_published_session_or_else_the_newest_early_one_with_a_window() {
+    let now = Instant::now();
+    let mut choices = Choices::unsaved();
+    choices.remember(ACCOUNT, ONE);
+    let mut wiring = Wiring::new(Routing::Live, false, choices);
+    // An early session whose view was never made, an older one with its
+    // view, and the newest with its view: the newest that has a window.
+    let older = wiring.open(target(ONE), material(4100), None, now);
+    wiring.window_created(older, "main-runtime-1");
+    let newest = wiring.open(target(ONE), material(4200), None, now);
+    wiring.window_created(newest, "main-runtime-2");
+    let unmade = wiring.open(target(ONE), material(4300), None, now);
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(newest));
+    assert_eq!(
+        wiring.app_window_created("show-1", ACCOUNT, ONE, None),
+        [install(newest, "show-1")]
+    );
+    // Its window gone, an early session is nobody's to join.
+    wiring.reconcile(None, |window| window != "main-runtime-2" && window != "show-1", now);
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(older));
+    // Once a view is published, its session is the one, whichever is newer.
+    assert_eq!(wiring.reconcile(Some(&shown(ONE, "main-runtime-1")), |_| true, now), []);
+    assert_eq!(wiring.asks_through(older), Some("main-runtime-1"));
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(older));
+    let later = wiring.open(target(ONE), material(4400), None, now);
+    wiring.window_created(later, "main-runtime-3");
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(older));
+    // Never another instance's or account's, and never one with no window.
+    assert_eq!(wiring.shared(ACCOUNT, TWO), None);
+    assert_eq!(wiring.shared("account-2", ONE), None);
+    let _ = unmade;
+}
+
+#[test]
+fn a_choice_is_read_with_its_place_among_the_choices_made() {
+    let mut wiring = live();
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, 0));
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, 1));
+    // Any choice moves the order on, so a reading made before it is older
+    // for every page, also one of another instance.
+    wiring.choose(ACCOUNT, TWO, Mode::Tunnel);
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, 2));
+    wiring.choose(ACCOUNT, ONE, Mode::Automatic);
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, 3));
+    assert_eq!(wiring.choice(ACCOUNT, TWO), (Mode::Tunnel, 3));
+}
+
+#[test]
+fn only_an_instance_that_could_be_routed_is_one_whose_page_gets_a_bridge() {
+    let custom = "https://avibe.example.com";
+    let mut wiring = live();
+    assert!(wiring.routable(ONE));
+    // Whatever the choice of path: its page can still read and change it.
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert!(wiring.routable(ONE));
+    // An address the direct path does not serve, and anything that is not
+    // an instance's own origin.
+    for origin in [custom, "http://one-app.avibe.bot", "one-app.avibe.bot", ""] {
+        assert!(!wiring.routable(origin), "{origin}");
+    }
+    // A configured proxy, or a system that cannot route.
+    assert!(!Wiring::new(Routing::Live, true, Choices::unsaved()).routable(ONE));
+    assert!(!Wiring::new(Routing::Unsupported, false, Choices::unsaved()).routable(ONE));
+    assert!(Wiring::new(Routing::AtCreation, false, Choices::unsaved()).routable(ONE));
+}
+
+#[test]
+fn an_instance_that_answered_before_is_routed_before_its_view_first_loads() {
+    let now = Instant::now();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("direct-paths.json");
+    let mut wiring = Wiring::new(Routing::Live, false, Choices::load(path.clone()));
+
+    // Never answered: the view is created as it always was, asked once it
+    // is shown, and routed with the first answer. WebKit already has its
+    // connection by then, so that view keeps the tunnel while it lives.
+    assert!(!wiring.starts_at_creation(&target(ONE)));
+    let first = opened(&mut wiring, ONE, "main-runtime-1", now);
+    assert_eq!(wiring.window_created(first, "show-1"), []);
+    assert_eq!(
+        wiring.probed(first, true),
+        [install(first, "main-runtime-1"), install(first, "show-1")]
+    );
+    assert_eq!(wiring.reconcile(None, |_| false, now), [retire(first, &[])]);
+
+    // From then on, also after a restart, its client starts before its view
+    // is created, and the view is routed as it is made: before its first
+    // load, without waiting for an answer.
+    let mut wiring = Wiring::new(Routing::Live, false, Choices::load(path));
+    assert!(wiring.starts_at_creation(&target(ONE)));
+    assert!(!wiring.starts_at_creation(&target(TWO)));
+    let session = wiring.open(target(ONE), material(4300), None, now);
+    assert_eq!(
+        wiring.window_created(session, "main-runtime-2"),
+        [install(session, "main-runtime-2")]
+    );
+    assert_eq!(wiring.window_created(session, "main-runtime-2"), []);
+    // Until its window is the published instance view it waits, asks
+    // nothing, and no second client is started for that view.
+    assert_eq!(wiring.asks_through(session), None);
+    assert_eq!(wiring.reconcile(None, |_| true, now), []);
+    assert_eq!(wiring.reconcile(Some(&away(ONE, "main-runtime-2")), |_| true, now), []);
+    // Its view can be on show before a look has seen it there. An app
+    // window opened from it in that moment joins it and is routed as it is
+    // made; one of another instance or account does not.
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(session));
+    assert_eq!(
+        wiring.app_window_created("show-1", ACCOUNT, ONE, None),
+        [install(session, "show-1")]
+    );
+    assert_eq!(wiring.app_window_created("show-9", ACCOUNT, TWO, None), []);
+    assert_eq!(wiring.app_window_created("show-8", "account-2", ONE, None), []);
+    let published = shown(ONE, "main-runtime-2");
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), []);
+    assert_eq!(wiring.asks_through(session), Some("main-runtime-2"));
+    // The first answer routes nothing twice.
+    assert_eq!(wiring.probed(session, true), []);
+    // An app window opened from the view joins it and is routed as it is made.
+    assert_eq!(
+        wiring.app_window_created("show-2", ACCOUNT, ONE, None),
+        [install(session, "show-2")]
+    );
+    // It ends as any session does, and its route comes off every window.
+    assert_eq!(
+        wiring.choose(ACCOUNT, ONE, Mode::Tunnel),
+        [retire(session, &["main-runtime-2", "show-1", "show-2"])]
+    );
+    // "Cloudflare tunnel only", a configured proxy, system proxy settings
+    // that rule the route out, and a system that cannot route: no client
+    // before the view, as none after.
+    assert!(!wiring.starts_at_creation(&target(ONE)));
+    wiring.choose(ACCOUNT, ONE, Mode::Automatic);
+    assert!(wiring.starts_at_creation(&target(ONE)));
+    wiring.system_proxy(true);
+    assert!(!wiring.starts_at_creation(&target(ONE)));
+    for (routing, proxy_configured) in [(Routing::Live, true), (Routing::Unsupported, false)] {
+        let mut choices = Choices::unsaved();
+        choices.remember(ACCOUNT, ONE);
+        assert!(!Wiring::new(routing, proxy_configured, choices).starts_at_creation(&target(ONE)));
+    }
+}
+
+#[test]
+fn a_view_that_is_never_shown_ends_its_early_session_and_takes_its_route_off() {
+    let now = Instant::now();
+    let mut choices = Choices::unsaved();
+    choices.remember(ACCOUNT, ONE);
+    let mut wiring = Wiring::new(Routing::Live, false, choices);
+    let session = wiring.open(target(ONE), material(4300), None, now);
+    wiring.window_created(session, "main-runtime-1");
+    // Another instance's view is on show meanwhile: it has a session of its own.
+    assert_eq!(
+        wiring.reconcile(Some(&shown(TWO, "main-runtime-0")), |_| true, now),
+        [open("main-runtime-0")]
+    );
+    assert!(wiring
+        .reconcile(None, |_| true, now + Duration::from_secs(59))
+        .is_empty());
+    assert_eq!(
+        wiring.reconcile(None, |_| true, now + Duration::from_secs(60)),
+        [retire(session, &["main-runtime-1"])]
+    );
 }

@@ -52,17 +52,23 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'])
     await page.emulateMedia({ reducedMotion: 'no-preference' });
     await trigger.hover(); await page.mouse.down();
     await trigger.evaluate(async (node) => { await Promise.all(node.getAnimations().map((animation) => animation.finished)); });
-    await expect(trigger).toHaveCSS('scale', '1');
+    // A press does not scale it, as it does not scale the Settings button.
+    await expect(trigger).toHaveCSS('scale', 'none');
     await page.mouse.up();
-    // The dot and the name are one group centred in the hover wash, with no hover tip (Max,
-    // 2026-11-20).
-    const gaps = await trigger.evaluate((node) => {
-      const box = node.getBoundingClientRect();
-      const glyph = node.querySelector('[data-line-glyph]')!.getBoundingClientRect();
-      const label = node.querySelector('[data-account-label]')!.getBoundingClientRect();
-      return { left: glyph.left - box.left, right: box.right - label.right };
+    // No fill at rest, and the Settings button's wash under the pointer (Max, 2026-11-22 12:05). No hover
+    // tip (Max, 2026-11-20).
+    const settings = page.locator('[data-settings-toggle]');
+    // Read once the colour transition has ended.
+    const fill = (locator: typeof trigger) => locator.evaluate(async (node) => {
+      await Promise.all(node.getAnimations().map((animation) => animation.finished));
+      return getComputedStyle(node).backgroundColor;
     });
-    expect(Math.abs(gaps.left - gaps.right)).toBeLessThanOrEqual(1);
+    await page.mouse.move(0, 0);
+    expect(await fill(trigger)).toBe('rgba(0, 0, 0, 0)');
+    await settings.hover();
+    const settingsHover = await fill(settings);
+    await trigger.hover();
+    expect(await fill(trigger)).toBe(settingsHover);
     await expect(trigger).not.toHaveAttribute('title');
     await expect(trigger).not.toHaveAttribute('aria-expanded');
     await expect(page.locator('[data-account-chevron]')).toHaveCount(0);

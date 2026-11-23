@@ -130,11 +130,129 @@ describe('BackendModelPickerDialog', () => {
     expect(group(BUILT_IN).getAllByRole('checkbox').map((row) => row.textContent))
       .toEqual(['gpt-6', 'gpt-6-mini']);
     expect(group(BUILT_IN).getByText('2')).toBeTruthy();
-    // A provider row names the model, its id, and — in the order the server gave
-    // them — who can serve it. That order is the route's own preference, so it is
-    // not the client's to sort.
-    expect(group(PROVIDERS).getByRole('checkbox').textContent).toBe('GLM 5.2glm-5.2Primary relayBackup relay');
+    // Two providers list the model, so it sits under each of them, in the order
+    // the server named them; the fold's heading says who serves it, so the row
+    // itself only names the model.
+    expect(group(PROVIDERS).getAllByRole('group').map((fold) => fold.getAttribute('aria-label')))
+      .toEqual(['Primary relay', 'Backup relay']);
+    for (const provider of ['Primary relay', 'Backup relay']) {
+      expect(group(provider).getByRole('checkbox').textContent).toBe('GLM 5.2glm-5.2');
+    }
     expect(screen.queryByRole('group', { name: LISTED })).toBeNull();
+  });
+
+  const supplier = (id: string, name: string, model: string) => ({ source_id: id, source_name: name, model_id: model });
+  const fold = (name: string) => screen.getByRole('button', { name: new RegExp(`^${name}`) });
+
+  it('keeps one provider as a plain list, each row naming who serves it', async () => {
+    answers({ providers: [candidate('glm-5.2', { display_name: 'GLM 5.2', suppliers: [supplier('src_a', 'Primary relay', 'glm-5.2-air')] })] });
+    renderPicker();
+    await screen.findByRole('group', { name: PROVIDERS });
+    expect(group(PROVIDERS).queryByRole('group')).toBeNull();
+    expect(group(PROVIDERS).getByRole('checkbox').textContent).toBe('GLM 5.2glm-5.2Primary relay');
+  });
+
+  it('ticks a model once however many providers list it, and counts it under each', async () => {
+    const user = userEvent.setup();
+    answers({
+      providers: [
+        candidate('glm-5.2', { suppliers: [supplier('src_a', 'Primary relay', 'glm-5.2'), supplier('src_b', 'Backup relay', 'glm-5.2')] }),
+        candidate('glm-5.2-air', { suppliers: [supplier('src_b', 'Backup relay', 'glm-5.2-air')] }),
+        // No provider is named for this one: it keeps its place in the list, after the folds.
+        candidate('glm-orphan'),
+      ],
+    });
+    const { onAdd } = renderPicker();
+    await screen.findByRole('group', { name: 'Primary relay' });
+    expect(group(PROVIDERS).getByRole('checkbox', { name: 'glm-orphan' })).toBeTruthy();
+    await user.click(group('Backup relay').getByRole('checkbox', { name: 'glm-5.2' }));
+    expect(group('Primary relay').getByRole('checkbox', { name: 'glm-5.2' }).getAttribute('aria-checked')).toBe('true');
+    expect(fold('Primary relay').textContent).toContain('1 selected');
+    expect(fold('Backup relay').textContent).toContain('1 selected');
+    await user.click(confirm());
+    expect(onAdd.mock.calls[0][0].map((pick: ChosenCandidate) => pick.candidate.id)).toEqual(['glm-5.2']);
+  });
+
+  it('folds a long inventory to one line per provider, and a search reaches inside the folds', async () => {
+    const user = userEvent.setup();
+    const many = (prefix: string, count: number, source: ReturnType<typeof supplier>) =>
+      Array.from({ length: count }, (_, index) => candidate(`${prefix}-${index + 1}`, { suppliers: [{ ...source, model_id: `${prefix}-${index + 1}` }] }));
+    answers({ providers: [...many('alpha', 7, supplier('src_a', 'Primary relay', '')), ...many('beta', 7, supplier('src_b', 'Backup relay', ''))] });
+    renderPicker();
+    await screen.findByRole('group', { name: 'Primary relay' });
+    // Fourteen models: every provider starts folded, with its count on the line.
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
+    expect(fold('Primary relay').getAttribute('aria-expanded')).toBe('false');
+    expect(fold('Primary relay').textContent).toContain('7');
+    await user.click(fold('Backup relay'));
+    expect(group('Backup relay').getAllByRole('checkbox')).toHaveLength(7);
+    // A search opens the provider that has the answer and leaves out the one that has none.
+    await user.type(search(), 'alpha-3');
+    expect(screen.getAllByRole('checkbox').map((row) => row.textContent)).toEqual(['alpha-3']);
+    expect(screen.queryByRole('group', { name: 'Backup relay' })).toBeNull();
+    expect(fold('Primary relay').getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('opens, on a re-ask, every fold that holds a pick to look at again', async () => {
+    const relay = supplier('src_a', 'Primary relay', '');
+    const ids = [...Array.from({ length: 16 }, (_, index) => `nova-${index + 1}`), ...Array.from({ length: 16 }, (_, index) => `labs/nova-${index + 1}`)];
+    answers({
+      providers: [
+        ...ids.map((id) => candidate(id, { suppliers: [{ ...relay, model_id: id }] })),
+        candidate('glm-5.2', { suppliers: [supplier('src_b', 'Backup relay', 'glm-5.2')] }),
+      ],
+    });
+    renderPicker({ seedPicked: new Set(['labs/nova-3']) });
+    await screen.findByRole('group', { name: 'Primary relay' });
+    // The suppliers of this pick moved, and the user is asked to confirm them: the
+    // provider and the segment that hold it are open, the rest stay folded.
+    expect(group('labs/').getByRole('checkbox', { name: 'labs/nova-3' }).getAttribute('aria-checked')).toBe('true');
+    expect(fold('nova-').getAttribute('aria-expanded')).toBe('false');
+    expect(fold('Backup relay').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('shows no provider heading when a search leaves no provider model', async () => {
+    const user = userEvent.setup();
+    answers({
+      builtin: [candidate('gpt-6', { origin: 'builtin' })],
+      providers: [
+        candidate('glm-5.2', { suppliers: [supplier('src_a', 'Primary relay', 'glm-5.2')] }),
+        candidate('glm-5.2-air', { suppliers: [supplier('src_b', 'Backup relay', 'glm-5.2-air')] }),
+      ],
+    });
+    renderPicker();
+    await screen.findByRole('group', { name: PROVIDERS });
+    await user.type(search(), 'gpt-6');
+    expect(group(BUILT_IN).getAllByRole('checkbox')).toHaveLength(1);
+    expect(screen.queryByRole('group', { name: PROVIDERS })).toBeNull();
+  });
+
+  it("folds one provider's long list again by how its model IDs begin, without guessing vendors", async () => {
+    const user = userEvent.setup();
+    const relay = supplier('src_a', 'Primary relay', '');
+    const ids = [
+      ...Array.from({ length: 16 }, (_, index) => `nova-${index + 1}`),
+      ...Array.from({ length: 16 }, (_, index) => `labs/nova-${index + 1}`),
+      'solo-1', 'router*',
+    ];
+    answers({
+      providers: [
+        ...ids.map((id) => candidate(id, { suppliers: [{ ...relay, model_id: id }] })),
+        candidate('glm-5.2', { suppliers: [supplier('src_b', 'Backup relay', 'glm-5.2')] }),
+      ],
+    });
+    renderPicker();
+    await user.click(await screen.findByRole('button', { name: /^Primary relay/ }));
+    // The text in front of a slash, else in front of the first hyphen; what is too
+    // small for a fold of its own, or has neither, shares 「Other」.
+    expect(group('Primary relay').getAllByRole('group').map((part) => part.getAttribute('aria-label')))
+      .toEqual(['nova-', 'labs/', 'Other']);
+    expect(group('Primary relay').queryAllByRole('checkbox')).toHaveLength(0);
+    await user.click(fold('Other'));
+    expect(group('Other').getAllByRole('checkbox').map((row) => row.textContent)).toEqual(['solo-1', 'router*']);
+    // A provider with a short list has no second level.
+    await user.click(fold('Backup relay'));
+    expect(group('Backup relay').queryByRole('group')).toBeNull();
   });
 
   it('keeps a pick through the query that hid it, and adds in the order offered', async () => {

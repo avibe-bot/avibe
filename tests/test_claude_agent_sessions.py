@@ -2187,7 +2187,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(
             context=request_context,
             message="hello",
-            input_metadata=AgentInputMetadata(user_id="U1", user_name="Sender"),
+            input_metadata=AgentInputMetadata(user_id="U1", user_name="Sender", voice=True, source="mac_app; surface=main; evidence=hint"),
             working_path="/tmp/work",
             base_session_id="wechat_o9",
             composite_session_id="wechat_o9:/tmp/work",
@@ -2216,7 +2216,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mark_active_calls, [runtime_key])
         self.assertEqual(client.query.await_count, 1)
         prompt, origin = await _query_text(client.query.await_args.args[0])
-        self.assertEqual(prompt, "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<U1>]\nhello")
+        self.assertEqual(prompt, "[Now: 2026-09-06 11:10:00 UTC+00:00]\n[Sender<U1>]\n[Input: voice dictation; may contain speech-recognition errors]\n[Source: mac_app; surface=main; evidence=hint]\nhello")
         self.assertEqual(origin, {"kind": "human"})
         self.assertEqual(client.query.await_args.kwargs, {"session_id": runtime_key})
         self.assertEqual(request.message, "hello")

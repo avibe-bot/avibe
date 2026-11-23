@@ -111,9 +111,26 @@ export function VoiceShortcutHarness() {
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, []);
+  // `?transcript=long`: under a conversation that scrolls, as Chat lays it out (ChatPage's
+  // transcript: a flexible scroller above the composer, left scrolled to its newest row).
+  const transcript = new URLSearchParams(location.search).get('transcript') === 'long';
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const scroller = scrollerRef.current;
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }, []);
   // At the foot of the page, as in Chat: the take's card and its toast open above it.
   return (
-    <div className="flex min-h-dvh flex-col justify-end p-3">
+    <div className={transcript ? 'flex h-dvh flex-col p-3' : 'flex min-h-dvh flex-col justify-end p-3'}>
+      {transcript && (
+        <div ref={scrollerRef} data-transcript className="min-h-0 flex-1 overflow-y-auto">
+          <div className="flex flex-col gap-3 py-5">
+            {Array.from({ length: 40 }, (_, index) => (
+              <p key={index} className="rounded-xl bg-surface-2 px-4 py-3 text-[13px]">{`Row ${index + 1}`}</p>
+            ))}
+          </div>
+        </div>
+      )}
       <Composer
         ref={composerRef}
         sessionId="voice-shortcut-session"

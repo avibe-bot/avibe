@@ -716,6 +716,50 @@ def public_url(share_id: str | None, *, config: V2Config | None = None) -> str |
     return urljoin(base + "/", f"p/{share_id}/")
 
 
+def show_page_web_app_manifest(
+    *,
+    title: str,
+    start_url: str,
+    scope: str,
+    icon_url: str,
+) -> dict[str, Any]:
+    """Build manifest metadata whose identity and launch scope stay on one Show Page."""
+
+    normalized_start = str(start_url or "").strip()
+    normalized_scope = str(scope or "").strip()
+    normalized_title = str(title or "").strip() or "Show Page"
+    normalized_icon = str(icon_url or "").strip()
+    for value in (normalized_start, normalized_scope):
+        parsed = urlsplit(value)
+        if (
+            not value.startswith("/")
+            or not value.endswith("/")
+            or parsed.query
+            or parsed.fragment
+            or value == "/"
+        ):
+            raise ValueError("Show Page manifest requires a canonical Show Page path")
+    if normalized_start != normalized_scope:
+        raise ValueError("Show Page manifest start_url and scope must match")
+    if not normalized_icon.startswith("/"):
+        raise ValueError("Show Page manifest requires a same-origin icon path")
+    return {
+        "id": normalized_start,
+        "name": normalized_title,
+        "short_name": normalized_title,
+        "start_url": normalized_start,
+        "scope": normalized_scope,
+        "display": "standalone",
+        "icons": [
+            {
+                "src": normalized_icon,
+                "sizes": "any",
+                "purpose": "any",
+            }
+        ],
+    }
+
+
 class ShowPageStore:
     def __init__(self, db_path: Path | None = None, *, read_only: bool = False):
         self.db_path = db_path or paths.get_sqlite_state_path()

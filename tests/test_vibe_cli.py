@@ -1775,6 +1775,7 @@ def test_cmd_start_reuses_independent_ui_or_recovers_only_unhealthy_ui(monkeypat
 
     monkeypatch.setattr(runtime, "spawn_background", spawn)
     monkeypatch.setattr(runtime, "stop_ui", no_full_stop)
+    monkeypatch.setattr("vibe.remote_access.stop_connector", no_full_stop)
     monkeypatch.setattr("vibe.remote_access.stop", no_full_stop)
     assert cli.cmd_start() == 0
     expected_ui = 111 if ui_state == "healthy" else 333
@@ -1807,6 +1808,7 @@ def test_service_repair_preserves_independent_ui_status_and_never_touches_proces
 
     for name in ("start_ui", "stop_ui", "stop_pid", "spawn_background"):
         monkeypatch.setattr(runtime, name, forbidden)
+    monkeypatch.setattr("vibe.remote_access.stop_connector", forbidden)
     monkeypatch.setattr("vibe.remote_access.stop", forbidden)
     result = cli._start_service_after_repair("service", "ok", "failed", stopped_pids=[])
     assert result["status"] == ("failed" if service_fails else "repaired")

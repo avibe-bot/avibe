@@ -17,10 +17,10 @@
     "test:updater": "cargo test -p avibe-runtime-host update && cargo test -p avibe-desktop update"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.12.4"
+    "@tauri-apps/api": "^2.12.5"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.12.4",
+    "@tauri-apps/cli": "2.12.5",
     "typescript": "~7.0.2",
     "vite": "^8.3.8"
   }

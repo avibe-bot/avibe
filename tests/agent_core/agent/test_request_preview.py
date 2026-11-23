@@ -63,10 +63,10 @@ async def test_dry_tick_matches_live_resume_transport_bytes_without_any_effect(p
         assert tool.calls == []
         events = [event async for event in agent.resume(input_row("control", "not consumed"), turn_id="debug-test")]
         assert events[-1].reason == "error"
-    assert len(sent) == 1
+    assert len(sent) == (2 if protocol == 'anthropic' else 1)
     assert sent[0].content == preview.wire.body
-    # Actual HTTPX bodies captured on master before changing request ownership.
-    assert sent[0].content == (fixtures / f"request_body_{protocol}.json").read_bytes()
+    # A rejected Anthropic create replays the original full bytes, with no beta or thread field.
+    assert sent[-1].content == (fixtures / f"request_body_{protocol}.json").read_bytes()
     assert sent[0].url == httpx.URL(preview.wire.wire.url)
     assert tool.calls == []
 

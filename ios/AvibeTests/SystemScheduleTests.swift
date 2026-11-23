@@ -652,19 +652,50 @@ final class SystemScheduleTests: XCTestCase {
     }
 
     @MainActor
-    func testLiveCapabilitiesExposeOnlyThePlatformPathForThisOS() {
+    func testLiveCapabilitiesExposeEverySupportedKindForThisOS() {
         let capabilities = LiveSystemSchedulePlatform().capabilities()
         if #available(iOS 26.0, *) {
             XCTAssertTrue(capabilities.alarmKitAvailable)
-            XCTAssertFalse(capabilities.remindersAvailable)
-            XCTAssertEqual(capabilities.remindersAuthorization, .unsupported)
-            XCTAssertEqual(capabilities.supportedKinds, [.alarm])
+            XCTAssertEqual(capabilities.supportedKinds, [.alarm, .reminder])
         } else {
             XCTAssertFalse(capabilities.alarmKitAvailable)
-            XCTAssertTrue(capabilities.remindersAvailable)
             XCTAssertEqual(capabilities.alarmAuthorization, .unsupported)
             XCTAssertEqual(capabilities.supportedKinds, [.reminder])
         }
+        XCTAssertTrue(capabilities.remindersAvailable)
+        let expectedReminderAuthorization: SystemScheduleAuthorization
+        switch EKEventStore.authorizationStatus(for: .reminder) {
+        case .notDetermined: expectedReminderAuthorization = .notDetermined
+        case .restricted, .writeOnly: expectedReminderAuthorization = .restricted
+        case .denied: expectedReminderAuthorization = .denied
+        case .fullAccess: expectedReminderAuthorization = .authorized
+        @unknown default: expectedReminderAuthorization = .unsupported
+        }
+        XCTAssertEqual(capabilities.remindersAuthorization, expectedReminderAuthorization)
+    }
+
+    @MainActor
+    func testReminderDispatchReachesTheEventKitAuthorityFenceWithoutAnOSWrite() async {
+        let eventStore = ScheduleEventStoreWithoutOSWrites()
+        let platform = LiveSystemSchedulePlatform(eventStore: eventStore)
+        let request = makeRequest(kind: .reminder)
+        let identifier = platform.systemIdentifier(
+            for: request,
+            owner: makeContext().owner
+        )
+
+        let result = await platform.schedule(
+            request,
+            systemIdentifier: identifier,
+            stillCurrent: { false }
+        )
+
+        guard case .failure(.staleContext) = result else {
+            XCTFail("The reminder must reach the EventKit authority fence: \(result)")
+            return
+        }
+        XCTAssertEqual(eventStore.calendarCalls, 0)
+        XCTAssertEqual(eventStore.saveCalls, 0)
     }
 
     @MainActor
@@ -1067,60 +1098,69 @@ final class SystemScheduleTests: XCTestCase {
 
     @MainActor
     func testScheduleAndUserCancellationAreIdempotent() async throws {
-        let (directory, store) = try makeStore()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
-        let context = makeContext(owner: owner)
-        let request = makeRequest()
-        let platform = SystemSchedulePlatformSpy()
-        let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
+        for kind in SystemScheduleKind.allCases {
+            let (directory, store) = try makeStore()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+            let context = makeContext(owner: owner)
+            let request = makeRequest(kind: kind)
+            let platform = SystemSchedulePlatformSpy()
+            platform.alarmAuthorization = kind == .alarm ? .authorized : .denied
+            platform.remindersAuthorization = kind == .reminder ? .authorized : .denied
+            let coordinator = SystemScheduleCoordinator(platform: platform, store: store)
 
-        let first = await coordinator.schedule(
-            request,
-            context: context,
-            creationFence: { nil },
-            postWriteFence: { nil }
-        )
-        XCTAssertEqual(first.state, .scheduled)
-        XCTAssertEqual(platform.scheduleWriteCalls, 1)
+            let first = await coordinator.schedule(
+                request,
+                context: context,
+                creationFence: { nil },
+                postWriteFence: { nil }
+            )
+            XCTAssertEqual(first.state, .scheduled)
+            XCTAssertEqual(first.kind, kind)
+            XCTAssertEqual(platform.scheduleWriteCalls, 1)
 
-        platform.alarmAuthorization = .denied
-        let retry = await coordinator.schedule(
-            makeRequest(requestID: "request-2"),
-            context: makeContext(
-                owner: owner,
-                runtimeIdentity: context.runtimeIdentity + 1,
-                navigationEpoch: context.navigationEpoch + 1
-            ),
-            creationFence: { nil },
-            postWriteFence: { nil }
-        )
-        XCTAssertEqual(retry.state, .scheduled)
-        XCTAssertEqual(retry.requestID, "request-2")
-        XCTAssertEqual(retry.systemIdentifier, first.systemIdentifier)
-        XCTAssertEqual(retry.authorization, .denied)
-        XCTAssertEqual(platform.scheduleWriteCalls, 1)
+            platform.alarmAuthorization = .denied
+            platform.remindersAuthorization = .denied
+            let retry = await coordinator.schedule(
+                makeRequest(requestID: "request-2", kind: kind),
+                context: makeContext(
+                    owner: owner,
+                    runtimeIdentity: context.runtimeIdentity + 1,
+                    navigationEpoch: context.navigationEpoch + 1
+                ),
+                creationFence: { nil },
+                postWriteFence: { nil }
+            )
+            XCTAssertEqual(retry.state, .scheduled)
+            XCTAssertEqual(retry.requestID, "request-2")
+            XCTAssertEqual(retry.systemIdentifier, first.systemIdentifier)
+            XCTAssertEqual(retry.authorization, .denied)
+            XCTAssertEqual(platform.scheduleWriteCalls, 1)
 
-        platform.alarmAuthorization = .authorized
-        let cancellation = makeCancelRequest()
-        let cancelled = await coordinator.cancel(
-            cancellation,
-            context: context,
-            stillCurrent: { true }
-        )
-        XCTAssertEqual(cancelled.state, .cancelled)
-        XCTAssertEqual(platform.cancelWriteCalls, 1)
+            platform.alarmAuthorization = kind == .alarm ? .authorized : .denied
+            platform.remindersAuthorization = kind == .reminder ? .authorized : .denied
+            let cancellation = makeCancelRequest(kind: kind)
+            let cancelled = await coordinator.cancel(
+                cancellation,
+                context: context,
+                stillCurrent: { true }
+            )
+            XCTAssertEqual(cancelled.state, .cancelled)
+            XCTAssertEqual(cancelled.kind, kind)
+            XCTAssertEqual(platform.cancelWriteCalls, 1)
 
-        platform.alarmAuthorization = .denied
-        let repeated = await coordinator.cancel(
-            makeCancelRequest(requestID: "cancel-2"),
-            context: context,
-            stillCurrent: { true }
-        )
-        XCTAssertEqual(repeated.state, .cancelled)
-        XCTAssertEqual(repeated.requestID, "cancel-2")
-        XCTAssertEqual(repeated.authorization, .denied)
-        XCTAssertEqual(platform.cancelWriteCalls, 1)
+            platform.alarmAuthorization = .denied
+            platform.remindersAuthorization = .denied
+            let repeated = await coordinator.cancel(
+                makeCancelRequest(requestID: "cancel-2", kind: kind),
+                context: context,
+                stillCurrent: { true }
+            )
+            XCTAssertEqual(repeated.state, .cancelled)
+            XCTAssertEqual(repeated.requestID, "cancel-2")
+            XCTAssertEqual(repeated.authorization, .denied)
+            XCTAssertEqual(platform.cancelWriteCalls, 1)
+        }
     }
 
     // I3 review C2: detached cross-owner history blocks duplicate creation after relogin.
@@ -2499,12 +2539,13 @@ final class SystemScheduleTests: XCTestCase {
         requestID: String = "request-1",
         operationID: String = "operation-1",
         instanceID: String = "instance-1",
+        kind: SystemScheduleKind = .alarm,
         expiresAt: Date? = nil
     ) -> SystemScheduleRequest {
         SystemScheduleRequest(
             requestID: requestID,
             operationID: operationID,
-            kind: .alarm,
+            kind: kind,
             title: "Take medicine",
             fireAt: now.addingTimeInterval(3_600),
             timeZoneIdentifier: "UTC",
@@ -2516,12 +2557,13 @@ final class SystemScheduleTests: XCTestCase {
 
     private func makeCancelRequest(
         requestID: String = "cancel-1",
+        kind: SystemScheduleKind = .alarm,
         purpose: SystemScheduleCancelPurpose = .user
     ) -> SystemScheduleCancelRequest {
         SystemScheduleCancelRequest(
             requestID: requestID,
             operationID: "operation-1",
-            kind: .alarm,
+            kind: kind,
             purpose: purpose
         )
     }
@@ -2596,6 +2638,25 @@ final class SystemScheduleTests: XCTestCase {
             await Task.yield()
         }
         XCTFail("Condition did not become true")
+    }
+}
+
+private final class ScheduleEventStoreWithoutOSWrites: EKEventStore {
+    private(set) var calendarCalls = 0
+    private(set) var saveCalls = 0
+
+    override func requestFullAccessToReminders() async throws -> Bool {
+        false
+    }
+
+    override func defaultCalendarForNewReminders() -> EKCalendar? {
+        calendarCalls += 1
+        return nil
+    }
+
+    override func save(_ reminder: EKReminder, commit: Bool) throws {
+        saveCalls += 1
+        throw CocoaError(.fileWriteNoPermission)
     }
 }
 

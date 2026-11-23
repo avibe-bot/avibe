@@ -56,6 +56,19 @@ Dictated and typed inputs never share a batch (the input mode is part of
 and each input carries one mode, so a queue that alternates them starts one Turn
 per run of the same mode.
 
+Every human input also carries `[Source: <terminal>]`, after the voice line when
+present and independent of display switches. The terminal is `iphone_app`,
+`mac_app`, `browser`, `im:<platform>`, or `unknown`. Known Web terminals append a
+bounded `surface` (`main`, `mini`, `notification_reply`, or `ask_vibey`); a type
+available only from the client's hint adds `evidence=hint`. The service prefers
+the current authenticated session's device registry kind. These are presentation
+facts, never authorization or hardware attestation. Unknown older clients keep
+working. No device name, identifier, version, address, or credential is included.
+The resolved metadata survives the same admission/hydration/steering/recovery
+path as voice, and queue batches preserve one source label per input. See
+[input terminal provenance](input-terminal-source.md) for the boundary contract
+and MESSAGE-DELIVERY-341 validation.
+
 ## Scope
 
 - Keep metadata structured through normal starts, queued batches, and steering.

@@ -3055,14 +3055,13 @@ def stop_service(
 def stop_remote_access_connector() -> bool:
     """Stop this home's tunnel connector; ``False`` when it may still be running.
 
-    The connector's configuration is left as it is, so the next UI start
-    reconciles it back when remote access is enabled.
+    Keep the request intact so the next UI restores only requested access.
     """
 
     try:
         from vibe import remote_access
 
-        result = remote_access.stop()
+        result = remote_access.stop_connector()
     except Exception:
         logger.warning("Failed to stop remote access", exc_info=True)
         return False
@@ -3081,8 +3080,7 @@ def stop_ui(
     """Stop the recorded UI and, by default, the tunnel connector it serves.
 
     With ``runtime_ids``, a UI that is not that Runtime's is refused, and so is
-    its connector: the UI is checked before the connector stops, and again as
-    the pid about to be signalled is read.
+    its connector: verify ownership before signalling the UI.
     """
 
     remote_access_stopped = True
@@ -3092,6 +3090,11 @@ def stop_ui(
         recorded_pid = _read_pid_file(ui_pid_path)
         if recorded_pid and pid_alive(recorded_pid):
             refuse_foreign_desktop_process(recorded_pid, "ui", runtime_ids)
+    # End the monitor and startup worker before stopping the connector; with
+    # intent preserved, either worker could otherwise respawn it during exit.
+    ui_started_at = time.monotonic()
+    ui_stopped = stop_process(ui_pid_path, runtime_ids=runtime_ids, part="ui")
+    ui_seconds = time.monotonic() - ui_started_at
     if stop_remote_access:
         remote_access_started_at = time.monotonic()
         remote_access_stopped = stop_remote_access_connector()
@@ -3108,9 +3111,6 @@ def stop_ui(
         if timings is not None:
             timings["stop_remote_access_seconds"] = 0.0
             timings["stop_remote_access_skipped"] = True
-    ui_started_at = time.monotonic()
-    ui_stopped = stop_process(ui_pid_path, runtime_ids=runtime_ids, part="ui")
-    ui_seconds = time.monotonic() - ui_started_at
     logger.info(
         "Shutdown phase=stop_ui_process duration_ms=%d stopped=%s",
         round(ui_seconds * 1000),

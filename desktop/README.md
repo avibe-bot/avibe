@@ -926,6 +926,14 @@ v1 uses OS-default notification activation; explicit cross-platform show/focus
 and session deep-link targets require follow-up work. See
 `../docs/plans/desktop-notifications-sse.md` for the frozen contract.
 
+On macOS, Agent result messages with quick replies can offer those choices and
+a text reply directly in the notification. Once macOS accepts that answerable
+notification, it also serves as the success notice for the same Runtime,
+Session, and turn. A filtered or failed answerable post preserves the ordinary
+completion notice. Other turns, independent tasks, failures, and Vault requests
+keep their existing notifications. See
+`../docs/plans/desktop-answer-completion-dedup.md` for correlation and acceptance.
+
 The same shell-owned connection keeps the app icon badge (the macOS Dock and
 supported Linux docks) equal to the Runtime's Avibe inbox `unread_total`. Each
 connect and each SSE frame, heartbeats included, schedules one
@@ -1019,6 +1027,20 @@ description macOS denies access with no prompt; without the entitlement a
 Developer ID–signed build is denied the same way. The first recording shows the
 standard macOS prompt; a later denial is changed in System Settings → Privacy &
 Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
+
+## Local network
+
+The direct path to another computer's instance dials it on the same network.
+macOS (15 and later) asks for Local Network access the first time, and shows
+`NSLocalNetworkUsageDescription`: `src-tauri/Info.plist` has the English
+sentence, `src-tauri/macos/{en,zh-Hans}.lproj/InfoPlist.strings` both
+localizations. They are the iPhone App's sentences
+(`ios/Avibe/Resources/InfoPlist.xcstrings`), and
+`tests/notarization_preflight.rs` holds them equal. A denial is changed in
+System Settings → Privacy & Security → Local Network. The app works either
+way: without the access a same-network path is not found and the instance is
+reached as before. The direct core cannot yet tell a denial from a peer that
+is not reachable, so the app does not say which it is.
 
 ## CI
 

@@ -460,6 +460,7 @@ agent_runs = Table(
     Index("ix_agent_runs_definition_status", "definition_id", "status"),
     Index("ix_agent_runs_status_created", "status", "created_at"),
     Index("ix_agent_runs_type_status_created", "run_type", "status", "created_at"),
+    Index("ix_agent_runs_timeline_times", "id", "started_at", "completed_at"),
     Index("ix_agent_runs_session_created", "session_id", "created_at"),
     Index("ix_agent_runs_session_status", "session_id", "status"),
     Index("ix_agent_runs_sender_status", "source_kind", "source_actor", "status"),
@@ -1156,6 +1157,13 @@ session_turn_replies = Table(
 # positive native acceptance the complete immutable Message candidate lives only
 # here. Acceptance moves one Delivery snapshot, or one ordered merged batch,
 # into ``messages`` and links every participating Delivery to that record.
+# The same literal predicate is needed in a read for SQLite to recognize the
+# partial index. Membership here includes claimed rows; the FSM, not the
+# index, decides which live rows are claimable or ordering fences.
+DELIVERY_SESSION_ORDER_PREDICATE = (
+    "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', 'reconciling_steer')"
+)
+
 message_deliveries = Table(
     "message_deliveries",
     metadata,
@@ -1292,10 +1300,7 @@ message_deliveries = Table(
         "session_id",
         "submitted_at",
         "id",
-        sqlite_where=text(
-            "state in ('reserved', 'queued', 'claimed', 'pending_steer', 'steering', "
-            "'reconciling_steer')"
-        ),
+        sqlite_where=text(DELIVERY_SESSION_ORDER_PREDICATE),
     ),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
     Index(

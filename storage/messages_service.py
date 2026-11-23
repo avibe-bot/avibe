@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, bindparam, case, delete, func, literal, or_, select, update
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DatabaseError
 
@@ -1478,104 +1478,53 @@ def list_inbox_sessions(
 
     def _latest_message_value(
         column_name: Optional[str],
+        types: tuple[str, ...],
         *,
-        author: Optional[str] = None,
-        types: Optional[tuple[str, ...]] = None,
-        conversation_only: bool = False,
-        input_turn_only: bool = False,
-        active_turn_reply_only: bool = False,
+        session_id=agent_sessions.c.id,
+        input_only: bool = False,
+        settling_only: bool = False,
     ) -> Any:
         msg = messages.alias()
         order_value = transcript_order_value(msg)
         selected_value = order_value if column_name is None else getattr(msg.c, column_name)
         query = (
             select(selected_value)
-            .where(msg.c.session_id == agent_sessions.c.id)
-            .where(msg.c.session_id.is_not(None))
+            .where(msg.c.session_id == session_id)
             .order_by(order_value.desc(), msg.c.id.desc())
             .limit(1)
-            # Always the outer row's session. Nested in another subquery whose
-            # FROM lacks ``agent_sessions`` (``last_input_turn_state``),
-            # auto-correlation would instead add ``agent_sessions`` to this FROM
-            # and return the latest value across every session.
-            .correlate(agent_sessions)
+            # Nested inside another scalar lookup, do not bring the Session
+            # table into this FROM and take the latest across every Session.
+            .correlate(session_id.table)
         )
         if platform is not None:
             query = query.where(msg.c.platform == platform)
-        if author is not None:
-            query = query.where(msg.c.author == author)
-        if types is not None:
-            query = query.where(msg.c.type.in_(types))
-        if active_turn_reply_only:
+        # Parameterized IN lists don't imply the catalog's literal partial
+        # indexes. Render just these code-owned values literally, not caller data.
+        query = query.where(msg.c.type.in_(bindparam(
+            "type", types, expanding=True, literal_execute=True, unique=True,
+        )))
+        if input_only:
+            query = query.where(or_(*(
+                and_(
+                    msg.c.author == literal(author, literal_execute=True),
+                    msg.c.type == literal(input_type, literal_execute=True),
+                )
+                for author, input_type in INPUT_TURN_AUTHOR_TYPES
+            )))
+        if settling_only:
             query = query.where(
+                msg.c.type.in_(_INBOX_SETTLES_REPLY_TYPES),
                 ~and_(
                     msg.c.type.in_(_DETACHED_COMPLETION_TYPES),
-                    func.coalesce(func.json_extract(msg.c.metadata_json, "$.detached"), 0)
-                    == 1,
-                )
+                    func.coalesce(func.json_extract(msg.c.metadata_json, "$.detached"), 0) == 1,
+                ),
             )
-        if input_turn_only:
-            query = query.where(
-                or_(
-                    *(
-                        and_(msg.c.author == input_author, msg.c.type == input_type)
-                        for input_author, input_type in INPUT_TURN_AUTHOR_TYPES
-                    )
-                )
-            )
-        if conversation_only:
-            query = query.where(msg.c.type.in_(INBOX_ACTIVITY_TYPES))
         return query.scalar_subquery()
 
-    # Drive from the small session set and do top-1 index probes per session.
-    # This preserves the inbox contract while avoiding full message-window
-    # materialization as history grows.
-    last_activity_at = _latest_message_value(None, conversation_only=True)
-    last_author = _latest_message_value("author", conversation_only=True)
-    preview_id = _latest_message_value("id", types=_INBOX_PREVIEW_TYPES)
-    preview_at = _latest_message_value(None, types=_INBOX_PREVIEW_TYPES)
-    last_terminal_id = _latest_message_value(
-        "id",
-        types=_INBOX_SETTLES_REPLY_TYPES,
-        active_turn_reply_only=True,
-    )
-    last_terminal_at = _latest_message_value(
-        None,
-        types=_INBOX_SETTLES_REPLY_TYPES,
-        active_turn_reply_only=True,
-    )
-    last_turn_terminal_id = (
-        select(session_turns.c.id)
-        .where(
-            session_turns.c.session_id == agent_sessions.c.id,
-            session_turns.c.state == "terminal",
-            session_turns.c.terminal_outcome != "not_written",
-        )
-        .order_by(
-            func.julianday(session_turns.c.terminal_at).desc(),
-            session_turns.c.id.desc(),
-        )
-        .limit(1)
-        .scalar_subquery()
-    )
-    last_turn_terminal_at = (
-        select(session_turns.c.terminal_at)
-        .where(
-            session_turns.c.session_id == agent_sessions.c.id,
-            session_turns.c.state == "terminal",
-            session_turns.c.terminal_outcome != "not_written",
-        )
-        .order_by(
-            func.julianday(session_turns.c.terminal_at).desc(),
-            session_turns.c.id.desc(),
-        )
-        .limit(1)
-        .scalar_subquery()
-    )
-    last_input_at = _latest_message_value(
-        None, conversation_only=True, input_turn_only=True
-    )
-    last_input_id = _latest_message_value("id", conversation_only=True, input_turn_only=True)
+    last_activity_at = _latest_message_value(None, INBOX_ACTIVITY_TYPES)
+    last_author = _latest_message_value("author", INBOX_ACTIVITY_TYPES)
+    preview_id = _latest_message_value("id", _INBOX_PREVIEW_TYPES)
+    last_input_id = _latest_message_value("id", INBOX_ACTIVITY_TYPES, input_only=True)
     last_input_turn_state = (
         select(session_turns.c.state)
         .select_from(
@@ -1585,8 +1534,8 @@ def list_inbox_sessions(
             )
         )
         .where(message_deliveries.c.message_id == last_input_id)
-        # The input's Delivery is this session's: seek by session rather than
-        # walk every Delivery for one message id, which has no index.
+        # Merged Deliveries may share a Message, but belong to the same Turn.
+        # Keep the Session fence as well as the indexed Message identity.
         .where(message_deliveries.c.session_id == agent_sessions.c.id)
         .correlate(agent_sessions)
         .limit(1)
@@ -1627,12 +1576,6 @@ def list_inbox_sessions(
             category_expression(agent_sessions.c.id).label("category"),
             unread_count_col,
             preview_id.label("preview_id"),
-            preview_at.label("preview_at"),
-            last_terminal_id.label("last_terminal_id"),
-            last_terminal_at.label("last_terminal_at"),
-            last_turn_terminal_id.label("last_turn_terminal_id"),
-            last_turn_terminal_at.label("last_turn_terminal_at"),
-            last_input_at.label("last_input_at"),
             last_input_id.label("last_input_id"),
             last_input_turn_state.label("last_input_turn_state"),
         )
@@ -1688,13 +1631,45 @@ def list_inbox_sessions(
     ).limit(effective_limit + 1)
     limited_sessions = query.subquery()
     preview_msg = messages.alias()
+    input_msg = messages.alias()
+    terminal_msg = messages.alias()
+    terminal_turn = session_turns.alias()
+    page = limited_sessions.c
+    # A linked input's own Turn decides replied, including a successor already
+    # visible after commit. A Session without an input cannot await a reply.
+    # Only unlinked (e.g. mirrored) input needs historical terminal evidence;
+    # CASE is lazy in SQLite. Fetch each fallback winner once, by primary key.
+    needs_evidence = and_(page.last_input_id.is_not(None), page.last_input_turn_state.is_(None))
+    # Search the ordered preview subset when it covers every settlement type.
+    fallback_types = tuple(dict.fromkeys((*_INBOX_PREVIEW_TYPES, *_INBOX_SETTLES_REPLY_TYPES)))
+    fallback_id = _latest_message_value(
+        "id", fallback_types, session_id=page.session_id, settling_only=True,
+    )
+    fallback_turn_id = select(session_turns.c.id).where(
+        session_turns.c.session_id == page.session_id,
+        session_turns.c.state == "terminal",
+        session_turns.c.terminal_outcome != "not_written",
+    ).order_by(
+        func.julianday(session_turns.c.terminal_at).desc(), session_turns.c.id.desc(),
+    ).limit(1).correlate(limited_sessions).scalar_subquery()
     query = (
         select(
             limited_sessions,
+            transcript_order_value(preview_msg).label("preview_at"),
+            transcript_order_value(input_msg).label("last_input_at"),
+            terminal_msg.c.id.label("last_terminal_id"),
+            transcript_order_value(terminal_msg).label("last_terminal_at"),
+            terminal_turn.c.id.label("last_turn_terminal_id"),
+            terminal_turn.c.terminal_at.label("last_turn_terminal_at"),
             preview_msg.c.content_text.label("preview_text"),
             preview_msg.c.content_json.label("preview_json"),
         )
-        .select_from(limited_sessions.join(preview_msg, preview_msg.c.id == limited_sessions.c.preview_id))
+        .select_from(
+            limited_sessions.join(preview_msg, preview_msg.c.id == page.preview_id)
+            .outerjoin(input_msg, input_msg.c.id == page.last_input_id)
+            .outerjoin(terminal_msg, terminal_msg.c.id == case((needs_evidence, fallback_id)))
+            .outerjoin(terminal_turn, terminal_turn.c.id == case((needs_evidence, fallback_turn_id)))
+        )
         .order_by(limited_sessions.c.last_activity_at.desc(), limited_sessions.c.session_id.desc())
     )
 

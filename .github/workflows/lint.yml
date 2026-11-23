@@ -295,6 +295,7 @@ jobs:
             suites: |
               # Chromium and WebKit (the macOS shell's engine).
               npm run test:safe-browser
+              npm run test:show-system-entry
               npm run test:pet-mini
               npm run test:chat-interactions
               npm run test:inbox-return
@@ -302,7 +303,7 @@ jobs:
             suites: |
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts bots.spec.ts project-expansion-return.spec.ts
               # Against the built app: StrictMode's dev double-mount drops the picker's first open.
-              npm run test:workbench-general-build -- composer-mention-picker.spec.ts
+              npm run test:workbench-general-build -- composer-mention-picker.spec.ts inbox-skeleton-loading.spec.ts
               npm run test:project-order
               # Paging older history through the retained-window cap (Chromium, desktop and phone).
               npm run test:chat-paging
@@ -338,6 +339,7 @@ jobs:
           # to BROWSER_CHECKOUT in scripts/ci_docs_only.py.
           sparse-checkout: |
             /ui/
+            /vibe/ui_server.py
             /vibe/message_types.json
             /vibe/data/
             /assets/mascot/cloud-tuanzi-v2.png
@@ -522,21 +524,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two lanes per runner. Four additional runners cover the complete suite
-        # on 3.15 (~11 minutes of file work per runner) with half the startups.
-        include:
-          - {python: '3.12', shard: 0, shard-total: 8}
-          - {python: '3.12', shard: 1, shard-total: 8}
-          - {python: '3.12', shard: 2, shard-total: 8}
-          - {python: '3.12', shard: 3, shard-total: 8}
-          - {python: '3.12', shard: 4, shard-total: 8}
-          - {python: '3.12', shard: 5, shard-total: 8}
-          - {python: '3.12', shard: 6, shard-total: 8}
-          - {python: '3.12', shard: 7, shard-total: 8}
-          - {python: '3.15', shard: 0, shard-total: 4}
-          - {python: '3.15', shard: 1, shard-total: 4}
-          - {python: '3.15', shard: 2, shard-total: 4}
-          - {python: '3.15', shard: 3, shard-total: 4}
+        # Each Python version runs the full suite over 16 timing-balanced lanes,
+        # two per runner, under the same 20-minute job deadline.
+        python: ['3.12', '3.15']
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard-total: [8]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit

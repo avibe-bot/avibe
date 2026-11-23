@@ -1,10 +1,23 @@
 """The warm freeze: armed once, fires at the first natural full collection after
 the warm-up whatever is streaming, and rolls back without restart.
-GC operations are faked; the process heap is never frozen by these tests."""
+Real GC operations are confined to disposable child interpreters."""
 
+import subprocess
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from core import loop_watchdog as wd
+
+
+@pytest.mark.parametrize("case", ["default", "before_startup", "before_watchdog", "after_arm"])
+def test_real_interpreter_freeze_ownership(case):
+    subprocess.run(
+        [sys.executable, "-I", "-S", str(Path(__file__).with_name("warm_gc_child.py")), case],
+        check=True, timeout=20,
+    )
 
 
 def test_freeze_fires_on_the_first_warm_full_collection_even_with_open_streams(monkeypatch, caplog):

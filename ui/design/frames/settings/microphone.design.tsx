@@ -63,6 +63,23 @@ const designFrames = frames([
     fixtures: settingsFixtures({}, { desktopShell: true, copy, microphone: { platform: 'desktop', state } }),
     render: page,
   })),
+  ...([1280, 720] as const).map((width) => ({
+    name: `desktop-long-device-${width}`,
+    title: 'Microphone · Desktop · Long device name',
+    width,
+    height: 800,
+    status: 'shipped' as const,
+    route: '/settings/microphone',
+    fixtures: settingsFixtures({}, {
+      desktopShell: true,
+      microphone: {
+        platform: 'desktop',
+        state: 'selected',
+        devices: [{ deviceId: 'usb', label: 'Studio USB microphone — Conference room input / 会议室外接麦克风 (High Definition Audio Device)' }],
+      },
+    }),
+    render: page,
+  })),
   ...(['default', 'testing', 'quiet', 'prompt', 'denied'] as const).map((state) => ({
     name: `ios-${state}`,
     title: `麦克风 · iOS · ${labels[state]}`,

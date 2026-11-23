@@ -21,6 +21,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,7 +104,14 @@ def hostname_for_prefix(prefix: str) -> str:
 
 
 def _valid_prefix(prefix: Any) -> bool:
-    return isinstance(prefix, str) and _PREFIX.fullmatch(prefix) is not None and is_managed_name(hostname_for_prefix(prefix))
+    # avibe.bot's rule for a new prefix (avibe-bot-backend lib/claims/prefix.ts):
+    # also, ``<prefix>-app`` must not read as an IDNA label (``xx--``).
+    return (
+        isinstance(prefix, str)
+        and _PREFIX.fullmatch(prefix) is not None
+        and f"{prefix}-app"[2:4] != "--"
+        and is_managed_name(hostname_for_prefix(prefix))
+    )
 
 
 # --- the local binding --------------------------------------------------------
@@ -422,6 +430,31 @@ _inflight: dict[str, int] = {}
 _last_read_started: float | None = None
 _last_read_failed: float | None = None
 _read_refused = False  # the last read got a definitive refusal from avibe.bot
+# avibe.bot's answer that it will not tell this pairing the address state, nor
+# act on its renames, until remote access is bound again: (pairing, code). While
+# it stands for the pairing in use nothing asks again by itself.
+_STANDING_REFUSALS = frozenset({"rebind_required"})
+_standing_refusal: tuple[tuple[str, str], str] | None = None
+# What the last state read was refused with, when the page has a word for it:
+# (pairing, HTTP status, code), as a rename refused the same way reaches the
+# page. Unlike a standing refusal it stops nothing from asking again.
+_READ_PAGE_ERRORS: dict[str, tuple[int, str]] = {
+    "invalid_device_secret": (409, "pairing_invalid"),
+    "forbidden": (409, "rename_ineligible"),
+    "rename_ineligible": (409, "rename_ineligible"),
+}
+_read_refusal: tuple[tuple[str, str], int, str] | None = None
+# ``ineligible_reason`` while avibe.bot has never answered a state read for this
+# instance: an avibe.bot that does not have the address endpoints yet, or one
+# that has not been reached since pairing. Not a switch: a fact, read from the
+# stored state, that ends by itself with the first state read that succeeds.
+STATE_UNKNOWN_REASON = "address_state_unknown"
+# The pairing whose latest state read was answered 404: avibe.bot does not have
+# the address endpoints now (not yet, or no longer, as after a rollback). Until a
+# read succeeds the address is treated as never answered. In memory only: every
+# opening of the page and every start reads first, and the stored state, with its
+# list of old names, is left as it is.
+_endpoint_absent: tuple[str, str] | None = None
 _known_cleanup: tuple[str, frozenset[str]] | None = None
 _read_lock = threading.Lock()
 _retired_at_flip: dict[str, str] = {}  # old host -> new origin, for streams open at the switch
@@ -464,6 +497,28 @@ def _drop_authority() -> None:
     with _LOCK:
         _authority = None
         _authority_epoch += 1
+
+
+def _note_standing_refusal(binding: Binding, code: str) -> None:
+    """avibe.bot named a refusal that only a new binding of remote access ends."""
+
+    global _standing_refusal, _read_refusal
+
+    # No permission is given, so none is held, and no reply still on its way restores one.
+    _drop_authority()
+    with _LOCK:
+        _standing_refusal = (binding.pairing, code)
+        _read_refusal = None
+
+
+def _standing_refusal_for(binding: Binding | None) -> str | None:
+    standing = _standing_refusal
+    return standing[1] if standing is not None and binding is not None and standing[0] == binding.pairing else None
+
+
+def _read_refusal_for(binding: Binding | None) -> tuple[int, str] | None:
+    refusal = _read_refusal
+    return refusal[1:] if refusal is not None and binding is not None and refusal[0] == binding.pairing else None
 
 
 def _cleanup_allowed_locked(host: str, binding: Binding) -> bool:
@@ -694,44 +749,83 @@ def _read_is_stale_locked(read: _StateRead) -> bool:
     return isinstance(stored_generation, int) and read.state["generation"] < stored_generation
 
 
-def _read_state_once(binding: Binding) -> _StateRead | None:
-    """One read of ``hostname-state``. ``None`` when it gave no usable state."""
+def _read_state_once(binding: Binding, *, again: bool = False) -> _StateRead | None:
+    """One read of ``hostname-state``. ``None`` when it gave no usable state.
 
-    global _read_refused
+    While a standing refusal holds for this pairing no request is made: the
+    answer would be the same until remote access is bound again, which makes
+    another pairing. ``again`` is for a person who asks now.
+    """
+
+    global _read_refused, _standing_refusal, _read_refusal, _endpoint_absent
 
     from vibe import remote_access
 
+    if not again and _standing_refusal_for(binding) is not None:
+        return None
     with _LOCK:
         epoch = _authority_epoch
     started_monotonic, started_wall = _monotonic(), _wall()
+
+    def latest() -> bool:
+        # Under the role lock: no refusal was noted and no permission dropped
+        # since this request left, and the binding is the one it was made for.
+        # An answer that is not the latest changes nothing that is remembered.
+        return epoch == _authority_epoch and current_binding() == binding
+
     try:
         payload = remote_access._device_json_request(_load_config(), "POST", "hostname-state", {}, timeout=8.0)
     except remote_access.BackendRequestError as exc:
-        if exc.status == 401:
-            # The binding is no longer current: no cleaning anywhere, and no
-            # reply still on its way may bring it back.
-            _drop_authority()
         # A definitive answer (not a throttle, not a server fault): asking again
         # soon would get the same one.
-        _read_refused = 400 <= exc.status < 500 and exc.status != 429
+        definitive = 400 <= exc.status < 500 and exc.status != 429
+        _read_refused = definitive
+        code = exc.payload.get("error") if isinstance(exc.payload, dict) else None
+        if not isinstance(code, str):
+            code = ""  # an object or a list where the code belongs names nothing
+        with _LOCK:
+            if latest():
+                if definitive:
+                    # Another definitive answer takes a standing refusal's place;
+                    # a throttle or a server fault says nothing about it.
+                    _standing_refusal = None
+                    _endpoint_absent = binding.pairing if exc.status == 404 else None
+                worded = _READ_PAGE_ERRORS.get(code) if definitive else None
+                _read_refusal = (binding.pairing, *worded) if worded is not None else None
+        if exc.status == 401:
+            # The binding is no longer current: no cleaning anywhere, and no
+            # reply still on its way may bring it back. Only this status means
+            # so: an endpoint avibe.bot does not have answers 404.
+            _drop_authority()
+        if exc.status == 409 and code in _STANDING_REFUSALS:
+            _note_standing_refusal(binding, code)
         return None
     except Exception:
         _read_refused = False
+        with _LOCK:
+            if latest():
+                _read_refusal = None  # no answer says nothing, also not about a refusal that stands
         return None
     _read_refused = False
     state = _validated_state(binding, payload)
     with _LOCK:
-        if state is None or epoch != _authority_epoch or current_binding() != binding:
+        if not latest():
             return None
+        _read_refusal = None
+        _endpoint_absent = None  # the endpoint answered, whatever the shape of its answer
+        if state is None:
+            return None
+        _standing_refusal = None
     return _StateRead(binding, state, started_monotonic, started_wall, epoch)
 
 
-def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
+def refresh_state(*, force: bool = False, wait: bool = True, again: bool = False) -> bool:
     """Read the state unless one was read in the last few seconds; apply it.
 
     One read at a time. ``wait=False`` returns at once when a read is in flight
     instead of queueing behind it. After a failed read the interval runs from
-    the failure's end, so slow failures are not retried back to back.
+    the failure's end, so slow failures are not retried back to back. ``again``
+    asks even while a standing refusal holds (see ``_read_state_once``).
     """
 
     global _last_read_started, _last_read_failed
@@ -746,7 +840,7 @@ def refresh_state(*, force: bool = False, wait: bool = True) -> bool:
             if not force and _read_too_recent():
                 return False
             _last_read_started = _monotonic()
-        read = _read_state_once(binding)
+        read = _read_state_once(binding, again=True) if again else _read_state_once(binding)
         if read is None:
             with _LOCK:
                 _last_read_failed = _monotonic()
@@ -821,9 +915,35 @@ def _note_other_active_name(
 
     journal = stored.get("journal")
     if isinstance(journal, dict) and journal.get("origin") == "local" and journal.get("phase") == "intent":
-        # Our own request is still unanswered here; its replay settles it.
-        _wake_worker()
-        return
+        if not isinstance(journal.get("held"), dict):
+            # Our own request is still unanswered here; its replay settles it.
+            _wake_worker()
+            return
+        target = journal.get("target_hostname")
+        if state["active_hostname"] == target and state["last_rename_operation_id"] == journal.get("operation_id"):
+            # avibe.bot names this operation as the one that made the change: the
+            # address is ours to take. Not the permission to delete Health data:
+            # that needs the generation the operation was committed at (rule A5),
+            # which only its receipt carries, and the current one is no proof of
+            # it (a later operation may have raised it). Without it, nothing is
+            # deleted.
+            release = next((entry.get("release_at") for entry in state["cleanup"]
+                            if entry.get("hostname") == journal.get("previous_hostname")), None)
+            _set_journal(binding, {
+                **{key: value for key, value in journal.items() if key != "held"},
+                "phase": "committed",
+                "receipt": {
+                    "committed_generation": None,
+                    "previous_hostname": journal.get("previous_hostname"),
+                    "hostname": target,
+                    "previous_release_at": release if _parse_instant(release) is not None else None,
+                    "oidc_client_id": state.get("oidc_client_id"),
+                },
+            })
+        else:
+            # Another change: adopted as one made elsewhere, which deletes nothing.
+            _set_journal(binding, None)
+            journal = None
     if not isinstance(journal, dict):
         _update_state(
             binding.instance_id,
@@ -895,6 +1015,15 @@ def _eligibility(binding: Binding | None) -> str | None:
     return None
 
 
+def _state_ever_read(binding: Binding) -> bool:
+    """Whether avibe.bot has answered a state read for this instance (stored, so it
+    survives a restart) and has the endpoint now (its latest read was not a 404)."""
+
+    if _endpoint_absent is not None and _endpoint_absent == binding.pairing:
+        return False
+    return isinstance(_load_state(binding.instance_id).get("state_read_at"), int)
+
+
 def _device_rows(binding: Binding) -> list[dict[str, Any]]:
     """The devices a change signs out: the registry's Owner view, every account."""
 
@@ -937,6 +1066,24 @@ def _hold_days(state: Mapping[str, Any]) -> int | None:
     return max(1, round(delay / 86400)) if isinstance(delay, int) and delay > 0 else None
 
 
+_held_checked_at: float | None = None
+
+
+def _check_held(binding: Binding, *, force: bool = False) -> bool:
+    """One read of the state for a held change, asked for by the Owner; past a
+    standing refusal, but at most once a minute unless ``force``. Whether it read."""
+
+    global _held_checked_at
+
+    now = _monotonic()
+    with _LOCK:
+        if not force and _held_checked_at is not None and now - _held_checked_at < DISPLAY_REFRESH_SECONDS:
+            return False
+        _held_checked_at = now
+    refresh_state(force=True, again=True)
+    return True
+
+
 def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
     """First of the two requests: what a change to ``prefix`` would do (rule A2)."""
 
@@ -944,14 +1091,34 @@ def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
     reason = _eligibility(binding)
     if reason is not None or binding is None:
         raise AddressError(409, "rename_ineligible", reason=reason)
+    if not _state_ever_read(binding):
+        # avibe.bot has not answered for this address yet: nothing is asked of it here.
+        raise AddressError(409, "rename_ineligible", reason=STATE_UNKNOWN_REASON)
     if not _valid_prefix(prefix):
         raise AddressError(400, "invalid_prefix")
     target = hostname_for_prefix(prefix)
     if target == binding.active_host:
         raise AddressError(409, "same_address")
-    if isinstance(_load_state(binding.instance_id).get("journal"), dict):
+    journal = _load_state(binding.instance_id).get("journal")
+    if isinstance(journal, dict) and isinstance(journal.get("held"), dict):
+        # A held change: the Owner asking is one read of the state, also past a
+        # standing refusal, which may show what became of it. Read only: nothing
+        # is sent again and no refusal is set aside.
+        _check_held(binding, force=True)
+        journal = _load_state(binding.instance_id).get("journal")
+    if isinstance(journal, dict):
         raise AddressError(409, "operation_in_progress")
-    refresh_state(force=True)
+    # The Owner asks now: one read, also when avibe.bot's last word was a standing refusal.
+    refresh_state(force=True, again=True)
+    if not _state_ever_read(binding):
+        raise AddressError(409, "rename_ineligible", reason=STATE_UNKNOWN_REASON)
+    refusal = _standing_refusal_for(binding)
+    if refusal is not None:
+        raise AddressError(409, refusal)
+    worded = _read_refusal_for(binding)
+    if worded is not None:
+        # Refused as a rename would be: the same code, the same way out.
+        raise AddressError(*worded)
     state = _load_state(binding.instance_id)
     generation = state.get("generation")
     read_at = state.get("state_read_at")
@@ -994,6 +1161,8 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
     reason = _eligibility(binding)
     if reason is not None or binding is None:
         raise AddressError(409, "rename_ineligible", reason=reason)
+    if not _state_ever_read(binding):
+        raise AddressError(409, "rename_ineligible", reason=STATE_UNKNOWN_REASON)
     with _LOCK:
         entry = _confirmations.pop(confirmation_id, None) if isinstance(confirmation_id, str) else None
         if entry is None or entry["actor"] != actor or entry["expires_monotonic"] <= _monotonic():
@@ -1009,7 +1178,9 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
             or entry["generation"] != state.get("generation")
         ):
             raise AddressError(409, "address_changed")
-        operation_id = secrets.token_urlsafe(32)
+        # avibe.bot accepts only a UUID here (its ``renameTuple``); a repeat sends
+        # this same id from the journal, so it is made once, with the intent.
+        operation_id = str(uuid.uuid4())
         journal = {
             "origin": "local",
             "phase": "intent",
@@ -1052,13 +1223,23 @@ def describe() -> dict[str, Any]:
     reason = _eligibility(binding)
     if binding is None:
         return {"ok": True, "hostname": None, "public_url": None, "eligible": False, "ineligible_reason": reason,
-                "hold_days": None, "release_at_if_changed_now": None, "operation": None,
+                "hold_days": None, "release_at_if_changed_now": None, "operation": None, "state_error": None,
                 "unrecognized_change": None, "cleanup": [], "health": {"connected": False, "cleanup": "none"}}
     state = _load_state(binding.instance_id)
     read_at = state.get("state_read_at")
-    if reason is None and (not isinstance(read_at, int) or _wall() - read_at > DISPLAY_REFRESH_SECONDS):
+    # One way to read per opening of the page, never two.
+    if isinstance(state.get("journal"), dict) and isinstance(state["journal"].get("held"), dict):
+        # The Owner looking at a held change checks it, at most once a minute.
+        if _check_held(binding):
+            state = _load_state(binding.instance_id)
+    elif reason is None and (not isinstance(read_at, int) or _wall() - read_at > DISPLAY_REFRESH_SECONDS):
+        # Also while the state was never read: opening the page asks again (no
+        # more often than the read interval), so the page follows avibe.bot
+        # without a restart once it answers.
         refresh_state()
         state = _load_state(binding.instance_id)
+    if reason is None and not _state_ever_read(binding):
+        reason = STATE_UNKNOWN_REASON
     journal = state.get("journal")
     operation = None
     if isinstance(journal, dict):
@@ -1067,6 +1248,11 @@ def describe() -> dict[str, Any]:
             "hostname": journal.get("target_hostname"),
             "error": None,
         }
+        held = journal.get("held")
+        if journal.get("phase") == "intent" and isinstance(held, dict):
+            # Refused after avibe.bot may already have taken the request: not
+            # failed, not sent again, waiting for the state to say what became of it.
+            operation.update({"error": held.get("error"), "unconfirmed": True})
     elif isinstance(state.get("last_operation"), dict) and state["last_operation"].get("state") == "failed":
         last = state["last_operation"]
         operation = {key: value for key, value in last.items() if key not in {"operation_id", "status"}}
@@ -1110,6 +1296,9 @@ def describe() -> dict[str, Any]:
         "hold_days": _hold_days(state),
         "release_at_if_changed_now": state.get("active_release_at_if_renamed_now"),
         "operation": operation,
+        # A standing refusal of the address state: what is shown is as last
+        # read, and no old name is cleaned, until remote access is bound again.
+        "state_error": _standing_refusal_for(binding),
         "unrecognized_change": state.get("unrecognized_change"),
         "cleanup": cleanup,
         "health": {"connected": _health_connected(), "cleanup": "pending" if health_pending else "none"},
@@ -1229,6 +1418,8 @@ def _advance_operation() -> float:
     if journal is None:
         return 0.0
     if journal.get("origin") == "local" and journal.get("phase") == "intent":
+        if isinstance(journal.get("held"), dict):
+            return 0.0  # not sent again; a state read that shows the outcome resolves it
         return _request_change(binding, journal)
     return _apply_committed(binding, journal)
 
@@ -1246,8 +1437,19 @@ _PAGE_ERRORS: dict[str, tuple[int, str]] = {
     # really is. Definitive for this operation: it is settled here and not sent
     # again; the way out is to bind remote access again, then try again.
     "remote_access_configuration_mismatch": (409, "remote_access_configuration_mismatch"),
+    # This computer's credential is valid, but avibe.bot holds more than one
+    # pairing for the instance and will not choose one. Definitive in the same
+    # way, with the same way out; the cause is another, so is the code.
+    "rebind_required": (409, "rebind_required"),
 }
 _LIMIT_FIELDS = ("limit", "held_count", "earliest_release_at")
+# A code avibe.bot sends that the page has no own word for is passed on as it is,
+# when it looks like one; the page says the change was not made, with the code.
+_WIRE_CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# The form avibe.bot's request rule takes for an operation id. An id made by an
+# earlier version (a 43-character token) is refused by that rule before the
+# rename is looked at, so such a refusal proves the request never landed.
+_UUID = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
 def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
@@ -1265,25 +1467,66 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
         "expected_hostname": journal["expected_hostname"],
         "new_prefix": journal["new_prefix"],
     }
+    # Whether an earlier sending of this request may have been taken by avibe.bot:
+    # it was answered "pending", or not answered for sure (no answer, a server
+    # fault, an answer this contract does not know, a crash while it was out).
+    # Recorded before the request leaves, so a crash counts as not knowing.
+    landed_before = bool(journal.get("may_have_landed"))
+    if not landed_before:
+        journal = {**journal, "may_have_landed": True}
+        _set_journal(binding, journal)
     try:
         reply = remote_access._device_json_request(_load_config(), "POST", "hostname-renames", body, timeout=20.0)
     except remote_access.BackendRequestError as exc:
         status, payload = exc.status, exc.payload if isinstance(exc.payload, dict) else {}
         if status == 429 or status >= 500:
+            if status == 429 and not landed_before:
+                # Turned away before it was looked at: this sending did not land.
+                journal = {**journal, "may_have_landed": False}
+                _set_journal(binding, journal)
             retry = payload.get("retry_after_seconds")
             return float(min(max(retry, 1), 600)) if isinstance(retry, (int, float)) else 30.0
         code = payload.get("error") if isinstance(payload.get("error"), str) else ""
-        page_status, page_code = _PAGE_ERRORS.get(code, (503, "unavailable"))
+        if code in _PAGE_ERRORS:
+            page_status, page_code = _PAGE_ERRORS[code]
+        elif status == 404:
+            # No such endpoint at avibe.bot: the address cannot be changed from here now.
+            page_status, page_code = 409, "rename_ineligible"
+        elif 400 <= status < 500:
+            # A definitive refusal: said as what it is, never as "unavailable",
+            # which means a fault that passes. The request is not sent again.
+            # ``resource_acl_device_rejected`` is the request helper's own word
+            # for a body that was not JSON, not a code avibe.bot sent.
+            named = _WIRE_CODE.fullmatch(code) and code != "resource_acl_device_rejected"
+            page_status, page_code = 409, code if named else "rename_refused"
+        else:
+            page_status, page_code = 503, "unavailable"
         if status == 401:
             # The binding is refused: no cleaning anywhere from this moment, and
             # no state read still on its way may bring it back, whatever the
             # read after this refusal manages to learn.
             _drop_authority()
             page_status, page_code = 409, "pairing_invalid"
+        elif status == 409 and code in _STANDING_REFUSALS:
+            # The same answer stands for the state read, which is not asked again.
+            _note_standing_refusal(binding, code)
         failure = {"operation_id": journal["operation_id"], "state": "failed", "hostname": target,
                    "error": page_code, "status": page_status}
         if page_code == "name_holding_limit_reached":
             failure.update({field: payload.get(field) for field in _LIMIT_FIELDS})
+        old_id_refused = (
+            status == 400 and code == "invalid_request" and not _UUID.fullmatch(str(journal["operation_id"]))
+        )
+        if landed_before and not old_id_refused:
+            # This sending was refused, but an earlier one may have been taken and
+            # still be in avibe.bot's hands (a refusal of a repeat does not cancel
+            # it). Not a failure of the change: stop sending, keep the journal with
+            # its request and its local origin, and let a state read that shows the
+            # outcome settle it (``_note_other_active_name``).
+            held = {key: value for key, value in failure.items() if key not in {"operation_id", "state", "hostname"}}
+            _set_journal(binding, {**journal, "held": held})
+            refresh_state(force=True)
+            return 0.0
         _refuse_operation(binding, journal, failure)
         return 0.0
     except Exception:

@@ -407,6 +407,22 @@ const ActivityRows: React.FC<{ rows: ActivityRow[]; showToolCalls: boolean; vari
 // constant-height, bottom-following, top-fading viewport once content reaches the cap.
 const COMPACT_CAP_PX = 110;
 
+/** Turns Agent Activity off (the Settings switch), from a running card's or an opened group's header. */
+function DisableActivityButton({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={t('chat.agentActivity.disable')}
+      title={t('chat.agentActivity.disable')}
+      className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-edge text-foreground/80 transition-colors hover:bg-foreground/[0.08] bg-field"
+    >
+      <X className="size-3.5" aria-hidden="true" />
+    </button>
+  );
+}
+
 export const ActivityCard: React.FC<{
   rows: ActivityRow[];
   startedAtMs: number | null;
@@ -508,17 +524,7 @@ export const ActivityCard: React.FC<{
             <span className="ml-auto shrink-0 font-mono text-[11px] text-muted">{clock}</span>
           </button>
           <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
-          {onDisableActivity && (
-            <button
-              type="button"
-              onClick={onDisableActivity}
-              aria-label={t('chat.agentActivity.disable')}
-              title={t('chat.agentActivity.disable')}
-              className="inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-edge text-foreground/80 transition-colors hover:bg-foreground/[0.08] bg-field"
-            >
-              <X className="size-3.5" aria-hidden="true" />
-            </button>
-          )}
+          {onDisableActivity && <DisableActivityButton onClick={onDisableActivity} />}
           {/* A disclosure control like the label beside it, so opening by either is the same tap. */}
           <button type="button" onClick={onToggleExpanded} aria-expanded={expanded} aria-label={t('chat.agentActivity.collapse')}>
             <ChevronDown
@@ -600,7 +606,10 @@ export const ActivityChip: React.FC<{
   onToggleTools: () => void;
   /** What makes the chip a transcript item (its key, what it hangs on), on its root. */
   itemAttributes?: Record<string, string>;
-}> = ({ group, expanded, loading, error, onToggle, onRetry, showToolCalls, onToggleTools, itemAttributes }) => {
+  /** Turns Agent Activity off, from the opened panel's header (as the running card offers it). The
+   *  closed pill stays one control: a second one beside it would change its shape. */
+  onDisableActivity?: () => void;
+}> = ({ group, expanded, loading, error, onToggle, onRetry, showToolCalls, onToggleTools, itemAttributes, onDisableActivity }) => {
   const { t } = useTranslation();
   const StatusIcon =
     group.status === 'failed' ? AlertTriangle : group.status === 'interrupted' ? CircleSlash : CheckCircle2;
@@ -747,6 +756,7 @@ export const ActivityChip: React.FC<{
                 <span data-transcript-shared="label" className="min-w-0 truncate text-[12px] font-medium text-foreground/90">{label}</span>
               </button>
               <ToolsEyePill shown={showToolCalls} onToggle={onToggleTools} />
+              {onDisableActivity && <DisableActivityButton onClick={onDisableActivity} />}
               <button type="button" onClick={onToggle} aria-label={t('chat.agentActivity.collapse')}>
                 <ChevronDown className="size-3.5 shrink-0 rotate-180 text-muted" aria-hidden="true" />
               </button>

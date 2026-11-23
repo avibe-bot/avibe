@@ -56,7 +56,12 @@ SHARED_INPUTS = (".github/", "scripts/", "npm/", "patches/")
 NATIVE_UI = ("ui/src/lib/native", "ui/src/lib/useNative", "ui/src/mobile/")
 IOS_CONTRACTS = ("ios/", *NATIVE_UI, "vibe/data/", "vibe/message_types.json",
                  "assets/mascot/cloud-tuanzi-v2.png")
-DESKTOP_CONTRACTS = ("desktop/", "ui/src/i18n/", *NATIVE_UI)
+# The page desktop-shell's composer caret probe loads, and the composer it guards.
+COMPOSER_CARET = (
+    "ui/src/components/workbench/Composer.tsx", "ui/src/components/workbench/MentionEditor.tsx",
+    "ui/src/components/voice/ComposerHold.tsx", "ui/e2e/voice-shortcut/fixture.",
+)
+DESKTOP_CONTRACTS = ("desktop/", "ui/src/i18n/", *NATIVE_UI, *COMPOSER_CARET)
 INSTALL_INPUTS = (
     "vibe/runtime", "vibe/install", "vibe/bootstrap", "vibe/upgrade",
     "vibe/cli.py", "vibe/commands/", "vibe/paths.py", "vibe/model_hub_runtime/",

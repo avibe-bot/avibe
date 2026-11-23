@@ -645,6 +645,12 @@ fn in_place(webview: &WKWebView) -> Option<Retained<NSWindow>> {
 
 /// The native window an opener's web view is shown in, if it is what the user
 /// is looking at: in place, in a window that is on screen.
+pub(crate) fn app_lock_did_unlock() {
+    // A protected card becoming visible again is a fresh arrival, even if
+    // LocalAuthentication returned while this app was already active.
+    ARRIVALS.with_borrow_mut(|arrivals| arrivals.last = Some(Instant::now()));
+}
+
 fn shown_in(webview: &WKWebView) -> Option<Retained<NSWindow>> {
     in_place(webview).filter(|window| is_on_screen(window))
 }
@@ -949,7 +955,12 @@ fn web_view_changed() {
         return;
     };
     for (key, webview) in openers {
-        if webview.is_none_or(|webview| in_place(&webview).is_none()) {
+        if webview.is_none_or(|webview| {
+            in_place(&webview).is_none()
+                && !(crate::app_lock::protects_view(&webview)
+                    && in_home_window(&webview).is_some()
+                    && !covered_by_a_web_view(&webview))
+        }) {
             close_children_of(key, Destroy::Now);
         }
     }
@@ -1150,6 +1161,15 @@ impl SandboxWindow {
     /// either: a click aimed at the card must not land on something else. The
     /// title bar keeps working, so the window can be moved or closed.
     fn admits(&self, event: &NSEvent) -> bool {
+        // App Lock replaces the content responder with its native unlock UI.
+        // The superclass routes only to that cover while the page is hidden.
+        if self.contentView().is_some_and(|view| {
+            view.subviews()
+                .iter()
+                .any(|child| crate::app_lock::protects_view(&child))
+        }) {
+            return true;
+        }
         let kind = event.r#type();
         if !is_input(kind) || self.is_live_for(event) {
             return true;

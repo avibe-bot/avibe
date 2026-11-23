@@ -666,8 +666,8 @@ export const ChatPage: React.FC = () => {
             sessionId,
             composerReady: composeReady({ sessionId, showPageActive, hydratedSessionId: hydratedTranscriptSessionId }),
             showChat: () => selectChatView(sessionId, true),
-            appendLine: (text: string) => composerRef.current?.appendLine(text) ?? false,
-            addFiles: (files: File[]) => composerRef.current?.stageFiles(files) ?? false,
+            appendLine: (text, surface) => composerRef.current?.appendLine(text, surface) ?? false,
+            addFiles: (files, surface) => composerRef.current?.stageFiles(files, surface) ?? false,
           }
         : null,
     [sessionId, sessionLoaded, writable, showPageActive, hydratedTranscriptSessionId, selectChatView],
@@ -5253,6 +5253,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onRetry={() => activity.onRetryGroup(group)}
         showToolCalls={activity.showToolCalls}
         onToggleTools={activity.onToggleTools}
+        onDisableActivity={activity.onDisable}
       />
     ) : null;
   // Runs of Harness input fold into one group (docs/plans/workbench-refinements.md

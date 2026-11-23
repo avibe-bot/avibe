@@ -23,8 +23,6 @@ import {
   triggerRefId,
 } from '../../lib/agentGraph';
 import { searchGraph, type GraphSearchResult } from '../../lib/graphSearch';
-import { readGraphShowDisabled, writeGraphShowDisabled } from '../../lib/graphViewPrefs';
-import { readAgentGraphMode, writeAgentGraphMode } from '../../lib/agentsViewMemory';
 import { useIsDesktop } from '../../lib/useIsDesktop';
 import { AgentGraphCanvas } from './AgentGraphCanvas';
 import { AgentGraphMobileList } from './AgentGraphMobileList';
@@ -114,16 +112,11 @@ export const AgentGraphTab: React.FC = () => {
   const [projects, setProjects] = useState<{ id: string; display_name: string }[]>([]);
 
   // Filters (spec: 活跃/含历史 · time window · project incl. 独立 · 显示后台会话).
-  // The 活跃/含历史 choice is remembered across visits (含历史 by default) so
-  // re-entering the Runs tab resumes the view the user was actually watching.
-  // Only an explicit segmented-control click persists — the filter widening the
-  // search-locate path performs below is transient, same ruling as the
-  // disabled-trigger reveal.
-  const [mode, setMode] = useState<'active' | 'history'>(readAgentGraphMode);
-  const setModePersisted = useCallback((next: 'active' | 'history') => {
-    setMode(next);
-    writeAgentGraphMode(next);
-  }, []);
+  // Every visit to the Runs tab opens on 活跃 (owner ruling): the 活跃/含历史
+  // choice lasts only while this tab stays mounted and is never stored, so a
+  // value an older build left in localStorage has no effect. The search-locate
+  // path below may widen it to 含历史 for the same mounted lifetime.
+  const [mode, setMode] = useState<'active' | 'history'>('active');
   const [windowSel, setWindowSel] = useState<GraphWindow>('24h');
   const [projectSel, setProjectSel] = useState<string>('all');
   const [showBackground, setShowBackground] = useState(true);
@@ -142,18 +135,17 @@ export const AgentGraphTab: React.FC = () => {
   }, []);
 
   // A11: disabled trigger chips (+ their trigger edges) are hidden by default;
-  // the canvas legend switch reveals them and the choice is remembered locally.
-  const [showDisabled, setShowDisabled] = useState(readGraphShowDisabled);
-  // A search-hit reveal of a hidden disabled chip is TRANSIENT — it must not
-  // write the persisted preference (owner ruling): only an explicit legend /
-  // mobile toggle persists. This session-only flag OR's into the effective
-  // visibility so a searched-for chip renders without changing what the user
-  // sees on the next load.
+  // the canvas legend switch reveals them. Every visit opens with them hidden
+  // (owner ruling): the choice lasts only while this tab stays mounted and is
+  // never stored, so a value an older build left in localStorage has no effect.
+  const [showDisabled, setShowDisabled] = useState(false);
+  // A search-hit reveal of a hidden disabled chip is TRANSIENT: it does not
+  // turn the switch on. This flag OR's into the effective visibility so a
+  // searched-for chip renders without changing the switch.
   const [revealDisabled, setRevealDisabled] = useState(false);
   const effectiveShowDisabled = showDisabled || revealDisabled;
-  const setShowDisabledPersisted = useCallback((next: boolean) => {
+  const setShowDisabledChoice = useCallback((next: boolean) => {
     setShowDisabled(next);
-    writeGraphShowDisabled(next);
     // An explicit hide also clears any transient reveal, so "off" always hides.
     if (!next) setRevealDisabled(false);
   }, []);
@@ -594,7 +586,7 @@ export const AgentGraphTab: React.FC = () => {
         />
         <SegmentedRadio
           value={mode}
-          onChange={setModePersisted}
+          onChange={setMode}
           ariaLabel={t('agents.graph.filters.modeLabel')}
           options={[
             { id: 'active', label: t('agents.graph.filters.active') },
@@ -651,13 +643,13 @@ export const AgentGraphTab: React.FC = () => {
           <Switch checked={showBackground} onCheckedChange={setShowBackground} label={t('agents.graph.filters.showBackground')} />
         </label>
         {/* Mobile has no canvas legend, so surface the disabled-trigger toggle here;
-            otherwise a transient search-reveal can never be turned off on mobile. This
-            switch persists the preference; its checked state tracks the effective value
-            so a transient reveal shows as on and can be toggled back off. */}
+            otherwise a transient search-reveal can never be turned off on mobile. Its
+            checked state tracks the effective value, so a transient reveal shows as on
+            and can be toggled back off. */}
         {!isDesktop && (
           <label className="inline-flex items-center gap-2 text-[12px] text-muted">
             {t('agents.graph.legend.showDisabled')}
-            <Switch checked={effectiveShowDisabled} onCheckedChange={setShowDisabledPersisted} label={t('agents.graph.legend.showDisabled')} />
+            <Switch checked={effectiveShowDisabled} onCheckedChange={setShowDisabledChoice} label={t('agents.graph.legend.showDisabled')} />
           </label>
         )}
         <Button type="button" variant="outline" size="xs" onClick={() => fetchGraph(false)} disabled={loading}>
@@ -717,7 +709,7 @@ export const AgentGraphTab: React.FC = () => {
                 selectedId={selectedNodeId}
                 selectedTriggerId={selectedTriggerId}
                 showDisabled={effectiveShowDisabled}
-                onToggleDisabled={setShowDisabledPersisted}
+                onToggleDisabled={setShowDisabledChoice}
                 heightPx={fillHeight}
                 // Refit the viewport when the filters change the layout (small→
                 // large graph, different project/window, or revealing disabled

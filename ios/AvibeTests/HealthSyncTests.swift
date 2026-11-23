@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Security
+import SwiftUI
 import WebKit
 import XCTest
 @testable import Avibe
@@ -335,6 +336,298 @@ final class HealthSyncTests: XCTestCase {
     // ACK-gated completion, cancellation and durable deduplication are outside
     // the reader's aggregation and the bridge's parsing responsibilities.
     @MainActor
+    func testPreviouslyDeterminedAuthorizationCanConnectWithEmptyReadResults() async throws {
+        let fixture = try coordinatorFixture()
+        fixture.uploader.autoAcknowledge = true
+        let operation = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let state = await operation.value
+        XCTAssertEqual(state, "connected")
+        try await eventually { fixture.client.results.count == 1 }
+        XCTAssertEqual(fixture.reader.authorizations, 1)
+        XCTAssertEqual(fixture.client.results[0]["outcome"] as? String, "succeeded")
+        let result = try XCTUnwrap(fixture.client.results[0]["result"] as? [String: Any])
+        XCTAssertEqual(result["metrics"] as? [String: String], ["steps": "empty"])
+    }
+
+    @MainActor
+    func testFirstConnectionOffersOptionalHelpOnlyForACompleteEmptyStepWindow() async throws {
+        for scenario in ["empty", "older-sample", "zero", "sample", "missing-day", "query-error", "locked"] {
+            let fixture = try coordinatorFixture()
+            fixture.uploader.autoAcknowledge = true
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+            let now = Date()
+            let aggregation = try HealthDayAggregation(days: 30, now: now, calendar: calendar)
+            let sampleDay = scenario == "older-sample" ? aggregation.days[0] : aggregation.days.last!
+            let quantities: [Date: HealthDayAggregation.Quantity] = ["zero", "sample", "older-sample"].contains(scenario)
+                ? [sampleDay.start: .init(value: scenario == "zero" ? 0 : 10, latestSampleEnd: sampleDay.start)] : [:]
+            var items = aggregation.steps(quantities, queriedAt: now)
+            if scenario == "missing-day" { items.removeLast() }
+            fixture.reader.window = HealthQueryWindow(
+                computedAt: now, from: aggregation.days.first!.name, to: aggregation.days.last!.name,
+                items: items, failures: scenario == "query-error" ? [["metric": "steps", "code": "protected_data_unavailable"]] : [],
+                metricStates: ["steps": scenario == "query-error" ? "protected_data_unavailable" : quantities.isEmpty ? "empty" : "ok",
+                               "sleep": "empty", "activity": "empty", "workouts": "empty"])
+            fixture.coordinator.protectedDataAvailable = { scenario != "locked" }
+            let operation = fixture.connect()
+            try await eventually { fixture.coordinator.consent != nil }
+            fixture.coordinator.answerConsent(true)
+            let state = await operation.value
+            XCTAssertEqual(state, "connected", scenario)
+            try await eventually { !fixture.uploader.uploads.isEmpty }
+            XCTAssertEqual(fixture.coordinator.notice == "health.no_recent_steps",
+                           ["empty", "older-sample"].contains(scenario), scenario)
+            fixture.coordinator.dismissNotice()
+            await fixture.reader.observer?()
+            XCTAssertNil(fixture.coordinator.notice, "Help must not repeat for this connection: \(scenario)")
+            XCTAssertEqual(fixture.credentials.identity?.deviceID, "device-1")
+        }
+    }
+
+    @MainActor
+    func testHealthAuthorizationWaitsForTheActualConsentSheetDismissal() async throws {
+        let fixture = try coordinatorFixture()
+        let operation = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        let id = try XCTUnwrap(fixture.coordinator.consent?.id)
+        fixture.coordinator.answerConsent(true, afterDismissal: true)
+        XCTAssertNil(fixture.coordinator.consent)
+        XCTAssertEqual(fixture.reader.authorizations, 0)
+        fixture.coordinator.consentDismissed(id: UUID())
+        XCTAssertEqual(fixture.reader.authorizations, 0)
+        fixture.coordinator.consentDismissed(id: id)
+        let state = await operation.value
+        XCTAssertEqual(state, "connected")
+        XCTAssertEqual(fixture.reader.authorizations, 1)
+    }
+
+    @MainActor
+    func testPresentedConsentHostDismissesBeforeAuthorizingHealth() async throws {
+        let fixture = try coordinatorFixture()
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        let window = UIWindow(windowScene: scene)
+        let host = UIHostingController(rootView: Color.clear.modifier(HealthConsentHost(health: fixture.coordinator)))
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true; previous?.makeKey() }
+        let operation = fixture.connect()
+        try await eventually { host.presentedViewController?.view.window != nil }
+        fixture.coordinator.answerConsent(true, afterDismissal: true)
+        XCTAssertEqual(fixture.reader.authorizations, 0)
+        let state = await operation.value
+        XCTAssertEqual(state, "connected")
+        XCTAssertNil(host.presentedViewController)
+        XCTAssertEqual(fixture.reader.authorizations, 1)
+    }
+
+    /// The production SwiftUI view, rendered on the simulator, without an
+    /// HKHealthStore, real account or instance. XCTest keeps both theme images.
+    @MainActor
+    func testHealthConsentAppearanceInBothThemes() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            let window = UIWindow(windowScene: scene)
+            window.overrideUserInterfaceStyle = style
+            let target = HealthConnectionTarget(accountID: "synthetic-account", instanceID: "synthetic-instance",
+                                                name: "max", origin: "https://max.example.invalid")
+            let host = UIHostingController(rootView: HealthConsentView(request: HealthConsentRequest(target: target),
+                                                                       answer: { _ in }))
+            window.rootViewController = host
+            window.makeKeyAndVisible()
+            defer { window.isHidden = true; previous?.makeKey() }
+            try await eventually { host.view.window != nil && !host.view.bounds.isEmpty }
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                XCTAssertTrue(host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true))
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "health-consent-\(Locale.preferredLanguages.first ?? "unknown")-\(name)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+    }
+
+    /// Consume both notices through the real sheet/alert host. The help stays
+    /// connected, and neither notice offers a misleading Settings shortcut.
+    @MainActor
+    func testConnectionNoticesHaveOneDismissActionInBothThemes() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.first as? UIWindowScene)
+        let previous = scene.windows.first { $0.isKeyWindow }
+        for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
+            for timeout in [true, false] {
+                let fixture = try coordinatorFixture(connectionTimeout: .seconds(1))
+                fixture.reader.holdAuthorization = timeout
+                fixture.uploader.autoAcknowledge = true
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+                let now = Date()
+                let days = try HealthDayAggregation(days: 30, now: now, calendar: calendar)
+                fixture.reader.window = HealthQueryWindow(
+                    computedAt: now, from: days.days.first!.name, to: days.days.last!.name,
+                    items: days.steps([:], queriedAt: now), failures: [],
+                    metricStates: ["steps": "empty", "activity": "empty", "sleep": "empty", "workouts": "empty"])
+                let window = UIWindow(windowScene: scene)
+                window.overrideUserInterfaceStyle = style
+                let host = UIHostingController(rootView: Color(uiColor: .systemGroupedBackground)
+                    .modifier(HealthConsentHost(health: fixture.coordinator)))
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                defer { window.isHidden = true; previous?.makeKey() }
+                let operation = fixture.connect()
+                // A controller can acquire a window before its presentation
+                // and SwiftUI appearance have finished. A user acts on the
+                // presented sheet, not that intermediate controller state.
+                try await eventually {
+                    guard let sheet = host.presentedViewController else { return false }
+                    return sheet.view.window != nil && !sheet.isBeingPresented
+                }
+                fixture.coordinator.answerConsent(true, afterDismissal: true)
+                let result = await operation.value
+                XCTAssertEqual(result, timeout ? "failed" : "connected")
+                let key = timeout ? "health.connection_timed_out" : "health.no_recent_steps"
+                try await eventually { host.presentedViewController is UIAlertController }
+                let alert = try XCTUnwrap(host.presentedViewController as? UIAlertController)
+                try await eventually {
+                    alert.view.window != nil && !alert.isBeingPresented && alert.transitionCoordinator == nil
+                }
+                XCTAssertEqual(alert.message, String(localized: String.LocalizationValue(key)))
+                XCTAssertEqual(alert.actions.count, 1)
+                XCTAssertEqual(fixture.credentials.identity != nil, !timeout)
+                let image = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
+                    XCTAssertTrue(window.drawHierarchy(in: window.bounds, afterScreenUpdates: true))
+                }
+                let attachment = XCTAttachment(image: image)
+                attachment.name = "health-\(timeout ? "timeout" : "empty-steps")-\(Locale.preferredLanguages.first ?? "unknown")-\(name)"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+                fixture.reader.releaseAuthorization()
+                fixture.coordinator.dismissNotice()
+                try await eventually { host.presentedViewController == nil }
+            }
+        }
+    }
+
+    @MainActor
+    func testUnreturnedConsentDismissalFailsWithoutClaimingUserDeclined() async throws {
+        let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(60))
+        let operation = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        let id = try XCTUnwrap(fixture.coordinator.consent?.id)
+        fixture.coordinator.answerConsent(true, afterDismissal: true)
+        let state = await operation.value
+        XCTAssertEqual(state, "failed")
+        fixture.coordinator.consentDismissed(id: id)
+        XCTAssertEqual(fixture.reader.authorizations, 0)
+        XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("/pair") })
+    }
+
+    @MainActor
+    func testLateAuthorizationCannotPairAfterTheSetupDeadline() async throws {
+        let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(60))
+        fixture.reader.holdAuthorization = true
+        let operation = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        try await eventually { fixture.reader.authorizationHeld }
+        let state = await operation.value
+        XCTAssertEqual(state, "failed")
+        XCTAssertEqual(fixture.coordinator.notice, "health.connection_timed_out")
+        fixture.reader.releaseAuthorization()
+        await Task.yield()
+        XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("/pair") })
+        XCTAssertNil(fixture.credentials.identity)
+        XCTAssertEqual(fixture.reader.starts, 0)
+    }
+
+    @MainActor
+    func testExpiredAuthorizationCannotPairAheadOfTheQueuedTimeoutCallback() async throws {
+        let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(60))
+        // Simulate an actor that cannot run its timer until the system callback
+        // returns. Checking only whether the timer ran is insufficient.
+        fixture.reader.authorizationWork = { Thread.sleep(forTimeInterval: 0.1) }
+        let operation = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let state = await operation.value
+        XCTAssertEqual(state, "failed")
+        XCTAssertEqual(fixture.coordinator.notice, "health.connection_timed_out")
+        XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("/pair") })
+        XCTAssertNil(fixture.credentials.identity)
+    }
+
+    @MainActor
+    func testSystemCleanupWaitsAreBoundedAndLateCompletionCannotPair() async throws {
+        for barrier in ["background-delivery", "url-session-tasks"] {
+            let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(100))
+            fixture.reader.holdDisableAfter = barrier == "background-delivery" ? 1 : nil
+            fixture.uploader.holdCancellation = barrier == "url-session-tasks"
+            let operation = fixture.connect()
+            try await eventually { fixture.coordinator.consent != nil }
+            fixture.coordinator.answerConsent(true)
+            let state = await operation.value
+            XCTAssertEqual(state, "failed", barrier)
+            XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.cleanupPending, barrier)
+            XCTAssertNil(fixture.credentials.identity, barrier)
+            XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("/pair") }, barrier)
+            fixture.reader.releaseDisable()
+            fixture.uploader.releaseCancellation()
+            // resume consumes the existing cleanup owner before permitting work.
+            await fixture.coordinator.resume(foreground: false)
+            XCTAssertFalse(fixture.client.calls.contains { $0.path.hasSuffix("/pair") }, barrier)
+            XCTAssertEqual(fixture.reader.starts, 0, barrier)
+        }
+    }
+
+    @MainActor
+    func testRollbackWithAHeldSystemCallbackReturnsFailureAndKeepsCleanupPending() async throws {
+        let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(100))
+        fixture.client.manifestError = HealthSyncError.http(500, "fixture_failure", nil)
+        fixture.reader.holdDisableAfter = 2
+        let operation = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        try await eventually { fixture.reader.disableHeld }
+        let state = await operation.value
+        XCTAssertEqual(state, "failed")
+        XCTAssertTrue(try HealthDeviceStore(directory: fixture.directory).state.cleanupPending)
+        XCTAssertNil(fixture.credentials.identity)
+        XCTAssertEqual(fixture.reader.starts, 0)
+        fixture.reader.releaseDisable()
+        await fixture.coordinator.resume(foreground: false)
+        XCTAssertNil(fixture.credentials.identity)
+        XCTAssertTrue(fixture.uploader.uploads.isEmpty)
+    }
+
+    @MainActor
+    func testLatePairResponseCannotCommitOrClearAReplacementConnection() async throws {
+        let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(120))
+        fixture.client.holdPair = true
+        let first = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        try await eventually { fixture.client.pairContinuation != nil }
+        let firstState = await first.value
+        XCTAssertEqual(firstState, "failed")
+        fixture.client.holdPair = false
+        fixture.client.pairedDeviceID = "replacement-device"
+        let second = fixture.connect()
+        try await eventually { fixture.coordinator.consent != nil }
+        fixture.coordinator.answerConsent(true)
+        let secondState = await second.value
+        XCTAssertEqual(secondState, "connected")
+        let currentIdentity = fixture.credentials.identity
+        fixture.client.releasePair(deviceID: "retired-device", credential: "retired-credential")
+        try await eventually { fixture.client.calls.contains { $0.method == "DELETE" } }
+        XCTAssertTrue(fixture.client.calls.contains { $0.method == "DELETE" && $0.credential == "retired-credential" })
+        XCTAssertEqual(fixture.credentials.identity, currentIdentity)
+        XCTAssertEqual(try HealthDeviceStore(directory: fixture.directory).state.committedDeviceID, "replacement-device")
+    }
+
+    @MainActor
     func testDecliningNativeConsentDoesNotAuthorizeReadOrPair() async throws {
         let fixture = try coordinatorFixture()
         let operation = fixture.connect()
@@ -448,6 +741,9 @@ final class HealthSyncTests: XCTestCase {
         XCTAssertEqual(state, "failed")
         XCTAssertNil(try fixture.credentials.load())
         XCTAssertEqual(fixture.credentials.saves, 0)
+        // Native can settle as soon as logout retires its authority. The late
+        // pair response independently owns revoking the credential it returns.
+        try await eventually { fixture.client.calls.contains { $0.method == "DELETE" && $0.credential == "memory-only" } }
         XCTAssertTrue(fixture.client.calls.contains { $0.method == "DELETE" && $0.credential == "memory-only" })
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.directory.path))
         XCTAssertTrue(fixture.reader.days.isEmpty)
@@ -2241,10 +2537,14 @@ final class HealthSyncTests: XCTestCase {
 
     @MainActor
     private func coordinatorFixture(
-        directory: URL? = nil, savedIdentity: Bool = false
+        directory: URL? = nil, savedIdentity: Bool = false, connectionTimeout: Duration = .seconds(90)
     ) throws -> HealthCoordinatorFixture {
-        let fixture = HealthCoordinatorFixture(directory: try directory ?? temporaryDirectory(), savedIdentity: savedIdentity)
+        let fixture = HealthCoordinatorFixture(directory: try directory ?? temporaryDirectory(), savedIdentity: savedIdentity,
+                                              connectionTimeout: connectionTimeout)
         addTeardownBlock { @MainActor in
+            fixture.reader.releaseAuthorization()
+            fixture.reader.releaseDisable()
+            fixture.uploader.releaseCancellation()
             await fixture.coordinator.logout()
             fixture.client.releasePending()
         }
@@ -2346,12 +2646,28 @@ final class HealthFakeReader: HealthDataReading {
         queryContinuation = nil
         continuation?.resume()
     }
-    func authorize() async throws { authorizations += 1 }
+    var holdAuthorization = false
+    var authorizationWork: (() -> Void)?
+    private var authorizationContinuation: CheckedContinuation<Void, Never>?
+    var authorizationHeld: Bool { authorizationContinuation != nil }
+    func releaseAuthorization() {
+        holdAuthorization = false
+        let continuation = authorizationContinuation
+        authorizationContinuation = nil
+        continuation?.resume()
+    }
+    func authorize() async throws {
+        authorizations += 1
+        authorizationWork?()
+        if holdAuthorization { await withCheckedContinuation { authorizationContinuation = $0 } }
+    }
     var queryErrors: [Error] = []
+    var window: HealthQueryWindow?
     func query(days: Int, now: Date) async throws -> HealthQueryWindow {
         self.days.append(days)
         if !queryErrors.isEmpty { throw queryErrors.removeFirst() }
         if holdQueries { await withCheckedContinuation { queryContinuation = $0 } }
+        if let window { return window }
         return HealthQueryWindow(
             computedAt: now, from: "2026-11-18", to: "2026-11-18",
             items: [], failures: [],
@@ -2376,7 +2692,23 @@ final class HealthFakeReader: HealthDataReading {
     }
     private(set) var disables = 0
     var disableSucceeds = true
-    func disableBackgroundDelivery() async -> Bool { disables += 1; stopObserving(); return disableSucceeds }
+    var holdDisableAfter: Int?
+    private var disableContinuation: CheckedContinuation<Void, Never>?
+    var disableHeld: Bool { disableContinuation != nil }
+    func releaseDisable() {
+        holdDisableAfter = nil
+        let continuation = disableContinuation
+        disableContinuation = nil
+        continuation?.resume()
+    }
+    func disableBackgroundDelivery() async -> Bool {
+        disables += 1
+        stopObserving()
+        if let limit = holdDisableAfter, disables >= limit {
+            await withCheckedContinuation { disableContinuation = $0 }
+        }
+        return disableSucceeds
+    }
     func stopObserving() { observer = nil }
 }
 
@@ -2403,7 +2735,19 @@ final class HealthFakeUploader: HealthUploading {
         }
     }
     func invalidate() {}
-    func cancelAll() async { cancellations += 1 }
+    var holdCancellation = false
+    private var cancellationContinuation: CheckedContinuation<Void, Never>?
+    @MainActor
+    func releaseCancellation() {
+        holdCancellation = false
+        let continuation = cancellationContinuation
+        cancellationContinuation = nil
+        continuation?.resume()
+    }
+    func cancelAll() async {
+        cancellations += 1
+        if holdCancellation { await withCheckedContinuation { cancellationContinuation = $0 } }
+    }
     @MainActor
     func acknowledge(_ upload: Upload) async {
         await onComplete?(upload.id, .success(["accepted_seq": upload.sequence]))
@@ -2503,10 +2847,13 @@ final class HealthFakeClient: HealthDeviceRequesting {
         ticketContinuation = nil
         continuation?.resume(throwing: CancellationError())
     }
-    func releasePair() {
+    func releasePair(deviceID: String? = nil, credential: String? = nil) {
         let continuation = pairContinuation
         pairContinuation = nil
-        continuation?.resume(returning: pairResponse)
+        var response = pairResponse
+        if let deviceID { response["device_id"] = deviceID }
+        if let credential { response["credential"] = credential }
+        continuation?.resume(returning: response)
     }
     func releaseManifest() {
         let continuation = manifestContinuation
@@ -2548,6 +2895,7 @@ final class HealthCoordinatorFixture {
     let coordinator: HealthSyncCoordinator
     let origin: WebOrigin
     init(directory: URL, savedIdentity: Bool, origin originText: String = "https://health-fixture.invalid",
+         connectionTimeout: Duration = .seconds(90),
          now: @escaping () -> Date = Date.init) {
         self.directory = directory
         self.origin = WebOrigin.parseConfigured(originText)!
@@ -2558,7 +2906,8 @@ final class HealthCoordinatorFixture {
             )
         }
         coordinator = HealthSyncCoordinator(
-            credentials: credentials, reader: reader, client: client, uploader: uploader, directory: directory, now: now
+            credentials: credentials, reader: reader, client: client, uploader: uploader, directory: directory,
+            connectionTimeout: connectionTimeout, now: now
         )
         let target = HealthConnectionTarget(
             accountID: "account-1", instanceID: "instance-1", name: "Fixture", origin: origin.serialized

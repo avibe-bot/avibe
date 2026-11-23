@@ -1,6 +1,7 @@
+import { desktopVoiceLock } from '@/lib/desktopVoiceLock';
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent, type PetReady } from './petBridge';
+import { answerPetResizes, onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent, type PetReady } from './petBridge';
 import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
@@ -24,6 +25,8 @@ let liveSummons = 0;
 const storeListeners = new Set<() => void>();
 const summonListeners = new Set<() => void>();
 
+desktopVoiceLock.onInvalidate(() => { pendingSummon = null; liveSummons += 1; });
+
 const setMain = (next: string | null) => {
   if (binding === next) return;
   binding = next;
@@ -36,6 +39,7 @@ const setMain = (next: string | null) => {
 };
 
 const noteSummon = (intent: PetIntent) => {
+  if (!desktopVoiceLock.allowed()) return;
   pendingSummon = intent;
   summonListeners.forEach((listener) => listener());
 };
@@ -52,7 +56,11 @@ const start = () => {
     // a display change).
     layout: drawSnapshot,
   });
+  // A drag's resizes are made while the window is hidden; it shows again once
+  // this page has drawn at the new height.
+  answerPetResizes();
   const liveSummonsAtRequest = liveSummons;
+  const lockToken = desktopVoiceLock.token();
   // The page draws nothing until the shell's first layout; if that never
   // comes, it draws the default one after FIRST_LAYOUT_TIMEOUT.
   const waiting = window.setTimeout(petPanel.stopWaiting, FIRST_LAYOUT_TIMEOUT_MS);
@@ -67,7 +75,7 @@ const start = () => {
       if (petPanel.applySnapshot(ready.snapshot)) acknowledge(ready.snapshot.revision);
       else acknowledge(petPanel.revision());
     } else petPanel.stopWaiting();
-    if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
+    if (ready.summon_pending && desktopVoiceLock.current(lockToken) && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   };
   // Until the shell has heard this document draws the top layout, it cannot
   // release a frame held for it, so a failed pet_ready is asked again. The

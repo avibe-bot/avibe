@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import UIKit
 import Security
+import OSLog
 
 struct HealthConnectionTarget: Equatable {
     let accountID: String
@@ -13,6 +14,30 @@ struct HealthConnectionTarget: Equatable {
 struct HealthConsentRequest: Identifiable {
     let id = UUID()
     let target: HealthConnectionTarget
+}
+
+/// One live setup owns its deadline and every late callback. This is not a
+/// second device identity: provisional credentials never publish authorization.
+@MainActor
+private final class HealthConnectionAttempt {
+    let id: UUID
+    var epoch: UUID
+    var provisional: HealthDeviceIdentity?
+    var work: Task<Void, Never>?
+    var timer: Task<Void, Never>?
+    var completion: CheckedContinuation<String, Never>?
+    var deadline: ContinuousClock.Instant?
+
+    init(id: UUID, epoch: UUID) { self.id = id; self.epoch = epoch }
+
+    func finish(_ state: String) {
+        let completion = self.completion
+        self.completion = nil
+        timer?.cancel()
+        timer = nil
+        work = nil
+        completion?.resume(returning: state)
+    }
 }
 
 @MainActor
@@ -32,6 +57,13 @@ final class HealthSyncCoordinator: ObservableObject {
     private var authorizationResumeID: UUID?
     private var epoch = UUID()
     private var consentContinuation: CheckedContinuation<Bool, Never>?
+    private var approvedConsentID: UUID?
+    private var connectionAttempt: HealthConnectionAttempt?
+    // Only a new local commitment may offer this help. Restoration does not
+    // repeat a dismissed offer; no new persisted health or permission state.
+    private var firstSyncHelpDeviceID: String?
+    private let connectionTimeout: Duration
+    private static let logger = Logger(subsystem: "bot.avibe.ios", category: "health-connection")
     private var connecting: UUID?
     private var cleanupTask: Task<Void, Never>?
     private var startupBindingUntrusted = false
@@ -118,6 +150,7 @@ final class HealthSyncCoordinator: ObservableObject {
          client: HealthDeviceRequesting = HealthDeviceClient(),
          uploader: HealthUploading = HealthBackgroundUploader(),
          directory: URL = URL.applicationSupportDirectory.appendingPathComponent("HealthSync", isDirectory: true),
+          connectionTimeout: Duration = .seconds(90),
          now: @escaping () -> Date = Date.init) {
         self.credentials = credentials
         self.reader = reader ?? HealthDataReader()
@@ -125,6 +158,7 @@ final class HealthSyncCoordinator: ObservableObject {
         self.uploader = uploader
         self.directory = directory
         self.now = now
+        self.connectionTimeout = connectionTimeout
         uploader.onComplete = { [weak self] id, result in
             self?.uploadCompleted(id: id, result: result)
         }
@@ -134,11 +168,54 @@ final class HealthSyncCoordinator: ObservableObject {
 
     func dismissNotice() { notice = nil }
 
-    func answerConsent(_ allowed: Bool) {
+    func answerConsent(_ allowed: Bool, afterDismissal: Bool = false) {
+        if allowed, let attempt = connectionAttempt { startConnectionDeadline(attempt) }
+        if allowed, afterDismissal, let consent {
+            approvedConsentID = consent.id
+            self.consent = nil
+            return
+        }
+        approvedConsentID = nil
         let continuation = consentContinuation
         consentContinuation = nil
         consent = nil
         continuation?.resume(returning: allowed)
+    }
+
+    func consentDismissed(id: UUID) {
+        guard approvedConsentID == id else { return }
+        answerConsent(true)
+    }
+
+    private func startConnectionDeadline(_ attempt: HealthConnectionAttempt) {
+        guard attempt.timer == nil else { return }
+        let deadline = ContinuousClock.now.advanced(by: connectionTimeout)
+        attempt.deadline = deadline
+        attempt.timer = Task { @MainActor [weak self, weak attempt] in
+            do { try await Task.sleep(until: deadline, clock: .continuous) }
+            catch { return }
+            guard let self, let attempt, self.connectionAttempt === attempt else { return }
+            Self.logger.error("Health connection setup timed out")
+            // Freeze authority before settling Native. Cancellation alone
+            // cannot stop a HealthKit or URLSession callback already issued.
+            attempt.work?.cancel()
+            if self.epoch == attempt.epoch {
+                self.beginCleanup(unregister: true, capturedIdentity: attempt.provisional)
+            }
+            self.connectionAttempt = nil
+            self.notice = "health.connection_timed_out"
+            attempt.finish("failed")
+        }
+    }
+
+    private func requireConnection(_ attempt: HealthConnectionAttempt) throws {
+        try requireCurrent(attempt.epoch)
+        // A resumed callback can be scheduled ahead of the timer after the App
+        // was suspended. Its deadline still forbids starting pair or commit.
+        guard connectionAttempt === attempt,
+              let deadline = attempt.deadline, ContinuousClock.now < deadline else {
+            throw HealthSyncError.code("connection_timed_out")
+        }
     }
 
     /// Capture before account-store construction; an AFU Keychain read can
@@ -254,7 +331,7 @@ final class HealthSyncCoordinator: ObservableObject {
     }
 
     func connect(requestID: String, pairingCode: String, origin: WebOrigin) async -> String {
-        guard connecting == nil, !startupBindingUntrusted,
+        guard connecting == nil, connectionAttempt == nil, !startupBindingUntrusted,
               let binding = websiteDataStoreIDProvider?(),
               let target = targetProvider?(), currentAccountID == target.accountID,
               target.origin == origin.serialized,
@@ -263,34 +340,59 @@ final class HealthSyncCoordinator: ObservableObject {
         connecting = connection
         defer {
             if connecting == connection { connecting = nil }
+            if connectionAttempt?.id == connection {
+                connectionAttempt?.timer?.cancel()
+                connectionAttempt = nil
+            }
             resumeAuthorizedConnection()
         }
         let token = epoch
+        let attempt = HealthConnectionAttempt(id: connection, epoch: token)
+        connectionAttempt = attempt
         let approved = await withCheckedContinuation { continuation in
             consentContinuation = continuation
             consent = HealthConsentRequest(target: target)
         }
         guard epoch == token, targetProvider?() == target else { return "failed" }
         guard approved else { return "declined" }
-        var operationEpoch = token
-        var provisional: HealthDeviceIdentity?
+        return await withCheckedContinuation { completion in
+            attempt.completion = completion
+            attempt.work = Task { @MainActor in
+                let state = await self.establishConnection(
+                    requestID: requestID, pairingCode: pairingCode,
+                    target: target, binding: binding, attempt: attempt)
+                if self.connectionAttempt === attempt { self.connectionAttempt = nil }
+                attempt.finish(state)
+            }
+        }
+    }
+
+    private func establishConnection(requestID: String, pairingCode: String,
+                                     target: HealthConnectionTarget, binding: UUID,
+                                     attempt: HealthConnectionAttempt) async -> String {
         var committed = false
         do {
+            try requireConnection(attempt)
+            Self.logger.info("Health authorization requested")
             try await reader.authorize()
-            try requireCurrent(token)
+            Self.logger.info("Health authorization request completed")
+            try requireConnection(attempt)
             let installationID = try credentials.installationID()
             // The device being replaced is revoked, unless its origin is no
             // longer listed for it: nothing more is sent there.
             let replaced = identity ?? (try? credentials.load())
-            operationEpoch = beginCleanup(unregister: replaced.map { !delisted($0) } ?? true)
-            connecting = connection
+            Self.logger.info("Health replacement cleanup started")
+            attempt.epoch = beginCleanup(unregister: replaced.map { !delisted($0) } ?? true,
+                                         preservingConnection: attempt.id)
+            connecting = attempt.id
             await cleanupTask?.value
             // This connect still owns its generation after replacing the old device.
-            guard connecting == nil || connecting == connection else { throw HealthSyncError.code("connection_changed") }
-            connecting = connection
-            try requireCurrent(operationEpoch)
+            try requireConnection(attempt)
+            guard connecting == nil || connecting == attempt.id else { throw HealthSyncError.code("connection_changed") }
+            connecting = attempt.id
             guard !cleanupPending, targetProvider?() == target, currentAccountID == target.accountID,
                   websiteDataStoreIDProvider?() == binding else { throw HealthSyncError.code("connection_changed") }
+            Self.logger.info("Health replacement cleanup completed; pairing requested")
             let response = try await client.request(origin: target.origin, credential: nil, method: "POST",
                 path: "/api/mobile/device/v1/pair", body: [
                     "pairing_code": pairingCode, "installation_id": installationID,
@@ -305,11 +407,12 @@ final class HealthSyncCoordinator: ObservableObject {
                 accountID: target.accountID, instanceID: target.instanceID,
                 instanceName: target.name, origin: target.origin, deviceID: deviceID,
                 credential: credential, websiteDataStoreID: binding)
-            provisional = candidate
-            guard epoch == operationEpoch else {
+            attempt.provisional = candidate
+            guard epoch == attempt.epoch, !Task.isCancelled else {
                 await revoke(candidate)
                 return "failed"
             }
+            try requireConnection(attempt)
             guard targetProvider?() == target, currentAccountID == target.accountID,
                   let instance = response["instance"] as? [String: Any],
                   instance["id"] as? String == target.instanceID else { throw HealthSyncError.code("invalid_pair") }
@@ -320,13 +423,15 @@ final class HealthSyncCoordinator: ObservableObject {
             func setup(_ method: String, _ path: String, _ body: [String: Any]) async throws -> [String: Any] {
                 let response = try await client.request(origin: candidate.origin, credential: candidate.credential,
                     method: method, path: "/api/mobile/device/v1/" + path, body: body)
-                try requireCurrent(operationEpoch)
+                try requireConnection(attempt)
                 guard currentAccountID == target.accountID, bindingMatches(candidate) else {
                     throw HealthSyncError.code("connection_changed")
                 }
                 return response
             }
+            Self.logger.info("Health pairing completed; manifest requested")
             _ = try await setup("PUT", "manifest", manifestBody(background: false))
+            Self.logger.info("Health manifest completed; claim requested")
             let responseClaim = try await setup("POST", "requests/claim", ["request_id": requestID, "wait_seconds": 0, "max": 1])
             guard let claims = responseClaim["requests"] as? [[String: Any]], claims.count == 1,
                   claims[0]["id"] as? String == requestID,
@@ -334,6 +439,7 @@ final class HealthSyncCoordinator: ObservableObject {
                 throw HealthSyncError.code("request_unavailable")
             }
             let reservation = try Self.reservation(claims[0])
+            try requireConnection(attempt)
             // This single replacement is the commitment point. No await or
             // observer/query/upload can interleave with publishing the owner.
             try provisionalStore.update {
@@ -341,11 +447,13 @@ final class HealthSyncCoordinator: ObservableObject {
                 $0.committedDeviceID = candidate.deviceID
             }
             identity = candidate
+            firstSyncHelpDeviceID = candidate.deviceID
             authorizationPaused = false
             authorizationResumePending = false
             committed = true
             uploader.reconnect()
-            let workEpoch = operationEpoch
+            Self.logger.info("Health connection committed")
+            let workEpoch = attempt.epoch
             Task { @MainActor [weak self] in
                 guard let self, self.epoch == workEpoch else { return }
                 await self.registerObservers()
@@ -357,16 +465,23 @@ final class HealthSyncCoordinator: ObservableObject {
             }
             return "connected"
         } catch {
-            guard epoch == operationEpoch else {
-                if let provisional { await revoke(provisional) }
+            guard epoch == attempt.epoch else {
+                if let provisional = attempt.provisional { await revoke(provisional) }
                 return "failed"
             }
             if !committed {
+                Self.logger.info("Health setup failed; rollback started")
                 _ = await stopLocal(unregister: !Self.isAuthorizationFailure(error),
-                                    expectedEpoch: operationEpoch, capturedIdentity: provisional)
+                                    expectedEpoch: attempt.epoch, capturedIdentity: attempt.provisional,
+                                    preservingConnection: attempt.id)
             }
-            notice = Self.safeCode(error) == "contract_unsupported" || Self.httpStatus(error) == 426
-                ? "health.update_required" : "health.connection_failed"
+            guard connectionAttempt === attempt else { return "failed" }
+            if Self.safeCode(error) == "connection_timed_out" {
+                notice = "health.connection_timed_out"
+            } else {
+                notice = Self.safeCode(error) == "contract_unsupported" || Self.httpStatus(error) == 426
+                    ? "health.update_required" : "health.connection_failed"
+            }
             return "failed"
         }
     }
@@ -700,6 +815,12 @@ final class HealthSyncCoordinator: ObservableObject {
                     state.completed[requestID] = result
                 }
             }
+            if let deviceID = self.firstSyncHelpDeviceID, deviceID == self.authorizedIdentity?.deviceID {
+                self.firstSyncHelpDeviceID = nil
+                if self.protectedDataAvailable(), window.hasCompleteEmptyRecentSteps, self.notice == nil {
+                    self.notice = "health.no_recent_steps"
+                }
+            }
             try await self.drainUploads()
             if waitForUpload { try await self.waitForUpload(id) }
             try self.requireCurrent(token)
@@ -959,7 +1080,8 @@ final class HealthSyncCoordinator: ObservableObject {
     /// can await their unrelated push/network cleanup.
     @discardableResult
     private func beginCleanup(unregister: Bool, expectedEpoch: UUID? = nil,
-                              capturedIdentity: HealthDeviceIdentity? = nil) -> UUID {
+                              capturedIdentity: HealthDeviceIdentity? = nil,
+                              preservingConnection: UUID? = nil) -> UUID {
         if let expectedEpoch, expectedEpoch != epoch { return epoch }
         let old = capturedIdentity ?? identity ?? (try? credentials.load())
         epoch = UUID()
@@ -967,6 +1089,7 @@ final class HealthSyncCoordinator: ObservableObject {
         connecting = nil
         answerConsent(false)
         identity = nil
+        firstSyncHelpDeviceID = nil
         authorizationPaused = false
         authorizationResumePending = false
         authorizationResumeID = nil
@@ -986,13 +1109,24 @@ final class HealthSyncCoordinator: ObservableObject {
         store = nil
         uploadingIDs.removeAll()
         retryAfter = nil
+        if let attempt = connectionAttempt, attempt.id != preservingConnection {
+            // Logout/supersession frees its bridge owner only after authority
+            // and local credentials have been retired. The late task still has
+            // its captured identity and can only revoke that identity.
+            connectionAttempt = nil
+            attempt.finish("failed")
+        }
         let previous = cleanupTask
         cleanupsRunning += 1
         cleanupTask = Task { @MainActor in
             defer { self.cleanupsRunning -= 1 }
+            Self.logger.info("Health cleanup waiting for previous cleanup")
             await previous?.value
+            Self.logger.info("Health cleanup waiting for upload cancellation")
             await self.uploader.cancelAll()
+            Self.logger.info("Health cleanup waiting for background delivery shutdown")
             let disabled = await self.reader.disableBackgroundDelivery()
+            Self.logger.info("Health background delivery shutdown completed")
             guard self.epoch == stoppedEpoch else {
                 if unregister, let old { await self.revoke(old) }
                 return
@@ -1014,8 +1148,10 @@ final class HealthSyncCoordinator: ObservableObject {
 
     @discardableResult
     private func stopLocal(unregister: Bool, expectedEpoch: UUID? = nil,
-                           capturedIdentity: HealthDeviceIdentity? = nil) async -> UUID {
-        let stopped = beginCleanup(unregister: unregister, expectedEpoch: expectedEpoch, capturedIdentity: capturedIdentity)
+                           capturedIdentity: HealthDeviceIdentity? = nil,
+                           preservingConnection: UUID? = nil) async -> UUID {
+        let stopped = beginCleanup(unregister: unregister, expectedEpoch: expectedEpoch,
+                                   capturedIdentity: capturedIdentity, preservingConnection: preservingConnection)
         await cleanupTask?.value
         return stopped
     }

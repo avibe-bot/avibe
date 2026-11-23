@@ -288,6 +288,61 @@ describe('BackendModelCatalogDialog', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalledWith(undefined));
   });
 
+  it('takes a rename back when another editor took the new ID meanwhile, instead of writing over their model', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 }), model('beta')];
+    const theirs = model('gamma', { display_name: 'Theirs' });
+    const newer = [...catalog, theirs];
+    vi.spyOn(modelsApi, 'getAgentSources')
+      .mockResolvedValueOnce(agent(catalog))
+      .mockResolvedValue(agent(newer));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError('invalid_request', 'modelHub.errors.backend_model_conflict', true))
+      .mockResolvedValue(agent(newer));
+    renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'gamma');
+    await user.clear(screen.getByLabelText('Context window'));
+    await user.type(screen.getByLabelText('Context window'), '2000');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/This list changed elsewhere while you were editing/)).toBeTruthy();
+    // alpha is back under its own ID beside their gamma; only its other edit is still pending.
+    expect(screen.getByRole('button', { name: 'Edit alpha' })).toBeTruthy();
+    expect(screen.getByText('Theirs')).toBeTruthy();
+    expect(screen.getByText('3 models')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /^(Save|Retry|Try again)$/ }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(2));
+    expect(putAgentModels.mock.calls[1][1]).toEqual({
+      baseline: newer,
+      models: [model('alpha', { context_window: 2000 }), model('beta'), theirs],
+    });
+  });
+
+  it('shows no error on a focused editor while the rename it just made is being saved', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha')]));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    let settle: (value: ReturnType<typeof agent>) => void = () => {};
+    vi.spyOn(modelsApi, 'putAgentModels').mockReturnValue(new Promise((resolve) => { settle = resolve; }));
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+    await screen.findByRole('button', { name: 'Save model' });
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'alpha-2');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+
+    // The draft already holds the row under its new ID; that is this row, not another one.
+    expect(screen.getByRole('button', { name: 'Save model' })).toHaveProperty('disabled', true);
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByRole('status').textContent).toContain('switch to the new ID');
+    await act(async () => { settle(agent([model('alpha-2')])); });
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: false, renamedTo: 'alpha-2' }));
+  });
+
   it('cancels a focused removal without writing', async () => {
     const user = userEvent.setup();
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent([model('alpha'), model('beta')]));
@@ -406,7 +461,7 @@ describe('BackendModelCatalogDialog', () => {
 
     await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
-    await user.type(screen.getByLabelText('Model'), 'added');
+    await user.type(screen.getByLabelText('Model ID'), 'added');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
 
     expect(await screen.findByText('3 models')).toBeTruthy();
@@ -431,7 +486,7 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(await enabledAddModels());
     await user.click(await screen.findByRole('checkbox', { name: 'beta' }));
     await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
-    await user.type(screen.getByLabelText('Model'), 'added');
+    await user.type(screen.getByLabelText('Model ID'), 'added');
     await user.click(screen.getByRole('button', { name: 'Add model' }));
 
     expect(await screen.findByText('4 models')).toBeTruthy();
@@ -510,9 +565,9 @@ describe('BackendModelCatalogDialog', () => {
     const catalog = [model('glm-4.7', { native_protocol: 'openai_responses' }), GROK];
     vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog, { backend: 'opencode' }));
     vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
-    // models.dev publishes this model under exactly the id the list already
-    // holds, which is the whole point: the typed query does not name the saved
-    // row, and the chosen suggestion does.
+    // The catalog registers this model under exactly the id the list already
+    // holds, which is the whole point: describing the row from it stamps
+    // `models_dev` on a row the server remembers as `provider`.
     vi.spyOn(modelsApi, 'searchModelsDev').mockResolvedValue([{
       provider_id: 'xai',
       provider_name: 'xAI',
@@ -534,10 +589,10 @@ describe('BackendModelCatalogDialog', () => {
     await user.click(await screen.findByRole('button', { name: 'Remove Grok 4.6' }));
     await user.click(screen.getByRole('button', { name: 'Add models' }));
     await waitFor(() => expect((screen.getByLabelText('Search models or providers') as HTMLInputElement).disabled).toBe(false));
-    // The editor in add mode, whose lookup stamps `models_dev` on what it fills.
+    // The editor in add mode, where the catalog's answer stamps `models_dev` on what it fills.
     await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
-    await user.type(await screen.findByLabelText('Model'), 'grok 4.6');
-    await user.click(await screen.findByRole('option', { name: /Grok 4\.6/ }));
+    await user.type(await screen.findByLabelText('Model ID'), 'grok-4.6');
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('256,000'));
     await user.click(screen.getByRole('button', { name: 'Add model' }));
     await user.click(await screen.findByRole('button', { name: 'Save' }));
 
@@ -561,7 +616,6 @@ describe('BackendModelCatalogDialog', () => {
     renderDialog();
 
     await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
-    expect((screen.getByLabelText('Model') as HTMLInputElement).readOnly).toBe(true);
     await user.clear(screen.getByLabelText('Context window'));
     await user.type(screen.getByLabelText('Context window'), '2000');
     await user.click(screen.getByRole('button', { name: 'Save model' }));
@@ -571,6 +625,230 @@ describe('BackendModelCatalogDialog', () => {
       baseline: catalog,
       models: [model('alpha', { context_window: 2000 })],
     }));
+  });
+
+  it('saves a changed ID as a rename, however many times it was retyped before saving', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 }), model('beta')];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog();
+    const renameTo = async (from: string, to: string) => {
+      await user.click(await screen.findByRole('button', { name: `Edit ${from}` }));
+      await user.clear(screen.getByLabelText('Model ID'));
+      await user.type(screen.getByLabelText('Model ID'), to);
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+    };
+
+    // Twice before saving is one rename, from the ID the server knows.
+    await renameTo('alpha', 'alpha-2');
+    await renameTo('alpha-2', 'alpha-3');
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+      baseline: catalog,
+      models: [model('alpha-3', { context_window: 1000 }), model('beta')],
+      renames: { alpha: 'alpha-3' },
+    }));
+  });
+
+  it('keeps a refused rename in the draft and sends the same rename when Save is pressed again', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 })];
+    // The server wrote nothing, or stopped between its two writes: either way the
+    // list it serves still holds the old ID, and the same save must complete it.
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels')
+      .mockRejectedValueOnce(new ApiCallError('backend_model_store_busy', undefined, true))
+      .mockResolvedValue(agent([model('alpha-2', { context_window: 1000 })]));
+    renderDialog();
+
+    await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'alpha-2');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('Could not save right now; nothing was changed. Press Save again in a moment.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Edit alpha-2' })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /^(Save|Retry|Try again)$/ }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(2));
+    expect(putAgentModels.mock.calls[1]).toEqual(putAgentModels.mock.calls[0]);
+    expect(putAgentModels.mock.calls[1][1].renames).toEqual({ alpha: 'alpha-2' });
+  });
+
+  it('says nothing of a rename once the ID is typed back to what it was', async () => {
+    const user = userEvent.setup();
+    const catalog = [model('alpha', { context_window: 1000 })];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+    renderDialog();
+    const edit = async (from: string, to: string, contextWindow?: string) => {
+      await user.click(await screen.findByRole('button', { name: `Edit ${from}` }));
+      await user.clear(screen.getByLabelText('Model ID'));
+      await user.type(screen.getByLabelText('Model ID'), to);
+      if (contextWindow) {
+        await user.clear(screen.getByLabelText('Context window'));
+        await user.type(screen.getByLabelText('Context window'), contextWindow);
+      }
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+    };
+
+    await edit('alpha', 'alpha-2');
+    await edit('alpha-2', 'alpha', '2000');
+    await user.click(await screen.findByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+      baseline: catalog,
+      models: [model('alpha', { context_window: 2000 })],
+    }));
+  });
+
+  describe('a rename the save could not say as one', () => {
+    const start = (catalog: BackendModel[], candidates = offered()) => {
+      vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+      vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(candidates);
+      const putAgentModels = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent(catalog));
+      renderDialog();
+      return putAgentModels;
+    };
+    const typeId = async (user: ReturnType<typeof userEvent.setup>, to: string) => {
+      await user.clear(screen.getByLabelText('Model ID'));
+      await user.type(screen.getByLabelText('Model ID'), to);
+    };
+    const renameTo = async (user: ReturnType<typeof userEvent.setup>, from: string, to: string) => {
+      await user.click(await screen.findByRole('button', { name: `Edit ${from}` }));
+      await typeId(user, to);
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+    };
+    const reserved = 'This ID can’t be used yet. Save the model list first, then use it.';
+
+    it('does not hand a removed row\'s rename to a new row added under the same ID', async () => {
+      const user = userEvent.setup();
+      const catalog = [model('alpha', { context_window: 1000 }), model('beta')];
+      const putAgentModels = start(catalog);
+
+      await renameTo(user, 'alpha', 'gamma');
+      await user.click(await screen.findByRole('button', { name: 'Remove gamma' }));
+      await user.click(await enabledAddModels());
+      await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
+      await typeId(user, 'gamma');
+      await user.click(screen.getByRole('button', { name: 'Add model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      // alpha is removed and gamma is new: nothing of alpha's moves to it.
+      await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(1));
+      const body = putAgentModels.mock.calls[0][1];
+      expect(body.models.map((entry) => entry.id)).toEqual(['beta', 'gamma']);
+      expect(body.renames).toBeUndefined();
+      expect(body.expected_suppliers).toBeUndefined();
+    });
+
+    it('refuses a new row under the ID a row was renamed away from, until the list is saved', async () => {
+      const user = userEvent.setup();
+      const catalog = [model('alpha', { context_window: 1000 }), model('beta')];
+      const supplied = (id: string) => candidate(id, { suppliers: [{ source_id: 'src_a', source_name: 'Relay', model_id: id }] });
+      const putAgentModels = start(catalog, offered({ providers: [supplied('alpha'), supplied('other')] }));
+
+      await renameTo(user, 'alpha', 'gamma');
+      await user.click(await enabledAddModels());
+      // The picker does not offer it either: on the server it is still the renamed row's.
+      expect(await screen.findByRole('checkbox', { name: /^other/ })).toBeTruthy();
+      expect(screen.queryByRole('checkbox', { name: /^alpha/ })).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
+      await typeId(user, 'alpha');
+      await user.click(screen.getByRole('button', { name: 'Add model' }));
+      expect(screen.getByRole('alert').textContent).toBe(reserved);
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(putAgentModels).toHaveBeenCalledWith('claude', {
+        baseline: catalog,
+        models: [model('gamma', { context_window: 1000 }), model('beta')],
+        renames: { alpha: 'gamma' },
+      }));
+    });
+
+    it('refuses renaming a saved row onto an ID removed or renamed away in the same draft', async () => {
+      const user = userEvent.setup();
+      const catalog = [model('alpha'), model('beta'), model('delta'), model('omega')];
+      const putAgentModels = start(catalog);
+
+      // Onto a removed row's ID: that would overwrite beta, not rename alpha.
+      await user.click(await screen.findByRole('button', { name: 'Remove beta' }));
+      await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
+      await typeId(user, 'beta');
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(screen.getByRole('alert').textContent).toBe(reserved);
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      // A chain: delta moves away, omega may not move into its place yet.
+      await renameTo(user, 'delta', 'delta-2');
+      await user.click(await screen.findByRole('button', { name: 'Edit omega' }));
+      await typeId(user, 'delta');
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(screen.getByRole('alert').textContent).toBe(reserved);
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+      // The renamed row itself may always go back to the ID it was saved under.
+      await renameTo(user, 'delta-2', 'delta');
+      await renameTo(user, 'delta', 'delta-3');
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(1));
+      const body = putAgentModels.mock.calls[0][1];
+      expect(body.models.map((entry) => entry.id)).toEqual(['alpha', 'delta-3', 'omega']);
+      expect(body.renames).toEqual({ delta: 'delta-3' });
+    });
+
+    it('counts a built-in model a provider supplies as listed', async () => {
+      const user = userEvent.setup();
+      start([model('alpha')], offered({ builtin: [candidate('official-name', { origin: 'builtin', suppliers: [{ source_id: 'src_a', source_name: 'Relay', model_id: 'official-name' }] })] }));
+
+      await user.click(await screen.findByRole('button', { name: 'Edit alpha' }));
+      await typeId(user, 'nobody-lists-this');
+      expect(await screen.findByText('No provider lists this ID. After saving, set its route separately.')).toBeTruthy();
+      await typeId(user, 'official-name');
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+    });
+
+    it('describes no rename for a row this draft added, and sends none', async () => {
+      const user = userEvent.setup();
+      const catalog = [model('alpha')];
+      const putAgentModels = start(catalog);
+
+      await user.click(await enabledAddModels());
+      await user.click(await screen.findByRole('button', { name: 'Add custom model…' }));
+      await typeId(user, 'fresh');
+      await user.click(screen.getByRole('button', { name: 'Add model' }));
+      await user.click(await screen.findByRole('button', { name: 'Edit fresh' }));
+      await typeId(user, 'fresh-2');
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      await user.click(await screen.findByRole('button', { name: 'Save' }));
+
+      await waitFor(() => expect(putAgentModels).toHaveBeenCalledTimes(1));
+      const body = putAgentModels.mock.calls[0][1];
+      expect(body.models.map((entry) => entry.id)).toEqual(['alpha', 'fresh-2']);
+      expect(body.renames).toBeUndefined();
+    });
+  });
+
+  it('tells a focused opener the new ID when its row was renamed, not that it was removed', async () => {
+    const user = userEvent.setup();
+    const catalog = [locked, model('alpha', { context_window: 1000 })];
+    vi.spyOn(modelsApi, 'getAgentSources').mockResolvedValue(agent(catalog));
+    vi.spyOn(modelsApi, 'getAgentModelCandidates').mockResolvedValue(offered());
+    const write = vi.spyOn(modelsApi, 'putAgentModels').mockResolvedValue(agent([locked, model('alpha-2', { context_window: 1000 })]));
+    const { onClose } = renderDialog({ focus: { modelId: 'alpha', action: 'edit' } });
+
+    await screen.findByRole('button', { name: 'Save model' });
+    await user.clear(screen.getByLabelText('Model ID'));
+    await user.type(screen.getByLabelText('Model ID'), 'alpha-2');
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledWith({ removed: false, renamedTo: 'alpha-2' }));
+    expect(write.mock.calls[0][1].renames).toEqual({ alpha: 'alpha-2' });
   });
 
   it('removes rows on the click, asks once on save in its own dialog, then echoes the guard byte for byte', async () => {
@@ -1377,7 +1655,7 @@ describe('BackendModelCatalogDialog', () => {
       await screen.findByRole('checkbox', { name: /Backup relay/ });
       await user.click(screen.getByRole('button', { name: 'Add custom model…' }));
 
-      expect((await screen.findByLabelText('Model') as HTMLInputElement).value).toBe('');
+      expect((await screen.findByLabelText('Model ID') as HTMLInputElement).value).toBe('');
       const leave = within(screen.getByRole('dialog', { name: 'Add model' }))
         .getByRole('button', { name: 'Cancel' });
       await user.click(leave);

@@ -12,7 +12,9 @@ use url::Url;
 
 use crate::LoopbackOrigin;
 
+mod answers;
 mod registry;
+use answers::{AnswerPosts, Turn};
 pub use registry::{NotificationReceipt, NotificationRegistry, NotificationSnapshot};
 
 #[derive(Clone, Debug)]
@@ -151,6 +153,7 @@ impl SseDecoder {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationIntent {
     ApprovalRequested,
+    AnswerRequested,
     RunSucceeded,
     RunFailed,
     RunCanceled,
@@ -200,7 +203,9 @@ impl NotificationPreferences {
     }
 }
 
-struct RunPreferences {
+struct DeliveryContext {
+    slots: Arc<Semaphore>,
+    answers: Arc<Mutex<AnswerPosts>>,
     current: Arc<RwLock<NotificationPreferences>>,
     at_receipt: NotificationPreferences,
     presentation_generation: u64,
@@ -208,6 +213,12 @@ struct RunPreferences {
 }
 
 pub trait NotificationSink: Send + Sync {
+    /// Only a sink that actually submits native reply actions can replace a
+    /// turn's ordinary success notice with its question.
+    fn supports_answer_actions(&self) -> bool {
+        false
+    }
+
     fn registry(&self) -> &Mutex<NotificationRegistry>;
     fn gate(&self) -> NotificationGate;
     /// Capture before asynchronous detail/badge reads. The sink rechecks this
@@ -231,6 +242,21 @@ pub trait NotificationSink: Send + Sync {
     /// The Runtime's badge total (loud-category unread), for the app icon.
     /// It is state rather than an interruption: no device/focus gate applies.
     fn show_unread(&self, total: u64, presentation_generation: u64);
+    /// An Agent question the user can answer from the notification. The
+    /// default forgets the reservation: a sink without answers shows nothing.
+    fn deliver_answer_request(
+        &self,
+        request: AnswerRequest,
+        source: Option<String>,
+        presentation_generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    ) {
+        let _ = (request, source, presentation_generation);
+        self.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(receipt.id());
+    }
     /// A remote desktop update event is only a nudge. The shell must re-read
     /// and validate its request file; the SSE payload never reaches this API.
     fn desktop_update_requested(&self) {}
@@ -263,6 +289,7 @@ impl RetainedKeys {
 pub struct NotificationFilter {
     approvals: RetainedKeys,
     runs: RetainedKeys,
+    questions: RetainedKeys,
 }
 
 #[derive(Deserialize)]
@@ -332,6 +359,8 @@ pub struct RunDetail {
     pub session_label: Option<String>,
     pub definition_name: Option<String>,
     pub notification_category: Option<String>,
+    pub session_id: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 const SOURCE_PART_CHARS: usize = 48;
@@ -406,8 +435,112 @@ struct RunEvent {
     stamps: RunTimestamps,
 }
 
+/// The most quick replies a notification offers as buttons; the rest stay in the conversation.
+pub const MAX_ANSWER_OPTIONS: usize = 3;
+const PREVIEW_CHARS: usize = 180;
+
+/// One Agent question the user can answer from the notification: the message
+/// whose quick replies are still open, the options it offers, and the
+/// Runtime's revision of that option set (`None` from an older Runtime,
+/// which then gets no buttons).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnswerRequest {
+    pub session_id: String,
+    pub message_id: String,
+    pub revision: Option<String>,
+    pub options: Vec<String>,
+    pub preview: Option<String>,
+    pub turn_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MessageEvent {
+    id: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    session_id: Option<String>,
+    platform: Option<String>,
+    author: Option<String>,
+    text: Option<String>,
+    #[serde(default)]
+    content: Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
+}
+
+fn turn_id(metadata: Option<&serde_json::Value>) -> Option<&str> {
+    metadata?.get("turn_id")?.as_str().filter(|id| !id.trim().is_empty())
+}
+
+impl MessageEvent {
+    fn question(self) -> Option<AnswerRequest> {
+        // Only a `result` counts as unread, which is what withdraws the
+        // notification once the question is read anywhere.
+        if self.id.is_empty()
+            || self.author.as_deref() != Some("agent")
+            || self.platform.as_deref() != Some("avibe")
+            || self.kind.as_deref() != Some("result")
+        {
+            return None;
+        }
+        let session_id = self.session_id.filter(|id| !id.is_empty())?;
+        let content = self.content?;
+        if content
+            .get("quick_reply_chosen")
+            .is_some_and(|chosen| !chosen.is_null())
+        {
+            return None;
+        }
+        let options = content
+            .get("quick_replies")?
+            .as_array()?
+            .iter()
+            .map(|option| option.as_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()?;
+        if options.is_empty() || options.iter().any(|option| option.trim().is_empty()) {
+            return None;
+        }
+        let revision = content
+            .get("quick_reply_revision")
+            .and_then(serde_json::Value::as_str)
+            .filter(|revision| revision.len() == 64 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_owned);
+        Some(AnswerRequest {
+            session_id,
+            message_id: self.id,
+            revision,
+            options,
+            preview: preview(self.text.as_deref()),
+            turn_id: turn_id(self.metadata.as_ref()).map(str::to_owned),
+        })
+    }
+}
+
+/// The message text as a notification body: one line, bounded, without the
+/// invisible formatting a label may not carry.
+fn preview(text: Option<&str>) -> Option<String> {
+    let words = text?
+        .chars()
+        .filter(|character| !is_invisible_format(*character))
+        .map(|character| if character.is_control() { ' ' } else { character })
+        .collect::<String>();
+    let collapsed = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    if collapsed.chars().count() <= PREVIEW_CHARS {
+        return Some(collapsed);
+    }
+    let mut truncated = collapsed.chars().take(PREVIEW_CHARS - 1).collect::<String>();
+    truncated.truncate(truncated.trim_end().len());
+    truncated.push('…');
+    Some(truncated)
+}
+
 enum Candidate {
-    Approval,
+    Approval {
+        request_id: String,
+    },
+    Question(AnswerRequest),
     Run {
         run_id: String,
         session_id: Option<String>,
@@ -421,12 +554,20 @@ enum Candidate {
 
 impl NotificationFilter {
     fn consider(&mut self, frame: SseFrame, now: Instant) -> Option<Candidate> {
-        if !matches!(frame.event.as_str(), "vaults.updated" | "runs.updated") {
+        if !matches!(frame.event.as_str(), "vaults.updated" | "runs.updated" | "message.new") {
             return None;
         }
         let envelope: Envelope = serde_json::from_str(&frame.data).ok()?;
         if envelope.event != frame.event {
             return None;
+        }
+        if frame.event == "message.new" {
+            let message: MessageEvent = serde_json::from_value(envelope.data).ok()?;
+            let question = message.question()?;
+            return self
+                .questions
+                .insert(&question.message_id, now)
+                .then_some(Candidate::Question(question));
         }
         if frame.event == "vaults.updated" {
             let approval: Approval = serde_json::from_value(envelope.data).ok()?;
@@ -440,7 +581,9 @@ impl NotificationFilter {
             return self
                 .approvals
                 .insert(&approval.request_id, now)
-                .then_some(Candidate::Approval);
+                .then_some(Candidate::Approval {
+                    request_id: approval.request_id,
+                });
         }
         let run: RunEvent = serde_json::from_value(envelope.data).ok()?;
         if run.run_id.is_empty() {
@@ -480,6 +623,32 @@ pub trait NotificationTransport: Send + Sync {
     async fn run_detail(&self, run_id: &str) -> Option<RunDetail>;
     async fn unread(&self) -> Option<UnreadState>;
     async fn preferences(&self) -> Option<NotificationPreferences>;
+    /// Where a Session is and which account category it belongs to.
+    async fn session_detail(&self, session_id: &str) -> Option<SessionDetail> {
+        let _ = session_id;
+        None
+    }
+}
+
+/// One Session's Inbox row as the shell needs it: its labels and category.
+#[derive(Clone, Default, Deserialize)]
+pub struct SessionDetail {
+    pub session_id: String,
+    pub project_name: Option<String>,
+    pub title: Option<String>,
+    pub category: Option<String>,
+}
+
+impl SessionDetail {
+    /// "Project · Session", with the same cleaning and bounds as a run's source.
+    pub fn source(&self) -> Option<String> {
+        let project = clean_label(self.project_name.as_deref());
+        let place = clean_label(self.title.as_deref());
+        match (project, place) {
+            (Some(project), Some(place)) if project != place => Some(format!("{project} · {place}")),
+            (project, place) => place.or(project),
+        }
+    }
 }
 
 pub struct HttpNotificationTransport {
@@ -583,6 +752,26 @@ impl NotificationTransport for HttpNotificationTransport {
         UnreadState::parse(&inbox)
     }
 
+    async fn session_detail(&self, session_id: &str) -> Option<SessionDetail> {
+        let mut url = self.url("/api/inbox");
+        url.query_pairs_mut()
+            .append_pair("platform", "avibe")
+            .append_pair("session", session_id)
+            .append_pair("limit", "1");
+        let response = self.client.get(url).timeout(REQUEST_TIMEOUT).send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let bytes = bounded_detail_body(response).await?;
+        let inbox: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        inbox
+            .get("sessions")?
+            .as_array()?
+            .iter()
+            .filter_map(|row| serde_json::from_value::<SessionDetail>(row.clone()).ok())
+            .find(|row| row.session_id == session_id)
+    }
+
     async fn preferences(&self) -> Option<NotificationPreferences> {
         let response = self
             .client
@@ -644,6 +833,9 @@ pub async fn run_notifications(
 ) {
     let mut backoff = ReconnectBackoff::default();
     let preferences = Arc::new(RwLock::new(NotificationPreferences::default()));
+    // Scoped to this adopted Runtime connection; a presentation change is
+    // additionally fenced by the epoch in each exact turn key.
+    let answers = Arc::new(Mutex::new(AnswerPosts::default()));
     // Any frame may follow an unread change, and listing the event types that
     // can would miss the next one added, so every connection and every frame
     // (the 15-second heartbeat included) asks for a fresh total. The reader
@@ -690,7 +882,7 @@ pub async fn run_notifications(
                         .filter(|_| allowed_at_receipt);
                     match candidate {
                         None => {}
-                        Some(Candidate::Approval) => {
+                        Some(Candidate::Approval { request_id }) => {
                             if sink.gate().allows() {
                                 let receipt = sink
                                     .registry()
@@ -698,6 +890,7 @@ pub async fn run_notifications(
                                     .expect("notification registry lock")
                                     .reserve(None);
                                 if let Some(receipt) = receipt {
+                                    receipt.set_opens(format!("avibe://vaults/request/{request_id}"));
                                     sink.deliver(
                                         NotificationIntent::ApprovalRequested,
                                         None,
@@ -706,6 +899,50 @@ pub async fn run_notifications(
                                     );
                                 }
                             }
+                        }
+                        Some(Candidate::Question(request)) => {
+                            if !sink.gate().allows() {
+                                continue;
+                            }
+                            let Some(receipt) = sink
+                                .registry()
+                                .lock()
+                                .expect("notification registry lock")
+                                .reserve(Some(request.session_id.clone()))
+                            else {
+                                continue;
+                            };
+                            while lookups.try_join_next().is_some() {}
+                            if lookups.len() >= MAX_PENDING_LOOKUPS {
+                                // A question's category is only known from its
+                                // read; overloaded, it fails closed.
+                                sink.registry()
+                                    .lock()
+                                    .expect("notification registry lock")
+                                    .forget(receipt.id());
+                                continue;
+                            }
+                            if sink.supports_answer_actions() && request.revision.is_some() {
+                                if let Some(turn) = Turn::new(
+                                    presentation_generation,
+                                    Some(&request.session_id),
+                                    request.turn_id.as_deref(),
+                                ) {
+                                    answers.lock().expect("answer posts").observe(turn, &receipt);
+                                }
+                            }
+                            let (transport, sink) = (transport.clone(), sink.clone());
+                            let preferences = DeliveryContext {
+                                slots: slots.clone(),
+                                answers: answers.clone(),
+                                current: preferences.clone(),
+                                at_receipt,
+                                presentation_generation,
+                                receipt,
+                            };
+                            lookups.spawn(async move {
+                                notify_question(transport, sink, request, preferences).await;
+                            });
                         }
                         Some(Candidate::Run {
                             run_id,
@@ -737,20 +974,16 @@ pub async fn run_notifications(
                                 }
                                 continue;
                             }
-                            let (transport, sink, slots) = (transport.clone(), sink.clone(), slots.clone());
-                            let preferences = RunPreferences {
+                            let (transport, sink) = (transport.clone(), sink.clone());
+                            let preferences = DeliveryContext {
+                                slots: slots.clone(),
+                                answers: answers.clone(),
                                 current: preferences.clone(),
                                 at_receipt,
                                 presentation_generation,
                                 receipt,
                             };
                             lookups.spawn(async move {
-                                // Queue behind the request limit rather than
-                                // drop: a run without stamps is only decided
-                                // by its read.
-                                let Ok(_slot) = slots.acquire_owned().await else {
-                                    return;
-                                };
                                 notify_run(transport, sink, run_id, stamps, intent, background, preferences).await;
                             });
                         }
@@ -798,6 +1031,48 @@ async fn follow_unread(
     }
 }
 
+/// One bounded read per question: it names the source and the account
+/// category whose switch decides whether the question interrupts at all.
+async fn notify_question(
+    transport: Arc<dyn NotificationTransport>,
+    sink: Arc<dyn NotificationSink>,
+    request: AnswerRequest,
+    preferences: DeliveryContext,
+) {
+    let Ok(slot) = preferences.slots.clone().acquire_owned().await else {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(preferences.receipt.id());
+        return;
+    };
+    let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.session_detail(&request.session_id))
+        .await
+        .ok()
+        .flatten();
+    drop(slot);
+    let category = detail.as_ref().and_then(|detail| detail.category.as_deref());
+    let current = preferences.current.read().await;
+    let receipt = preferences.receipt;
+    if detail.is_none()
+        || !preferences.at_receipt.allows_run(category)
+        || !current.allows_run(category)
+        || receipt.retired()
+        || !sink.gate().allows()
+    {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(receipt.id());
+        return;
+    }
+    // A question is a new Workbench message: reading its Session withdraws
+    // it, also when that happened before the shell sampled it as unread.
+    receipt.confirm_unread_message();
+    let source = detail.as_ref().and_then(SessionDetail::source);
+    sink.deliver_answer_request(request, source, preferences.presentation_generation, receipt);
+}
+
 /// One bounded read per terminal run: it names the source and, when the event
 /// lacked stamps, decides whether the run was background work at all.
 async fn notify_run(
@@ -807,12 +1082,20 @@ async fn notify_run(
     mut stamps: RunTimestamps,
     intent: NotificationIntent,
     background: bool,
-    preferences: RunPreferences,
+    preferences: DeliveryContext,
 ) {
+    let Ok(slot) = preferences.slots.clone().acquire_owned().await else {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(preferences.receipt.id());
+        return;
+    };
     let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.run_detail(&run_id))
         .await
         .ok()
         .flatten();
+    drop(slot);
     let source = detail.as_ref().and_then(RunDetail::source);
     // The snapshot covers Avibe Sessions, not IM channels. Unknown/old-server
     // details keep their notification instead of treating absence as a read.
@@ -837,10 +1120,49 @@ async fn notify_run(
             .forget(preferences.receipt.id());
         return;
     }
+    drop(current);
+    let turn = detail.as_ref().and_then(|detail| {
+        // A stale/inconsistent detail cannot establish a different Session's
+        // ownership, even if the turn string happens to match.
+        (detail.session_id.as_deref() == preferences.receipt.session_id())
+            .then(|| {
+                Turn::new(
+                    preferences.presentation_generation,
+                    detail.session_id.as_deref(),
+                    turn_id(detail.metadata.as_ref()),
+                )
+            })
+            .flatten()
+    });
+    let category = category.map(str::to_owned);
     if let Some(detail) = detail {
         stamps.fill_missing(detail.stamps);
     }
     if (background || stamps.is_long_running()) && sink.gate().allows() && !preferences.receipt.retired() {
+        if matches!(intent, NotificationIntent::RunSucceeded) {
+            if let Some(turn) = turn {
+                preferences
+                    .receipt
+                    .follow_answer(answers::Completion::new(&preferences.answers, turn.clone()));
+                let submissions = preferences.answers.lock().expect("answer posts").submissions(&turn);
+                if answers::any_submitted(submissions).await {
+                    sink.registry()
+                        .lock()
+                        .expect("notification registry lock")
+                        .forget(preferences.receipt.id());
+                    return;
+                }
+            }
+        }
+        // A pending OS response may outlive the preference/focus snapshot.
+        let current = preferences.current.read().await;
+        if !current.allows_run(category.as_deref()) || !sink.gate().allows() || preferences.receipt.retired() {
+            sink.registry()
+                .lock()
+                .expect("notification registry lock")
+                .forget(preferences.receipt.id());
+            return;
+        }
         if !preferences.receipt.readable() {
             sink.registry()
                 .lock()
@@ -859,6 +1181,124 @@ async fn notify_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const REVISION: &str = "591e4424a227942cfaa898ff551771f8d762d17663e9e4b77d74c8d983582885";
+
+    fn message(data: serde_json::Value) -> SseFrame {
+        SseFrame {
+            event: "message.new".into(),
+            data: serde_json::json!({ "type": "message.new", "data": data }).to_string(),
+        }
+    }
+
+    fn agent_question(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "session_id": "ses_a",
+            "platform": "avibe",
+            "author": "agent",
+            "type": "result",
+            "text": "PR #4031 passed review.\n\nMerge it now?",
+            "content": { "quick_replies": ["Yes", "No"], "quick_reply_revision": REVISION },
+        })
+    }
+
+    #[test]
+    fn an_open_agent_question_on_the_workbench_becomes_one_answer_request() {
+        let mut filter = NotificationFilter::default();
+        let now = Instant::now();
+        let Some(Candidate::Question(request)) = filter.consider(message(agent_question("m1")), now) else {
+            panic!("an open question is a candidate");
+        };
+        assert_eq!(
+            request,
+            AnswerRequest {
+                session_id: "ses_a".into(),
+                message_id: "m1".into(),
+                revision: Some(REVISION.into()),
+                options: vec!["Yes".into(), "No".into()],
+                preview: Some("PR #4031 passed review. Merge it now?".into()),
+                turn_id: None,
+            }
+        );
+        // The same message again (a mirror republish) asks nothing new.
+        assert!(filter.consider(message(agent_question("m1")), now).is_none());
+    }
+
+    #[test]
+    fn only_an_unanswered_agent_question_with_real_options_qualifies() {
+        let base = agent_question("m");
+        let variants: Vec<(&str, serde_json::Value)> = vec![
+            ("/author", serde_json::json!("user")),
+            ("/platform", serde_json::json!("slack")),
+            ("/type", serde_json::json!("assistant")),
+            ("/session_id", serde_json::json!("")),
+            ("/content/quick_replies", serde_json::json!([])),
+            ("/content/quick_replies", serde_json::json!(["Yes", " "])),
+            ("/content/quick_replies", serde_json::json!(["Yes", 3])),
+            ("/content/quick_reply_chosen", serde_json::json!("Yes")),
+            ("/content/quick_reply_chosen", serde_json::json!("")),
+        ];
+        for (index, (pointer, value)) in variants.into_iter().enumerate() {
+            let mut data = base.clone();
+            let (parent, key) = pointer.rsplit_once('/').unwrap();
+            let parent = if parent.is_empty() {
+                &mut data
+            } else {
+                data.pointer_mut(parent).unwrap()
+            };
+            parent[key] = value;
+            data["id"] = serde_json::json!(format!("m{index}"));
+            let mut filter = NotificationFilter::default();
+            assert!(
+                filter.consider(message(data), Instant::now()).is_none(),
+                "{pointer} must not qualify"
+            );
+        }
+    }
+
+    #[test]
+    fn a_question_without_a_valid_revision_is_offered_without_buttons() {
+        for revision in [
+            serde_json::Value::Null,
+            serde_json::json!("short"),
+            serde_json::json!(REVISION.replace('5', "g")),
+        ] {
+            let mut data = agent_question("m1");
+            data["content"]["quick_reply_revision"] = revision;
+            let mut filter = NotificationFilter::default();
+            let Some(Candidate::Question(request)) = filter.consider(message(data), Instant::now()) else {
+                panic!("the question itself still qualifies");
+            };
+            assert_eq!(request.revision, None);
+        }
+    }
+
+    #[test]
+    fn a_preview_is_one_bounded_line_without_invisible_formatting() {
+        assert_eq!(preview(Some("a\u{202e}b\n\n c")), Some("ab c".into()));
+        assert_eq!(preview(Some(" \n ")), None);
+        let long = preview(Some(&"字".repeat(400))).unwrap();
+        assert_eq!(long.chars().count(), PREVIEW_CHARS);
+        assert!(long.ends_with('…'));
+    }
+
+    #[test]
+    fn a_session_source_names_its_project_and_title_once() {
+        let detail = |project: Option<&str>, title: Option<&str>| SessionDetail {
+            session_id: "ses_a".into(),
+            project_name: project.map(str::to_owned),
+            title: title.map(str::to_owned),
+            category: Some("session".into()),
+        };
+        assert_eq!(
+            detail(Some("avibe-app"), Some("Dock fix")).source().as_deref(),
+            Some("avibe-app · Dock fix")
+        );
+        assert_eq!(detail(Some("same"), Some("same")).source().as_deref(), Some("same"));
+        assert_eq!(detail(None, Some("Dock fix")).source().as_deref(), Some("Dock fix"));
+        assert_eq!(detail(None, None).source(), None);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn both_retained_sets_are_bounded_by_size_and_age_even_without_transition_events() {

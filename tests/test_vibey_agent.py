@@ -317,6 +317,7 @@ class _Controller:
                 runtime_key="runtime",
                 runtime_turn_id=turn_id,
                 native_turn_id=native,
+                execution=(context.platform_specific or {}).get("vibey_execution"),
             )
             assert message_deliveries.materialize_start_acceptance(conn, turn_id=turn_id, evidence={"kind": "test"})
 
@@ -1448,10 +1449,10 @@ async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(e
         prepare_input_metadata=MethodType(MessageHandler.prepare_input_metadata, handler)
     )
     first = harness.request("check the release")
-    first.input_metadata = AgentInputMetadata(user_id="U1", user_name="Alex", voice=True)
+    first.input_metadata = AgentInputMetadata(user_id="U1", user_name="Alex", voice=True, source="iphone_app; surface=main")
     await harness.agent.handle_message(first)
     [live] = [entry for entry in await harness.context_rows() if entry.row_id == first.context.platform_specific["delivery_id"]]
-    assert f"{VOICE_INPUT_LINE}\ncheck the release" in live.message.content[-1].text
+    assert f"{VOICE_INPUT_LINE}\n[Source: iphone_app; surface=main]\ncheck the release" in live.message.content[-1].text
 
     second = harness.request("watch the deploy")
     turn_id = _turn(second.context)
@@ -1470,7 +1471,7 @@ async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(e
             snapshot=message_deliveries.message_snapshot(
                 scope_id=_SCOPES["avibe"], session_id=SESSION, platform="avibe", author="user",
                 source="user", message_type="user", text="also the smoke test", author_id="U1",
-                metadata={"input": "voice"},
+                metadata={"input": "voice", "terminal_source": {"type": "mac_app", "surface": "mini", "hint": True}},
             ),
             dispatch_text="also the smoke test",
             now=NOW,
@@ -1487,7 +1488,7 @@ async def test_a_dictated_input_reaches_vibey_with_its_line_live_and_recovered(e
     await harness.agent.handle_message(harness.request("anything new?"))
 
     [recovered] = [entry for entry in await harness.context_rows() if entry.row_id == "dlv_dictated_steer"]
-    assert recovered.message.content[-1].text.endswith(f"{VOICE_INPUT_LINE}\nalso the smoke test")
+    assert recovered.message.content[-1].text.endswith(f"{VOICE_INPUT_LINE}\n[Source: mac_app; surface=mini; evidence=hint]\nalso the smoke test")
 
 
 async def _blocked_second_turn(engine, tmp_path, *, finished_step: bool):
@@ -2683,6 +2684,74 @@ async def test_a_running_turn_takes_its_sessions_model_effort_and_speed_at_its_n
     assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
 
 
+@pytest.mark.parametrize("inherited", [False, True], ids=["session-pin", "agent-default"])
+async def test_model_rename_during_an_upstream_call_is_seen_only_on_the_next_request(
+    engine, session, tmp_path, published, inherited
+):
+    from config.v2_config import ModelHubBackendModelConfig
+    from tests.test_model_hub_api import _service
+
+    service, store, _ = _service(tmp_path)
+    agent = store.config.agents["vibey"]
+    agent.models = [ModelHubBackendModelConfig(id="test-model")]
+    baseline = [row.to_payload() for row in agent.models]
+    desired = [{**baseline[0], "id": "new-model"}]
+    old_turn = {"turn_id": "last-completed", "agent": "vibey", "requested_model_id": "test-model"}
+    service.provenance.put(old_turn)
+    with engine.begin() as conn:
+        if inherited:
+            from tests.test_model_selection_addresses import _add_agent
+
+            _add_agent(conn, "inherit-agent", "test-model")
+            _add_agent(conn, "previous-agent", "unchanged-model")
+            conn.exec_driver_sql("UPDATE agents SET backend='vibey' WHERE id IN ('inherit-agent', 'previous-agent')")
+            conn.exec_driver_sql("UPDATE agent_sessions SET agent_id='previous-agent', agent_name='previous-agent' WHERE id=?", (SESSION,))
+        else:
+            conn.exec_driver_sql("UPDATE agent_sessions SET model=? WHERE id=?", ("test-model", SESSION))
+    started, release = asyncio.Event(), asyncio.Event()
+    first, second = _tool_turn()
+
+    async def in_flight(request, cancel):
+        started.set()
+        await release.wait()
+        for event in first:
+            yield event
+
+    harness = _Harness(engine, tmp_path, "avibe", [in_flight, second])
+    request = harness.request("list files")
+    if inherited:
+        request.vibe_agent_id = "previous-agent"
+        request.vibe_agent_model = request.vibe_agent_inherited_model = "unchanged-model"
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        with engine.connect() as conn:
+            receipt = conn.exec_driver_sql(
+                "SELECT start_receipt_json FROM session_turns WHERE session_id=?", (SESSION,)
+            ).scalar_one()
+        first_id = "unchanged-model" if inherited else "test-model"
+        assert json.loads(receipt)["vibey_execution"]["model"] == first_id
+        if inherited:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("UPDATE agent_sessions SET agent_id='inherit-agent', agent_name='inherit-agent' WHERE id=?", (SESSION,))
+        await service.set_agent_models("vibey", baseline, desired, renames={"test-model": "new-model"})
+        assert service.provenance.get("last-completed")["requested_model_id"] == "test-model"
+        with engine.connect() as conn:
+            assert (
+                conn.exec_driver_sql(
+                    "SELECT start_receipt_json FROM session_turns WHERE session_id=?", (SESSION,)
+                ).scalar_one()
+                == receipt
+            )
+        assert not running.done()
+        assert harness.provider.closed_streams == 0
+    finally:
+        release.set()
+        await running
+    assert [call.endpoint.model_id for call in harness.provider.requests] == [first_id, "new-model"]
+    assert [terminal["is_error"] for terminal in harness.controller.terminals] == [False]
+
+
 async def test_a_turn_dispatch_did_not_resolve_from_its_session_keeps_its_route(
     engine, session, tmp_path, published
 ) -> None:
@@ -2715,7 +2784,7 @@ def test_the_session_settings_a_turn_follows_are_read_by_primary_key(engine, ses
 
     try:
         with engine.connect() as conn:
-            assert session_route_settings(conn, SESSION) == {"model": None, "reasoning_effort": None, "metadata": {}}
+            assert session_route_settings(conn, SESSION) == {"model": None, "reasoning_effort": None, "metadata": {}, "agent_id": None, "agent_name": "vibey"}
             assert session_route_settings(conn, "ses_gone") is None
             (statement,) = set(statements)
             plan = [row[3] for row in conn.exec_driver_sql(f"EXPLAIN QUERY PLAN {statement}", ("ses_any",))]
@@ -4360,20 +4429,24 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
 
     def gateway(request: httpx.Request) -> httpx.Response:
         seen.append(request.url.path)
+        response = body.replace('"hi"', '"wrong model"') if "thread" in json.loads(request.content) else body
         return httpx.Response(
-            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=body
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": served}, text=response
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(
             engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
         )
+        harness.controller.hub_source_id = "src_registry01"
         harness.controller.hub_protocol = hub_protocol
         await harness.agent.handle_message(harness.request("hello"))
 
     # Each protocol's adapter from the real registry speaks to its own gateway path; the served origin comes from
     # x-avibe-served-hop.
-    assert seen == [path.format(model=harness.controller.hub_calls[-1])]
+    # The mock deliberately reports a different origin. The ordinary replay may follow that route; the pinned
+    # Anthropic create may not expose its answer.
+    assert seen == [path.format(model=harness.controller.hub_calls[-1])] * (2 if hub_protocol == "anthropic" else 1)
     final = (await harness.context_rows())[-1].message
     assert final.content == (TextBlock(text="hi"),)
     assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", hub_protocol, "served-model")
@@ -4533,8 +4606,9 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     from modules.agents.vibey.models import registry_providers
 
     path, body = _TEXT_STREAMS[hub_protocol]
+    source = "src_nativepin01"
     served = json.dumps(
-        {"provider": "upstream", "api": hub_protocol, "model": "served-model", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": hub_protocol, "model": "test-model", "source": source},
         separators=(",", ":"),
     )
     seen: list[httpx.Request] = []
@@ -4549,6 +4623,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
         harness = _Harness(
             engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client)
         )
+        harness.controller.hub_source_id = source
         harness.controller.hub_protocol = hub_protocol
         harness.controller.hub_hosted_tools = {
             "web_search": {"native": "assumed", "declaration": declaration, "include": include, "replay": "assumed"},
@@ -4559,7 +4634,7 @@ async def test_a_hop_resolved_native_hosted_tool_reaches_the_gateway_pinned_to_i
     (request,) = seen
     sent = json.loads(request.content)
     assert request.url.path == path
-    assert request.headers["x-avibe-pin-source"] == "src_test"
+    assert request.headers["x-avibe-pin-source"] == source
     # The hosted tools lead the Turn's tools: the native one as the provider's declaration, the proxied one as its
     # canonical function.
     assert sent["tools"][0] == declaration
@@ -5009,8 +5084,9 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
 
     from modules.agents.vibey.models import registry_providers
 
+    source = "src_proxytool01"
     served = json.dumps(
-        {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": source},
         separators=(",", ":"),
     )
     call = '{"type":"tool_use","id":"toolu_1","name":"web_search","input":{"query":"avibe release"}}'
@@ -5043,6 +5119,7 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
             providers=registry_providers(media_loader=None, client=client),
             gateway_client=client,
         )
+        harness.controller.hub_source_id = source
         harness.controller.hub_hosted_tools = {"web_search": {"native": "unsupported", "replay": "unsupported"}}
         message = harness.request("search")
         await harness.agent.handle_message(message)
@@ -6936,8 +7013,9 @@ async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(en
     from tests.agent_core.ai import test_hosted_replay as replay
 
     sent: list[bytes] = []
+    source = "src_artifacts01"
     headers = {"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(
-        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": replay.SOURCE}
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": source}
     )}
 
     def gateway(request):
@@ -6948,6 +7026,7 @@ async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(en
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "telegram", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = source
         await harness.agent.handle_message(harness.request("first"))
         assert harness.agent.request_artifacts.entries() == []
         failing = harness.request("second")
@@ -6955,7 +7034,9 @@ async def test_a_turns_failed_model_request_is_kept_with_its_session_and_turn(en
 
     store = harness.agent.request_artifacts
     assert store.root == tmp_path / "agent_core" / "model-requests"
-    (meta,) = store.entries()
-    assert meta["session_id"] == SESSION and meta["turn_id"] == _turn(failing.context)
-    assert meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
-    assert (store.path(meta["id"]) / REQUEST_FILE).read_bytes() == sent[-1]
+    entries = store.entries()
+    assert len(entries) == len(sent) - 1 == 2  # rejected create and its ordinary replay
+    for meta in entries:
+        assert meta["session_id"] == SESSION and meta["turn_id"] == _turn(failing.context)
+        assert meta["state"] == "failed" and meta["outcome"]["http_status"] == 400
+    assert sorted((store.path(m['id']) / REQUEST_FILE).read_bytes() for m in entries) == sorted(sent[1:])

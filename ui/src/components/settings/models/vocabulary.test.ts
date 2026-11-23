@@ -29,10 +29,17 @@ describe('Models page vocabulary', () => {
     expect(zh.settings.models.billing.metered).toBe('按量付费');
     expect(en.settings.models.billing.monthly).toBe('Subscription');
     expect(en.settings.models.billing.metered).toBe('Pay as you go');
-    expect(zh.settings.models.order.subtitle).toBe('作用于自动路由，已保存的手动路由保持不变。');
-    expect(en.settings.models.order.subtitle).toBe('Applies to automatic routes. Saved manual routes stay unchanged.');
-    expect(zh.settings.models.order.section['heldOut.note']).toBe('可用于手动路由。');
-    expect(en.settings.models.order.section['heldOut.note']).toBe('Available for manual routes.');
+    // A model either follows default routing or has a route set separately; the
+    // page uses those two names everywhere and none of the older ones.
+    expect(copy).not.toMatch(/手动路由|固定路由|自动路由|继承路由/);
+    expect(leaves(en.settings.models).join('\n')).not.toMatch(/manual routes?|fixed routes?|automatic routes?|inherited rout/i);
+    // Switching a model back is saved like any other change; the dialog does not call it a restore.
+    expect(leaves(zh.settings.models.routing).join('\n')).not.toMatch(/恢复后|撤销恢复/);
+    expect(leaves(en.settings.models.routing).join('\n')).not.toMatch(/after restore|undo the restore/i);
+    expect(zh.settings.models.routeDialog.mode.follow).toBe('跟随默认路由');
+    expect(zh.settings.models.routeDialog.mode.custom).toBe('单独设置');
+    expect(en.settings.models.routeDialog.mode.follow).toBe('Follow default routing');
+    expect(en.settings.models.routeDialog.mode.custom).toBe('Set separately');
     expect(zh.settings.models.supplyMode.fixHint).toBe('去「模型」页添加或启用供应商即可恢复。');
     expect('policy' in zh.settings.models.agents).toBe(false);
   });

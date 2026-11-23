@@ -73,7 +73,7 @@ avibe.bot listed for this instance id can be.
 
 | ID | Who could do what | What would be lost | Rule | Acceptance check |
 |---|---|---|---|---|
-| B1 | A crash or lost reply between avibe.bot accepting the rename and this instance switching. | The instance believes the old name; visitors sent to the new name find nothing. | Before the first request the instance writes the intent to a crash-safe journal: operation id, expected generation, expected hostname, new prefix, who confirmed. It sends the identical tuple until it gets a final answer (`202` means repeat the same request after `Retry-After`). On a committed receipt it records the receipt, reads the hostname state, then applies in this order, each step idempotent and recorded: (0) the device list and its receipts are snapshotted for the name about to retire, so that a page that clears and reports the moment it is told is not reporting to nothing; and, for a change of its own, the time is written into the journal as the Health cut-off, so that a phone paired at the new address later is never this change's to delete (no Health store is opened here: an unreadable store must not hold up the switch); (1) the role flip: roles and config (`public_url`, `redirect_uri`, OIDC client id) in one config write, the active-hostname snapshot rewritten without managed names (B7), the connector's recorded signature updated under its lifecycle lock so that a later Start or reconcile does not bounce the tunnel, and **open pages woken at once** (D1); (2) one database transaction: snapshot the device list, end all remote sessions, disable remote push subscriptions; (3) after a short grace for the final frames, every stream and socket still open on the old Host is closed (C1); (4) Health (C4). On start and on every state read an unfinished journal entry resumes from its recorded step. | Kill the process after each step and after a lost `200`: on restart the same tuple is replayed, the end state is identical, nothing runs twice (Health deletion in particular), and no second operation id is minted. A refusal clears the journal and changes nothing. |
+| B1 | A crash or lost reply between avibe.bot accepting the rename and this instance switching. | The instance believes the old name; visitors sent to the new name find nothing. | Before the first request the instance writes the intent to a crash-safe journal: operation id, expected generation, expected hostname, new prefix, who confirmed. The operation id is a UUID (avibe.bot accepts nothing else), made once with the intent. It sends the identical tuple until it gets a final answer (`202` means repeat the same request after `Retry-After`). On a committed receipt it records the receipt, reads the hostname state, then applies in this order, each step idempotent and recorded: (0) the device list and its receipts are snapshotted for the name about to retire, so that a page that clears and reports the moment it is told is not reporting to nothing; and, for a change of its own, the time is written into the journal as the Health cut-off, so that a phone paired at the new address later is never this change's to delete (no Health store is opened here: an unreadable store must not hold up the switch); (1) the role flip: roles and config (`public_url`, `redirect_uri`, OIDC client id) in one config write, the active-hostname snapshot rewritten without managed names (B7), the connector's recorded signature updated under its lifecycle lock so that a later Start or reconcile does not bounce the tunnel, and **open pages woken at once** (D1); (2) one database transaction: snapshot the device list, end all remote sessions, disable remote push subscriptions; (3) after a short grace for the final frames, every stream and socket still open on the old Host is closed (C1); (4) Health (C4). On start and on every state read an unfinished journal entry resumes from its recorded step. | Kill the process after each step and after a lost `200`: on restart the same tuple is replayed, the end state is identical, nothing runs twice (Health deletion in particular), and no second operation id is minted. A refusal follows the one rule for refused renames (below): it ends the journal only when the request provably never landed, and otherwise holds it; nothing of the switch runs either way. |
 | B2 | A stale or wrong view makes the instance send cleaning responses on the name it is serving. | Every visitor's cache and drafts wiped and everyone signed out, for as long as it lasts. | One local role table decides content and cleaning, read once per request. (a) The locally recorded active name is never cleaned, whatever any list says; a name outside the managed grammar is never cleaned at all. (b) A cleaning response needs the Host to be in the last cleanup list avibe.bot gave for this instance id, at a generation not older than the stored one, not past the end date avibe.bot gave for it (the instance never computes 30 days itself), and from a state read that was **started** no more than 60 seconds ago by both the monotonic clock and the wall clock (the monotonic clock stops while the computer sleeps; a wall-clock difference that is negative or over 60 seconds also ends the permission); this is checked again immediately before the response headers are written, without waiting: while the role lock is busy the check is asked again a few times and then answers no (that visit gets the plain `503` and is cleaned on its next request). A state read is applied only if, at that moment, no `401` has dropped authority since the read started, the pairing is the same and no newer generation is recorded; this holds at every point a read is used, including after the settle and after the config write of a switch. Neither the name being left nor the name being taken is cleaned while the address moves. Otherwise the instance reads the state first (one read at a time per instance) and, if it cannot, answers the unknown-Host `503` with no clearing header and no script. A restart, a `401` from the state read, a pairing write, or a sleep or suspension past the 60 seconds drops the permission; a late or older reply cannot restore it. (c) The instance never infers **active** or **cleanup** from a suffix, a timeout or its own journal alone (refusing content by a name's shape is E8). | Property test over role tables: no Host is both served and cleaned. For every route class (page, API, static asset, `/api/session`, `/auth/*`, `/p/*`, device route, WebSocket) on the active Host with that Host also injected into the cleanup list: content, never a clearing header. State unreachable, or read started more than 60 s ago (measured from the start of the read; simulated sleep where only the wall clock advances): `503`, no header. Spellings of the Host (upper case, trailing dot, port) decide the same way; a forwarded Host never causes cleaning. After restart with no fresh read: `503`. Past the listed end date: `503`. A reply that arrives after a `401` does not re-enable cleaning. |
 | B3 | Any change of a name from cleanup to active (asked for here, or made elsewhere and learned from the state): a cleaning response produced a moment earlier reaches a browser after the name is active again. | That browser's fresh sign-in and cache. | Before sending a request whose target is one of its own cleanup names, the instance moves that name to **quiet**, waits until cleaning responses already started on it are fully written, and records this in the journal. avibe.bot does its half for a return from any requester: it stops listing the name for cleaning, raises the generation, and does not publish the name as active until every 60-second permission it handed out has run out (it answers `202` meanwhile; the instance replays). The name becomes active here only after the commit, a state read that names it active, and the local drain; a short settle is added but is not treated as proof that a browser has finished with an earlier response. A refusal returns it to cleanup only after a fresh state read still lists it. What cannot be promised by either side: recalling a response already on the network. | Hold a slow cleaning response open, take the name back: the name is not served until the response finished and the settle passed; no clearing header is produced for it after the journal says quiet. Refused take-back: name cleans again only after a fresh state lists it. |
 | B4 | Two renames in a row (A→B→C), then back (C→A). | A browser returning on any of the three ends in the wrong place. | Roles come from the state: after A→B→C, C is active and A and B are cleanup, each with its own `release_at`. After C→A, A is active (B3), B and C are cleanup, and A's clearing list is closed at the switch (F4). A returning browser on a cleanup name is cleaned and told the Avibe moved; on the active name it is served and its old cache is wiped by the existing ended-session rule before sign-in. | Walk the three renames with one browser profile per name: each lands as stated; no profile is cleaned on the active name. |
@@ -144,9 +144,10 @@ All three: Owner by current authorization or direct loopback (A1); JSON;
 named below.
 
 - `GET /api/instance-address` →
-  `{ok, hostname, public_url, eligible, ineligible_reason, hold_days (from avibe.bot's `release_delay_seconds`; null until first read), release_at_if_changed_now (passed through; null when avibe.bot cannot give a date),
-  operation, unrecognized_change, cleanup, health}`.
+  `{ok, hostname, public_url, eligible, ineligible_reason (`not_paired`, `not_personal`, `address_not_managed`, or `address_state_unknown`: avibe.bot has not yet answered for this address, below), hold_days (from avibe.bot's `release_delay_seconds`; null until first read), release_at_if_changed_now (passed through; null when avibe.bot cannot give a date),
+  operation, state_error, unrecognized_change, cleanup, health}`.
   `operation`: `null` or `{state:"pending"|"applying"|"failed", hostname, error}`.
+  `state_error`: `null` or `"rebind_required"`: avibe.bot's standing refusal to tell this computer its address state (below). What the page shows is then as last read, and no old name is being cleaned.
   `unrecognized_change`: `null` or `{previous_hostname, hostname, noticed_at}`.
   `cleanup`: `[{hostname, retired_at, release_at (the real date from avibe.bot, passed through; it can be later than the waiting period when a direct certificate outlives it), complete:false,
   incomplete_reason, unconfirmed, devices:[{id, kind,
@@ -156,8 +157,10 @@ named below.
 - `POST /api/instance-address/preview` `{prefix}` →
   `{ok, confirmation_id, expires_at, hostname, is_return, hold_days, release_at_if_changed_now,
   devices:[…as above without state], health_connected}`.
-  Local refusals only: `invalid_prefix`, `same_address`, `rename_ineligible`,
-  `operation_in_progress`. No availability check: the name is not asked of
+  Local refusals: `invalid_prefix`, `same_address`, `rename_ineligible`
+  (with `reason`, the value of `ineligible_reason`), `operation_in_progress`;
+  and, when the state read it makes is refused, `rebind_required`,
+  `pairing_invalid` or `rename_ineligible` as below. No availability check: the name is not asked of
   avibe.bot before the Owner confirmed.
 - `POST /api/instance-address/change` `{confirmation_id}` →
   `200 {ok, state:"applied", hostname, public_url}` or
@@ -169,12 +172,13 @@ named below.
 | 403 | `owner_required` | Not the Owner. |
 | 409 | `confirmation_expired` | Preview again. |
 | 409 | `operation_in_progress` | A change is already running. |
-| 409 | `rename_ineligible` | Organization instance, not paired, or refused by avibe.bot. |
+| 409 | `rename_ineligible` | Organization instance, not paired, avibe.bot has not yet answered for this address (`reason: "address_state_unknown"`), or refused by avibe.bot. |
 | 409 | `taken` | The name is not available. No reason is given, by design. |
 | 409 | `name_holding_limit_reached` + `limit`, `held_count`, `earliest_release_at` (UTC string or null) | Approved sentence ("already holds N names, including those still waiting") with the real number and date, passed through from avibe.bot unchanged. The page does not hold the number. |
 | 409 | `address_changed` | The address changed meanwhile; reload. |
 | 409 | `pairing_invalid` | avibe.bot no longer accepts this binding: bind remote access again. |
 | 409 | `remote_access_configuration_mismatch` | This computer's tunnel configuration does not match avibe.bot's record of it, so avibe.bot will not change it. Nothing changed: the address, the sessions and the device stay as they were. Bind remote access again, then try again. |
+| 409 | `rebind_required` | avibe.bot holds more than one pairing for this instance and will not choose one (typically an earlier installation that was paired and never revoked). Nothing changed and nobody was signed out. The same way out, another cause: bind remote access again on this computer, then try again. |
 | 503 | `unavailable` | avibe.bot could not be reached or could not decide; nothing changed, or the operation stays pending. |
 
 The old address (not for the settings page): `410` cleaning response on every
@@ -243,8 +247,9 @@ Settled with the backend writer (Session `ses6x9a627t9a`, November 21, 11:27):
    probes no cleanup name. Health device routes are the exception: `401
    device_unauthorized`, body unread (the App acts on `401`, not on `410`).
 6. `Clear-Site-Data: "storage", "cache"`; never `"cookies"` or `"*"`.
-7. On `401` from `hostname-state` every cleaning permission is dropped and no
-   late reply restores it; the active name keeps today's behaviour.
+7. On `401` from `hostname-state`, and on `409 rebind_required` from either
+   endpoint, every cleaning permission is dropped and no late reply restores
+   it; the active name keeps today's behaviour.
 
 The limit on names comes back as `409 name_holding_limit_reached` with
 `limit`, `held_count` and `earliest_release_at`.
@@ -252,19 +257,164 @@ The limit on names comes back as `409 name_holding_limit_reached` with
 A `429` or `5xx` from avibe.bot is not shown to the page: the same request is
 repeated and the operation stays `pending`.
 
-`409 remote_access_configuration_mismatch` is a final answer for that
-operation, whether it comes to the first request or to a repeat of one first
-answered `pending`. The instance settles it like every other refusal: the
-journal ends in the same write that records the failure, the request is never
-sent again, the state is read once, and nothing of the switch runs (no session
-ends, no name is cleaned, no Health data is touched). `GET
-/api/instance-address` then shows `operation: {state:"failed", hostname,
-error:"remote_access_configuration_mismatch"}`, and a `change` still waiting
-for its first answer gets the same code with `409`. The way out is to bind
-remote access again and start a new change, which is a new operation with a
-new id. Only that answer means this: a timeout, a reply cut short, a request
-still on its way, a `429` or `5xx`, and a refused credential (`401`, which is
-`pairing_invalid`) keep the handling they had.
+`409 remote_access_configuration_mismatch` is a definitive refusal, and
+what it does to the operation follows the one rule for refused renames below:
+refused at its first sending it settles (`operation: {state:"failed",
+hostname, error:"remote_access_configuration_mismatch"}`, and `409` from a
+`change` still waiting); refused at a repeat of a request that may have
+landed, it holds. Nothing of the switch runs either way. The way out is to
+bind remote access again and start a new change, a new operation with a new
+id, once nothing is held. A timeout, a reply cut short, a request still on its
+way, a `429` or `5xx` are not this answer and keep the request owed.
+
+`409 rebind_required` comes from both `hostname-renames` and `hostname-state`:
+this computer's credential is valid, but avibe.bot holds more than one
+unrevoked pairing for the instance, and it will neither choose one nor give
+any of them permission to clean. It is not a damaged configuration and not a
+fault that passes. It is kept apart from the mismatch above on purpose.
+
+- **At a rename** it follows the one rule for refused renames below, and it
+  stands for the state read too. Where the page finds it depends on the case:
+  settled (refused at the first sending), `change` while it waits answers
+  `409 rebind_required` and `GET` shows `operation: {state:"failed", error:
+  "rebind_required"}`; held (a repeat that may have landed), `change` waits
+  out its time and answers `202 pending`, `GET` shows `operation:
+  {state:"pending", error:"rebind_required", unconfirmed:true}`, and
+  `preview` answers `409 operation_in_progress` (see "A held change").
+- **At a state read** it becomes a standing refusal for the pairing in use,
+  kept in memory: `GET /api/instance-address` shows `state_error`, and
+  `preview` answers `409 rebind_required`.
+- **No permission is held.** Every cleaning permission is dropped at once and
+  no reply still on its way restores it, as for `401`: former names answer the
+  empty `503`. A change already committed at avibe.bot but not yet applied
+  here stays `applying` and waits.
+- **Nothing asks again by itself** while it stands: not the worker's owed
+  read, not a `hostname_generation` hint (one arrives every 15 seconds), not
+  a visitor of a former name, and not the read that follows a refused rename.
+  Opening the page does not read either, unless a change is held: then it
+  makes one read-only check, at most once a minute (see "A held change"). A
+  rename refused this way sets the same standing refusal, since the read
+  would be answered alike.
+- **What asks again:** a person asking for a change (`preview` makes one read;
+  with no answer the refusal stands), opening the page while a change is held
+  (once a minute), a start of the process, and a new binding of remote
+  access, which is another pairing and is read as any pairing is. A successful read or another definitive answer ends the
+  refusal; a throttle, a server fault or no answer does not. Only the latest
+  answer counts: a reply to a read that left before the refusal was noted
+  changes nothing.
+
+**Before avibe.bot has ever answered.** The address can be changed only
+after avibe.bot has answered a state read for this instance at least once
+(the stored `state_read_at`; kept by instance id, so it survives a restart
+and a new binding of the same instance). Until then `GET
+/api/instance-address` says `eligible: false` with `ineligible_reason:
+"address_state_unknown"`, and `preview` and `change` answer `409
+rename_ineligible` with that reason and send no request. It is not a switch
+and no setting: it is the fact that the endpoints have not answered, and it
+ends by itself with the first read that succeeds. This is what an instance
+sees against an avibe.bot that does not have the address endpoints yet, and
+what an instance paired before this version sees until its first read. Nothing
+else differs: the address in use is served, the list of old names is empty,
+and another managed name gets the empty `503` as before.
+
+An avibe.bot without the endpoints answers `hostname-state` with `404` and
+its HTML "not found" page (read in the backend's routes: there is no such
+route, and its middleware does not run under `/api/v1/`). That is a
+definitive refusal of the second kind below. It is not `401`: only `401`
+means the binding is refused and drops permissions.
+
+**When the endpoints go away again** (avibe.bot rolled back after this
+instance had read the state), the same rule applies: while the latest state
+read for the pairing in use was answered `404`, the address counts as never
+answered (`address_state_unknown`), so the change is not offered and
+`preview` and `change` send nothing. This is kept in memory only; the stored
+state, with its list of old names, is left as it is, and every opening of the
+page and every start reads first. No answer (a timeout, `429`, `5xx`) leaves
+it as it is; any other answer, and first of all a state read that succeeds,
+ends it, and the next opening of the page offers the change again.
+
+A definitive refusal of a state read is one of two kinds, and they differ in
+who asks again:
+
+| | Stands on the pairing in use | Definitive, not standing |
+|---|---|---|
+| Which answers | `409 rebind_required` | Every other `4xx` except `429`: `404` (no such endpoint), `400`, `405`, `415`, `401`, `403`, another `409` |
+| The worker's owed read | Not sent | Sent again after 30 seconds, doubling, at most an hour apart |
+| A `hostname_generation` hint | Not sent | Read at once |
+| Opening the page (`GET /api/instance-address`) | Not sent; shows `state_error`. With a held change: one read-only check, at most once a minute | Read again when the state was never read or is older than 60 seconds, no more often than every 5 seconds. With a held change: only the held check, at most once a minute |
+| A visitor of a former name | Not sent | Read as before, same 5 seconds |
+| `preview` (a person asking) | One read; with a held change, one read and then `operation_in_progress` while it stays held | One read, when the state was ever read; with a held change, the same as on the left |
+| Ends with | A new binding, a start of the process, a successful read, another definitive answer | The next read that succeeds |
+
+So once avibe.bot has the endpoints, a person who opens the page sees the
+change offered at that opening (the read is made while the page loads; or
+at the next one, when a read failed in the last 5 seconds), and an instance
+nobody looks at learns it at its next owed read, within the hour,
+or at the first reply that carries a `hostname_generation`.
+
+**The one rule for a refused rename: it fails the change only when the request
+never landed.** Before a rename request leaves, the journal records that it
+may land (`may_have_landed`), so a crash while it is out counts as not
+knowing. A `429` takes back only what this sending added, since it is turned
+away before it is looked at; it does not erase an earlier `202`/`pending` or
+an earlier sending whose outcome is unknown. Every definitive refusal (any `4xx` but `429`) is one of three cases:
+
+1. **Refused at its first sending** (nothing earlier may have landed): the
+   operation settles. One write ends the journal and records the failure, the
+   request is never sent again, nothing of the switch runs, and the page gets
+   the code.
+2. **The earlier, non-UUID id refused with `400 invalid_request`**: avibe.bot's
+   request rule refuses it before the rename is looked at, which proves it
+   never landed, also after an uncertain sending. It settles as case 1; the
+   Owner previews and confirms again, with a new UUID.
+3. **Any other refusal after an earlier sending was answered `202`/`pending`
+   or not answered for sure** (no answer, `5xx`, an unknown answer, a crash):
+   only this repeat was refused, and avibe.bot may still hold the operation it
+   took (a `409` to a repeat does not cancel it). It holds, as follows.
+
+A held change: the journal is kept, with its
+request, its UUID and its local origin, marked `held` with the refusal; the
+request is not sent again; `401` still drops every permission, and
+`rebind_required` still stands. `GET` shows `operation: {state: "pending",
+hostname, error, unconfirmed: true}`. A state read that shows the outcome
+settles it. The target active with `last_rename_operation_id` equal to the
+journal's is our own change: the address is taken, sessions end and the old
+name is cleaned, but Health data is not deleted, because that needs the
+generation the operation was committed at (A5), which only its receipt
+carries; the current generation is no proof of it. Any other change is
+adopted as one made elsewhere, which deletes nothing. Until such a state, the
+Owner cannot start another change (`operation_in_progress`).
+
+- A held change is not sent again and nothing unlocks it by time: avibe.bot's
+  state does not report a cancelled operation, so waiting, an unchanged
+  address or a restart prove nothing. The way out without evidence is
+  support confirming the operation's end at avibe.bot.
+- The Owner can check it: opening the page (at most once a minute) and asking
+  for a change each make one read of the state, also past a standing
+  `rebind_required`. Read only: nothing is sent and no refusal is set aside.
+- **Rollback:** an earlier version does not know `held`; its worker sends the
+  journal's request again, with its valid UUID, as soon as it starts, whether
+  the entry is shown or not. An installation that holds a change must not be
+  rolled back to a version that does not know `held`.
+
+What the instance does with every answer of the two endpoints (the codes are
+the backend's, `docs/plans/personal-hostname-release.md`). At a state read the
+page is told by `preview`, in the words a rename refused the same way gets.
+"Refused" at a rename means the rule above: settled when the request never
+landed (cases 1 and 2), held otherwise (case 3), with the same code either way:
+
+| Answer | At a rename | At a state read |
+|---|---|---|
+| `202` pending | The same request again after the stated wait. | — |
+| `400 invalid_prefix`, `409 taken`, `409 name_holding_limit_reached` | Refused; the page gets the code. | — |
+| `409 binding_changed`, `409 operation_conflict` | Refused; the page gets `address_changed`. | Not sent by a state read; treated as the next row if it were. |
+| `400 invalid_request`, `405`, `415`, any other `4xx` | Refused; the page gets `409` with avibe.bot's own code (`rename_refused` when it sent none that looks like one); never `unavailable`. | Definitive, not standing; `preview` answers `503 unavailable` when what was read before is older than 60 seconds. |
+| `404` (no such endpoint) | Refused; the page gets `409 rename_ineligible`. | The change is no longer offered (`address_state_unknown`, above). |
+| `401 invalid_device_secret` | Refused; permissions dropped; the page gets `pairing_invalid`. | Permissions dropped; definitive, not standing; `preview` answers `409 pairing_invalid`. |
+| `403 forbidden`, `403 rename_ineligible` | Refused; the page gets `rename_ineligible`. | Definitive, not standing; `preview` answers `409 rename_ineligible`. |
+| `409 remote_access_configuration_mismatch` | Refused; the page gets the code. | — |
+| `409 rebind_required` | Refused; standing refusal; the page gets the code. | Standing refusal; `preview` answers the code and `GET` shows `state_error`. |
+| `429`, `5xx`, no answer, a reply cut short | The same request again; the operation stays `pending`. | Asked again in 30 seconds; `preview` answers `503 unavailable` as above. |
 
 Settled with the direct lane (coordinator Session `ses8mgme5623t`): C3.
 

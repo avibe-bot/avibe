@@ -832,6 +832,43 @@ fn set_channel(app: &AppHandle, channel: Channel) -> Result<(), String> {
     emit_state(app);
     Ok(())
 }
+pub(crate) fn refresh_channel_menu(app: &AppHandle) {
+    if let Some(updater) = app.try_state::<Updater>() {
+        let checked = updater.state.lock().expect("updater state").channel == Channel::Test;
+        let _ = updater.channel_menu.set_checked(checked);
+    }
+}
+
+#[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+pub(crate) fn e2e_menu(app: &AppHandle, path: &Path) -> bool {
+    if app.try_state::<Updater>().is_none() {
+        app.manage(Updater {
+            state: Mutex::new(State {
+                phase: Phase::Idle,
+                latest: None,
+                channel: Channel::Stable,
+                manifest: None,
+                availability_interactive: false,
+                auto_update: false,
+                remote_request: None,
+                active_request: None,
+                control_request: None,
+            }),
+            busy: AtomicBool::new(false),
+            source: AtomicUsize::new(0),
+            channel_path: path.join("channel.json"),
+            skipped_path: path.join("skipped.json"),
+            remote_request_path: path.join("request.json"),
+            auto_update_path: path.join("auto.json"),
+            status: UpdateStatusStore::new(path.join("update-status.json")),
+            menu: MenuItem::with_id(app, MENU_ID, "update fixture", true, None::<&str>).unwrap(),
+            channel_menu: CheckMenuItem::with_id(app, CHANNEL_ID, "channel fixture", true, false, None::<&str>)
+                .unwrap(),
+        });
+    }
+    app.state::<Updater>().state.lock().unwrap().channel == Channel::Test
+}
+
 pub fn toggle_channel(app: &AppHandle) {
     let updater = app.state::<Updater>();
     if updater.busy.load(Ordering::SeqCst) {

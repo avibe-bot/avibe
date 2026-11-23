@@ -133,6 +133,23 @@
       "runCanceled": {
         "title": "运行已取消",
         "body": "后台工作已取消。"
+      },
+      "answerRequested": {
+        "title": "等你回复",
+        "body": "Agent 在等你回复。"
+      },
+      "answer": {
+        "reply": "回复…",
+        "send": "发送",
+        "placeholder": "回复这个会话",
+        "notSent": "没有发送",
+        "notDelivered": "没有送达",
+        "answerAgain": "打开 Avibe 重新回复。",
+        "alreadyChoice": "已经在其他设备上回复了「{{choice}}」。",
+        "alreadyText": "已在其他设备上回复。",
+        "stale": "会话已经有了新进展。打开看看再回复。",
+        "gone": "这个会话已经打不开了。",
+        "unavailable": "连不上这个实例。打开 Avibe 重新回复。"
       }
     },
     "pet": {
@@ -746,9 +763,9 @@
       "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
       "appLock": {
         "title": "App 锁",
-        "descriptionFaceId": "打开 Avibe，或离开超过所选时间后回来，需要先用面容 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
-        "descriptionTouchIdPhone": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或设备密码解锁。只对这台 iPhone 生效，更改时需要验证一次。",
-        "descriptionMac": "打开 Avibe，或离开超过所选时间后回来，需要先用触控 ID 或 Mac 登录密码解锁。只对这台 Mac 生效，更改时需要验证一次。",
+        "descriptionFaceId": "用面容 ID 或设备密码解锁 Avibe，只对这台 iPhone 生效。",
+        "descriptionTouchIdPhone": "用触控 ID 或设备密码解锁 Avibe，只对这台 iPhone 生效。",
+        "descriptionMac": "用触控 ID 或登录密码解锁 Avibe，只对这台 Mac 生效。",
         "off": "关闭",
         "immediately": "立即",
         "oneMinute": "1 分钟后",
@@ -1413,7 +1430,7 @@
       "gateway": {
         "heading": "路由",
         "infoLabel": "什么是路由",
-        "info": "模型跟随默认路由，已保存手动路由的模型除外。模型交给列出它的供应商；没有供应商列出的模型，需要设置手动路由。",
+        "info": "模型跟随默认路由，单独设置了路由的除外。模型交给列出它的供应商；没有供应商列出的模型，需要单独设置路由。",
         "address": "本机地址：{{address}}（把其他工具接到网关时使用）",
         "sourceOrder": "默认路由",
         "manageModels": "管理模型",
@@ -1529,7 +1546,8 @@
           "dropped_other": "已放下 {{model}}，第 {{position}} / {{count}} 位。",
           "grabCancelled": "已取消移动 {{model}}，位置已还原。",
           "added_one": "已添加 {{model}}",
-          "added_other": "已添加 {{count}} 个模型"
+          "added_other": "已添加 {{count}} 个模型",
+          "saveBusy": "现在保存不了，没有改动任何东西。稍后再点一次保存。"
         },
         "picker": {
           "title": "添加 {{backend}} 模型",
@@ -1548,11 +1566,13 @@
           "confirm_one": "添加 {{count}} 个模型",
           "confirm_other": "添加 {{count}} 个模型",
           "groupCatalog": "模型目录",
-          "catalogNote": "你的供应商没有列出这些模型。添加后，要在这个模型的路由里指定一个供应商才能使用。",
+          "catalogNote": "没有供应商列出这些模型，添加后要为它单独设置路由。",
           "noSuppliedMatch": "你的供应商没有列出这个模型。先选一个列出的；其他模型可以之后在「设置 › 模型」里添加。",
           "notListed": "供应商未列出",
-          "customFromQueryNote": "模型 ID 按你输入的原样使用，参数取默认值，以后可以在「管理模型」里改。",
-          "searchingCatalog": "正在搜索模型目录"
+          "searchingCatalog": "正在搜索模型目录",
+          "sourcePicked_one": "已选 {{count}}",
+          "sourcePicked_other": "已选 {{count}}",
+          "segmentOther": "其他"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · 模型列表",
@@ -1565,23 +1585,23 @@
             "capabilities": "能力"
           },
           "id": {
-            "label": "模型",
-            "placeholder": "搜索 models.dev 或输入模型 ID",
+            "label": "模型 ID",
+            "placeholder": "输入模型 ID",
             "required": "请填写 Backend 模型 ID。",
-            "duplicate": "列表中已存在相同 ID 的模型。"
+            "duplicate": "列表中已存在相同 ID 的模型。",
+            "renameNote": "保存后，用这个模型的 Agent 和会话改用新 ID。命令或脚本里写的旧 ID 不会改。",
+            "renameRunning": "正在进行的对话可能中断。",
+            "renameNoRoute": "没有供应商列出这个 ID，保存后要为它单独设置路由。",
+            "reserved": "这个 ID 现在还不能用：先保存模型列表，再用它。"
           },
           "displayName": {
             "label": "显示名称",
             "placeholder": "可选，留空时列表显示模型 ID"
           },
-          "lookupLoading": "正在搜索 models.dev…",
-          "useAsId": "把「<id>{{query}}</id>」作为模型 ID",
-          "useAsIdKeep": "使用「<id>{{query}}</id>」，保留当前参数",
-          "parametersFrom": "参数来自 {{name}}",
-          "clearParameters": "清空参数",
-          "fillFailed": "没能访问 models.dev",
-          "fillUnavailable": "models.dev 不可用",
-          "matches": "models.dev 匹配结果",
+          "lookupLoading": "正在搜索模型目录…",
+          "fillFailed": "没能访问模型目录",
+          "fillUnavailable": "模型目录不可用",
+          "matches": "模型目录搜索结果",
           "contextWindow": "上下文窗口",
           "maxOutput": "最大输出",
           "tokens": "tokens",
@@ -1604,7 +1624,7 @@
           "reasoningEfforts": "推理强度",
           "customEffort": "自定义档位",
           "customEffortPlaceholder": "如 medium",
-          "effortNote": "仅声明该模型支持的选项。在 Agent 中选择“关闭”才会禁用扩展思考；选项列表为空不等于关闭。其他档位按原样转发。",
+          "effortNote": "勾选这个模型支持的档位，Agent 里就能选它们。想让 Agent 能关掉思考，要勾上「关闭」；一个都不勾并不会关掉思考。",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -1612,7 +1632,21 @@
           },
           "cancel": "取消",
           "add": "添加模型",
-          "apply": "保存模型"
+          "apply": "保存模型",
+          "source": {
+            "from": "参数来自 <id>{{model}}</id>",
+            "fromClosest": "参数来自最接近的 <id>{{model}}</id>",
+            "none": "模型目录里没有找到这个模型",
+            "updateTo": "按 <id>{{model}}</id> 更新参数",
+            "change": "更换",
+            "pick": "从目录选一个套用参数",
+            "search": "搜索模型目录",
+            "applyNote": "只套用参数，模型 ID 不变。",
+            "clear": "不套用，自己填",
+            "empty": "没有找到，换个关键词试试。"
+          },
+          "presets": "常见值",
+          "effortInfoLabel": "推理强度怎么填"
         },
         "off": {
           "status": "已停用",
@@ -1742,60 +1776,59 @@
           "stalled": "模型请求等待数据超时"
         },
         "origin": {
-          "automatic": "自动",
-          "manual": "手动",
+          "automatic": "跟随默认",
+          "manual": "单独设置",
           "passthrough": "原样转发",
           "unconfigured": "未配置"
         },
         "help": {
-          "automatic": "已按模型名自动匹配。\n供应商顺序跟随 {{backend}} 的默认路由。",
-          "manual": "此模型已保存固定路由。\n不随默认路由调整，可在路由设置中恢复自动。",
+          "automatic": "跟随 {{backend}} 的默认路由，按其中的供应商顺序走。",
+          "manual": "这个模型单独设置了路由，不受默认路由影响。",
           "passthrough": "供应商的模型列表里都没有这个模型。\n会按默认顺序，把这个模型名原样转发给符合条件的 API Key 供应商试试。",
-          "unconfigured": "此模型暂无路由。可在路由设置中配置默认路由或恢复自动。"
+          "unconfigured": "这个模型还没有路由。打开它的路由，调整默认路由或单独设置。"
         },
-        "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
-        "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
         "cacheTtl": {
-          "label": "对话缓存时长",
-          "default": "使用内置估计",
+          "label": "缓存时长",
+          "default": "自动",
           "5m": "5 分钟",
           "30m": "30 分钟",
           "1h": "1 小时",
           "12h": "12 小时",
-          "help": "这个路由级估计决定何时清理旧工具结果。官方 OpenAI Responses GPT-5.6+ 默认使用 30 分钟缓存；选择 30 分钟或 12 小时会显式发送对应的提供商选项。12 小时写入按模型输入价格的 2.5 倍计费，30 分钟写入为 1.25 倍；缓存读取仍使用模型专属读取价格。较早 OpenAI 模型依赖组织策略的 prompt_cache_retention 不会被自动推断。中继不会收到 OpenAI 专用缓存参数。"
+          "help": "供应商会把对话里重复的开头缓存一段时间，这段时间内再发送更便宜、更快。Avibe 按这里的时长判断缓存还在不在。一般保持「自动」；只有确切知道供应商缓存多久时才改。直连官方时，选更长的时长会按更高的缓存写入价计费。",
+          "infoLabel": "缓存时长是什么"
         },
-        "undoDone": "已恢复之前的手动草稿。",
+        "undoDone": "已恢复之前单独设置的草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
-          "automatic": "恢复后：自动匹配",
-          "passthrough": "恢复后：原样转发",
-          "unconfigured": "恢复后：没有供应商提供"
+          "automatic": "保存后：跟随默认路由",
+          "passthrough": "保存后：原样转发",
+          "unconfigured": "保存后：没有供应商提供"
         },
-        "previewLoading": "正在读取继承路由…",
-        "previewFailed": "无法预览继承路由，尚未保存任何更改。请重试或撤销恢复。",
+        "previewLoading": "正在读取默认路由…",
+        "previewFailed": "读不到默认路由，还没有保存任何更改。请重试，或撤销这次切换。",
         "draftEmpty": "草稿中暂无路由条目。",
-        "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「自定义」里为它指定。",
+        "noDefaults": "默认路由里没有列出这个模型的供应商。可以添加一个列出它的供应商，或把已有的加入默认路由；如果你的供应商其实提供它，在「单独设置」里为它指定。",
         "inventoryNotProvided": "模型列表未提供",
         "configureDefaults": "设置默认路由",
         "close": "关闭",
         "cancelChanges": "取消修改",
-        "manualPending": "保存后，此模型将使用手动路由，不再跟随默认路由。",
+        "manualPending": "保存后，这个模型使用单独设置的路由，不再跟随默认路由。",
         "exactModel": "准确模型 ID",
         "moveUp": "上移供应商",
         "moveDown": "下移供应商",
-        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个固定路由",
+        "counts": "{{inherited}} 个模型跟随默认路由 · {{manual}} 个单独设置",
         "errorShort": "错误"
       },
       "order": {
         "title": "{{backend}} · 默认路由",
-        "subtitle": "作用于自动路由，已保存的手动路由保持不变。",
+        "subtitle": "只影响跟随默认路由的模型；单独设置了路由的模型不变。",
         "infoLabel": "关于默认路由",
         "reorder": "调整供应商顺序",
         "section": {
           "ordered": "供应商优先级",
-          "ordered.note": "模型按这个顺序交给列出它的供应商；没有供应商列出的模型，需要设置手动路由。",
+          "ordered.note": "模型按这个顺序交给列出它的供应商；没有供应商列出的模型，需要单独设置路由。",
           "heldOut": "未加入默认路由",
-          "heldOut.note": "可用于手动路由。"
+          "heldOut.note": "单独设置路由时可以选用。"
         },
         "action": {
           "include": "排进来",
@@ -2343,17 +2376,19 @@
         "impact": {
           "refreshFail": "路由已保存，但暂时无法刷新显示。"
         },
-        "hint": "此模型已保存固定路由，默认路由的调整不会覆盖它。",
         "mode": {
           "label": "路由方式",
-          "follow": "跟随默认",
-          "custom": "自定义",
+          "follow": "跟随默认路由",
+          "custom": "单独设置",
           "undo": "撤销",
           "viewDefaults": "查看默认路由",
-          "adjustDefaults": "调整默认路由"
+          "adjustDefaults": "调整默认路由",
+          "infoLabel": "两种路由方式的区别",
+          "followInfo": "：按 {{backend}} 默认路由里的供应商顺序走。默认路由改了，这里跟着变。",
+          "customInfo": "：这个模型用它自己的供应商和顺序，不受默认路由影响。"
         },
         "hopActions": "路由项操作",
-        "modelActions": "模型操作"
+        "advanced": "高级"
       },
       "recent": {
         "title": "最近切换",
@@ -2372,17 +2407,18 @@
         "field": {
           "vendor": "供应商",
           "vendor.custom": "其他供应商 · 自己填写地址",
-          "vendor.hint": "选 DeepSeek / Qwen / Kimi 等时，会自动填好官方地址",
           "vendor.search": "搜索供应商",
           "vendor.empty": "没有同名的供应商",
           "name": "名称(可选)",
           "protocol": "API 格式",
           "protocol.hint": "指定接口不代表凭证有效，也不代表实际模型调用兼容",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "填写 API 根地址，例如 https://api.example.com/v1；只填域名时使用标准 /v1 路径",
+          "baseUrl.hint": "填 API 根地址。只填域名时，会用标准的 /v1 路径。",
           "apiKey": "API Key",
           "apiKey.reveal": "显示 API Key",
-          "apiKey.conceal": "隐藏 API Key"
+          "apiKey.conceal": "隐藏 API Key",
+          "baseUrl.infoLabel": "Base URL 怎么填",
+          "baseUrl.placeholder": "https://api.example.com/v1"
         },
         "pull": {
           "result_one": "拉到 {{count}} 个模型",
@@ -2575,7 +2611,7 @@
       "migration": {
         "open": "迁移配置",
         "title": "迁移到模型网关",
-        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留，迁移时不联网校验 Key 或拉取模型列表。Key 是否可用由后续模型调用确认。",
+        "subtitle": "导入配置文件、Shell 启动文件或受支持凭据库中已保存的认证。",
         "cleanApiKeys": "同时清理原生 CLI 中的 API Key 配置",
         "cleanApiKeysHint": "包括 Shell 启动文件和各 CLI 的配置文件。不勾选时这些 Key 保持原样，经模型网关启动的助手不会使用它们。",
         "empty": "没有检测到可迁移的配置。",
@@ -2622,13 +2658,15 @@
           "claude": "Claude Code 配置",
           "codex": "Codex 配置",
           "opencode": "OpenCode 配置"
-        }
+        },
+        "detailsLabel": "导入时会做什么",
+        "details": "订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留。导入时不联网检查 Key，也不拉取模型列表，Key 能不能用要等实际调用时才知道。"
       },
       "sourceTest": {
         "open": "测试",
         "testNow": "立即测试",
         "title": "测试 {{source}}",
-        "hint": "使用此供应商和选中的模型发送一次简短请求，可能产生少量费用。结果仅代表这个模型。",
+        "hint": "会发一次很短的请求，可能产生少量费用。",
         "cooldownHint": "测试成功会立即恢复这个供应商。",
         "stillUnavailable": "供应商仍标记为暂不可用。",
         "model": "测试模型",
@@ -2690,7 +2728,6 @@
           "title": "编辑 {{source}}",
           "name": "显示名称",
           "baseUrl": "Base URL",
-          "hint": "协议保持不变。更改 Base URL 可能改变可用模型和路由；应用前会先让你确认影响。",
           "cancel": "取消",
           "save": "保存",
           "saving": "保存中…",
@@ -3176,6 +3213,9 @@
       "desktopTitle": "桌面 App 系统通知",
       "desktopHint": "Vault 审批和后台任务完成。只对本机生效，和菜单栏里的开关是同一个。",
       "desktopHintMenuBar": "Vault 审批和后台任务完成。本机的开关在菜单栏图标 › 通知。",
+      "desktopHintAnswers": "Vault 审批、后台任务完成，以及 Agent 等你回复的消息。等你回复的消息可以直接在通知里选或回复。只对这台电脑生效，和菜单栏里的开关是同一个。",
+      "desktopDenied": "macOS 没有允许 Avibe 发通知，所以这台电脑收不到通知，也不能在通知里回复。",
+      "openSystemSettings": "打开系统设置",
       "desktopSaveFailed": "无法保存通知开关，请稍后重试。"
     }
   },
@@ -3638,6 +3678,7 @@
       "maximize": "最大化",
       "restore": "还原",
       "openInNewTab": "在新标签页打开",
+      "openInBrowser": "在浏览器打开",
       "openChat": "打开聊天"
     },
     "preview": {
@@ -5795,8 +5836,16 @@
       "pinToDockCaption": "作为应用从应用栏打开",
       "pinnedConfirm": "已固定 —「{{title}}」已在你的应用栏中",
       "addToHomeTitle": "添加到主屏幕",
-      "addToHomeBodySafari": "点此处在新页面中打开，再点「分享」 →「添加到主屏幕」。",
-      "addToHomeBodyPwa": "复制上方链接，在 Safari 中打开，再点分享 →「添加到主屏幕」。"
+      "addToHomeBodySafari": "打开此 Show Page，然后通过「分享」→「添加到主屏幕」。",
+      "addToDockTitle": "添加到程序坞",
+      "addToDockBodySafari": "在 Safari 中打开此 Show Page，点分享按钮或菜单「文件」，选择「添加到程序坞」。",
+      "openShowPage": "打开 Show Page",
+      "addToSystemTitle": "添加到主屏幕或程序坞",
+      "addToSystemBodyOther": "复制链接，在 Safari 中打开此 Show Page 后添加。",
+      "systemEntryUnavailableTitle": "无法添加到主屏幕或程序坞",
+      "systemEntryUnavailableBody": "这里没有可在 Safari 中打开的分享链接。请联系实例所有者，在「远程访问」中连接 Avibe Cloud。",
+      "openInBrowser": "在浏览器中打开",
+      "openInBrowserBody": "在默认浏览器中打开此 Show Page；如果不是 Safari，请复制链接到 Safari。"
     },
     "titlePlaceholder": "会话标题",
     "pickAgent": "选择 Agent",
@@ -8054,6 +8103,10 @@
     },
     "authorize": "在 iPhone 上授权",
     "opening": "正在打开授权…",
+    "preparing": "正在准备连接…",
+    "connecting": "正在连接 Apple 健康…",
+    "retry": "重试",
+    "reopenApp": "连接未响应。请重新打开 Avibe 后再试。",
     "loading": "正在读取请求…",
     "loadError": "暂时无法获取请求状态。请稍后重新打开此页面。",
     "readOnly": "只读取，不写入健康 App。",

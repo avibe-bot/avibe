@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Copy, ExternalLink, FileText, Image as ImageIcon, LayoutGrid, Loader2, Plus, Share2 } from 'lucide-react';
+import { Check, Copy, ExternalLink, FileText, Image as ImageIcon, LayoutGrid, Loader2, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '../ui/button';
@@ -16,15 +16,17 @@ import {
   hasNativeShareExport,
   isNativeShell,
   nativeSharePresent,
+  openNativeExternal,
   type NativeShareKind,
   type NativeShareResult,
 } from '../../lib/native';
-import { isIosDevice, isRealMobileSafari, isStandalonePwa } from '../../lib/platform';
+import { isIosDevice, isRealMobileSafari, isRealSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+import { ShowPageSystemEntryGuide, type ShowPageSystemEntryMode } from './ShowPageSystemEntryGuide';
 
 type ShowExportKind = Exclude<NativeShareKind, 'link'>;
 
@@ -144,7 +146,19 @@ export const ShowPageShareControl: React.FC<{
   // phone app that predates them explains the update instead.
   const showExport = (nativeShell || exportAvailable) && !!payload && frameVisible;
   const iosStandalone = isIosDevice() && isStandalonePwa();
-  const showAddToHome = !nativeShell && !!link && (iosStandalone || isRealMobileSafari());
+  const safariBrowser = isRealSafari();
+  const iosSafari = isRealMobileSafari();
+  const systemEntryUnavailable = nativeShell && payload?.url_available === false;
+  const showSystemEntry = Boolean(payload && !offline && (link || systemEntryUnavailable));
+  const systemEntryMode: ShowPageSystemEntryMode = systemEntryUnavailable
+    ? 'unavailable'
+    : nativeShell
+      ? 'native'
+      : iosSafari || iosStandalone
+        ? 'ios'
+        : safariBrowser && !isIosDevice()
+          ? 'mac'
+          : 'other';
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
@@ -254,6 +268,11 @@ export const ShowPageShareControl: React.FC<{
     }
   };
 
+  const openInBrowser = async () => {
+    if (!link) return;
+    await openNativeExternal(link);
+  };
+
   const reportShareResult = (result: NativeShareResult) => {
     // The system sheet closing is the whole answer to a completed or cancelled share.
     if (result.status === 'completed' || result.status === 'cancelled') return;
@@ -323,7 +342,7 @@ export const ShowPageShareControl: React.FC<{
           size="icon"
           className={cn(compact
             ? 'size-6 shrink-0 rounded-md text-muted hover:bg-wash hover:text-foreground'
-            : 'size-7 shrink-0', anchorOnly && 'pointer-events-none opacity-0')}
+            : 'size-7 shrink-0', anchorOnly && 'size-7 pointer-events-none opacity-0')}
           aria-label={t('chat.showPage.share')}
           {...(anchorOnly ? { tabIndex: -1, 'aria-hidden': true } : {})}
         >
@@ -462,27 +481,13 @@ export const ShowPageShareControl: React.FC<{
           </p>
         ) : null}
 
-        {showAddToHome ? (
-          <div className="border-t border-border pt-3">
-            <div className="flex items-center gap-1.5 text-xs font-medium text-foreground">
-              <Plus className="size-3.5 shrink-0 text-cyan-ink" />
-              {t('chat.showPage.addToHomeTitle')}
-            </div>
-            {iosStandalone ? (
-              <p className="mt-1 text-xs leading-relaxed text-muted">
-                {t('chat.showPage.addToHomeBodyPwa')}
-              </p>
-            ) : (
-              <a
-                href={link}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 block text-xs leading-relaxed text-foreground underline underline-offset-2"
-              >
-                {t('chat.showPage.addToHomeBodySafari')}
-              </a>
-            )}
-          </div>
+        {showSystemEntry ? (
+          <ShowPageSystemEntryGuide
+            mode={systemEntryMode}
+            link={link}
+            onOpenBrowser={openInBrowser}
+            onCopyLink={copyLink}
+          />
         ) : null}
 
         {payload && canPinToDock ? (

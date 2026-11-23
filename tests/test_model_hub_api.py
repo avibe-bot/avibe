@@ -2847,7 +2847,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
             # Bare `/v1/models` discovery: nothing but the id.
             ModelHubModelConfig(id="gpt-described", provenance="discovered"),
             ModelHubModelConfig(
-                id="gpt-supplier-says",
+                id="gpt-9-example-high",
                 provenance="discovered",
                 display_name="Relay label",
                 reasoning_efforts=["high"],
@@ -2880,7 +2880,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
                     "modalities": {"input": ["text", "image"], "output": ["text"]},
                     "limit": {"context": 400_000, "output": 128_000},
                 },
-                "gpt-supplier-says": {
+                "gpt-9-example": {
                     "name": "Catalog label",
                     "reasoning": True,
                     "reasoning_options": [{"type": "effort", "values": ["low"]}],
@@ -2900,6 +2900,7 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
         "suppliers": rows["gpt-described"]["suppliers"],
         "origin": "provider",
         "models_dev_id": "openai/gpt-described",
+        "match_kind": "exact",
         "context_window": 400_000,
         "max_output_tokens": 128_000,
         "input_modalities": ["text", "image"],
@@ -2908,9 +2909,10 @@ def test_provider_candidates_carry_exact_models_dev_description(tmp_path):
         "supports_reasoning": True,
     }
     # What the suppliers state wins; models.dev only fills what they left unsaid.
-    assert rows["gpt-supplier-says"]["display_name"] == "Relay label"
-    assert rows["gpt-supplier-says"]["reasoning_efforts"] == ["high"]
-    assert rows["gpt-supplier-says"]["models_dev_id"] == "openai/gpt-supplier-says"
+    assert rows["gpt-9-example-high"]["display_name"] == "Relay label"
+    assert rows["gpt-9-example-high"]["reasoning_efforts"] == ["high"]
+    assert rows["gpt-9-example-high"]["models_dev_id"] == "openai/gpt-9-example"
+    assert rows["gpt-9-example-high"]["match_kind"] == "closest"
     # Nobody states a ladder: the tiers the backend's request protocol accepts —
     # fixed for Codex and Claude, the model family's for OpenCode — and no
     # description.

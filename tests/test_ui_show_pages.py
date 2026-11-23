@@ -99,6 +99,71 @@ def _active_org_cookie(config, email="member@example.com", subject="member-1", *
     )
 
 
+def test_show_runtime_entry_injection_adds_exact_manifest_and_platform_meta():
+    content = b"""<!doctype html>
+<html><head><title>Custom</title></head><body><div id="root"></div></body></html>"""
+    config = ui_server._show_system_entry_config(
+        title="Q4 Roadmap",
+        base_path="/p/limited-link/",
+        icon_url="/p/limited-link/__show/icon?v=icon-v1",
+        language="en",
+    )
+
+    injected = ui_server._inject_show_system_entry(
+        content,
+        config,
+        base_path="/p/limited-link/",
+    ).decode("utf-8")
+
+    assert '<link rel="manifest" href="/p/limited-link/__show/manifest.webmanifest" crossorigin="use-credentials">' in injected
+    assert '<link rel="apple-touch-icon" href="/p/limited-link/__show/icon?v=icon-v1">' in injected
+    assert 'name="apple-mobile-web-app-title" content="Q4 Roadmap"' in injected
+    assert 'name="avibe-show-system-entry"' in injected
+    assert 'src="/p/limited-link/__show/system-entry.js"' in injected
+    assert "/p/limited-link/" in injected
+    assert "token" not in injected.lower()
+
+
+def test_show_runtime_entry_script_keeps_limited_page_copy_localized():
+    english = ui_server._show_system_entry_config(
+        title="Demo",
+        base_path="/p/demo/",
+        icon_url="/apple-touch-icon.png",
+        language="en",
+    )
+    chinese = ui_server._show_system_entry_config(
+        title="演示",
+        base_path="/p/demo/",
+        icon_url="/apple-touch-icon.png",
+        language="zh",
+    )
+
+    assert english["copy"]["cta"] == "Add to Home Screen or Dock"
+    assert chinese["copy"]["cta"] == "添加到主屏幕或程序坞"
+    assert english["copy"]["iosCta"] == "Add to Home Screen"
+    assert english["copy"]["macCta"] == "Add to Dock"
+    assert chinese["copy"]["iosCta"] == "添加到主屏幕"
+    assert chinese["copy"]["macCta"] == "添加到程序坞"
+    assert english["copy"]["cta"] != chinese["copy"]["cta"]
+
+
+def test_show_runtime_entry_script_is_small_dismissible_and_standalone_safe():
+    script = ui_server._SHOW_SYSTEM_ENTRY_SCRIPT_BODY
+
+    assert "display-mode: standalone" in script
+    assert "navigator.standalone" in script
+    assert "attachShadow({ mode: 'open' })" in script
+    assert "data-avibe-show-system-entry" in script
+    assert "window.localStorage" in script
+    assert "savePreference('dismissed')" in script
+    assert "root.remove()" in script
+    assert "data-avibe-show-system-entry-spacer" in script
+    assert "button.hidden = open" in script
+    assert "collapseButton" in script
+    assert "aria-labelledby" in script
+    assert "aria-live" in script
+
+
 class _FakeShowRuntimeManager:
     def __init__(
         self,
@@ -1479,6 +1544,16 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
     set_show_runtime_manager_for_tests(manager)
     try:
         client = app.test_client()
+        # Metadata must not turn a missing guest identity into public access.
+        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js", "__show/icon"):
+            anonymous = client.get(
+                f"/p/{share_id}/{installed_resource}",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+                follow_redirects=False,
+            )
+            assert anonymous.status_code == 302
+            assert anonymous.headers["Cache-Control"] == "private, no-store"
         login = client.get(
             f"/p/{share_id}/",
             base_url="https://alex.avibe.bot",
@@ -1554,6 +1629,24 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
         )
         assert events.status_code == 404
 
+        # A non-member recipient can install this exact limited route; metadata
+        # has the same admission boundary as its content, never a management gate.
+        manifest = client.get(
+            f"/p/{share_id}/__show/manifest.webmanifest",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert manifest.status_code == 200
+        identity = json.loads(manifest.content)
+        assert identity["id"] == identity["start_url"] == identity["scope"] == f"/p/{share_id}/"
+        assert manifest.headers["Cache-Control"] == "private, no-store"
+        guidance = client.get(
+            f"/p/{share_id}/__show/system-entry.js",
+            base_url="https://alex.avibe.bot",
+            environ_base=_remote_peer(),
+        )
+        assert guidance.status_code == 200
+
         store = ShowPageStore()
         try:
             access = store.get_access("ses123")
@@ -1568,6 +1661,15 @@ def test_limited_show_guest_is_rechecked_after_access_changes(
             assert removed.status == "applied"
         finally:
             store.close()
+
+        for installed_resource in ("__show/manifest.webmanifest", "__show/system-entry.js", "__show/icon"):
+            denied = client.get(
+                f"/p/{share_id}/{installed_resource}",
+                base_url="https://alex.avibe.bot",
+                environ_base=_remote_peer(),
+            )
+            assert denied.status_code == 404
+            assert denied.headers["Cache-Control"] == "private, no-store"
 
         existing_asset = client.get(
             f"/p/{share_id}/app.js",

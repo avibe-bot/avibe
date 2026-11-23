@@ -8,6 +8,7 @@ import logging
 import time
 from typing import Any
 
+from core.warm_gc_baseline import observe_service_startup
 from config.paths import ensure_data_dirs, get_logs_dir
 from vibe.logging_config import (
     APPLICATION_LOG_BACKUP_COUNT,
@@ -179,6 +180,7 @@ def _request_controller_loop_stop(controller: Any) -> bool:
 def main():
     """Main entry point"""
     process_started_at = time.monotonic()
+    observe_service_startup()
     lock_acquired = False
     macos_session_diagnostics = None
     controller = None

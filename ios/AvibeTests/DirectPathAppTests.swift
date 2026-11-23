@@ -591,6 +591,63 @@ final class DirectPathAppTests: XCTestCase {
     }
 
     @MainActor
+    func testBothScheduleKindsKeepTheirIntentThroughConfirmationReceiptAndCancellation() async throws {
+        for kind in SystemScheduleKind.allCases {
+            let now = Date(timeIntervalSince1970: 1_800_000_000)
+            let platform = RuntimeSystemSchedulePlatform()
+            platform.supportsReminders = true
+            let app = try await makeApp(
+                directTransport: nil,
+                systemSchedulePlatform: platform,
+                systemScheduleNow: { now }
+            )
+            let runtime = try await select("instance-1", in: app)
+            let page = try await showRuntimePage(app, runtime)
+            defer { page.close() }
+            var params = scheduleParams(
+                requestID: "create-\(kind.rawValue)",
+                operationID: "operation-1",
+                now: now
+            )
+            params["kind"] = kind.rawValue
+            params["title"] = kind == .alarm ? "Wake up" : "取快递"
+            let requestParams = params
+            let creation = Task { @MainActor in
+                try await page.systemScheduleRequest(requestParams)
+            }
+            try await eventually { app.systemScheduleConfirmation != nil }
+            let confirmation = try XCTUnwrap(app.systemScheduleConfirmation)
+            XCTAssertEqual(confirmation.request.kind, kind)
+            XCTAssertEqual(confirmation.request.title, params["title"] as? String)
+            XCTAssertEqual(platform.systemCreationCalls, 0)
+
+            app.confirmSystemSchedule(id: confirmation.id)
+            let receipt = try jsonObject(try await creation.value)
+            XCTAssertEqual(receipt["kind"] as? String, kind.rawValue)
+            XCTAssertEqual(receipt["state"] as? String, "scheduled")
+            XCTAssertEqual(receipt["systemIdentifier"] as? String, "system-1")
+            XCTAssertEqual(platform.systemCreationCalls, 1)
+            XCTAssertNil(app.systemScheduleConfirmation)
+
+            let cancellation = try jsonObject(try await page.systemScheduleCancel(
+                requestID: "cancel-\(kind.rawValue)",
+                operationID: "operation-1",
+                kind: kind.rawValue
+            ))
+            XCTAssertEqual(cancellation["kind"] as? String, kind.rawValue)
+            XCTAssertEqual(cancellation["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.cancelIdentifiers, ["system-1"])
+            let repeated = try jsonObject(try await page.systemScheduleCancel(
+                requestID: "repeat-cancel-\(kind.rawValue)",
+                operationID: "operation-1",
+                kind: kind.rawValue
+            ))
+            XCTAssertEqual(repeated["state"] as? String, "cancelled")
+            XCTAssertEqual(platform.cancelCalls, 1)
+        }
+    }
+
+    @MainActor
     func testDeferredColdLogoutRemainsUnmanagedThroughAppRecoveryAndAccountReopen() async throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let directory = FileManager.default.temporaryDirectory
@@ -2059,77 +2116,83 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testBridgeFreezesAuthorityBeforeItsTaskForCreateAndCancel() async throws {
         for action in ["create", "cancel"] {
-            let now = Date(timeIntervalSince1970: 1_800_000_000)
-            let platform = RuntimeSystemSchedulePlatform()
-            let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
-                                        systemScheduleNow: { now })
-            let runtime = try await select("instance-1", in: app)
-            let originalIdentity = app.runtimeIdentity
-            var captures = 0
-            var capturedAdmission: SystemScheduleAdmission?
-            var deliveries = 0
-            let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
-                captures += 1
-                capturedAdmission = admission
-                withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
-                guard case .authorized(let context) = admission else {
-                    XCTFail("trusted primary source must be admitted")
-                    return
+            // The page's process has ended under this test on CI: see
+            // `onceMoreIfItsPageProcessEnded`.
+            try await onceMoreIfItsPageProcessEnded { shown in
+                let now = Date(timeIntervalSince1970: 1_800_000_000)
+                let platform = RuntimeSystemSchedulePlatform()
+                let app = try await makeApp(directTransport: nil, systemSchedulePlatform: platform,
+                                            systemScheduleNow: { now })
+                let runtime = try await select("instance-1", in: app)
+                let originalIdentity = app.runtimeIdentity
+                var captures = 0
+                var capturedAdmission: SystemScheduleAdmission?
+                var deliveries = 0
+                let controller = try makeRuntimeController(app, runtime, afterScheduleAdmission: { admission in
+                    captures += 1
+                    capturedAdmission = admission
+                    withUnsafeCurrentTask { XCTAssertNil($0, "admission must precede NativeBridge's Task") }
+                    guard case .authorized(let context) = admission else {
+                        XCTFail("trusted primary source must be admitted")
+                        return
+                    }
+                    XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                    app.openSelectedInstance(path: "/")
+                    XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
+                }, onScheduleDelivery: { admission in
+                    deliveries += 1
+                    guard case .authorized(let context) = admission else {
+                        XCTFail("delivery must carry the original admission")
+                        return
+                    }
+                    XCTAssertEqual(context.runtimeIdentity, originalIdentity)
+                    XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
+                })
+                app.registerRuntimeController(controller, for: runtime)
+                let page = try RuntimePage(controller: controller)
+                // Recorded before its first load, which is also the page's.
+                shown.page = page
+                defer { page.close() }
+                try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+                let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
+                let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
+                let store = try XCTUnwrap(appScheduleStore)
+                let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
+                if action == "cancel" {
+                    var record = cleanupPendingRecord(request: request, owner: owner,
+                        systemIdentifier: "must-remain", updatedAt: now)
+                    record.lifecycle = .managedScheduled
+                    record.createState = .scheduled
+                    XCTAssertTrue(store.save(record))
                 }
-                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
-                app.openSelectedInstance(path: "/")
-                XCTAssertNotEqual(app.runtimeIdentity, originalIdentity)
-            }, onScheduleDelivery: { admission in
-                deliveries += 1
-                guard case .authorized(let context) = admission else {
-                    XCTFail("delivery must carry the original admission")
-                    return
+                let payload: [String: Any] = action == "create" ? params : [
+                    "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
+                ]
+                let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
+                    method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
+                // Reopening retires the old factory as well. It may refuse delivery
+                // before AppModel, but may never resolve into the replacement owner.
+                if let receipt = bridgeResult["receipt"] as? [String: Any] {
+                    XCTAssertEqual(action, "create")
+                    XCTAssertEqual(receipt["state"] as? String, "stale_context")
+                } else {
+                    XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
                 }
-                XCTAssertEqual(context.runtimeIdentity, originalIdentity)
-                XCTAssertNotEqual(context.runtimeIdentity, app.runtimeIdentity)
-            })
-            app.registerRuntimeController(controller, for: runtime)
-            let page = try RuntimePage(controller: controller)
-            defer { page.close() }
-            try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
-            let params = scheduleParams(requestID: "old-\(action)", operationID: "target", now: now)
-            let request = try XCTUnwrap(SystemScheduleRequest.parse(params))
-            let store = try XCTUnwrap(appScheduleStore)
-            let owner = try XCTUnwrap(store.managementOwner(accountID: "account-1"))
-            if action == "cancel" {
-                var record = cleanupPendingRecord(request: request, owner: owner,
-                    systemIdentifier: "must-remain", updatedAt: now)
-                record.lifecycle = .managedScheduled
-                record.createState = .scheduled
-                XCTAssertTrue(store.save(record))
-            }
-            let payload: [String: Any] = action == "create" ? params : [
-                "requestId": "old-cancel", "operationId": "target", "kind": "alarm", "purpose": "user"
-            ]
-            let bridgeResult = try jsonObject(try await page.systemScheduleOutcome(
-                method: action == "create" ? "systemSchedule.request" : "systemSchedule.cancel", params: payload))
-            // Reopening retires the old factory as well. It may refuse delivery
-            // before AppModel, but may never resolve into the replacement owner.
-            if let receipt = bridgeResult["receipt"] as? [String: Any] {
-                XCTAssertEqual(action, "create")
-                XCTAssertEqual(receipt["state"] as? String, "stale_context")
-            } else {
-                XCTAssertEqual(bridgeResult["errorCode"] as? String, "forbidden")
-            }
-            XCTAssertEqual(captures, 1)
-            XCTAssertLessThanOrEqual(deliveries, 1)
-            let originalAdmission = try XCTUnwrap(capturedAdmission)
-            let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
-            XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
-            let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
-                operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
-            XCTAssertNil(deliveredCancel)
-            XCTAssertEqual(platform.scheduleCalls, 0)
-            XCTAssertEqual(platform.cancelCalls, 0)
-            XCTAssertNil(app.systemScheduleConfirmation)
-            if action == "cancel" {
-                XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
-                               .managedScheduled)
+                XCTAssertEqual(captures, 1)
+                XCTAssertLessThanOrEqual(deliveries, 1)
+                let originalAdmission = try XCTUnwrap(capturedAdmission)
+                let deliveredCreate = await app.requestSystemSchedule(request, admission: originalAdmission)
+                XCTAssertEqual(deliveredCreate["state"] as? String, "stale_context")
+                let deliveredCancel = await app.cancelSystemSchedule(.init(requestID: "old-cancel",
+                    operationID: "target", kind: .alarm, purpose: .user), admission: originalAdmission)
+                XCTAssertNil(deliveredCancel)
+                XCTAssertEqual(platform.scheduleCalls, 0)
+                XCTAssertEqual(platform.cancelCalls, 0)
+                XCTAssertNil(app.systemScheduleConfirmation)
+                if action == "cancel" {
+                    XCTAssertEqual(store.record(operationID: "target", instanceID: "instance-1", owner: owner)?.lifecycle,
+                                   .managedScheduled)
+                }
             }
         }
     }
@@ -2154,15 +2217,25 @@ final class DirectPathAppTests: XCTestCase {
 
     @MainActor
     func testSameOriginReturnDoesNotReviveARequestRevokedAtProvisionalStart() async throws {
-        // WebKit can end a page's WebContent process under a test (seen on
-        // CI at its network process's request, run 44658571690). The page's
-        // load or its bridge call in flight then fails, and the scenario
-        // cannot be finished without its page. So it is run once more, from
-        // the start, only when the fixture saw that page's process end; any
-        // other failure, and a second ended process, fails the test.
+        try await onceMoreIfItsPageProcessEnded { record in
+            try await self.sameOriginReturnScenario(recording: record)
+        }
+    }
+
+    /// WebKit can end a page's WebContent process under a test (seen on CI
+    /// at its network process's request, run 44658571690). The page's load
+    /// or its bridge call in flight then fails, and the scenario cannot be
+    /// finished without its page. So `scenario` is run once more, from the
+    /// start, only when the fixture saw the page it recorded lose its
+    /// process; any other failure, and a second ended process, fails the
+    /// test. Only for a test with such a failure on record.
+    @MainActor
+    private func onceMoreIfItsPageProcessEnded(
+        _ scenario: @MainActor (RuntimePageRecord) async throws -> Void
+    ) async throws {
         let first = RuntimePageRecord()
         do {
-            try await sameOriginReturnScenario(recording: first)
+            try await scenario(first)
             return
         } catch where first.page?.webContentProcessTerminated == true {
             print("[iOS fixture] stage=scenario run again, its page's process ended: \(error)")
@@ -2170,7 +2243,7 @@ final class DirectPathAppTests: XCTestCase {
         // A page whose first load failed was never handed to the scenario,
         // which closes the ones it gets. Closing twice is harmless.
         first.page?.close()
-        try await sameOriginReturnScenario(recording: RuntimePageRecord())
+        try await scenario(RuntimePageRecord())
     }
 
     @MainActor
@@ -3137,17 +3210,28 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     func testContinuousRuntimeOpenTimerUsesTheScheduleCallAsItsDeadlineOrigin() async throws {
         let timing = ContinuousRuntimeOpenTiming()
-        var fired = false
-        let timer = timing.schedule(after: .milliseconds(80)) {
-            fired = true
+        var fired: [String] = []
+        let held = timing.schedule(after: .milliseconds(80)) {
+            fired.append("scheduled before the hold")
         }
+        // The main actor is held past that timer's deadline.
         let holdUntil = ContinuousClock.now.advanced(by: .milliseconds(120))
         while ContinuousClock.now < holdUntil {
             _ = 1 + 1
         }
-        try await Task.sleep(for: .milliseconds(20))
-        XCTAssertTrue(fired)
-        withExtendedLifetime(timer) {}
+        // A second timer, scheduled only now and for less than the first
+        // one's whole delay. Counted from its schedule call, the first
+        // timer's deadline is already past, so it fires first. Counted from
+        // when its task first ran, which is after the hold, it would be due
+        // 80 ms from here and fire after this one. The order holds however
+        // long a loaded simulator takes over either: no margin is waited.
+        let reference = timing.schedule(after: .milliseconds(60)) {
+            fired.append("scheduled after the hold")
+        }
+        try await eventually { fired.count == 2 }
+        XCTAssertEqual(fired, ["scheduled before the hold", "scheduled after the hold"])
+        withExtendedLifetime(held) {}
+        withExtendedLifetime(reference) {}
     }
 
     @MainActor
@@ -3920,6 +4004,7 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
         app.registerRuntimeController(controller, for: runtime)
 
         enterBackground()
@@ -4538,6 +4623,17 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertNotNil(controller.livePrimaryWebView, file: file, line: line)
         if let directTransport {
+            // The transport is selected only for a routed host. A listener
+            // fault, or a first bind slower than the App's listener wait,
+            // leaves the host on the public path with no selection at all;
+            // say which rather than fail below on a selection that was
+            // never made.
+            XCTAssertFalse(
+                app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
+                whyNoHostIsRouted(by: app),
+                file: file,
+                line: line
+            )
             XCTAssertEqual(open.routes, [.loading, .browser(runtime)], file: file, line: line)
             let target = try XCTUnwrap(directTransport.selections.last, file: file, line: line)
             XCTAssertEqual(target.runtime, runtime, file: file, line: line)
@@ -4970,7 +5066,6 @@ final class DirectPathAppTests: XCTestCase {
         let controller = try makeRuntimeController(app, reopened)
         app.registerRuntimeController(controller, for: reopened)
         let page = try RuntimePage(controller: controller)
-        defer { page.close() }
         try await page.load(
             """
             <!doctype html><script>
@@ -4986,6 +5081,11 @@ final class DirectPathAppTests: XCTestCase {
         )
         app.didFinishRuntimeLoading()
         try await eventually { try await page.changes() == #"["/chat/waited"]"# }
+        // Closed before the App closes the page itself below: on iOS 27 a
+        // page closed after its controller was invalidated keeps the store
+        // in use past the teardown.
+        page.close()
+        withExtendedLifetime(controller) {}
 
         // No answer: the instance list, and what waited goes with it.
         confirmSession(in: defaults, daysAgo: 15)
@@ -4998,7 +5098,13 @@ final class DirectPathAppTests: XCTestCase {
         }
         XCTAssertNil(app.runtimeOpenAttempt)
         XCTAssertFalse(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
-        withExtendedLifetime(controller) {}
+
+        // An answer again ends the test settled: no session read is left
+        // on its last transport when the teardown removes the store.
+        session.replace(with: Self.signedInSessionAnswer)
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
+        _ = try await waitForBrowser("instance-2", in: app)
+        XCTAssertTrue(app.mobileSessionCoordinator.sessionConfirmationIsCurrent)
     }
 
     /// With a direct transport an open waits for its route before its
@@ -5109,9 +5215,39 @@ final class DirectPathAppTests: XCTestCase {
             sessionResponse: { withoutInstanceOne },
             reusingDefaults: defaults
         )
-        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
-            (try? recorded()[originOne]) == nil && next.mobileSessionCoordinator.currentAccount != nil
+        // The removal is one attempt for each signed-in answer. One that
+        // cannot finish in its bounds (its page has 10 s to load and each of
+        // its steps 8 s; a web content launch on the CI simulator can take
+        // longer) leaves everything in place and is made again at the next
+        // answer, by design. The launch gave one answer. So while the
+        // address is still recorded the App is asked again, through its own
+        // session check, as a later launch or refresh asks: one check at a
+        // time, 10 s after the last one ended. A newer answer waits for a
+        // running attempt, so this is a few attempts, not one per check.
+        let checks = SessionChecks()
+        let clock = ContinuousClock()
+        let began = clock.now
+        do {
+            try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+                let signedIn = next.mobileSessionCoordinator.currentAccount != nil
+                if signedIn, (try? recorded()[originOne]) == nil {
+                    return true
+                }
+                if signedIn {
+                    checks.askAgainIfDue(next, at: clock.now)
+                }
+                return false
+            }
+        } catch {
+            print("[iOS fixture] stage=departed address still recorded, after=\(began.duration(to: clock.now)), answers=\(1 + checks.asked)")
+            await checks.settle()
+            throw error
         }
+        // A check still in flight ends before the fixture removes its store.
+        await checks.settle()
+        // How long the removal took and how many answers it needed: one
+        // answer and a few seconds when the first attempt succeeded.
+        print("[iOS fixture] stage=departed address removed, after=\(began.duration(to: clock.now)), answers=\(1 + checks.asked)")
         XCTAssertNil(next.runtimePageCache.page(accountID: "account-1", origin: originOne))
         XCTAssertEqual(choices.preference(accountID: "account-1", origin: originOne), .automatic)
         // The listed instance keeps its own.
@@ -5185,7 +5321,8 @@ final class DirectPathAppTests: XCTestCase {
                 root = RootViewStandIn(
                     app: app,
                     notifications: notifications,
-                    registration: registration
+                    registration: registration,
+                    didMake: { [weak self] in self?.trackOwner($0) }
                 )
             }
         )
@@ -5217,7 +5354,8 @@ final class DirectPathAppTests: XCTestCase {
         let root = RootViewStandIn(
             app: app,
             notifications: notifications,
-            registration: registration
+            registration: registration,
+            didMake: { [weak self] in self?.trackOwner($0) }
         )
         for index in 0..<10 {
             let instanceID = index.isMultiple(of: 2) ? "instance-1" : "instance-2"
@@ -5400,6 +5538,7 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
         app.registerRuntimeController(controller, for: runtime)
         controller.loadViewIfNeeded()
         return controller
@@ -5546,12 +5685,13 @@ final class DirectPathAppTests: XCTestCase {
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
         _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-2")
         _ = try await waitForBrowser("instance-2", in: app)
-        // The transport is selected only for a routed host. A first bind
-        // slower than the App's listener wait leaves the host on the public
-        // path with no selection at all; say so rather than time out below.
+        // The transport is selected only for a routed host. A listener fault,
+        // or a first bind slower than the App's listener wait, leaves the
+        // host on the public path with no selection at all; say which rather
+        // than time out below.
         XCTAssertFalse(
             app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
-            "The App routed no host: its first bind was slower than the listener wait, so nothing is selected."
+            whyNoHostIsRouted(by: app)
         )
         // The transport's selection follows the browser asynchronously: wait
         // for it rather than for a fixed time a loaded simulator may exceed.
@@ -7121,6 +7261,32 @@ final class DirectPathAppTests: XCTestCase {
 
     private var storeIdentifiers: Set<UUID> = []
     private var releaseFixtureApps: [@MainActor () -> Void] = []
+    /// Whether an App or a runtime controller this test made is still
+    /// alive: either keeps its store (a controller through its WebViews).
+    private var fixtureOwnerIsAlive: [@MainActor () -> Bool] = []
+    /// Stores WebKit alone still held when their test ended, and since
+    /// when. Later teardowns try them again; see `removeTrackedStores`.
+    @MainActor private static var storesWebKitStillHolds: [UUID: Date] = [:]
+
+    /// The class is done: one more try for what WebKit still held. What it
+    /// still holds now is printed, with for how long, and is not a failure.
+    override class func tearDown() {
+        MainActor.assumeIsolated {
+            guard !DirectPathAppTests.storesWebKitStillHolds.isEmpty else { return }
+            let finished = XCTestExpectation(description: "final store sweep")
+            Task { @MainActor in
+                await DirectPathAppTests.retryStoresWebKitStillHolds()
+                finished.fulfill()
+            }
+            _ = XCTWaiter.wait(for: [finished], timeout: 10)
+            for (identifier, since) in DirectPathAppTests.storesWebKitStillHolds {
+                print("[iOS fixture] stage=class end, identifier=\(identifier), "
+                    + "WebKit still holds it after \(Int(Date().timeIntervalSince(since))) s")
+            }
+            DirectPathAppTests.storesWebKitStillHolds.removeAll()
+        }
+        super.tearDown()
+    }
     private func scheduleParams(
         requestID: String,
         operationID: String,
@@ -7170,13 +7336,24 @@ final class DirectPathAppTests: XCTestCase {
         return answer
     }
 
+    /// Why the App routed no host, as far as the App itself says. Two things
+    /// leave a host on the public path with nothing selected and no listener
+    /// to find, both by design: the listener faulted (seen on CI after one
+    /// of the simulator's system services was interrupted, run 44934936305),
+    /// or its first bind and ownership check were slower than the App's
+    /// listener wait (1 s). The App reports only the first.
+    @MainActor
+    private func whyNoHostIsRouted(by app: AppModel) -> String {
+        app.directListenerFault
+            ? "The App routed no host: its listener faulted, so the host loads on the public path, nothing is selected and no listener serves."
+            : "The App routed no host and reports no listener fault: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+    }
+
     /// The App's direct listener, found from outside: the one new listening
     /// socket on 127.0.0.1 since `baseline`. First, through WebKit's own
-    /// store, that the App routed its host at all. A first bind and ownership
-    /// check slower than the App's listener wait (1 s) leave the host on the
-    /// public path and stop the listener, by design; then there is no
-    /// listener to find, and the failure says so instead of reading as a
-    /// scan that missed one.
+    /// store, that the App routed its host at all: when it did not, there is
+    /// no listener to find, and the failure says why (`whyNoHostIsRouted`)
+    /// instead of reading as a scan that missed one.
     @MainActor
     private func directListenerPort(
         of app: AppModel,
@@ -7186,7 +7363,7 @@ final class DirectPathAppTests: XCTestCase {
     ) throws -> NWEndpoint.Port {
         XCTAssertFalse(
             app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty,
-            "The App routed no host: its first bind was slower than the listener wait, so it loads on the public path and serves no listener.",
+            whyNoHostIsRouted(by: app),
             file: file,
             line: line
         )
@@ -7240,23 +7417,43 @@ final class DirectPathAppTests: XCTestCase {
             listening = try listeningSockets()
         }
         source.appModel = app
-        // The probe's stream, then the relay's.
+        // The probe's stream, then the relay's. The dial waits for it: see
+        // below.
         let connection = DirectIrohFakeConnection(
             log: log,
             remote: DirectIrohFixtures.instanceEndpoint,
             answers: [DirectIrohFakeConnection.established, DirectIrohFakeConnection.established]
         )
-        engine.prepare().connection.resolve(connection)
+        let endpoint = engine.prepare()
 
         let runtime = try await select("instance-1", in: app)
         let controller = try makeRuntimeController(app, runtime)
         app.registerRuntimeController(controller, for: runtime)
         let page = try RuntimePage(controller: controller)
         // A document of the instance's origin, loaded here before the path
-        // comes up: the runtime's own load of the instance would otherwise
-        // send WebKit's own CONNECT through the route, and could take the
-        // relay's stream below.
+        // comes up.
         try await page.load(RuntimePage.recordingDocument, baseURL: runtime.instance.url)
+        // The runtime's own load of the instance sends WebKit's own CONNECT
+        // through the route. With no path up it ends on the public leg. Once
+        // the path is up it would be a direct relay and take the stream the
+        // CONNECT below is to get (seen on CI, run 44981277303: the path came
+        // up first, `504` here, and four streams). So the dial is held until
+        // the App has recorded that CONNECT's end; WebKit sends it once its
+        // processes are running.
+        guard !app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty else {
+            // Nothing of the runtime's goes through the listener then.
+            XCTFail(whyNoHostIsRouted(by: app))
+            throw DirectTestTimeout()
+        }
+        do {
+            try await eventually(timeout: WebKitReadiness.webContentLaunch) {
+                self.directStatus(app, self.instance)?.races.isEmpty == false
+            }
+        } catch {
+            XCTFail("WebKit's own CONNECT for the runtime's load never reached the App's listener.")
+            throw error
+        }
+        endpoint.connection.resolve(connection)
         try await eventually {
             // A request made before the WebView existed is asked again.
             scheduler.fire(Self.patientIrohTiming.pageRetrySeconds)
@@ -7691,7 +7888,7 @@ final class DirectPathAppTests: XCTestCase {
         onScheduleDelivery: ((SystemScheduleAdmission) -> Void)? = nil
     ) throws -> WebViewController {
         let origin = try XCTUnwrap(WebOrigin(url: runtime.instance.url))
-        return WebViewController(
+        let controller = WebViewController(
             instanceOrigin: origin,
             websiteDataStore: app.runtimeWebsiteDataStore,
             deviceID: { [weak app] in app?.systemScheduleDeviceID },
@@ -7716,14 +7913,70 @@ final class DirectPathAppTests: XCTestCase {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        trackOwner(controller)
+        return controller
+    }
+
+    /// A runtime controller this test made on a tracked store keeps that
+    /// store until it is released (`removeTrackedStores`).
+    @MainActor
+    private func trackOwner(_ controller: WebViewController) {
+        fixtureOwnerIsAlive.append { [weak controller] in controller != nil }
     }
 
     /// The App made real named stores; remove exactly those.
     @MainActor
     private func trackStore(of app: AppModel) {
         storeIdentifiers.insert(app.websiteDataStore.identifier)
+        fixtureOwnerIsAlive.append { [weak app] in app != nil }
     }
 
+    @MainActor
+    private static func registeredStores() async -> Set<UUID> {
+        await withCheckedContinuation { continuation in
+            WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
+                continuation.resume(returning: Set($0))
+            }
+        }
+    }
+
+    /// WebKit's answer for a store none of our pages uses any more, while a
+    /// web process of its own for that store has not shut down yet (iOS 27).
+    /// A store one of our pages still uses is "Data store is in use".
+    private static func isHeldByWebKitAlone(_ error: Error?) -> Bool {
+        error?.localizedDescription == "Data store is in use (by network process)"
+    }
+
+    /// One try for each store WebKit still held at an earlier teardown.
+    @MainActor
+    private static func retryStoresWebKitStillHolds() async {
+        for (identifier, since) in storesWebKitStillHolds {
+            let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            if await !registeredStores().contains(identifier) {
+                storesWebKitStillHolds[identifier] = nil
+                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                    + "\(Int(Date().timeIntervalSince(since))) s after its test")
+            } else if !isHeldByWebKitAlone(error) {
+                storesWebKitStillHolds[identifier] = nil
+                XCTFail("Fixture store still registered: \(identifier); error=\(String(describing: error))")
+            }
+        }
+    }
+
+    /// Removes the stores this test's Apps used.
+    ///
+    /// What the test owns is asserted here: its Apps and runtime controllers
+    /// are released and no page of theirs uses a store, within the same 5 s
+    /// as before.
+    ///
+    /// On iOS 27 WebKit keeps a store while a web process of its own for it
+    /// has not shut down, and answers every removal "in use (by network
+    /// process)" until then. That process waits for the web content to
+    /// answer what WebKit last asked it: 11 ms at the median on CI, but over
+    /// 30 s for 3 of 683 processes in one run of this class, and five
+    /// minutes for one that never answered. No wait covers that, so such a
+    /// store, once nothing of the test that holds it is alive, is left to
+    /// later teardowns (one try each) and to the class's own.
     @MainActor
     private func removeTrackedStores() async {
         // Release every App's runtime/account views before removing any
@@ -7732,24 +7985,31 @@ final class DirectPathAppTests: XCTestCase {
         for release in releaseFixtureApps { release() }
         releaseFixtureApps.removeAll()
         print("[iOS fixture] stage=App views invalidated before store removal")
+        await Self.retryStoresWebKitStillHolds()
         for identifier in storeIdentifiers {
             var removed = false
             var lastError: Error?
             for _ in 0..<50 {
                 lastError = await AccountWebsiteDataStoreOperations.live
                     .removeIdentifier(identifier)
-                let registered = await withCheckedContinuation { continuation in
-                    WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                        continuation.resume(returning: Set($0))
-                    }
-                }
-                if !registered.contains(identifier) {
+                if await !Self.registeredStores().contains(identifier) {
                     removed = true
                     break
                 }
                 try? await Task.sleep(for: .milliseconds(100))
             }
-            XCTAssertTrue(removed, "Fixture store still registered: \(identifier); error=\(String(describing: lastError))")
+            let ownerAlive = fixtureOwnerIsAlive.contains { $0() }
+            if !removed, !ownerAlive, Self.isHeldByWebKitAlone(lastError) {
+                Self.storesWebKitStillHolds[identifier] = Date()
+                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
+                    + "WebKit still holds it: left to a later teardown")
+                continue
+            }
+            XCTAssertTrue(
+                removed,
+                "Fixture store still registered: \(identifier); an App or controller of this test is still alive: \(ownerAlive); "
+                    + "error=\(String(describing: lastError))"
+            )
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
         }
         storeIdentifiers.removeAll()
@@ -8025,6 +8285,7 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
     private(set) var scheduleCalls = 0
     private(set) var systemCreationCalls = 0
     private(set) var cancelCalls = 0
+    var supportsReminders = false
     var holdBeforeSystemCreation = false
     var holdAfterSystemCreation = false
     var onCreationSuspended: (() -> Void)?
@@ -8047,9 +8308,9 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
             iosVersion: "26.6.2",
             alarmKitAvailable: true,
             alarmAuthorization: .authorized,
-            remindersAvailable: false,
-            remindersAuthorization: .unsupported,
-            supportedKinds: [.alarm]
+            remindersAvailable: supportsReminders,
+            remindersAuthorization: supportsReminders ? .authorized : .unsupported,
+            supportedKinds: supportsReminders ? [.alarm, .reminder] : [.alarm]
         )
     }
 
@@ -8132,6 +8393,39 @@ private final class RuntimeSystemSchedulePlatform: SystemSchedulePlatforming {
         creationResultContinuation = nil
         holdAfterSystemCreation = false
         continuation?.resume()
+    }
+}
+
+/// The App's own session checks, asked for by a test that waits for
+/// something the App does at each signed-in answer: one at a time, and not
+/// sooner than `spacing` after the last one ended.
+@MainActor
+private final class SessionChecks {
+    private static let spacing: Duration = .seconds(10)
+    private(set) var asked = 0
+    private var running: Task<Void, Never>?
+    private var lastEnded: ContinuousClock.Instant?
+
+    func askAgainIfDue(_ app: AppModel, at now: ContinuousClock.Instant) {
+        guard let since = lastEnded else {
+            // The launch's own answer has just been given.
+            lastEnded = now
+            return
+        }
+        guard running == nil, since.duration(to: now) >= Self.spacing else {
+            return
+        }
+        asked += 1
+        running = Task { @MainActor in
+            _ = try? await app.mobileSessionCoordinator.refresh()
+            self.lastEnded = ContinuousClock.now
+            self.running = nil
+        }
+    }
+
+    /// Returns once no check is in flight.
+    func settle() async {
+        await running?.value
     }
 }
 
@@ -8918,11 +9212,16 @@ private final class RootViewStandIn {
     private(set) var registrations: [Made] = []
     private var subscription: AnyCancellable?
 
+    /// Told of each controller made, for the test's store bookkeeping.
+    private let didMake: @MainActor (WebViewController) -> Void
+
     init(
         app: AppModel,
         notifications: NotificationsOn,
-        registration: Registration
+        registration: Registration,
+        didMake: @escaping @MainActor (WebViewController) -> Void
     ) {
+        self.didMake = didMake
         subscription = app.$route.dropFirst().sink { [weak self, weak app] route in
             guard let self, let app, case .browser(let runtime) = route else {
                 return
@@ -8955,6 +9254,7 @@ private final class RootViewStandIn {
         }
     }
 
+    @MainActor
     private func register(_ runtime: MobileRuntimeContext, in app: AppModel) {
         guard let origin = WebOrigin(url: runtime.instance.url) else {
             return
@@ -8967,6 +9267,7 @@ private final class RootViewStandIn {
             didFinishLoading: {},
             didFailLoading: {}
         )
+        didMake(controller)
         let inFlight = !app.mobileSessionCoordinator.isCurrentRuntime(runtime)
             && app.mobileSessionCoordinator.isSelectedRuntime(runtime)
         app.registerRuntimeController(controller, for: runtime)

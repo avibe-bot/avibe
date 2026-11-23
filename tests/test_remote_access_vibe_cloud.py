@@ -2803,7 +2803,7 @@ def test_stop_ui_continues_when_remote_access_stop_fails(monkeypatch, tmp_path) 
     stop_calls = []
     timings = {}
 
-    monkeypatch.setattr(remote_access, "stop", lambda: {"ok": False, "error": "cloudflared_stop_failed"})
+    monkeypatch.setattr(remote_access, "stop_connector", lambda: {"ok": False, "error": "cloudflared_stop_failed"})
     monkeypatch.setattr(runtime, "stop_process", lambda pid_path, **kwargs: stop_calls.append(pid_path) or True)
 
     assert runtime.stop_ui(timings) is False
@@ -2820,7 +2820,7 @@ def test_stop_ui_can_skip_remote_access_stop(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setattr(
         remote_access,
-        "stop",
+        "stop_connector",
         lambda: (_ for _ in ()).throw(AssertionError("remote access should stay running")),
     )
     monkeypatch.setattr(runtime, "stop_process", lambda pid_path, **kwargs: stop_calls.append(pid_path) or True)

@@ -27,6 +27,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from core.agent_input import HARNESS_SOURCE_FIELDS, is_voice_input
+from core.input_source import source_label
 from core.delivery_target import normalize_message_kind
 from storage.delivery_states import (
     CLAIMABLE_QUEUE_STATES,
@@ -35,6 +36,7 @@ from storage.delivery_states import (
     policy_for,
 )
 from storage.models import (
+    DELIVERY_SESSION_ORDER_PREDICATE,
     agent_runs,
     agent_sessions,
     message_deliveries,
@@ -409,20 +411,13 @@ def active_turn(conn: Connection, session_id: str) -> dict[str, Any] | None:
         conn,
         select(session_turns)
         .where(session_turns.c.session_id == session_id)
-        .where(session_turns.c.state.in_(TURN_OWNER_STATES))
-        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        # Match the unique partial index: there cannot be two owners to sort.
+        .where(session_turns.c.state.in_([literal(state, literal_execute=True) for state in TURN_OWNER_STATES]))
         .limit(1),
     )
 
 
-def ordering_head(
-    conn: Connection,
-    session_id: str,
-    *,
-    include_claimable: bool = True,
-) -> dict[str, Any] | None:
-    """Oldest eligible queued row or unresolved ordering fence."""
-
+def _ordering_rows(session_id: str, *, include_claimable: bool = True) -> Select:
     predicates = [message_deliveries.c.state.in_(FENCE_STATES)]
     if include_claimable:
         predicates.append(
@@ -432,25 +427,28 @@ def ordering_head(
             )
         )
 
-    head = _one(
-        conn,
+    return (
         select(message_deliveries)
-        .where(message_deliveries.c.session_id == session_id)
+        .where(message_deliveries.c.session_id == session_id, text(DELIVERY_SESSION_ORDER_PREDICATE))
         .where(or_(*predicates))
         .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
-        .limit(1),
     )
-    if not head or not waiting_for_external_input(head):
-        return head
-    # A parked input may not block an older, independently runnable input.
-    # Read the rows out before deciding: an early return must not leave a cursor
-    # (and its SQLite read lock) open on a pooled connection.
-    for candidate in conn.execute(select(message_deliveries).where(
-        message_deliveries.c.session_id == session_id, or_(*predicates),
-    ).order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)).mappings().all():
-        row = dict(candidate)
-        if row["state"] != "queued" or can_start_carried_batch(conn, session_id, [row]):
-            return row
+
+
+def ordering_head(
+    conn: Connection,
+    session_id: str,
+    *,
+    include_claimable: bool = True,
+) -> dict[str, Any] | None:
+    """Oldest runnable queued row or unresolved ordering fence."""
+    # The index streams live work in FIFO order. Skip parked inputs, but never
+    # skip a fence. Close the cursor even when returning the first row.
+    with conn.execute(_ordering_rows(session_id, include_claimable=include_claimable)) as rows:
+        for candidate in rows.mappings():
+            row = dict(candidate)
+            if row["state"] != "queued" or can_start_carried_batch(conn, session_id, [row]):
+                return row
     return None
 
 
@@ -462,27 +460,14 @@ def claimable_fifo_head(conn: Connection, session_id: str) -> dict[str, Any] | N
 def claimable_fifo_prefix(conn: Connection, session_id: str) -> list[dict[str, Any]]:
     """Queued prefix before the first unresolved ordering fence."""
 
-    rows = conn.execute(
-        select(message_deliveries)
-        .where(message_deliveries.c.session_id == session_id)
-        .where(
-            or_(
-                and_(
-                    message_deliveries.c.priority == "p3",
-                    message_deliveries.c.state == "queued",
-                ),
-                message_deliveries.c.state.in_(FENCE_STATES),
-            )
-        )
-        .order_by(message_deliveries.c.submitted_at, message_deliveries.c.id)
-    ).mappings()
-    prefix: list[dict[str, Any]] = []
-    for row in rows:
-        current = dict(row)
-        if current["state"] != "queued":
-            break
-        if can_start_carried_batch(conn, session_id, [current]):
-            prefix.append(delivery_payload(current))
+    with conn.execute(_ordering_rows(session_id)) as rows:
+        prefix: list[dict[str, Any]] = []
+        for row in rows.mappings():
+            current = dict(row)
+            if current["state"] != "queued":
+                break
+            if can_start_carried_batch(conn, session_id, [current]):
+                prefix.append(delivery_payload(current))
     return prefix
 
 
@@ -700,6 +685,8 @@ def message_merge_identity(value: dict[str, Any]) -> tuple[Any, ...]:
         # Dictated and typed inputs never share a batch: the merged Message keeps the first
         # one's metadata, and the Agent reads one input mode per input (``is_voice_input``).
         is_voice_input(metadata),
+        # A batch carries one terminal label, just as it carries one input mode.
+        source_label(metadata, value.get("platform")),
         # Nor do carried and fresh inputs: the carry line covers exactly what was carried.
         str(metadata.get("turn_carry") or "") if isinstance(metadata.get("turn_carry"), str) else "",
     )

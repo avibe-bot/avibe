@@ -173,6 +173,7 @@ async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies()
         "id": "run", "started_at": "2026-09-10T12:00:00Z", "updated_at": "2026-09-10T12:00:30Z",
         "notification_category": "bot", "session_platform": null, "session_is_workbench": true,
         "session_project_name": "avibe-app", "session_label": "桌面版检查更新", "definition_name": null,
+        "session_id": "ses_one", "metadata": { "turn_id": "trn_one" },
     }});
     let server = FakeServer::start([
         response("200 OK", "application/json", valid.to_string().as_bytes()),
@@ -193,6 +194,8 @@ async fn refetch_requires_the_requested_run_and_bounds_untrusted_detail_bodies()
     assert_eq!(detail.stamps.updated_at, Some("2026-09-10T12:00:30Z".into()));
     assert_eq!(detail.notification_category.as_deref(), Some("bot"));
     assert_eq!(detail.session_is_workbench, Some(true));
+    assert_eq!(detail.session_id.as_deref(), Some("ses_one"));
+    assert_eq!(detail.metadata.as_ref().unwrap()["turn_id"], "trn_one");
     assert!(detail.session_platform.is_none());
     assert_eq!(detail.source(), Some("avibe-app · 桌面版检查更新".into()));
     for _ in 0..5 {

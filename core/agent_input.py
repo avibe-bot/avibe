@@ -232,6 +232,8 @@ class AgentInputMetadata:
     #: The person dictated this input (``is_voice_input``). A batch never mixes dictated and
     #: typed inputs (``storage.message_deliveries.message_merge_identity``), so one flag covers it.
     voice: bool = False
+    #: Human terminal, resolved at admission; absent for Harness inputs.
+    source: str | None = None
 
     def render(self, text: str, config: Any, *, now: datetime | None = None) -> str:
         lines: list[str] = [self.handoff.rstrip() + "\n"] if self.handoff and self.handoff.strip() else []
@@ -255,4 +257,6 @@ class AgentInputMetadata:
         # How to read the words, so no display switch hides it.
         if self.voice:
             lines.append(VOICE_INPUT_LINE)
+        if self.source is not None:
+            lines.append(f"[Source: {self.source}]")
         return "\n".join([*lines, text]) if lines else text

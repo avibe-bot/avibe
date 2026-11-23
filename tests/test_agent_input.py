@@ -254,7 +254,7 @@ def test_a_persons_message_is_never_tagged(tmp_path, include_time):
     rendered = prepared.render("hello", config, now=datetime(2026, 9, 6, tzinfo=timezone.utc))
 
     assert "[Harness:" not in rendered
-    assert rendered.endswith("[Alex<U1>]\nhello")
+    assert rendered.endswith("[Alex<U1>]\n[Source: im:slack]\nhello")
 
 
 @pytest.mark.parametrize("include_time", [False, True])
@@ -297,7 +297,7 @@ def test_a_persons_input_is_marked_dictated_only_from_its_own_metadata(metadata,
     handler = SimpleNamespace(_input_user_name=AsyncMock(return_value="Alex"))
     prepared = asyncio.run(MessageHandler.prepare_input_metadata(handler, context, human=True))
 
-    assert prepared == AgentInputMetadata(user_id="U1", user_name="Alex", voice=voice)
+    assert prepared == AgentInputMetadata(user_id="U1", user_name="Alex", voice=voice, source="unknown")
 
 
 def test_an_input_no_person_typed_is_never_marked_dictated(tmp_path):

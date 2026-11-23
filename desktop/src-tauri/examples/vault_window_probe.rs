@@ -28,12 +28,22 @@ fn main() {}
 
 #[cfg(target_os = "macos")]
 fn main() {
+    macos_vault_window::app_lock_did_unlock();
     probe::run();
 }
 
 #[cfg(target_os = "macos")]
 #[path = "../src/macos_vault_window.rs"]
 mod macos_vault_window;
+
+// This standalone Vault boundary probe has no App Lock owner. Temporary
+// concealment is never authorized here; every hidden view follows retirement.
+#[cfg(target_os = "macos")]
+mod app_lock {
+    pub(crate) fn protects_view(_: &objc2_app_kit::NSView) -> bool {
+        false
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod probe {

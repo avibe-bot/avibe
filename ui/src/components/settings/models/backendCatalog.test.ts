@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   applyBackendCatalogIntent,
   applyModelsDevMatch,
+  applyModelsDevParameters,
   backendCatalogIntent,
   backendCatalogIntentApplied,
   blankBackendModel,
@@ -20,9 +21,11 @@ import {
   offeredCandidates,
   MODELS_DEV_FIELDS,
   clearModelsDevParameters,
+  modelsDevBaseId,
   pickerGroups,
   readBackendCatalogBaseline,
   sameBackendModel,
+  settleBackendCatalogRenames,
 } from './backendCatalog';
 import type {
   AgentSupply,
@@ -141,6 +144,42 @@ describe('applyModelsDevMatch', () => {
     filled.reasoning_efforts.push('mutated');
 
     expect(match.reasoning_efforts).toEqual(['low', 'high']);
+  });
+});
+
+describe('applyModelsDevParameters', () => {
+  it('describes the row from the match and leaves its ID and its name alone', () => {
+    const draft = model('relay/house-name', { display_name: 'House name', origin: 'provider', locked: true });
+
+    const described = applyModelsDevParameters(draft, match, draft.origin, null);
+
+    // Asserted as the whole row: everything the catalog decides arrives, and the
+    // two things that say WHICH model this is — and how the row was created —
+    // stay as they were. A saved row is passed no backend, so the API it is
+    // answered on is not the catalog's to change either.
+    expect(described).toEqual({
+      ...draft,
+      models_dev_id: match.models_dev_id,
+      context_window: match.context_window,
+      max_output_tokens: match.max_output_tokens,
+      input_modalities: match.input_modalities,
+      output_modalities: match.output_modalities,
+      supports_tools: match.supports_tools,
+      supports_reasoning: match.supports_reasoning,
+      reasoning_efforts: match.reasoning_efforts,
+    });
+    expect('native_protocol' in described).toBe('native_protocol' in draft);
+  });
+
+  it('brings the API with the description only for an OpenCode row being added', () => {
+    const answered = { ...match, native_protocol: 'anthropic' as const };
+    expect(applyModelsDevParameters(blankBackendModel(), answered, 'models_dev', 'opencode').native_protocol).toBe('anthropic');
+    expect('native_protocol' in applyModelsDevParameters(blankBackendModel(), answered, 'models_dev', 'codex')).toBe(false);
+  });
+
+  it('reads a catalog key, or a prefixed model ID, as the registered name', () => {
+    expect(modelsDevBaseId('anthropic/claude-opus-4')).toBe('claude-opus-4');
+    expect(modelsDevBaseId('claude-opus-4')).toBe('claude-opus-4');
   });
 });
 
@@ -524,6 +563,56 @@ describe('applyBackendCatalogIntent', () => {
     const intent = backendCatalogIntent([model('a'), model('b')], [model('b'), model('a')]);
 
     expect(applyBackendCatalogIntent([model('b')], intent).map((entry) => entry.id)).toEqual(['b']);
+  });
+});
+
+describe('settleBackendCatalogRenames', () => {
+  // The draft renamed a to x and widened it; b is untouched.
+  const draft = [model('x', { context_window: 2000 }), model('b')];
+  const renames = new Map([['x', 'a']]);
+  const settle = (current: BackendModel[]) => settleBackendCatalogRenames(current, draft, renames);
+
+  it('keeps a rename the newer list still allows', () => {
+    const settled = settle([model('a'), model('b'), model('c')]);
+
+    expect(settled.draft).toEqual(draft);
+    expect([...settled.renames]).toEqual([['x', 'a']]);
+  });
+
+  it('takes the row back to its saved ID when another editor took the new one', () => {
+    const theirs = model('x', { display_name: 'Theirs' });
+    const current = [model('a'), model('b'), theirs];
+    const settled = settle(current);
+
+    // The row keeps its other edit under the old ID, and is no rename any more.
+    expect(settled.draft).toEqual([model('a', { context_window: 2000 }), model('b')]);
+    expect(settled.renames.size).toBe(0);
+    // Replayed, the other editor's model is neither removed nor written over.
+    const replayed = applyBackendCatalogIntent(current, backendCatalogIntent([model('a'), model('b')], settled.draft));
+    expect(replayed).toEqual([model('a', { context_window: 2000 }), model('b'), theirs]);
+  });
+
+  it('takes the row back when its model was removed elsewhere, so no new model appears under the new ID', () => {
+    const settled = settle([model('b')]);
+
+    expect(settled.draft.map((row) => row.id)).toEqual(['a', 'b']);
+    expect(settled.renames.size).toBe(0);
+  });
+
+  it('adopts the server\'s row when the rename is already there', () => {
+    const landed = model('x', { context_window: 2000 });
+    const current = [landed, model('b')];
+    const settled = settle(current);
+
+    expect(settled.draft).toEqual(current);
+    expect(settled.renames.size).toBe(0);
+    expect(applyBackendCatalogIntent(current, backendCatalogIntent([model('a'), model('b')], settled.draft))).toEqual(current);
+  });
+
+  it('leaves a draft with no rename as it is', () => {
+    const settled = settleBackendCatalogRenames([model('b')], draft, new Map());
+
+    expect(settled.draft).toEqual(draft);
   });
 });
 

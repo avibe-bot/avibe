@@ -305,7 +305,7 @@ export const SourceOrderDrawer: React.FC<{
                 <DialogPrimitive.Title className="model-hub-order-title truncate font-bold text-foreground">{title}</DialogPrimitive.Title>
                 <ModelHubInfoHint
                   label={t('settings.models.order.infoLabel')}
-                  content={t('settings.models.order.subtitle')}
+                  content={<span className="flex flex-col gap-2"><span>{t('settings.models.order.subtitle')}</span><span>{t('settings.models.order.section.ordered.note')}</span></span>}
                   className="model-hub-order-info"
                 />
               </div>
@@ -315,7 +315,8 @@ export const SourceOrderDrawer: React.FC<{
                 </Button>
               </DialogPrimitive.Close>
             </div>
-            <DialogPrimitive.Description className="model-hub-order-subtitle">
+            {/* What the order applies to is behind the info control; a screen reader still gets it as the dialog's description. */}
+            <DialogPrimitive.Description className="sr-only">
               {t('settings.models.order.subtitle')}
             </DialogPrimitive.Description>
           </header>
@@ -358,7 +359,6 @@ export const SourceOrderDrawer: React.FC<{
                 <section className="model-hub-order-section">
                   <div className="model-hub-order-section-head">
                     <h3>{t('settings.models.order.section.ordered')}</h3>
-                    <span className="model-hub-order-section-explanation">{t('settings.models.order.section.ordered.note')}</span>
                   </div>
                   {ordered.length === 0
                     ? <div className="model-hub-order-empty">{t('settings.models.order.empty.ordered')}</div>
