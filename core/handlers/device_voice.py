@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+from html.parser import HTMLParser
 import io
 import re
+from urllib.parse import urlsplit
 import wave
 
 import aiohttp
+from markdown_it import MarkdownIt
 
 from core.control_requests import ControlRequest, failure, result
 
@@ -26,15 +29,87 @@ def _failure(controller, code: str, key: str) -> dict:
 
 def speech_projection(text: str) -> str:
     """Speak up to two complete plain sentences; never synthesize code/URLs."""
+    class HTMLScope(HTMLParser):
+        """Track HTML across inline tokens/paragraphs without rendering it."""
+
+        def __init__(self):
+            super().__init__(convert_charrefs=False)
+            self.tags: list[str] = []
+            self.invalid = False
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                           "link", "meta", "param", "source", "track", "wbr"}:
+                self.tags.append(tag)
+
+        def handle_endtag(self, tag):
+            if not self.tags or self.tags[-1] != tag:
+                self.invalid = True
+            else:
+                self.tags.pop()
+
+        def handle_startendtag(self, tag, attrs):
+            pass
+
+    def without_addresses(value: str) -> str:
+        # CommonMark recognizes angle-bracket autolinks, not bare addresses.
+        # Filter only text leaves here; Markdown structure is already parsed.
+        for word in value.split():
+            candidate = word.strip(".,;:!?。！？，、()[]{}<>\"'")
+            address = "://" in candidate or "@" in candidate or candidate.casefold().startswith(("//", "www.", "mailto:"))
+            if not address:
+                try:
+                    host = urlsplit("//" + candidate).hostname or ""
+                except ValueError:
+                    host = ""
+                labels = host.split(".")
+                address = (len(labels) > 1 and len(labels[-1]) >= 2 and labels[-1].isalpha()
+                           and all(label and all(c.isalnum() or c == "-" for c in label) for label in labels))
+            if address:
+                value = value.replace(word, "")
+        return value
+
     text = re.sub(r"<silent>.*?</silent>", "", text, flags=re.S)
-    text = re.sub(r"```.*?```", "", text, flags=re.S)
-    text = re.sub(r"(`+).*?\1", "", text, flags=re.S)
-    text = text.split("`")[0]  # An unterminated code span cannot become speech.
-    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
-    text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"https?://\S+", "", text)
-    text = re.sub(r"[#*`>_]", "", text)
-    text = " ".join(text.split()).split("---")[0].strip()
+    html = HTMLScope()
+    parents: list[str] = []
+    prose: list[str] = []
+    allowed = {"paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open",
+               "list_item_open", "blockquote_open"}
+    for token in MarkdownIt("commonmark").enable("table").parse(text):
+        if token.type == "hr":
+            break
+        if token.nesting == 1:
+            parents.append(token.type)
+        elif token.nesting == -1:
+            parents.pop()
+        elif token.type == "html_block":
+            html.feed(token.content)
+        elif token.type == "inline" and parents and all(parent in allowed for parent in parents):
+            # CommonMark treats an indented continuation without a blank line as
+            # prose. Withhold that ambiguous paragraph instead of speaking code.
+            ambiguous_indent = any(line.startswith("    ") for line in token.content.expandtabs(4).splitlines())
+            parts: list[str] = []
+            autolink = False
+            for child in token.children or []:
+                if child.type == "html_inline":
+                    html.feed(child.content)
+                elif child.type == "link_open":
+                    autolink = child.markup == "autolink"
+                elif child.type == "link_close":
+                    autolink = False
+                elif not html.tags and not html.invalid and not autolink:
+                    if child.type == "text":
+                        # An unmatched backtick is a CommonMark text token. The
+                        # remainder is withheld, including subsequent emphasis.
+                        prefix, marker, _ = child.content.partition("`")
+                        parts.append(without_addresses(prefix))
+                        if marker:
+                            break
+                    elif child.type in {"softbreak", "hardbreak", "code_inline", "image"}:
+                        parts.append(" ")
+            if not html.tags and not html.invalid and not ambiguous_indent:
+                prose.append("".join(parts))
+    text = " ".join(" ".join(prose).split())
     sentences = re.findall(r"[^。！？.!?]+[。！？.!?]", text)
     chosen: list[str] = []
     for sentence in sentences[:2]:

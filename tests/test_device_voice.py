@@ -55,13 +55,75 @@ def controller():
 
 def test_projection_does_not_send_full_long_answer():
     assert speech_projection("苹果是红色的。你想吃一个吗？" + "详情" * 200) == "苹果是红色的。你想吃一个吗？"
-    assert speech_projection("```secret code```<silent>hidden</silent>你好。") == "你好。"
+    assert speech_projection("`secret code`<silent>hidden</silent>你好。") == "你好。"
     assert speech_projection("长" * 500) == ""
     assert speech_projection("Done. unfinished") == "Done."
     assert speech_projection("unfinished") == ""
     assert speech_projection("Run `rm -rf /` now.") == "Run now."
     assert speech_projection("Hello. `unterminated code") == "Hello."
     assert speech_projection("Use ``secret`value`` carefully.") == "Use carefully."
+
+
+@pytest.mark.parametrize(("source", "expected"), [
+    ("# 标题。\n\n正文。第三句。", "标题。 正文。"),
+    ("- **苹果**是红色的。\n- *梨子*是黄色的。", "苹果是红色的。 梨子是黄色的。"),
+    ("1. First sentence.\n2. Second sentence.\n3. Third.", "First sentence. Second sentence."),
+    ("> Quoted **prose**.\n>\n> - Nested prose.", "Quoted prose. Nested prose."),
+    ("Ap**ple** is red.", "Apple is red."),
+    ("Hello.\n\n```sh\nDO_NOT_SPEAK.\n```\n\n再见。", "Hello. 再见。"),
+    ("你好。\n\n~~~sh\nDO_NOT_SPEAK.\n~~~\n\nGoodbye.", "你好。 Goodbye."),
+    ("你好。\n\n```sh\nDO_NOT_SPEAK.", "你好。"),
+    ("你好。\n\n~~~sh\nDO_NOT_SPEAK.", "你好。"),
+    ("Hello.\n\n    DO_NOT_SPEAK.\n\n再见。", "Hello. 再见。"),
+    ("Hello.\n\n\tDO_NOT_SPEAK.\n\n再见。", "Hello. 再见。"),
+    ("Run:\n    rm -rf /.", ""),
+    ("> Run:\n>     DO_NOT_SPEAK.", ""),
+    ("- Hello.\n\n      DO_NOT_SPEAK.\n\n再见。", "Hello. 再见。"),
+    ("Hello `DO_NOT_SPEAK` world.", "Hello world."),
+    ("Hello ``secret`code`` world.", "Hello world."),
+    ("Hello. `DO_NOT_SPEAK **MORE_CODE**.", "Hello."),
+    ("Hello. ``DO_NOT_SPEAK ` more.", "Hello."),
+    ("`DO_NOT_SPEAK.", ""),
+    ("Before <code>DO_NOT_SPEAK.</code> after.", "Before after."),
+    ("Before <kbd>DO_NOT_SPEAK.</kbd> after.", "Before after."),
+    ("Before <pre>DO_NOT_SPEAK.</pre> after.", "Before after."),
+    ("Before <unknown data-x='>'>DO_NOT_SPEAK.</unknown> after.", "Before after."),
+    ("Before <CoDe><b>DO_NOT_SPEAK.</b></CoDe> after.", "Before after."),
+    ("Before <code>DO_NOT_SPEAK. **MORE_CODE**</code> after.", "Before after."),
+    ("Before <code>DO_NOT_SPEAK. `MORE_CODE`</code> after.", "Before after."),
+    ("Hello. <code>DO_NOT_SPEAK.", ""),
+    ("Hello. <unknown>DO_NOT_SPEAK.", ""),
+    ("Hello. </unknown> DO_NOT_SPEAK.", ""),
+    ("Hello. <code><b>DO_NOT_SPEAK.</code></b>", ""),
+    ("Before <unknown>DO_NOT_SPEAK.\n\nMORE_CODE.</unknown> After.", "After."),
+    ("Hello.\n\n<div>\nDO_NOT_SPEAK.\n</div>\n\n再见。", "Hello. 再见。"),
+    ("Hello.\n\n<div>\nDO_NOT_SPEAK.\n\nMORE_CODE.", "Hello."),
+    ("Hello.<br/> Goodbye.", "Hello. Goodbye."),
+    ("Hello. <!-- DO_NOT_SPEAK. --> Goodbye.", "Hello. Goodbye."),
+    ("Hello. ![DO_NOT_SPEAK.](https://example.org/image.png) Goodbye.", "Hello. Goodbye."),
+    ("[Hello](https://example.org/private). [再见][ref]。\n\n[ref]: https://example.org/secret", "Hello. 再见。"),
+    ("Visit <https://example.org/private> now.", "Visit now."),
+    ("Write to <person@example.org> later.", "Write to later."),
+    ("Visit https://example.org/private now.", "Visit now."),
+    ("Visit HTTP://example.org/private now.", "Visit now."),
+    ("Visit www.example.org/private now.", "Visit now."),
+    ("Visit example.org/private now.", "Visit now."),
+    ("Visit //example.org/private now.", "Visit now."),
+    ("Visit ftp://example.org/private now.", "Visit now."),
+    ("网址https://example.org/secret 不朗读。", "不朗读。"),
+    ("Hello.\n\n| DO_NOT_SPEAK. |\n| --- |\n| MORE_CODE. |\n\n再见。", "Hello. 再见。"),
+    ("Hello.\n\n---\n\nDO_NOT_SPEAK.", "Hello."),
+    ("你好。\n\n***\n\nDO_NOT_SPEAK.", "你好。"),
+    ("Hello.\n\n<silent>DO_NOT_SPEAK.\n~~~\nMORE_CODE\n~~~</silent>\n\n再见。", "Hello. 再见。"),
+    ("Hello. <silent>DO_NOT_SPEAK.", ""),
+    ("unfinished", ""),
+    ("Done. unfinished", "Done."),
+    ("甲" * 119 + "。", "甲" * 119 + "。"),
+    ("甲" * 120 + "。", ""),
+    ("甲" * 115 + "。第二句太长。", "甲" * 115 + "。"),
+])
+def test_projection_extracts_only_structured_prose(source, expected):
+    assert speech_projection(source) == expected
 
 
 async def site(app, bound_socket=None):
@@ -106,7 +168,11 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
 
     transcripts = iter(["苹果是什么颜色？", "那它可以吃吗？", "先不聊了"])
     provider_calls = []
-    answers = iter(["苹果是红色的。", "可以，刚才说的苹果可以吃。"])
+    full_answers = [
+        "**苹果**是红色的。\n\n~~~sh\nDO_NOT_SPEAK.\n~~~\n\n<pre>MORE_CODE.</pre>\n\n---\n\n快捷回复不朗读。",
+        "可以，刚才说的[苹果](https://example.org/private)可以吃。\n\n    DO_NOT_SPEAK.",
+    ]
+    answers = iter(full_answers)
     store = controller.scheduled_task_service.request_store
     prompts = []
     conversation_ids = []
@@ -128,6 +194,7 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
         payload = await request.json()
         assert set(payload) == {"text"}
         assert "synthetic-cloud-secret" not in json.dumps(payload)
+        assert payload["text"] in {"苹果是红色的。", "可以，刚才说的苹果可以吃。"}
         provider_calls.append(payload["text"])
         return web.Response(body=audio(), content_type="audio/wav")
 
@@ -139,7 +206,7 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
         prompts.append(body["messages"])
         if len(prompts) == 2:
             assert any("苹果是什么颜色" in str(m) for m in body["messages"])
-            assert any("苹果是红色的" in str(m) for m in body["messages"])
+            assert any("是红色的" in str(m) for m in body["messages"])
             assert all("Unrelated Web" not in str(m) for m in body["messages"])
         return web.Response(body=text_stream(next(answers)), headers=served_headers())
 
@@ -252,7 +319,7 @@ async def test_real_two_turn_socket_codec_host_cloud(plugin, controller, monkeyp
                 assert len(set(request_ids)) == 3
         assert len(prompts) == 2
         history = controller.device_chat.history(conversation_ids[0])
-        assert [row["output"] for row in history["turns"]] == ["苹果是红色的。", "可以，刚才说的苹果可以吃。"]
+        assert [row["output"] for row in history["turns"]] == full_answers
         assert len(store.list_runs()) == 1  # Only the ordinary Web Run, never device input.
         assert provider_calls == ["asr", "苹果是红色的。", "asr", "可以，刚才说的苹果可以吃。", "asr"]
         assert "synthetic-cloud-secret" not in caplog.text
