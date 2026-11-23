@@ -9,7 +9,7 @@ import {
   LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone, X,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 
 import type { TranslationKey } from '@/i18n/types';
@@ -25,6 +25,7 @@ import { ClaimFields } from './claim';
 import { OpenNewAddress } from './OpenNewAddress';
 import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
+import { RENAME_ENTRY_ENABLED, SUPPORT_EMAIL } from './features';
 import { claimProblemText } from './texts';
 import {
   RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
@@ -645,6 +646,9 @@ export function DevicesPageView({
   signOutNotice, unrecognizedChange, rebindOffered = true, problem, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
+  // The notice about an address changed elsewhere sends the owner to 「更改域名」 and binding again
+  // only where both exist in this release.
+  const outsideWayOut = RENAME_ENTRY_ENABLED && rebindOffered;
   // Each device says which list it belongs to; nothing is inferred from an absent account.
   const mine = devices.filter((each) => each.group === 'mine');
   const others = devices.filter((each) => each.group === 'others');
@@ -723,13 +727,25 @@ export function DevicesPageView({
       subtitle={owner ? t('devices.subtitle') : t('devices.subtitleMemberPlain')}
       activeTab="remote-access"
     >
-      {owner && unrecognizedChange && (
+      {owner && unrecognizedChange && (outsideWayOut ? (
         <Notice tone="danger" action={<Button variant="destructive" size="sm" onClick={actions.onOpenRebind}>{t('devices.outsideChange.action')}</Button>}>
           <div className="text-balance text-[14px] font-semibold">{t('devices.outsideChange.title')}</div>
           <p className="mt-1"><KeptTail text={t('devices.outsideChange.body', { host: unrecognizedChange.hostname })} /></p>
           <p className="mt-1"><KeptTail text={t('devices.rebind.copiedData')} /></p>
         </Notice>
-      )}
+      ) : (
+        // Neither 「更改域名」 nor binding again is in this release: the fact, and a way out that exists.
+        <Notice tone="danger">
+          <div className="text-balance text-[14px] font-semibold">{t('devices.outsideChange.title')}</div>
+          <p className="mt-1">
+            <Trans
+              i18nKey="devices.outsideChange.bodySupport"
+              values={{ host: unrecognizedChange.hostname, email: SUPPORT_EMAIL }}
+              components={{ mail: <a href={`mailto:${SUPPORT_EMAIL}`} className="font-medium underline underline-offset-2" /> }}
+            />
+          </p>
+        </Notice>
+      ))}
       {/* After turning remote access off from afar, not reading its state is the expected result:
           the notice below says so, and the card does not add "cannot be read" to it. */}
       {owner && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}

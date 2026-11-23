@@ -648,17 +648,22 @@ describe('DevicesPage · devices', () => {
     vi.useRealTimers();
   });
 
-  it('shows the notice that the address was changed somewhere else, with the way to bind again', async () => {
+  it('says an address changed somewhere else with a way out that exists in this release', async () => {
     vi.spyOn(devicesApi, 'address').mockResolvedValue({
       hostname: 'sam-app.avibe.bot', eligible: true, retired: [], healthConnected: false,
       unrecognizedChange: { previousHostname: host, hostname: 'sam-app.avibe.bot' },
     });
+    // Even where binding again exists: 「更改域名」 does not in this release.
+    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(true);
     mount();
 
     expect(await screen.findByText('这个 Avibe 的地址在别处被改了')).toBeTruthy();
-    expect(screen.getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: '去重新绑定' }));
-    expect(await screen.findByText('/settings/remote-access/connection')).toBeTruthy();
+    const notice = screen.getByText('这个 Avibe 的地址在别处被改了').parentElement!;
+    expect(notice.textContent).toContain('现在的 sam-app.avibe.bot 不是在这台电脑上改的，可能有人拿到了它的设备密钥。请联系 support@avibe.bot。');
+    expect(within(notice).getByRole('link', { name: 'support@avibe.bot' }).getAttribute('href')).toBe('mailto:support@avibe.bot');
+    expect(screen.queryByRole('button', { name: '去重新绑定' })).toBeNull();
+    expect(notice.textContent).not.toContain('更改域名');
+    expect(notice.textContent).not.toContain('重新绑定');
   });
 });
 

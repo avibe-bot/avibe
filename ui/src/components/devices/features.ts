@@ -7,3 +7,6 @@
  * frames and their tests stay as they are.
  */
 export const RENAME_ENTRY_ENABLED = false;
+
+/** Where a person is sent when this release has no way of its own out of a situation. */
+export const SUPPORT_EMAIL = 'support@avibe.bot';

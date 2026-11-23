@@ -8474,7 +8474,8 @@
     "outsideChange": {
       "title": "This Avibe's address was changed somewhere else",
       "body": "{{host}} was not set from this computer; someone may have its device key. Bind remote access again first, then take your old name back under Change the domain.",
-      "action": "Go to Bind again"
+      "action": "Go to Bind again",
+      "bodySupport": "{{host}} was not set from this computer; someone may have its device key. Contact <mail>{{email}}</mail>."
     },
     "rebind": {
       "title": "Bind remote access again",
