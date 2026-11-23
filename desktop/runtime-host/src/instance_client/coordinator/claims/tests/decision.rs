@@ -93,7 +93,7 @@ impl Transport for Hosted {
     async fn send(&self, req: Request) -> Result<Response> {
         let mut status = 200;
         let mut headers = reqwest::header::HeaderMap::new();
-        if self.publication_case.starts_with("monitor_check_") && req.url.path() == "/api/desktop/local-instance" {
+        if self.publication_case.starts_with("monitor_") && req.url.path() == "/api/desktop/local-instance" {
             assert_eq!(req.method, reqwest::Method::GET);
             self.observing.notify_one();
             self.resume_observation.notified().await;
@@ -640,6 +640,8 @@ async fn only_a_released_review_can_submit_and_neither_external_wait_owns_a_coor
     for cut in [
         "http",
         "busy_after_grant",
+        "monitor_grant_live",
+        "monitor_grant_retired",
         "no_saved_owner_at_confirm",
         "machine",
         "publication_offline",
@@ -843,7 +845,7 @@ async fn check_cut(cut: &'static str) {
     let store = ConnectionStore::new(root.path().join("connection.json"));
     let mut record = store.load("fixture computer").unwrap();
     let review = cut.strip_prefix("proof_start_review_");
-    let adopting = cut.starts_with("monitor_check_")
+    let adopting = cut.starts_with("monitor_")
         || cut == "proof_start_bound"
         || cut.starts_with("proof_start_auto_save")
         || cut.starts_with("proof_start_save_")
@@ -914,7 +916,7 @@ async fn check_cut(cut: &'static str) {
         },
         view,
     ));
-    if cut.starts_with("monitor_check_") {
+    if cut.starts_with("monitor_") {
         // Seed the fixture before its first document; no navigation or view invalidation.
         c.inner.lock().unwrap().local = Some(NativeSession::new(
             "http://127.0.0.1:1984".parse().unwrap(),
@@ -1240,6 +1242,32 @@ async fn check_cut(cut: &'static str) {
         assert!(peer.arm().await.is_err());
         assert_eq!(c.claims.lock().unwrap().active.as_ref().unwrap().receipt, successor);
         drop(next);
+        return;
+    }
+    if cut.starts_with("monitor_grant_") {
+        let refresh = c.refresh_local();
+        tokio::pin!(refresh);
+        tokio::select! { _ = &mut refresh => panic!("descriptor read was not held"), _ = hosted.observing.notified() => () }
+        reply.send(()).unwrap();
+        tokio::select! { biased; _ = &mut decision => panic!("grant did not wait for descriptor read"), _ = tokio::task::yield_now() => () }
+        peer.assert_unarmed();
+        if cut == "monitor_grant_retired" {
+            caller.retire();
+            assert!(decision.await.is_err());
+            hosted.resume_observation.notify_one();
+            refresh.await;
+            assert!(peer.arm().await.is_err());
+        } else {
+            hosted.resume_observation.notify_one();
+            refresh.await;
+            tokio::select! { _ = &mut decision => panic!("missing arm"), arm = peer.arm() => { arm.unwrap(); } }
+            peer.finish.send(Ok(MachineOutcome::Declined)).ok().unwrap();
+            assert_eq!(
+                decision.await.unwrap().deliver().unwrap(),
+                Some(json!({"state":"declined"}))
+            );
+        }
+        assert_eq!(hosted.grants.load(Ordering::SeqCst), 1);
         return;
     }
     if cut == "busy_after_grant" {

@@ -192,6 +192,14 @@ impl Coordinator {
             _ = tokio::time::sleep_until(deadline) => return Err(stale()),
             response = claim.confirm(&mut flow, &state, revision) => response,
         };
+        // This is an answer to the one dispatched grant, not a new confirmation.
+        // Wait only for the background descriptor poll before checking the original
+        // owner. Cancellation, ticket expiry and real account contention still win.
+        let monitor = tokio::select! { biased;
+            _ = &mut interrupted => return Err(stale()),
+            _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+            guard = self.descriptor_refresh.lock() => guard,
+        };
         let grant = match grant {
             Ok(value) => value,
             Err(error) => {
@@ -260,6 +268,7 @@ impl Coordinator {
             inner.account.session = flow.session;
             (completion, jar)
         };
+        drop(monitor);
         let verify = async {
             match completion.wait().await? {
                 MachineOutcome::Declined => {
