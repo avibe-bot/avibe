@@ -32,7 +32,15 @@ pub(super) async fn dispatch<'a>(
     action: Value,
 ) -> Result<ClaimReply<'a>> {
     let request = serde_json::from_value(json!({"expected_generation":generation, "action":action})).unwrap();
-    c.claim_review(&host(), caller, "en", request).await
+    let host = host();
+    let review = c.claim_review(&host, caller, "en", request);
+    // This is the production entry future, not a larger stack for the test runner.
+    assert!(
+        std::mem::size_of_val(&review) <= 4096,
+        "claim entry future: {} bytes",
+        std::mem::size_of_val(&review)
+    );
+    review.await
 }
 
 pub(super) fn submission(result: Option<Value>) -> Uuid {

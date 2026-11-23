@@ -591,6 +591,18 @@ impl Coordinator {
         locale: &str,
         r: ClaimRequest,
     ) -> Result<ClaimReply<'_>> {
+        // A caller can retain an in-flight review while another action is polled.
+        // Keep the dispatcher's largest action state off every enclosing task's stack.
+        Box::pin(self.dispatch_claim_review(host, caller, locale, r)).await
+    }
+
+    async fn dispatch_claim_review(
+        self: &Arc<Self>,
+        host: &RuntimeHost,
+        caller: &ClaimCaller,
+        locale: &str,
+        r: ClaimRequest,
+    ) -> Result<ClaimReply<'_>> {
         if !Arc::ptr_eq(&self.claims, &caller.owner) {
             return Err(stale());
         }
@@ -648,9 +660,13 @@ impl Coordinator {
                 });
             }
             ClaimAction::ReviewAfterProof { receipt, submission } => {
-                return self
-                    .reread_after_proof(caller, r.expected_generation, opaque(receipt)?, opaque(submission)?)
-                    .await;
+                return Box::pin(self.reread_after_proof(
+                    caller,
+                    r.expected_generation,
+                    opaque(receipt)?,
+                    opaque(submission)?,
+                ))
+                .await;
             }
             ClaimAction::SubmitFactorCode {
                 receipt,
@@ -672,9 +688,8 @@ impl Coordinator {
             ClaimAction::SubmitFactorPasskey { receipt, submission } => {
                 let receipt = opaque(receipt)?;
                 let id = self.factor_predecessor(caller, receipt, opaque(submission)?, false)?;
-                let body = self
-                    .submit_claim_factor_passkey(caller, r.expected_generation, receipt, id)
-                    .await?;
+                let body =
+                    Box::pin(self.submit_claim_factor_passkey(caller, r.expected_generation, receipt, id)).await?;
                 return Ok(ClaimReply {
                     body,
                     account: epoch,
