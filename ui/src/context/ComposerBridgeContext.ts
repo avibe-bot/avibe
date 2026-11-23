@@ -28,10 +28,10 @@ export type ComposeTarget = {
   /** Show the conversation (not its Show Page), remembering that choice. */
   showChat: () => void;
   /** Append on a new line; false when the composer refuses (voice capture). */
-  appendLine: (text: string) => boolean;
+  appendLine: (text: string, surface?: 'ask_vibey') => boolean;
   /** Stage and upload files through the composer's own attachment path;
    *  false when the composer refuses them right now. */
-  addFiles: (files: File[]) => boolean;
+  addFiles: (files: File[], surface?: 'ask_vibey') => boolean;
 };
 
 type ComposerBridge = {

@@ -12,6 +12,7 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from core.agent_input import AgentInputMetadata, harness_hints, harness_label, is_voice_input
+from core.input_source import source_label
 from core.backend_failure import (
     CONTINUE_ON_VIBEY_NEXT_STEP,
     emit_backend_failure,
@@ -1573,6 +1574,7 @@ class MessageHandler(BaseHandler):
             user_name=await self._input_user_name(context),
             # The durable Delivery's own metadata (``SessionTurnManager._hydrate_delivery_context``).
             voice=is_voice_input((context.platform_specific or {}).get("message_metadata")),
+            source=source_label((context.platform_specific or {}).get("message_metadata"), context.platform),
         )
 
     async def _input_user_name(self, context: MessageContext) -> str:

@@ -355,7 +355,7 @@ describe('typed send haptics', () => {
     fireEvent.change(textarea(), { target: { value: 'Ship it' } });
 
     fireEvent.click(screen.getByRole('button', { name: en.chat.compose.send }));
-    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Ship it', [], undefined));
+    await waitFor(() => expect(onSend).toHaveBeenCalledWith('Ship it', [], undefined, undefined));
     expect(nativeHapticImpact).toHaveBeenCalledWith('light');
   });
 

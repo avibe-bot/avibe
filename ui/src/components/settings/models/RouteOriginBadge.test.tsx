@@ -16,7 +16,7 @@ afterEach(cleanup);
 describe('route origin help', () => {
   it('keeps dialog provenance noninteractive and outside the collection help state', () => {
     render(<I18nextProvider i18n={i18n}><RouteOriginBadge origin="manual" backend="codex" interactive={false} /></I18nextProvider>);
-    expect(screen.getByText('Manual').tagName).toBe('SPAN');
+    expect(screen.getByText('Own route').tagName).toBe('SPAN');
     expect(screen.queryByRole('button')).toBeNull();
     expect(document.querySelector('.model-hub-origin-help')).toBeNull();
   });

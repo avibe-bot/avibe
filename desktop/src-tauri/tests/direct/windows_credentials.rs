@@ -8,14 +8,22 @@ use tokio::{
 
 pub(super) async fn connect_as(c: &Client, credential: &WindowRegistration, expected: u16) -> TcpStream {
     let route = c.route().unwrap();
+    connect_at(route.proxy, route.host, credential, expected).await
+}
+async fn connect_at(
+    proxy: std::net::SocketAddrV4,
+    host: &str,
+    credential: &WindowRegistration,
+    expected: u16,
+) -> TcpStream {
     let (user, pass) = credential.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
-    let mut stream = TcpStream::connect(route.proxy).await.unwrap();
+    let mut stream = TcpStream::connect(proxy).await.unwrap();
     stream
         .write_all(
             format!(
                 "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: Basic {auth}\r\n\r\n",
-                route.host
+                host
             )
             .as_bytes(),
         )
@@ -36,6 +44,52 @@ pub(super) async fn echo(s: &mut TcpStream) {
     s.write_all(b"w").await.unwrap();
     assert_eq!(s.read_u8().await.unwrap(), b'w');
 }
+#[tokio::test]
+async fn handle_issues_and_revokes_while_client_refresh_is_in_flight() {
+    timeout(Duration::from_secs(4), async {
+        let host = "one-app.avibe.bot";
+        let mut c = Client::new(host, "one".into()).await.unwrap();
+        let mut legacy = super::handover_tests::public_browser(&mut c).await;
+        let proxy = c.route().unwrap().proxy;
+        let h = c.handover();
+        let fault = c.listener.accept_fault.clone();
+        let mut health = c.listener_lifetime();
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let refresh = c.refresh_reply(|_| async move {
+            entered.send(()).unwrap();
+            wait.await.unwrap();
+            super::rendezvous::Reply::NotReady
+        });
+        let windows = async {
+            started.await.unwrap();
+            let a = h.window_credential("a").unwrap();
+            let mut leg = connect_at(proxy, host, &a, 200).await;
+            echo(&mut leg).await;
+            h.revoke_window(&a);
+            assert!(matches!(leg.read(&mut [0]).await, Ok(0) | Err(_)));
+            drop(connect_at(proxy, host, &a, 407).await);
+            let fresh = h.window_credential("a").unwrap();
+            let mut replacement = connect_at(proxy, host, &fresh, 200).await;
+            h.revoke_window(&a);
+            echo(&mut replacement).await;
+            fault.notify_one();
+            assert!(health.changed().await.is_err());
+            assert!(h.window_credential("a").is_none());
+            h.revoke_window(&fresh); // existing streams can still be retired during drain
+            assert!(matches!(replacement.read(&mut [0]).await, Ok(0) | Err(_)));
+            echo(&mut legacy).await;
+            release.send(()).unwrap();
+        };
+        let (outcome, ()) = tokio::join!(refresh, windows);
+        assert_eq!(outcome, super::RefreshOutcome::Retired);
+        drop(c);
+        assert!(h.window_credential("a").is_none());
+    })
+    .await
+    .unwrap();
+}
+
 #[test]
 fn every_credential_byte_is_required_by_the_registry() {
     let keys = super::credentials::Windows::new().unwrap();

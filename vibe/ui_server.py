@@ -3249,6 +3249,9 @@ def add_api_timing_headers(response: Response) -> Response:
                           # Inclusive graph phase times; overlap execute/fetch/assemble above.
                           "candidates", "lineage", "histories", "edges")
         )
+        history_spans = getattr(g, "graph_history_spans", None)
+        if history_spans is not None:
+            stages_text += " history_statements=" + json.dumps(history_spans.log_fields(), separators=(",", ":"))
         logger.warning(
             "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s%s",
             request.path,
@@ -5621,6 +5624,7 @@ async def model_hub_agent_models_put(backend):
             "baseline",
             "models",
             "expected_suppliers",
+            "renames",
             "force",
             "would_remove_hops",
             "would_interrupt",
@@ -5630,6 +5634,7 @@ async def model_hub_agent_models_put(backend):
             backend,
             payload.get("baseline"),
             payload.get("models"),
+            **({"renames": payload["renames"]} if "renames" in payload else {}),
             expected_suppliers=payload.get("expected_suppliers"),
             force=payload.get("force") is True,
             confirmed_remove_hops=payload.get("would_remove_hops"),
@@ -6319,6 +6324,7 @@ async def agents_graph_get():
     context = _request_authorization_context()
     submitted = time.perf_counter()
     stages = {"ipc": submitted - started}
+    history_spans = agent_graph.HistoryStatementSpans()
 
     def render_graph():
         entered = time.perf_counter()
@@ -6326,7 +6332,7 @@ async def agents_graph_get():
         payload = agent_graph.build_graph(
             live_agents=live_agents, window=window, project=project,
             include_ended=include_ended, include_background=include_background,
-            live_unreachable=live_unreachable, timings=stages,
+            live_unreachable=live_unreachable, timings=stages, history_spans=history_spans,
         )
         built = time.perf_counter()
         # Includes Python/ORM overhead, not time blocked opening or reading SQLite.
@@ -6342,6 +6348,7 @@ async def agents_graph_get():
     response, finished = await asyncio.to_thread(render_graph)
     stages["resume"] = time.perf_counter() - finished
     g.graph_stage_seconds = stages
+    g.graph_history_spans = history_spans
     return response
 
 
@@ -15079,6 +15086,15 @@ async def sessions_messages_create(session_id: str):
                 },
                 getattr(g, "authorization_context", None),
             )
+            from vibe.input_source import resolve_source
+
+            # Overwrite caller-supplied resolved facts, including retries from old clients.
+            message_metadata["terminal_source"] = resolve_source(
+                conn, identity=getattr(g, "remote_session_identity", None),
+                authorization=getattr(g, "authorization_context", None),
+                client_hint=request.headers.get("X-Avibe-Input-Source"),
+                surface_hint=message_metadata.pop("input_surface", None),
+            )
             message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
             if web_push_authorization_context is not None:
                 message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [
@@ -20576,7 +20592,7 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
     try:
         from vibe import remote_access
 
-        result = remote_access.reconcile(config)
+        result = remote_access.restore_connector()
         if isinstance(result, dict) and result.get("ok") is False:
             logger.warning("Remote access reconcile after UI start failed: %s", result.get("error"))
     except Exception:

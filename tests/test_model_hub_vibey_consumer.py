@@ -562,6 +562,11 @@ async def test_vibey_candidate_capabilities_survive_catalog_admission_without_gu
     candidate, = service.agent_model_candidates("vibey")["providers"]
     desired = {key: value for key, value in candidate.items() if key != "suppliers"}
     await service.set_agent_models("vibey", [], [desired])
+    stored = service.store.load().agents["vibey"].models[0].to_payload()
+    assert "match_kind" not in stored
+    if metadata == "catalog":
+        assert candidate["match_kind"] == "exact"
+        assert stored["models_dev_id"] == "fixture/claude-unknown"
     gateway = ModelHubTurnGateway(service)
     try:
         hop = await ModelHubRuntimeRouter(service=service, turn_gateway=gateway).resolve_hop(
@@ -1253,7 +1258,7 @@ async def test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limi
     ]
     payload["agents"]["opencode"]["models"] = [
         # The user set the context window when adding it.
-        {"id": "claude-sonnet-5-5", "origin": "provider", "native_protocol": "anthropic", "context_window": 200_000},
+        {"id": "claude-sonnet-5-5-high", "origin": "provider", "native_protocol": "anthropic", "context_window": 200_000},
         # models.dev described it, and the user cleared both limits since.
         {
             "id": "claude-opus-5-5", "origin": "provider", "native_protocol": "anthropic",
@@ -1289,7 +1294,7 @@ async def test_mh_limits_001_rows_written_before_a_models_dev_copy_take_its_limi
 
     assert limits("vibey") == [("claude-opus-5-5", "anthropic/claude-opus-5-5", 1_000_000, 128_000)]
     assert limits("opencode") == [
-        ("claude-sonnet-5-5", "anthropic/claude-sonnet-5-5", 200_000, 64_000),
+        ("claude-sonnet-5-5-high", "anthropic/claude-sonnet-5-5", 200_000, 64_000),
         ("claude-opus-5-5", "anthropic/claude-opus-5-5", None, None),
     ]
     for backend in ("claude", "codex"):

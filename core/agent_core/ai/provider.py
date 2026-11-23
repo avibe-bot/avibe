@@ -8,7 +8,7 @@ given, converts canonical messages with the cross-provider rules, and yields
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal, Mapping, Optional, Protocol, Union
+from typing import Any, AsyncIterator, Awaitable, Callable, Literal, Mapping, Optional, Protocol, Union
 
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import AssistantMessage, HostedImage, Message, ProtocolName
@@ -133,6 +133,8 @@ class ModelEndpoint:
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
     image_models: Optional[ImageModels] = None
+    #: A Model Hub launch (including a read-only description); its gateway URL is not a provider route identity.
+    via_hub: bool = False
 
 
 @dataclass(frozen=True)
@@ -172,6 +174,18 @@ class MediaSink(Protocol):
         ...
 
 
+@dataclass
+class ThreadObservation:
+    """One Anthropic request's wire attempts. Side requests have no reusable Session parent."""
+
+    session_id: str | None
+    attempts: list[dict[str, Any]] = field(default_factory=list)
+    settle_discard: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+    ordinary_retry: bool = False
+    # A provider can propose a measured optimization; only a committed conversation response accepts it.
+    after_commit: Callable[[], Awaitable[None]] | None = None
+
+
 @dataclass(frozen=True)
 class ModelRequest:
     endpoint: ModelEndpoint
@@ -183,6 +197,7 @@ class ModelRequest:
     cache: Literal["default", "none"] = "default"
     supports_images: bool = False
     """Resolved by the loop from ``ModelCapabilities``; an unknown capability counts as False."""
+    thread_observation: ThreadObservation | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -253,6 +268,7 @@ class ProviderError:
     #: narrow metadata grants Vibey one transcript-only recovery. The partial
     #: contains safe empty arguments for these calls; the loop must not execute them.
     malformed_tool_calls: tuple[MalformedToolCall, ...] = ()
+    silence_exhausted: bool = False
 
 
 @dataclass(frozen=True)

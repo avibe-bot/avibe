@@ -34,11 +34,15 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass
+from functools import cached_property
+from operator import length_hint
+from itertools import islice
 from time import perf_counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from sqlalchemy import and_, func, literal_column, or_, select, text
+from sqlalchemy import and_, bindparam, func, literal_column, or_, select, text
 from sqlalchemy.engine import Engine
 
 from storage.agent_session_rows import session_openable_in_chat
@@ -201,14 +205,75 @@ def _schedule_label(row: Mapping[str, Any]) -> Optional[str]:
 
 # ── main assembly ────────────────────────────────────────────────────────────
 
+@dataclass
+class _StatementSpan:
+    statements: int = 0  # One execution per SQL parameter batch.
+    batches: int = 0     # Nonempty fetchmany batches.
+    rows: int = 0        # Rows yielded, not prefetched or inferred from rowcount.
+    execute: float = 0.0
+    fetch: float = 0.0
+
+
+class HistoryStatementSpans:
+    """Fixed, request-local diagnostics; no SQL, parameters or record values."""
+
+    def __init__(self):
+        self._spans = {name: _StatementSpan() for name in (
+            "run_totals", "timeline_bounds", "all_timeline_times", "time_candidates", "trigger_runs", "trigger_runs_fallback", "trigger_exceptions",
+            "spawn_endpoints", "callback_endpoints", "run_headers", "history_index_probe",
+            "timeline_timestamps_covered", "timeline_timestamps_fallback", "callback_tie_ids", "callback_modes", "callback_delivery_ids",
+        )}
+
+    def log_fields(self):
+        return {name: {"statements": s.statements, "batches": s.batches, "rows": s.rows,
+                       "execute_ms": round(s.execute * 1000, 2), "fetch_ms": round(s.fetch * 1000, 2)}
+                for name, s in self._spans.items() if s.statements}
+
+
 class _GraphReader:
     """Time SQL execution and row retrieval, not the Python that consumes rows."""
 
-    def __init__(self, conn, timings: dict[str, float]):
+    def __init__(self, conn, timings: dict[str, float], history_spans: Optional[HistoryStatementSpans] = None):
         self.conn = conn
+        self.history_spans = history_spans
         self.timings = timings
         raw = conn.connection.driver_connection
         self.bind_limit = raw.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) if hasattr(raw, "getlimit") else 999
+
+    @cached_property
+    def history_indexes(self):
+        # Same-name indexes in compatible future layouts can have different
+        # keys or a WHERE predicate. INDEXED BY on a partial index can fail
+        # with 'no query solution'. Validate both hints before executing either.
+        expected = {
+            'ix_agent_runs_session_created': ['session_id', 'created_at'],
+            'ix_agent_runs_timeline_times': ['id', 'started_at', 'completed_at'],
+        }
+        keys = {name: [] for name in expected}
+        # At most four key columns per index (one past the longest expected
+        # shape catches extra keys). Ignore SQLite's auxiliary rowid, *not*
+        # expressions, collation, or sort direction on declared key columns.
+        stmt = text("""
+            SELECT i.name, k.name, k.coll, k.desc
+            FROM pragma_index_list('agent_runs', 'main') AS i
+            CROSS JOIN pragma_index_xinfo(i.name, 'main') AS k
+            WHERE i.name IN ('ix_agent_runs_timeline_times','ix_agent_runs_session_created')
+              AND i.partial = 0 AND k.key = 1 AND k.seqno < 4
+            ORDER BY i.name, k.seqno
+        """)
+        for name, column, collation, descending in self.rows(stmt, name="history_index_probe"):
+            keys[name].append((column, collation, descending))
+        return {name for name, columns in expected.items()
+                if keys[name] == [(column, 'BINARY', 0) for column in columns]}
+
+    @cached_property
+    def timeline_query(self):
+        exists = "ix_agent_runs_timeline_times" in self.history_indexes
+        index = "INDEXED BY ix_agent_runs_timeline_times" if exists else ""
+        stmt = text(f"SELECT id, started_at, completed_at FROM agent_runs {index} WHERE id IN :ids").bindparams(
+            bindparam("ids", expanding=True)
+        )
+        return stmt, "timeline_timestamps_covered" if exists else "timeline_timestamps_fallback"
 
     def batches(self, ids, *, reserved=0, copies=1):
         # The node cap does not bound lineage, candidate count, trigger IDs,
@@ -218,22 +283,37 @@ class _GraphReader:
         for start in range(0, len(values), size):
             yield values[start:start + size]
 
-    def rows(self, stmt, *, mappings=False):
+    def rows(self, stmt, *, mappings=False, name=None):
+        span = self.history_spans._spans[name] if name is not None and self.history_spans is not None else None
         started = perf_counter()
         result = self.conn.execute(stmt)
-        executed = perf_counter()
-        self.timings["execute"] += executed - started
+        elapsed = perf_counter() - started
+        self.timings["execute"] += elapsed
+        if span is not None:
+            span.statements += 1
+            span.execute += elapsed
         keys = tuple(result.keys()) if mappings else ()
-        for batch in iter(lambda: self._fetch(result), []):
-            if mappings:
-                yield from (dict(zip(keys, row)) for row in batch)
+        for batch in iter(lambda: self._fetch(result, span), []):
+            if span is None:
+                yield from (dict(zip(keys, row)) for row in batch) if mappings else batch
             else:
-                yield from batch
+                # fetchmany returns a list. Read its iterator's remaining
+                # length once per batch, even if the consumer stops early.
+                # Nothing is timed (or counted) once per result row.
+                span.batches += 1
+                rows = iter(batch)
+                try:
+                    yield from (dict(zip(keys, row)) for row in rows) if mappings else rows
+                finally:
+                    span.rows += len(batch) - length_hint(rows)
 
-    def _fetch(self, result):
+    def _fetch(self, result, span=None):
         started = perf_counter()
         batch = result.fetchmany(512)
-        self.timings["fetch"] += perf_counter() - started
+        elapsed = perf_counter() - started
+        self.timings["fetch"] += elapsed
+        if span is not None:
+            span.fetch += elapsed
         return batch
 
 
@@ -249,6 +329,7 @@ def build_graph(
     node_cap: int = NODE_CAP,
     engine: Optional[Engine] = None,
     timings: Optional[dict[str, float]] = None,
+    history_spans: Optional[HistoryStatementSpans] = None,
 ) -> dict[str, Any]:
     """Assemble the run-graph payload (contract §3 + amendments A1/A2).
 
@@ -279,7 +360,7 @@ def build_graph(
             # to join facts from the same run without rereading its payload.
             if not connection.connection.driver_connection.in_transaction:
                 connection.exec_driver_sql("BEGIN")
-            conn = _GraphReader(connection, timings)
+            conn = _GraphReader(connection, timings, history_spans)
             # The candidate source differs by view. History (include_ended) uses
             # the window scan. Active (contract A5 = live + queued) uses the live
             # set plus every session with a non-terminal run, independent of the
@@ -327,7 +408,7 @@ def build_graph(
             follow_refs = include_ended or candidate_truncated or check_imported
             waves = [loaded_ids]
             while follow_refs and waves[-1]:
-                extra = _lineage_refs(conn, waves[-1]) - loaded_ids
+                extra = _lineage_refs(conn, waves[-1], loaded_ids)
                 if not extra:
                     break
                 waves.append(extra)
@@ -365,7 +446,7 @@ def build_graph(
             counts_by_session = _run_totals(conn, node_ids)
             for wave in waves:
                 if visible := wave & node_ids:
-                    runs_by_session.update(_load_runs(conn, visible, node_ids, cutoff))
+                    runs_by_session.update(_load_runs(conn, visible, node_ids, cutoff, counts_by_session))
             for node in nodes:
                 sid = node["session_id"]
                 _add_run_details(node, runs_by_session.get(sid, []), counts_by_session.get(sid, (0, 0, False)))
@@ -545,7 +626,8 @@ def _run_totals(conn, session_ids):
     r = agent_runs.c
     stmt = select(r.session_id, r.status, func.count()).group_by(r.session_id, r.status)
     totals = {}
-    rows = (row for batch in conn.batches(session_ids) for row in conn.rows(stmt.where(r.session_id.in_(batch))))
+    rows = (row for batch in conn.batches(session_ids)
+            for row in conn.rows(stmt.where(r.session_id.in_(batch)), name="run_totals"))
     for sid, status, count in rows:
         total, running, pending = totals.get(sid, (0, 0, False))
         status = normalize_run_status(status)
@@ -554,7 +636,121 @@ def _run_totals(conn, session_ids):
     return totals
 
 
-def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime) -> dict[str, list[dict[str, Any]]]:
+# Positive proof only: UTC spellings and precisions emitted by our writers.
+# Other text (including offsets) always goes through the original parser.
+_D = "[0-9]"
+_UTC_SECOND = f"{_D * 4}-{_D * 2}-{_D * 2}T{_D * 2}:{_D * 2}:{_D * 2}"
+_UTC_TAILS = ("Z", "+00:00", "." + _D * 6 + "Z", "." + _D * 6 + "+00:00")
+_NONSTANDARD = " AND ".join(f"r.created_at NOT GLOB '{_UTC_SECOND}{tail}'" for tail in _UTC_TAILS)
+
+
+def _creation_candidates(conn, session_ids, long_ids, endpoints):
+    """Ten raw-order samples are witnesses, not the result: even with offsets,
+    the oldest parsed witness is a lower bound on the true tenth instant.
+    Keep its entire second, all exceptional spellings and edge instants. The
+    raw maximum also survives (canonical maxima are >= the floor or invalid).
+    """
+    if not long_ids:
+        r = agent_runs.c
+        stmt = select(literal_column("agent_runs.rowid"), r.session_id, r.created_at)
+        for batch in conn.batches(session_ids):
+            yield from conn.rows(stmt.where(r.session_id.in_(batch)), name="all_timeline_times")
+        return
+    floors = dict.fromkeys(session_ids, "")
+    bounds = text("""
+        SELECT value, (SELECT json_group_array(created_at) FROM (
+            SELECT created_at FROM agent_runs WHERE session_id = s.value
+            ORDER BY created_at DESC LIMIT :n
+        )) FROM json_each(:ids) AS s
+    """).bindparams(ids=json.dumps(sorted(long_ids)), n=RUNS_PER_NODE)
+    for sid, raw_values in conn.rows(bounds, name="timeline_bounds"):
+        witnesses = [_parse_iso(t) or _EPOCH for t in json.loads(raw_values)]
+        # isoformat pads years and our lower bound includes every tie.
+        oldest = min(witnesses)
+        floors[sid] = oldest.isoformat()[:19] if oldest != _EPOCH else ""
+    # Compatibility/edge probes still visit old *index keys*. They need not
+    # transfer/parse every historical time or fetch old table records.
+    stmt = text(f"""
+        SELECT r.rowid, r.session_id, r.created_at FROM json_each(:floors) AS s
+        CROSS JOIN agent_runs AS r
+        WHERE r.session_id = s.key AND (
+            r.created_at >= s.value OR ({_NONSTANDARD})
+            OR r.rowid IN (SELECT value FROM json_each(:edges))
+        )
+    """).bindparams(floors=json.dumps(floors), edges=json.dumps(list(endpoints)))
+    yield from conn.rows(stmt, name="time_candidates")
+
+
+def _newest_ties(keys, group_key, times):
+    groups = {}
+    for k in keys:
+        group = group_key(k)
+        instant = times[k][2]
+        count, newest, ties = groups.get(group, (0, _EPOCH, None))
+        if ties is None or instant > newest:
+            newest, ties = instant, [k]
+        elif instant == newest:
+            ties.append(k)
+        groups[group] = count + 1, newest, ties
+    return {k: count for count, _, ties in groups.values() for k in ties}
+
+
+def _callback_winners(conn, callbacks, times):
+    """Find the newest drawable instant per endpoint pair before fetching
+    headers. An entire tie survives until its real run IDs break the tie.
+    Look ahead geometrically through failure-only notices, batching across
+    pairs. A known sent callback rules out all strictly older candidates.
+    """
+    r = agent_runs.c
+    rowid = literal_column("agent_runs.rowid")
+    pairs = {}
+    for k, (target, _) in callbacks.items():
+        pairs.setdefault((times[k][0], target), []).append(k)
+    # Discard older instants proved irrelevant by a sent notice. Only a
+    # remaining equal-instant group needs IDs (not status/type/JSON) to sort.
+    # Resolve that order *before* looking at any modes: even a tied failure
+    # notice after a sent winner must not cause another metadata read.
+    ties = []
+    for pair, members in pairs.items():
+        floor = max((times[k][2] for k in members if callbacks[k][1] == "sent"), default=_EPOCH)
+        groups = {}
+        for k in members:
+            if times[k][2] >= floor:
+                groups.setdefault(times[k][2], []).append(k)
+        pairs[pair] = [k for group in groups.values() for k in group]
+        ties.extend(k for group in groups.values() if len(group) > 1 for k in group)
+    ids = {}
+    for batch in conn.batches(ties):
+        ids.update(conn.rows(select(rowid, r.id).where(rowid.in_(batch)), name="callback_tie_ids"))
+    pending = {pair: iter(sorted(members, key=lambda k: (times[k][2], ids.get(k, "")), reverse=True))
+               for pair, members in pairs.items()}
+    width = 1
+    winners = set()
+    while pending:
+        probes = {}
+        for pair, members in pending.items():
+            group = probes[pair] = []
+            for k in islice(members, width):
+                group.append(k)
+                if callbacks[k][1] == "sent":
+                    break
+        unsent = (k for group in probes.values() for k in group if callbacks[k][1] != "sent")
+        failed_only = set()
+        for batch in conn.batches(unsent, reserved=1):
+            mode = func.json_extract(r.metadata_json, "$.callback_mode")
+            failed_only.update(k for k, value in conn.rows(select(rowid, mode).where(rowid.in_(batch)),
+                                                          name="callback_modes") if value == "failure")
+        for pair, group in probes.items():
+            first = next((k for k in group if k not in failed_only), None)
+            if first is not None:
+                winners.add(first)
+            if first is not None or len(group) < width:
+                del pending[pair]
+        width = min(64, width * 2)
+    return winners
+
+
+def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime, totals) -> dict[str, list[dict[str, Any]]]:
     """Hydrate runs that can contribute a timeline or an edge in this wave.
 
     `created_at` and the callback fields follow unbounded text/JSON on the
@@ -564,42 +760,72 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
     """
     r = agent_runs.c
     rowid = literal_column("agent_runs.rowid").label("rid")
-    times = {}
-    by_session = {}
-    needed = set()
-    times_stmt = select(rowid, r.session_id, r.created_at)
-    for rid, sid, raw in (row for b in conn.batches(session_ids) for row in conn.rows(times_stmt.where(r.session_id.in_(b)))):
-        instant = _parse_iso(raw) or _EPOCH
-        times[rid] = (raw, instant)
-        by_session.setdefault(sid, []).append(rid)
-        if instant >= cutoff:
-            needed.add(rid)  # potential trigger; definition/type are before payloads
-    for ids in by_session.values():
-        # Keep all ties at the timeline boundary until we have the real run
-        # IDs to break them. The raw maximum separately decides session/edge
-        # insertion order (the legacy SQL ORDER BY created_at DESC, id DESC).
-        boundary = sorted((times[k][1] for k in ids), reverse=True)[min(RUNS_PER_NODE, len(ids)) - 1]
-        raw_max = max(times[k][0] for k in ids)
-        needed.update(k for k in ids if times[k][1] >= boundary or times[k][0] == raw_max)
-
-    spawn = select(rowid).where(r.source_kind == "agent")
+    # Recover actor/target from the existing endpoint indexes; on upgraded
+    # layouts these columns of the table record can follow stdout.
+    spawn = select(rowid, r.source_actor).where(r.source_kind == "agent")
     cb = select(rowid, r.callback_session_id, r.callback_status).where(r.callback_status.is_not(None), r.callback_status != "")
     callbacks = {}
+    actors = {}
     for batch in conn.batches(session_ids, reserved=1, copies=2):
         belongs = r.session_id.in_(batch)
         for endpoints in conn.batches(visible, reserved=1 + len(batch)):
-            needed.update(k for k, in conn.rows(spawn.where(belongs, r.source_actor.in_(endpoints))))
+            actors.update(conn.rows(spawn.where(belongs, r.source_actor.in_(endpoints)), name="spawn_endpoints"))
             matching = cb.where(belongs, r.callback_session_id.in_(endpoints))
-            callbacks.update((k, (target, status)) for k, target, status in conn.rows(matching))
-    needed.update(callbacks)
+            callbacks.update((k, (target, status)) for k, target, status in conn.rows(matching, name="callback_endpoints"))
+    times = {}
+    by_session = {}
+    needed = set()
+    long_ids = {sid for sid in session_ids if totals.get(sid, (0,))[0] > RUNS_PER_NODE}
+    for k, sid, raw in _creation_candidates(conn, session_ids, long_ids, actors.keys() | callbacks.keys()):
+        times[k] = (sid, raw, _parse_iso(raw) or _EPOCH)
+        by_session.setdefault(sid, []).append(k)
+    for ids in by_session.values():
+        boundary = sorted((times[k][2] for k in ids), reverse=True)[min(RUNS_PER_NODE, len(ids)) - 1]
+        raw_max = max(times[k][1] for k in ids)
+        needed.update(k for k in ids if times[k][2] >= boundary or times[k][1] == raw_max)
+    spawn_counts = _newest_ties(actors, lambda k: (times[k][0], actors[k]), times)
+    needed.update(spawn_counts)
+    trigger_defs = {}
+    if long_ids:
+        floor = cutoff.astimezone(timezone.utc).isoformat()[:19]
+        # Only timestamps in the raw window need a type check on the run
+        # record. Non-standard times below the raw floor can be inside the
+        # window too; the time index pass retained those.
+        # With several session IDs the unhinted planner can seek the global
+        # run_type prefix instead of the visible sessions' time ranges.
+        has_range_index = "ix_agent_runs_session_created" in conn.history_indexes
+        hint = "INDEXED BY ix_agent_runs_session_created" if has_range_index else ""
+        label = "trigger_runs" if has_range_index else "trigger_runs_fallback"
+        stmt = text(f"""
+            SELECT rowid, session_id, created_at, definition_id FROM agent_runs {hint}
+            WHERE session_id IN :ids AND created_at >= :floor AND run_type IN ('scheduled','watch')
+              AND definition_id IS NOT NULL AND definition_id != ''
+        """).bindparams(bindparam("ids", expanding=True), floor=floor)
+        for batch in conn.batches(long_ids, reserved=1):
+            for k, sid, raw, definition in conn.rows(stmt.params(ids=batch), name=label):
+                instant = _parse_iso(raw)
+                if instant is not None and instant >= cutoff:
+                    times[k] = (sid, raw, instant)
+                    trigger_defs[k] = definition
+        unusual = (k for k, (sid, raw, instant) in times.items() if raw < floor and instant >= cutoff and sid in long_ids)
+        for batch in conn.batches(unusual, reserved=3):
+            stmt = select(rowid, r.definition_id).where(rowid.in_(batch), r.run_type.in_(_TRIGGER_RUN_TYPES),
+                                                       r.definition_id.is_not(None), r.definition_id != "")
+            trigger_defs.update(conn.rows(stmt, name="trigger_exceptions"))
+    trigger_counts = _newest_ties(trigger_defs, lambda k: (times[k][0], trigger_defs[k]), times)
+    needed.update(trigger_counts)
+    callback_winners = _callback_winners(conn, callbacks, times)
+    needed.update(callback_winners)
 
     grouped = {}
     for batch in conn.batches(needed):
-        head = select(rowid, r.session_id, r.id, r.status, r.run_type, r.definition_id, r.source_kind, r.source_actor)
-        for data in conn.rows(head.where(rowid.in_(batch)), mappings=True):
+        head = select(rowid, r.id, r.status, r.run_type, r.definition_id)
+        for data in conn.rows(head.where(rowid.in_(batch)), mappings=True, name="run_headers"):
             k = data["rid"]
-            data["created_at"], data["instant"] = times[k]
-            if k in callbacks:
+            data["session_id"], data["created_at"], data["instant"] = times[k]
+            if k in spawn_counts:
+                data["source_kind"], data["source_actor"] = "agent", actors[k]
+            if k in callback_winners:
                 data["callback_session_id"], data["callback_status"] = callbacks[k]
             grouped.setdefault(data["session_id"], []).append(data)
 
@@ -608,32 +834,33 @@ def _load_runs(conn, session_ids: set[str], visible: set[str], cutoff: datetime)
 
     grouped = dict(sorted(grouped.items(), key=raw_order, reverse=True))
     timeline = {}
-    for runs in grouped.values():
+    for sid, runs in grouped.items():
         runs.sort(key=lambda r: (r["instant"], r["id"]), reverse=True)
-        timeline.update((r["rid"], r) for r in runs[:RUNS_PER_NODE])
+        timeline.update((r["id"], r) for r in runs[:RUNS_PER_NODE])
+        spawn_seen, trigger_seen = set(), set()
+        for run in runs:
+            k = run["rid"]
+            if k in spawn_counts:
+                src = actors[k]
+                run["spawn_count"] = 0 if src in spawn_seen else spawn_counts[k]
+                spawn_seen.add(src)
+            if sid in long_ids:
+                d = trigger_defs.get(k)
+                run["trigger_count"] = 0 if d in trigger_seen else trigger_counts.get(k, 0)
+                if k in trigger_counts:
+                    trigger_seen.add(d)
+    # The unique PK index also matches id, but would walk payload overflow
+    # pages for the two timestamps. Seek their exact (including NULL) values
+    # in the index built by revision 0099 instead.
     for batch in conn.batches(timeline):
-        for k, started, completed in conn.rows(select(rowid, r.started_at, r.completed_at).where(rowid.in_(batch))):
+        stmt, label = conn.timeline_query
+        for k, started, completed in conn.rows(stmt.params(ids=batch), name=label):
             timeline[k].update(started_at=started, completed_at=completed)
 
-    # A sent callback always draws an edge, even in failure-only mode. For
-    # the other candidates evaluate the JSON predicate only on their own rows.
-    if callbacks:
-        by_callback = {run["rid"]: run for runs in grouped.values() for run in runs if run["rid"] in callbacks}
-        for batch in conn.batches((k for k, (_, status) in callbacks.items() if status != "sent"), reserved=1):
-            mode = func.json_extract(r.metadata_json, "$.callback_mode")
-            for k, callback_mode in conn.rows(select(rowid, mode).where(rowid.in_(batch))):
-                by_callback[k]["callback_mode"] = callback_mode
-        # Only the newest drawable callback per (sender, target) contributes
-        # its delivery ID. Reading that trailing field on all historical sent
-        # callbacks can otherwise cost as much as reading all the payloads.
-        latest = {}
-        for sid, runs in grouped.items():
-            for run in runs:
-                if _draws_callback_edge(run):
-                    latest.setdefault((sid, run["callback_session_id"]), run)
-        for batch in conn.batches(run["rid"] for run in latest.values()):
-            for k, callback_id in conn.rows(select(rowid, r.callback_run_id).where(rowid.in_(batch))):
-                by_callback[k]["callback_run_id"] = callback_id
+    winners = {run["rid"]: run for runs in grouped.values() for run in runs if run["rid"] in callback_winners}
+    for batch in conn.batches(winners):
+        for k, callback_id in conn.rows(select(rowid, r.callback_run_id).where(rowid.in_(batch)), name="callback_delivery_ids"):
+            winners[k]["callback_run_id"] = callback_id
     return grouped
 
 
@@ -645,26 +872,41 @@ def _draws_callback_edge(run: Mapping[str, Any]) -> bool:
     return run.get("callback_mode") != "failure" or run.get("callback_status") == "sent"
 
 
-def _lineage_refs(conn, frontier: set[str]) -> set[str]:
-    """Advance one wave, including old delegations. The two probes use the
-    source/session and session/callback indexes; only an unsent callback can
-    require touching the run's metadata to decide if it draws an edge."""
+def _lineage_refs(conn, frontier: set[str], visited: set[str] | None = None) -> set[str]:
+    """Discover new endpoints, not whether every historical callback drew an
+    edge. The latter needs payload I/O; the former can usually be answered
+    using two covering indexes without reading any run table records.
+    """
     r = agent_runs.c
-    # Group in index order, including the session. DISTINCT source_actor
-    # alone invites SQLite to walk *all* agent-authored runs via the actor
-    # index once per wave, filtering session_id from the table afterwards.
-    callers = select(r.session_id, r.source_actor).where(r.source_kind == "agent").group_by(r.session_id, r.source_actor)
-    targets = select(r.session_id, r.callback_session_id).where(
-        r.callback_session_id.is_not(None),
-        r.callback_status.is_not(None), r.callback_status != "",
-        or_(r.callback_status == "sent",
-            func.json_extract(r.metadata_json, "$.callback_mode").is_distinct_from("failure")),
-    ).group_by(r.session_id, r.callback_session_id)
+    visited = visited or set()
     refs = set()
-    for batch in conn.batches(frontier, reserved=5, copies=2):
+    uncertain = set()
+    callers = select(r.session_id, r.source_actor).where(r.source_kind == "agent").group_by(r.session_id, r.source_actor)
+    # Group by the index prefix; don't walk the table to extract JSON while
+    # deduplicating targets already reached by a spawn or sent callback.
+    targets = select(r.session_id, r.callback_session_id, r.callback_status).where(
+        r.callback_session_id.is_not(None), r.callback_status.is_not(None), r.callback_status != "",
+    ).group_by(r.session_id, r.callback_session_id, r.callback_status)
+    for batch in conn.batches(frontier, reserved=1):
         wave = r.session_id.in_(batch)
-        refs.update(sid for _, sid in conn.rows(callers.where(wave).union_all(targets.where(wave))) if sid)
-    return refs
+        refs.update(sid for _, sid in conn.rows(callers.where(wave)) if sid)
+        for _, sid, status in conn.rows(targets.where(wave)):
+            if sid:
+                (refs if status == "sent" else uncertain).add(sid)
+
+    # Only unresolved, not-yet-reached targets need a mode check. Restrict
+    # both ends to *this wave*; other senders don't establish reachability.
+    uncertain.difference_update(visited, refs)
+    if uncertain:
+        candidate = select(r.session_id, r.callback_session_id).where(
+            r.callback_status.is_not(None), r.callback_status != "",
+            func.json_extract(r.metadata_json, "$.callback_mode").is_distinct_from("failure"),
+        ).group_by(r.session_id, r.callback_session_id)
+        for batch in conn.batches(frontier, reserved=3, copies=2):
+            for targets_batch in conn.batches(uncertain - refs, reserved=3 + len(batch)):
+                stmt = candidate.where(r.session_id.in_(batch), r.callback_session_id.in_(targets_batch))
+                refs.update(sid for _, sid in conn.rows(stmt))
+    return refs - visited
 
 
 def _build_edges(
@@ -701,10 +943,10 @@ def _build_edges(
             # Callback deliveries use source_kind='callback'. Every agent child
             # remains independent delegation, even when it targets the parent
             # run's callback session.
-            if run.get("source_kind") == "agent" and run.get("source_actor"):
+            if "spawn_count" in run:
                 key = (run["source_actor"], session_id)
                 agg = spawn.setdefault(key, {"run_count": 0, "last_run_id": None, "last_at": None})
-                agg["run_count"] += 1
+                agg["run_count"] += run["spawn_count"]
                 if agg["last_at"] is None or _newer(agg["last_at"], created):
                     agg["last_at"] = created
                     agg["last_run_id"] = run.get("id")
@@ -725,7 +967,8 @@ def _build_edges(
             # or since-disabled definition must not resurface just because its old
             # session lingers.
             if (
-                run.get("run_type") in _TRIGGER_RUN_TYPES
+                run.get("trigger_count", 1)
+                and run.get("run_type") in _TRIGGER_RUN_TYPES
                 and run.get("definition_id")
                 and (run_at := _parse_iso(created)) is not None
                 and run_at >= cutoff
@@ -734,7 +977,7 @@ def _build_edges(
                 trigger_ids.add(definition_id)
                 key = (definition_id, session_id)
                 agg = trigger.setdefault(key, {"run_count": 0, "last_at": None})
-                agg["run_count"] += 1
+                agg["run_count"] += run.get("trigger_count", 1)
                 if agg["last_at"] is None or _newer(agg["last_at"], created):
                     agg["last_at"] = created
 

@@ -1427,7 +1427,7 @@
       "gateway": {
         "heading": "Routes",
         "infoLabel": "What routes are",
-        "info": "Models follow default routing unless they have a saved manual route. A model goes to the providers that list it; a model no provider lists needs a manual route.",
+        "info": "Models follow default routing unless they have their own route. A model goes to the providers that list it; a model no provider lists needs its own route.",
         "address": "Local address: {{address}} (for connecting other tools to the gateway)",
         "sourceOrder": "Default routing",
         "manageModels": "Manage models",
@@ -1562,11 +1562,13 @@
           "confirm_one": "Add {{count}} model",
           "confirm_other": "Add {{count}} models",
           "groupCatalog": "Model catalog",
-          "catalogNote": "No provider lists these. After adding one, choose a provider for it in its route before you use it.",
+          "catalogNote": "No provider lists these. After adding one, set its route separately.",
           "noSuppliedMatch": "None of your providers lists this model. Pick one they list; you can add others later in Settings › Models.",
           "notListed": "Not listed by a provider",
-          "customFromQueryNote": "Uses the ID exactly as typed, with default parameters. You can change them later in Manage models.",
-          "searchingCatalog": "Searching the model catalog"
+          "searchingCatalog": "Searching the model catalog",
+          "sourcePicked_one": "{{count}} selected",
+          "sourcePicked_other": "{{count}} selected",
+          "segmentOther": "Other"
         },
         "modelEditor": {
           "eyebrow": "{{backend}} · Model list",
@@ -1579,8 +1581,8 @@
             "capabilities": "Capabilities"
           },
           "id": {
-            "label": "Model",
-            "placeholder": "Search models.dev or enter a model ID",
+            "label": "Model ID",
+            "placeholder": "Enter a model ID",
             "required": "Enter a backend model ID.",
             "duplicate": "This list already has a model with this ID."
           },
@@ -1588,14 +1590,10 @@
             "label": "Display name",
             "placeholder": "Optional — the list shows the model ID when this is empty"
           },
-          "lookupLoading": "Searching models.dev…",
-          "useAsId": "Use \"<id>{{query}}</id>\" as the model ID",
-          "useAsIdKeep": "Use \"<id>{{query}}</id>\", keep current parameters",
-          "parametersFrom": "Parameters from {{name}}",
-          "clearParameters": "Clear parameters",
-          "fillFailed": "models.dev could not be reached",
-          "fillUnavailable": "models.dev unavailable",
-          "matches": "models.dev matches",
+          "lookupLoading": "Searching the model catalog…",
+          "fillFailed": "The model catalog could not be reached",
+          "fillUnavailable": "The model catalog is unavailable",
+          "matches": "Model catalog results",
           "contextWindow": "Context window",
           "maxOutput": "Maximum output",
           "tokens": "tokens",
@@ -1618,7 +1616,7 @@
           "reasoningEfforts": "Reasoning effort",
           "customEffort": "Custom effort",
           "customEffortPlaceholder": "e.g. medium",
-          "effortNote": "List only options this model supports. Selecting Off in an Agent disables extended thinking; an empty option list does not mean Off. Other effort values are forwarded unchanged.",
+          "effortNote": "Tick the levels this model supports; Agents can then choose them. To let an Agent turn thinking off, tick Off; ticking none does not turn thinking off.",
           "nativeProtocol": {
             "label": "API",
             "openai_responses": "OpenAI Responses",
@@ -1626,7 +1624,21 @@
           },
           "cancel": "Cancel",
           "add": "Add model",
-          "apply": "Save model"
+          "apply": "Save model",
+          "source": {
+            "from": "Parameters from <id>{{model}}</id>",
+            "fromClosest": "Parameters from the closest match, <id>{{model}}</id>",
+            "none": "The model catalog has no match for this model",
+            "updateTo": "Update parameters to <id>{{model}}</id>",
+            "change": "Change",
+            "pick": "Pick a model to copy parameters from",
+            "search": "Search the model catalog",
+            "applyNote": "Copies parameters only. The model ID stays.",
+            "clear": "Fill in myself",
+            "empty": "Nothing found. Try another keyword."
+          },
+          "presets": "Common values",
+          "effortInfoLabel": "How to fill in reasoning effort"
         },
         "off": {
           "status": "Turned off",
@@ -1756,60 +1768,59 @@
           "stalled": "The model request timed out waiting for data"
         },
         "origin": {
-          "automatic": "Automatic",
-          "manual": "Manual",
+          "automatic": "Default",
+          "manual": "Own route",
           "passthrough": "Forwarded as is",
           "unconfigured": "Unconfigured"
         },
         "help": {
-          "automatic": "Matched by model name.\nProvider order follows {{backend}} default routing.",
-          "manual": "This model has a saved, fixed route.\nDefault routing does not change it. Restore automatic in route settings to follow defaults.",
+          "automatic": "Follows {{backend}}'s default routing and its provider order.",
+          "manual": "This model has its own route. Default routing does not affect it.",
           "passthrough": "No provider lists this model.\nIts name is forwarded as is to eligible API-key providers, which try it in default order.",
-          "unconfigured": "No route is configured for this model. Open route settings to configure defaults or restore automatic routing."
+          "unconfigured": "This model has no route yet. Open its route to adjust default routing or set one separately."
         },
-        "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
-        "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
         "cacheTtl": {
-          "label": "Conversation cache lifetime",
-          "default": "Use built-in estimate",
+          "label": "Cache duration",
+          "default": "Automatic",
           "5m": "5 minutes",
           "30m": "30 minutes",
           "1h": "1 hour",
           "12h": "12 hours",
-          "help": "This route-wide estimate controls when old tool results are cleared. Official OpenAI Responses GPT-5.6+ uses a 30-minute cache by default; selecting 30 minutes or 12 hours explicitly sends that provider option. The 12-hour mode costs 2.5x the model input rate for writes versus 1.25x for 30 minutes; cached reads keep the model-specific read price. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive OpenAI-specific cache options."
+          "help": "Providers keep the repeated start of a conversation cached for a while; sending it again in that time is cheaper and faster. Avibe uses this duration to judge whether the cache is still there. Leave it on Automatic unless you know how long your provider keeps its cache. On a direct official connection, a longer duration is billed at a higher cache-write price.",
+          "infoLabel": "What cache duration is"
         },
-        "undoDone": "Previous manual draft restored.",
+        "undoDone": "Your earlier separate route is back as an unsaved draft.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
-          "automatic": "After restore: automatic matching",
-          "passthrough": "After restore: forwarded as is",
-          "unconfigured": "After restore: no provider supplies it"
+          "automatic": "After saving: follows default routing",
+          "passthrough": "After saving: forwarded as is",
+          "unconfigured": "After saving: no provider supplies it"
         },
-        "previewLoading": "Reading inherited routing...",
-        "previewFailed": "Could not preview inherited routing. Nothing has been saved. Retry or undo the restore.",
+        "previewLoading": "Reading default routing…",
+        "previewFailed": "Could not read default routing. Nothing has been saved. Retry, or undo this switch.",
         "draftEmpty": "No route entries in this draft.",
-        "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Custom.",
+        "noDefaults": "No provider in default routing lists this model. Add one that lists it or put an existing one in default routing; if your provider does serve it, choose it under Set separately.",
         "inventoryNotProvided": "Model list not provided",
         "configureDefaults": "Configure default routing",
         "close": "Close",
         "cancelChanges": "Cancel changes",
-        "manualPending": "After saving, this model will use a manual route and no longer follow default routing.",
+        "manualPending": "After saving, this model uses its own route and no longer follows default routing.",
         "exactModel": "Exact model ID",
         "moveUp": "Move provider up",
         "moveDown": "Move provider down",
-        "counts": "{{inherited}} models follow defaults · {{manual}} fixed routes",
+        "counts": "{{inherited}} models follow default routing · {{manual}} set separately",
         "errorShort": "Error"
       },
       "order": {
         "title": "{{backend}} · Default routing",
-        "subtitle": "Applies to automatic routes. Saved manual routes stay unchanged.",
+        "subtitle": "Affects only models that follow default routing. Models with their own route stay unchanged.",
         "infoLabel": "About default routing",
         "reorder": "Reorder provider",
         "section": {
           "ordered": "Provider priority",
-          "ordered.note": "A model goes to the providers that list it, in this order. A model no provider lists needs a manual route.",
+          "ordered.note": "A model goes to the providers that list it, in this order. A model no provider lists needs its own route.",
           "heldOut": "Not in default routing",
-          "heldOut.note": "Available for manual routes."
+          "heldOut.note": "Available when you set a model's route separately."
         },
         "action": {
           "include": "Add to order",
@@ -2357,17 +2368,19 @@
         "impact": {
           "refreshFail": "The route chain was saved, but the display could not be refreshed."
         },
-        "hint": "This model has a saved, fixed route. Default routing changes do not overwrite it.",
         "mode": {
           "label": "Routing mode",
-          "follow": "Follow defaults",
-          "custom": "Custom",
+          "follow": "Follow default routing",
+          "custom": "Set separately",
           "undo": "Undo",
           "viewDefaults": "View default routing",
-          "adjustDefaults": "Adjust default routing"
+          "adjustDefaults": "Adjust default routing",
+          "infoLabel": "How the routing modes differ",
+          "followInfo": ": uses the provider order in {{backend}}'s default routing. When default routing changes, this changes with it.",
+          "customInfo": ": this model uses its own providers and order. Default routing does not affect it."
         },
         "hopActions": "Hop actions",
-        "modelActions": "Model actions"
+        "advanced": "Advanced"
       },
       "recent": {
         "title": "Recent switches",
@@ -2386,17 +2399,18 @@
         "field": {
           "vendor": "Provider",
           "vendor.custom": "Other provider · enter its address",
-          "vendor.hint": "Pick DeepSeek, Qwen, Kimi and the like, and the official address is filled in for you",
           "vendor.search": "Search providers",
           "vendor.empty": "No provider by that name",
           "name": "Name (optional)",
           "protocol": "API format",
           "protocol.hint": "A declared interface is not proof of credential validity or model compatibility",
           "baseUrl": "Base URL",
-          "baseUrl.hint": "API root, such as https://api.example.com/v1; a bare host uses the standard /v1 path",
+          "baseUrl.hint": "Enter the API root. A bare host uses the standard /v1 path.",
           "apiKey": "API key",
           "apiKey.reveal": "Show API key",
-          "apiKey.conceal": "Hide API key"
+          "apiKey.conceal": "Hide API key",
+          "baseUrl.infoLabel": "How to fill in the Base URL",
+          "baseUrl.placeholder": "https://api.example.com/v1"
         },
         "pull": {
           "result_one": "Fetched {{count}} model",
@@ -2589,7 +2603,7 @@
       "migration": {
         "open": "Migrate configuration",
         "title": "Migrate to the Model Hub",
-        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores. Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default; migration does not test keys online or fetch model lists. Later model requests establish whether a key works.",
+        "subtitle": "Import authentication saved in configuration files, shell startup files, or supported credential stores.",
         "cleanApiKeys": "Also remove the API keys from the native CLI configuration",
         "cleanApiKeysHint": "Includes shell startup files and each CLI’s config files. Left unchecked, those keys stay as they are; assistants launched through Model Hub don’t use them.",
         "empty": "No configuration found to migrate.",
@@ -2636,13 +2650,15 @@
           "claude": "Claude Code configuration",
           "codex": "Codex configuration",
           "opencode": "OpenCode configuration"
-        }
+        },
+        "detailsLabel": "What an import does",
+        "details": "Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default. An import does not test keys online or fetch model lists; whether a key works shows when a model is first called."
       },
       "sourceTest": {
         "open": "Test",
         "testNow": "Test now",
         "title": "Test {{source}}",
-        "hint": "Send one short request using this provider and the selected model. This can incur a small charge. The result applies only to this model.",
+        "hint": "Sends one short request, which can incur a small charge.",
         "cooldownHint": "A successful test makes this provider available again right away.",
         "stillUnavailable": "The provider is still marked unavailable.",
         "model": "Test model",
@@ -2704,7 +2720,6 @@
           "title": "Edit {{source}}",
           "name": "Display name",
           "baseUrl": "Base URL",
-          "hint": "The protocol stays fixed. Changing the Base URL can change available models and routes; you will review any impact before it is applied.",
           "cancel": "Cancel",
           "save": "Save",
           "saving": "Saving…",

@@ -698,7 +698,7 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     steps = workflow["jobs"]["simulator"]["steps"]
     selection_index, selection = next(
         (index, step) for index, step in enumerate(steps)
-        if step.get("name") == "Select the pinned iPhone 17 Pro simulator"
+        if step.get("name") == "Select the pinned iPhone 18 Pro / iOS 27.2 simulator"
     )
     boot = steps[selection_index + 1]
     assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
@@ -708,14 +708,14 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
     # Execute the actual workflow selector, not a copied implementation.
     selector = shell.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-27-2"
     devices = {
-        "com.apple.CoreSimulator.SimRuntime.iOS-26-4-1": [
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "old"},
+        "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "old"},
         ],
         pinned: [
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "z"},
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "a"},
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "z"},
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "a"},
         ],
     }
     if inventory == "reversed":
@@ -741,7 +741,7 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     else:
         assert result.returncode != 0
         assert result.stdout == ""
-        assert f"No available iPhone 17 Pro simulator for {pinned}" in result.stderr
+        assert f"No available iPhone 18 Pro simulator for {pinned}" in result.stderr
 
 
 @pytest.mark.parametrize("pin_state", ["pending", "published"])

@@ -369,9 +369,9 @@ export const backendModelId = (id: string): string => id.trim();
 /**
  * The one write that gives a draft row its id.
  *
- * Every id this UI produces lands through here — a models.dev fill, the picker's
- * 「add as a custom model」 seed, the 「use what I typed」 escape, and the row the
- * editor finally commits. One chokepoint rather than a rule each producer
+ * Every id this UI produces lands through here — a catalog model added from the
+ * picker, the picker's 「add as a custom model」 seed, and the row the editor
+ * finally commits. One chokepoint rather than a rule each producer
  * remembers: a producer that skipped the resolver used to be a defect nobody
  * could see until the backend refused the saved id, and the answer to 「which
  * producers apply it?」 has to be 「there is no other way in」, not a list that a
@@ -397,13 +397,12 @@ export const draftWithId = (
 /**
  * A models.dev match, poured into a draft — the id included.
  *
- * Choosing a suggestion is choosing a model, not decorating one: the row it
- * creates is the model that was picked, so it carries that model's own id
- * (`model_id`, the id a backend accepts — not the catalog key `models_dev_id`),
- * resolved through `backendModelId` against the provider that offered it. The
- * user typed a search, and every filled field including the id stays editable
- * afterwards. Keeping what was typed is the 「use what I typed」 escape, which
- * never reaches this function — but reaches the same resolver.
+ * Adding a catalog model from the picker is choosing a model, not decorating
+ * one: the row it creates is the model that was picked, so it carries that
+ * model's own id (`model_id`, the id a backend accepts — not the catalog key
+ * `models_dev_id`), resolved through `backendModelId` against the provider that
+ * offered it. The editor never comes here: there the id is the user's, and the
+ * catalog only describes it (`applyModelsDevParameters`).
  *
  * `origin` is passed in rather than derived because the schema defines it as how
  * the row was FIRST created — an existing row keeps its own answer no matter how
@@ -432,6 +431,41 @@ export const applyModelsDevMatch = (
   match.model_id,
   backend,
 );
+
+/** The registered model a catalog key names: its last path segment. The same
+ *  cut reads a provider-prefixed model ID as the registry would know it. */
+export const modelsDevBaseId = (id: string): string => id.slice(id.lastIndexOf('/') + 1);
+
+/**
+ * A models.dev answer's parameters, poured into a draft that keeps its own ID
+ * and display name.
+ *
+ * This is describing a model, not choosing one: the row stays the model the
+ * user named — a relay's name for it, a variant the catalog files under its
+ * base — and takes what the catalog knows about the model it answers to.
+ *
+ * `origin` is passed in for the reason `applyModelsDevMatch` takes it. `backend`
+ * is passed only for a row being added: the API an OpenCode model is answered
+ * on comes with the description then, and a saved row keeps the one it has.
+ */
+export const applyModelsDevParameters = (
+  draft: BackendModel,
+  match: ModelsDevMatch,
+  origin: BackendModelOrigin,
+  backend: AgentBackend | null,
+): BackendModel => ({
+  ...draft,
+  origin,
+  models_dev_id: match.models_dev_id,
+  context_window: match.context_window,
+  max_output_tokens: match.max_output_tokens,
+  input_modalities: [...match.input_modalities],
+  output_modalities: [...match.output_modalities],
+  supports_tools: match.supports_tools,
+  supports_reasoning: match.supports_reasoning,
+  reasoning_efforts: [...match.reasoning_efforts],
+  ...(backend === 'opencode' ? { native_protocol: match.native_protocol } : {}),
+});
 
 const sameList = (left: readonly unknown[], right: readonly unknown[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
@@ -465,8 +499,8 @@ export const MODELS_DEV_FIELDS = [
  * parameters the action names. The provenance goes with the parameters, so the
  * row no longer claims a models.dev source it now owes nothing to.
  *
- * Editing the id never comes here: a catalog model picked as a base is the
- * starting point for a model under another id, and its parameters are kept.
+ * Editing the id never comes here: the parameters on screen stay while the id
+ * changes, and what the new id answers to is only offered.
  */
 export const clearModelsDevParameters = (draft: BackendModel): BackendModel => {
   const blank = blankBackendModel();

@@ -236,10 +236,34 @@
   --model-hub-model-note-size: 11px;
   --model-hub-model-match-height: 31px;
 
+  /* Where a model's parameters came from, and the catalog search under it. */
+  --model-hub-model-source-size: 12px;
+  --model-hub-model-source-line: 18px;
+  --model-hub-model-source-id-size: 11.5px;
+  --model-hub-model-source-gap: 8px;
+  --model-hub-model-source-pad: 10px;
+  --model-hub-model-preset-height: 24px;
+  --model-hub-model-preset-pad-x: 9px;
+  --model-hub-model-preset-gap: 6px;
+  --model-hub-model-preset-radius: 999px;
+
   /* Model picker. */
   --model-hub-picker-row-pad-x: 12px;
   --model-hub-picker-row-gap: 10px;
   --model-hub-picker-name-size: 12.5px;
+  /* The folds of 「From your providers」: a provider's line is as tall as a row
+   * and reads at the row's own size; a long provider's second fold is lighter. */
+  /* Declared with the surface, not on the group: the list's scroller reads it too. */
+  --model-hub-picker-group-inner-gap: 4px;
+  --model-hub-picker-fold-height: 36px;
+  --model-hub-picker-fold-pad-x: 10px;
+  --model-hub-picker-fold-gap: 8px;
+  --model-hub-picker-fold-indent: 14px;
+  --model-hub-picker-fold-icon: 14px;
+  --model-hub-picker-fold-count-size: 11.5px;
+  --model-hub-picker-segment-height: 32px;
+  --model-hub-picker-segment-size: 12px;
+  --model-hub-picker-segment-icon: 13px;
 }
 
 .model-hub-accent-tile--cyan { background: var(--model-hub-cyan-1a); }
@@ -593,7 +617,15 @@
 .model-hub-model-open:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
 .model-hub-origin-help { width: 340px; max-width: calc(100vw - 32px); white-space: pre-line; font-size: 12px; line-height: 1.6; }
 .model-hub-route-mode { gap: 6px; }
-.model-hub-route-mode-copy { font-size: 11.5px; line-height: 17px; }
+/* What the two modes mean sits behind the info control beside the switch. */
+.model-hub-route-mode-row { gap: 10px; }
+/* Settings a route rarely needs, folded under the hops. */
+.model-hub-route-advanced { gap: 10px; }
+.model-hub-route-advanced-toggle { gap: 4px; font-size: 12px; font-weight: 600; }
+.model-hub-route-advanced-toggle:hover { color: var(--foreground); }
+.model-hub-route-advanced-toggle > svg { width: 14px; height: 14px; transition: transform var(--motion-duration-fast) var(--motion-ease-move); }
+.model-hub-route-advanced-row { gap: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; }
+.model-hub-route-advanced-label { font-size: 12.5px; font-weight: 600; color: var(--foreground); }
 /* A switch that saving would apply, and the one way back from it. */
 .model-hub-route-pending { gap: 12px; padding: 8px 12px; border: 1px solid var(--model-hub-gold-4d); border-radius: 8px; background: var(--model-hub-gold-1a); color: var(--gold-ink); font-size: 11.5px; line-height: 17px; overflow-wrap: anywhere; }
 .model-hub-route-pending-undo { gap: 4px; color: inherit; }
@@ -1096,6 +1128,10 @@
 .model-hub-route-head { min-height: var(--model-hub-route-head-height); flex-shrink: 0; padding: 16px 20px; gap: 4px; border-color: var(--model-hub-wash-14); }
 .model-hub-route-close { width: 26px; height: 26px; margin: -5px -5px -5px 0; color: var(--model-hub-ink-59); }
 .model-hub-route-close > svg { width: 15px; height: 15px; }
+/* Edit and delete are the model list's own row actions, a size down; a rule
+ * keeps the destructive one away from close. */
+.model-hub-route-head-action { --model-hub-catalog-action-size: 28px; --model-hub-catalog-action-radius: 7px; }
+.model-hub-route-head-rule { width: 1px; height: 16px; margin: 0 4px 0 6px; background: var(--border); }
 .model-hub-route-title {
   --model-hub-route-title-size: 15px;
   min-width: 0;
@@ -1850,7 +1886,6 @@
   --model-hub-order-head-gap: 6px;
   --model-hub-order-head-padding-x: 20px;
   --model-hub-order-head-padding-y: 18px;
-  min-height: 82px;
   padding: var(--model-hub-order-head-padding-y) var(--model-hub-order-head-padding-x);
   display: flex;
   flex-direction: column;
@@ -1861,13 +1896,6 @@
   font-size: var(--model-hub-order-title-size);
 }
 .model-hub-order-info { width: 13px; height: 13px; color: var(--model-hub-ink-59); }
-.model-hub-order-subtitle {
-  --model-hub-order-subtitle-line: 17px;
-  --model-hub-order-subtitle-size: 11.5px;
-  color: var(--model-hub-ink-73);
-  font-size: var(--model-hub-order-subtitle-size);
-  line-height: var(--model-hub-order-subtitle-line);
-}
 .model-hub-order-close { color: var(--model-hub-ink-59); }
 .model-hub-order-body {
   --model-hub-order-body-gap: 18px;
@@ -3686,21 +3714,7 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-chip--add { border-style: dashed; }
 .model-hub-model-chip--custom { padding-right: 6px; }
 
-/* The 「Model」 typeahead. It floats over the fields below it rather than
- * displacing them: the frame draws it in layout flow, but every field it can
- * fill sits underneath, and pushing them down on each keystroke moves the very
- * values the user is about to check. Same metrics, overlay layering. */
-.model-hub-model-match-list {
-  /* Nine rows: the ranked read returns at most eight matches, and the 「use what
-   * I typed」 escape is always one more, so the cap is reached rather than
-   * guessed — and a shorter list is still exactly as tall as its rows. */
-  max-height: calc(var(--model-hub-model-match-height) * 9);
-  overflow: hidden auto;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--model-hub-model-control-radius);
-  background: var(--surface-2);
-  box-shadow: var(--model-hub-menu-shadow);
-}
+/* One catalog model in the search under 「更换」. */
 .model-hub-model-match {
   min-height: var(--model-hub-model-match-height);
   padding: 8px 12px;
@@ -3709,11 +3723,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
 .model-hub-model-match:last-child { border-bottom: none; }
 .model-hub-model-match:hover { background: var(--model-hub-wash-05); }
 .model-hub-model-match.is-selected { background: var(--model-hub-mint-14); }
-/* The 「use what I typed」 row as the escape under the suggestions: no fill, so it
- * reads as the plain sentence the frame draws. (First in the list, once a
- * catalog model is the base, it is drawn as a plain match row instead.) */
-.model-hub-model-match--literal { border-bottom: none; }
-.model-hub-model-match--literal.is-selected { background: var(--model-hub-wash-08); }
 .model-hub-model-match-name {
   font-size: 12.5px;
   font-weight: 600;
@@ -3726,11 +3735,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   font-size: 11px;
   color: var(--muted);
 }
-.model-hub-model-match-literal {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--foreground);
-}
 .model-hub-model-match-state {
   min-height: var(--model-hub-model-match-height);
   padding: 8px 12px;
@@ -3738,10 +3742,74 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   color: var(--muted);
 }
 
-.model-hub-model-note {
-  font-size: var(--model-hub-model-note-size);
+/* The line that says which registered model the parameters stand on. It wraps:
+ * on a phone the offer and 「更换」 drop under the sentence rather than cut it. */
+.model-hub-model-source { display: flex; flex-direction: column; gap: var(--model-hub-model-source-gap); min-width: 0; }
+.model-hub-model-source-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px var(--model-hub-model-source-gap);
+  min-width: 0;
+  font-size: var(--model-hub-model-source-size);
+  line-height: var(--model-hub-model-source-line);
   color: var(--muted);
 }
+.model-hub-model-source-id { font-family: var(--font-mono); font-size: var(--model-hub-model-source-id-size); color: var(--foreground); overflow-wrap: anywhere; }
+.model-hub-model-source-action { font-weight: 600; color: var(--foreground); text-decoration: underline; text-underline-offset: 2px; }
+/* The parameters the ID itself would bring, offered as one press. */
+.model-hub-model-source-offer {
+  min-height: var(--model-hub-model-preset-height);
+  padding: 0 var(--model-hub-model-preset-pad-x);
+  border: 1px solid var(--mint);
+  border-radius: var(--model-hub-model-preset-radius);
+  background: var(--mint-soft);
+  font-size: var(--model-hub-model-source-id-size);
+  font-weight: 600;
+  color: var(--model-hub-mint-ink);
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.model-hub-model-source-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-model-preset-gap);
+  padding: var(--model-hub-model-source-pad);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+}
+.model-hub-model-source-list { max-height: calc(var(--model-hub-model-match-height) * 6); overflow-y: auto; }
+/* One catalog model: name, ID, provider, size on a line; on a phone the name
+ * takes its own line so neither it nor the ID is cut to fit the other. */
+.model-hub-model-source-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.model-hub-model-source-row-detail { display: flex; flex: 1 1 auto; align-items: center; gap: var(--model-hub-model-source-gap); min-width: 0; }
+.model-hub-model-source-row-end { display: flex; flex-shrink: 0; align-items: center; gap: var(--model-hub-model-source-gap); margin-left: auto; color: var(--model-hub-mint-ink); }
+@media (max-width: 640px) {
+  .model-hub-model-source-row { flex-direction: column; align-items: stretch; gap: 2px; padding-block: 6px; }
+}
+.model-hub-model-source-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--model-hub-model-source-gap);
+  font-size: var(--model-hub-model-source-id-size);
+  color: var(--muted);
+}
+/* Common limits under an empty box. */
+.model-hub-model-presets { display: flex; flex-wrap: wrap; gap: var(--model-hub-model-preset-gap); }
+.model-hub-model-preset {
+  height: var(--model-hub-model-preset-height);
+  padding: 0 var(--model-hub-model-preset-pad-x);
+  border: 1px solid var(--border);
+  border-radius: var(--model-hub-model-preset-radius);
+  background: var(--background);
+  font-size: var(--model-hub-model-source-id-size);
+  font-weight: 600;
+  color: var(--muted);
+}
+.model-hub-model-preset:hover { border-color: var(--border-strong); color: var(--foreground); }
+
 .model-hub-model-error {
   font-size: var(--model-hub-model-note-size);
   font-weight: 600;
@@ -3766,7 +3834,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   gap: var(--model-hub-picker-group-gap);
 }
 .model-hub-picker-group {
-  --model-hub-picker-group-inner-gap: 4px;
   display: flex;
   flex-direction: column;
   gap: var(--model-hub-picker-group-inner-gap);
@@ -3807,6 +3874,69 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   border-color: var(--mint);
   background: var(--mint-soft);
 }
+/* 「From your providers」, one fold per provider: its name, how many models it
+ * offers, and how many of them are picked. Rows sit indented under the fold. */
+.model-hub-picker-source,
+.model-hub-picker-source-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--model-hub-picker-group-inner-gap);
+}
+.model-hub-picker-source-rows { padding-left: var(--model-hub-picker-fold-indent); }
+.model-hub-picker-source-head,
+.model-hub-picker-segment-head {
+  display: flex;
+  align-items: center;
+  gap: var(--model-hub-picker-fold-gap);
+  padding: 0 var(--model-hub-picker-fold-pad-x);
+  border-radius: var(--radius-md);
+  color: var(--foreground);
+  text-align: left;
+}
+/* An open fold's heading stays at the top of the list while its rows scroll
+ * under it, so the rows on screen always say whose they are. It sticks inside its
+ * own fold only, and is opaque: the wash is drawn over the dialog's surface. */
+.model-hub-picker-source-head,
+.model-hub-picker-segment-head {
+  position: sticky;
+  background-color: var(--popover);
+  /* The same surface, spread over the gap around the heading, so no edge of a
+   * row passing under it shows at its corners or in the gap between the two. */
+  box-shadow: 0 0 0 var(--model-hub-picker-group-inner-gap) var(--popover);
+}
+/* A row brought into view by focus stops below both headings, not under them. */
+.model-hub-catalog-scroll:has(> .model-hub-picker-list) {
+  scroll-padding-top: calc(var(--model-hub-picker-fold-height) + var(--model-hub-picker-segment-height) + var(--model-hub-picker-group-inner-gap) * 2);
+}
+.model-hub-picker-source-head { top: 0; z-index: 2; }
+.model-hub-picker-segment-head { top: calc(var(--model-hub-picker-fold-height) + var(--model-hub-picker-group-inner-gap)); z-index: 1; }
+.model-hub-picker-source-head {
+  min-height: var(--model-hub-picker-fold-height);
+  border: 1px solid var(--border);
+  background-image: linear-gradient(var(--model-hub-wash-08), var(--model-hub-wash-08));
+  font-size: var(--model-hub-picker-name-size);
+  font-weight: 600;
+}
+.model-hub-picker-source-head:hover:not(:disabled) { border-color: var(--border-strong); }
+/* A long provider list's second fold, by how the IDs begin: lighter than the
+ * provider's own line, so the two levels read as two. */
+.model-hub-picker-segment-head {
+  min-height: var(--model-hub-picker-segment-height);
+  font-size: var(--model-hub-picker-segment-size);
+  font-weight: 500;
+}
+.model-hub-picker-segment-head:hover:not(:disabled) { background-image: linear-gradient(var(--model-hub-wash-08), var(--model-hub-wash-08)); }
+.model-hub-picker-source-head > svg,
+.model-hub-picker-segment-head > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform var(--motion-duration-fast) var(--motion-ease-move);
+}
+.model-hub-picker-source-head > svg { width: var(--model-hub-picker-fold-icon); height: var(--model-hub-picker-fold-icon); }
+.model-hub-picker-segment-head > svg { width: var(--model-hub-picker-segment-icon); height: var(--model-hub-picker-segment-icon); }
+.model-hub-picker-source-count { font-size: var(--model-hub-picker-fold-count-size); font-weight: 500; color: var(--muted); }
+.model-hub-picker-source-picked { margin-left: auto; font-size: var(--model-hub-picker-fold-count-size); font-weight: 600; color: var(--model-hub-mint-ink); }
+
 /* An already-listed row is shown, not offered: it stays legible so the search
  * answers 「it exists」, and greys its name so it never looks pickable. */
 .model-hub-picker-row--listed .model-hub-picker-name { color: var(--muted); }
@@ -3892,12 +4022,6 @@ a.model-hub-order-price:hover { text-decoration: underline; }
   font-size: var(--model-hub-picker-name-size);
   font-weight: 600;
   color: var(--foreground);
-}
-.model-hub-picker-typed-note {
-  display: block;
-  font-size: 11px;
-  line-height: 1.45;
-  color: var(--muted);
 }
 
 .model-hub-picker-empty {
