@@ -3991,6 +3991,7 @@ class UpdateConfig:
     idle_minutes: int = 30  # Minutes of inactivity before auto-update
     notify_admins: bool = True  # Send update notification to admins when update is available
     prereleases: bool = False  # Also offer GitHub-only release candidates (gh-vX.Y.ZrcN)
+    model_hub_engine_auto_update: bool = True  # Routine adoption only; withdrawals always apply.
 
 
 @dataclass

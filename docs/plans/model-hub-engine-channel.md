@@ -512,7 +512,10 @@ completed result. Existing Doctor and `runtime prepare/clean` use the same targe
 own `update.auto_update` and Model Hub enablement. Use the existing permissively
 loaded update section: adding a field inside today's strict `model_hub` object
 would break downgrade loading. Verify down/up policy persistence as well as source
-preservation. Turning it off prevents routine automatic adoption, not checking,
+preservation. A downgrade that only reads the config preserves the opt-out; saving
+config with a release older than this setting rewrites `update` without it, so it
+defaults to on after upgrading again.
+Turning it off prevents routine automatic adoption, not checking,
 explicit Update now, repair of the already selected/default target, or withdrawal
 of a known-bad build. It must not silently adopt the newest engine under “repair”.
 State that exception beside the switch. An explicit Retry after a failed update
@@ -526,6 +529,29 @@ operations; known locally recorded revocations still apply. Local/test manifest
 overrides opt out of the public channel and are visibly identified. Use English/
 Chinese catalog keys; implementation includes dependency-row design frames and Show
 review.
+
+### Backend control contract
+
+The dependency list keeps its existing envelope and file-readiness fields. The
+engine row adds nullable full asset tags (`active_release` for a live generation,
+`default_release` for the package, `available_release` for an eligible target),
+`min_avibe_version`, boolean `auto_update`, `update_state`, `update_reason`,
+`last_checked_at`, `last_result`, and `operation_id`. `rolled_back` is a warning,
+not evidence that restored files are broken. `unavailable`/`rejected` describe
+a refresh, not an implicit withdrawal of the last accepted index. With no
+controller a file inspection never claims an active process.
+
+Owner POSTs to `/api/dependencies/model-hub-engine/check` and `/update` accept an
+empty body; 202 is a receipt, not an applied change. Poll the `job_id` (also
+`operation_id`) at `/api/dependencies/model-hub-engine/install/<job_id>` until
+`status` is `succeeded` or `failed`, then inspect `update_state` and refresh the
+row. Concurrent equivalent requests share one ID; update during a check returns
+409 with its ID so the caller can retry after polling. An absent or incompatible
+controller returns 503, not a direct install. The last 32 receipts are readable
+after restart; interrupted operations are never replayed from a receipt.
+`POST /api/dependencies/model-hub-engine/auto-update` accepts only a JSON boolean
+`enabled`. The policy is effective on the next routine check; `/install` repairs
+the required release. No operation changes the signed channel protocol.
 
 ## 6. Delivery, acceptance and owner decisions
 
