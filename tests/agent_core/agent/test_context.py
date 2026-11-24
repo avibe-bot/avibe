@@ -1472,9 +1472,10 @@ def test_goals_past_its_limit_only_by_entries_the_turn_marked_asks_no_repair():
     started = _mind(**{"## Mission": "- [x] old: " + "o" * 300 + "\n- [ ] audit\n  " + "q" * 400, "## Workstreams": "- [ ] next"})
     marked = started.replace("- [ ] audit", "- [x] audit")
     review = review_mind(marked, started, 8_000)
-    # Its 774 bytes are 194 tokens, 90 without the entry just marked; the old entry's 311 bytes are 78.
+    # Its 774 bytes are 194 tokens, 90 without the entry just marked; the old entry's 311 bytes are 78. The amount
+    # asked for is the excess and a twentieth of the limit more, so the result lands under it.
     assert review.over == (("Goals", 194, 83),) and review.problems() == [
-        "mind.md is over its length limits: Goals is about 194 tokens, at most 83 (take about 111 out); condense it: in "
+        "mind.md is over its length limits: Goals is about 194 tokens, at most 83 (take about 115 out); condense it: in "
         'Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or drop '
         "them (about 78 tokens of it), then move finished detail out of live entries"
     ]
@@ -1518,7 +1519,7 @@ def test_a_mind_past_a_section_limit_is_shown_cut_per_section_with_every_heading
     review = review_mind(mind, mind)
     assert review.over == (("Goals", 3_281, 2_000),) and review.structure is None
     assert review.problems() == [
-        "mind.md is over its length limits: Goals is about 3,281 tokens, at most 2,000 (take about 1,281 out); "
+        "mind.md is over its length limits: Goals is about 3,281 tokens, at most 2,000 (take about 1,381 out); "
         "condense it: "
         'in Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or '
         "drop them, then move finished detail out of live entries"

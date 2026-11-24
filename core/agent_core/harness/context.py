@@ -1332,8 +1332,10 @@ class MindReview:
         # A waived Goals asks nothing: what the checkpoint shows leaves its finished entries out first (``fit_mind``).
         over = [(title, size, limit) for title, size, limit in self.over if title != "Goals" or not self.waived]
         if over:
+            # The amount asked for aims a twentieth of the limit under it: a model that takes out just the excess, by
+            # its own count, lands a few tokens past the limit again.
             sections = ", ".join(
-                f"{title} is about {size:,} tokens, at most {limit:,} (take about {size - limit:,} out)"
+                f"{title} is about {size:,} tokens, at most {limit:,} (take about {size - limit + max(1, limit // 20):,} out)"
                 for title, size, limit in over
             )
             finished = f" (about {self.foldable:,} tokens of it)" if self.foldable else ""

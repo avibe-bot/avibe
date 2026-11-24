@@ -658,7 +658,9 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   rewrites a finished line. Before `checkpoint-v5.2` the Mission's entries could never become fewer, so finished ones
   could not be folded and only piled up (§11).
 
-  The repair names each section past its limit with its size, its limit, how much to take out, and its own way to condense
+  The repair names each section past its limit with its size, its limit, how much to take out (the excess and a
+  twentieth of the limit more: a model that takes out just the excess, by its own count, lands a few tokens past the
+  limit again), and its own way to condense
   (`CONDENSE_ADVICE`): overlapping agreements merged; the Goals entries that already were finished when the turn began
   folded or dropped (with the tokens they take); overturned decisions folded into the ones that replaced them;
   recurring lessons merged into principles. Entries the turn itself marked as finished have to stay this once, so a
