@@ -95,7 +95,7 @@ fn connecting(wiring: &mut Wiring, runtime: &str, now: Instant) -> u64 {
 fn linked(wiring: &mut Wiring, runtime: &str, now: Instant) -> u64 {
     let session = connecting(wiring, runtime, now);
     assert_eq!(
-        wiring.path(session, true, 0, now),
+        wiring.path(session, true, 1, 0, now),
         [strict(session, true), reload(session, &[runtime])]
     );
     session
@@ -166,18 +166,18 @@ fn the_first_link_makes_the_listener_direct_only_and_reloads_its_windows_once() 
     let session = connecting(&mut wiring, VIEW, now);
     assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE, None).len(), 1);
     // No link yet, however often that is said: still the tunnel.
-    assert_eq!(wiring.path(session, false, 0, now), []);
-    assert_eq!(wiring.path(session, false, 0, now + seconds(3)), []);
+    assert_eq!(wiring.path(session, false, 2, 0, now), []);
+    assert_eq!(wiring.path(session, false, 2, 0, now + seconds(3)), []);
     assert!(!wiring.is_direct_only(session));
     assert_eq!(wiring.deadline(), None);
 
     assert_eq!(
-        wiring.path(session, true, 0, now + seconds(4)),
+        wiring.path(session, true, 1, 0, now + seconds(4)),
         [strict(session, true), reload(session, &[VIEW, "show-1"])]
     );
     assert!(wiring.is_direct_only(session));
-    assert_eq!(wiring.path(session, true, 0, now + seconds(5)), []);
-    assert_eq!(wiring.path(session, true, 0, now + seconds(500)), []);
+    assert_eq!(wiring.path(session, true, 1, 0, now + seconds(5)), []);
+    assert_eq!(wiring.path(session, true, 1, 0, now + seconds(500)), []);
     assert_eq!(
         wiring.reconcile(Some(&shown(ONE, VIEW)), |_| true, now + seconds(600)),
         []
@@ -186,8 +186,8 @@ fn the_first_link_makes_the_listener_direct_only_and_reloads_its_windows_once() 
     // A session of another choice hears its path and nothing follows.
     let mut automatic = Wiring::new(Routing::Live, false, Choices::unsaved());
     let other = automatic.open(target(TWO), material(), None, now);
-    assert_eq!(automatic.path(other, true, 0, now), []);
-    assert_eq!(automatic.path(other, false, 9, now), []);
+    assert_eq!(automatic.path(other, true, 1, 0, now), []);
+    assert_eq!(automatic.path(other, false, 2, 9, now), []);
     assert_eq!(automatic.unlinked(other, now), []);
     assert!(!automatic.is_direct_only(other));
 }
@@ -205,14 +205,14 @@ fn a_drop_fails_clearly_for_ten_seconds_and_then_connects_again_through_the_tunn
     let published = shown(ONE, VIEW);
 
     let dropped = now + seconds(100);
-    assert_eq!(wiring.path(session, false, 0, dropped), []);
+    assert_eq!(wiring.path(session, false, 2, 0, dropped), []);
     assert!(wiring.is_direct_only(session));
     // The shell looks again exactly when that time is up.
     assert_eq!(wiring.deadline(), Some(dropped + seconds(10)));
     assert_eq!(wiring.reconcile(Some(&published), |_| true, dropped + seconds(9)), []);
     // The requests that failed meanwhile are the core's to count; they
     // change nothing here.
-    assert_eq!(wiring.path(session, false, 7, dropped + seconds(9)), []);
+    assert_eq!(wiring.path(session, false, 2, 7, dropped + seconds(9)), []);
     assert!(wiring.is_direct_only(session));
 
     assert_eq!(
@@ -224,15 +224,15 @@ fn a_drop_fails_clearly_for_ten_seconds_and_then_connects_again_through_the_tunn
     // Once: the next look starts nothing again.
     assert_eq!(wiring.reconcile(Some(&published), |_| true, dropped + seconds(11)), []);
     assert_eq!(
-        wiring.path(session, true, 7, dropped + seconds(13)),
+        wiring.path(session, true, 1, 7, dropped + seconds(13)),
         [strict(session, true), reload(session, &[VIEW])]
     );
 
     // A link that is back while requests were still failing: nothing was
     // let onto the tunnel, and nothing has to be reloaded.
     let again = dropped + seconds(200);
-    assert_eq!(wiring.path(session, false, 7, again), []);
-    assert_eq!(wiring.path(session, true, 7, again + seconds(4)), []);
+    assert_eq!(wiring.path(session, false, 2, 7, again), []);
+    assert_eq!(wiring.path(session, true, 1, 7, again + seconds(4)), []);
     assert!(wiring.is_direct_only(session));
     assert_eq!(wiring.deadline(), None);
     assert_eq!(wiring.reconcile(Some(&published), |_| true, again + seconds(30)), []);
@@ -269,7 +269,7 @@ fn the_choice_is_set_back_only_when_the_instance_is_heard_from_and_no_link_comes
     let session = connecting(&mut wiring, VIEW, now);
     assert_eq!(wiring.unlinked(session, now + seconds(2)), []);
     assert_eq!(
-        wiring.path(session, true, 0, now + seconds(5)),
+        wiring.path(session, true, 1, 0, now + seconds(5)),
         [strict(session, true), reload(session, &[VIEW])]
     );
     assert_eq!(wiring.deadline(), None);
@@ -284,7 +284,7 @@ fn the_choice_is_set_back_only_when_the_instance_is_heard_from_and_no_link_comes
     let session = connecting(&mut wiring, VIEW, now);
     for minute in 1..=60 {
         let at = now + seconds(60 * minute);
-        assert_eq!(wiring.path(session, false, 0, at), []);
+        assert_eq!(wiring.path(session, false, 2, 0, at), []);
         assert_eq!(wiring.reconcile(Some(&published), |_| true, at), []);
     }
     assert_eq!(wiring.deadline(), None);
@@ -302,7 +302,7 @@ fn a_third_drop_in_ten_minutes_sets_the_choice_back_once_the_instance_is_heard_f
     let published = shown(ONE, VIEW);
     // Drops at `at`, and connects again ten seconds on.
     let drop = |wiring: &mut Wiring, session: u64, at: Instant| {
-        assert_eq!(wiring.path(session, false, 0, at), []);
+        assert_eq!(wiring.path(session, false, 2, 0, at), []);
         assert_eq!(
             wiring.reconcile(Some(&published), |_| true, at + seconds(10)),
             [strict(session, false), Effect::Ask { session }]
@@ -310,7 +310,7 @@ fn a_third_drop_in_ten_minutes_sets_the_choice_back_once_the_instance_is_heard_f
     };
     let link = |wiring: &mut Wiring, session: u64, at: Instant| {
         assert_eq!(
-            wiring.path(session, true, 0, at),
+            wiring.path(session, true, 1, 0, at),
             [strict(session, true), reload(session, &[VIEW])]
         );
     };
@@ -343,7 +343,10 @@ fn a_third_drop_in_ten_minutes_sets_the_choice_back_once_the_instance_is_heard_f
         link(&mut wiring, session, now + seconds(at + 15));
     }
     drop(&mut wiring, session, now + seconds(180));
-    assert_eq!(wiring.path(session, true, 0, now + seconds(195)), [revert(ONE, VIEW)]);
+    assert_eq!(
+        wiring.path(session, true, 1, 0, now + seconds(195)),
+        [revert(ONE, VIEW)]
+    );
 
     // Far apart: every drop is connected again, and nothing is armed.
     let mut wiring = chosen(Routing::Live);
@@ -367,16 +370,16 @@ fn a_third_drop_in_ten_minutes_sets_the_choice_back_once_the_instance_is_heard_f
     assert_eq!(wiring.window_created(second, "main-runtime-2").len(), 1);
     assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(131)), []);
     assert_eq!(
-        wiring.path(second, true, 0, now + seconds(132)),
+        wiring.path(second, true, 1, 0, now + seconds(132)),
         [strict(second, true), reload(second, &["main-runtime-2"])]
     );
-    assert_eq!(wiring.path(second, false, 0, now + seconds(140)), []);
+    assert_eq!(wiring.path(second, false, 2, 0, now + seconds(140)), []);
     assert_eq!(
         wiring.reconcile(Some(&published), |_| true, now + seconds(150)),
         [strict(second, false), Effect::Ask { session: second }]
     );
     assert_eq!(
-        wiring.path(second, true, 0, now + seconds(155)),
+        wiring.path(second, true, 1, 0, now + seconds(155)),
         [strict(second, true), reload(second, &["main-runtime-2"])]
     );
 }
@@ -385,7 +388,11 @@ fn a_third_drop_in_ten_minutes_sets_the_choice_back_once_the_instance_is_heard_f
 /// same: three within a minute, and the link is taken for one that carries
 /// nothing. Asking again would only renew it, so the instance is opened
 /// again, with a new client. Failures counted before the session looked,
-/// or spread out, or made while no link is up, are not that.
+/// or spread out, or made while no link is up, are not that. It is the
+/// failures that count, however many looks they are seen in: the client is
+/// looked at when it says something changed, and may have failed several
+/// by then. Failures seen across a change of the path are not counted
+/// against the link that is there now.
 #[test]
 fn a_link_that_carries_nothing_has_its_instance_opened_again() {
     let now = Instant::now();
@@ -393,19 +400,19 @@ fn a_link_that_carries_nothing_has_its_instance_opened_again() {
     // The client had counted failures before this session first looked.
     let session = connecting(&mut wiring, VIEW, now);
     assert_eq!(
-        wiring.path(session, true, 40, now),
+        wiring.path(session, true, 1, 40, now),
         [strict(session, true), reload(session, &[VIEW])]
     );
-    assert_eq!(wiring.path(session, true, 40, now + seconds(1)), []);
+    assert_eq!(wiring.path(session, true, 1, 40, now + seconds(1)), []);
     // Spread out: never three within a minute.
-    assert_eq!(wiring.path(session, true, 41, now + seconds(10)), []);
-    assert_eq!(wiring.path(session, true, 42, now + seconds(50)), []);
-    assert_eq!(wiring.path(session, true, 43, now + seconds(110)), []);
-    assert_eq!(wiring.path(session, true, 44, now + seconds(170)), []);
-    // Three looks with new failures within a minute.
-    assert_eq!(wiring.path(session, true, 45, now + seconds(175)), []);
+    assert_eq!(wiring.path(session, true, 1, 41, now + seconds(10)), []);
+    assert_eq!(wiring.path(session, true, 1, 42, now + seconds(50)), []);
+    assert_eq!(wiring.path(session, true, 1, 43, now + seconds(110)), []);
+    assert_eq!(wiring.path(session, true, 1, 44, now + seconds(170)), []);
+    // Three failures within a minute, one a look.
+    assert_eq!(wiring.path(session, true, 1, 45, now + seconds(175)), []);
     assert_eq!(
-        wiring.path(session, true, 50, now + seconds(178)),
+        wiring.path(session, true, 1, 46, now + seconds(178)),
         // Its route stays on the window: its client goes, and the window
         // fails rather than reach the tunnel until it is replaced.
         [retire(session, &[]), reopen(VIEW)]
@@ -417,12 +424,53 @@ fn a_link_that_carries_nothing_has_its_instance_opened_again() {
         []
     );
 
+    // Three failures seen in one look: a page's requests fail together,
+    // and the client is looked at once for all of them.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(
+        wiring.path(session, true, 1, 3, now + seconds(5)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+    // Two in one look and one in the next, and many at once, likewise.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(wiring.path(session, true, 1, 2, now + seconds(5)), []);
+    assert_eq!(
+        wiring.path(session, true, 1, 3, now + seconds(6)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(
+        wiring.path(session, true, 1, 4_000_000_000_000, now + seconds(5)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+    // Two in a look, and the third more than a minute later: not three
+    // within a minute.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(wiring.path(session, true, 1, 2, now + seconds(5)), []);
+    assert_eq!(wiring.path(session, true, 1, 3, now + seconds(66)), []);
+
+    // The link went and came back between two looks: the path has changed
+    // twice, and what failed in between failed for want of a link, which
+    // is no fault of the one that is there now. From here they count.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(wiring.path(session, true, 3, 5, now + seconds(20)), []);
+    assert_eq!(wiring.path(session, true, 3, 7, now + seconds(21)), []);
+    assert_eq!(
+        wiring.path(session, true, 3, 8, now + seconds(22)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+
     // While no link is up, failed connections are what is meant to happen.
     let mut wiring = chosen(Routing::Live);
     let session = linked(&mut wiring, VIEW, now);
-    assert_eq!(wiring.path(session, false, 0, now + seconds(1)), []);
+    assert_eq!(wiring.path(session, false, 2, 0, now + seconds(1)), []);
     for count in 1..=9 {
-        assert_eq!(wiring.path(session, false, count, now + seconds(2)), []);
+        assert_eq!(wiring.path(session, false, 2, count, now + seconds(2)), []);
     }
 }
 
@@ -587,6 +635,188 @@ fn choosing_or_leaving_direct_only_ends_the_sessions_and_reopens_the_instance() 
     let mut wiring = chosen(Routing::Live);
     let _session = linked(&mut wiring, VIEW, now);
     assert_eq!(wiring.choose(ACCOUNT, ONE, Direct), []);
+}
+
+/// A view that was to be replaced and is still the one on show is asked for
+/// again until another view is: the request to open its instance again may
+/// fail (no network, a refused sign-in) or bring nothing. Whatever the
+/// choice is now: a view that left "the direct path and the relay only"
+/// keeps a route that serves nothing and allows no failover, and under
+/// "Cloudflare tunnel only" nothing else would ever start a session for it.
+#[test]
+fn a_view_that_was_to_be_replaced_is_asked_for_again_until_another_is_on_show() {
+    let now = Instant::now();
+    let published = shown(ONE, VIEW);
+    for (routing, mode) in [
+        (Routing::Live, Mode::Tunnel),
+        (Routing::Live, Mode::Automatic),
+        (Routing::AtCreation, Mode::Tunnel),
+        (Routing::AtCreation, Mode::Automatic),
+    ] {
+        let case = format!("{mode:?}, live: {}", routing == Routing::Live);
+        let mut wiring = chosen(routing);
+        let session = linked(&mut wiring, VIEW, now);
+        // The view keeps its route either way: one that is put on an open
+        // window is left on it, and one given at creation cannot be taken
+        // off (what is taken off there is the answer to the listener).
+        let detached: &[&str] = if routing == Routing::Live { &[] } else { &[VIEW] };
+        assert_eq!(wiring.choose(ACCOUNT, ONE, mode), [retire(session, detached)], "{case}");
+        wiring.reopening(VIEW, now);
+        // While the request may still bring its view: nothing, and no
+        // session of its own for the view that is going.
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, now + seconds(59)),
+            [],
+            "{case}"
+        );
+        // It brought none: asked again, and again a minute later, for as
+        // long as that view is the one on show.
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, now + seconds(60)),
+            [reopen(VIEW)],
+            "{case}"
+        );
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, now + seconds(61)),
+            [],
+            "{case}"
+        );
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, now + seconds(119)),
+            [],
+            "{case}"
+        );
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, now + seconds(120)),
+            [reopen(VIEW)],
+            "{case}"
+        );
+        // Another view is on show: that was it. Nothing is asked again,
+        // and the new view is treated as any view of its choice.
+        let replaced = shown(ONE, "main-runtime-2");
+        let after = wiring.reconcile(Some(&replaced), |_| true, now + seconds(125));
+        assert!(
+            !after.contains(&reopen(VIEW)) && !after.contains(&reopen("main-runtime-2")),
+            "{case}"
+        );
+        assert_eq!(
+            wiring.reconcile(Some(&replaced), |_| true, now + seconds(400)),
+            after,
+            "{case}"
+        );
+    }
+
+    // A request that failed outright is asked again sooner: 10 s after the
+    // failure, then 20 s, then 40 s, and from then on a minute after it was
+    // asked, as one that brought nothing is. (Each fails a second after it
+    // is asked here.)
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(wiring.choose(ACCOUNT, ONE, Mode::Tunnel), [retire(session, &[])]);
+    let mut at = now;
+    for due in [11, 21, 41, 60, 60] {
+        wiring.reopening(VIEW, at);
+        wiring.reopen_refused(VIEW, &target(ONE), at + seconds(1));
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, at + seconds(due - 1)),
+            [],
+            "{due}"
+        );
+        assert_eq!(
+            wiring.reconcile(Some(&published), |_| true, at + seconds(due)),
+            [reopen(VIEW)],
+            "{due}"
+        );
+        at += seconds(due);
+    }
+    // A failure of another view's request, or one that comes when nothing
+    // is being replaced, changes nothing.
+    wiring.reopen_refused("main-runtime-9", &target(ONE), at);
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, at + seconds(30)), []);
+
+    // Under "the direct path and the relay only" a failed request keeps
+    // the pace that choice has: its opening-again is counted (three in ten
+    // minutes arm the setting-back), and is not made more frequent.
+    let mut wiring = chosen(Routing::Live);
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), [reopen(VIEW)]);
+    wiring.reopen_refused(VIEW, &target(ONE), now + seconds(1));
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(30)), []);
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(59)), []);
+}
+
+/// An app window of a direct-only instance is never left to load without a
+/// route. With no session to join it gets a route to nothing, where a
+/// route is put on an open window; where the route is given at creation
+/// the shell asks `blocks` and gives the window that route then.
+#[test]
+fn an_app_window_of_a_direct_only_instance_without_a_session_gets_a_route_to_nothing() {
+    let now = Instant::now();
+    let block = |window: &str| Effect::Block {
+        window: window.to_owned(),
+        origin: ONE.to_owned(),
+    };
+
+    // With its session: the session's route, as ever.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert!(wiring.blocks(ACCOUNT, ONE));
+    assert_eq!(
+        wiring.app_window_created("show-1", ACCOUNT, ONE, None),
+        [Effect::Install {
+            session,
+            window: "show-1".to_owned()
+        }]
+    );
+    assert!(!wiring.unrouted("show-1"));
+
+    // Its link carried nothing and the instance is being opened again:
+    // there is no session until the new view comes. A window opened in
+    // that moment leads nowhere.
+    assert_eq!(
+        wiring.path(session, true, 1, 3, now + seconds(5)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+    assert_eq!(
+        wiring.app_window_created("show-2", ACCOUNT, ONE, None),
+        [block("show-2")]
+    );
+    assert!(wiring.unrouted("show-2"));
+    // Its listener ended, likewise.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    wiring.listener_ended(session, now + seconds(1));
+    assert_eq!(
+        wiring.app_window_created("show-3", ACCOUNT, ONE, None),
+        [block("show-3")]
+    );
+    // And while the system's proxy settings rule the route out, before the
+    // look that sets the choice back.
+    let mut wiring = chosen(Routing::Live);
+    let _session = linked(&mut wiring, VIEW, now);
+    wiring.system_proxy(true);
+    assert_eq!(
+        wiring.app_window_created("show-4", ACCOUNT, ONE, None),
+        [block("show-4")]
+    );
+
+    // Another instance's window, and this one's under another choice, are
+    // created as they always were: no session, no route, the tunnel.
+    let mut wiring = chosen(Routing::Live);
+    assert!(!wiring.blocks(ACCOUNT, TWO));
+    assert_eq!(wiring.app_window_created("editor-1", ACCOUNT, TWO, None), []);
+    assert!(!wiring.blocks("account-2", ONE));
+    assert_eq!(wiring.app_window_created("editor-2", "account-2", ONE, None), []);
+    for mode in [Mode::Automatic, Mode::Tunnel] {
+        wiring.choose(ACCOUNT, ONE, mode);
+        assert!(!wiring.blocks(ACCOUNT, ONE), "{mode:?}");
+        assert_eq!(wiring.app_window_created("show-5", ACCOUNT, ONE, None), [], "{mode:?}");
+    }
+
+    // Where the route is given at creation, it was (`blocks`, asked by the
+    // shell before the window exists): nothing is put on the window after.
+    let mut wiring = chosen(Routing::AtCreation);
+    assert!(wiring.blocks(ACCOUNT, ONE));
+    assert_eq!(wiring.app_window_created("show-6", ACCOUNT, ONE, None), []);
 }
 
 /// The app sets the choice back itself: it is automatic from then on, it

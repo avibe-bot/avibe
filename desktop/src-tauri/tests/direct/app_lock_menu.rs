@@ -23,6 +23,7 @@ pub(crate) fn run(app: &AppHandle, click: Option<&str>) -> tauri::Result<serde_j
             menu: Mutex::new(Some(menu)),
             pages: Mutex::default(),
             available: true,
+            dead_end: OnceLock::new(),
         }));
     }
     let state = direct(app).expect("test owner");

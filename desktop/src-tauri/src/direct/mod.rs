@@ -12,6 +12,10 @@ mod connect;
 #[path = "../../tests/direct/windows_credentials.rs"]
 mod credential_tests;
 mod credentials;
+mod dead_end;
+#[cfg(test)]
+#[path = "../../tests/direct/dead_end.rs"]
+mod dead_end_tests;
 pub use credentials::WindowRegistration;
 pub use quiet::PublicCensus;
 #[cfg(test)]

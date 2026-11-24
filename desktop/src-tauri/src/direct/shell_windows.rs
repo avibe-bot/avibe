@@ -109,6 +109,10 @@ pub fn answer(
     });
 }
 
+/// Routing here is given at creation: a window that may not load without a
+/// route has one to nothing in its arguments (`shell::blocked`).
+pub fn block(_: &AppHandle, _: String, _: String, _: std::net::SocketAddrV4, _: impl Fn() -> bool + Send + 'static) {}
+
 /// What was kept for a window that has closed is dropped.
 pub fn forget_closed(open: impl Fn(&str) -> bool) {
     if let Ok(mut answering) = ANSWERING.lock() {

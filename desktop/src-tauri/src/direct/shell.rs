@@ -9,6 +9,7 @@
 //! that could identify an instance.
 use super::{
     choices::{Choices, Mode, Reason, Reverted},
+    dead_end::DeadEnd,
     rendezvous::{origin_of, Reply, Request},
     wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
     Client, RefreshOutcome,
@@ -17,7 +18,7 @@ use crate::instance_client;
 use avibe_runtime_host::instance_client::protocol::{ClientAction, ClientRequest, ClientTarget};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
@@ -184,6 +185,9 @@ pub(crate) struct Direct {
     pages: Mutex<pages::Pages>,
     /// Whether this system and configuration can route at all.
     available: bool,
+    /// Where a route that must lead nowhere points. Made when the first
+    /// such route is needed.
+    dead_end: OnceLock<DeadEnd>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -240,6 +244,7 @@ pub(crate) fn init(app: &AppHandle) {
         menu: Mutex::new(None),
         pages: Mutex::default(),
         available: routing != Routing::Unsupported && !proxy_configured,
+        dead_end: OnceLock::new(),
     });
     app.manage(state.clone());
     let app = app.clone();
@@ -386,6 +391,19 @@ fn route_window(app: &AppHandle, state: &Arc<Direct>, effect: Effect) -> Option<
             }
             None
         }
+        // No session, no registration, no credential: an address that
+        // carries nothing, and no failover.
+        Effect::Block { window, origin } => {
+            if let Some(host) = origin.strip_prefix("https://") {
+                let still = {
+                    let (state, window) = (state.clone(), window.clone());
+                    move || lock(&state.wiring).unrouted(&window)
+                };
+                let nowhere = state.dead_end.get_or_init(DeadEnd::hold).address();
+                native::block(app, window, host.to_owned(), nowhere, still);
+            }
+            None
+        }
         other => Some(other),
     }
 }
@@ -396,7 +414,7 @@ async fn perform(app: &AppHandle, state: &Arc<Direct>, effect: Effect) {
     };
     match effect {
         Effect::Open { runtime } => open(app, state, &runtime).await,
-        Effect::Install { .. } | Effect::Answer { .. } => {}
+        Effect::Install { .. } | Effect::Answer { .. } | Effect::Block { .. } => {}
         Effect::Retire { session, detach } => {
             // The route comes off every window before the client that owns
             // its listener is dropped. Taking it off is not what ends the
@@ -485,8 +503,18 @@ const RETURNING: Duration = Duration::from_secs(120);
 /// load. The view on show stays until the new one is ready.
 ///
 /// The new view starts at the instance's first page; it is sent back to
-/// where the old one was once it shows (`go_back`). What was typed and not
-/// sent in the old view is lost.
+/// where the old one was once it shows (`go_back`).
+///
+/// A view of another computer's instance has browsing data of its own,
+/// which goes with it. So of what was typed and not sent, the new view has
+/// what the page had saved on the instance (it saves a draft's text a
+/// moment after the last keystroke, when it can reach the instance), and
+/// not what the old view kept only for itself: the last moment's typing,
+/// text typed while the instance could not be reached, and the files
+/// attached to a message that was not sent.
+///
+/// A request that fails leaves the old view where it is, and is made again
+/// (`Wiring::reopen_refused`, `Wiring::reconcile`).
 fn reopen(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
     let Some(shown) = lock(&state.shown).clone().filter(|shown| shown.runtime == runtime) else {
         return;
@@ -495,6 +523,13 @@ fn reopen(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
         return;
     };
     lock(&state.wiring).reopening(runtime, Instant::now());
+    // A switch that is under way, or that waits for the person's consent,
+    // is not asked for a second time over itself: this is asked again when
+    // its time is up, if the view is still the one on show then.
+    let busy = client.coordinator.state();
+    if busy.consent.is_some() || busy.connection.pending.is_some() {
+        return;
+    }
     let at = app
         .get_webview(runtime)
         .and_then(|view| view.url().ok())
@@ -515,6 +550,7 @@ fn reopen(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
     let coordinator = client.coordinator.clone();
     let instance_id = shown.target.instance.clone();
     let (app, state) = (app.clone(), state.clone());
+    let (runtime, target) = (runtime.to_owned(), shown.target.clone());
     tauri::async_runtime::spawn(async move {
         // As the app selects the instance it last showed when it starts.
         let reply = coordinator
@@ -526,10 +562,13 @@ fn reopen(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
             })
             .await;
         if reply.error.is_some() {
+            // The old view stays, on a route that may serve nothing: it is
+            // asked again, soon (`Wiring::reconcile`).
+            lock(&state.wiring).reopen_refused(&runtime, &target, Instant::now());
             eprintln!("desktop direct: an instance could not be opened again");
         }
-        poke(&app);
         drop(state);
+        poke(&app);
     });
 }
 
@@ -843,7 +882,9 @@ pub(crate) fn window_arguments(route_argument: &str) -> String {
 /// The session a window that is about to be created is routed to, so that
 /// its route is in place before its first load.
 pub(crate) struct AtCreation {
-    session: u64,
+    /// `None` for a window that joins no session and is given a route to
+    /// nothing (`blocked`).
+    session: Option<u64>,
     /// The whole of the window's browser arguments, where its route is given
     /// by them.
     pub arguments: Option<String>,
@@ -886,7 +927,10 @@ pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Op
     let session = lock(&state.wiring).open(target, material, None, Instant::now());
     start(app, &state, session, client);
     state.wake.notify_one();
-    Some(AtCreation { session, arguments })
+    Some(AtCreation {
+        session: Some(session),
+        arguments,
+    })
 }
 
 /// The signed-in instance whose document `destination` is, by its origin.
@@ -918,6 +962,13 @@ fn target_at(app: &AppHandle, destination: &url::Url) -> Option<Target> {
 
 /// An app window is about to be opened from the instance view at `origin`:
 /// the session it shares, and its route where that is given at creation.
+///
+/// A window of an instance whose choice is "the direct path and the relay
+/// only" is never created without a route. When it has no session to share
+/// (its instance is being opened again, its listener has ended, or the
+/// system's proxy settings rule the route out), its route leads to nothing
+/// and allows no failover: the window fails, and closes when its instance
+/// is opened again.
 pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Option<AtCreation> {
     let state = direct(app)?;
     let origin = origin_of(origin.as_str())?;
@@ -928,9 +979,35 @@ pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Opti
         .account
         .identity?
         .id;
+    if let Some(shared) = shared_route(&state, &account, &origin).await {
+        return Some(shared);
+    }
+    blocked(&state, &account, &origin)
+}
+
+/// The route to nothing of an app window that may not load without one.
+/// Where a route is put on an open window it is put there once the window
+/// exists (`Effect::Block`), and this only says that no session is shared.
+fn blocked(state: &Arc<Direct>, account: &str, origin: &str) -> Option<AtCreation> {
+    if !lock(&state.wiring).blocks(account, origin) {
+        return None;
+    }
+    // (A direct-only instance's address is a managed one, which a route's
+    // arguments can always name.)
+    let nowhere = Material {
+        proxy: state.dead_end.get_or_init(DeadEnd::hold).address(),
+        exclusive: true,
+    };
+    Some(AtCreation {
+        session: None,
+        arguments: native::arguments(origin.strip_prefix("https://")?, &nowhere),
+    })
+}
+
+async fn shared_route(state: &Arc<Direct>, account: &str, origin: &str) -> Option<AtCreation> {
     let host = {
         let wiring = lock(&state.wiring);
-        let session = wiring.shared(&account, &origin)?;
+        let session = wiring.shared(account, origin)?;
         wiring.route(session)?.0.to_owned()
     };
     // The system's settings may have changed since the last look.
@@ -938,14 +1015,15 @@ pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Opti
     let mut wiring = lock(&state.wiring);
     wiring.system_proxy(rules_out);
     if rules_out {
-        // The session ends at the next look; this window gets no route.
+        // The session ends at the next look; this window does not get its
+        // route.
         state.wake.notify_one();
         return None;
     }
-    let session = wiring.shared(&account, &origin)?;
+    let session = wiring.shared(account, origin)?;
     let (host, material) = wiring.route(session)?;
     Some(AtCreation {
-        session,
+        session: Some(session),
         arguments: native::arguments(host, material),
     })
 }
@@ -954,7 +1032,8 @@ pub(crate) async fn app_window_route(app: &AppHandle, origin: &url::Url) -> Opti
 /// sent to its instance, so its route is in place for its first request.
 pub(crate) fn window_created(app: &AppHandle, window: &str, route: AtCreation) {
     let Some(state) = direct(app) else { return };
-    let effects = lock(&state.wiring).window_created(route.session, window);
+    let Some(session) = route.session else { return };
+    let effects = lock(&state.wiring).window_created(session, window);
     route_windows(app, &state, effects);
 }
 
@@ -972,7 +1051,7 @@ pub(crate) fn app_window_created(app: &AppHandle, window: &str, origin: &url::Ur
     let (Some(account), Some(origin)) = (account, origin_of(origin.as_str())) else {
         return;
     };
-    let created_for = route.map(|route| route.session);
+    let created_for = route.and_then(|route| route.session);
     let effects = lock(&state.wiring).app_window_created(window, &account, &origin, created_for);
     route_windows(app, &state, effects);
 }

@@ -69,6 +69,32 @@ pub fn install(
     });
 }
 
+/// A route to nothing for a window that may not load without one: to an
+/// address that carries nothing (`dead_end.rs`), with no failover and a
+/// credential that is never asked for. `still` is asked on the main thread, at this
+/// work's turn: a window that a session has routed meanwhile keeps that
+/// session's route.
+pub fn block(
+    app: &AppHandle,
+    window: String,
+    host: String,
+    nowhere: std::net::SocketAddrV4,
+    still: impl Fn() -> bool + Send + 'static,
+) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(view) = handle.get_webview(&window) else {
+            return;
+        };
+        with(&view, move |webview, main| {
+            if !still() {
+                return;
+            }
+            let _ = webview_macos::install_route(webview, main, &host, nowhere, "-", "-", false);
+        });
+    });
+}
+
 /// Routing here is live: nothing is answered per window.
 pub fn answer(_: &AppHandle, _: String, _: Material, _: WindowRegistration, _: impl Fn() -> bool + Send + 'static) {}
 

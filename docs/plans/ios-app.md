@@ -183,7 +183,11 @@ from the phone App:
   shows. Between `"automatic"` and `"tunnel"` it reloads nothing; choosing
   `"direct"`, or leaving it, reopens the instance at once and brings the new
   view back to the URL the old one showed (the instance's first page when
-  the old view was not showing the instance). Nothing waits for the app to
+  the old view was not showing the instance). The new view has new browsing
+  data: a draft's text is there again when the page had saved it on the
+  instance, and what only the old view held is not (the last moment's
+  typing, text typed while the instance could not be reached, files
+  attached to an unsent message). Nothing waits for the app to
   be opened again, so `pendingRelaunch`, which its answers and events carry
   as the App's do, is always `false`. The desktop app sets a
   choice back itself only from `"direct"` (`reverted.from` is always

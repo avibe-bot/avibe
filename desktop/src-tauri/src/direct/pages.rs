@@ -112,8 +112,13 @@ pub(super) fn session_started(app: &AppHandle, state: &Arc<Direct>, session: u64
         loop {
             let status = *paths.borrow_and_update();
             let linked = matches!(status.preferred, PreferredPath::Direct(_));
-            let effects =
-                lock(&state.wiring).path(session, linked, status.strict_failures, tokio::time::Instant::now());
+            let effects = lock(&state.wiring).path(
+                session,
+                linked,
+                status.sequence,
+                status.strict_failures,
+                tokio::time::Instant::now(),
+            );
             for effect in effects {
                 perform(&app, &state, effect).await;
             }
