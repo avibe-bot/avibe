@@ -99,8 +99,8 @@ describe('DevicesPage · a saved pairing request', () => {
 
   it('where pressing it continues the saved request, the page offers only 「开启远程访问」', async () => {
     for (const pending of [
-      { phase: 'prepared', can_resume: true, replay_state: 'manual' },
-      { phase: 'redeemed', can_resume: true, replay_state: 'local_archive' },
+      { phase: 'prepared', can_resume: true, replay_state: 'manual', operation_owner: 'personal_claim' },
+      { phase: 'redeemed', can_resume: true, replay_state: 'local_archive', operation_owner: 'cli' },
       { phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'personal_claim' },
     ]) {
       status = unpaired(pending);
@@ -150,6 +150,14 @@ describe('DevicesPage · a saved pairing request', () => {
     expect(await screen.findByText(said('这次绑定在 Avibe Desktop 里完成。'))).toBeTruthy();
     noButton();
     desktop.unmount();
+
+    // Desktop's request still being sent: the owner is named on every record.
+    status = unpaired({ phase: 'prepared', can_resume: true, replay_state: 'scheduled', next_retry_at: Date.now() / 1000 + 30, operation_owner: 'desktop_app' });
+    const sending = mount();
+    expect(await screen.findByText(said('这次绑定在 Avibe Desktop 里完成。'))).toBeTruthy();
+    expect(screen.queryByText('正在完成绑定…')).toBeNull();
+    noButton();
+    sending.unmount();
 
     status = unpaired({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'cli' });
     mount();

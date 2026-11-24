@@ -231,8 +231,9 @@ const CLAIM_CODES = new Set([
  */
 export function pairingHold(status: Pick<RemoteAccessStatus, 'pending_pairing'> | null | undefined): PairingHold | undefined {
   const pending = status?.pending_pairing;
-  // Avibe Desktop's own request is finished there, whatever its state.
-  if (pending?.operation_owner === 'desktop_app') return { kind: 'desktop' };
+  // Avibe Desktop's own request is finished there, whatever its state. The owner is named on every
+  // record; one with no replay state and past sending (revoked, being retired) is not held.
+  if (pending?.operation_owner === 'desktop_app' && (pending.replay_state || pending.phase === 'prepared')) return { kind: 'desktop' };
   switch (pending?.replay_state) {
     case 'scheduled':
       return { kind: 'finishing' };

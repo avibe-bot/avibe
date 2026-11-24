@@ -737,8 +737,8 @@ export type RemoteAccessStatus = {
     /** What happens to a saved pairing request (#4210): Avibe sends it again by itself
      *  (`scheduled`, at `next_retry_at`, epoch seconds), it waits for 「继续」 (`manual`), avibe.bot
      *  accepted it and this computer has not finished saving it (`local_archive`), only support can
-     *  settle it (`needs_reconciliation`), or this computer will not send it (`terminated`, with
-     *  whose operation it is). */
+     *  settle it (`needs_reconciliation`), or this computer will not send it (`terminated`).
+     *  `operation_owner`: whose operation it is, on every readable record. */
     replay_state?: 'scheduled' | 'manual' | 'local_archive' | 'needs_reconciliation' | 'terminated';
     next_retry_at?: number;
     operation_owner?: 'desktop_app' | 'personal_claim' | 'cli';

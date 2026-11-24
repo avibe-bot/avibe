@@ -195,12 +195,18 @@ describe('pairingHold', () => {
     expect(of({ phase: 'unknown', can_resume: false, replay_state: 'needs_reconciliation' })).toEqual({ kind: 'support' });
     expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'desktop_app' })).toEqual({ kind: 'desktop' });
     expect(of({ phase: 'prepared', can_resume: true, replay_state: 'manual', operation_owner: 'desktop_app' })).toEqual({ kind: 'desktop' });
+    expect(of({ phase: 'prepared', can_resume: true, replay_state: 'scheduled', operation_owner: 'desktop_app' })).toEqual({ kind: 'desktop' });
+    expect(of({ phase: 'applied', can_resume: true, replay_state: 'local_archive', operation_owner: 'desktop_app' })).toEqual({ kind: 'desktop' });
     expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'cli' })).toEqual({ kind: 'support' });
     expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated' })).toEqual({ kind: 'support' });
   });
   it('leaves 「开启远程访问」 where pressing it continues, and for none or a state it does not know', () => {
     expect(of({ phase: 'prepared', can_resume: true, replay_state: 'manual' })).toBeUndefined();
     expect(of({ phase: 'applied', can_resume: true, replay_state: 'local_archive' })).toBeUndefined();
+    // Every readable record names its owner now; the owner alone holds nothing.
+    expect(of({ phase: 'prepared', can_resume: true, replay_state: 'manual', operation_owner: 'personal_claim' })).toBeUndefined();
+    expect(of({ phase: 'applied', can_resume: true, replay_state: 'local_archive', operation_owner: 'cli' })).toBeUndefined();
+    expect(of({ phase: 'revoked', can_resume: false, operation_owner: 'desktop_app' })).toBeUndefined();
     expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'personal_claim' })).toBeUndefined();
     expect(of(null)).toBeUndefined();
     expect(of({ phase: 'prepared', can_resume: true })).toBeUndefined();
