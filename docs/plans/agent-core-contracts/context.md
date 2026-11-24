@@ -91,8 +91,12 @@ is edited, and not after that, which the next response's usage shows. A payload 
 (C-1); it still counts, until that route's first answer anchors.
 
 The **anchor** is the latest response in the context that neither failed nor was aborted, reports non-zero usage,
-and records the request it answered on its row (`ModelResponse.request.tokens`: `tokens()` of that whole request as
-sent). It is rebuilt from the rows, so it holds across a new Agent and a new Turn.
+contains no provider-executed tool call (`HostedToolBlock`), and records the request it answered on its row
+(`ModelResponse.request.tokens`: `tokens()` of that whole request as sent). A hosted response's usage is still its
+billed total: it can include several passes over the same input, not the size of one context. Count that response
+once in growth from the previous eligible anchor, or locally as part of the whole request if no anchor holds.
+Merely declaring a hosted tool, or calling one executed by the client, does not disqualify a response. The anchor
+is rebuilt from the rows, so it holds across a new Agent and a new Turn.
 
 ```text
 est    = usage(R) - tokens(R) + growth                     while the anchor R holds
