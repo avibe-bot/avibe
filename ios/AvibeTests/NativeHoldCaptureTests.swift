@@ -1401,6 +1401,62 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertFalse(capture.followsPress)
     }
 
+    /// The tap that focuses the composer: the page takes the press for
+    /// itself, so the App is not told of the lift, and the page takes the
+    /// focused composer back from its list before the App learns the finger
+    /// has gone. Asked, the touch says it lifted: the press is counted as
+    /// the tap it was, with its own length, whether the microphone was
+    /// started for it, and what each judged time would have done.
+    func testATapThatFocusesTheComposerIsCountedAsATap() {
+        for early in [false, true] {
+            startsAtTouchDown = early
+            let audio = FakeAudio()
+            let (capture, webView) = makeHoldCapture(audio)
+            taps = []
+            tapRecords = []
+            notes = []
+            clock = 0
+            var lifted: TimeInterval?
+            capture.touchDown(
+                at: Self.onComposer, in: webView, timestamp: 50,
+                touch: { .init(liftedAt: lifted, point: Self.onComposer) }
+            )
+            // At 50 ms the finger is down: where the input may start then, it starts.
+            XCTAssertEqual(startEarly(), early, "\(early)")
+            // A 120 ms tap; nothing tells the App, and the page takes the surface back.
+            lifted = 50.12
+            clock = 160
+            XCTAssertTrue(capture.setSurfaces([], for: webView), "\(early)")
+            XCTAssertFalse(capture.followsPress, "\(early)")
+            XCTAssertNil(capture.currentTake, "\(early)")
+            XCTAssertEqual(audio.calls, early ? ["arm", "begin", "stop"] : ["arm", "disarm"], "\(early)")
+            XCTAssertEqual(taps, ["120"], "\(early)")
+            XCTAssertEqual(tapRecords.map(\.opened), [early], "\(early)")
+            // Prepared at once (the fake answers at touch-down): a 120 ms tap lasts as long as every judged time.
+            XCTAssertEqual(tapRecords.first?.wouldOpen, [50: true, 80: true, 100: true, 120: true], "\(early)")
+            XCTAssertTrue(notes.isEmpty, "\(early): \(notes)")
+            capture.stop(webView: webView)
+            drain()
+        }
+    }
+
+    /// A press the page takes back while the finger is still down is not a
+    /// tap: it stays a line of its own, and counts nothing.
+    func testAPressWithdrawnWithTheFingerStillDownIsNotATap() throws {
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        capture.touchDown(
+            at: Self.onComposer, in: webView, timestamp: 50,
+            touch: { .init(liftedAt: nil, point: Self.onComposer) }
+        )
+        clock = 120
+        XCTAssertTrue(capture.setSurfaces([], for: webView))
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertTrue(taps.isEmpty)
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix("end=withdrawn"), notes.last ?? "")
+    }
+
     /// One WebView's surfaces at a time, and only for a WebView whose
     /// touches the App sees.
     func testSurfacesBelongToTheWebViewThatNamedThem() {
