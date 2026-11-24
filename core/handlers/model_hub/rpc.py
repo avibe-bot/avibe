@@ -261,6 +261,8 @@ async def dispatch_model_hub_rpc(
         return await service.migration_apply(
             payload.get("item_ids"), payload.get("clean_api_keys", False),
         )
+    if operation == "engine_job":
+        return await service.adapter.engine_job(payload.get("operation_id"))
     if operation == "engine_status":
         return await service.engine_status()
     if operation in {"engine_check", "engine_update"}:

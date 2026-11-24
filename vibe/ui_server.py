@@ -11338,6 +11338,36 @@ def get_dependencies():
     return jsonify(api.dependencies_status(dependency_ids=dependency_ids))
 
 
+def _engine_control_response(action, job_id=None):
+    from core.handlers.model_hub import ModelHubError
+    from vibe.model_hub_client import engine_control_sync
+
+    try:
+        result = engine_control_sync(action, operation_id=job_id)
+    except ModelHubError as exc:
+        return jsonify({"ok": False, "error": exc.code, **exc.data,
+                        **({"update_state": "waiting_for_controller"} if exc.status == 503 else {})}), exc.status
+    return jsonify(result), 200 if action == "job" else 202
+
+
+@app.route("/api/dependencies/model-hub-engine/check", methods=["POST"])
+@app.route("/api/dependencies/model-hub-engine/update", methods=["POST"])
+def engine_control_request():
+    if request.json is not None and request.json != {}:
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    return _engine_control_response(request.path.rsplit("/", 1)[-1])
+
+
+@app.route("/api/dependencies/model-hub-engine/auto-update", methods=["POST"])
+def engine_policy_request():
+    from vibe.model_hub_runtime.controls import set_auto_update
+
+    payload = request.json
+    if not isinstance(payload, dict) or set(payload) != {"enabled"} or type(payload["enabled"]) is not bool:
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
+    return jsonify(set_auto_update(payload["enabled"]))
+
+
 @app.route("/api/dependencies/<dep>/install", methods=["POST"])
 def dependency_install(dep):
     """Install/repair a required local dependency in a background job."""
@@ -11357,6 +11387,8 @@ def dependency_install_status(dep, job_id):
 
     from vibe import api
 
+    if dep == "model-hub-engine" and job_id.startswith("engine-"):
+        return _engine_control_response("job", job_id)
     result = api.get_agent_install_job(job_id, backend=dep)
     status = 404 if not result.get("ok") and result.get("error") == "job_not_found" else 200
     return jsonify(result), status

@@ -11621,6 +11621,39 @@ def _published_running_version() -> str | None:
 
 def _model_hub_engine_dependency_status() -> dict:
     """Project lifecycle-required verified files, never a tentative candidate."""
+    from core.handlers.model_hub import ModelHubError
+    from vibe.model_hub_client import engine_control_sync
+    from vibe.model_hub_runtime.controls import auto_update_enabled, project
+    from vibe.model_hub_runtime.engine_channel import shipped_trust_roots
+
+    row = _model_hub_engine_files_status()
+    cached = row.get("engine_lifecycle") or {}
+    from vibe.model_hub_runtime.installer import EngineRuntimeManager
+
+    manager = EngineRuntimeManager(offline=True)
+    # An EngineLifecycleView is never evidence of a running process. Only a
+    # live controller response may report active_release.
+    try:
+        live = engine_control_sync("status")
+    except ModelHubError:
+        live = None
+    if live is None:
+        bundled = manager.bundled_manifest()
+        participation = ("opted_out" if manager.manifest_path is not None or manager.manifest_url else
+                         None if shipped_trust_roots().commissioned else "uncommissioned")
+        fields = project(cached, default=bundled.payload.get("asset_release_tag") if bundled else None,
+                         automatic=auto_update_enabled(), participation=participation, live=False)
+    else:
+        fields = {key: live.get(key) for key in (
+            "active_release", "default_release", "available_release", "min_avibe_version", "auto_update",
+            "update_state", "update_reason", "last_checked_at", "last_result", "operation_id",
+        )}
+    # Legacy install action repairs the required manifest, never the optional
+    # channel offer. Keep its target/version mismatch paired with that action.
+    return {**row, **fields}
+
+
+def _model_hub_engine_files_status() -> dict:
 
     try:
         from vibe.model_hub_runtime.installer import EngineRuntimeManager
