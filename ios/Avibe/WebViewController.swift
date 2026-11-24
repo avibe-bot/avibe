@@ -1114,6 +1114,8 @@ final class WebViewController: UIViewController {
     /// host has a route and the listener is closed or being bound again):
     /// nothing is loaded against that port; one pending bit is kept, and
     /// `directAvailabilityDidChange()` loads once when the gate opens.
+    /// Fault (something else may hold that port): the same, for as long as
+    /// that lasts.
     private func loadConfiguredInstance() {
         guard !isInvalidatedForAccountTransition else {
             hasPendingAutoLoad = false
@@ -1127,10 +1129,8 @@ final class WebViewController: UIViewController {
                 return
             }
             retainedWebView?.load(URLRequest(url: start ?? instanceOrigin.url))
-        case .held:
+        case .held, .fault:
             hasPendingAutoLoad = true
-        case .fault:
-            hasPendingAutoLoad = false
         }
     }
 

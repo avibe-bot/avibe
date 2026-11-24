@@ -705,15 +705,20 @@ With a transport:
   after a failed attempt, a port that is closed or refusing (WebKit then
   leaves it for the public origin by itself; `allowFailover`). Held: a
   routed listener closed for the background or on its return's first
-  attempt, and, after a failed attempt, a port something else may hold (it
-  was in use, or answered as a stranger), because WebKit would send the
-  host there. An open that meets a held gate stays on the loading route in
-  one slot owned by its runtime identity; Retry reloads only while open;
-  the WebView's own automatic loads (its first load and the reload after
-  its web content process ended) pass the same gate where they are made,
-  and one that meets a held gate is kept as one pending bit, made once when
-  the gate opens and dropped by the controller's invalidation. The
-  controller announces each change; nothing in the gate waits on a timer.
+  attempt; in the foreground this is always bounded. Fault: something else
+  may hold the port (it was in use, or answered as a stranger), so WebKit
+  would send the host there. It is not terminal: the attempts go on, and
+  it ends when one serves or finds the port merely closed; it holds in the
+  background and across a return too. Nobody waits it out: a caller with
+  its own bound (the voice capture's client) refuses on fault, where it
+  would go on after a held gate. An open that meets a held or fault gate
+  stays on the loading route in one slot owned by its runtime identity;
+  Retry reloads only while open; the WebView's own automatic loads (its
+  first load and the reload after its web content process ended) pass the
+  same gate where they are made, and one that meets a held or fault gate
+  is kept as one pending bit, made once when the gate opens and dropped by
+  the controller's invalidation. The controller announces each change;
+  nothing in the gate waits on a timer.
 - **The listener's recovery** (2026-11-24, replacing the terminal listener
   fault of 2026-11-12, which showed "Connection lost — reopen the app" and
   ran the next launch without a listener). No failure of the listener is
@@ -727,11 +732,11 @@ With a transport:
   What the shell does with it:
   - **Nothing is rebuilt.** The runtime, its WebView and its page stay, so
     what was typed and not sent is still there. A child window stays too.
-  - **Only a runtime whose loads the gate holds is covered,** so an
-    unrouted host never is, and neither is a routed one whose port is
-    merely closed: its page already loads over the public origin, and
-    direct comes back when the listener serves.
-  - **While its loads are held:** the thin progress line over the page. If
+  - **Only a runtime whose loads the gate does not let through is
+    covered** (held or fault), so an unrouted host never is, and neither is
+    a routed one whose port is merely closed: its page already loads over
+    the public origin, and direct comes back when the listener serves.
+  - **While its loads wait:** the thin progress line over the page. If
     the page's web content process ended meanwhile, the skeleton stands in
     for the blank WebView.
   - **Past `listenerRecoveryPatience`** (10 s, counted from when this
@@ -754,8 +759,9 @@ With a transport:
   - Each failure is on record (step, error number, seconds in the
     background before that stay) in `direct.status()` and on the next
     rendezvous request, so the instance's log has it.
-  - `DirectLoadGate.fault` is still declared and never returned; the voice
-    capture client and controller still name it.
+  - A take the voice capture keeps under the fault gate is not sent again
+    by itself (`untilReopened`, from when the fault was terminal); that is
+    the voice capture's to revisit.
 - `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
   account data store, which the runtime WebViews and the hidden account
   transport share. A store's route lists exact instance hosts (at most 16 per

@@ -161,6 +161,7 @@ final class DirectPathAppTests: XCTestCase {
 
         // The return, in its own turn: the page's loads wait, with the line.
         enterForeground()
+        XCTAssertEqual(app.directLoadGate(for: first), .held)
         XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .connecting)
         XCTAssertFalse(app.listenerRecoveryIsOverdue)
 
@@ -168,8 +169,9 @@ final class DirectPathAppTests: XCTestCase {
         // the port, so nothing is loaded against it; the runtime, its page
         // and its open are as they were.
         try await eventually { app.listenerRecoveryPresentation(for: first) == .unreachable }
-        XCTAssertEqual(app.directLoadGate(for: first), .held)
+        XCTAssertEqual(app.directLoadGate(for: first), .fault)
         XCTAssertFalse(app.mayReload(first))
+        XCTAssertFalse(app.authorizeReload(of: first))
         XCTAssertEqual(app.route, .browser(first))
         XCTAssertEqual(app.runtimeIdentity, identity)
         XCTAssertNil(app.runtimeOpenNotice)
@@ -282,6 +284,7 @@ final class DirectPathAppTests: XCTestCase {
 
         enterForeground()
         try await eventually { app.listenerRecoveryPresentation(for: routed) == .unreachable }
+        XCTAssertEqual(app.directLoadGate(for: routed), .fault)
         XCTAssertEqual(app.listenerRecoveryPresentation(for: ordinary), .none)
         XCTAssertEqual(app.directLoadGate(for: ordinary), .open)
         XCTAssertTrue(app.mayReload(ordinary))

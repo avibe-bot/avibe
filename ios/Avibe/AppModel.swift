@@ -2790,8 +2790,9 @@ final class AppModel: ObservableObject {
     /// The creation boundary of a runtime's WebView, decided synchronously
     /// from the load gate. Open: the browser. Held (the host has a route
     /// and the listener is closed or being bound again): the loading route
-    /// stays and the open waits in its slot for the return to settle, or
-    /// for the listener's recovery when something else may hold its port.
+    /// stays and the open waits in its slot for the return to settle.
+    /// Fault (something else may hold the listener's port): it waits in the
+    /// same slot, until an attempt has made the port the App's again.
     private func settleOpen(of runtime: MobileRuntimeContext, identity: Int) {
         guard let directPathController else {
             return
@@ -2815,8 +2816,8 @@ final class AppModel: ObservableObject {
                 directPathController.runtimeDidOpen(runtime)
             }
         case .held, .fault:
-            // (`.fault` is no longer returned: no failure of the listener
-            // is terminal.)
+            // No WebView is made against a port the App does not hold. The
+            // open's own line, long-wait row and budget apply meanwhile.
             deferredOpen = (runtime, identity)
         }
     }
@@ -2905,8 +2906,8 @@ final class AppModel: ObservableObject {
     /// the host is on WebKit's normal path or its route points at a serving
     /// listener, or at one whose port is closed (WebKit then leaves it by
     /// itself). Never while the listener is closed for the background or
-    /// on its return's first attempt, nor while something else may hold its
-    /// port. Always `true` without a transport.
+    /// on its return's first attempt (held), nor while something else may
+    /// hold its port (fault). Always `true` without a transport.
     func mayReload(_ runtime: MobileRuntimeContext) -> Bool {
         directLoadGate(for: runtime) == .open
     }
@@ -2926,8 +2927,9 @@ final class AppModel: ObservableObject {
         /// wait for it (its host has no route, or the port is closed and
         /// WebKit leaves it by itself for the public origin).
         case none
-        /// Its loads wait for the listener, which is being bound again:
-        /// the page stays, with the thin line.
+        /// Its loads wait for the listener, which is being bound again (a
+        /// return's first attempt, or a port something else may hold): the
+        /// page stays, with the thin line.
         case connecting
         /// They still wait past the patience: the message with Retry.
         /// The attempts go on underneath.
@@ -2935,19 +2937,23 @@ final class AppModel: ObservableObject {
     }
 
     /// What to show over `runtime` for the listener's recovery. Read from
-    /// the controller each time; only a runtime whose loads the gate holds
-    /// is covered, so an unrouted one never is.
+    /// the controller each time; only a runtime whose loads the gate does
+    /// not let through is covered, so an unrouted one never is.
     func listenerRecoveryPresentation(
         for runtime: MobileRuntimeContext
     ) -> ListenerRecoveryPresentation {
         guard
             let directPathController,
-            directPathController.listenerRecovery != nil,
-            directPathController.loadGate(for: runtime) == .held
+            directPathController.listenerRecovery != nil
         else {
             return .none
         }
-        return listenerRecoveryIsOverdue ? .unreachable : .connecting
+        switch directPathController.loadGate(for: runtime) {
+        case .open:
+            return .none
+        case .held, .fault:
+            return listenerRecoveryIsOverdue ? .unreachable : .connecting
+        }
     }
 
     /// The live runtime's WebView has nothing on screen and holds its load
