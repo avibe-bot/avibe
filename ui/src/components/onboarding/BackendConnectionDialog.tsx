@@ -227,6 +227,7 @@ export function BackendConnectionDialog({ backend, method, onClose, onConnected,
   const title = t('onboarding.connection.dialogTitle', { name });
   const intro = t(backend === 'claude' ? 'onboarding.connection.claudeDialogIntro'
     : backend === 'codex' ? 'onboarding.connection.codexDialogIntro'
+    : backend === 'antigravity' ? 'onboarding.connection.antigravityDialogIntro'
     : 'onboarding.connection.opencodeDialogIntro');
 
   // What every row is called, decided once for the whole catalog and before any

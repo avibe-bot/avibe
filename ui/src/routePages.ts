@@ -52,6 +52,7 @@ export const SettingsBackendsPage = lazyPage(() => settings().then((m) => m.Sett
 export const SettingsOpencodeProviderPage = lazyPage(() => settings().then((m) => m.SettingsOpencodeProviderPage));
 export const SettingsClaudeProviderPage = lazyPage(() => settings().then((m) => m.SettingsClaudeProviderPage));
 export const SettingsCodexProviderPage = lazyPage(() => settings().then((m) => m.SettingsCodexProviderPage));
+export const SettingsAntigravityProviderPage = lazyPage(() => settings().then((m) => m.SettingsAntigravityProviderPage));
 export const SettingsBackendPage = lazyPage(() => settings().then((m) => m.SettingsBackendPage));
 export const SettingsDependenciesPage = lazyPage(() => settings().then((m) => m.SettingsDependenciesPage));
 export const SettingsMessagingPage = lazyPage(() => settings().then((m) => m.SettingsMessagingPage));

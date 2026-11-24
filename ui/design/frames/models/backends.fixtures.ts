@@ -1,11 +1,12 @@
 // Fixture builders for the Settings · Backends frames: each backend's runtime, connection, and
 // sign-in reads, on top of the Settings pages' config and the Model Hub's agent supply.
-import type { BackendConnectionState, BackendRuntimeInfo, ClaudeAuthState, CodexAuthState, OpencodeProvider } from '@/context/ApiContext';
+import type { AntigravityAuthState, BackendConnectionState, BackendRuntimeInfo, ClaudeAuthState, CodexAuthState, OpencodeProvider } from '@/context/ApiContext';
+import type { NativeCliBackend } from '@/lib/agentBackends';
 
 import { settingsConfig, settingsFixtures } from '../settings/fixtures';
 import { chatgptPro, claudeMax, deepseek, hubApi, relayClaude, relayGpt, type AgentSpec } from './fixtures';
 
-type Backend = 'claude' | 'codex' | 'opencode';
+type Backend = NativeCliBackend;
 
 const runtime = (name: Backend, extra: Partial<BackendRuntimeInfo> = {}): BackendRuntimeInfo => ({
   ok: true,
@@ -25,11 +26,12 @@ const runtime = (name: Backend, extra: Partial<BackendRuntimeInfo> = {}): Backen
   ...extra,
 });
 
-/** Claude Code has an update waiting, Codex is current, OpenCode's CLI is missing from PATH. */
+/** Claude Code has an update waiting, Codex is current, OpenCode and Antigravity are current. */
 export const RUNTIMES: Record<Backend, BackendRuntimeInfo> = {
   claude: runtime('claude', { current_version: '2.1.30', latest_version: '2.1.32', has_update: true }),
   codex: runtime('codex', { current_version: '0.66.0', latest_version: '0.66.0' }),
   opencode: runtime('opencode', { current_version: '1.4.11', latest_version: '1.4.11' }),
+  antigravity: runtime('antigravity', { cli_path: 'agy', resolved_path: '/Users/demo/.local/bin/agy', current_version: '1.5.16', latest_version: '1.5.16' }),
 };
 
 const connection = (backend: Backend, extra: Partial<BackendConnectionState> = {}): BackendConnectionState => ({
@@ -82,6 +84,23 @@ const codexAuth: CodexAuthState = {
   file_store_active: true,
 };
 
+const antigravityAuth: AntigravityAuthState = {
+  ok: true,
+  auth_mode: 'oauth-personal',
+  authenticated: true,
+  credentials_present: true,
+  catalog_available: true,
+  cli_installed: true,
+  cli_version: '1.5.16',
+  has_api_key: false,
+  api_key_masked: null,
+  base_url: null,
+  gcp_project: null,
+  gcp_location: null,
+  adc_present: false,
+  adc_command: 'gcloud auth application-default login',
+};
+
 const provider = (id: string, name: string, models: string[], extra: Partial<OpencodeProvider> = {}): OpencodeProvider => ({
   id, name, description: '', configured: false, oauth_available: false, local: false, models, ...extra,
 });
@@ -106,11 +125,12 @@ const modelCatalog = (models: string[]) => ({
   reasoning_options: Object.fromEntries(models.map((model) => [model, ['low', 'medium', 'high'].map((value) => ({ value, label: value }))])),
 });
 
-/** Claude Code signs in natively; Codex and OpenCode take their models from the gateway. */
+/** Claude Code and Antigravity sign in natively; Codex and OpenCode take their models from the gateway. */
 const agents: AgentSpec[] = [
   { backend: 'claude', mode: 'direct' },
   { backend: 'codex', order: [chatgptPro, relayGpt], routes: { 'gpt-6-astra': { hops: [[chatgptPro, 'gpt-6-astra'], [relayGpt, 'gpt-6-astra']] }, 'gpt-5.6-sol': { hops: [[relayGpt, 'gpt-5.6-sol']] } } },
   { backend: 'opencode', order: [deepseek, relayClaude], routes: { 'deepseek-v4': { hops: [[deepseek, 'deepseek-v4']] }, 'claude-sonnet-5': { hops: [[relayClaude, 'claude-sonnet-5']] } } },
+  { backend: 'antigravity', mode: 'direct' },
 ];
 
 /** A different state for some backends: its runtime projection, whether it is switched on, its other reads. */
@@ -131,6 +151,7 @@ export function backendsFixtures({ runtimes = {}, enabled = {}, api = {} }: Back
       claude: { ...agentConfig.claude, enabled: enabled.claude ?? true },
       codex: { ...agentConfig.codex, enabled: enabled.codex ?? true, auth_mode: 'api_key', has_api_key: true, api_key_length: 164 },
       opencode: { ...agentConfig.opencode, enabled: enabled.opencode ?? true },
+      antigravity: { cli_path: 'agy', ...(agentConfig.antigravity ?? {}), enabled: enabled.antigravity ?? true },
     },
   };
   return settingsFixtures({
@@ -143,11 +164,14 @@ export function backendsFixtures({ runtimes = {}, enabled = {}, api = {} }: Back
     '/api/backend/claude/connection': connection('claude'),
     '/api/backend/codex/connection': connection('codex', { auth: 'api_key', supply_mode: 'hub' }),
     '/api/backend/opencode/connection': connection('opencode', { auth: 'api_key', supply_mode: 'hub' }),
+    '/api/backend/antigravity/connection': connection('antigravity', { auth: 'subscription', supply_mode: 'direct' }),
     '/api/backend/claude/auth': claudeAuth,
     '/api/backend/codex/auth': codexAuth,
+    '/api/backend/antigravity/auth': antigravityAuth,
     '/api/backend/opencode/providers': opencodeProviders,
     '/api/claude/models': modelCatalog(['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-5']),
     '/api/codex/models': modelCatalog(['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.5']),
+    '/api/antigravity/models': modelCatalog(['gemini-4-neon', 'gemini-4-carbon', 'gemini-3.8-flash']),
     ...api,
   });
 }

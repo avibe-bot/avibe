@@ -37,6 +37,7 @@ export type BackendUiMeta = {
 };
 
 const VibeyMark = brandMarkIcon(BACKEND_BRAND_MARKS.vibey, 'VibeyMark');
+const AntigravityMark = brandMarkIcon(BACKEND_BRAND_MARKS.antigravity, 'AntigravityMark');
 
 // Presentation only. Membership, defaults and capabilities come from Python.
 const BACKEND_VISUALS = {
@@ -80,7 +81,7 @@ const BACKEND_VISUALS = {
     nativeOrder: 3,
     publisher: 'Google',
     accent: 'cyan',
-    Icon: Sparkles,
+    Icon: AntigravityMark,
     Avatar: Bot,
     initials: 'AG',
     blockCls: 'border-cyan/40 bg-cyan/[0.10] text-cyan-ink',

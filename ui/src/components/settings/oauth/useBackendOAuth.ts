@@ -11,9 +11,10 @@ const POLL_INTERVAL_MS = 2000;
 const POLL_DEADLINE_MS = 16 * 60 * 1000;
 
 /** One owner for Settings and onboarding: invalidation precedes cancellation. */
-export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange, onPendingChange }: {
+export function useBackendOAuth({ backend, opencodeProviderId, authMode, onSuccess, onFailure, onCancel, onActiveChange, onPendingChange }: {
   backend: OAuthBackend;
   opencodeProviderId?: string;
+  authMode?: string;
   onSuccess?: (applicationError?: string) => void | Promise<void>;
   /** Observe persisted credentials when a terminal server failure follows commit. */
   onFailure?: (error: string) => void | Promise<void>;
@@ -29,6 +30,8 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
   const [url, setUrl] = useState<string | null>(null);
   const [deviceCode, setDeviceCode] = useState<string | null>(null);
   const [callbackKind, setCallbackKind] = useState<OAuthWebStartResult['callback_kind']>(null);
+  const [terminalCommand, setTerminalCommand] = useState<string | null>(null);
+  const [instructions, setInstructions] = useState<string | null>(null);
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -83,7 +86,7 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     owner.current.flowId = '';
     owner.current.busy = false;
     owner.current.submitting = false;
-    setState('idle'); setUrl(null); setDeviceCode(null); setCode(''); setError(null); setHubOwnedAuth(false); setAuthorizationCompleted(false);
+    setState('idle'); setUrl(null); setDeviceCode(null); setTerminalCommand(null); setInstructions(null); setCode(''); setError(null); setHubOwnedAuth(false); setAuthorizationCompleted(false);
     setStarting(false); setSubmitting(false);
     callbacks.current.onActiveChange?.(false);
   };
@@ -114,6 +117,8 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     if (data.callback_kind) setCallbackKind(data.callback_kind);
     if (data.url) setUrl(data.url);
     if (data.device_code) setDeviceCode(data.device_code);
+    if (data.terminal_command) setTerminalCommand(data.terminal_command);
+    if (data.instructions) setInstructions(data.instructions);
     if (data.state === 'success' || (receipt && (data.state === 'failed' || data.state === 'cancelled'))) {
       if (backend === 'claude' && data.authorization_completed === false) throw new Error(t('onboarding.connection.unconfirmed'));
       stopPolling();
@@ -171,12 +176,14 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     callbacks.current.onPendingChange?.(true);
     owner.current.busy = true;
     owner.current.deadline = Date.now() + POLL_DEADLINE_MS;
-    setStarting(true); setState('starting'); setError(null); setHubOwnedAuth(false); setAuthorizationCompleted(false); setCode(''); setUrl(null); setDeviceCode(null); setCallbackKind(null);
+    setStarting(true); setState('starting'); setError(null); setHubOwnedAuth(false); setAuthorizationCompleted(false); setCode(''); setUrl(null); setDeviceCode(null); setCallbackKind(null); setTerminalCommand(null); setInstructions(null);
     callbacks.current.onActiveChange?.(true);
     try {
       const result = backend === 'opencode'
         ? await api.startOAuthWebForOpencodeProvider(opencodeProviderId || '', false)
-        : await api.startOAuthWeb(backend, false);
+        : authMode
+          ? await api.startOAuthWeb(backend, false, authMode)
+          : await api.startOAuthWeb(backend, false);
       if (!current(generation)) {
         if (result.flow_id) await cancelRemote(result.flow_id);
         settled(generation);
@@ -232,6 +239,6 @@ export function useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFail
     }
   };
   const isActive = state === 'starting' || state === 'awaiting_code' || state === 'verifying';
-  return { state, authorizationCompleted, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError, hubOwnedAuth,
+  return { state, authorizationCompleted, url, deviceCode, callbackKind, terminalCommand, instructions, code, setCode, submitting, starting, error, setError, hubOwnedAuth,
     isActive, startFlow, cancelFlow, submitCallback, resetToIdle };
 }

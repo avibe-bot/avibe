@@ -1,6 +1,7 @@
 // Settings · Backends · one backend: the shipped Claude Code, Codex, OpenCode, and Vibey pages —
 // runtime and lifecycle chip, 模型管理方式 (gateway or direct), sign-in, and 测试连通性 — plus what a
 // click opens on them: the lifecycle chip's popover in each state, and a sign-in in progress.
+import { SettingsAntigravityProviderPage } from '@/components/settings/SettingsAntigravityProviderPage';
 import { SettingsBackendPage } from '@/components/settings/SettingsBackendPage';
 import { SettingsClaudeProviderPage } from '@/components/settings/SettingsClaudeProviderPage';
 import { SettingsCodexProviderPage } from '@/components/settings/SettingsCodexProviderPage';
@@ -12,6 +13,7 @@ import { backendsFixtures } from './backends.fixtures';
 
 const claude = settingsPage('backends/claude', <SettingsClaudeProviderPage />);
 const codex = settingsPage('backends/codex', <SettingsCodexProviderPage />);
+const antigravity = settingsPage('backends/antigravity', <SettingsAntigravityProviderPage />);
 
 // Codex run directly, with an API key and a relay Base URL instead of the gateway.
 const codexDirect = backendsFixtures({
@@ -55,6 +57,66 @@ const codexSignIn = backendsFixtures({
     '/api/backend/codex/auth': { ok: true, auth_mode: 'oauth', active_auth_mode: 'oauth', has_api_key: false, api_key_length: 0, api_key_masked: null, base_url: null, has_chatgpt_tokens: true, chatgpt_account: 'lin@chainbot.io', credentials_store: 'file', file_store_active: true },
     '/api/backend/codex/auth/oauth/start': codexDevice,
     '/api/backend/codex/auth/oauth/status/flow_codex': codexDevice,
+  },
+});
+
+// Antigravity personal Google sign-in in progress (paste-code flow).
+const antigravitySignIn = backendsFixtures({
+  api: {
+    '/api/backend/antigravity/auth': {
+      ok: true,
+      auth_mode: 'oauth-personal',
+      authenticated: false,
+      credentials_present: false,
+      catalog_available: true,
+      cli_installed: true,
+      cli_version: '1.5.16',
+      has_api_key: false,
+      api_key_masked: null,
+      base_url: null,
+      gcp_project: null,
+      gcp_location: null,
+      adc_present: false,
+      adc_command: 'gcloud auth application-default login',
+    },
+    '/api/backend/antigravity/auth/oauth/start': {
+      ok: true,
+      flow_id: 'flow_antigravity',
+      backend: 'antigravity',
+      state: 'awaiting_code',
+      callback_kind: 'code',
+      url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=antigravity-cli&response_type=code',
+    },
+    '/api/backend/antigravity/auth/oauth/status/flow_antigravity': {
+      ok: true,
+      flow_id: 'flow_antigravity',
+      backend: 'antigravity',
+      state: 'awaiting_code',
+      callback_kind: 'code',
+      url: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=antigravity-cli&response_type=code',
+    },
+  },
+});
+
+// Antigravity configured for Gemini Enterprise Agent Platform with ADC hint.
+const antigravityAgentPlatform = backendsFixtures({
+  api: {
+    '/api/backend/antigravity/auth': {
+      ok: true,
+      auth_mode: 'agent-platform',
+      authenticated: false,
+      credentials_present: false,
+      catalog_available: true,
+      cli_installed: true,
+      cli_version: '1.5.16',
+      has_api_key: false,
+      api_key_masked: null,
+      base_url: null,
+      gcp_project: 'avibe-agent-prod',
+      gcp_location: 'global',
+      adc_present: false,
+      adc_command: 'gcloud auth application-default login',
+    },
   },
 });
 
@@ -206,6 +268,47 @@ const designFrames = frames([
     fixtures: codexSignIn,
     click: ['role=button[name="{t:settings.backends.oauthReauthenticate}"]'],
     render: codex,
+  },
+  {
+    name: 'antigravity',
+    title: '后端 · Antigravity · 直连、Google 账号',
+    width: 1440,
+    height: 1050,
+    status: 'shipped',
+    route: '/settings/backends/antigravity',
+    fixtures: backendsFixtures(),
+    render: antigravity,
+  },
+  {
+    name: 'antigravity-phone',
+    title: '后端 · Antigravity · 手机',
+    width: 390,
+    height: 1180,
+    status: 'shipped',
+    route: '/settings/backends/antigravity',
+    fixtures: backendsFixtures(),
+    render: antigravity,
+  },
+  {
+    name: 'antigravity-sign-in',
+    title: '后端 · Antigravity · 登录进行中（授权码）',
+    width: 1440,
+    height: 1200,
+    status: 'shipped',
+    route: '/settings/backends/antigravity',
+    fixtures: antigravitySignIn,
+    click: ['role=button[name="{t:settings.backends.antigravitySignInGoogle}"]'],
+    render: antigravity,
+  },
+  {
+    name: 'antigravity-agent-platform',
+    title: '后端 · Antigravity · Agent Platform',
+    width: 1440,
+    height: 1080,
+    status: 'shipped',
+    route: '/settings/backends/antigravity',
+    fixtures: antigravityAgentPlatform,
+    render: antigravity,
   },
 ]);
 

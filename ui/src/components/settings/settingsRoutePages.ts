@@ -12,6 +12,7 @@ export { SettingsBackendsPage } from './SettingsBackendsPage';
 export { SettingsDependenciesPage } from './SettingsDependenciesPage';
 export { SettingsClaudeProviderPage } from './SettingsClaudeProviderPage';
 export { SettingsCodexProviderPage } from './SettingsCodexProviderPage';
+export { SettingsAntigravityProviderPage } from './SettingsAntigravityProviderPage';
 export { SettingsBackendPage } from './SettingsBackendPage';
 export { SettingsOpencodeProviderPage } from './SettingsOpencodeProviderPage';
 export { SettingsLogsPage } from './SettingsLogsPage';

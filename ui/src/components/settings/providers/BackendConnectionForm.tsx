@@ -14,6 +14,7 @@ import { surfaceBackendNotices } from '../shared/surfaceBackendNotices';
 import { useBackendOAuth, type OAuthBackend } from '../oauth/useBackendOAuth';
 import { BackendOAuthPanel } from '../BackendOAuthPanel';
 import { OAuthDeviceCodeRow, OAuthLinkRow } from '../oauth/OAuthFlowParts';
+import { AntigravityConnectionForm } from './AntigravityConnectionForm';
 import './connection.css';
 
 type Method = 'oauth' | 'api_key';
@@ -110,9 +111,38 @@ const settle = (submission: Submission, showing: { baseUrl: string; method: Meth
 type Editable = Credential | 'base_url' | 'method' | 'credential_type';
 
 /** Settings and onboarding share persistence, validation, effective readback and cancellation. */
-export function BackendConnectionForm({ backend, provider, initialMethod = 'oauth', compact = false,
-  onConnected, onCancel, onHeading, onBusyChange, onWriteState, connectionRevision = 0 }: {
+export function BackendConnectionForm({ backend, ...rest }: {
   backend: OAuthBackend;
+  provider?: OpencodeProvider;
+  initialMethod?: Method;
+  compact?: boolean;
+  /** Runtime mutation settlement: refresh observations without replacing input drafts. */
+  connectionRevision?: number;
+  onConnected?: () => void | Promise<void>;
+  onCancel?: () => void;
+  onHeading?: (heading: ConnectionHeading) => void;
+  onBusyChange?: (busy: boolean) => void;
+  onWriteState?: (pending: boolean) => void;
+}) {
+  if (backend === 'antigravity') {
+    return (
+      <AntigravityConnectionForm
+        initialMethod={rest.initialMethod}
+        compact={rest.compact}
+        connectionRevision={rest.connectionRevision}
+        onConnected={rest.onConnected}
+        onCancel={rest.onCancel}
+        onBusyChange={rest.onBusyChange}
+        onWriteState={rest.onWriteState}
+      />
+    );
+  }
+  return <StandardBackendConnectionForm backend={backend} {...rest} />;
+}
+
+function StandardBackendConnectionForm({ backend, provider, initialMethod = 'oauth', compact = false,
+  onConnected, onCancel, onHeading, onBusyChange, onWriteState, connectionRevision = 0 }: {
+  backend: Exclude<OAuthBackend, 'antigravity'>;
   provider?: OpencodeProvider;
   initialMethod?: Method;
   compact?: boolean;
