@@ -2064,15 +2064,34 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(settled, .held)
         XCTAssertTrue(slept.isEmpty)
 
-        // The fault is terminal: not waited for.
+        // In front a fault is waited for as a held gate is: the listener
+        // recovers by itself, re-binding only in front (#4233), so coming to
+        // the front is when it clears. The load goes once the gate opens.
+        slept = []
+        gates = [.fault, .fault, .held, .open]
+        settled = await Client.settledGate(
+            gate: { gates.count > 1 ? gates.removeFirst() : gates[0] },
+            isActive: { true }, sleep: sleep, now: { clock }
+        )
+        XCTAssertEqual(settled, .open)
+        XCTAssertEqual(slept.count, 3)
+        // A fault that lasts the five seconds is the answer: nothing is loaded.
+        slept = []
         settled = await Client.settledGate(gate: { .fault }, isActive: { true }, sleep: sleep, now: { clock })
+        XCTAssertEqual(settled, .fault)
+        XCTAssertEqual(slept.count, 100)
+        // In the background no re-bind happens: a fault is not waited for.
+        slept = []
+        settled = await Client.settledGate(gate: { .fault }, isActive: { false }, sleep: sleep, now: { clock })
         XCTAssertEqual(settled, .fault)
         XCTAssertTrue(slept.isEmpty)
     }
 
-    /// A faulted listener is its own reason, and the take is kept as for an
-    /// unreachable instance (sent again by itself), not as a failed
-    /// transcription.
+    /// A faulted listener is its own reason in the client's record, and the
+    /// take is kept as for an unreachable instance: sent again by itself,
+    /// with the island's promise to (「还没发出去，连上你的 Avibe 后会自动发送。」).
+    /// The listener recovers by itself (#4233): the fault is a hold of its
+    /// port by another process that clears once the port is the App's again.
     func testAFaultedListenerKeepsTheTakeLikeAnUnreachableInstance() async throws {
         let target = VoiceCaptureTarget(
             accountID: "a", instanceID: "i",
@@ -2095,13 +2114,21 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await controller.toggle()
         world.audio?.duration = 3
         _ = await controller.toggle()
-        // This process cannot reach it until Avibe is opened again: kept for
-        // Retry, with no promise to send by itself and no retries.
+        // Kept, with the promise to send by itself, and sent again by itself.
         XCTAssertEqual(controller.phase, .failed)
-        XCTAssertEqual(world.activities.first?.states.last?.reason, .offline)
-        XCTAssertEqual(world.retryHolds, 0)
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend)
+        XCTAssertEqual(world.retryHolds, 1)
         XCTAssertEqual(world.instance.transcribed, 1)
-        XCTAssertNil(controller.retryTask, "not sent again by itself")
+        XCTAssertNotNil(controller.retryTask, "sent again by itself")
+
+        // The listener serves again: the next retry sends it.
+        world.instance.transcribeResult = .success("hello")
+        let retry = controller.retryTask
+        await world.wakeRetry()
+        await retry?.value
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.retryHolds, 0)
 
         // The same when the consent ask meets the fault.
         let asked = World()
@@ -2110,8 +2137,9 @@ final class VoiceCaptureTests: XCTestCase {
         _ = await other.toggle()
         asked.audio?.duration = 3
         _ = await other.toggle()
-        XCTAssertEqual(asked.activities.first?.states.last?.reason, .offline)
-        XCTAssertEqual(asked.retryHolds, 0)
+        XCTAssertEqual(asked.activities.first?.states.last?.reason, .willSend)
+        XCTAssertEqual(asked.retryHolds, 1)
+        XCTAssertNotNil(other.retryTask, "sent again by itself")
     }
 
     func testOnlyAFirstLoadInFrontAroundAHeldGateIsMadeAgain() {
