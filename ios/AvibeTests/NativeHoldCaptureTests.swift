@@ -1440,6 +1440,23 @@ final class NativeHoldCaptureTests: XCTestCase {
         }
     }
 
+    /// A press whose touch is already gone when the page takes it back has
+    /// lifted at a time not known: it is not counted by the time of that
+    /// word, which would read longer than the tap was; it stays a line.
+    func testAPressWithdrawnAfterItsTouchWentStaysALine() throws {
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        capture.touchDown(
+            at: Self.onComposer, in: webView, timestamp: 50,
+            touch: { .init(liftedAt: 50.4, point: nil, gone: true) }
+        )
+        clock = 400
+        XCTAssertTrue(capture.setSurfaces([], for: webView))
+        XCTAssertFalse(capture.followsPress)
+        XCTAssertTrue(taps.isEmpty)
+        XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix("end=withdrawn"), notes.last ?? "")
+    }
+
     /// A press the page takes back while the finger is still down is not a
     /// tap: it stays a line of its own, and counts nothing.
     func testAPressWithdrawnWithTheFingerStillDownIsNotATap() throws {
