@@ -25,7 +25,7 @@ from vibe import api
 from vibe.backend_model_catalog import backend_model_snapshot
 from vibe.cli_health import cli_version
 from vibe.cli_repair import identify_repair_source
-from vibe.desktop_backends import DesktopBackendError, install_desktop_backend
+from vibe.desktop_backends import BACKEND_SPECS, DesktopBackendError, install_desktop_backend
 
 
 def test_catalog_registers_antigravity_and_never_acp():
@@ -173,9 +173,10 @@ def test_antigravity_cli_health_repair_and_desktop_guard(tmp_path: Path):
     assert source.kind == "native"
     assert source.destination == str(native_bin)
 
+    assert BACKEND_SPECS["antigravity"].install_kind == "release_archive"
     with pytest.raises(DesktopBackendError) as exc_info:
-        install_desktop_backend("antigravity")
-    assert exc_info.value.code == "unsupported_desktop_install"
+        install_desktop_backend("antigravity", base_env={})
+    assert exc_info.value.code == "desktop_toolchain_unavailable"
 
 
 def test_antigravity_managed_skills_and_native_agent_discovery(tmp_path: Path, monkeypatch):

@@ -84,9 +84,6 @@ TYPESCRIPT_DECLARATIONS = {
     ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex", "antigravity"})): (
         4, "native_subset", "Account-level native auth endpoints; OpenCode uses provider auth.",
     ),
-    ("ui/src/components/settings/BackendTestPanel.tsx", frozenset({"claude", "codex"})): (
-        1, "native_subset", "Account-level native auth testing.",
-    ),
     ("ui/src/lib/effortOptions.ts", frozenset({"claude", "codex"})): (
         1, "native_subset", "Backends with shared-default reasoning effort metadata.",
     ),

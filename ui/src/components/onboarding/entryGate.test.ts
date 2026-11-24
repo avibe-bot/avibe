@@ -48,7 +48,7 @@ const evidence = (overrides: Partial<EntryEvidence> = {}): EntryEvidence => ({
   suppliesRead: true,
   supplies: [claudeSupply()],
   runtime: RUNTIME_OK,
-  cliHealthy: { claude: true, codex: false, opencode: false },
+  cliHealthy: { claude: true, codex: false, opencode: false, antigravity: false },
   ...overrides,
 });
 
@@ -140,6 +140,7 @@ describe('C4 configured-path CLI evidence', () => {
     expect(configuredCliPath({ agents: { claude: { cli_path: '  /x  ' } } }, 'claude')).toBe('/x');
     expect(configuredCliPath({ agents: { claude: { enabled: true } } }, 'claude')).toBe('claude');
     expect(configuredCliPath(undefined, 'codex')).toBe('codex');
+    expect(configuredCliPath(undefined, 'antigravity')).toBe('agy');
   });
 
   it('detects the configured path from the already-fresh prerequisite', async () => {
@@ -151,13 +152,14 @@ describe('C4 configured-path CLI evidence', () => {
     expect(detectCli).toHaveBeenCalledWith('/opt/custom/claude', 'claude');
     expect(detectCli).toHaveBeenCalledWith('codex', 'codex');
     expect(detectCli).toHaveBeenCalledWith('opencode', 'opencode');
-    expect(read!.cliHealthy).toEqual({ claude: true, codex: false, opencode: false });
+    expect(detectCli).toHaveBeenCalledWith('agy', 'antigravity');
+    expect(read!.cliHealthy).toEqual({ claude: true, codex: false, opencode: false, antigravity: false });
   });
 
   it('does not admit when detectCli is not found even if installed and cli_present', () => {
     const read = evidence({
       connections: [connection('claude', { installed: true, ready: true, entry_eligible: true, application: 'applied' })],
-      cliHealthy: { claude: false, codex: false, opencode: false },
+      cliHealthy: { claude: false, codex: false, opencode: false, antigravity: false },
     });
     expect(entryCandidates(read)).toEqual([]);
     expect(admitEntry(read)).toMatchObject({ kind: 'refused', startable: false });
@@ -168,14 +170,14 @@ describe('C4 configured-path CLI evidence', () => {
       detectCli: vi.fn(async () => { throw new Error('detector unread'); }),
     });
     const read = await readEntryEvidence(gate);
-    expect(read!.cliHealthy).toEqual({ claude: false, codex: false, opencode: false });
+    expect(read!.cliHealthy).toEqual({ claude: false, codex: false, opencode: false, antigravity: false });
     expect(admitEntry(read!)).toMatchObject({ kind: 'refused', startable: false });
   });
 
   it('does not treat connection.installed as the detector', () => {
     const read = evidence({
       connections: [connection('claude', { installed: false, ready: true, entry_eligible: true, application: 'applied' })],
-      cliHealthy: { claude: true, codex: false, opencode: false },
+      cliHealthy: { claude: true, codex: false, opencode: false, antigravity: false },
     });
     expect(entryCandidates(read)).toEqual([{ agent: CLAUDE, backend: 'claude', modelId: 'openai/gpt-5.6-sol' }]);
   });
@@ -201,7 +203,7 @@ describe('D3 a built-in assistant completes setup on its own', () => {
     agents: [CLAUDE, VIBEY],
     connections: [applied('vibey')],
     supplies: [vibeySupply()],
-    cliHealthy: { claude: false, codex: false, opencode: false },
+    cliHealthy: { claude: false, codex: false, opencode: false, antigravity: false },
     ...overrides,
   });
 

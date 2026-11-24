@@ -2,7 +2,7 @@ import type { BackendConnectionState, VibeAgentBrief, VibeAgentFull, CliStatus }
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import { runtimeIsRunning } from '../settings/models/runtimeLifecycle';
 import type { AgentSupply, RuntimeDependency, SupplyStatus } from '../settings/models/types';
-import { BUILTIN_BACKENDS, isBuiltinBackend, type AgentBackendId } from '@/lib/agentBackends';
+import { BUILTIN_BACKENDS, getBackendUiMeta, isBuiltinBackend, type AgentBackendId } from '@/lib/agentBackends';
 import { isSelectableAgent } from '@/lib/bots';
 import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
 import { readSetupTargets } from './setupTargets';
@@ -85,7 +85,7 @@ export function configuredCliPath(config: Record<string, unknown> | undefined, b
   const agents = config && isRecord(config.agents) ? config.agents : undefined;
   const row = agents && isRecord(agents[backend]) ? agents[backend] : undefined;
   if (row && typeof row.cli_path === 'string' && row.cli_path.trim()) return row.cli_path.trim();
-  return backend;
+  return getBackendUiMeta(backend).defaultCli ?? backend;
 }
 
 /**
