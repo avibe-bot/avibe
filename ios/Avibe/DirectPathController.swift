@@ -288,6 +288,50 @@ struct DirectPathTiming: Sendable {
     static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
 }
 
+/// One failed attempt to bind the listener's port or to check that the
+/// listener on it is this App's. Numbers only: no wall time, address, port
+/// or identifier.
+struct DirectListenerFailure: Equatable, Sendable {
+    enum Step: String, Sendable {
+        /// The port could not be bound.
+        case bind
+        /// The bind was left waiting by the system.
+        case waiting
+        /// Nothing answered the ownership check on the port.
+        case ownership
+        /// The attempt ran out of time.
+        case deadline
+        /// Something else holds the port, or answered on it.
+        case foreign
+        /// The listening socket failed while it was serving.
+        case socket
+    }
+
+    let step: Step
+    /// The POSIX or Network error number, when there is one.
+    let code: Int32?
+    /// How long the App had been away before the stay in the foreground
+    /// this attempt belongs to; `nil` for a failure with no background
+    /// before it.
+    let backgroundSeconds: Int?
+    let at: ContinuousClock.Instant
+}
+
+/// A listener that a route points at is not serving, in the foreground, and
+/// its port is being bound again.
+struct DirectListenerRecovery: Equatable, Sendable {
+    /// When this recovery began: the return to the foreground, or the
+    /// failure if the listener failed while the App was in front. It starts
+    /// again at each return.
+    let since: ContinuousClock.Instant
+    /// The last attempt that failed in this recovery; `nil` while the first
+    /// one is still running.
+    let lastFailure: DirectListenerFailure?
+    /// Something else may hold the port: loads of routed hosts are held,
+    /// because WebKit would send them to whatever answers there.
+    let portMayBeForeign: Bool
+}
+
 
 /// The listener's state, as the controller sees it.
 enum DirectListenerState: Equatable, Sendable {
@@ -1484,6 +1528,24 @@ final class DirectPathController {
             return nil
         }
     }
+
+    /// Non-`nil` while a listener that a route points at is not serving, in
+    /// the foreground. Every change of it is announced through
+    /// `onAvailabilityChanged`.
+    ///
+    /// The contract for the listener's recovery
+    /// (docs/plans/remote-direct-ios.md section 9). Until the recovery
+    /// itself lands, a listener that fails is the listener fault, as before,
+    /// and this is always `nil`.
+    var listenerRecovery: DirectListenerRecovery? {
+        nil
+    }
+
+    /// Starts an attempt to bind and check the listener's port now, unless
+    /// one is running: what 「重试」 asks for. Nothing in the background, or
+    /// when nothing is recovering; so nothing at all until the recovery
+    /// itself lands.
+    func retryListenerNow() {}
 
     /// The listening socket of `failed` failed, as its lifecycle recorded
     /// where Network reported it.
