@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 describe('ConnectionPage · in an Avibe Desktop window of another computer\'s instance', () => {
-  it('says the path this device uses, as the phone App does, and offers no choice here yet', async () => {
+  it('says the path this device uses, as the phone App does, and offers its choice through the window\'s bridge', async () => {
     install(said('ipv4', 'local'));
     const native = await mount('direct');
     // The desktop bridge is not the phone App's: only its direct path is asked of it.
@@ -84,7 +84,14 @@ describe('ConnectionPage · in an Avibe Desktop window of another computer\'s in
     expect(await screen.findByText('这台设备')).toBeTruthy();
     // The desktop core measures no round trip: the path and its family, nothing else.
     await waitFor(() => expect(screen.getByText('本设备正在使用：局域网直连 · IPv4')).toBeTruthy());
-    expect(screen.queryByRole('radiogroup', { name: '这台设备' })).toBeNull();
+    // The choice is the window's own, read through its bridge. A shell at `directPreference` 1
+    // does not take 「仅直连和中继」: it is not offered, and the hint says nothing about it.
+    const group = await screen.findByRole('radiogroup', { name: '这台设备' });
+    expect(Array.from(group.querySelectorAll('[role="radio"]')).map((each) => each.textContent?.split(/[哪不]/)[0])).toEqual(['自动', '仅 Cloudflare 隧道']);
+    expect(within(group).getByRole('radio', { name: /^自动/ }).getAttribute('aria-checked')).toBe('true');
+    expect(document.body.textContent).not.toContain('仅直连和中继');
+    expect(group.parentElement!.textContent).toContain('这个选择只管这台设备。');
+    expect(document.body.textContent).not.toContain('会自己改回');
     // Not a browser: the page does not say what browsers do.
     expect(document.body.textContent).not.toContain('浏览器只走 Cloudflare 隧道');
   });
