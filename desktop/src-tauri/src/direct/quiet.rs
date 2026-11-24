@@ -9,13 +9,65 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf},
     sync::oneshot,
     time::Instant,
 };
 
 #[derive(Clone, Default)]
 pub(super) struct PublicLegs(Arc<Mutex<Vec<Weak<Leg>>>>);
+// The session lock orders policy sampling, public commitment, and explicit
+// cutover. A retained ticket cannot become current again, even after toggling off.
+#[derive(Clone, Default)]
+pub(super) struct SessionPolicy(Arc<Mutex<Policy>>);
+#[derive(Default)]
+struct Policy {
+    strict: bool,
+    epoch: Arc<()>,
+    legs: Vec<Weak<Leg>>,
+}
+pub(super) struct PublicTicket {
+    session: Arc<Mutex<Policy>>,
+    epoch: Arc<()>,
+}
+impl SessionPolicy {
+    pub fn set_direct_only(&self, on: bool) {
+        self.0.lock().unwrap().strict = on;
+    }
+    pub fn sample(&self) -> Option<PublicTicket> {
+        let p = self.0.lock().unwrap();
+        (!p.strict).then(|| PublicTicket {
+            session: self.0.clone(),
+            epoch: p.epoch.clone(),
+        })
+    }
+    pub fn close_public(&self) -> usize {
+        let mut p = self.0.lock().unwrap();
+        p.epoch = Arc::new(());
+        p.legs
+            .drain(..)
+            .filter_map(|w| w.upgrade())
+            .filter(|leg| leg.0.lock().unwrap().stop.take().is_some_and(|s| s.send(()).is_ok()))
+            .count()
+    }
+}
+impl PublicTicket {
+    pub fn commit(
+        self,
+        legs: &PublicLegs,
+        browser: &tokio::net::TcpStream,
+        peer: &tokio::net::TcpStream,
+    ) -> Option<PublicCopy> {
+        let mut p = self.session.lock().unwrap();
+        if !Arc::ptr_eq(&self.epoch, &p.epoch) {
+            return None;
+        }
+        let copy = legs.commit(browser, peer);
+        p.legs.retain(|w| w.strong_count() != 0);
+        p.legs.push(Arc::downgrade(&copy.leg));
+        Some(copy)
+    }
+}
 struct Leg(Mutex<Activity>);
 struct Activity {
     setup: bool,
@@ -121,6 +173,36 @@ impl PublicLegs {
     }
 }
 impl PublicCopy {
+    /// Setup is part of the committed public leg, including pipelined TLS
+    /// bytes. Fence each synchronous write poll against forced retirement.
+    pub(super) async fn serve(
+        mut self,
+        mut browser: tokio::net::TcpStream,
+        mut peer: tokio::net::TcpStream,
+        buffered: &[u8],
+    ) {
+        use std::future::{poll_fn, Future};
+        let setup = async {
+            browser
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await?;
+            peer.write_all(buffered).await
+        };
+        let ready = {
+            tokio::pin!(setup);
+            tokio::select! { biased;
+                _ = &mut self.stopped => false,
+                r = poll_fn(|cx| {
+                    let activity = self.leg.0.lock().unwrap();
+                    if activity.stop.is_none() { Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into())) }
+                    else { setup.as_mut().poll(cx) }
+                }) => r.is_ok(),
+            }
+        };
+        if ready {
+            self.copy(browser, peer).await;
+        }
+    }
     pub(super) async fn copy<A: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
         mut self,
         a: A,

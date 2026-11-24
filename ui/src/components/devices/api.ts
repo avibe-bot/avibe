@@ -96,6 +96,8 @@ export type ClaimState = {
   code?: string;
   reasonCode?: string;
   ownerHint?: string;
+  /** Only with `code: 'other_account'`: the account that confirmed the refusal, never the Owner. */
+  confirmingEmail?: string;
   hostname?: string;
   disposition?: 'existing' | 'new';
   retryAfterSeconds?: number;
@@ -105,6 +107,7 @@ const claimState = (body: Record<string, unknown>): ClaimState => ({
   code: typeof body.code === 'string' ? body.code : undefined,
   reasonCode: typeof body.reason_code === 'string' ? body.reason_code : undefined,
   ownerHint: typeof body.owner_hint === 'string' ? body.owner_hint : undefined,
+  confirmingEmail: typeof body.confirming_account_email === 'string' ? body.confirming_account_email : undefined,
   hostname: typeof body.hostname === 'string' ? body.hostname : undefined,
   disposition: body.binding_disposition === 'existing' || body.binding_disposition === 'new' ? body.binding_disposition : undefined,
   retryAfterSeconds: typeof body.retry_after_seconds === 'number' ? body.retry_after_seconds : undefined,

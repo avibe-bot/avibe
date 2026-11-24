@@ -184,7 +184,9 @@ export function DevicesPage() {
       if (end.state === 'bound') setStartedAt(Date.now());
       setClaimIssue(undefined);
     } else {
-      setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, { claimId: end.claimId, seconds: end.seconds }));
+      setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, {
+        claimId: end.claimId, seconds: end.seconds, confirmingEmail: end.claim?.confirmingEmail,
+      }));
     }
     void load();
   }, [load]);

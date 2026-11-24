@@ -225,6 +225,16 @@ describe('claimProblem', () => {
     expect(claimProblem('subject_mismatch')).toEqual({ code: 'unknown', raw: 'subject_mismatch' });
     expect(claimProblem(undefined)).toEqual({ code: 'unknown', raw: 'unknown' });
   });
+
+  it('says another account only with the confirming address the instance checked, else no reason', () => {
+    expect(claimProblem('other_account', { confirmingEmail: 'b@example.test' })).toEqual({ code: 'other_account', email: 'b@example.test' });
+    for (const bad of [undefined, '', 'a***@b***', 'b@example.test\nx', 'b@exa\u202emple.test', 'b example@example.test',
+      '<b@example.test>', 'b@localhost', `b@${'x'.repeat(250)}.test`]) {
+      expect(claimProblem('other_account', { confirmingEmail: bad })).toEqual({ code: 'binding_unavailable' });
+    }
+    // The address is never read from anywhere else: a returned word alone is the unexplained refusal.
+    expect(claimProblem('other_account')).toEqual({ code: 'binding_unavailable' });
+  });
 });
 
 describe('connectionFromWire', () => {

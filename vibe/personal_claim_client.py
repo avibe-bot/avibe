@@ -73,6 +73,29 @@ def text(value, limit: int) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit and value.strip() == value and value.isprintable()
 
 
+# One address, as avibe.bot's ordinary other-account refusal names the account that confirmed it:
+# printable, no whitespace, angle brackets or quotes, one ``@`` and a dotted domain.
+_EMAIL = re.compile(r'[^\s@<>"]{1,64}@[^\s@<>"]+\.[^\s@<>".]+')
+
+
+def confirming_email(value) -> str | None:
+    if text(value, 254) and _EMAIL.fullmatch(value) and ".." not in value.partition("@")[2]:
+        return value
+    return None
+
+
+class OtherAccountRefusal(ClaimError):
+    """The ordinary refusal confirmed by another account. ``confirming_account_email`` is that
+    account's address (never the Owner's); it goes to this claim's starter only, never to a log."""
+
+    def __init__(self, email: str):
+        super().__init__("other_account")
+        self.confirming_account_email = email
+
+    def __repr__(self):
+        return "OtherAccountRefusal('other_account')"
+
+
 def _instant(value: str) -> float:
     try:
         when = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -113,6 +136,11 @@ class Issuance:
     instance_id: str
     hostname: str
     key: str
+    binding_disposition: str | None = None
+
+
+def is_constrained_key(key: str) -> bool:
+    return isinstance(key, str) and key.startswith("vrp2_") and _TOKEN32.fullmatch(key[5:]) is not None
 
 
 @dataclass(frozen=True)
@@ -134,12 +162,47 @@ def _retry_after(value: str) -> int:
 
 
 class ClaimsClient:
+    _user_code = re.compile(r"[A-Z2-9]{10}", re.ASCII)
+
+    def _start_constraints(self, mode, origin) -> dict:
+        return {}
+
+    def _check_start_ack(self, data):
+        self._decision_ticket = data.get("claim_id") if data.get("ordinary_decision_readback") is True else None
+
+    def _disposition(self, data, key):
+        if key.startswith("vrp2_"):
+            raise ClaimError("invalid_claim_response")
+        return None
+
+    def _check_error(self, suffix, payload, status, data):
+        if (status != 409 or suffix != "/redeem" or not self._decision_ticket
+                or payload.get("claim_id") != self._decision_ticket or not isinstance(data, dict)):
+            return
+        proof = {"claim_id": self._decision_ticket, "code_verifier": self._verifier}
+        reading = payload == {**proof, "read_decision": True}
+        accepting = (text(payload.get("accepted_subject"), 200)
+                     and payload == {**proof, "accepted_subject": payload["accepted_subject"]})
+        reason = data.get("reason")
+        if ((reading or (accepting and reason == "active_pairing_recent"))
+                and reason in ("paired_installation_loopback_required", "active_pairing_recent")
+                and data == {"error": "binding_unavailable", "reason": reason}):
+            raise ClaimError(reason)
+        # Only the tagged read carries it, and only with exactly these three fields; anything else
+        # is the unexplained refusal. It never offers a reset.
+        if (reading and reason == "other_account"
+                and set(data) == {"error", "reason", "confirming_account_email"} and data["error"] == "binding_unavailable"):
+            email = confirming_email(data["confirming_account_email"])
+            if email:
+                raise OtherAccountRefusal(email)
+
     def __init__(self, backend_url: str):
         self._target, error = remote_access._normalize_pairing_backend_url(backend_url)
         if self._target is None:
             raise ClaimError("control_plane_unreachable" if error == "pairing_backend_unresolvable" else "invalid_backend", 5)
         self.base = self._target.base_url
         self._verifier = secrets.token_urlsafe(32)
+        self._decision_ticket = None
 
     def _post(self, suffix: str, payload: dict, *, accepting: bool = False):
         """Try each pinned address at connect time. Never duplicate an ambiguous start POST."""
@@ -186,6 +249,7 @@ class ClaimsClient:
             # Uncertain publication is resolved only by the same accept; spent yields 410.
             raise ClaimError("control_plane_unreachable", delay)
         if status >= 300 or not isinstance(data, dict):
+            self._check_error(suffix, payload, status, data)
             # Never project arbitrary remote fields or error messages.
             codes = {"taken": "name_taken", "claim_unavailable": "claim_unavailable", "already_redeemed": "fresh_claim_required",
                      "already_started": "already_started", "binding_unavailable": "binding_unavailable", "subject_mismatch": "subject_mismatch"}
@@ -200,11 +264,13 @@ class ClaimsClient:
             if not local_origin(origin):
                 raise ClaimError("link_required")
             payload.update(return_origin=origin, redirect_state_challenge=s256(state))
+        payload.update(self._start_constraints(mode, origin))
         status, d, _ = self._post("", payload)
+        self._check_start_ack(d)
         try:
             code, ident, expiry, interval = (d[k] for k in ("user_code", "claim_id", "expires_at", "poll_interval_seconds"))
             url = self.base + "/connect/" + code
-            if (status == 201 and str(UUID(ident)) == ident and re.fullmatch(r"[A-Z2-9]{10}", code)
+            if (status == 201 and str(UUID(ident)) == ident and self._user_code.fullmatch(code)
                     and d["user_url"] == url and type(interval) is int and 1 <= interval <= 86400):
                 return Ticket(ident, code, url, expiry, _instant(expiry), interval)
         except (KeyError, ValueError, TypeError, AttributeError):
@@ -212,7 +278,10 @@ class ClaimsClient:
         raise ClaimError("invalid_claim_response")
 
     def observe(self, ticket: Ticket) -> Grant | Pending:
-        status, d, delay = self._post("/redeem", self._proof(ticket))
+        proof = self._proof(ticket)
+        if self._decision_ticket and ticket.id == self._decision_ticket:
+            proof["read_decision"] = True
+        status, d, delay = self._post("/redeem", proof)
         if status == 202 and d.get("status") == "pending":
             return Pending(delay)
         if status == 200 and d.get("status") == "granted":
@@ -233,10 +302,109 @@ class ClaimsClient:
             if (status == 200 and d.get("status") == "redeemed" and Grant.parse(d, instance["hostname"]) == approved
                     and text(instance["id"], 120) and instance["public_url"] == "https://" + approved.hostname
                     and text(pairing["pairing_key"], 512) and _instant(pairing["expires_at"]) <= ticket.deadline):
-                return Issuance(instance["id"], approved.hostname, pairing["pairing_key"])
+                key = pairing["pairing_key"]
+                return Issuance(instance["id"], approved.hostname, key, self._disposition(d, key))
         except (KeyError, TypeError, ClaimError):
             pass
         raise ClaimError("fresh_claim_required")
 
     def _proof(self, ticket: Ticket) -> dict:
         return {"claim_id": ticket.id, "code_verifier": self._verifier}
+
+
+_TOKEN32 = re.compile(r"[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]", re.ASCII)
+_MASKED = re.compile(r"(?:\*{3}|[a-zA-Z0-9]\*{3}@[a-zA-Z0-9]\*{3})", re.ASCII)
+
+
+def loopback_origin(value: str) -> bool:
+    if not local_origin(value):
+        return False
+    host = urlsplit(value).hostname
+    return host == "localhost" or ipaddress.ip_address(host).is_loopback
+
+
+class ConfirmedRefusal(ClaimError):
+    """Only a proved v2 observation can produce one; by itself this cannot reset anything."""
+
+    def __init__(self, reason, *, owner_hint=None):
+        super().__init__("installation_unverified")
+        self.reason = reason
+        self.owner_hint = owner_hint
+
+
+class ConstrainedClaimsClient(ClaimsClient):
+    _user_code = re.compile(r"RB2-[A-HJ-NP-Z2-9]{10}", re.ASCII)
+
+    def __init__(self, backend_url: str, instance_id: str, instance_secret: str):
+        if not backend_url or not instance_id or not instance_secret:
+            raise ClaimError("local_binding_unavailable")
+        super().__init__(backend_url)
+        self._predecessor = {"instance_id": instance_id, "instance_secret": instance_secret}
+        self._ticket_id = self._callback_token = None
+
+    def _start_constraints(self, mode, origin):
+        if mode != "redirect" or not loopback_origin(origin):
+            raise ClaimError("direct_loopback_required")
+        return {"predecessor": self._predecessor}
+
+    def _check_start_ack(self, data):
+        if data.get("predecessor_constrained") is not True:
+            raise ClaimError("constrained_claim_unsupported")
+
+    def start(self, *args, **kwargs):
+        if self._ticket_id is not None:
+            raise ClaimError("already_started")
+        ticket = super().start(*args, **kwargs)
+        self._ticket_id = ticket.id
+        return ticket
+
+    def confirm_return(self, ticket: Ticket, token: str):
+        # Called only after the flow has checked the exact browser cookie, origin and HMAC.
+        if (ticket.id != self._ticket_id or self._callback_token is not None or not isinstance(token, str)
+                or not _TOKEN32.fullmatch(token)):
+            raise ClaimError("invalid_return")
+        self._callback_token = token
+
+    def _proof(self, ticket):
+        if ticket.id != self._ticket_id or not self._ticket_id:
+            raise ClaimError("invalid_return")
+        proof = {**super()._proof(ticket), "predecessor_constrained": True}
+        if self._callback_token is not None:
+            proof["callback_token"] = self._callback_token
+        return proof
+
+    def observe(self, ticket):
+        if self._callback_token is None:
+            raise ClaimError("invalid_return")
+        return super().observe(ticket)
+
+    def accept(self, ticket, approved):
+        if self._callback_token is None:
+            raise ClaimError("invalid_return")
+        return super().accept(ticket, approved)
+
+    def _disposition(self, data, key):
+        disposition = data.get("binding_disposition")
+        if disposition not in ("existing", "new") or not is_constrained_key(key):
+            raise ClaimError("invalid_claim_response")
+        return disposition
+
+    def _check_error(self, suffix, payload, status, data):
+        if not suffix and status == 422:
+            raise ClaimError("constrained_claim_unsupported")
+        if status != 409 or not isinstance(data, dict) or data.get("error") != "installation_unverified":
+            return
+        if (suffix == "/redeem" and self._callback_token is not None and self._ticket_id is not None
+                and payload == {"claim_id": self._ticket_id, "code_verifier": self._verifier,
+                                "predecessor_constrained": True, "callback_token": self._callback_token}):
+            base = {"error": "installation_unverified"}
+            if data == {**base, "reason": "active_pairing_recent"}:
+                raise ConfirmedRefusal("active_pairing_recent")
+            reset = {**base, "recovery": "reset_as_new"}
+            if data == {**reset, "reason": "predecessor_unrecoverable"}:
+                raise ConfirmedRefusal("predecessor_unrecoverable")
+            hint = data.get("owner_hint")
+            if (isinstance(hint, str) and _MASKED.fullmatch(hint)
+                    and data == {**reset, "reason": "other_account", "owner_hint": hint}):
+                raise ConfirmedRefusal("other_account", owner_hint=hint)
+        raise ClaimError("installation_unverified")

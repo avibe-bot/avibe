@@ -126,6 +126,8 @@ export type ClaimProblem =
       | 'pairing_recovery_required' | 'fresh_claim_required' | 'name_taken' | 'binding_unavailable'
       | 'paired_installation_loopback_required' | 'active_pairing_recent' | 'local_binding_changed' }
   | { code: 'claim_in_progress'; claimId?: string }
+  /** Refused at avibe.bot by another account: `email` is the account that confirmed it, never the Owner. */
+  | { code: 'other_account'; email: string }
   | { code: 'rate_limited'; seconds?: number }
   | { code: 'unknown'; raw: string };
 
@@ -166,11 +168,12 @@ export type ProxyAccess = { origins: string[]; peerScope: 'single_address' | 'ra
 /** The instance's direct state (`GET /api/devices/connection`). */
 export type DirectState = 'ready' | 'off' | 'awaiting-permission' | 'denied' | 'awaiting-certificate' | 'not-running' | 'unknown';
 
-/** The Avibe App's own path choice (`direct.preference()`, capability `directPreference` 1). */
+/** This device's own path choice, in the Avibe App or a Desktop window of another computer's
+ *  instance (`direct.preference()`, capability `directPreference`). */
 export type DirectPreference = {
-  mode: 'automatic' | 'tunnel';
-  /** The App put `tunnel` back to `automatic` by itself because it could not connect. */
-  reverted: null | { at: string; reason: 'unreachable' };
+  mode: 'automatic' | 'tunnel' | 'direct';
+  /** The shell put `from` back to `automatic` by itself because it could not connect. */
+  reverted: null | { at: string; reason: 'unreachable'; from: 'tunnel' | 'direct' };
 };
 
 export type TunnelSetting = 'protocol' | 'ipFamily' | 'outbound';

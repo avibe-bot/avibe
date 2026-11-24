@@ -167,6 +167,19 @@ describe('DevicesPage · turning remote access on', () => {
     expect(readClaimMarker()).toBeNull();
   });
 
+  it.each([
+    ['b@example.test', '这台电脑原来的 Avibe 不在 b@example.test 这个账号下。请用拥有它的账号登录 avibe.bot，再试一次。'],
+    [undefined, 'avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。'],
+    ['b@example.test\u202e', 'avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。'],
+  ])('names only the account that confirmed another account\'s refusal (%s), and offers no new binding', async (email, sentence) => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'error', code: 'other_account', confirmingEmail: email });
+    mount();
+
+    expect(await screen.findByText(said(sentence))).toBeTruthy();
+    expect(screen.queryByText(/新电脑/)).toBeNull();
+  });
+
   it('hands a bind-again that comes back here to the connection page, that once and not on any later visit', async () => {
     writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now(), away: true });
     const first = mount();

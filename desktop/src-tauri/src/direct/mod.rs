@@ -50,6 +50,10 @@ pub mod rendezvous;
 mod rendezvous_tests;
 mod selection;
 pub(crate) mod shell;
+mod strict;
+#[cfg(test)]
+#[path = "../../tests/direct/strict.rs"]
+mod strict_tests;
 // muda builds macOS menus only on the main thread, which a test never runs on.
 #[cfg(all(test, windows))]
 #[path = "../../tests/direct/menu.rs"]
@@ -135,7 +139,8 @@ impl Client {
             return None;
         }
         let (links, rx) = watch::channel(None);
-        let listener = Listener::bind(host.clone(), rx).await?;
+        let status = watch::channel(PathStatus::default()).0;
+        let listener = Listener::bind(host.clone(), rx, status.clone()).await?;
         Some(Self {
             clock: Clock::default(),
             host,
@@ -144,7 +149,7 @@ impl Client {
             links,
             listener,
             status_writer: Default::default(),
-            status: watch::channel(PathStatus::default()).0,
+            status,
             monitor: None,
         })
     }
