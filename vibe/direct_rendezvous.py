@@ -48,6 +48,27 @@ _UNIQUE_LOCAL_V6 = ipaddress.ip_network("fc00::/7")
 _KIND_ORDER = {"lan": 0, "ipv6": 1}
 
 
+def log_listener_faults(faults: Any) -> None:
+    """Log only complete, valid batches of optional client diagnostics."""
+    if not isinstance(faults, list) or len(faults) > 5:
+        return
+    for fault in faults:
+        if (
+            not isinstance(fault, dict)
+            or fault.keys() != {"step", "code", "background_seconds"}
+            or fault["step"] not in ("bind", "waiting", "ownership", "deadline", "foreign")
+            or type(fault["code"]) is not int
+            or type(fault["background_seconds"]) is not int
+            or fault["background_seconds"] < 0
+        ):
+            return
+    for fault in faults:
+        logger.info(
+            "direct rendezvous listener_fault step=%s code=%d background_seconds=%d",
+            fault["step"], fault["code"], fault["background_seconds"],
+        )
+
+
 def is_endpoint_id(value: Any) -> bool:
     return isinstance(value, str) and _ENDPOINT_ID_RE.fullmatch(value) is not None
 

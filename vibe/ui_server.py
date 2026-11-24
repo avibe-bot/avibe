@@ -9195,6 +9195,7 @@ def direct_rendezvous():
             subject=subject,
             client_endpoint_id=payload["client_endpoint_id"],
         )
+    rendezvous_state.log_listener_faults(payload.get("listener_faults"))
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
     return response
