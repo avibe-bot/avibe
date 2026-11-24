@@ -3313,11 +3313,7 @@
       "familyIpv4": "IPv4",
       "familyIpv6": "IPv6",
       "withDetail": "{{path}} · {{detail}}",
-      "legMs": "{{ms}} ms",
-      "legNone": "—",
-      "legFailed": "失败",
-      "legCancelled": "未用上",
-      "legTimeout": "超时"
+      "legMs": "{{ms}} ms"
     },
     "interfaceOption": "{{name}} · {{address}}",
     "manualRetryAt": "可在 {{time}} 再次优化。",
@@ -8407,9 +8403,24 @@
       "directCertificate": "直连证书",
       "validUntil": "有效期至 {{date}}",
       "noCertificate": "没有有效的证书",
-      "lastConnection": "最近一次连接",
-      "lastConnectionLegs": "直连 {{direct}} / Cloudflare {{public}}",
-      "lastConnectionNone": "这台设备没有记录"
+      "measure": {
+        "title": "线路测速",
+        "run": "测速",
+        "running": "正在测速…",
+        "lead": "从这台设备，经现在用的线路和 Cloudflare 隧道各发 5 次小请求，比较往返时间，不含建立连接的时间。",
+        "value": "中位 {{median}} · 最慢 {{max}}",
+        "partial": "{{value}}（{{samples}} 次中 {{ok}} 次完成）",
+        "failed": "没有完成：连接失败",
+        "timedOut": "没有完成：超时",
+        "directOrRelay": "直连或中继",
+        "noCurrent": "现在没有在用",
+        "notMeasured": "没能测",
+        "atToday": "今天 {{time}} 测得",
+        "atYesterday": "昨天 {{time}} 测得",
+        "atDated": "{{date}} {{time}} 测得",
+        "busy": "另一次测速还在进行，请稍后再试。",
+        "unreadable": "这次测速没有结果，可以再测一次。"
+      }
     },
     "rename": {
       "title": "更改域名",

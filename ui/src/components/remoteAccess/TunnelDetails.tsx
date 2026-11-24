@@ -2,11 +2,15 @@
 // 「连接方式」 shows them behind 「连接诊断与网络路径」. Props only: the page reads the status and
 // runs the diagnostics.
 import { Activity, ArrowRight, ChevronDown, Cloud, MapPin, Server } from 'lucide-react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 
 import type { CloudflareEdgeLocation, RemoteAccessStatus, TunnelConnectivityDiagnostics } from '@/context/ApiContext';
 import type { TranslationKey } from '@/i18n/types';
+import type { DirectMeasurement, MeasureLeg } from '@/lib/nativeDirectMeasure';
 import { getTunnelRequestPathDisplayState } from '@/lib/tunnelQuality';
+import { timeParts } from '../devices/format';
+import { KeptTail } from '../ui/kept-tail';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 
@@ -140,37 +144,29 @@ function NetworkPath({ status, now }: { status: RemoteAccessStatus; now: number 
   );
 }
 
-type Leg = number | 'none' | 'failed' | 'timeout' | 'cancelled';
-const legKeys = {
-  none: 'remoteAccess.direct.legNone',
-  failed: 'remoteAccess.direct.legFailed',
-  timeout: 'remoteAccess.direct.legTimeout',
-  cancelled: 'remoteAccess.direct.legCancelled',
-} as const satisfies Record<Exclude<Leg, number>, TranslationKey>;
-
-/** Direct, for advanced users and debugging: its certificate, and how the last new connection's two
- *  paths raced (only the Avibe App on this device records that). */
+/** Direct, for advanced users and debugging: its certificate. */
 export type DirectDetails = {
   /** The certificate's expiry while it is valid; null without a valid one. */
   certificate: Date | null;
-  lastConnection: { direct: Leg; public: Leg } | null;
+};
+
+/** 「测速」: this device's shell measures small round trips over the path it uses now and over the
+ *  Cloudflare tunnel (`direct.measure()`). Nothing is shown before a measurement has run. */
+export type MeasureDetails = {
+  running?: boolean;
+  result?: DirectMeasurement;
+  /** `busy`: another measurement is running. `failed`: none could be read. */
+  error?: 'busy' | 'failed';
 };
 
 function DirectRows({ direct }: { direct: DirectDetails }) {
   const { t, i18n } = useTranslation();
-  const leg = (value: Leg) => (typeof value === 'number' ? t('remoteAccess.direct.legMs', { ms: value }) : t(legKeys[value]));
   const rows: Array<[string, string]> = [
     [
       t('devices.connection.directCertificate'),
       direct.certificate
         ? t('devices.connection.validUntil', { date: new Intl.DateTimeFormat(i18n.language, { year: 'numeric', month: 'long', day: 'numeric' }).format(direct.certificate) })
         : t('devices.connection.noCertificate'),
-    ],
-    [
-      t('devices.connection.lastConnection'),
-      direct.lastConnection
-        ? t('devices.connection.lastConnectionLegs', { direct: leg(direct.lastConnection.direct), public: leg(direct.lastConnection.public) })
-        : t('devices.connection.lastConnectionNone'),
     ],
   ];
   return (
@@ -188,6 +184,75 @@ function DirectRows({ direct }: { direct: DirectDetails }) {
   );
 }
 
+const atKeys = {
+  today: 'devices.connection.measure.atToday',
+  yesterday: 'devices.connection.measure.atYesterday',
+  other: 'devices.connection.measure.atDated',
+} as const satisfies Record<NonNullable<ReturnType<typeof timeParts>>['day'], TranslationKey>;
+
+/** A measured path by its shipped name, with its address family or the relay's region. */
+function legName(t: TFunction, leg: MeasureLeg): string {
+  if (leg.kind === 'tunnel') return t('remoteAccess.direct.usingTunnel');
+  if (leg.kind === 'relay') {
+    const relay = t('remoteAccess.direct.usingRelay');
+    return leg.relayRegion ? t('remoteAccess.direct.withDetail', { path: relay, detail: leg.relayRegion }) : relay;
+  }
+  const name = t(leg.scope === 'local' ? 'remoteAccess.direct.usingLan' : leg.scope === 'global' ? 'remoteAccess.direct.usingPunched' : 'remoteAccess.direct.usingDirect');
+  return t('remoteAccess.direct.withDetail', { path: name, detail: t(leg.kind === 'ipv4' ? 'remoteAccess.direct.familyIpv4' : 'remoteAccess.direct.familyIpv6') });
+}
+
+/** Median and worst over the completed samples; what became of the rest. */
+function legValue(t: TFunction, leg: MeasureLeg, samples: number): string {
+  if (leg.ok === 0 || leg.medianMs === null || leg.maxMs === null) {
+    return t(leg.error === 'timeout' ? 'devices.connection.measure.timedOut' : 'devices.connection.measure.failed');
+  }
+  const value = t('devices.connection.measure.value', { median: formatLatency(leg.medianMs), max: formatLatency(leg.maxMs) });
+  return leg.ok < samples ? t('devices.connection.measure.partial', { value, ok: leg.ok, samples }) : value;
+}
+
+function MeasureRows({ measure, onMeasure }: { measure: MeasureDetails; onMeasure?: () => void }) {
+  const { t, i18n } = useTranslation();
+  const { result } = measure;
+  const at = result ? timeParts(new Date(result.measuredAt).toISOString(), i18n.language) : null;
+  const rows: Array<[string, string]> = result ? [
+    result.current
+      ? [legName(t, result.current), legValue(t, result.current, result.samples)]
+      : [t('devices.connection.measure.directOrRelay'), t('devices.connection.measure.noCurrent')],
+    [t('remoteAccess.direct.usingTunnel'), result.tunnel ? legValue(t, result.tunnel, result.samples) : t('devices.connection.measure.notMeasured')],
+  ] : [];
+  return (
+    <div className="border-t border-border/70 pt-4" data-testid="direct-measure">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-[13px] font-semibold text-foreground">{t('devices.connection.measure.title')}</h3>
+        <Button type="button" variant="secondary" size="xs" disabled={measure.running} onClick={onMeasure}>
+          <Activity className="size-3.5" />
+          {measure.running ? t('devices.connection.measure.running') : t('devices.connection.measure.run')}
+        </Button>
+      </div>
+      <p className="mt-1 text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.connection.measure.lead')} /></p>
+      {measure.error && (
+        <p role="alert" className="mt-2 text-[12px] text-gold-ink">
+          {t(measure.error === 'busy' ? 'devices.connection.measure.busy' : 'devices.connection.measure.unreadable')}
+        </p>
+      )}
+      {result && (
+        <>
+          {/* On a phone each path's name sits above its times, so the times keep one line. */}
+          <dl className="mt-3 grid gap-y-1.5 text-[12px] sm:grid-cols-[minmax(0,auto)_minmax(0,1fr)] sm:gap-x-6">
+            {rows.map(([label, value]) => (
+              <div key={label} className="contents">
+                <dt className="text-muted">{label}</dt>
+                <dd className="mb-1 tabular-nums text-foreground sm:mb-0">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          {at && <p className="mt-2 text-[11px] text-muted">{t(atKeys[at.day], { date: at.date, time: at.time })}</p>}
+        </>
+      )}
+    </div>
+  );
+}
+
 export type TunnelDetailsProps = {
   status: RemoteAccessStatus | null;
   diagnostics: TunnelConnectivityDiagnostics | null;
@@ -198,10 +263,13 @@ export type TunnelDetailsProps = {
   now: number;
   /** Present only while this Avibe has direct turned on. */
   direct?: DirectDetails;
+  /** Present only where this device's shell can measure (`directMeasure`). */
+  measure?: MeasureDetails;
   onRun?: () => void;
+  onMeasure?: () => void;
 };
 
-export function TunnelDetails({ status, diagnostics, running, error, now, direct, onRun }: TunnelDetailsProps) {
+export function TunnelDetails({ status, diagnostics, running, error, now, direct, measure, onRun, onMeasure }: TunnelDetailsProps) {
   const { t } = useTranslation();
   const rows: DiagnosticKey[] = diagnostics ? ['dns', 'quic', 'http2'] : [];
   const inactiveQuic = (key: DiagnosticKey) => key === 'quic' && diagnostics?.quic.status === 'unknown' && diagnostics.effective_protocol === 'http2';
@@ -209,6 +277,7 @@ export function TunnelDetails({ status, diagnostics, running, error, now, direct
     <div className="flex flex-col gap-5">
       {status ? <NetworkPath status={status} now={now} /> : <p className="text-[12px] text-muted">{t('devices.connection.noNetworkPath')}</p>}
       {direct && <DirectRows direct={direct} />}
+      {measure && <MeasureRows measure={measure} onMeasure={onMeasure} />}
       <div className="border-t border-border/70 pt-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">

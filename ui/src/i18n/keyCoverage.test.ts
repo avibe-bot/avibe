@@ -941,6 +941,7 @@ const NON_KEY_LITERALS = [
   'c1.share_draft',
   'device.describe',
   'direct.handover',
+  'direct.measure',
   'direct.preference',
   'direct.setPreference',
   'direct.status',

@@ -3313,11 +3313,7 @@
       "familyIpv4": "IPv4",
       "familyIpv6": "IPv6",
       "withDetail": "{{path}} · {{detail}}",
-      "legMs": "{{ms}} ms",
-      "legNone": "—",
-      "legFailed": "failed",
-      "legCancelled": "not used",
-      "legTimeout": "timed out"
+      "legMs": "{{ms}} ms"
     },
     "interfaceOption": "{{name}} · {{address}}",
     "manualRetryAt": "You can optimize again at {{time}}.",
@@ -8407,9 +8403,24 @@
       "directCertificate": "Direct certificate",
       "validUntil": "valid until {{date}}",
       "noCertificate": "no valid certificate",
-      "lastConnection": "Last connection",
-      "lastConnectionLegs": "direct {{direct}} / Cloudflare {{public}}",
-      "lastConnectionNone": "none recorded on this device"
+      "measure": {
+        "title": "Path speed",
+        "run": "Measure",
+        "running": "Measuring…",
+        "lead": "From this device, sends 5 small requests over the path in use and over the Cloudflare tunnel and compares the round trips, not counting connection setup.",
+        "value": "median {{median}} · worst {{max}}",
+        "partial": "{{value}} ({{ok}} of {{samples}} completed)",
+        "failed": "Did not complete: failed",
+        "timedOut": "Did not complete: timed out",
+        "directOrRelay": "Direct or relay",
+        "noCurrent": "Not in use now",
+        "notMeasured": "Could not be measured",
+        "atToday": "Measured today at {{time}}",
+        "atYesterday": "Measured yesterday at {{time}}",
+        "atDated": "Measured on {{date}} at {{time}}",
+        "busy": "Another measurement is still running. Try again shortly.",
+        "unreadable": "This measurement returned no result. You can measure again."
+      }
     },
     "rename": {
       "title": "Change the domain",

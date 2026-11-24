@@ -45,6 +45,8 @@ export type ConnectionPageActions = RenameActions & RebindActions & {
   onOpenDiagnostics?: () => void;
   onCloseDiagnostics?: () => void;
   onRunDiagnostics?: () => void;
+  /** 「测速」 in the diagnostics. */
+  onMeasure?: () => void;
   onChangeDomain?: () => void;
   onShowCleanup?: (retired: RetiredName) => void;
 };
@@ -549,7 +551,7 @@ export function ConnectionPageView({
             <DialogHeader>
               <DialogTitle>{t('devices.connection.diagnostics')}</DialogTitle>
             </DialogHeader>
-            <TunnelDetails {...diagnostics} onRun={actions.onRunDiagnostics} />
+            <TunnelDetails {...diagnostics} onRun={actions.onRunDiagnostics} onMeasure={actions.onMeasure} />
           </DialogContent>
         </Dialog>
       )}
