@@ -122,6 +122,7 @@ from modules.agents.catalog import (
     NATIVE_CLI_BACKENDS,
     agent_backend_catalog_payload,
     agent_backend_descriptors,
+    default_cli_for_backend,
     display_name_for_backend,
     is_agent_backend,
     is_builtin_backend,
@@ -9062,13 +9063,14 @@ def get_agent_install_job(job_id: str | None = None, *, backend: str | None = No
 
 
 def _configured_agent_cli_path(name: str) -> str:
+    default_cli = default_cli_for_backend(name) or name
     try:
         config = load_config()
     except (FileNotFoundError, OSError, ValueError):
-        return name
+        return default_cli
     backend = getattr(getattr(config, "agents", None), name, None)
     configured = getattr(backend, "cli_path", "") if backend is not None else ""
-    return configured or name
+    return configured or default_cli
 
 
 def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = False) -> str | None:
@@ -9114,6 +9116,10 @@ _DESKTOP_BACKEND_ERROR_I18N_KEYS = {
     "install_locked": "desktopBackendInstall.installLocked",
     "npm_install_failed": "desktopBackendInstall.installFailed",
     "desktop_install_failed": "desktopBackendInstall.installFailed",
+    "archive_download_failed": "desktopBackendInstall.installFailed",
+    "missing_checksum": "desktopBackendInstall.invalidInstall",
+    "checksum_mismatch": "desktopBackendInstall.invalidInstall",
+    "invalid_archive": "desktopBackendInstall.invalidInstall",
     "invalid_backend_root": "desktopBackendInstall.invalidInstall",
     "invalid_package": "desktopBackendInstall.invalidInstall",
     "native_executable_missing": "desktopBackendInstall.invalidInstall",
@@ -9262,6 +9268,18 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
             if not bash or not curl:
                 return _cli_repair_refusal(name)
             cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://claude.ai/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
+    elif name == "antigravity":
+        command_env = {**native_bootstrap_env(command_env), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
+        if os.name == "nt":
+            powershell = resolve_cli_path("powershell")
+            if not powershell:
+                return _cli_repair_refusal(name)
+            cmd = [powershell, "-NoProfile", "-Command", "irm https://antigravity.google/cli/install.ps1 -ErrorAction Stop | iex"]
+        else:
+            bash, curl = resolve_cli_path("bash"), resolve_cli_path("curl")
+            if not bash or not curl:
+                return _cli_repair_refusal(name)
+            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://antigravity.google/cli/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
     else:
         return _cli_repair_refusal(name)
     return _run_install_command(name, cmd, truncate_output, mode="repair", env=command_env, expected_path=source.destination)
@@ -9273,6 +9291,13 @@ def _native_vendor_install_target(name: str) -> str | None:
         return str(home / ".opencode" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode"))
     if name == "claude":
         return str(home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude"))
+    if name == "antigravity":
+        if os.name == "nt":
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            if local_app_data:
+                return str(Path(local_app_data) / "agy" / "bin" / "agy.exe")
+            return str(home / ".local" / "bin" / "agy.exe")
+        return str(home / ".local" / "bin" / "agy")
     return None
 
 
@@ -9365,7 +9390,10 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     if existing_path is None and is_desktop_managed_runtime():
         return _run_desktop_backend_install(name, _truncate_output)
     health = detect_cli(configured_path, name)
-    if health["status"] in {"broken", "unknown"} or (health["status"] == "missing" and configured_path != name):
+    default_cli = default_cli_for_backend(name) or name
+    if health["status"] in {"broken", "unknown"} or (
+        health["status"] == "missing" and configured_path not in {name, default_cli}
+    ):
         if health["status"] == "unknown":
             return _cli_repair_refusal(name)
         return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output, version=version)
@@ -9393,6 +9421,9 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
             if isinstance(upgrade, dict):
                 return upgrade
             cmd, command_env = upgrade
+        elif name == "antigravity":
+            cmd = [existing_path, "update"]
+            command_env = {**_command_env_for(existing_path), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
         else:
             cmd = None
         if cmd is not None:
@@ -9473,6 +9504,26 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
                 "message": "npm not found. Please install Node.js first.",
                 "output": None,
             }
+    elif name == "antigravity":
+        command_env = {**os.environ, "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
+        if system == "windows":
+            error = _check_binary("powershell")
+            if error:
+                return {"ok": False, "message": error, "output": None}
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "irm https://antigravity.google/cli/install.ps1 -ErrorAction Stop | iex",
+            ]
+            expected_path = _native_vendor_install_target(name)
+        else:
+            for binary in ["curl", "bash"]:
+                error = _check_binary(binary)
+                if error:
+                    return {"ok": False, "message": error, "output": None}
+            cmd = _curl_installer_command("https://antigravity.google/cli/install.sh", "bash")
+            expected_path = _native_vendor_install_target(name)
     else:
         return {"ok": False, "message": f"Unknown agent: {name}", "output": None}
 
@@ -12673,7 +12724,8 @@ async def get_backend_connection(name: str) -> dict:
     enabled = builtin or bool(backend_config.enabled)
     supply_mode = config.model_hub.agents[name].mode
     native = is_native_cli_backend(name)
-    cli_health = await detect_cli_async(backend_config.cli_path or name, name) if native else None
+    default_cli = (default_cli_for_backend(name) or name) if native else name
+    cli_health = await detect_cli_async(backend_config.cli_path or default_cli, name) if native else None
     installed = cli_health["found"] if cli_health is not None else True
     result = {
         "ok": True, "backend": name, "installed": installed, "enabled": enabled,
@@ -12738,6 +12790,17 @@ async def get_backend_connection(name: str) -> dict:
             # check's lease is released before this observation settles.
             await finish_native_operation(asyncio.to_thread(_assert_direct_claude_custody))
             result["auth"] = "external"
+        elif name == "antigravity":
+            auth = await get_antigravity_auth_async()
+            if not auth.get("ok") or auth.get("auth_mode_uncertain"):
+                return result
+            result["auth"] = {
+                "oauth-personal": "subscription",
+                "oauth-business": "subscription",
+                "gemini-api-key": "api_key",
+                "agent-platform": "external",
+                "none": "none",
+            }.get(auth.get("active_auth_mode"), "unknown")
         else:
             auth = await asyncio.to_thread(get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):
@@ -12785,7 +12848,12 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
 
     backend_cfg = getattr(getattr(config, "agents", None), name, None) if config else None
     enabled = bool(getattr(backend_cfg, "enabled", False))
-    configured_path = (cli_path or name) if cli_path is not None else (getattr(backend_cfg, "cli_path", "") or name)
+    default_cli = default_cli_for_backend(name) or name
+    configured_path = (
+        (cli_path or default_cli)
+        if cli_path is not None
+        else (getattr(backend_cfg, "cli_path", "") or default_cli)
+    )
 
     health = await detect_cli_async(configured_path, name)
     resolved_path = health["path"]
@@ -13140,9 +13208,15 @@ def start_oauth_web(
     backend: str,
     force_reset: bool = True,
     provider_id: Optional[str] = None,
+    auth_method: Optional[str] = None,
 ) -> dict:
     return _submit_oauth_coro(
-        start_oauth_web_async(backend, force_reset=force_reset, provider_id=provider_id),
+        start_oauth_web_async(
+            backend,
+            force_reset=force_reset,
+            provider_id=provider_id,
+            auth_method=auth_method,
+        ),
         timeout=60.0,
     )
 
@@ -13151,6 +13225,7 @@ async def start_oauth_web_async(
     backend: str,
     force_reset: bool = True,
     provider_id: Optional[str] = None,
+    auth_method: Optional[str] = None,
 ) -> dict:
     backend = (backend or "").strip().lower()
     if not supports_web_oauth(backend):
@@ -13168,6 +13243,7 @@ async def start_oauth_web_async(
             backend,
             force_reset=force_reset,
             provider_id=(provider_id.strip() if isinstance(provider_id, str) else None),
+            auth_method=(auth_method.strip() if isinstance(auth_method, str) and auth_method.strip() else None),
         )
     except BackendLoginInProgressError as exc:
         try:
@@ -13198,7 +13274,7 @@ async def start_oauth_web_async(
             "state": flow.state,
             "authorization_completed": flow.authorization_completed,
         }
-    return {
+    response = {
         "ok": True,
         "flow_id": flow.flow_id,
         "backend": flow.backend,
@@ -13210,6 +13286,13 @@ async def start_oauth_web_async(
         "provider": flow.provider,
         "authorization_completed": flow.authorization_completed,
     }
+    if getattr(flow, "auth_method", None) is not None:
+        response["auth_method"] = flow.auth_method
+    if getattr(flow, "terminal_command", None) is not None:
+        response["terminal_command"] = flow.terminal_command
+    if getattr(flow, "instructions", None) is not None:
+        response["instructions"] = flow.instructions
+    return response
 
 
 def get_oauth_web_status(flow_id: str) -> dict:
@@ -13312,7 +13395,7 @@ def remove_backend_api_key(backend: str) -> dict:
       Claude Code's OAuth token store is left alone.
     """
     backend = (backend or "").strip().lower()
-    if backend not in {"claude", "codex"}:
+    if backend not in {"claude", "codex", "antigravity"}:
         return {"ok": False, "error": "unsupported_backend"}
     recovery_message = _config_recovery_message()
     if recovery_message:
@@ -13340,13 +13423,19 @@ def remove_backend_api_key(backend: str) -> dict:
             logger.error("apply_claude_auth(oauth) during remove-key failed: %s", exc, exc_info=True)
             return {"ok": False, "error": "remove_failed", "detail": str(exc)}
 
-    # Clear V2Config api_key for both backends.
+    # Clear V2Config api_key for account-level native backends.
     try:
         from config.v2_config import update_config_fields
 
         def _clear_auth_fields(cfg: V2Config) -> None:
             target = getattr(getattr(cfg, "agents", None), backend, None)
             if target is None:
+                return
+            if backend == "antigravity":
+                if getattr(target, "auth_mode", None) == "gemini-api-key":
+                    target.auth_mode = "oauth-personal"
+                target.api_key = None
+                target.base_url = None
                 return
             target.auth_mode = "oauth"
             target.api_key = None
@@ -14143,6 +14232,206 @@ def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
         state["warning"] = oauth_cleanup_result.get("warning") or "oauth_cleanup_failed"
         state["detail"] = oauth_cleanup_result.get("detail")
     return state
+
+
+async def get_antigravity_auth_async() -> dict:
+    """Read passive Antigravity auth state via ``AcpClient.session_list()``.
+
+    Never passes ``--dangerously-skip-permissions``, never opens a session,
+    never triggers inference, and never logs or exposes existing session
+    listings. Plaintext API keys never leave the server.
+    """
+    from config.v2_compat import runtime_agent_cli_path
+    from core.agent_auth_service import (
+        ANTIGRAVITY_AUTH_MODES,
+        detect_antigravity_adc,
+        probe_antigravity_passive_status,
+    )
+
+    try:
+        config = await asyncio.to_thread(load_config)
+        cfg = getattr(getattr(config, "agents", None), "antigravity", None)
+    except Exception:
+        cfg = None
+
+    raw_mode = getattr(cfg, "auth_mode", None)
+    auth_mode = raw_mode if raw_mode in ANTIGRAVITY_AUTH_MODES else "oauth-personal"
+    api_key = (getattr(cfg, "api_key", None) or "").strip() if cfg is not None else ""
+    base_url = (getattr(cfg, "base_url", None) or "").strip() if cfg is not None else ""
+    gcp_project = (getattr(cfg, "gcp_project", None) or "").strip() if cfg is not None else ""
+    gcp_location = (getattr(cfg, "gcp_location", None) or "").strip() if cfg is not None else ""
+    configured_cli = (getattr(cfg, "cli_path", None) or "").strip() if cfg is not None else ""
+    default_cli = default_cli_for_backend("antigravity") or "agy"
+
+    adc = await asyncio.to_thread(detect_antigravity_adc)
+    cli_health = await detect_cli_async(configured_cli or default_cli, "antigravity")
+    if cli_health["status"] == "ok":
+        binary = cli_health["path"] or runtime_agent_cli_path(
+            configured_cli or default_cli, "antigravity", resolve_agent_paths=True
+        )
+        probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
+    else:
+        probe = {
+            "ok": False,
+            "authenticated": False,
+            "credentials_present": (
+                bool(api_key)
+                if auth_mode == "gemini-api-key"
+                else (bool(adc["present"]) if auth_mode == "agent-platform" else False)
+            ),
+            "catalog_available": False,
+            "inference_verified": False,
+            "uncertain": True,
+            "auth_methods": list(ANTIGRAVITY_AUTH_MODES),
+            "supports_logout": False,
+            "error": "cli_not_found" if cli_health["status"] == "missing" else "cli_broken",
+        }
+
+    authenticated = bool(probe.get("authenticated"))
+    if auth_mode == "gemini-api-key":
+        credentials_present = bool(api_key)
+    elif auth_mode == "agent-platform":
+        credentials_present = bool(adc["present"])
+    else:
+        credentials_present = authenticated
+
+    return {
+        "ok": True,
+        "auth_mode": auth_mode,
+        "active_auth_mode": auth_mode if authenticated else "none",
+        "auth_mode_uncertain": bool(probe.get("uncertain")),
+        "authenticated": authenticated,
+        "credentials_present": credentials_present,
+        "catalog_available": False,
+        "inference_verified": False,
+        "cli_installed": bool(cli_health["found"]),
+        "cli_version": cli_health.get("version"),
+        "has_api_key": bool(api_key),
+        "api_key_length": len(api_key),
+        "api_key_masked": _mask_api_key(api_key),
+        "base_url": base_url or None,
+        "gcp_project": gcp_project or None,
+        "gcp_location": gcp_location or None,
+        "adc_present": bool(adc["present"]),
+        "adc_source": adc["source"],
+        "adc_command": adc["login_command"],
+        "auth_methods": probe.get("auth_methods") or list(ANTIGRAVITY_AUTH_MODES),
+        "supports_logout": bool(probe.get("supports_logout", False)),
+        "has_oauth_credentials": authenticated and auth_mode in {"oauth-personal", "oauth-business"},
+        "error": probe.get("error"),
+    }
+
+
+def get_antigravity_auth() -> dict:
+    """Synchronous non-HTTP wrapper around ``get_antigravity_auth_async``."""
+    return _submit_oauth_coro(get_antigravity_auth_async(), timeout=20.0)
+
+
+@_native_auth_write("antigravity")
+def save_antigravity_auth(payload: dict) -> dict:
+    """Persist Antigravity auth settings into ``V2Config.agents.antigravity``.
+
+    Never writes to shell profiles or ``~/.gemini`` and never creates sessions
+    or triggers inference.
+    """
+    from core.agent_auth_service import ANTIGRAVITY_AUTH_MODES, detect_antigravity_adc
+
+    if not isinstance(payload, dict):
+        return {"ok": False, "message": "Payload must be an object"}
+
+    auth_mode = payload.get("auth_mode")
+    if auth_mode not in ANTIGRAVITY_AUTH_MODES:
+        return {
+            "ok": False,
+            "message": f"auth_mode must be one of {list(ANTIGRAVITY_AUTH_MODES)}",
+        }
+
+    raw_api_key = payload.get("api_key")
+    if raw_api_key is not None and not isinstance(raw_api_key, str):
+        return {"ok": False, "message": "api_key must be a string"}
+    api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else None
+
+    def _parse_optional_str(field_name: str) -> tuple[bool, Optional[str], Optional[str]]:
+        if field_name not in payload:
+            return False, None, None
+        raw_val = payload.get(field_name)
+        if raw_val is not None and not isinstance(raw_val, str):
+            return True, None, f"{field_name} must be a string"
+        cleaned = raw_val.strip() if isinstance(raw_val, str) else None
+        return True, (cleaned or None), None
+
+    base_url_present, base_url_change, base_url_err = _parse_optional_str("base_url")
+    if base_url_err:
+        return {"ok": False, "message": base_url_err}
+    gcp_project_present, gcp_project_change, gcp_project_err = _parse_optional_str("gcp_project")
+    if gcp_project_err:
+        return {"ok": False, "message": gcp_project_err}
+    gcp_location_present, gcp_location_change, gcp_location_err = _parse_optional_str("gcp_location")
+    if gcp_location_err:
+        return {"ok": False, "message": gcp_location_err}
+
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
+
+    from config.v2_config import update_config_fields
+
+    validation_error: dict[str, Any] = {}
+    saved_snapshot: dict[str, Any] = {}
+
+    def _apply_antigravity_auth(cfg: V2Config) -> None:
+        target = cfg.agents.antigravity
+        effective_key = api_key if api_key else (target.api_key or "").strip() or None
+        if auth_mode == "gemini-api-key" and not effective_key:
+            validation_error["message"] = "api_key is required when auth_mode='gemini-api-key'"
+            return
+        target.auth_mode = auth_mode
+        if auth_mode == "gemini-api-key":
+            target.api_key = effective_key
+            if base_url_present:
+                target.base_url = base_url_change
+        elif base_url_present:
+            target.base_url = base_url_change
+        if gcp_project_present:
+            target.gcp_project = gcp_project_change
+        if gcp_location_present:
+            target.gcp_location = gcp_location_change
+        saved_snapshot["auth_mode"] = target.auth_mode
+        saved_snapshot["api_key"] = target.api_key or ""
+        saved_snapshot["base_url"] = target.base_url
+        saved_snapshot["gcp_project"] = target.gcp_project
+        saved_snapshot["gcp_location"] = target.gcp_location
+
+    update_config_fields(_apply_antigravity_auth)
+    if validation_error:
+        return {"ok": False, "message": validation_error["message"]}
+
+    try:
+        restart = restart_backend(
+            "antigravity",
+            metadata={"reason": "save_antigravity_auth", "source": "ui_api"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
+
+    adc = detect_antigravity_adc()
+    stored_key = saved_snapshot.get("api_key") or ""
+    return {
+        "ok": True,
+        "auth_mode": saved_snapshot["auth_mode"],
+        "has_api_key": bool(stored_key),
+        "api_key_length": len(stored_key),
+        "api_key_masked": _mask_api_key(stored_key),
+        "base_url": saved_snapshot["base_url"],
+        "gcp_project": saved_snapshot["gcp_project"],
+        "gcp_location": saved_snapshot["gcp_location"],
+        "adc_present": bool(adc["present"]),
+        "adc_source": adc["source"],
+        "adc_command": adc["login_command"],
+        "catalog_available": False,
+        "inference_verified": False,
+        "restart": restart,
+    }
 
 
 # ---------------------------------------------------------------------------
