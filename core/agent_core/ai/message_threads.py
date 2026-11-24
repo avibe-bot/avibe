@@ -309,6 +309,21 @@ def record_http_error(record: dict, status: int, body: str, *, hub: bool = False
     record.update(thread_error_fields(status, body, hub=hub))
 
 
+def _continuation_budget(full: dict, suffix: list, parent_tokens: int) -> str | None:
+    # Same four UTF-8 bytes/token estimate as the context planner, but over rendered JSON
+    # so tool schemas, block framing and structured results are included. Not a tokenizer.
+    suffix_bytes = len(encoded(suffix))
+    static_bytes = len(encoded([full.get("tools"), full.get("system")]))
+    estimated_tokens = (static_bytes + 1 + suffix_bytes + 3) // 4
+    if parent_tokens < MIN_PARENT_TO_STATIC_RATIO * estimated_tokens:
+        return "large_static_or_delta"
+    # A relay dropping the parent gets the suffix, NOT the local system/tools. Even
+    # one token per suffix byte must leave most of the first-event floor unexplained.
+    if parent_tokens < MIN_PARENT_TO_STATIC_RATIO * suffix_bytes:
+        return "dense_delta_risk"
+    return None
+
+
 def _contains_image(messages: list) -> bool:
     def has_image(content) -> bool:
         return isinstance(content, list) and any(
@@ -404,10 +419,8 @@ def prepare(
             # usage heuristic for a suffix containing images, including a tool's returned images.
             if _contains_image(suffix):
                 mode, reason = "full", "image_delta"
-            elif parent.tokens < MIN_PARENT_TO_STATIC_RATIO * len(
-                encoded([full.get("tools"), full.get("system"), suffix])
-            ):
-                reason = "large_static_or_delta"
+            elif budget_reason := _continuation_budget(full, suffix, parent.tokens):
+                reason = budget_reason
             elif parent.message_id is None:
                 warm = parent.reads > 0
             elif parent.trial is not None and not bootstrap.owns(route, parent.trial):

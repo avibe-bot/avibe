@@ -64,6 +64,59 @@ def test_signed_create_carries_engine_thinking_policy_into_delta(tmp_path, monke
     )
 
 
+def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(monkeypatch, tmp_path):
+    import time
+    from core.agent_core.ai import message_threads as mt
+    from core.agent_core.ai._common import WireRequest
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ep = _request(source_id="test-source").endpoint
+    route = mt.route_key(ep, True)
+    history = [{"role": "user", "content": "prior conversation"}]
+    answer = {"role": "assistant", "content": [{"type": "tool_use", "id": "call", "name": "lookup", "input": {}}]}
+    wire = WireRequest(
+        "https://fixture.invalid/messages",
+        {},
+        {
+            "model": ep.model_id,
+            "system": "system instruction " * 600,
+            "tools": [
+                {"name": "lookup", "description": "lookup description " * 600, "input_schema": {"type": "object"}}
+            ],
+            "messages": history,
+        },
+    )
+    create = mt.prepare(wire, ep, True, None, route, None)
+
+    def follow(tokens, text):
+        parent = mt.Parent(
+            route,
+            create.fixed,
+            1,
+            create.history,
+            mt.message_digest([answer]),
+            "msg_fixture",
+            tokens,
+            time.monotonic() + 60,
+        )
+        result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call", "content": text}]}
+        return mt.prepare(
+            replace(wire, body={**wire.body, "messages": [*history, answer, result]}), ep, True, parent, route, None
+        )
+
+    assert follow(36_406, "result " * 400).mode == "continue"
+    assert follow(19_999, "ok").reason == "small_parent"
+    assert follow(20_000, "result " * 400).mode == "continue"
+    # 5,000 additional static bytes push the ratio, but not the floor or suffix guard.
+    wire = replace(wire, body={**wire.body, "system": wire.body["system"] + "x" * 5_000})
+    create = mt.prepare(wire, ep, True, None, route, None)
+    # 30,761 UTF-8 bytes → 7,691 estimated tokens. Equality is sufficient.
+    assert follow(23_072, "result " * 400).reason == "large_static_or_delta"
+    assert follow(23_073, "result " * 400).mode == "continue"
+    assert follow(36_406, "x" * 13_000).reason == "dense_delta_risk"
+    assert follow(36_406, "结果 " * 8_000).reason == "large_static_or_delta"
+
+
 async def test_create_rejection_replays_once_and_remembers_route():
     sent = []
 
