@@ -759,7 +759,11 @@ describe('ConnectionPageView', () => {
     const option = screen.getByRole('radio', { name: /^仅直连和中继/ });
     expect(option.textContent).toContain('重新打开 App 后生效。');
     unmount();
-    view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null } });
+    const unset = view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null } });
+    expect(document.body.textContent).not.toContain('重新打开 App 后生效');
+    unset.unmount();
+    // Never under the option while another one is chosen, whatever the shell sends.
+    view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: null, pendingRelaunch: true } });
     expect(document.body.textContent).not.toContain('重新打开 App 后生效');
   });
 
