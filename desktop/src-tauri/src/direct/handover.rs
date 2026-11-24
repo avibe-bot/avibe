@@ -44,6 +44,7 @@ pub enum HandoverResult {
 #[derive(Clone)]
 pub struct Handover {
     pub(super) host: Authority,
+    pub(super) port: u16,
     pub(super) links: watch::Receiver<Option<Arc<Link>>>,
     pub(super) health: watch::Receiver<()>,
     pub(super) listener: std::sync::Weak<ListenerAccess>,
