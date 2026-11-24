@@ -857,7 +857,9 @@ impl Wiring {
     /// look counts, not one a look; and failures count against a link only
     /// when the path did not change between the two looks: a link that
     /// went and came back unseen failed them for want of a link, which is
-    /// no fault of the link that is there now.
+    /// no fault of the link that is there now. For the same reason a change
+    /// of the path, seen or not, starts the count again: three failures
+    /// are three on one path.
     pub fn path(&mut self, session: u64, linked: bool, sequence: u64, failures: u64, now: Instant) -> Vec<Effect> {
         let Some(found) = self.sessions.iter_mut().find(|candidate| candidate.id == session) else {
             return Vec::new();
@@ -869,6 +871,11 @@ impl Wiring {
         let fresh = failures.saturating_sub(only.counted.unwrap_or(failures));
         only.counted = Some(failures);
         let steady = only.sequence.replace(sequence) == Some(sequence);
+        if !steady {
+            // Another path, or the same one after something was closed on
+            // it: what failed before is no evidence about it.
+            only.failed.clear();
+        }
         let (connecting, failing) = match only.phase {
             Phase::Connecting { .. } => (true, false),
             Phase::Failing { .. } => (false, true),

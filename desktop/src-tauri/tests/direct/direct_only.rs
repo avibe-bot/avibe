@@ -465,6 +465,33 @@ fn a_link_that_carries_nothing_has_its_instance_opened_again() {
         [retire(session, &[]), reopen(VIEW)]
     );
 
+    // Three failures are three on one path. Two, then the link goes and
+    // comes back (seen, and within the ten seconds, so nothing reloads):
+    // the next failure is the new path's first, not the third.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(wiring.path(session, true, 1, 2, now + seconds(5)), []);
+    assert_eq!(wiring.path(session, false, 2, 2, now + seconds(6)), []);
+    assert_eq!(wiring.path(session, true, 3, 2, now + seconds(8)), []);
+    assert_eq!(wiring.path(session, true, 3, 3, now + seconds(9)), []);
+    assert_eq!(wiring.path(session, true, 3, 4, now + seconds(10)), []);
+    assert_eq!(
+        wiring.path(session, true, 3, 5, now + seconds(11)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+    // The same when the going and coming back were not seen: one look
+    // finds another path and one more failure.
+    let mut wiring = chosen(Routing::Live);
+    let session = linked(&mut wiring, VIEW, now);
+    assert_eq!(wiring.path(session, true, 1, 2, now + seconds(5)), []);
+    assert_eq!(wiring.path(session, true, 3, 3, now + seconds(8)), []);
+    assert_eq!(wiring.path(session, true, 3, 4, now + seconds(9)), []);
+    assert_eq!(wiring.path(session, true, 3, 5, now + seconds(10)), []);
+    assert_eq!(
+        wiring.path(session, true, 3, 6, now + seconds(11)),
+        [retire(session, &[]), reopen(VIEW)]
+    );
+
     // While no link is up, failed connections are what is meant to happen.
     let mut wiring = chosen(Routing::Live);
     let session = linked(&mut wiring, VIEW, now);
