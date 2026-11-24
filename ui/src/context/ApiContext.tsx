@@ -2602,6 +2602,7 @@ export type AntigravityAuthState = {
   ok: boolean;
   auth_mode: AntigravityAuthMode | null;
   active_auth_mode?: ActiveAuthMode | AntigravityAuthMode;
+  auth_mode_uncertain?: boolean;
   authenticated: boolean;
   credentials_present: boolean;
   catalog_available: boolean;
@@ -2614,6 +2615,7 @@ export type AntigravityAuthState = {
   gcp_location: string | null;
   adc_present: boolean;
   adc_command: string | null;
+  error?: string | null;
   message?: string;
 };
 
@@ -2631,7 +2633,6 @@ export type AntigravityAuthSaveResult = AntigravityAuthState & {
   partial?: boolean;
   warning?: string;
   detail?: string;
-  error?: string;
   reauth_channel?: 'hub';
 };
 

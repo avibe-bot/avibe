@@ -1115,6 +1115,8 @@
       "antigravityAdcMissing": "未在本机检测到 ADC 凭据。请在终端运行下方命令后刷新状态。",
       "antigravityAdcCommandHint": "在终端中认证 Application Default Credentials：",
       "antigravityCredentialsUnverified": "检测到凭据，但尚未确认认证有效。请使用下方「测试连通性」进行验证。",
+      "antigravityAdcSaveNeedsAuth": "Agent Platform 设置已保存，但未在本机检测到 Application Default Credentials（ADC）。请在终端运行下方命令，然后刷新状态以完成连接。",
+      "antigravityApiKeyUnconfirmed": "设置已保存，但无法确认 Gemini API Key 认证有效。请检查 API Key 和 Base URL 后重试。",
       "vibeyDescription": "内置 Agent · 在模型网关管理模型和路由",
       "backToBackends": "返回后端列表",
       "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
