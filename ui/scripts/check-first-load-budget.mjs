@@ -53,15 +53,15 @@ const KiB = 1024;
 // it; it is not raised again without him, and no sentence is deleted to fit.
 // Splitting the locale by surface is its own task, not part of #4147.
 //
-// chat 900 -> 904 KiB (2026-11-24). Master measured 899.9 KiB, so any new
-// sentence crossed 900. With the Model Hub engine's update strip in Settings ›
-// Dependencies (#4242) it measures 900.5 KiB. The strip, the fold of its states
-// and the wait for an operation's result all load with Settings; the first
-// screen gained only two one-line requests in ApiContext (0.1 KiB). The other
-// 0.5 KiB is copy in the locale chunk, which every first load takes whole: the
-// strip's sentences and the line crediting the project the engine is built on.
-// Same cause and same remedy as the home note above (one locale chunk per
-// surface); back to 900 with that split.
+// chat 900 -> 904 KiB (2026-11-24, decided by the owner of merges). Temporary,
+// until the locale is split by surface; then back within 900, at the latest
+// by 3.2.9 RC1. Master measured 899.9 KiB after the image preview's touch
+// paging (#4225). #4163 adds 0.6 KiB to every first load (the intent a press
+// on the notification switch carries, the Settings and access-blocked
+// sentences, and the check that decides whether a repair can be on offer) and
+// measures 900.5 KiB; the repair itself was moved off the first screen first
+// (src/lib/webPushBindingRepair.ts loads on demand). It is not raised again
+// without him.
 const BUDGETS = {
   home: 608 * KiB,
   chat: 904 * KiB,

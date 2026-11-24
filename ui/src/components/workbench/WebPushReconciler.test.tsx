@@ -7,8 +7,8 @@ import { WebPushReconciler } from './WebPushReconciler';
 const { api, native, activity, reconcile } = vi.hoisted(() => ({
   api: {},
   native: { hasNativeCapability: vi.fn() },
-  activity: { onPageReactivated: vi.fn() },
-  reconcile: { reconcileWebPush: vi.fn() },
+  activity: { onPageReactivated: vi.fn(), readPageActivity: vi.fn() },
+  reconcile: { reconcileWebPush: vi.fn(), restoreWebPushAfterBinding: vi.fn() },
 }));
 
 const state = vi.hoisted(() => ({
@@ -39,6 +39,8 @@ beforeEach(() => {
   state.enabled = true;
   native.hasNativeCapability.mockReturnValue(true);
   activity.onPageReactivated.mockReturnValue(() => undefined);
+  activity.readPageActivity.mockReturnValue(true);
+  reconcile.restoreWebPushAfterBinding.mockResolvedValue(false);
   reconcile.reconcileWebPush.mockResolvedValue({
     support: { supported: true, standalone: true, requiresStandalone: false },
     status: 'enabled',
@@ -108,5 +110,57 @@ describe('WebPushReconciler', () => {
     await Promise.resolve();
 
     expect(reconcile.reconcileWebPush).not.toHaveBeenCalled();
+  });
+
+  describe('in a browser', () => {
+    beforeEach(() => {
+      native.hasNativeCapability.mockReturnValue(false);
+    });
+
+    it('takes back what binding stopped when the page opens in front and each time it comes back', async () => {
+      let reactivate: (() => void) | undefined;
+      activity.onPageReactivated.mockImplementation((callback: () => void) => {
+        reactivate = callback;
+        return () => undefined;
+      });
+
+      render(<WebPushReconciler />);
+      await waitFor(() => expect(reconcile.restoreWebPushAfterBinding).toHaveBeenCalledOnce());
+      expect(reconcile.restoreWebPushAfterBinding).toHaveBeenCalledWith(api);
+
+      reactivate?.();
+      expect(reconcile.restoreWebPushAfterBinding).toHaveBeenCalledTimes(2);
+      // The full reconcile stays the notification control's: nothing else changes here.
+      expect(reconcile.reconcileWebPush).not.toHaveBeenCalled();
+    });
+
+    it('waits for the foreground when the page was loaded in a background tab', async () => {
+      activity.readPageActivity.mockReturnValue(false);
+      let reactivate: (() => void) | undefined;
+      activity.onPageReactivated.mockImplementation((callback: () => void) => {
+        reactivate = callback;
+        return () => undefined;
+      });
+
+      render(<WebPushReconciler />);
+      await Promise.resolve();
+      expect(reconcile.restoreWebPushAfterBinding).not.toHaveBeenCalled();
+
+      reactivate?.();
+      expect(reconcile.restoreWebPushAfterBinding).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      ['notifications are switched off in preferences', () => { state.enabled = false; }],
+      ['the viewer may not read the instance', () => { state.canReadInstance = false; }],
+      ['preferences are not read yet', () => { state.loaded = false; }],
+    ])('does nothing while %s', async (_label, arrange) => {
+      arrange();
+
+      render(<WebPushReconciler />);
+      await Promise.resolve();
+
+      expect(reconcile.restoreWebPushAfterBinding).not.toHaveBeenCalled();
+    });
   });
 });

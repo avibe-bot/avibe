@@ -982,6 +982,9 @@
     "configRestartRefused": "已保存，但未重启服务：无法确认此处运行的 Avibe 属于这个桌面应用。",
     "consoleServerTitle": "控制台服务",
     "consoleServerHint": "保存这些值只会重启 Web UI 服务，不会重启主服务。",
+    "consoleServerBound": "这个 Avibe 已绑定账号，改成网络地址也不会让其他设备免登录打开。",
+    "consoleServerInvalidHost": "这不是一个可用的地址，没有保存。",
+    "consoleServerOwnerOnly": "只有所有者可以改这个地址和端口。",
     "instanceNameTitle": "实例名称",
     "instanceNameHint": "显示在浏览器标签标题中（“Avibe - 名称”）。留空则优先使用远程访问名称，否则使用系统 hostname。",
     "consoleServerRedirecting": "UI 服务地址已变更，正在跳转到 {{origin}}...",
@@ -3377,10 +3380,10 @@
     }
   },
   "accessBlocked": {
-    "title": "无法在此地址打开控制台",
-    "body": "Avibe 正在运行，但拒绝在当前地址打开控制台。",
-    "hint": "请用你的 https://<你的子域>.avibe.bot 链接打开，或在运行 Avibe 的机器上访问 http://127.0.0.1:5123。开启远程访问时，直接用局域网或 Tailscale IP 会被拦截。",
-    "codeLabel": "原因",
+    "title": "这个地址打不开 Avibe",
+    "body": "Avibe 在运行，但不在这个地址打开。",
+    "hint": "在 avibe.bot 登录后，从你的列表里打开它；也可以在运行 Avibe 的那台电脑上直接打开。",
+    "code": "原因：{{code}}",
     "retry": "重试"
   },
   "errors": {
@@ -3465,7 +3468,7 @@
     "project_agent_conflict": "该项目的 Agent 已在别处变更，正在重新加载，请再次修改。",
     "project_order_conflict": "项目顺序已在别处变更，列表已刷新，请重新拖动。",
     "invalid_project_order": "无法保存项目顺序，请刷新列表后重试。",
-    "remote_access_host_mismatch": "这个地址无法打开 Avibe 控制台。请用你的 https://<你的子域>.avibe.bot 链接打开，或在运行 Avibe 的机器上访问 http://127.0.0.1:5123。",
+    "remote_access_host_mismatch": "这个地址打不开 Avibe。在 avibe.bot 登录后从你的列表里打开它，或者在运行 Avibe 的那台电脑上直接打开。",
     "remote_access_config_unavailable": "Avibe 无法读取配置。请确认服务运行正常后重试。",
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
     "remote_access_session_secret_missing": "远程访问配置有误（缺少会话密钥）。请重新配对此设备以恢复访问。",

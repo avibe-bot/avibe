@@ -1148,11 +1148,16 @@ def _validate_remote_access_network_change(
         )
 
 
+class NetworkSettingsForbidden(PermissionError):
+    """A settings patch tried to change a protected network field."""
+
+
 def save_config(
     payload: dict,
     *,
     validate_remote_access_network: bool = True,
     generic_remote_access: bool = False,
+    direct_origin_writer: bool = False,
     user_context: Any = None,
 ) -> V2Config:
     """Save general settings while discarding removed optional-feature sections."""
@@ -1190,6 +1195,15 @@ def save_config(
         str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
     )
 
+    remote_fields = payload.get('remote_access')
+    pairing_fields = remote_fields.get('vibe_cloud') if isinstance(remote_fields, dict) else None
+    if isinstance(pairing_fields, dict) and pairing_fields.keys() & {'backend_url', 'instance_id', 'instance_secret', 'session_secret'}:
+        # A pairing publication needs the push table, including a first pair
+        # performed by a standalone CLI before service startup. Migration takes
+        # place outside the config lock; inside it only reserve the SQLite writer.
+        from storage.importer import ensure_sqlite_state
+
+        ensure_sqlite_state()
     pairing_revocation_operation_id: str | None = None
     # Serialize the WHOLE read-merge-write cycle across processes
     # (#1458 stage ③): the base load, merge, validation, and write all
@@ -1238,6 +1252,18 @@ def save_config(
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        if generic_remote_access:
+            from config.v2_config import UiConfig
+
+            # Compare the merged result, not the keys the client happened to send.
+            # The file lock above covers both this decision and the eventual write.
+            original = base_config.ui if base_config is not None else UiConfig()
+            if config.ui.trusted_public_origins != original.trusted_public_origins and not (
+                direct_origin_writer and context.is_instance_owner
+            ):
+                raise NetworkSettingsForbidden("proxy_origin_change_requires_direct_owner")
+            if (config.ui.setup_host, config.ui.setup_port) != (original.setup_host, original.setup_port) and not context.is_instance_owner:
+                raise NetworkSettingsForbidden("listener_change_requires_owner")
         # This settings writer does not change relay consent. Ordinary host file
         # and shell access can still modify local config, including via Web Terminal.
         # Compare against the locked base, not a prior read or the request's role.
@@ -1316,7 +1342,10 @@ def save_config(
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
-        config.save()
+        from storage.web_push_cutover import publishing
+
+        with publishing(base_config, config):
+            config.save()
         if not remote_access.complete_pairing_revocation(pairing_revocation_operation_id):
             logger.error(
                 "Pairing revocation committed but its pending record could not be retired; "
