@@ -55,8 +55,9 @@ TEXT = {
         "then open http://127.0.0.1:{port} there and go to Devices."
     ),
     "way_browser_effects": (
-        "Binding again signs every remote device out. Pages open on this computer\n"
-        "are not affected. It does not change the tunnel credential."
+        "After binding again, devices that are signed in reconnect by themselves.\n"
+        "Pages open on this computer are not affected.\n"
+        "It does not change the tunnel credential."
     ),
     # Product's sentences. Keep the wording: this one where binding again is
     # explained, ``copied_warning_reset`` where the reset is confirmed.

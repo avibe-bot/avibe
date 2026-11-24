@@ -2076,8 +2076,9 @@ def _remote_rebind_help_text() -> str:
           your own computer and open it there (5123 unless you changed the port):
               ssh -L 5123:127.0.0.1:5123 <user>@<this-server>
               http://127.0.0.1:5123
-          It signs every remote device out. Pages open on this computer are not
-          affected. It does not change the tunnel credential.
+          After binding again, devices that are signed in reconnect by themselves.
+          Pages open on this computer are not affected. It does not change the
+          tunnel credential.
           If someone may have copied this computer's Avibe data as a whole, delete this
           Avibe at avibe.bot, bind it again, then take your name back.
 

@@ -512,7 +512,7 @@ describe('ConnectionPage · binding again', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
     // The key is retired when it is done, not before; neither the account nor the address is promised.
-    expect(dialog.textContent).toContain('完成后，旧的设备密钥作废，所有远程设备都会退出、要重新登录');
+    expect(dialog.textContent).toContain('完成后，旧的设备密钥作废；这台电脑上的页面不受影响。重新绑定后，已登录的设备会自动重新连上。');
     expect(dialog.textContent).toContain('地址通常不变；如果变了，完成后这里会显示新地址');
     expect(dialog.textContent).not.toContain('立即作废');
     expect(start).not.toHaveBeenCalled();
