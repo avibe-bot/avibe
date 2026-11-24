@@ -6569,3 +6569,284 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     assert relogin["local"]["remote_access"]["requested"] is False
     assert V2Config.load().remote_access == before
     assert starts == ["唯一实例"]
+
+
+def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-917 — Antigravity HTTP settings save, passive status, ADC check, and API-key removal."""
+    from core import agent_auth_service
+    from core.command_runner import SupervisedCommandResult
+    from vibe import api, cli_health, internal_client
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+
+    selected = tmp_path / "bin" / "agy"
+    selected.parent.mkdir(parents=True, exist_ok=True)
+    selected.write_text("#!/bin/sh\necho 1.5.16\n", encoding="utf-8")
+    selected.chmod(0o755)
+
+    async def fake_cli_probe(*, command, **_kwargs):
+        assert command == [str(selected), "--version"]
+        return SupervisedCommandResult(stdout="1.5.16\n", stderr="", exit_code=0, timed_out=False)
+
+    monkeypatch.setattr(cli_health, "run_supervised_command", fake_cli_probe)
+
+    config = V2Config.default()
+    config.agents.antigravity.enabled = True
+    config.agents.antigravity.cli_path = str(selected)
+    config.agents.antigravity.auth_mode = "oauth-personal"
+    config.save()
+
+    probe_state = {"authenticated": False, "calls": []}
+
+    async def fake_passive_probe(binary, *, config=None, auth_mode=None, **_kwargs):
+        probe_state["calls"].append(
+            {
+                "binary": binary,
+                "auth_mode": auth_mode,
+                "api_key": getattr(config, "api_key", None),
+                "base_url": getattr(config, "base_url", None),
+                "gcp_project": getattr(config, "gcp_project", None),
+            }
+        )
+        return {
+            "ok": True,
+            "authenticated": probe_state["authenticated"],
+            "credentials_present": probe_state["authenticated"],
+            "catalog_available": False,
+            "inference_verified": False,
+            "uncertain": False,
+            "auth_methods": list(agent_auth_service.ANTIGRAVITY_AUTH_MODES),
+            "supports_logout": True,
+            "error": None if probe_state["authenticated"] else "not_logged_in",
+        }
+
+    monkeypatch.setattr(agent_auth_service, "probe_antigravity_passive_status", fake_passive_probe)
+    monkeypatch.setattr(api, "restart_backend", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        internal_client,
+        "backend_application",
+        AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "state": "applied", "controller_pid": 99}}),
+    )
+    monkeypatch.setattr(api, "_backend_apply_receipts", {})
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    runner = ScenarioRunner(SimpleNamespace())
+
+    def initial_passive_unauthenticated(_h):
+        auth = client.get("/api/backend/antigravity/auth").get_json()
+        assert auth["ok"] is True
+        assert auth["authenticated"] is False
+        assert auth["catalog_available"] is False
+        assert auth["inference_verified"] is False
+        conn = client.get("/api/backend/antigravity/connection").get_json()
+        assert conn["auth"] == "none" and conn["ready"] is False
+
+    def save_api_key_and_read_back(_h):
+        saved = client.post(
+            "/api/backend/antigravity/auth",
+            json={
+                "auth_mode": "gemini-api-key",
+                "api_key": "AIza-scenario-key-5678",
+                "base_url": "https://relay.scenario.test/v1",
+            },
+            headers=headers,
+        ).get_json()
+        assert saved["ok"] is True
+        assert saved["auth_mode"] == "gemini-api-key"
+        assert saved["has_api_key"] is True
+        assert saved["base_url"] == "https://relay.scenario.test/v1"
+        assert "AIza-scenario-key-5678" not in json.dumps(saved)
+        assert not (fake_home / ".gemini").exists()
+
+        probe_state["authenticated"] = True
+        auth = client.get("/api/backend/antigravity/auth").get_json()
+        assert auth["authenticated"] is True
+        assert auth["active_auth_mode"] == "gemini-api-key"
+        assert auth["catalog_available"] is False
+        assert auth["inference_verified"] is False
+        conn = client.get("/api/backend/antigravity/connection").get_json()
+        assert conn["auth"] == "api_key" and conn["ready"] is True
+
+    def save_agent_platform_and_detect_adc(_h):
+        saved = client.post(
+            "/api/backend/antigravity/auth",
+            json={
+                "auth_mode": "agent-platform",
+                "gcp_project": "proj-scenario",
+                "gcp_location": "us-central1",
+            },
+            headers=headers,
+        ).get_json()
+        assert saved["ok"] is True
+        assert saved["adc_present"] is False
+        assert saved["adc_command"] == agent_auth_service.ANTIGRAVITY_ADC_LOGIN_COMMAND
+
+        adc_path = fake_home / ".config" / "gcloud" / "application_default_credentials.json"
+        adc_path.parent.mkdir(parents=True, exist_ok=True)
+        adc_path.write_text('{"type":"authorized_user"}', encoding="utf-8")
+        auth = client.get("/api/backend/antigravity/auth").get_json()
+        assert auth["cli_installed"] is True
+        assert auth["cli_version"] == "1.5.16"
+        assert auth["adc_present"] is True
+        assert auth["adc_command"] is None
+        assert auth["gcp_project"] == "proj-scenario"
+
+    def remove_api_key_resets_fields(_h):
+        removed = client.post(
+            "/api/backend/antigravity/auth/api-key/remove",
+            json={},
+            headers=headers,
+        ).get_json()
+        assert removed["ok"] is True
+        persisted = V2Config.load().agents.antigravity
+        assert persisted.api_key is None
+        assert persisted.base_url is None
+
+    steps = [
+        ("initial-passive", initial_passive_unauthenticated),
+        ("save-api-key", save_api_key_and_read_back),
+        ("save-agent-platform", save_agent_platform_and_detect_adc),
+        ("remove-api-key", remove_api_key_resets_fields),
+    ]
+    asyncio.run(runner.run(*(ScenarioStep(name, fn) for name, fn in steps)))
+    ScenarioExpect.step_history(runner, [name for name, _ in steps])
+
+
+def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-918 — -32000 recovery card and explicit probe distinguishing auth, catalog, and inference."""
+    from modules.agents import acp
+    from modules.im import MessageContext
+
+    config = V2Config.default()
+    config.agents.antigravity.enabled = True
+    config.agents.antigravity.cli_path = "/fake/agy"
+    config.agents.antigravity.auth_mode = "oauth-personal"
+    config.save()
+
+    sent_buttons = []
+
+    class _ImStub:
+        async def send_message(self, _ctx, _text):
+            return "m-plain"
+
+        async def send_message_with_buttons(self, _ctx, text, keyboard):
+            sent_buttons.append((text, keyboard.buttons[0][0].callback_data))
+            return "m-btn"
+
+    controller = SimpleNamespace(
+        config=config,
+        im_client=_ImStub(),
+        emit_agent_message=AsyncMock(),
+        agent_service=None,
+        session_handler=None,
+    )
+    service = AgentAuthService(controller)
+
+    class _FakeAcpClient:
+        mode = "success"
+        observed_commands = []
+
+        def __init__(self, command, *, cwd=None, env=None, request_timeout=120.0):
+            self.command = list(command)
+            self.env = dict(env or {})
+            self.auth_methods = [{"id": "oauth-personal"}]
+            self.supports_close = True
+            self._notify = None
+            self.closed_sessions = []
+            _FakeAcpClient.observed_commands.append((self.command, self.env))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return None
+
+        def on_notification(self, cb):
+            self._notify = cb
+
+        async def initialize(self, **_kwargs):
+            return {"protocolVersion": 1}
+
+        async def authenticate(self, _method_id):
+            return {}
+
+        async def session_new(self, _cwd, **_kwargs):
+            if _FakeAcpClient.mode == "auth_error":
+                raise acp.AcpRpcError(-32000, "Authentication required")
+            return {
+                "sessionId": "sess-probe-1",
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "options": [{"value": "gemini-4-neon"}],
+                    }
+                ],
+            }
+
+        async def session_set_config_option(self, _sid, _cid, value):
+            if value != "gemini-4-neon":
+                raise acp.AcpRpcError(-32602, f"Unsupported model: {value}")
+            return {}
+
+        async def session_prompt(self, _sid, _prompt, **_kwargs):
+            if self._notify is not None:
+                await self._notify(
+                    "session/update",
+                    {
+                        "sessionId": "sess-probe-1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "OK"},
+                        },
+                    },
+                )
+            return {"stopReason": "end_turn"}
+
+        async def session_close(self, session_id):
+            self.closed_sessions.append(session_id)
+            return {}
+
+    monkeypatch.setattr(acp, "AcpClient", _FakeAcpClient)
+    ctx = MessageContext(user_id="u1", channel_id="c1", platform="slack")
+
+    async def _run():
+        recovered = await service.maybe_emit_auth_recovery_message(
+            ctx,
+            "antigravity",
+            "ACP RPC error -32000: Authentication required",
+        )
+        assert recovered is True
+        assert sent_buttons and sent_buttons[-1][1] == "auth_setup:antigravity"
+
+        _FakeAcpClient.mode = "auth_error"
+        r_auth = await service.test_web_auth("antigravity", model="gemini-4-neon")
+        assert r_auth["ok"] is False
+        assert r_auth["authenticated"] is False
+        assert r_auth["catalog_available"] is False
+        assert r_auth["inference_verified"] is False
+
+        _FakeAcpClient.mode = "success"
+        r_bad_model = await service.test_web_auth("antigravity", model="unknown-model")
+        assert r_bad_model["ok"] is False
+        assert r_bad_model["authenticated"] is True
+        assert r_bad_model["catalog_available"] is True
+        assert r_bad_model["inference_verified"] is False
+
+        r_ok = await service.test_web_auth("antigravity", model="gemini-4-neon")
+        assert r_ok["ok"] is True
+        assert r_ok["authenticated"] is True
+        assert r_ok["catalog_available"] is True
+        assert r_ok["inference_verified"] is True
+        assert r_ok["excerpt"] == "OK"
+
+        for cmd, env in _FakeAcpClient.observed_commands:
+            assert "--dangerously-skip-permissions" not in cmd
+            assert "--disable-telemetry" in cmd
+            assert env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+
+    asyncio.run(_run())
