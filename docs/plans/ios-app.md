@@ -181,7 +181,11 @@ from the phone App:
   newest: a delivery that arrives late does not put an older choice back.
 - `direct.setPreference` changes the choice the app's own 「连接方式」 menu
   shows. Between `"automatic"` and `"tunnel"` it reloads nothing; choosing
-  `"direct"`, or leaving it, reopens the instance. The desktop app sets a
+  `"direct"`, or leaving it, reopens the instance at once and brings the new
+  view back to the URL the old one showed (the instance's first page when
+  the old view was not showing the instance). Nothing waits for the app to
+  be opened again, so `pendingRelaunch`, which its answers and events carry
+  as the App's do, is always `false`. The desktop app sets a
   choice back itself only from `"direct"` (`reverted.from` is always
   `"direct"`), never from `"tunnel"`. From `directPreference` version 2 it
   delivers `direct.preferenceChanged` as the window event
