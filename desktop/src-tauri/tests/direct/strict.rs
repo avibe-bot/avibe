@@ -49,7 +49,9 @@ async fn sleep_expires_a_silent_wait_and_a_ready_dial() {
     let budget = Duration::from_secs(10);
     let ticks = Arc::new(AtomicUsize::new(0));
     let source = ticks.clone();
-    let clock = Clock(Arc::new(move || Duration::from_secs(source.load(Ordering::SeqCst) as u64)));
+    let clock = Clock(Arc::new(move || {
+        Duration::from_secs(source.load(Ordering::SeqCst) as u64)
+    }));
     let (_tx, rx) = watch::channel(None::<()>);
     let start = Instant::now();
     let (opened, ()) = tokio::join!(strict::open(rx, &clock, budget, |_| async { Some(()) }), async {
@@ -65,7 +67,8 @@ async fn sleep_expires_a_silent_wait_and_a_ready_dial() {
         // The machine wakes inside a successful dial poll, before the next timer tick.
         ticks.store(120, Ordering::SeqCst);
         Some(())
-    }).await;
+    })
+    .await;
     assert_eq!(opened, None);
     assert_eq!(start.elapsed(), Duration::ZERO);
 }
