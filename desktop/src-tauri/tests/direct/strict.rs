@@ -1,4 +1,5 @@
 use super::{
+    clock::Clock,
     credential_tests::{connect_as, echo},
     handover_tests::{echo_socket, pair},
     listener::Listener,
@@ -26,7 +27,8 @@ async fn publication_and_dial_share_one_budget_including_relay() {
     for stalled in [false, true] {
         let (tx, rx) = watch::channel(None);
         let start = Instant::now();
-        let open = strict::open(rx, budget, |path| async move {
+        let clock = Clock(Arc::new(move || start.elapsed()));
+        let open = strict::open(rx, &clock, budget, |path| async move {
             assert_eq!(path, SelectedPath::Relay);
             if stalled {
                 pending::<()>().await;
@@ -40,6 +42,32 @@ async fn publication_and_dial_share_one_budget_including_relay() {
         assert_eq!(result, (!stalled).then_some(SelectedPath::Relay));
         assert_eq!(start.elapsed(), if stalled { budget } else { Duration::from_secs(7) });
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn sleep_expires_a_silent_wait_and_a_ready_dial() {
+    let budget = Duration::from_secs(10);
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let source = ticks.clone();
+    let clock = Clock(Arc::new(move || Duration::from_secs(source.load(Ordering::SeqCst) as u64)));
+    let (_tx, rx) = watch::channel(None::<()>);
+    let start = Instant::now();
+    let (opened, ()) = tokio::join!(strict::open(rx, &clock, budget, |_| async { Some(()) }), async {
+        tokio::task::yield_now().await;
+        ticks.store(60, Ordering::SeqCst);
+    });
+    assert_eq!(opened, None);
+    assert!(start.elapsed() <= Duration::from_millis(250));
+
+    let (_tx, rx) = watch::channel(Some(()));
+    let start = Instant::now();
+    let opened = strict::open(rx, &clock, budget, |_| async {
+        // The machine wakes inside a successful dial poll, before the next timer tick.
+        ticks.store(120, Ordering::SeqCst);
+        Some(())
+    }).await;
+    assert_eq!(opened, None);
+    assert_eq!(start.elapsed(), Duration::ZERO);
 }
 
 #[tokio::test]

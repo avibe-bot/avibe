@@ -126,6 +126,7 @@ impl Listener {
         let policy = SessionPolicy::default();
         let accept_policy = policy.clone();
         let timing = strict::Timing::default();
+        let boot_clock = super::clock::Clock::default();
         let task = tokio::spawn(async move {
             let _live = live;
             let mut clients = JoinSet::new();
@@ -146,12 +147,13 @@ impl Listener {
                 let policy = accept_policy.clone();
                 let status = status.clone();
                 let budget = timing.strict_open;
+                let clock = boot_clock.clone();
                 clients.spawn(async move {
                     let mut failed = false;
                     serve(socket, &h, &keys, || async {
                         let Some(ticket) = policy.sample() else {
                             let host = &h;
-                            let opened = strict::open(links.clone(), budget, |l| async move {
+                            let opened = strict::open(links.clone(), &clock, budget, |l| async move {
                                 let stream = l.open(host).await?;
                                 Some(Backend::Direct(stream, l.commit_stream()?))
                             }).await;
