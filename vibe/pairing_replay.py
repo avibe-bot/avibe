@@ -39,6 +39,18 @@ def _saved():
         return None
 
 
+def accept_conflict(record, *, active_claim_id=None, sealed_archive=False):
+    """An issued acceptance belongs to its journal or the lock-held live handoff only."""
+    from vibe import personal_claims
+    journal_id = ((record or {}).get('personal_claim') or {}).get('claim_id')
+    try:
+        sealed_id = (journal_id or '') if sealed_archive else None
+        marked = personal_claims._outcome(sealed_claim_id=sealed_id).get('claim_id')
+    except personal_claims.ClaimError:
+        return True
+    return bool(marked and marked not in (journal_id, active_claim_id))
+
+
 def orphaned_delivery(*, active_claim_id=None):
     """No current grant: an outstanding send or accept is not a clean start."""
     from vibe import personal_claims
@@ -46,8 +58,7 @@ def orphaned_delivery(*, active_claim_id=None):
         saved = _saved()
         if saved is not None and saved.get('mode') != 'retired':
             return True
-        marked = personal_claims._outcome().get('claim_id')
-        return bool(marked and marked != active_claim_id)
+        return accept_conflict(None, active_claim_id=active_claim_id)
     except (OSError, ValueError, AttributeError, RecursionError, personal_claims.ClaimError):
         return True
 
@@ -100,6 +111,8 @@ def _view(state, now):
 
 
 def projection(record, eligible):
+    if accept_conflict(record):
+        return {'replay_state': 'needs_reconciliation'}
     if not eligible or record.get('desktop_failure'):
         return {'replay_state': 'terminated'}
     try:
@@ -122,6 +135,8 @@ def replacement_blocked(record, *, active_claim_id=None):
     """Called under the send right, before any new input can replace evidence."""
     if not record:
         return orphaned_delivery(active_claim_id=active_claim_id)
+    if accept_conflict(record, active_claim_id=active_claim_id):
+        return True
     if record['phase'] in ('redeemed', 'applied'):
         return True
     if record['phase'] != 'prepared' or record.get('desktop_failure') == 'pairing_key_expired':
@@ -134,6 +149,27 @@ def replacement_blocked(record, *, active_claim_id=None):
                 or _now() < s['not_before'])
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         return True
+
+
+def wait_result(state, now):
+    if now >= state['not_before']:
+        return None
+    seconds = math.ceil(state['not_before'] - now)
+    result = (_pending(seconds) if state.get('wait_reason') == 'pending' else
+              {'ok': False, 'error': 'pairing_retry_wait', 'retry_after_seconds': seconds})
+    return {**result, **_view(state, now)}
+
+
+def duplicate_hold(record):
+    if accept_conflict(record):
+        return reconciliation_required()
+    try:
+        state, now = _state(record), _now()
+        if _view(state, now)['replay_state'] == 'needs_reconciliation':
+            return reconciliation_required()
+        return wait_result(state, now)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, OverflowError):
+        return reconciliation_required()
 
 
 def _save(state):
@@ -199,6 +235,8 @@ def run(record, *, automatic=False, manual_only=False):
                 if (error or not current or local.claim_snapshot(current) != local.claim_snapshot(record)
                         or current['phase'] != 'prepared' or not eligible(current, local._config())):
                     return {'ok': False, 'error': 'local_binding_changed', 'status': 409}
+                if accept_conflict(current):
+                    return reconciliation_required()
                 if current.get('desktop_failure'):
                     return {'ok': False, 'error': current['desktop_failure'], 'status': 400}
                 # Use the journal's representation even on the first send.
@@ -213,12 +251,8 @@ def run(record, *, automatic=False, manual_only=False):
                 if automatic and (not _scheduled(s, now) or now < s['due']):
                     return {'ok': False, 'error': 'pairing_replay_not_due'}
                 view = _view(s, now)
-                if now < s['not_before']:
-                    seconds = math.ceil(s['not_before'] - now)
-                    if s.get('wait_reason') == 'pending':
-                        return {**_pending(seconds), **view}
-                    # 429 and older schedules with unknown cause are not cloud 409s.
-                    return {'ok': False, 'error': 'pairing_retry_wait', 'retry_after_seconds': seconds, **view}
+                if wait := wait_result(s, now):
+                    return wait
                 if manual_only and view['replay_state'] == 'scheduled':
                     return {'ok': False, 'error': 'pairing_replay_scheduled', **view}
                 s['attempts'] += 1

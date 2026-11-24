@@ -79,6 +79,36 @@ def test_explicit_key_leaves_settled_personal_request_with_its_owner(claim_peer,
     assert claim_peer.decisions == decisions and not pairing_replay.orphaned_delivery()
 
 
+@pytest.mark.parametrize('superseded', [False, True])
+def test_personal_recovery_classifies_the_generation_that_tick_finished(claim_peer, monkeypatch, superseded):
+    from vibe import pairing_replay
+
+    now = [pairing_replay._now()]
+    monkeypatch.setattr(pairing_replay, '_now', lambda: now[0])
+    requests = []
+    def redeem(_url, payload, **_kwargs):
+        requests.append(dict(payload))
+        if len(requests) == 1:
+            raise remote_access.BackendRequestError(503, {'error': 'temporarily_unavailable'})
+        return _response()
+    monkeypatch.setattr(remote_access, '_json_request', redeem)
+    assert _claim()['code'] == 'pairing_recovery_required'
+    retry = remote_access._retry_installation_pairing
+    def finish_between_selection_and_dispatch(record):
+        now[0] += 2
+        pairing_replay.tick()
+        if superseded:
+            cfg = V2Config.load()
+            cfg.remote_access.vibe_cloud.instance_secret = 'fixture-successor'
+            cfg.save()
+        return retry(record)
+    monkeypatch.setattr(remote_access, '_retry_installation_pairing', finish_between_selection_and_dispatch)
+    result = claims.recover_pairing(claim_peer.id)
+    assert result == ({'state': 'error', 'code': 'local_binding_changed'} if superseded else {'state': 'bound'})
+    assert len(requests) == 2 and requests[0] == requests[1]
+    assert claim_peer.decisions == ['owner-id']
+
+
 def test_off_binding_is_not_repaired_or_replaced(claim_peer):
     assert _claim()["state"] == "bound"
     cfg = V2Config.load()
@@ -307,8 +337,8 @@ def test_pairing_cannot_publish_a_target_different_from_the_approved_claim(claim
 
 
 @pytest.mark.parametrize("damage", ["{not json", "[]", '{"bound": 5}', b"\xff\xfe"])
-def test_damaged_status_file_blocks_neither_a_new_claim_nor_its_sealed_pairing(claim_peer, monkeypatch, damage):
-    """The outcome file holds no secret: unparseable reads as absent, and the next write replaces it."""
+def test_damaged_attempt_blocks_new_claim_but_not_matching_sealed_archive(claim_peer, monkeypatch, damage):
+    """This file may be the sole acceptance evidence: only a sealed local receipt can repair it."""
     import json
     from tests.test_pairing_recovery import _fail_config_publication_once
     marker = claims._marker()
@@ -316,6 +346,11 @@ def test_damaged_status_file_blocks_neither_a_new_claim_nor_its_sealed_pairing(c
     def damage_marker():
         marker.write_bytes(damage if isinstance(damage, bytes) else damage.encode())
     damage_marker()
+    before = marker.read_bytes()
+    assert _claim()['code'] == 'pairing_needs_reconciliation'
+    assert not claim_peer.calls and marker.read_bytes() == before
+    # Independent clean fixture history: seal a real receipt first, then damage the marker.
+    marker.unlink()
     _fail_config_publication_once(monkeypatch)
     assert _claim()["code"] == "pairing_recovery_required"
     ident = claim_peer.id

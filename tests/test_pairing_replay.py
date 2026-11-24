@@ -153,6 +153,29 @@ def test_owner_http_status_keeps_desktop_ownership_when_retries_go_manual(setup_
     assert len(wire.sent) == 1
 
 
+@pytest.mark.parametrize('status,expected', [(409, 'pairing_redeem_pending'), (429, 'pairing_retry_wait')])
+def test_same_explicit_input_reports_the_durable_wait(setup_replay, monkeypatch, status, expected):
+    wire, clock, payload, post = setup_replay
+    wire.status = status
+    if status == 429:
+        def truncated():
+            def read():
+                raise ConnectionResetError('fixture truncated response body')
+            return SimpleNamespace(status=429, read=read, getheader=lambda name: '90')
+        monkeypatch.setattr(wire, 'getresponse', truncated)
+    else:
+        wire.body = b'{"error":"pairing_redeem_pending","retry_after_seconds":60}'
+    post(payload)
+    clock[0] += 3
+    explicit = ra.pair(payload['pairing_key'], payload['backend_url'])
+    empty = post({}).get_json()
+    for result in (explicit, empty):
+        assert result['error'] == expected
+        assert result['retry_after_seconds'] == (87 if status == 429 else 57)
+    replay.tick()
+    assert len(wire.sent) == 1
+
+
 def test_rate_limit_advice_is_not_shortened(setup_replay):
     wire, clock, payload, post = setup_replay
     wire.status, wire.advice = 429, '90'

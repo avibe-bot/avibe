@@ -58,6 +58,8 @@ def _recover_before_start(on_bound):
                 raise ClaimError('pairing_needs_reconciliation')
             return None
         phase = pending["phase"]
+        if phase not in ('redeemed', 'applied') and pairing_replay.accept_conflict(pending):
+            raise ClaimError('pairing_needs_reconciliation')
         if phase == "revoked":
             cloud = local._config().remote_access.vibe_cloud
             if any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret)):
@@ -103,18 +105,33 @@ def _marker():
     return paths.get_state_dir() / "personal-claim-outcome.json"
 
 
-def _outcome():
-    """Nonsecret status only. A damaged file reads as absent and the next write replaces it."""
+def _outcome(*, sealed_claim_id=None):
+    """Missing is clean; unreadable acceptance evidence never authorizes a send."""
     try:
         saved = json.loads(_marker().read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError, RecursionError):
+        # Even when the rest is damaged, a readable foreign acceptance ID is
+        # evidence. Local archiving may not erase it in favor of another claim.
+        if sealed_claim_id is not None and isinstance(saved, dict) and saved.get('claim_id') not in (None, sealed_claim_id):
+            raise ClaimError('pairing_needs_reconciliation')
+        if not isinstance(saved, dict) or set(saved) - {'bound', 'claim_id', 'expires_at'}:
+            raise ValueError
+        if ('claim_id' in saved) != ('expires_at' in saved) or any(
+            not isinstance(saved[k], str) or not saved[k] for k in ('claim_id', 'expires_at') if k in saved
+        ):
+            raise ValueError
+        if 'bound' in saved:
+            bound = saved['bound']
+            if not isinstance(bound, dict) or not all(isinstance(bound.get(k), str) and bound[k] for k in ('claim_id', 'generation')):
+                raise ValueError
+        return saved
+    except FileNotFoundError:
         return {}
+    except (ValueError, RecursionError):
+        if sealed_claim_id is not None:
+            return {}
+        raise ClaimError('pairing_needs_reconciliation') from None
     except OSError:
         raise ClaimError("local_claim_unavailable") from None
-    bound = saved.get("bound", {}) if isinstance(saved, dict) else None
-    if not isinstance(bound, dict) or (bound and not all(isinstance(bound.get(k), str) for k in ("claim_id", "generation"))):
-        return {}
-    return saved
 
 
 def _record_attempt(ticket):
@@ -140,7 +157,7 @@ def retire_expired_attempt(claim_id):
 
 def record_bound(claim_id, identity):
     """Called under the publication lock before retirement, including by legacy Resume."""
-    saved = _outcome()
+    saved = _outcome(sealed_claim_id=claim_id)
     saved["bound"] = {"claim_id": claim_id, "generation": _binding_stamp(identity)}
     if saved.get("claim_id") == claim_id:
         saved.pop("claim_id")
@@ -307,6 +324,7 @@ class _Flow:
                                 if pairing_replay.replacement_blocked(
                                     local._pending(), active_claim_id=ticket.id if self.accepting else None,
                                 ):
+                                    self._cleanup_client = None  # Quarantine forbids even a cleanup POST.
                                     raise ClaimError('pairing_needs_reconciliation')
                                 if not self.accepting:
                                     _record_attempt(ticket)
@@ -399,9 +417,19 @@ def _claim_recovery_view(claim_id):
             state = action.get('replay_state', 'terminated')
             code = 'pairing_needs_reconciliation' if state == 'needs_reconciliation' else 'pairing_recovery_required'
             return {'state': 'error', 'code': code, 'replay_state': state}
-        if _outcome().get('claim_id') == claim_id:
+        saved = _outcome()
+        if saved.get('claim_id') == claim_id:
             return {'state': 'error', 'code': 'pairing_needs_reconciliation', 'replay_state': 'needs_reconciliation'}
+        return _bound_view(claim_id, saved)
+
+
+def _bound_view(claim_id, saved):
+    bound = saved.get('bound', {})
+    if bound.get('claim_id') != claim_id:
         return None
+    identity = remote_access._pairing_identity_from_cloud(local._config().remote_access.vibe_cloud)
+    return ({'state': 'bound'} if _binding_stamp(identity) == bound['generation'] else
+            {'state': 'error', 'code': 'local_binding_changed'})
 
 
 def recover_pairing(claim_id: str) -> dict:
@@ -482,14 +510,9 @@ class RedirectClaims:
         with config_file_lock():
             recovery = _claim_recovery_view(claim_id)
             if recovery:
+                if view and view['state'] == recovery['state'] == 'bound':
+                    return view
                 return recovery
-            saved = _outcome()
-            bound = saved.get("bound", {})
-            if bound.get("claim_id") == claim_id:
-                identity = remote_access._pairing_identity_from_cloud(local._config().remote_access.vibe_cloud)
-                if _binding_stamp(identity) != bound["generation"]:
-                    return {"state": "error", "code": "local_binding_changed"}
-                return view if view and view["state"] == "bound" else {"state": "bound"}
         if view is not None:
             return {"state": "error", "code": "local_binding_changed"} if view["state"] == "bound" else view
         raise ClaimError("claim_unavailable")

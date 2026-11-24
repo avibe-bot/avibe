@@ -5151,26 +5151,34 @@ def _json_request_to_validated_backend(
                 may_have_sent = True
             connection.request("POST", request_path, body=body, headers=request_headers)
             response = connection.getresponse()
+            if response.status == 429:
+                # A truncated body cannot revoke a wait already imposed by the headers.
+                from email.utils import parsedate_to_datetime
+                import math
+
+                advice = response.getheader('Retry-After')
+                seconds = None
+                if advice:
+                    try:
+                        seconds = int(advice) if advice.isascii() and advice.isdigit() else math.ceil(
+                            parsedate_to_datetime(advice).timestamp() - time.time()
+                        )
+                    except (TypeError, ValueError, OverflowError, OSError):
+                        pass
+                if single_delivery and seconds is not None and 0 < seconds <= 2**53:
+                    raise BackendRequestError(429, {'error': 'rate_limited', 'retry_after_seconds': seconds})
+                try:
+                    payload = _backend_error_payload(response.read())
+                except (OSError, http.client.HTTPException):
+                    payload = {'error': 'rate_limited'}
+                if seconds is not None and 0 < seconds <= 2**53:
+                    payload['retry_after_seconds'] = seconds
+                raise BackendRequestError(429, payload)
             response_body = response.read()
             if 300 <= response.status < 400:
                 raise BackendRequestError(response.status, {"error": "backend_http_redirect_blocked"})
             if response.status >= 400:
-                error_payload = _backend_error_payload(response_body)
-                if response.status == 429:
-                    from email.utils import parsedate_to_datetime
-                    import math
-
-                    advice = response.getheader('Retry-After')
-                    if advice:
-                        try:
-                            seconds = int(advice) if advice.isascii() and advice.isdigit() else math.ceil(
-                                parsedate_to_datetime(advice).timestamp() - time.time()
-                            )
-                            if 0 < seconds <= 2**53:
-                                error_payload['retry_after_seconds'] = seconds
-                        except (TypeError, ValueError, OverflowError, OSError):
-                            pass
-                raise BackendRequestError(response.status, error_payload)
+                raise BackendRequestError(response.status, _backend_error_payload(response_body))
             try:
                 parsed_response = json.loads(response_body.decode("utf-8"))
             except (UnicodeDecodeError, ValueError) as exc:
@@ -6206,6 +6214,13 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
     from vibe import desktop_local_instance, pairing_replay
 
     pairing_key = (pairing_key or "").strip()
+    # Fail before endpoint resolution or local preparation. This advisory read
+    # never grants permission: the selected operation rechecks under its lock.
+    initial, initial_error = _read_pending_pairing_record()
+    if not initial_error and pairing_replay.accept_conflict(initial, sealed_archive=bool(
+        initial and initial['phase'] in ('redeemed', 'applied')
+    )):
+        return pairing_replay.reconciliation_required()
     if desktop_enrollment is not None:
         try:
             return _pair_desktop(pairing_key, backend_url, device_name, desktop_enrollment)
@@ -6218,6 +6233,8 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
         # process restart, without requiring the UI to retain its pairing key.
         record, error = _read_pending_pairing_record()
         if not error and record is None and pairing_replay.orphaned_delivery():
+            return pairing_replay.reconciliation_required()
+        if not error and record and record['phase'] not in ('redeemed', 'applied') and pairing_replay.accept_conflict(record):
             return pairing_replay.reconciliation_required()
         if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
             try:
@@ -6273,8 +6290,9 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
             if error:
                 return pairing_replay.reconciliation_required()
             if pending is not None and _same_pairing_request(pending, backend.base_url, pairing_key):
-                if pending.get('redeem_request') and pending['phase'] == 'prepared' and pairing_replay.replacement_blocked(pending):
-                    return pairing_replay.reconciliation_required()
+                if pending.get('redeem_request') and pending['phase'] == 'prepared':
+                    if hold := pairing_replay.duplicate_hold(pending):
+                        return hold
                 duplicate_operation_id = str(pending["operation_id"])
             elif pending and pending['phase'] in {'redeemed', 'applied'}:
                 return {'ok': False, 'error': 'pairing_local_archive_required', 'replay_state': 'local_archive'}
@@ -6374,6 +6392,9 @@ def _pair_desktop(
         desktop_local_instance.validate_guard(guard, config, claim)
         assert claim is not None
         if claim["phase"] == "prepared":
+            from vibe import pairing_replay
+            if pairing_replay.accept_conflict(claim):
+                return pairing_replay.reconciliation_required()
             if config.remote_access.vibe_cloud.instance_id:
                 raise desktop_local_instance.LocalInstanceError("local_binding_changed")
             replace_expired_grant = (
@@ -6561,6 +6582,9 @@ def _persist_pairing_impl(
                 }
             return {"ok": False, "error": "missing_pairing_key"}
 
+        from vibe import pairing_replay
+        if pairing_replay.accept_conflict(record, sealed_archive=record['phase'] in ('redeemed', 'applied')):
+            return pairing_replay.reconciliation_required()
         enrollment = record.get("personal_claim") or record.get("desktop_enrollment")
         if enrollment:
             from vibe import desktop_local_instance
