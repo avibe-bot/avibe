@@ -1422,6 +1422,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             usage=usage_from_dict(f["usage"]) if "usage" in f else None,
             error_message=f.get("error_message"),
             hosted_summary=summary,
+            hosted_call_unretained=bool(unknown_hosted_tools) and summary is None,
             source_identity=f.get("source_identity"),
         )
     if role == "tool_result":
