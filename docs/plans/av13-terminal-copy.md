@@ -156,7 +156,7 @@ There are two ways to bind this computer again.
 重新绑定这台电脑有两种方式。
 ```
 
-**C2** · Product: decided as written · the browser way; each paragraph is indented under the title. The last paragraph is Product's sentence.
+**C2** · Product: decided November 21; the effects sentence changed by Product November 24 · the browser way; each paragraph is indented under the title. The last paragraph is Product's sentence.
 
 ```
 1. Bind remote access again
@@ -165,8 +165,9 @@ opens Avibe at this computer's own address, on the Devices page.
 On a server with no browser, forward the port from your own computer:
     ssh -L {port}:127.0.0.1:{port} <user>@<this-server>
 then open http://127.0.0.1:{port} there and go to Devices.
-Binding again signs every remote device out. Pages open on this computer
-are not affected. It does not change the tunnel credential.
+After binding again, devices that are signed in reconnect by themselves.
+Pages open on this computer are not affected.
+It does not change the tunnel credential.
 If someone may have copied this computer's Avibe data as a whole, delete this
 Avibe at avibe.bot, bind it again, then take your name back.
 ```
@@ -177,7 +178,7 @@ Avibe at avibe.bot, bind it again, then take your name back.
 1. 重新绑定远程访问
 针对这台电脑现在绑定的 Avibe。要在浏览器里完成：用浏览器打开这台电脑本机地址上的 Avibe，进入「设备」页。
 服务器上没有浏览器时，从你自己的电脑做 SSH 端口转发：ssh -L {port}:127.0.0.1:{port} <用户>@<这台服务器>，然后在你的电脑上打开 http://127.0.0.1:{port}，进入「设备」页。
-重新绑定会让所有远程设备退出登录；在这台电脑上打开的页面不受影响。它不会更换隧道凭证。
+重新绑定后，已登录的设备会自动重新连上。在这台电脑上打开的页面不受影响。它不会更换隧道凭证。
 如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。
 ```
 
