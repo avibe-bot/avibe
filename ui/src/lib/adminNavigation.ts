@@ -20,7 +20,10 @@ export const SETTINGS_LANDING_PATH = '/settings/general';
 export const OWNER_ONLY_ROUTES = [
   '/settings/service',
   '/settings/platforms',
-  '/settings/remote-access',
+  // 「设备」 itself is every signed-in person's page (a member sees their own devices); how this
+  // Avibe is reached, and the full activity list, are the owner's.
+  '/settings/remote-access/activity',
+  '/settings/remote-access/connection',
   '/settings/backends',
   '/settings/models',
   '/settings/dependencies',
