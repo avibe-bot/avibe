@@ -150,6 +150,24 @@ function observedStep(binding: ComputerBinding, settled: boolean): BindStep {
  * claim view (avibe://desktop/claim), which a person's 「开启远程访问」 in the Workbench opened; it
  * signs in if needed, observes, and opens one review only when nothing is bound, once per document.
  */
+/** This computer's address as native projects it now: the list's host, or the local URL's; the
+ *  link only while remote access is on. Read at render, so it follows every state update. */
+function boundNow(state: DesktopClientState | null): ComputerBinding {
+  const local = state?.local;
+  const listed = state?.catalog.instances.find((each) => each.id === local?.instance_id);
+  const url = local?.remote_access_url ?? null;
+  let host = listed?.host ?? null;
+  if (!host && url) { try { host = new URL(url).host; } catch { host = null; } }
+  return { state: 'bound', host, url: local?.remote_access === 'on' ? url : null };
+}
+
+/** What native takes for a typed second factor (claim_session.rs): six digits for an
+ *  authenticator, a recovery code of at most 32 UTF-16 units. Anything else is corrected here. */
+export function factorCode(method: 'totp' | 'recovery', typed: string): string | null {
+  if (method === 'totp') { const digits = typed.replace(/\s/g, ''); return /^\d{6}$/.test(digits) ? digits : null; }
+  return typed.trim() && typed.length <= 32 ? typed : null;
+}
+
 export function useDesktopClaim(state: DesktopClientState | null, enabled: boolean, mode: 'account' | 'claim' = 'account') {
   const claimView = mode === 'claim';
   const generation = state?.generation ?? 0;
@@ -211,10 +229,8 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     if (!quietly) setBinding({ state: 'reading' });
     const reply = await call('desktop_claim_review', { type: 'observe_current_binding' });
     if (!reply) return null;
-    const local = latest.current?.local;
-    const listed = latest.current?.catalog.instances.find((each) => each.id === local?.instance_id);
-    const url = local?.remote_access_url ?? null;
-    const bound = (): ComputerBinding => ({ state: 'bound', host: listed?.host ?? (url ? new URL(url).host : null), url: local?.remote_access === 'on' ? url : null });
+    // The address is not stored: it is read from the state at render (boundNow).
+    const bound = (): ComputerBinding => ({ state: 'bound', host: null, url: null });
     if (!reply.ok) {
       if (reply.code === BOUND_UNREAD) {
         setBinding(bound());
@@ -630,7 +646,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       h.delivery = null;
       afterVerification(submission);
     } else if (step?.kind === 'factor' && step.method !== 'passkey' && h.submission) {
-      const reply = await call('desktop_claim_review', { type: 'submit_factor_code', receipt: h.receipt, submission: h.submission, method: step.method, code });
+      // Native ends the claim on a code it cannot take: say it is wrong here, and send nothing.
+      const checked = factorCode(step.method, code);
+      if (checked === null) { setStep({ ...step, error: 'code' }); return; }
+      const reply = await call('desktop_claim_review', { type: 'submit_factor_code', receipt: h.receipt, submission: h.submission, method: step.method, code: checked });
       if (!reply) return;
       if (!reply.ok) {
         setStep(WRONG_CODE.has(reply.code) ? { ...step, code: '', error: 'code' }
@@ -747,10 +766,11 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   // The claim view always shows the dialog: the App's sign-in first if needed, then the flow, or
   // what observing found.
+  const current = binding.state === 'bound' ? boundNow(state) : binding;
   const shown: BindStep | null = !claimView ? step
-    : step ?? (state && state.account.status !== 'signed_in' ? { kind: 'signIn' } : observedStep(binding, settled));
+    : step ?? (state && state.account.status !== 'signed_in' ? { kind: 'signIn' } : observedStep(current, settled));
   return {
-    binding, step: shown, busy, recheck: begin,
+    binding: current, step: shown, busy, recheck: begin,
     /** Nothing may leave: recovery codes shown, or the setup that returns them on its way. */
     held: step?.kind === 'codes' || finalizing === generation,
     /** Whether 「重新开始」 can do anything: the claim view's one review not yet sent. */

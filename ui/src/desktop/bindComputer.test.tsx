@@ -9,6 +9,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it, vi } from 'vitest';
 import { desktopEn as en } from '../i18n/desktop';
 import { AccountApp } from './AccountApp';
+import { factorCode } from './useDesktopClaim';
 import { DESKTOP_CLIENT_STATE_EVENT, type DesktopClientRequest, type DesktopClientState } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
 import replies from './__fixtures__/instance-client-v1/replies.json';
@@ -166,6 +167,30 @@ it.each(['header', 'Escape'])('leaving a claim document from its update view (%s
   else fireEvent.keyDown(window, { key: 'Escape' });
   await waitFor(() => expect(page.actions.find((each) => each.type === 'cancel')).toEqual({ type: 'cancel', receipt: 'r-up' }));
   await waitFor(() => expect(page.leaves()).toEqual(['cancel']));
+});
+
+it('the Account page follows the address native projects after observing it bound', async () => {
+  mount({ observe_current_binding: { state: 'owner_observed' } }, { ...signedIn, local: { ...signedIn.local, instance_id: 'mac-1', remote_access: 'off', remote_access_url: null } }, 'account');
+  await waitFor(() => expect(document.querySelector('[data-computer-binding="bound"]')).toBeTruthy());
+  expect(screen.queryByRole('link', { name: 'xiaoming-app.avibe.bot' })).toBeNull();
+  // The connector starts: native publishes remote access on, with its URL.
+  await broadcast({ ...signedIn, revision: signedIn.revision + 1,
+    local: { ...signedIn.local, instance_id: 'mac-1', remote_access: 'on', remote_access_url: 'https://xiaoming-app.avibe.bot' } });
+  expect((await screen.findByRole('link', { name: 'xiaoming-app.avibe.bot' })).getAttribute('href')).toBe('https://xiaoming-app.avibe.bot');
+  // Turned off: the address stays, the link goes.
+  await broadcast({ ...signedIn, revision: signedIn.revision + 2,
+    local: { ...signedIn.local, instance_id: 'mac-1', remote_access: 'off', remote_access_url: 'https://xiaoming-app.avibe.bot' } });
+  await waitFor(() => expect(screen.queryByRole('link', { name: 'xiaoming-app.avibe.bot' })).toBeNull());
+  expect(screen.getByText('xiaoming-app.avibe.bot')).toBeTruthy();
+});
+
+it('a typed second factor native cannot take is corrected in place, never sent', () => {
+  expect(factorCode('totp', ' 123 456 ')).toBe('123456');
+  expect(factorCode('totp', '12345')).toBeNull();
+  expect(factorCode('recovery', 'abcde-12345')).toBe('abcde-12345');
+  // Several saved recovery codes pasted at once: longer than native's 32 UTF-16 units.
+  expect(factorCode('recovery', 'abcde-12345 fghij-67890 klmno-13579')).toBeNull();
+  expect(factorCode('recovery', '   ')).toBeNull();
 });
 
 it('the Account page only reads, and shows this computer only when bound', async () => {
