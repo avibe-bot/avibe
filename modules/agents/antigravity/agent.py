@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -24,6 +25,7 @@ from core.agent_output import (
     emit_output,
 )
 from core.agent_path import prepend_managed_tools_to_path
+from core.agent_tool_policy import check_tool_call
 from core.backend_failure import emit_backend_failure
 from core.caller_context import (
     AVIBE_NATIVE_SESSION_ID_ENV,
@@ -55,12 +57,19 @@ from core.services.agent_steering import (
     SteerResult,
     result as steer_result,
 )
-from core.services.session_fork import pending_native_fork
+from core.services.session_fork import (
+    FORK_HANDOFF_MODE_NATIVE,
+    FORK_HANDOFF_MODE_SUMMARY,
+    build_fork_summary_handoff_text,
+    pending_native_fork,
+    record_fork_handoff_mode,
+)
 from core.system_prompt_injection import (
     build_system_prompt_injection,
     get_enabled_agents_for_prompt,
 )
 from modules.agents.acp import (
+    ACP_AUTH_REQUIRED,
     JSONRPC_METHOD_NOT_FOUND,
     AcpClient,
     AcpConfigOptionUpdate,
@@ -390,23 +399,34 @@ class AntigravityAgent(BaseAgent):
         *,
         previous_native_session_id: str | None = None,
     ) -> str | None:
-        reserved = self._reserved_native_session_id(request.context, backend=self.name)
-        if reserved:
-            return reserved
+        use_backend_anchor = self._uses_namespaced_backend_session(
+            request.context,
+            subagent_name=request.subagent_name,
+        )
+        if not use_backend_anchor:
+            reserved = self._reserved_native_session_id(request.context, backend=self.name)
+            if reserved:
+                return reserved
 
         if previous_native_session_id:
             return previous_native_session_id
 
         payload = request.context.platform_specific or {}
-        if isinstance(payload.get("agent_session_target"), Mapping):
+        if not use_backend_anchor and isinstance(payload.get("agent_session_target"), Mapping):
             # An explicit Workbench target with an empty native_session_id means a
             # fresh session, backend switch, or pending fork — never fall back to
             # an older session-key mapping.
             return None
 
-        getter = getattr(self.sessions, "get_agent_session_mapping", None)
-        if callable(getter):
-            stored = getter(request.session_key, self.name, request.base_session_id)
+        session_id_getter = getattr(self.sessions, "get_agent_session_id", None)
+        if callable(session_id_getter):
+            stored = session_id_getter(request.session_key, request.base_session_id, self.name)
+            if isinstance(stored, str) and stored.strip():
+                return stored.strip()
+
+        mapping_getter = getattr(self.sessions, "get_agent_session_mapping", None)
+        if callable(mapping_getter):
+            stored = mapping_getter(request.session_key, self.name, request.base_session_id)
             if isinstance(stored, str) and stored.strip():
                 return stored.strip()
         return None
@@ -537,16 +557,26 @@ class AntigravityAgent(BaseAgent):
             client.on_notification(_notify)
             client.on_server_request(_server_req)
 
+            fork_handoff_mode: str | None = None
             try:
                 await client.start()
                 await client.initialize(client_info=_CLIENT_INFO, client_capabilities={})
                 add_dirs = list(spec.rules_dirs) if (spec.rules_dirs and client.supports_additional_directories) else None
 
-                stored_native_id = self._resolve_stored_native_session_id(
+                use_backend_anchor = self._uses_namespaced_backend_session(
+                    request.context,
+                    subagent_name=request.subagent_name,
+                )
+                stored_native_id = await asyncio.to_thread(
+                    self._resolve_stored_native_session_id,
                     request,
                     previous_native_session_id=previous_native_id,
                 )
-                pending_fork = None if stored_native_id else pending_native_fork(request.context, self.name)
+                pending_fork = (
+                    None
+                    if (stored_native_id or use_backend_anchor)
+                    else pending_native_fork(request.context, self.name)
+                )
 
                 if stored_native_id:
                     if not client.supports_resume:
@@ -561,37 +591,49 @@ class AntigravityAgent(BaseAgent):
                             mcp_servers=(),
                             additional_directories=add_dirs,
                         )
-                    except (AcpRpcError, AcpTransportError) as exc:
+                    except AcpRpcError as exc:
+                        if exc.code == ACP_AUTH_REQUIRED:
+                            raise
+                        raise AntigravityResumeUnavailableError(stored_native_id, str(exc)) from exc
+                    except AcpTransportError as exc:
                         raise AntigravityResumeUnavailableError(stored_native_id, str(exc)) from exc
                     native_session_id = str(resp.get("sessionId") or stored_native_id)
-                elif pending_fork is not None and client.supports_fork:
-                    fork_params: dict[str, Any] = {
-                        "sessionId": pending_fork["source_native_session_id"],
-                        "cwd": request.working_path,
-                        "mcpServers": [],
-                    }
-                    if add_dirs is not None:
-                        fork_params["additionalDirectories"] = add_dirs
-                    resp = await client.send_request("session/fork", fork_params)
-                    native_session_id = str(resp.get("sessionId") or "")
-                    if not native_session_id:
-                        raise AcpTransportError("ACP session/fork response missing sessionId")
                 else:
-                    resp = await client.session_new(
-                        request.working_path,
-                        mcp_servers=(),
-                        additional_directories=add_dirs,
-                    )
+                    resp = None
+                    if pending_fork is not None and client.supports_fork:
+                        fork_params: dict[str, Any] = {
+                            "sessionId": pending_fork["source_native_session_id"],
+                            "cwd": request.working_path,
+                            "mcpServers": [],
+                        }
+                        if add_dirs is not None:
+                            fork_params["additionalDirectories"] = add_dirs
+                        try:
+                            resp = await client.send_request("session/fork", fork_params)
+                            fork_handoff_mode = FORK_HANDOFF_MODE_NATIVE
+                        except AcpRpcError as exc:
+                            if exc.code != JSONRPC_METHOD_NOT_FOUND:
+                                raise
+                            resp = None
+
+                    if resp is None:
+                        resp = await client.session_new(
+                            request.working_path,
+                            mcp_servers=(),
+                            additional_directories=add_dirs,
+                        )
+                        if pending_fork is not None:
+                            fork_handoff_mode = FORK_HANDOFF_MODE_SUMMARY
+                            if not (request.input_metadata is not None and request.input_metadata.handoff):
+                                session.pending_fork_handoff = await asyncio.to_thread(
+                                    build_fork_summary_handoff_text,
+                                    pending_fork,
+                                    backend=self.name,
+                                )
+
                     native_session_id = str(resp.get("sessionId") or "")
                     if not native_session_id:
-                        raise AcpTransportError("ACP session/new response missing sessionId")
-                    if pending_fork is not None and not (
-                        request.input_metadata is not None and request.input_metadata.handoff
-                    ):
-                        session.pending_fork_handoff = await asyncio.to_thread(
-                            self._build_fork_handoff_text,
-                            pending_fork,
-                        )
+                        raise AcpTransportError("ACP session creation response missing sessionId")
 
                 raw_options = resp.get("configOptions")
                 session.native_session_id = native_session_id
@@ -610,6 +652,12 @@ class AntigravityAgent(BaseAgent):
             bound_id = self.bind_agent_session_id(request, native_session_id)
             if bound_id:
                 session.agent_session_id = bound_id
+            if fork_handoff_mode and session.agent_session_id:
+                await asyncio.to_thread(
+                    record_fork_handoff_mode,
+                    session.agent_session_id,
+                    mode=fork_handoff_mode,
+                )
             return session
 
     async def _handle_server_request(
@@ -633,21 +681,37 @@ class AntigravityAgent(BaseAgent):
         if not isinstance(options, list) or not options:
             return {"outcome": {"outcome": "cancelled"}}
 
-        for option in options:
-            if not isinstance(option, Mapping):
-                continue
-            if option.get("kind") == "allow_once":
-                option_id = option.get("optionId")
-                if isinstance(option_id, str) and option_id:
-                    return {"outcome": {"outcome": "selected", "optionId": option_id}}
+        tool_call = params.get("toolCall")
+        denied_by_policy = False
+        if isinstance(tool_call, Mapping):
+            tool_name = str(
+                tool_call.get("name")
+                or tool_call.get("toolName")
+                or tool_call.get("title")
+                or ""
+            ).strip()
+            raw_input = tool_call.get("rawInput")
+            tool_input = dict(raw_input) if isinstance(raw_input, Mapping) else None
+            if tool_name and check_tool_call(tool_name, tool_input).denied:
+                denied_by_policy = True
 
-        for option in options:
-            if not isinstance(option, Mapping):
-                continue
-            if option.get("kind") == "reject_once":
-                option_id = option.get("optionId")
-                if isinstance(option_id, str) and option_id:
-                    return {"outcome": {"outcome": "selected", "optionId": option_id}}
+        if not denied_by_policy:
+            for option in options:
+                if not isinstance(option, Mapping):
+                    continue
+                if option.get("kind") == "allow_once":
+                    option_id = option.get("optionId")
+                    if isinstance(option_id, str) and option_id:
+                        return {"outcome": {"outcome": "selected", "optionId": option_id}}
+
+        for kind in ("reject_once", "reject_always"):
+            for option in options:
+                if not isinstance(option, Mapping):
+                    continue
+                if option.get("kind") == kind:
+                    option_id = option.get("optionId")
+                    if isinstance(option_id, str) and option_id:
+                        return {"outcome": {"outcome": "selected", "optionId": option_id}}
 
         return {"outcome": {"outcome": "cancelled"}}
 
@@ -732,32 +796,67 @@ class AntigravityAgent(BaseAgent):
                 turn.reply_chunks.append(update.text)
             return
 
-    def _build_fork_handoff_text(self, pending_fork: Mapping[str, Any]) -> str:
-        """Build Avibe's bounded handoff summary when ACP ``session/fork`` is unavailable."""
-        source_session_id = str(pending_fork.get("source_session_id") or "").strip()
-        db_path = paths.get_sqlite_state_path()
-        if source_session_id and db_path.is_file():
-            from core.session_handoff import build_backend_handoff
-            from storage.db import create_sqlite_engine
+    def _build_prompt_blocks_sync(
+        self,
+        request: AgentRequest,
+        input_metadata: AgentInputMetadata | None,
+        *,
+        supports_images: bool,
+    ) -> list[dict[str, Any]]:
+        image_blocks: list[dict[str, Any]] = []
+        text_files = []
 
-            engine = create_sqlite_engine(db_path, read_only=True)
-            try:
-                with engine.connect() as conn:
-                    return build_backend_handoff(
-                        conn,
-                        source_session_id,
-                        {"from_backend": self.name},
-                        to_backend=self.name,
+        for attachment in request.files or ():
+            mimetype = str(attachment.mimetype or "").strip()
+            if supports_images and mimetype.startswith("image/"):
+                raw_bytes: bytes | None = None
+                if isinstance(attachment.content, (bytes, bytearray)) and attachment.content:
+                    raw_bytes = bytes(attachment.content)
+                elif attachment.local_path:
+                    try:
+                        raw_bytes = Path(attachment.local_path).read_bytes()
+                    except OSError as exc:
+                        logger.debug(
+                            "Failed to read image attachment %s for ACP block; falling back to path reference: %s",
+                            attachment.local_path,
+                            exc,
+                        )
+                if raw_bytes is not None:
+                    image_blocks.append(
+                        {
+                            "type": "image",
+                            "data": base64.b64encode(raw_bytes).decode("ascii"),
+                            "mimeType": mimetype,
+                        }
                     )
-            finally:
-                engine.dispose()
-        return (
-            "[Avibe handoff]\n"
-            f"This session forked from Avibe session `{source_session_id or 'unknown'}`. "
-            "Native session fork is unavailable on this ACP server, so this carries a bounded "
-            "handoff summary rather than full native history.\n"
-            "[End of Avibe handoff]"
-        )
+                    continue
+            text_files.append(attachment)
+
+        prompt_text = message_with_files(request.message, text_files or None)
+        prompt_text = self.render_input(prompt_text, input_metadata)
+        blocks: list[dict[str, Any]] = []
+        if prompt_text or not image_blocks:
+            blocks.append({"type": "text", "text": prompt_text})
+        blocks.extend(image_blocks)
+        return blocks
+
+    @staticmethod
+    def _classify_failure(error: Exception) -> tuple[str, str, str | None]:
+        if isinstance(error, AcpRpcError) and error.code == ACP_AUTH_REQUIRED:
+            diagnostic = f"Antigravity authentication required (ACP {error.code}): {error.message}"
+            return diagnostic, f"❌ {diagnostic}", "auth_required"
+        if isinstance(error, FileNotFoundError) or (
+            isinstance(error, AcpTransportError) and isinstance(error.__cause__, FileNotFoundError)
+        ):
+            diagnostic = f"Antigravity CLI not found: {error}"
+            return diagnostic, f"❌ {diagnostic}", "cli_not_found"
+        if isinstance(error, OSError) or (
+            isinstance(error, AcpTransportError) and isinstance(error.__cause__, OSError)
+        ):
+            diagnostic = f"Antigravity CLI failed to launch: {error}"
+            return diagnostic, f"❌ {diagnostic}", "launch_failed"
+        diagnostic = str(error)
+        return diagnostic, f"❌ Antigravity error: {diagnostic}", None
 
     def _schedule_live_title_backfill(self, session: _RuntimeSession, title: str) -> None:
         if not session.agent_session_id or not session.native_session_id:
@@ -874,8 +973,7 @@ class AntigravityAgent(BaseAgent):
             if turn.settled:
                 return
             turn.settled = True
-        diagnostic = str(error)
-        display_text = f"❌ Antigravity error: {diagnostic}"
+        diagnostic, display_text, _ = self._classify_failure(error)
         if session is not None and not session.client.is_alive:
             session.exit_failure = (diagnostic, display_text)
             await self._close_session(session, intentional=False, retire_activation=True)
@@ -958,6 +1056,9 @@ class AntigravityAgent(BaseAgent):
             await self._settle_turn_failure(session, None, request, exc)
             return
         except Exception as exc:
+            _, _, prewrite_reason = self._classify_failure(exc)
+            if prewrite_reason:
+                mark_prewrite_recovery_required(request.context, prewrite_reason)
             await self._settle_turn_failure(session, None, request, exc)
             return
 
@@ -970,9 +1071,12 @@ class AntigravityAgent(BaseAgent):
             elif not input_metadata.handoff:
                 input_metadata = replace(input_metadata, handoff=handoff_text)
 
-        prompt_text = message_with_files(request.message, request.files)
-        prompt_text = self.render_input(prompt_text, input_metadata)
-        prompt_blocks = [{"type": "text", "text": prompt_text}]
+        prompt_blocks = await asyncio.to_thread(
+            self._build_prompt_blocks_sync,
+            request,
+            input_metadata,
+            supports_images=session.client.supports_images,
+        )
 
         now = time.monotonic()
         turn = _ActiveTurn(
