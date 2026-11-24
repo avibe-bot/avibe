@@ -22,7 +22,7 @@ from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
 from modules.agents.service import AgentService
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, default_cli_for_backend
 from modules.claude_client import ClaudeClient
 from modules.session_manager import SessionManager
 from modules.settings_manager import SettingsManager, MultiSettingsManager
@@ -3189,7 +3189,9 @@ class Controller:
             for backend in selected_backends:
                 backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
                 configured_paths[backend] = str(
-                    getattr(backend_config, "cli_path", None) or backend
+                    getattr(backend_config, "cli_path", None)
+                    or default_cli_for_backend(backend)
+                    or backend
                 )
             try:
                 resolved_paths = resolve_cli_paths(

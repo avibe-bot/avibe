@@ -86,6 +86,7 @@ from vibe.cli_paths import (
     _npm_global_prefixes,
     _npm_prefix_for,
     _windows_executable_candidates,
+    desktop_backend_for_cli,
     resolve_cli_path as _resolve_cli_path,
 )
 from vibe.upgrade import (
@@ -362,8 +363,9 @@ def resolve_cli_paths(
     for binary, path in resolved.items():
         if path is None:
             name = Path(os.path.expanduser(binary)).name
-            if name in NATIVE_CLI_BACKENDS:
-                resolved[binary] = resolve_published_desktop_backend(name)
+            desktop_backend = desktop_backend_for_cli(name)
+            if desktop_backend is not None:
+                resolved[binary] = resolve_published_desktop_backend(desktop_backend)
     return resolved
 
 
@@ -13239,12 +13241,14 @@ async def start_oauth_web_async(
 
     service = _get_oauth_service()
     try:
-        flow = await service.start_web_setup(
-            backend,
-            force_reset=force_reset,
-            provider_id=(provider_id.strip() if isinstance(provider_id, str) else None),
-            auth_method=(auth_method.strip() if isinstance(auth_method, str) and auth_method.strip() else None),
-        )
+        start_kwargs: dict[str, Any] = {
+            "force_reset": force_reset,
+            "provider_id": (provider_id.strip() if isinstance(provider_id, str) else None),
+        }
+        cleaned_auth_method = auth_method.strip() if isinstance(auth_method, str) and auth_method.strip() else None
+        if cleaned_auth_method is not None:
+            start_kwargs["auth_method"] = cleaned_auth_method
+        flow = await service.start_web_setup(backend, **start_kwargs)
     except BackendLoginInProgressError as exc:
         try:
             lang = load_config().language

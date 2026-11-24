@@ -17555,6 +17555,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                         opencode_agent=modal_values.get("opencode_agent"),
                         claude_agent=modal_values.get("claude_agent"),
                         codex_agent=modal_values.get("codex_agent"),
+                        antigravity_agent=modal_values.get("antigravity_agent"),
                     )
                     store.save()
                     return jsonify({"ok": True, "action": action})

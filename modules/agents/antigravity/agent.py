@@ -84,6 +84,7 @@ from modules.agents.acp import (
     AcpUsageUpdate,
     parse_session_update,
 )
+from modules.agents.antigravity.auth import authenticate_antigravity_client
 from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
@@ -116,25 +117,6 @@ _IMAGE_MIME_EXTENSIONS = {
     "image/gif": ".gif",
     "image/svg+xml": ".svg",
 }
-
-
-async def _authenticate_session_client(client: AcpClient, auth_mode: str | None) -> None:
-    """Run ACP ``authenticate`` for API-key / Agent Platform modes right after ``initialize``."""
-    mode = str(auth_mode or "").strip().lower()
-    if mode in _API_KEY_AUTH_MODES:
-        method_id = "gemini-api-key"
-    elif mode in _AGENT_PLATFORM_AUTH_MODES:
-        method_id = "agent-platform"
-    else:
-        return
-    advertised = {
-        str(method.get("id") or "").strip()
-        for method in client.auth_methods
-        if isinstance(method, Mapping)
-    }
-    if advertised and method_id not in advertised:
-        return
-    await client.authenticate(method_id)
 
 
 def _image_extension(raw: bytes, mime_type: str) -> str:
@@ -642,7 +624,7 @@ class AntigravityAgent(BaseAgent):
             try:
                 await client.start()
                 await client.initialize(client_info=_CLIENT_INFO, client_capabilities={})
-                await _authenticate_session_client(
+                await authenticate_antigravity_client(
                     client,
                     _config_str(self.antigravity_config, "auth_mode"),
                 )

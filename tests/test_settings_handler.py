@@ -688,12 +688,19 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
             "models": ["gpt-5.4"],
             "reasoning_options": {"gpt-5.4": [{"value": "ultra", "label": "Ultra"}]},
         },
+    ), patch(
+        "vibe.api.antigravity_models",
+        return_value={
+            "ok": True,
+            "models": ["gemini-4-neon"],
+            "reasoning_options": {"gemini-4-neon": [{"value": "high", "label": "High"}]},
+        },
     ):
         data = asyncio.run(handler._gather_routing_modal_data(context, include_all_backend_data=True))
 
     menus = data.menus
     assert {backend: _values(menu.variants) for backend, menu in menus.items()} == {
-        "vibey": [], "opencode": ["build"], "claude": ["reviewer"], "codex": ["builder"],
+        "vibey": [], "opencode": ["build"], "claude": ["reviewer"], "codex": ["builder"], "antigravity": [],
     }
     # The always-valid bare aliases lead, so a capped select trims dated snapshots first.
     assert _values(menus["claude"].models) == ["opus", "claude-sonnet-4-6"]
@@ -785,6 +792,7 @@ def test_gather_routing_modal_data_hides_disabled_backends() -> None:
     handler, server = _make_routing_handler()
     handler.config.claude.enabled = False
     handler.config.codex.enabled = False
+    handler.config.antigravity.enabled = False
     context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="slack")
 
     data = asyncio.run(handler._gather_routing_modal_data(context))
@@ -808,12 +816,12 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
         "vibe.api.claude_agents", side_effect=AssertionError("claude should not be fetched")
     ), patch("vibe.api.codex_models", side_effect=AssertionError("codex should not be fetched")), patch(
         "vibe.api.codex_agents", side_effect=AssertionError("codex should not be fetched")
-    ):
+    ), patch("vibe.api.antigravity_models", side_effect=AssertionError("antigravity should not be fetched")):
         data = asyncio.run(handler._gather_routing_modal_data(context))
 
     # Listed first, the built-in backend's Agent is still not the fallback while another is listed.
     assert data.current_agent == "id-opencode"
-    assert [agent.id for agent in data.agents] == ["id-vibey", "id-opencode", "id-codex"]
+    assert [agent.id for agent in data.agents] == [f"id-{backend}" for backend in AGENT_BACKENDS if backend != "claude"]
     assert _values(data.menus["opencode"].variants) == ["build"]
     assert server.calls == [
         "current_server",

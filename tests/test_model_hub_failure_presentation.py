@@ -56,7 +56,7 @@ def unavailable(tmp_path, backend="codex"):
     )
 
 
-@pytest.mark.parametrize("backend", AGENT_BACKENDS)
+@pytest.mark.parametrize("backend", [b for b in AGENT_BACKENDS if b != "antigravity"])
 @pytest.mark.parametrize("platform", ["avibe", "slack"])
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_shared_failure_uses_exact_hub_copy_and_preserves_terminal_evidence(

@@ -636,6 +636,8 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/backend/codex/auth$"),
         ("GET", r"^/api/backend/claude/auth$"),
         ("POST", r"^/api/backend/claude/auth$"),
+        ("GET", r"^/api/backend/antigravity/auth$"),
+        ("POST", r"^/api/backend/antigravity/auth$"),
         ("POST", r"^/api/backend/[^/]+/auth/oauth/start$"),
         ("GET", r"^/api/backend/[^/]+/auth/oauth/status/[^/]+$"),
         ("POST", r"^/api/backend/[^/]+/auth/oauth/submit-code$"),
@@ -692,6 +694,7 @@ _EDITOR_HTTP_RULES = tuple(
         ("GET", r"^/api/models/agents/[^/]+/models$"),
         ("GET", r"^/api/claude/models$"),
         ("GET", r"^/api/codex/models$"),
+        ("GET", r"^/api/antigravity/models$"),
         ("GET", r"^/api/running-agents$"),
         ("POST", r"^/api/running-agents/end$"),
         # Files favorites live under /api/browse, not /api/files. Admit only this

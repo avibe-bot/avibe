@@ -207,8 +207,15 @@ def test_complete_registered_api_management_inventory():
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
     # + 1 host network restriction (Owner, separately limited to unbound installations).
+    # + 2 Antigravity auth status/config methods (Member, like Claude/Codex auth) and
+    #   1 Antigravity model catalog read (Editor, like Claude/Codex models).
     # Three independent engine channel controls are owner-only, including metadata refresh.
-    assert len(endpoints) == 378
+    assert len(endpoints) == 381
+    for method in ("GET", "POST"):
+        assert (method, "/api/backend/antigravity/auth") in endpoints
+        assert http_authorization_policy(method, "/api/backend/antigravity/auth").minimum_role == "member"
+    assert ("GET", "/api/antigravity/models") in endpoints
+    assert http_authorization_policy("GET", "/api/antigravity/models").minimum_role == "editor"
     for action in ("check", "update", "auto-update"):
         path = f"/api/dependencies/model-hub-engine/{action}"
         assert ("POST", path) in endpoints
@@ -281,6 +288,7 @@ def test_complete_registered_api_management_inventory():
         (Path(__file__).parent / "fixtures/member_management_existing_read_roles.json").read_text()
     )
     baseline_read_roles.update({
+        "GET /api/antigravity/models": "editor",
         "GET /api/devices/activity": "viewer",
         "GET /api/devices/example/health": "viewer",
         "GET /api/devices/example/health/reads": "viewer",

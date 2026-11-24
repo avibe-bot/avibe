@@ -2054,6 +2054,7 @@ class SessionHandler(BaseHandler):
                 opencode_agent=current_routing.opencode_agent if current_routing else None,
                 claude_agent=current_routing.claude_agent if current_routing else None,
                 codex_agent=current_routing.codex_agent if current_routing else None,
+                antigravity_agent=current_routing.antigravity_agent if current_routing else None,
             )
             await asyncio.to_thread(settings_manager.set_channel_routing, settings_key, routing)
 

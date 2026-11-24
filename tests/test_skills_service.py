@@ -171,7 +171,7 @@ def test_add_global_all(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "gh:o/r", scope="global", backends=["opencode"], all_skills=True))
-    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "--all", "-y"]
+    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--all", "-y"]
 
 
 def test_add_reports_nothing_installed_when_no_skill_matched(monkeypatch):
@@ -198,7 +198,7 @@ def test_add_multi_backend_uses_single_a(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "gh:o/r", scope="global", backends=["claude", "opencode", "codex"], all_skills=True))
-    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "--all", "-y"]
+    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--all", "-y"]
 
 
 def test_add_project_has_no_p_flag_and_uses_cwd(monkeypatch):
@@ -206,7 +206,7 @@ def test_add_project_has_no_p_flag_and_uses_cwd(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "./pkg", scope="project", project_dir="/p", copy=True))
-    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "--copy", "-y"]
+    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "antigravity", "--copy", "-y"]
     assert rec.calls[0]["cwd"] == "/p"
 
 
@@ -214,7 +214,7 @@ def test_add_with_skill_selector(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "./pkg", scope="project", project_dir="/p", skill="formatter", backends=["opencode"]))
-    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "--skill", "formatter", "-y"]
+    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "antigravity", "--skill", "formatter", "-y"]
 
 
 def test_preview_uses_list_flag(monkeypatch):
@@ -817,6 +817,7 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
                 "claude-code",
                 "opencode",
                 "codex",
+                "antigravity",
                 "--skill",
                 "private-skill",
                 "-y",
@@ -1004,7 +1005,7 @@ def test_active_org_member_can_replace_installed_legacy_skill(monkeypatch, tmp_p
         engine.dispose()
 
     assert [call["args"] for call in member_recorder.calls] == [
-        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "--skill", "legacy-skill", "-y"],
+        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--skill", "legacy-skill", "-y"],
     ]
     assert result == install_result
     assert policy is not None
@@ -1041,7 +1042,7 @@ def test_instance_owner_skill_add_does_not_require_organization_membership(
 
     assert result == install_result
     assert [call["args"] for call in recorder.calls] == [
-        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "--skill", "legacy-skill", "-y"]
+        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--skill", "legacy-skill", "-y"]
     ]
 
 

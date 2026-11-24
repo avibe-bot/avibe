@@ -700,7 +700,9 @@ def _active_routing_variant(routing: RoutingSettings) -> str | None:
         return routing.claude_agent
     if agent_name == "opencode":
         return routing.opencode_agent
-    return routing.codex_agent or routing.claude_agent or routing.opencode_agent
+    if agent_name == "antigravity":
+        return routing.antigravity_agent
+    return routing.codex_agent or routing.claude_agent or routing.opencode_agent or routing.antigravity_agent
 
 
 def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSettings:
@@ -724,6 +726,8 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
         routing.claude_agent = routing.claude_agent or variant
     elif routing.agent_name == "opencode":
         routing.opencode_agent = routing.opencode_agent or variant
+    elif routing.agent_name == "antigravity":
+        routing.antigravity_agent = routing.antigravity_agent or variant
     # A row an older release wrote may carry its model or effort only in a
     # retired per-backend alias; the payload and the columns come first.
     lifted = routing_from_stored_payload({**aliases, "agent_name": routing.agent_name})

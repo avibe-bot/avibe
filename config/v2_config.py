@@ -2956,7 +2956,7 @@ def normalize_storable_backend_model_text(
 
 
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
-    if backend not in {"claude", "codex", "antigravity"}:
+    if backend not in {"claude", "codex"}:
         return []
     from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
@@ -3019,7 +3019,6 @@ class ModelHubAgentSupplyConfig(ModelHubSnapshotNode):
                 backend="antigravity",
                 mode="direct",
                 menu_kind="fixed",
-                models=_default_backend_models("antigravity"),
             )
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
@@ -3856,8 +3855,9 @@ class ModelHubConfig(ModelHubSnapshotNode):
         unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
             "vibey", mode="hub"
         )
-        default_antigravity = self.agents["antigravity"] == ModelHubAgentSupplyConfig.default(
-            "antigravity", mode="direct"
+        default_antigravity = (
+            self.agents["antigravity"].to_payload()
+            == ModelHubAgentSupplyConfig.default("antigravity", mode="direct").to_payload()
         )
         payload = {
             "enabled": self.enabled,

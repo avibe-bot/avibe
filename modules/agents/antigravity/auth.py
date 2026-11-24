@@ -46,9 +46,17 @@ _AUTH_ERROR_NEEDLES = (
 )
 
 
+_ANTIGRAVITY_AUTH_MODE_ALIASES = {
+    "api_key": "gemini-api-key",
+    "agent_platform": "agent-platform",
+    "adc": "agent-platform",
+}
+
+
 def normalize_antigravity_auth_mode(config: Any | None = None, auth_mode: str | None = None) -> str:
     """Resolve and validate an Antigravity auth mode, defaulting to ``oauth-personal``."""
-    mode = (auth_mode or getattr(config, "auth_mode", None) or "oauth-personal").strip()
+    raw = (auth_mode or getattr(config, "auth_mode", None) or "oauth-personal").strip().lower()
+    mode = _ANTIGRAVITY_AUTH_MODE_ALIASES.get(raw, raw)
     return mode if mode in ANTIGRAVITY_AUTH_MODES else "oauth-personal"
 
 

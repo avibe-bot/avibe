@@ -966,7 +966,8 @@ def test_released_config_adds_only_empty_vibey_supply():
     before = copy.deepcopy(released)
     config = ModelHubConfig.from_payload(released)
     assert released == before
-    assert set(config.agents) == {"claude", "codex", "opencode", "vibey"}
+    assert set(config.agents) == {"claude", "codex", "opencode", "vibey", "antigravity"}
+    assert config.agents["antigravity"].mode == "direct"
     for backend in ("claude", "codex", "opencode"):
         agent = config.agents[backend]
         original = before["agents"][backend]

@@ -2933,11 +2933,17 @@ def test_legacy_configs_stay_direct_while_fresh_configs_default_to_gateway():
     payload.pop("model_hub")
     legacy = V2Config.from_payload(payload)
 
-    assert {legacy.model_hub.agents[backend].mode for backend in ("claude", "codex", "opencode")} == {"direct"}
+    assert {legacy.model_hub.agents[backend].mode for backend in ("claude", "codex", "opencode", "antigravity")} == {"direct"}
     assert legacy.model_hub.agents["vibey"].mode == "hub"
-    assert {agent.mode for agent in default_config().model_hub.agents.values()} == {"hub"}
-    assert default_config().model_hub.enabled is True
-    assert default_config().model_hub.runtime_default_applied is True
+    fresh = default_config()
+    assert {
+        agent.mode
+        for backend, agent in fresh.model_hub.agents.items()
+        if backend != "antigravity"
+    } == {"hub"}
+    assert fresh.model_hub.agents["antigravity"].mode == "direct"
+    assert fresh.model_hub.enabled is True
+    assert fresh.model_hub.runtime_default_applied is True
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on"])

@@ -85,6 +85,28 @@ def _literal_strings(
     }
 
 
+def _uses_antigravity_login_command(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    call: ast.Call,
+) -> bool:
+    for arg in call.args:
+        target = arg.value if isinstance(arg, ast.Starred) else arg
+        if isinstance(target, ast.Name):
+            assigned = _assigned_value_before(function, target.id, call.lineno)
+            if (
+                isinstance(assigned, ast.Call)
+                and _call_name(assigned) == "antigravity_acp_command"
+                and any(
+                    keyword.arg == "login"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is True
+                    for keyword in assigned.keywords
+                )
+            ):
+                return True
+    return False
+
+
 def _spawn_sites(tree: ast.Module) -> list[tuple[str, str, ast.Call]]:
     """Find every provider login operation instead of enumerating today's sites."""
     sites: list[tuple[str, str, ast.Call]] = []
@@ -99,7 +121,9 @@ def _spawn_sites(tree: ast.Module) -> list[tuple[str, str, ast.Call]]:
                 before_line=call.lineno,
             )
             is_process_login = name == "create_subprocess_exec" and (
-                "--device-auth" in literals or {"auth", "login"} <= literals
+                "--device-auth" in literals
+                or {"auth", "login"} <= literals
+                or _uses_antigravity_login_command(function, call)
             )
             is_control_login = name in {
                 "_create_claude_control_client",
