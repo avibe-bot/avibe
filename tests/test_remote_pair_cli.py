@@ -16,9 +16,10 @@ from tests.test_personal_claims import claim_peer as claim_peer  # noqa: F401
 from vibe import cli, pairing_replay as replay, remote_access as ra
 from vibe.support_contact import SUPPORT_EMAIL
 
-NEEDS_CHECK = ("This computer cannot tell whether Avibe Cloud accepted its pairing request, "
-               "so it will not send it again, and a new key cannot replace it.\n"
-               f"To have it checked, email Avibe support at {SUPPORT_EMAIL}. Do not delete Avibe's files.\n")
+NEEDS_CHECK = ("Avibe could not confirm whether this binding worked, so this computer will not try again.\n"
+               f"Email {SUPPORT_EMAIL}; until then, do not delete Avibe's files.\n")
+FINISHING = "Avibe is finishing binding this computer.\nTo continue, run: vibe remote pair\n"
+TRY_AGAIN = "Binding this computer did not finish.\nTo try again, run: vibe remote pair\n"
 # Never offered where the result is not this computer's own first send of a key typed now.
 KEY_OFFERS = ("get a new", "enter it here", "new_pairing_key", "fresh", "substitute", "vibe remote pair")
 
@@ -69,9 +70,7 @@ def test_scheduled_retry_is_left_to_the_service(setup_replay, capsys, no_prompt)
     assert view()["replay_state"] == "scheduled"
     capsys.readouterr()
     assert run_pair() == 1
-    err = lines(capsys)
-    assert err.startswith("Avibe Cloud has not confirmed this pairing yet. Avibe will send the same request again at ")
-    assert err.endswith(" while it is running; you do not need a new key.\nTo check on it: vibe remote status\n")
+    assert lines(capsys) == FINISHING
     assert len(wire.sent) == 1
 
 
@@ -82,8 +81,7 @@ def test_manual_continue_sends_the_same_request_exactly_once(setup_replay, capsy
     assert view()["replay_state"] == "manual"
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys) == ("Avibe stopped retrying this pairing on its own. You can send the same request once more; "
-                             "your key is not needed again:\n  vibe remote pair\n")
+    assert lines(capsys) == TRY_AGAIN
     assert len(wire.sent) == 2 and wire.sent[0] == wire.sent[1]
     wire.status, wire.body = 200, json.dumps(_response("continued")).encode()
     clock[0] += 61
@@ -125,7 +123,7 @@ def test_cloud_pending_is_a_floor(setup_replay, capsys, no_prompt):
     clock[0] += 3
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys) == "Avibe Cloud is still processing this pairing. Wait 4 seconds, then run the same command again.\n"
+    assert lines(capsys) == FINISHING
     assert len(wire.sent) == 1
 
 
@@ -136,7 +134,7 @@ def test_rate_limit_with_retries_left_is_the_scheduled_text(setup_replay, capsys
     clock[0] += 60
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys).startswith("Avibe Cloud has not confirmed this pairing yet.")
+    assert lines(capsys) == FINISHING
     assert len(wire.sent) == 1
 
 
@@ -147,9 +145,7 @@ def test_rate_limit_after_the_window_names_the_wait(setup_replay, capsys, no_pro
     clock[0] = replay._state(ra._read_pending_pairing_record()[0])["deadline"] + 1
     capsys.readouterr()
     assert run_pair() == 1
-    err = lines(capsys)
-    assert err.startswith("Avibe Cloud asked this computer to wait before trying again. Wait ")
-    assert err.endswith(" seconds, then run the same command again.\n")
+    assert lines(capsys) == FINISHING
     assert len(wire.sent) == 1
 
 
@@ -195,8 +191,7 @@ def test_received_with_a_receipt_is_archived_here_without_sending(setup_replay, 
     assert ra._read_pending_pairing_record()[0]["phase"] == "redeemed"
     capsys.readouterr()
     assert run_pair("another-key") == 1
-    assert lines(capsys) == ("Avibe Cloud accepted this pairing, but this computer has not finished saving it. "
-                             "Finish here; nothing is sent to Avibe Cloud:\n  vibe remote pair\n")
+    assert lines(capsys) == FINISHING
     assert run_pair() in (0, 1)
     assert len(wire.sent) == 1
     assert ra.pending_pairing_status(None) is None
@@ -210,7 +205,7 @@ def test_ended_desktop_app_request_is_left_to_the_app(setup_replay, capsys, no_p
     capsys.readouterr()
     assert run_pair() == 1
     err = lines(capsys)
-    assert err == "This pairing is managed by the Avibe desktop app, which renews it.\n"
+    assert err == "Remote access on this computer is managed by the Avibe desktop app.\n"
     assert not any(offer in err.lower() for offer in KEY_OFFERS)
     assert len(wire.sent) == 1
 
@@ -261,8 +256,7 @@ def test_local_busy_is_not_pending_and_queues_nothing(setup_replay, monkeypatch,
         capsys.readouterr()
         for entered_key in (None, "another-key"):
             assert run_pair(entered_key) == 1
-            assert lines(capsys) == ("Another pairing step is running on this computer, so this command was not accepted. "
-                                     "Nothing from it was sent or saved. Run the same command again in a moment.\n")
+            assert lines(capsys) == FINISHING
         assert ra._pending_pairing_path().read_bytes() == before
     finally:
         release.set()
