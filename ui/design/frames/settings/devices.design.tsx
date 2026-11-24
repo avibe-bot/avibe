@@ -369,12 +369,14 @@ const designFrames = frames([
     { reach: { state: 'unknown' }, viewerAccount: account, devices: afterOff, problem: 'closedFromAfar' }),
   frame('unknown-kind', '一种这一页还不认识的设备：照样列出来，叫「设备」', at(760),
     { reach: on, devices: [...all('host'), { id: 'watch', group: 'mine', kind: 'other', name: null, client: { kind: 'other' }, lastActiveAt: ago(90), functions: [] }] }),
-  // While 「更改域名」 and binding again are not in the release (features.ts), the notice says the fact
-  // and sends the owner to support; once both are, it says rebind and take the name back.
-  frame('outside-change', '地址在这台 Avibe 之外被改了：醒目提示，说事实，请联系 support@avibe.bot（重新绑定和更改域名上线后换回原来那句）', at(1100),
-    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
-  frame('outside-change-phone', '地址在别处被改了 · 375 宽', { width: 375, height: 1500 },
-    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
+  // Without binding again on the instance (before #4133) the notice says the fact and sends the
+  // owner to support; with it, it says to bind again and take the name back.
+  frame('outside-change', '地址在这台 Avibe 之外被改了 · 实例还没有重新绑定（#4133 之前）：说事实，请联系 support@avibe.bot', at(1100),
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: false }),
+  frame('outside-change-phone', '地址在别处被改了 · 实例还没有重新绑定 · 375 宽', { width: 375, height: 1500 },
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: false }),
+  frame('outside-change-rebind', '地址在别处被改了 · 实例有重新绑定：原来那句，加「去重新绑定」', at(1100),
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: true }),
 
   // 8. Adding a device.
   frame('empty', '刚开启，只有主机：「添加设备」直接摆在列表里（iPhone）', at(760), { reach: on, devices: onlyHost }),

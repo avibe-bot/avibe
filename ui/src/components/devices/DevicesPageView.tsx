@@ -25,7 +25,7 @@ import { ClaimFields } from './claim';
 import { OpenNewAddress } from './OpenNewAddress';
 import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
-import { RENAME_ENTRY_ENABLED, SUPPORT_EMAIL } from './features';
+import { SUPPORT_EMAIL } from './features';
 import { claimProblemText } from './texts';
 import {
   RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
@@ -651,9 +651,9 @@ export function DevicesPageView({
   signOutNotice, unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
-  // The notice about an address changed elsewhere sends the owner to 「更改域名」 and binding again
-  // only where both exist in this release.
-  const outsideWayOut = RENAME_ENTRY_ENABLED && rebindOffered;
+  // The notice about an address changed elsewhere sends the owner to binding again (and then
+  // 「更改域名」) only where this instance has binding again.
+  const outsideWayOut = rebindOffered;
   // Each device says which list it belongs to; nothing is inferred from an absent account.
   const mine = devices.filter((each) => each.group === 'mine');
   const others = devices.filter((each) => each.group === 'others');
