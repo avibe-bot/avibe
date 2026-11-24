@@ -20,13 +20,13 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub async fn begin(
+    /// The instance `id` as the account's current catalog lists it, and its
+    /// canonical origin. Every opening asks avibe.bot again.
+    pub async fn find(
         account: &mut AccountFlow,
         state: &mut ClientState,
         id: &str,
-        transport: Arc<dyn Transport>,
-        epoch: Epoch,
-    ) -> Result<Self, ClientError> {
+    ) -> Result<(Instance, Url), ClientError> {
         account.discover(state).await?;
         if state.account.status != AccountStatus::SignedIn {
             return Err(ClientError::new("authentication_required"));
@@ -39,6 +39,28 @@ impl Selection {
             .cloned()
             .ok_or_else(|| ClientError::new("instance_access_denied"))?;
         let origin = instance_origin(&instance)?;
+        Ok((instance, origin))
+    }
+
+    /// A session this run already holds for `instance`. Nothing is shown with
+    /// it until `readiness` has checked it with the instance again.
+    pub fn resumed(instance: Instance, session: NativeSession) -> Self {
+        Self {
+            instance,
+            session,
+            query: String::new(),
+            transaction_state: String::new(),
+        }
+    }
+
+    /// Starts a new sign-in to `instance` at `origin` (from `find`).
+    pub async fn begin(
+        instance: Instance,
+        origin: Url,
+        state: &mut ClientState,
+        transport: Arc<dyn Transport>,
+        epoch: Epoch,
+    ) -> Result<Self, ClientError> {
         let mut session = NativeSession::new(origin, transport);
         session.fence(epoch);
         let response = session.request(Method::GET, "/auth/login?next=/", None).await?;
