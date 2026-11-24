@@ -81,87 +81,227 @@ final class DirectPathAppTests: XCTestCase {
 
         XCTAssertEqual(firstStore.proxyConfigurations.count, 0)
         XCTAssertEqual(app.runtimeWebsiteDataStore.proxyConfigurations.count, 0)
-        // Nothing of the listener fault exists either: no marker in the
-        // App's (isolated) preferences, and no fault state.
-        XCTAssertFalse(app.directListenerFault)
-        XCTAssertNil(
-            try XCTUnwrap(appDefaults).object(forKey: UserDefaultsDirectFaultMarker.key)
+        // Nothing of the listener's recovery exists either.
+        XCTAssertFalse(app.listenerRecoveryIsOverdue)
+        XCTAssertTrue(app.directListenerFailures.isEmpty)
+    }
+
+    // MARK: The listener's recovery
+
+    /// A launch with a transport removes what an earlier version stored to
+    /// run the launch after a listener fault without a listener, and still
+    /// uses the transport. Without a transport nothing of it is touched.
+    @MainActor
+    func testAnEarlierVersionsFaultNoteIsRemovedUnreadAndOnlyWithATransport() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport) {
+            try XCTUnwrap(self.appDefaults).set(1, forKey: RetiredListenerFaultNote.key)
+        }
+        XCTAssertNil(try XCTUnwrap(appDefaults).object(forKey: RetiredListenerFaultNote.key))
+        // The launch uses its listener all the same.
+        XCTAssertNotNil(app.directStatusProvider)
+        _ = try await select("instance-1", in: app)
+        XCTAssertEqual(transport.selections.count, 1)
+
+        let plain = try await makeApp(directTransport: nil) {
+            try XCTUnwrap(self.appDefaults).set(1, forKey: RetiredListenerFaultNote.key)
+        }
+        XCTAssertNil(plain.directStatusProvider)
+        XCTAssertEqual(
+            try XCTUnwrap(appDefaults).object(forKey: RetiredListenerFaultNote.key) as? Int,
+            1
         )
     }
 
-    // MARK: The listener fault
-
+    /// The owner's case (2026-11-24): the App comes back and its listener
+    /// cannot be bound. Here something else holds the port, the one case
+    /// the App cannot leave by itself. The page stays where it is, with the
+    /// line; after the wait the message with Retry; Retry tries in place;
+    /// and once the port is free the App serves again with nothing pressed,
+    /// on the same page, with what was typed in it.
     @MainActor
-    func testWithoutATransportTheFaultMarkerIsNeverReadOrWritten() async throws {
-        let marker = FaultMarkerSpy(marked: true)
-        let app = try await makeApp(directTransport: nil, directFaultMarker: marker)
-
-        _ = try await select("instance-1", in: app)
-
-        XCTAssertNil(app.directStatusProvider)
-        XCTAssertEqual(marker.takes, 0)
-        XCTAssertEqual(marker.marks, 0)
-        XCTAssertTrue(marker.isMarked)
-    }
-
-    /// The launch after a fault is decided in `init`, before any route or
-    /// first load: no controller, so no capability, no listener, no route
-    /// write, and a runtime that opens at once. It consumes the marker, so
-    /// the launch after it uses the transport again.
-    @MainActor
-    func testTheLaunchAfterAFaultUsesNoListenerAndTheOneAfterThatUsesTheTransport() async throws {
-        try assertSocketScanSeesListeners()
-        let marker = FaultMarkerSpy(marked: true)
+    func testAReturnThatCannotBindItsPortKeepsThePageSaysSoAfterTheWaitAndRecoversByItself() async throws {
         let transport = StandInDirectTransport()
-        let routeWrites = try ProxyConfigurationWrites.count()
         var listening: Set<ListeningSocket> = []
-        let bypassed = try await makeApp(
+        let app = try await makeApp(
             directTransport: transport,
-            directFaultMarker: marker
+            listenerRecoveryPatience: .milliseconds(600)
         ) {
             listening = try listeningSockets()
         }
+        let first = try await select("instance-1", in: app)
+        let port = try directListenerPort(of: app, since: listening)
+        let page = try await showRuntimePage(app, first)
+        defer { page.close() }
+        // What the user typed and has not sent.
+        _ = try await page.text("""
+            document.body.insertAdjacentHTML("beforeend", "<textarea id='draft'></textarea>");
+            document.getElementById("draft").value = "not sent yet";
+            "typed"
+            """)
+        let identity = app.runtimeIdentity
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .none)
 
-        XCTAssertNil(bypassed.directStatusProvider)
-        XCTAssertEqual(marker.takes, 1)
-        XCTAssertFalse(marker.isMarked)
-        _ = try bypassed.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        guard case .browser = bypassed.route else {
-            return XCTFail("The runtime did not open at once.")
-        }
-        XCTAssertEqual(try ProxyConfigurationWrites.count(), routeWrites)
-        XCTAssertEqual(try newListeners(since: listening), [])
-        XCTAssertEqual(transport.selections.count, 0)
-
-        // The next launch, with the same preferences, uses the transport.
-        let next = try await makeApp(
-            directTransport: transport,
-            directFaultMarker: marker
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
         )
-        XCTAssertNotNil(next.directStatusProvider)
-        XCTAssertEqual(marker.takes, 2)
-        _ = try await select("instance-1", in: next)
-        XCTAssertEqual(transport.selections.count, 1)
+        var squatterIsOpen = true
+        defer {
+            if squatterIsOpen {
+                squatter.close()
+            }
+        }
+        // Nothing is shown, or bound, in the background.
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .none)
+
+        // The return, in its own turn: the page's loads wait, with the line.
+        enterForeground()
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .connecting)
+        XCTAssertFalse(app.listenerRecoveryIsOverdue)
+
+        // Past the wait, the message with Retry. Something else may hold
+        // the port, so nothing is loaded against it; the runtime, its page
+        // and its open are as they were.
+        try await eventually { app.listenerRecoveryPresentation(for: first) == .unreachable }
+        XCTAssertEqual(app.directLoadGate(for: first), .held)
+        XCTAssertFalse(app.mayReload(first))
+        XCTAssertEqual(app.route, .browser(first))
+        XCTAssertEqual(app.runtimeIdentity, identity)
+        XCTAssertNil(app.runtimeOpenNotice)
+        // The failure is on record, for the next rendezvous request.
+        XCTAssertFalse(app.directListenerFailures.isEmpty)
+
+        // Retry, with the port still taken: an attempt now, the line while
+        // it runs, and the message again as soon as it has failed too.
+        app.retryListenerRecovery()
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .connecting)
+        try await eventually { app.listenerRecoveryPresentation(for: first) == .unreachable }
+
+        // The other holder lets go: the next attempt binds, by itself.
+        squatter.close()
+        squatterIsOpen = false
+        try await eventually(timeout: .seconds(20)) {
+            app.listenerRecoveryPresentation(for: first) == .none
+                && app.directLoadGate(for: first) == .open
+        }
+        XCTAssertFalse(app.listenerRecoveryIsOverdue)
+        XCTAssertTrue(app.mayReload(first))
+        // The same page, never rebuilt or reloaded.
+        XCTAssertEqual(app.route, .browser(first))
+        XCTAssertEqual(app.runtimeIdentity, identity)
+        XCTAssertFalse(page.webContentProcessTerminated)
+        let draft = try await page.text("document.getElementById('draft').value")
+        XCTAssertEqual(draft, "not sent yet")
+
+        // Another stay in the foreground starts with nothing to say.
+        enterBackground()
+        enterForeground()
+        try await eventually { app.directLoadGate(for: first) == .open }
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .none)
+        XCTAssertFalse(app.listenerRecoveryIsOverdue)
     }
 
-    func testTheFaultMarkerIsOneVersionedKeyAndAnyStoredValueCounts() throws {
-        let suiteName = "DirectPathAppTests.marker.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
-        let marker = UserDefaultsDirectFaultMarker(defaults: defaults)
+    /// Retry binds the port at once: it does not wait for the recovery's
+    /// own next attempt, which by then is seconds away.
+    @MainActor
+    func testRetryBindsTheListenersPortAtOnceWhenItIsFreeAgain() async throws {
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(
+            directTransport: transport,
+            listenerRecoveryPatience: .milliseconds(300)
+        ) {
+            listening = try listeningSockets()
+        }
+        let runtime = try await select("instance-1", in: app)
+        let port = try directListenerPort(of: app, since: listening)
 
-        XCTAssertFalse(marker.take())
-        marker.mark()
-        XCTAssertEqual(defaults.object(forKey: UserDefaultsDirectFaultMarker.key) as? Int, 1)
-        XCTAssertTrue(marker.take())
-        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
-        XCTAssertFalse(marker.take())
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        enterForeground()
+        try await eventually { app.listenerRecoveryPresentation(for: runtime) == .unreachable }
+        // The recovery's own attempts come 0.25, 0.5, 1, 2 and then 5 s
+        // apart (`DirectPathTiming.standard`): past the fourth, the next is
+        // about 5 s away.
+        try await Task.sleep(for: .milliseconds(4_200))
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: runtime), .unreachable)
+        squatter.close()
 
-        // A value this version cannot read still means one launch without
-        // the listener, and is cleared.
-        defaults.set("unreadable", forKey: UserDefaultsDirectFaultMarker.key)
-        XCTAssertTrue(marker.take())
-        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
+        app.retryListenerRecovery()
+        try await eventually(timeout: .seconds(2)) {
+            app.listenerRecoveryPresentation(for: runtime) == .none
+                && app.directLoadGate(for: runtime) == .open
+        }
+    }
+
+    /// The recovery covers only a runtime whose host is routed to the
+    /// listener. Another instance, opened while the listener could not
+    /// serve, is on WebKit's own path: not covered, its open not failed.
+    /// And the routed instance, opened again meanwhile, waits and then
+    /// opens by itself.
+    @MainActor
+    func testTheListenersRecoveryCoversOnlyARoutedRuntimeAndFailsNoOtherOpen() async throws {
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(
+            directTransport: transport,
+            listenerRecoveryPatience: .milliseconds(300)
+        ) {
+            listening = try listeningSockets()
+        }
+        let routed = try await select("instance-1", in: app)
+        let port = try directListenerPort(of: app, since: listening)
+
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        var squatterIsOpen = true
+        defer {
+            if squatterIsOpen {
+                squatter.close()
+            }
+        }
+        let ordinary = try await select("instance-2", in: app)
+        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+
+        enterForeground()
+        try await eventually { app.listenerRecoveryPresentation(for: routed) == .unreachable }
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: ordinary), .none)
+        XCTAssertEqual(app.directLoadGate(for: ordinary), .open)
+        XCTAssertTrue(app.mayReload(ordinary))
+        XCTAssertEqual(app.route, .browser(ordinary))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, attemptID)
+        XCTAssertNotEqual(app.runtimeOpenAttempt?.phase, .failed)
+
+        // The routed instance is opened again while something else may
+        // hold its port: no WebView is made against that port.
+        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
+        try await settle()
+        XCTAssertEqual(app.route, .loading)
+
+        // The port is free again: the open goes on by itself.
+        squatter.close()
+        squatterIsOpen = false
+        let reopened = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(app.directLoadGate(for: reopened), .open)
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: reopened), .none)
+        XCTAssertTrue(app.mayReload(reopened))
     }
 
     // MARK: The creation and reload boundaries
@@ -221,7 +361,7 @@ final class DirectPathAppTests: XCTestCase {
         let reopened = try await waitForBrowser("instance-1", in: app)
         if !theSimulatorRefusedABind(of: app) {
             XCTAssertEqual(app.directLoadGate(for: reopened), .open)
-            XCTAssertFalse(app.presentsDirectFaultOnly(reopened))
+            XCTAssertEqual(app.listenerRecoveryPresentation(for: reopened), .none)
             XCTAssertTrue(app.mayReload(reopened))
         }
     }
@@ -2197,7 +2337,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertTrue(app.authorizeReload(of: runtime))
         XCTAssertEqual(app.directLoadGate(for: runtime), .open)
         XCTAssertNil(app.directLoadGateProvider(for: runtime))
-        XCTAssertFalse(app.presentsDirectFaultOnly(runtime))
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: runtime), .none)
         enterBackground()
         XCTAssertTrue(app.mayReload(runtime))
         enterForeground()
@@ -2227,7 +2367,7 @@ final class DirectPathAppTests: XCTestCase {
             )
             XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCached, "\(stage)")
             XCTAssertEqual(
-                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase, directFault: false),
+                BrowserOverlay(attemptPhase: try XCTUnwrap(app.runtimeOpenAttempt).phase),
                 .loading,
                 "\(stage)"
             )
@@ -2301,7 +2441,7 @@ final class DirectPathAppTests: XCTestCase {
         app.runtimeCachedPageKeepsShell(attemptID: attempt.id, runtime: runtime)
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .showingCachedLive)
         XCTAssertEqual(
-            BrowserOverlay(attemptPhase: .showingCachedLive, directFault: false),
+            BrowserOverlay(attemptPhase: .showingCachedLive),
             .showingCachedLive
         )
         // A live navigation from the page that never replaces it (a link
@@ -2319,7 +2459,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .browser(runtime))
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .cachedUnreachable)
         XCTAssertEqual(
-            BrowserOverlay(attemptPhase: .cachedUnreachable, directFault: false),
+            BrowserOverlay(attemptPhase: .cachedUnreachable),
             .cachedUnreachable
         )
         XCTAssertNil(app.runtimeOpenNotice)
@@ -2341,7 +2481,7 @@ final class DirectPathAppTests: XCTestCase {
         app.handleRuntimeNavigation(live(.committed), attemptID: second.id, runtime: other)
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .loadingPage)
         XCTAssertEqual(
-            BrowserOverlay(attemptPhase: .loadingPage, directFault: false),
+            BrowserOverlay(attemptPhase: .loadingPage),
             .loading
         )
         XCTAssertFalse(try XCTUnwrap(app.runtimeOpenAttempt).isTakingLong)
@@ -2523,7 +2663,7 @@ final class DirectPathAppTests: XCTestCase {
                 next.runtimeCachedPageConnected(attemptID: attempt.id, runtime: opened)
                 XCTAssertEqual(next.runtimeOpenAttempt?.phase, .documentLoaded, row.name)
                 XCTAssertEqual(
-                    BrowserOverlay(attemptPhase: .documentLoaded, directFault: false),
+                    BrowserOverlay(attemptPhase: .documentLoaded),
                     .none
                 )
                 next.handleRuntimeNavigation(
@@ -3218,10 +3358,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(handedOff.deadline)
         XCTAssertFalse(handedOff.canResumeAutomaticBudget)
         XCTAssertEqual(
-            BrowserOverlay(
-                attemptPhase: handedOff.phase,
-                directFault: false
-            ),
+            BrowserOverlay(attemptPhase: handedOff.phase),
             .loading
         )
         // No timeout will end this loading layer: it offers Cancel at once,
@@ -3279,10 +3416,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
         XCTAssertNil(app.runtimeOpenAttempt?.deadline)
         XCTAssertEqual(
-            BrowserOverlay(
-                attemptPhase: app.runtimeOpenAttempt?.phase,
-                directFault: false
-            ),
+            BrowserOverlay(attemptPhase: app.runtimeOpenAttempt?.phase),
             .loadFailure
         )
 
@@ -3541,7 +3675,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(handedOff.deadline)
         XCTAssertFalse(handedOff.canResumeAutomaticBudget)
         XCTAssertEqual(
-            BrowserOverlay(attemptPhase: handedOff.phase, directFault: false),
+            BrowserOverlay(attemptPhase: handedOff.phase),
             .loading
         )
         XCTAssertEqual(events.filter { $0.stage == .handedOff }.count, 1)
@@ -3607,10 +3741,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(app.runtimeOpenAttempt?.deadline)
         XCTAssertFalse(app.runtimeOpenAttempt?.canResumeAutomaticBudget == true)
         XCTAssertEqual(
-            BrowserOverlay(
-                attemptPhase: app.runtimeOpenAttempt?.phase,
-                directFault: false
-            ),
+            BrowserOverlay(attemptPhase: app.runtimeOpenAttempt?.phase),
             .loading
         )
 
@@ -3952,109 +4083,38 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
-    /// A child window is presented above the view the reopen message
-    /// covers; the fault takes it away.
-    @MainActor
-    func testTheListenerFaultTakesAwayAPresentedChildWindow() async throws {
-        let server = try LocalHTTPServer { request in
-            switch request.path {
-            case "/child":
-                return .html(RuntimePage.listeningDocument(title: "Child"))
-            default:
-                return .html(
-                    RuntimePage.listeningDocument(
-                        title: "Instance",
-                        body: """
-                            <button id="open-child" onclick="window.open('/child', '_blank')">Open</button>
-                            """
-                    )
-                )
-            }
-        }
-        let url = try await server.start()
-        defer { server.stop() }
-        let origin = try XCTUnwrap(WebOrigin(url: url, requiresHTTPS: false))
-        let controller = WebViewController(
-            instanceOrigin: origin,
-            websiteDataStore: .nonPersistent(),
-            navigationPolicy: NavigationPolicy(
-                instanceOrigins: [origin],
-                authenticationOrigins: []
-            ),
-            didStartLoading: {},
-            didFinishLoading: {},
-            didFailLoading: {}
-        )
-        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))
-        window.rootViewController = controller
-        window.makeKeyAndVisible()
-        controller.loadViewIfNeeded()
-        controller.view.frame = window.bounds
-        controller.view.layoutIfNeeded()
-        defer {
-            controller.presentedViewController?.dismiss(animated: false)
-            window.rootViewController = nil
-            window.isHidden = true
-        }
-        let primary = try XCTUnwrap(
-            controller.view.subviews.compactMap { $0 as? WKWebView }.first
-        )
-        try await eventually {
-            (try? await primary.evaluateJavaScript("document.title") as? String) == "Instance"
-        }
-        _ = try await primary.evaluateJavaScript(
-            "document.querySelector('#open-child').click(); true"
-        )
-        try await eventually { controller.presentedViewController != nil }
-
-        controller.discardPopupsForListenerFault()
-
-        try await eventually { controller.presentedViewController == nil }
+    func testTheOverlayFollowsTheOpenAlone() {
+        XCTAssertEqual(BrowserOverlay(isLoading: true, failed: true), .loadFailure)
+        XCTAssertEqual(BrowserOverlay(isLoading: true, failed: false), .loading)
+        XCTAssertEqual(BrowserOverlay(attemptPhase: .awaitingUser), .awaitingUser)
+        XCTAssertEqual(BrowserOverlay(attemptPhase: .documentLoaded), .none)
+        XCTAssertEqual(BrowserOverlay(isLoading: false, failed: false), .none)
     }
 
-    func testTheListenerFaultCoversTheRuntimeWithoutRetryOrSpinner() {
-        XCTAssertEqual(
-            BrowserOverlay(isLoading: true, failed: true, directFault: true),
-            .directFault
-        )
-        XCTAssertEqual(
-            BrowserOverlay(isLoading: true, failed: false, directFault: true),
-            .directFault
-        )
-        XCTAssertEqual(
-            BrowserOverlay(isLoading: false, failed: true, directFault: false),
-            .loadFailure
-        )
-        XCTAssertEqual(
-            BrowserOverlay(isLoading: true, failed: false, directFault: false),
-            .loading
-        )
-        XCTAssertEqual(
-            BrowserOverlay(
-                attemptPhase: .awaitingUser,
-                directFault: false
-            ),
-            .awaitingUser
-        )
-        XCTAssertEqual(
-            BrowserOverlay(isLoading: false, failed: false, directFault: false),
-            .none
-        )
-    }
-
-    func testTheReopenMessageIsTheApprovedCopyInBothLocales() throws {
-        func localized(_ language: String) throws -> String {
+    /// The recovery's message is the approved "can't reach" copy with
+    /// Retry, over a page or alone, and the "reopen the app" text is gone
+    /// from both locales.
+    func testTheRecoveryMessageIsTheApprovedCopyAndNothingAsksToReopenTheApp() throws {
+        func localized(_ key: String, _ language: String) throws -> String {
             let path = try XCTUnwrap(Bundle.main.path(forResource: language, ofType: "lproj"))
             let bundle = try XCTUnwrap(Bundle(path: path))
-            return bundle.localizedString(
-                forKey: "browser.direct_fault.title",
-                value: "missing",
-                table: nil
-            )
+            return bundle.localizedString(forKey: key, value: "missing", table: nil)
         }
-
-        XCTAssertEqual(try localized("en"), "Connection lost — reopen the app")
-        XCTAssertEqual(try localized("zh-Hans"), "连接中断，请重新打开 App")
+        for language in ["en", "zh-Hans"] {
+            XCTAssertEqual(try localized("browser.direct_fault.title", language), "missing", language)
+        }
+        // Over the page that stays.
+        XCTAssertEqual(try localized("runtime.open.cached_timeout.title.named", "en"), "Can't reach %@ right now")
+        XCTAssertEqual(try localized("runtime.open.cached_timeout.title.named", "zh-Hans"), "暂时连不上 %@")
+        XCTAssertEqual(try localized("runtime.open.cached_timeout.body", "en"), "Showing what was here last")
+        XCTAssertEqual(try localized("runtime.open.cached_timeout.body", "zh-Hans"), "显示的是上次的内容")
+        XCTAssertEqual(try localized("runtime.open.cached_timeout.retry", "en"), "Retry")
+        XCTAssertEqual(try localized("runtime.open.cached_timeout.retry", "zh-Hans"), "重试")
+        // With no page left to keep.
+        XCTAssertEqual(try localized("browser.error.title.named", "en"), "Can't reach %@")
+        XCTAssertEqual(try localized("browser.error.title.named", "zh-Hans"), "暂时连不上 %@")
+        XCTAssertEqual(try localized("browser.error.retry", "en"), "Try Again")
+        XCTAssertEqual(try localized("browser.error.retry", "zh-Hans"), "重试")
     }
 
     func testRuntimeOpeningCopyIsApprovedInBothLocales() throws {
@@ -7244,7 +7304,7 @@ final class DirectPathAppTests: XCTestCase {
     @MainActor
     private func makeApp(
         directTransport: DirectTransporting?,
-        directFaultMarker: DirectFaultMarkerStoring? = nil,
+        listenerRecoveryPatience: Duration = .seconds(10),
         pushHolds: [PushHold] = [],
         sessionResponse: (@Sendable () -> LocalHTTPResponse?)? = nil,
         pushKeychain: InMemoryPushKeychainStore? = nil,
@@ -7370,32 +7430,12 @@ final class DirectPathAppTests: XCTestCase {
 
         let controlPlane = MobileControlPlaneConfiguration(testBaseURL: baseURL)
         let app: AppModel
-        if let directFaultMarker {
+        if let directTransport {
             app = AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
                 directTransport: directTransport,
-                directFaultMarker: directFaultMarker,
-                pushKeychain: notifications?.keychain
-                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: notifications?.generationStore
-                    ?? InMemoryPushGenerationStore(),
-                pushInstallationMarker: notifications?.marker
-                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
-                systemSchedulePlatform: systemSchedulePlatform,
-                systemScheduleStore: scheduleStore,
-                systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
-                runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter(),
-                networkPath: networkPath
-            )
-        } else if let directTransport {
-            app = AppModel(
-                defaults: defaults,
-                controlPlane: controlPlane,
-                directTransport: directTransport,
+                listenerRecoveryPatience: listenerRecoveryPatience,
                 pushKeychain: notifications?.keychain
                     ?? pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: notifications?.generationStore
@@ -8244,6 +8284,11 @@ private final class RuntimePage {
         try await loader.loadHTML(html, baseURL: baseURL, in: webView)
     }
 
+    /// Runs `script` in the page; its result, when it is text.
+    func text(_ script: String) async throws -> String? {
+        try await webView?.evaluateJavaScript(script) as? String
+    }
+
     /// The changes the document has recorded, as JSON.
     func changes() async throws -> String? {
         try await webView?.evaluateJavaScript(
@@ -8791,31 +8836,6 @@ private final class SilentBadgeCenter: AppBadgeCentering {
     }
 
     func setBadgeCount(_ count: Int) async throws {}
-}
-
-/// The fault marker as a test sees it, in memory.
-private final class FaultMarkerSpy: DirectFaultMarkerStoring {
-    private(set) var isMarked: Bool
-    private(set) var marks = 0
-    private(set) var takes = 0
-    /// Called inside `mark()`, before it returns.
-    var whileMarking: () -> Void = {}
-
-    init(marked: Bool) {
-        isMarked = marked
-    }
-
-    func mark() {
-        marks += 1
-        whileMarking()
-        isMarked = true
-    }
-
-    func take() -> Bool {
-        takes += 1
-        defer { isMarked = false }
-        return isMarked
-    }
 }
 
 /// A device with notifications on for account-1: the push keychain holds an

@@ -28,23 +28,16 @@ struct RootView: View {
     var body: some View {
         ZStack(alignment: .top) {
             if let runtime = appModel.route.runtime {
-                if appModel.presentsDirectFaultOnly(runtime) {
-                    // Opened under the listener fault: no WebView is made
-                    // for a route to a port the App may not hold.
-                    DirectFaultMessage()
-                        .id(appModel.runtimeIdentity)
-                } else {
-                    BrowserScreen(runtime: runtime)
-                        .id(appModel.runtimeIdentity)
-                        .allowsHitTesting(
-                            !appModel.route.coversRuntime
-                                && appModel.systemScheduleConfirmation == nil
-                        )
-                        .accessibilityHidden(
-                            appModel.route.coversRuntime
-                                || appModel.systemScheduleConfirmation != nil
-                        )
-                }
+                BrowserScreen(runtime: runtime)
+                    .id(appModel.runtimeIdentity)
+                    .allowsHitTesting(
+                        !appModel.route.coversRuntime
+                            && appModel.systemScheduleConfirmation == nil
+                    )
+                    .accessibilityHidden(
+                        appModel.route.coversRuntime
+                            || appModel.systemScheduleConfirmation != nil
+                    )
             }
             if let startScreen = appModel.route.onboardingStartScreen {
                 MobileOnboardingContainer(
@@ -355,10 +348,13 @@ private struct BrowserScreen: View {
         }
         let attemptID = attempt?.id ?? appModel.runtimeIdentity
         let failed = attempt?.phase == .failed
-        let overlay = BrowserOverlay(
-            attemptPhase: attempt?.phase,
-            directFault: appModel.directFaultCovers(runtime)
-        )
+        let overlay = BrowserOverlay(attemptPhase: attempt?.phase)
+        // The direct listener is being bound again and this runtime's loads
+        // wait for it. Shown over a page whose open is done; an open under
+        // way has its own line, rows and failure screen.
+        let recovery: AppModel.ListenerRecoveryPresentation = overlay == .none
+            ? appModel.listenerRecoveryPresentation(for: runtime)
+            : .none
         if let instanceOrigin = WebOrigin(url: instance.url) {
             VStack(spacing: 0) {
                 if showsAccountFallback && !failed {
@@ -514,10 +510,11 @@ private struct BrowserScreen: View {
                             Text("browser.error.body")
                         } actions: {
                             // Retry is offered only while the shell may
-                            // reload: on WebKit's normal path, or with a
-                            // serving listener. While the listener is being
-                            // bound again after the background it is not
-                            // shown; it returns when the return settles.
+                            // reload: on WebKit's normal path, with a
+                            // serving listener, or with its port closed.
+                            // While the listener is on a return's first
+                            // attempt it is not shown; it returns when
+                            // that settles.
                             if appModel.mayReload(runtime) {
                                 Button("browser.error.retry") {
                                     showsAccountFallback = false
@@ -543,10 +540,32 @@ private struct BrowserScreen: View {
                         )
                     }
 
-                    // Terminal for this process: no Retry or reload, which
-                    // would not reach a working listener. Reopening does.
-                    if overlay == .directFault {
-                        DirectFaultMessage()
+                    if recovery == .connecting {
+                        // The page stays, live to touch. A WebView whose
+                        // content process ended meanwhile has nothing to
+                        // show until the listener serves: its skeleton.
+                        if appModel.runtimeHoldsItsAutomaticLoad {
+                            RuntimeSkeleton()
+                        }
+                        RuntimeProgressLine(label: Text("runtime.loading"))
+                            .accessibilityIdentifier("listener-recovery-progress")
+                    }
+
+                    if recovery == .unreachable {
+                        if appModel.runtimeHoldsItsAutomaticLoad {
+                            // Nothing of the page is left to keep: the
+                            // failure screen, with Retry in place.
+                            ListenerRecoveryFailure(
+                                instanceName: instance.name,
+                                retry: { appModel.retryListenerRecovery() },
+                                showInstances: { appModel.showInstancePicker() }
+                            )
+                        } else {
+                            RuntimeCachedPageTimeoutBanner(
+                                instanceName: instance.name,
+                                retry: { appModel.retryListenerRecovery() }
+                            )
+                        }
                     }
                 }
             }
@@ -1104,29 +1123,46 @@ private func runtimeOpenPhaseLabel(_ phase: RuntimeOpenPhase) -> String {
     return NSLocalizedString(key, comment: "")
 }
 
-/// The listener fault's message: reopen the App. It has no Retry and no other
-/// action, because nothing in this process reaches a working listener.
-private struct DirectFaultMessage: View {
+/// The listener could not be bound again in time and the runtime's WebView
+/// has nothing to show: the instance cannot be reached now, with Retry in
+/// place (the attempts go on underneath) and the way to the other instances.
+private struct ListenerRecoveryFailure: View {
+    let instanceName: String
+    let retry: () -> Void
+    let showInstances: () -> Void
+
     var body: some View {
         ContentUnavailableView {
             Label(
-                "browser.direct_fault.title",
+                String(
+                    format: NSLocalizedString(
+                        "browser.error.title.named",
+                        comment: ""
+                    ),
+                    instanceName
+                ),
                 systemImage: "wifi.exclamationmark"
             )
+        } description: {
+            Text("browser.error.body")
+        } actions: {
+            Button("browser.error.retry", action: retry)
+                .buttonStyle(.borderedProminent)
+                .foregroundStyle(AvibeStyle.onAccent)
+            Button("browser.other_instances", action: showInstances)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(
             Color(uiColor: .systemBackground)
                 .ignoresSafeArea(.container, edges: .top)
         )
-        .contentShape(Rectangle())
-        .accessibilityIdentifier("direct-listener-fault")
+        .accessibilityIdentifier("listener-recovery-failure")
     }
 }
 
-/// What covers the runtime's WebView. The listener fault comes first: it is
-/// terminal for the process, so neither the spinner nor the load-failure
-/// view, whose Retry would not reach a working listener, is shown with it.
+/// What covers the runtime's WebView while its open is under way or has
+/// ended without a page. (The listener's recovery is shown apart from it,
+/// over a page whose open is done.)
 enum BrowserOverlay: Equatable {
     case none
     case loading
@@ -1135,13 +1171,8 @@ enum BrowserOverlay: Equatable {
     case cachedOffline
     case awaitingUser
     case loadFailure
-    case directFault
 
-    init(attemptPhase: RuntimeOpenPhase?, directFault: Bool) {
-        if directFault {
-            self = .directFault
-            return
-        }
+    init(attemptPhase: RuntimeOpenPhase?) {
         switch attemptPhase {
         case .preparingRoute, .connecting, .authenticating, .loadingPage,
              .showingCached:
@@ -1163,10 +1194,8 @@ enum BrowserOverlay: Equatable {
         }
     }
 
-    init(isLoading: Bool, failed: Bool, directFault: Bool) {
-        if directFault {
-            self = .directFault
-        } else if failed {
+    init(isLoading: Bool, failed: Bool) {
+        if failed {
             self = .loadFailure
         } else if isLoading {
             self = .loading
