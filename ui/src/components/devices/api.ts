@@ -140,6 +140,9 @@ export const devicesApi = {
   setFunction: async (id: string, kind: 'notifications' | 'schedule', on: boolean) => {
     await call(`/api/devices/${encodeURIComponent(id)}/${kind}`, { method: 'PUT', body: { on } });
   },
+  /** Restricts an Avibe that is not bound to the computer that runs it, in one step. The page
+   *  sends no address: the instance chooses its own loopback and keeps the port. */
+  restrictToThisComputer: async () => { await post('/api/devices/host/network-access', { mode: 'this_computer' }); },
   revokeHealth: async (id: string) => { await post(`/api/devices/${encodeURIComponent(id)}/health/revoke`); },
   revokeUnlinkedHealth: async (id: string) => { await post(`/api/devices/unlinked-health/${encodeURIComponent(id)}/revoke`); },
 

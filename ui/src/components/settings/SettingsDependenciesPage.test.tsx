@@ -29,6 +29,7 @@ vi.mock('react-i18next', () => ({
       values?.version ? `${key}:${String(values.version)}` : key
     ),
   }),
+  Trans: ({ i18nKey }: { i18nKey: string }) => <>{i18nKey}</>,
 }));
 
 vi.mock('./SettingsPageShell', () => ({

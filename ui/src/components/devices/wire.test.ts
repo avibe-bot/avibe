@@ -14,6 +14,33 @@ const row = (extra: Record<string, unknown>) => ({
   id: 'd1', group: 'mine', kind: 'browser', display_name: 'Chrome', account: { email: 'max@example.test' }, functions: [], ...extra,
 });
 
+describe('devicesFromWire · what the instance says about its own network', () => {
+  const hostRow = (extra: Record<string, unknown>) => devicesFromWire({ mine: [row({ id: 'host', kind: 'host', ...extra })] }).devices[0];
+
+  it('takes "open to the network" only from an outright true or false on the computer\'s own row', () => {
+    expect(hostRow({ network_open: true }).networkOpen).toBe(true);
+    expect(hostRow({ network_open: false }).networkOpen).toBe(false);
+    // Not known, not Avibe's to close, bound (no field), or anything else: silent, never "closed".
+    for (const value of [null, undefined, 'true', 'false', 1, 0, {}]) {
+      expect(hostRow({ network_open: value }).networkOpen).toBeUndefined();
+    }
+    // The fact is the computer's: no other row carries it, whatever it claims.
+    const others = devicesFromWire({ mine: [row({ id: 'phone', network_open: true }), row({ id: 'fake', kind: 'host', network_open: true })] }).devices;
+    expect(others.map((each) => each.networkOpen)).toEqual([undefined, undefined]);
+  });
+
+  it('carries the declared-proxy fact as given, and nothing when it is incomplete', () => {
+    const fact = (value: unknown) => devicesFromWire({ mine: [], unauthenticated_proxy_access: value }).proxyAccess;
+    expect(fact({ origins: ['https://a.example.test', 'https://b.example.test:8443'], peer_scope: 'range' }))
+      .toEqual({ origins: ['https://a.example.test', 'https://b.example.test:8443'], peerScope: 'range' });
+    expect(fact({ origins: ['https://a.example.test'], peer_scope: 'single_address' })?.peerScope).toBe('single_address');
+    for (const value of [undefined, null, {}, { origins: [], peer_scope: 'range' }, { origins: ['https://a.example.test'] },
+      { origins: ['https://a.example.test'], peer_scope: 'everyone' }, { origins: [7, ''], peer_scope: 'range' }]) {
+      expect(fact(value)).toBeUndefined();
+    }
+  });
+});
+
 describe('devicesFromWire', () => {
   it('maps the registry kinds, the current device and the lists as the instance names them', () => {
     const snapshot = devicesFromWire({

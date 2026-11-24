@@ -56,6 +56,12 @@ export type Device = {
   person?: string;
   /** No sign-in left on it, only a notification registration: signing it out stops those. */
   pushOnly?: boolean;
+  /** Only on the computer that runs Avibe, and only the instance's outright answer about an Avibe
+   *  that is not bound (`network_open` of its row). `true`: other devices on its network open it
+   *  without signing in, through a listener Avibe itself can close. `false`: only this computer
+   *  opens it. Absent when the instance does not say, says null (not known, or not Avibe's to
+   *  close), or is bound: never filled in from a missing answer. */
+  networkOpen?: boolean;
   recent?: DeviceActivity[];
 };
 
@@ -150,7 +156,12 @@ export type NameState = 'free' | 'taken';
 export type AddKind = 'iphone' | 'android' | 'computer';
 /** `remove`: sign the open device out. `health-off`: turn the open device's Health off.
  *  `remove-all-remote`: at the computer itself, every remote device. */
-export type DevicesConfirm = 'remove' | 'health-off' | 'turn-off' | 'remove-others' | 'remove-all-remote' | { unlinkedHealth: string };
+export type DevicesConfirm = 'remove' | 'health-off' | 'turn-off' | 'remove-others' | 'remove-all-remote' | 'this-computer-only' | { unlinkedHealth: string };
+
+/** Addresses an operator's own reverse proxy serves, whose visitors this Avibe lets in without
+ *  signing in (`unauthenticated_proxy_access` of `/api/devices`, the Owner only). `range`: the
+ *  trusted proxy is declared as more than one address. */
+export type ProxyAccess = { origins: string[]; peerScope: 'single_address' | 'range' };
 
 /** The instance's direct state (`GET /api/devices/connection`). */
 export type DirectState = 'ready' | 'off' | 'awaiting-permission' | 'denied' | 'awaiting-certificate' | 'not-running' | 'unknown';
