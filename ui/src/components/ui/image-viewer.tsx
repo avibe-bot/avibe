@@ -79,103 +79,9 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
 
   const [gestureSurface, setGestureSurface] = React.useState<HTMLDivElement | null>(null);
   const backdropRef = React.useRef<HTMLDivElement>(null);
+  const previousImageRef = React.useRef<HTMLDivElement>(null);
+  const nextImageRef = React.useRef<HTMLDivElement>(null);
   const { reduced } = useMotionPreference();
-
-  // The approved image-preview gesture (docs/plans/2026-11-17-ios-interactions.md).
-  // Capture outside the zoom wrapper: its own touchmove otherwise pans first.
-  // Never take a pinch, a zoomed pan, a control press, or an iOS edge gesture.
-  React.useEffect(() => {
-    const stage = stageRef.current;
-    const backdrop = backdropRef.current;
-    if (!gestureSurface || !stage || !backdrop || !src || !routeSurfaceActive) return;
-    const chrome = gestureSurface.querySelectorAll<HTMLElement>('[data-viewer-chrome]');
-    let gesture: { x: number; y: number; dy: number; axis: 'pending' | 'vertical' | 'yielded'; samples: GestureSample[] } | null = null;
-    let exitTimer: ReturnType<typeof setTimeout> | undefined;
-    const returnMs = readMotionMs('--motion-spring-snappy-duration') || 290;
-    const chromeMs = readMotionMs('--motion-duration-fast') || 160;
-    const easing = 'var(--motion-ease-move, cubic-bezier(0.32, 0.72, 0, 1))';
-    const paint = (dy: number, returning = false) => {
-      const progress = Math.min(1, Math.max(0, dy) / (window.innerHeight * 0.2));
-      stage.style.transition = returning && !reduced ? `translate ${returnMs}ms ${easing}, scale ${returnMs}ms ${easing}` : 'none';
-      stage.style.translate = `0px ${dy}px`;
-      stage.style.scale = String(reduced ? 1 : 1 - 0.15 * progress);
-      stage.style.opacity = '1';
-      backdrop.style.transition = returning && !reduced ? `opacity ${returnMs}ms linear` : 'none';
-      backdrop.style.opacity = String(1 - 0.85 * progress);
-      chrome.forEach((node) => {
-        node.style.transition = `opacity ${chromeMs}ms linear`;
-        node.style.opacity = dy > 8 ? '0' : '1';
-      });
-    };
-    const cancel = () => {
-      gesture = null;
-      paint(0, true);
-    };
-    const atFit = () => transformRef.current?.instance.state.scale === 1;
-    const start = (event: TouchEvent) => {
-      if (exitTimer !== undefined) return;
-      if (event.touches.length !== 1) {
-        // Once a second finger joins, this sequence belongs to pinch until all
-        // fingers lift. Do not turn its final one-finger tail into a dismissal.
-        interactedRef.current = true;
-        cancel();
-        return;
-      }
-      if (!atFit() || (event.target instanceof Element && event.target.closest('button, a'))) return;
-      const point = event.touches[0];
-      const edge = point.clientX <= 20 || point.clientX >= window.innerWidth - 20;
-      gesture = { x: point.clientX, y: point.clientY, dy: 0, axis: edge ? 'yielded' : 'pending', samples: [{ t: event.timeStamp, at: point.clientY }] };
-    };
-    const move = (event: TouchEvent) => {
-      if (!gesture) return;
-      if (event.touches.length !== 1 || !atFit()) { cancel(); return; }
-      const point = event.touches[0];
-      const dx = point.clientX - gesture.x;
-      const dy = point.clientY - gesture.y;
-      if (Math.hypot(dx, dy) >= 6) interactedRef.current = true;
-      if (gesture.axis === 'yielded') return;
-      trackGesture(gesture.samples, { t: event.timeStamp, at: point.clientY });
-      if (gesture.axis === 'pending') {
-        if (Math.hypot(dx, dy) < 6) return;
-        if (Math.abs(dy) <= Math.abs(dx) * 1.2) { gesture.axis = 'yielded'; return; }
-        gesture.axis = 'vertical';
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      gesture.dy = dy >= 0 ? dy : -24 * (1 - Math.exp(dy / 80));
-      paint(gesture.dy);
-    };
-    const end = (event: TouchEvent) => {
-      if (!gesture) return;
-      const ended = gesture;
-      gesture = null;
-      const velocity = releaseVelocity(ended.samples, event.timeStamp);
-      const dismiss = ended.axis === 'vertical' && ended.dy > 0 &&
-        (ended.dy >= window.innerHeight * 0.2 || velocity >= 0.5);
-      if (!dismiss) { paint(0, true); return; }
-      const duration = reduced ? 140 : Math.min(320, Math.max(140, velocity > 0 ? (window.innerHeight - ended.dy) / velocity : 320));
-      stage.style.transition = reduced ? `opacity ${duration}ms linear` : `translate ${duration}ms ${easing}, opacity ${duration}ms linear`;
-      if (!reduced) stage.style.translate = `0px ${window.innerHeight}px`;
-      stage.style.opacity = '0';
-      backdrop.style.transition = `opacity ${duration}ms linear`;
-      backdrop.style.opacity = '0';
-      chrome.forEach((node) => { node.style.opacity = '0'; });
-      exitTimer = setTimeout(close, duration);
-    };
-    paint(0);
-    gestureSurface.addEventListener('touchstart', start, { capture: true, passive: true });
-    gestureSurface.addEventListener('touchmove', move, { capture: true, passive: false });
-    gestureSurface.addEventListener('touchend', end, true);
-    gestureSurface.addEventListener('touchcancel', cancel, true);
-    return () => {
-      clearTimeout(exitTimer);
-      paint(0);
-      gestureSurface.removeEventListener('touchstart', start, true);
-      gestureSurface.removeEventListener('touchmove', move, true);
-      gestureSurface.removeEventListener('touchend', end, true);
-      gestureSurface.removeEventListener('touchcancel', cancel, true);
-    };
-  }, [gestureSurface, src, routeSurfaceActive, reduced, close]);
 
   // Everything about paging reads from this one set: the arrows, the counter and
   // the keyboard handler below share the single condition it produces. A
@@ -194,6 +100,157 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
     },
     [index, gallery, pageable],
   );
+
+  const previousSrc = pageable && index > 0 ? gallery[index - 1] : null;
+  const nextSrc = pageable && index < gallery.length - 1 ? gallery[index + 1] : null;
+
+  // One direction owner for touch paging and dismissal. See
+  // docs/plans/2026-11-24-image-preview-swiping.md.
+  // Capture outside the zoom wrapper: its own touchmove otherwise pans first.
+  // Never take a pinch, a zoomed pan, a control press, or an iOS edge gesture.
+  React.useLayoutEffect(() => {
+    const stage = stageRef.current;
+    const backdrop = backdropRef.current;
+    if (!gestureSurface || !stage || !backdrop || !src || !routeSurfaceActive) return;
+    const chrome = gestureSurface.querySelectorAll<HTMLElement>('[data-viewer-chrome]');
+    const neighbors = [previousImageRef.current, nextImageRef.current];
+    let gesture: { x: number; y: number; dx: number; dy: number; axis: 'pending' | 'horizontal' | 'vertical' | 'yielded'; samples: GestureSample[]; horizontalSamples: GestureSample[] } | null = null;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const returnMs = readMotionMs('--motion-spring-snappy-duration') || 290;
+    const chromeMs = readMotionMs('--motion-duration-fast') || 160;
+    const easing = 'var(--motion-ease-move, cubic-bezier(0.32, 0.72, 0, 1))';
+    const paint = (dy: number, returning = false) => {
+      const progress = Math.min(1, Math.max(0, dy) / (window.innerHeight * 0.2));
+      stage.style.transition = returning && !reduced ? `translate ${returnMs}ms ${easing}, scale ${returnMs}ms ${easing}` : 'none';
+      stage.style.translate = `0px ${dy}px`;
+      stage.style.scale = String(reduced ? 1 : 1 - 0.15 * progress);
+      stage.style.opacity = '1';
+      backdrop.style.transition = returning && !reduced ? `opacity ${returnMs}ms linear` : 'none';
+      backdrop.style.opacity = String(1 - 0.85 * progress);
+      chrome.forEach((node) => {
+        node.style.transition = `opacity ${chromeMs}ms linear`;
+        node.style.opacity = dy > 8 ? '0' : '1';
+      });
+    };
+    // The adjacent images preload while hidden. Their fit geometry matches the
+    // zoom stage, so committing the new src does not change its landing size.
+    const paintHorizontal = (dx: number, duration = 0) => {
+      const transition = duration && !reduced ? `translate ${duration}ms ${easing}` : 'none';
+      stage.style.transition = transition;
+      stage.style.translate = `${dx}px 0px`;
+      neighbors.forEach((node, i) => {
+        if (!node) return;
+        node.style.visibility = 'visible';
+        node.style.transition = transition;
+        node.style.translate = `${dx + (i === 0 ? -1 : 1) * window.innerWidth}px 0px`;
+      });
+    };
+    const hideNeighbors = () => neighbors.forEach((node) => {
+      if (node) { node.style.visibility = 'hidden'; node.style.transition = 'none'; }
+    });
+    const cancel = () => {
+      const horizontal = gesture?.axis === 'horizontal';
+      gesture = null;
+      clearTimeout(exitTimer);
+      exitTimer = undefined;
+      if (horizontal) paintHorizontal(0, returnMs);
+      else { paint(0, true); hideNeighbors(); }
+    };
+    const atFit = () => transformRef.current?.instance.state.scale === 1;
+    const start = (event: TouchEvent) => {
+      if (event.touches.length !== 1) {
+        // Once a second finger joins, this sequence belongs to pinch until all
+        // fingers lift. Do not turn its final one-finger tail into a dismissal.
+        interactedRef.current = true;
+        cancel();
+        return;
+      }
+      if (exitTimer !== undefined) return;
+      if (!atFit() || (event.target instanceof Element && event.target.closest('button, a'))) return;
+      const point = event.touches[0];
+      const edge = point.clientX <= 20 || point.clientX >= window.innerWidth - 20;
+      gesture = { x: point.clientX, y: point.clientY, dx: 0, dy: 0, axis: edge ? 'yielded' : 'pending', samples: [{ t: event.timeStamp, at: point.clientY }], horizontalSamples: [{ t: event.timeStamp, at: point.clientX }] };
+    };
+    const move = (event: TouchEvent) => {
+      if (!gesture) return;
+      if (event.touches.length !== 1 || !atFit()) { cancel(); return; }
+      const point = event.touches[0];
+      const dx = point.clientX - gesture.x;
+      const dy = point.clientY - gesture.y;
+      if (Math.hypot(dx, dy) >= 6) interactedRef.current = true;
+      if (gesture.axis === 'yielded') return;
+      trackGesture(gesture.samples, { t: event.timeStamp, at: point.clientY });
+      trackGesture(gesture.horizontalSamples, { t: event.timeStamp, at: point.clientX });
+      if (gesture.axis === 'pending') {
+        if (Math.hypot(dx, dy) < 6) return;
+        if (Math.abs(dy) > Math.abs(dx) * 1.2) gesture.axis = 'vertical';
+        else if (pageable && Math.abs(dx) > Math.abs(dy) * 1.2) gesture.axis = 'horizontal';
+        else { gesture.axis = 'yielded'; return; }
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      if (gesture.axis === 'horizontal') {
+        gesture.dx = dx;
+        const neighbor = dx > 0 ? previousSrc : nextSrc;
+        paintHorizontal(neighbor
+          ? Math.max(-window.innerWidth, Math.min(window.innerWidth, dx))
+          : Math.sign(dx) * 64 * (1 - Math.exp(-Math.abs(dx) / 200)));
+        return;
+      }
+      hideNeighbors();
+      gesture.dy = dy >= 0 ? dy : -24 * (1 - Math.exp(dy / 80));
+      paint(gesture.dy);
+    };
+    const end = (event: TouchEvent) => {
+      if (!gesture) return;
+      const ended = gesture;
+      gesture = null;
+      if (ended.axis === 'horizontal') {
+        const velocity = releaseVelocity(ended.horizontalSamples, event.timeStamp);
+        const next = ended.dx > 0 ? previousSrc : nextSrc;
+        const distance = Math.abs(ended.dx);
+        const flick = Math.abs(velocity) >= 0.5 && Math.sign(velocity) === Math.sign(ended.dx);
+        if (!next || (distance < Math.min(120, window.innerWidth * 0.25) && !flick)) {
+          paintHorizontal(0, returnMs);
+          return;
+        }
+        const commit = () => setView((cur) => cur?.src === src ? { ...cur, src: next } : cur);
+        if (reduced) { commit(); return; }
+        const remaining = Math.max(0, window.innerWidth - distance);
+        const duration = Math.min(290, Math.max(140, remaining / Math.max(0.5, Math.abs(velocity))));
+        paintHorizontal(Math.sign(ended.dx) * window.innerWidth, duration);
+        exitTimer = setTimeout(commit, duration);
+        return;
+      }
+      const velocity = releaseVelocity(ended.samples, event.timeStamp);
+      const dismiss = ended.axis === 'vertical' && ended.dy > 0 &&
+        (ended.dy >= window.innerHeight * 0.2 || velocity >= 0.5);
+      if (!dismiss) { paint(0, true); return; }
+      const duration = reduced ? 140 : Math.min(320, Math.max(140, velocity > 0 ? (window.innerHeight - ended.dy) / velocity : 320));
+      stage.style.transition = reduced ? `opacity ${duration}ms linear` : `translate ${duration}ms ${easing}, opacity ${duration}ms linear`;
+      if (!reduced) stage.style.translate = `0px ${window.innerHeight}px`;
+      stage.style.opacity = '0';
+      backdrop.style.transition = `opacity ${duration}ms linear`;
+      backdrop.style.opacity = '0';
+      chrome.forEach((node) => { node.style.opacity = '0'; });
+      exitTimer = setTimeout(close, duration);
+    };
+    paint(0);
+    hideNeighbors();
+    gestureSurface.addEventListener('touchstart', start, { capture: true, passive: true });
+    gestureSurface.addEventListener('touchmove', move, { capture: true, passive: false });
+    gestureSurface.addEventListener('touchend', end, true);
+    gestureSurface.addEventListener('touchcancel', cancel, true);
+    return () => {
+      clearTimeout(exitTimer);
+      paint(0);
+      hideNeighbors();
+      gestureSurface.removeEventListener('touchstart', start, true);
+      gestureSurface.removeEventListener('touchmove', move, true);
+      gestureSurface.removeEventListener('touchend', end, true);
+      gestureSurface.removeEventListener('touchcancel', cancel, true);
+    };
+  }, [gestureSurface, src, routeSurfaceActive, reduced, close, pageable, previousSrc, nextSrc]);
 
   // The lightbox is a modal while its route surface is foreground: it OWNS
   // Escape / arrows. The activity-aware owner withdraws this capture listener
@@ -240,7 +297,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               aria-hidden={!routeSurfaceActive || undefined}
               inert={!routeSurfaceActive || undefined}
               className={cn(
-                'fixed inset-0 z-50 flex items-center justify-center p-6 scheme-dark focus:outline-none',
+                'fixed inset-0 z-50 flex items-center justify-center overflow-hidden p-6 scheme-dark focus:outline-none',
                 !routeSurfaceActive && 'pointer-events-none invisible',
               )}
               onEscapeKeyDown={(event) => {
@@ -407,6 +464,14 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               </TransformComponent>
             </TransformWrapper>
           </div>
+          {([['previous', previousSrc, previousImageRef], ['next', nextSrc, nextImageRef]] as const).map(([side, neighbor, ref]) => neighbor && (
+            <div key={side} ref={ref} data-viewer-neighbor={side} aria-hidden="true"
+              className="pointer-events-none absolute inset-0 flex items-center justify-center"
+              style={{ visibility: 'hidden' }}>
+              <img src={neighbor} alt="" draggable={false}
+                className="max-h-[90vh] max-w-[90vw] rounded-lg object-contain shadow-elevation-3" />
+            </div>
+          ))}
           {pageable && (
             <span data-viewer-chrome className="absolute bottom-4 left-1/2 z-10 -translate-x-1/2 rounded-full bg-white/10 px-3 py-1 font-mono text-[11px] text-white">
               {index + 1} / {gallery.length}
