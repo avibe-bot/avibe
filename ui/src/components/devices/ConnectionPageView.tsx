@@ -265,16 +265,16 @@ function PreferenceGroup({ path, preference, shell = 'app', directOnly, onChange
               </span>
               <span className="min-w-0">
                 <span className="block text-[13px] font-medium text-foreground">{label}</span>
-                <span className="block text-[11px] leading-relaxed text-muted"><KeptTail text={text} /></span>
+                <span className="block text-[11px] leading-relaxed text-muted"><KeptTail fill text={text} /></span>
               </span>
             </button>
           );
         })}
       </div>
-      <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted"><KeptTail text={hint} /></p>
+      <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted"><KeptTail fill text={hint} /></p>
       {preference.reverted && (
         <p role="status" className="border-t border-border bg-gold/10 px-5 py-2.5 text-[11px] leading-relaxed text-foreground">
-          <KeptTail text={t(revertedKeys[revertedFrom][reverted ? reverted.day : 'undated'], { date: reverted?.date, time: reverted?.time })} />
+          <KeptTail fill text={t(revertedKeys[revertedFrom][reverted ? reverted.day : 'undated'], { date: reverted?.date, time: reverted?.time })} />
         </p>
       )}
     </SettingsPanel>

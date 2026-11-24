@@ -73,4 +73,12 @@ describe('KeptTail', () => {
     expect(kept(container).some((each) => each.includes(long))).toBe(false);
     expect(container.textContent).toBe(`Open ${long} now.`);
   });
+  it('fills the line in a full-width row: only a body paragraph\'s short tail is kept', () => {
+    const text = '这个选择只管这台设备。选了之后连不上，App 会自己改回「自动」。';
+    const short = render(<p><KeptTail text={text} /></p>).container;
+    const kept = (container: HTMLElement) => container.querySelector('span.whitespace-nowrap')?.textContent ?? '';
+    const filled = render(<p><KeptTail fill text={text} /></p>).container;
+    expect(kept(short).length).toBeGreaterThan(kept(filled).length);
+    expect(Array.from(kept(filled)).length).toBeLessThanOrEqual(8);
+  });
 });
