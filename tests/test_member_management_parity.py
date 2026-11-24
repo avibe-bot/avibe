@@ -93,6 +93,9 @@ def management_http(tmp_path, monkeypatch):
 # This inventory describes retained effects independently of the policy rules.
 # A newly registered Owner-only management route must be consciously classified.
 _RETAINED_OWNER_ROUTES = {
+    ("POST", "/api/dependencies/model-hub-engine/check"),
+    ("POST", "/api/dependencies/model-hub-engine/update"),
+    ("POST", "/api/dependencies/model-hub-engine/auto-update"),
     # MCP Hub management runs arbitrary local commands: Owner-only (plan §7).
     ("POST", "/api/mcp"),
     ("POST", "/api/mcp/discover"),
@@ -201,7 +204,12 @@ def test_complete_registered_api_management_inventory():
     # + 8 device function, activity and Health ticket methods.
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
-    assert len(endpoints) == 374
+    # Three independent engine channel controls are owner-only, including metadata refresh.
+    assert len(endpoints) == 377
+    for action in ("check", "update", "auto-update"):
+        path = f"/api/dependencies/model-hub-engine/{action}"
+        assert ("POST", path) in endpoints
+        assert http_authorization_policy("POST", path).minimum_role == "owner"
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
