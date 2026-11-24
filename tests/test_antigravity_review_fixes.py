@@ -1260,3 +1260,267 @@ async def test_summary_fork_handoff_survives_failed_turn_and_eviction_until_acce
         turn3_prompt = prompt_rpcs[1]["params"]["prompt"][0]["text"]
         assert "[Avibe handoff]" not in turn3_prompt
         assert "turn 3 after restart" in turn3_prompt
+
+
+# ---------------------------------------------------------------------------
+# 12. Clearing an active effort override resets native thought_level on ACP
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_clearing_effort_override_resets_native_thought_level_on_reused_runtime(
+    tmp_path: Path,
+) -> None:
+    from tests.helpers.antigravity_harness import make_agent_harness, make_request
+
+    async with make_agent_harness(tmp_path, record_rpc=True, name="effort-reset") as h:
+        # Turn 1: explicit override sets thought_level="high" while recording baseline "medium".
+        req1 = make_request(message="turn-1", workdir=h.workdir, model="model-alpha", effort="high")
+        await h.agent.handle_message(req1)
+
+        assert len(h.launches()) == 1
+        set_opts = [(m["params"]["configId"], m["params"]["value"]) for m in h.rpcs("session/set_config_option")]
+        assert set_opts == [("model", "model-alpha"), ("thought_level", "high")]
+        session = h.agent._sessions[req1.composite_session_id]
+        assert session.current_model == "model-alpha"
+        assert session.current_effort == "high"
+        assert session.default_efforts.get("model-alpha") == "medium"
+        assert next(o for o in session.config_options if o["id"] == "thought_level")["currentValue"] == "high"
+
+        # Turn 2: clearing effort (effort=None) on the same model MUST emit set_config_option("thought_level", "medium").
+        rpcs_before_clear = len(h.rpcs("session/set_config_option"))
+        await h.agent.handle_message(
+            make_request(message="turn-2", workdir=h.workdir, model="model-alpha", effort=None)
+        )
+
+        assert len(h.launches()) == 1
+        new_set_opts = [
+            (m["params"]["configId"], m["params"]["value"])
+            for m in h.rpcs("session/set_config_option")[rpcs_before_clear:]
+        ]
+        assert new_set_opts == [("thought_level", "medium")]
+        assert session.current_effort is None
+        assert session.default_efforts.get("model-alpha") == "medium"
+        assert next(o for o in session.config_options if o["id"] == "thought_level")["currentValue"] == "medium"
+
+        # Turn 3: staying on effort=None emits zero redundant set_config_option RPCs.
+        rpcs_after_clear = len(h.rpcs("session/set_config_option"))
+        await h.agent.handle_message(
+            make_request(message="turn-3", workdir=h.workdir, model="model-alpha", effort=None)
+        )
+
+        assert len(h.launches()) == 1
+        assert len(h.rpcs("session/set_config_option")) == rpcs_after_clear
+        assert session.current_effort is None
+
+
+@pytest.mark.asyncio
+async def test_apply_model_and_effort_clear_override_unit_contracts() -> None:
+    from modules.agents.acp import AcpRpcError
+
+    def _make_options(
+        *,
+        current_model: str = "model-alpha",
+        current_effort: str = "high",
+        default_value: str | None = None,
+    ) -> list[dict[str, Any]]:
+        effort_opt: dict[str, Any] = {
+            "id": "thought_level",
+            "category": "thought_level",
+            "currentValue": current_effort,
+            "options": [
+                {"value": "low"},
+                {"value": "medium"},
+                {"value": "high"},
+            ],
+        }
+        if default_value is not None:
+            effort_opt["defaultValue"] = default_value
+        return [
+            {
+                "id": "model",
+                "category": "model",
+                "currentValue": current_model,
+                "options": [
+                    {"value": "model-alpha"},
+                    {"value": "model-beta"},
+                ],
+            },
+            effort_opt,
+        ]
+
+    # 1. Recorded default_effort restores "medium" via thought_level RPC.
+    calls: list[tuple[str, Any]] = []
+
+    class _RestoringClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id
+            calls.append((config_id, value))
+            return {"configOptions": _make_options(current_effort=str(value))}
+
+    applied = await apply_model_and_effort(
+        _RestoringClient(),  # type: ignore[arg-type]
+        "sess-1",
+        _make_options(current_effort="high"),
+        model="model-alpha",
+        effort=None,
+        current_model="model-alpha",
+        current_effort="high",
+        default_effort="medium",
+    )
+    assert calls == [("thought_level", "medium")]
+    assert applied.effort is None
+    assert applied.default_effort == "medium"
+    assert next(o for o in applied.config_options if o["id"] == "thought_level")["currentValue"] == "medium"
+
+    # 2. RPC rejection while resetting effort raises effort_rejected.
+    class _RejectingResetClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id, config_id, value
+            raise AcpRpcError(-32602, "effort reset rejected")
+
+    with pytest.raises(AntigravityModelSelectionError) as rej_exc:
+        await apply_model_and_effort(
+            _RejectingResetClient(),  # type: ignore[arg-type]
+            "sess-1",
+            _make_options(current_effort="high"),
+            model="model-alpha",
+            effort=None,
+            current_model="model-alpha",
+            current_effort="high",
+            default_effort="medium",
+        )
+    assert rej_exc.value.reason == "effort_rejected"
+
+    # 3. Contradictory currentValue while resetting effort raises effort_mismatch.
+    class _MismatchResetClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id, config_id, value
+            return {"configOptions": _make_options(current_effort="high")}
+
+    with pytest.raises(AntigravityModelSelectionError) as mismatch_exc:
+        await apply_model_and_effort(
+            _MismatchResetClient(),  # type: ignore[arg-type]
+            "sess-1",
+            _make_options(current_effort="high"),
+            model="model-alpha",
+            effort=None,
+            current_model="model-alpha",
+            current_effort="high",
+            default_effort="medium",
+        )
+    assert mismatch_exc.value.reason == "effort_mismatch"
+
+    # 4. Omitted default_effort re-applies model; server resetting thought_level succeeds.
+    reapply_calls: list[tuple[str, Any]] = []
+
+    class _ModelReapplyResetsClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id
+            reapply_calls.append((config_id, value))
+            return {"configOptions": _make_options(current_effort="medium")}
+
+    reapplied = await apply_model_and_effort(
+        _ModelReapplyResetsClient(),  # type: ignore[arg-type]
+        "sess-1",
+        _make_options(current_effort="high"),
+        model="model-alpha",
+        effort=None,
+        current_model="model-alpha",
+        current_effort="high",
+    )
+    assert reapply_calls == [("model", "model-alpha")]
+    assert reapplied.effort is None
+    assert reapplied.default_effort == "medium"
+
+    # 5. Omitted default_effort re-applies model; if server advertises defaultValue, applies it.
+    advertised_calls: list[tuple[str, Any]] = []
+
+    class _ModelReapplyAdvertisesDefaultClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id
+            advertised_calls.append((config_id, value))
+            if config_id == "model":
+                return {"configOptions": _make_options(current_effort="high", default_value="medium")}
+            return {"configOptions": _make_options(current_effort=str(value), default_value="medium")}
+
+    advertised = await apply_model_and_effort(
+        _ModelReapplyAdvertisesDefaultClient(),  # type: ignore[arg-type]
+        "sess-1",
+        _make_options(current_effort="high"),
+        model="model-alpha",
+        effort=None,
+        current_model="model-alpha",
+        current_effort="high",
+    )
+    assert advertised_calls == [("model", "model-alpha"), ("thought_level", "medium")]
+    assert advertised.effort is None
+    assert advertised.default_effort == "medium"
+
+    # 6. Omitted default_effort re-applies model; if server keeps stale override with no defaultValue, fails explicitly.
+    stuck_calls: list[tuple[str, Any]] = []
+
+    class _StuckOverrideClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id
+            stuck_calls.append((config_id, value))
+            return {"configOptions": _make_options(current_effort="high")}
+
+    with pytest.raises(AntigravityModelSelectionError) as stuck_exc:
+        await apply_model_and_effort(
+            _StuckOverrideClient(),  # type: ignore[arg-type]
+            "sess-1",
+            _make_options(current_effort="high"),
+            model="model-alpha",
+            effort=None,
+            current_model="model-alpha",
+            current_effort="high",
+        )
+    assert stuck_calls == [("model", "model-alpha")]
+    assert stuck_exc.value.reason == "effort_reset_unavailable"
+
+    # 7. Switching models (model-alpha -> model-beta) while clearing effort (effort=None):
+    # if server preserves currentValue="high" without defaultValue, fail explicitly instead of silently keeping "high".
+    switch_stuck_calls: list[tuple[str, Any]] = []
+
+    class _ModelSwitchPreservesEffortClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id
+            switch_stuck_calls.append((config_id, value))
+            return {"configOptions": _make_options(current_model=str(value), current_effort="high")}
+
+    with pytest.raises(AntigravityModelSelectionError) as switch_stuck_exc:
+        await apply_model_and_effort(
+            _ModelSwitchPreservesEffortClient(),  # type: ignore[arg-type]
+            "sess-1",
+            _make_options(current_model="model-alpha", current_effort="high"),
+            model="model-beta",
+            effort=None,
+            current_model="model-alpha",
+            current_effort="high",
+        )
+    assert switch_stuck_calls == [("model", "model-beta")]
+    assert switch_stuck_exc.value.reason == "effort_reset_unavailable"
+
+    # 8. Switching models (model-alpha -> model-beta) while clearing effort succeeds when server resets effort.
+    switch_reset_calls: list[tuple[str, Any]] = []
+
+    class _ModelSwitchResetsEffortClient:
+        async def session_set_config_option(self, session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+            del session_id
+            switch_reset_calls.append((config_id, value))
+            return {"configOptions": _make_options(current_model=str(value), current_effort="medium")}
+
+    switched = await apply_model_and_effort(
+        _ModelSwitchResetsEffortClient(),  # type: ignore[arg-type]
+        "sess-1",
+        _make_options(current_model="model-alpha", current_effort="high"),
+        model="model-beta",
+        effort=None,
+        current_model="model-alpha",
+        current_effort="high",
+    )
+    assert switch_reset_calls == [("model", "model-beta")]
+    assert switched.model == "model-beta"
+    assert switched.effort is None
+    assert switched.default_effort == "medium"

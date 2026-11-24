@@ -90,6 +90,7 @@ from modules.agents.antigravity.auth import authenticate_antigravity_client
 from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
+    extract_initial_default_effort,
     resolve_requested_model_and_effort,
 )
 from modules.agents.antigravity.rules import render_session_rules
@@ -386,6 +387,7 @@ class _RuntimeSession:
     config_options: tuple[dict[str, Any], ...] = ()
     current_model: str | None = None
     current_effort: str | None = None
+    default_efforts: dict[str, str] = field(default_factory=dict)
     activation: RuntimeActivationIdentity | None = None
     active_turn: _ActiveTurn | None = None
     last_activity: float = field(default_factory=time.monotonic)
@@ -760,6 +762,13 @@ class AntigravityAgent(BaseAgent):
                     if isinstance(raw_options, list)
                     else ()
                 )
+                seeded_default = extract_initial_default_effort(
+                    session.config_options,
+                    allow_current_value=not stored_native_id,
+                )
+                if seeded_default is not None:
+                    init_model, init_effort = seeded_default
+                    session.default_efforts[init_model] = init_effort
                 session.activation = self._attach_activation(runtime_key)
                 self._sessions[runtime_key] = session
             except BaseException:
@@ -1291,10 +1300,13 @@ class AntigravityAgent(BaseAgent):
                 effort=resolved_effort,
                 current_model=session.current_model,
                 current_effort=session.current_effort,
+                default_effort=session.default_efforts.get(resolved_model),
             )
             session.config_options = applied.config_options
             session.current_model = applied.model
             session.current_effort = applied.effort
+            if applied.default_effort is not None:
+                session.default_efforts[applied.model] = applied.default_effort
         except AntigravityResumeUnavailableError as exc:
             mark_prewrite_recovery_required(request.context, "native_session_not_found")
             await self._settle_turn_failure(session, None, request, exc)
