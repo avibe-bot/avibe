@@ -9717,15 +9717,15 @@ def _run_install_command(
 _ASKILL_INSTALL_LOCK = threading.Lock()
 # The managed askill release. Avibe installs it and upgrades an older askill to
 # it; only an explicit repair replaces a newer one.
-ASKILL_VERSION = "0.1.15"
+ASKILL_VERSION = "0.1.17"
 # (sha256, size) of each ASKILL_VERSION binary by askill's platform name, from
 # the release's GitHub asset digests.
 _ASKILL_BINARIES = {
-    "darwin-arm64": ("09d333828577bca89c4c842f3a30fb5459f22a78a59db8287512b3653762acb1", 63759842),
-    "darwin-x64": ("0f81766bcaf18c05148c403ebe561a3b7f2c0699cadca86fc498b5f812fc97a9", 69484624),
-    "linux-arm64": ("e06830ba2170f70e8dc9c5efbe83568f615735c75cca8f6961e45f2fbaf2bc91", 93956240),
-    "linux-x64": ("a5ac72faafc0f3f14c36a34c1a2e2beff777a483ad6ce71ee945297f0fa0aa24", 94894208),
-    "win32-x64": ("00e1bd471f531bded8504f1c6d79edf900ff9cee7e313bf6528be927e508dfe1", 98781696),
+    "darwin-arm64": ("a51371a711f5c6e1449a29532c8869df2ca600111fcf14bb3f6a9b2d275399f6", 89473794),
+    "darwin-x64": ("1a101e0dbb539ddbfd88f5584e1a2a01d550e09f4f076accc833fd5d1c260b4b", 98562352),
+    "linux-arm64": ("8c340cda2135d8827066ffa4f192776127d5dd8c1d48f4e47933f8f0ae27de26", 109562872),
+    "linux-x64": ("5257e7cb627b4af465e64a12b6ea38839dc1164942ad48e7ef38540f1c11b464", 109521072),
+    "win32-x64": ("8f3befa8911ffe1358c9f576d7024dbb705eef79e1da71705df762dde7ea82fc", 115681792),
 }
 _AVAULT_INSTALL_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER_LOCK = threading.Lock()
