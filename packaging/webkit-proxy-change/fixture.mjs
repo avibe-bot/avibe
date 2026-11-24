@@ -45,7 +45,7 @@ window.probe = {
   streams: {}, pending: {},
   async fetch(id, path = '/fetch') {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10000);
+    const timer = setTimeout(() => controller.abort(), 45000);
     try {
       const response = await fetch(path + '?id=' + encodeURIComponent(id), {
         cache: 'no-store', signal: controller.signal
@@ -221,6 +221,11 @@ proxy.on('connect', (req, client, head) => {
   if (!c) { client.end('HTTP/1.1 403 Forbidden\r\n\r\n'); return; }
   const connection = `connect-${++connectionID}`;
   const mode = proxyModes.get(host) ?? 'transport';
+  if (mode === 'silent') {
+    client.on('error', () => {});
+    silentClose(client, c, connection, host);
+    return;
+  }
   const upstreamHost = mode === 'origin' && c.origin === 'h2' ? '127.0.0.2' : '127.0.0.1';
   const upstreamPort = mode === 'origin' ? 443 : c.proxy === 'h2' ? 18444 : 18443;
   log('proxy_connect', {case:c.id, host, target, connection, mode, upstreamHost, upstreamPort});
@@ -241,6 +246,15 @@ proxy.on('connect', (req, client, head) => {
   });
 });
 proxy.listen(18080, '127.0.0.1', () => log('proxy_listening', {port:18080}));
+function silentClose(client, c, connection, host) {
+  const start = performance.now();
+  log('silent_connect', {case:c.id, host, connection});
+  const timer = setTimeout(() => {
+    log('silent_close', {case:c.id, host, connection, elapsedMs:performance.now()-start, bytesWritten:client.bytesWritten});
+    client.end();
+  }, 10000);
+  client.once('close', () => { clearTimeout(timer); log('silent_socket_closed', {case:c.id, connection}); });
+}
 function failureListener(kind, port) {
   return net.createServer(client => {
     const connection = `${kind}-${++connectionID}`;
@@ -258,6 +272,9 @@ function failureListener(kind, port) {
       const c = byHost.get(host);
       if (!c) { client.destroy(); return; }
       log(kind === 'refuse' ? 'proxy_refused' : 'proxy_stall_connect', {port, connection, case:c.id, host, target});
+      if (kind === 'stall' && c.id.startsWith('silent-close-')) {
+        silentClose(client, c, connection, host);
+      }
       if (kind === 'refuse') client.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     });
     client.on('close', () => { stalledClients.delete(client); log('failure_listener_close', {connection}); });
@@ -305,20 +322,10 @@ const control = http.createServer(async (req,res) => {
       result = log('absent_listener_check', {ok:state === 'refused', host, case:c.id, port:18081, state});
     } else if (url.pathname === '/proxy-mode') {
       const host = url.searchParams.get('host'); const mode = url.searchParams.get('mode');
-      if (!byHost.has(host) || !['origin','transport'].includes(mode)) throw new Error('invalid mode');
+      if (!byHost.has(host) || !['origin','transport','silent'].includes(mode)) throw new Error('invalid mode');
       proxyModes.set(host, mode); log('proxy_mode', {host, mode});
     } else if (url.pathname === '/restart-network') {
-      const pid = Number(url.searchParams.get('pid'));
-      if (!Number.isInteger(pid) || pid < 2) throw new Error('invalid PID');
-      const command = execFileSync('/bin/ps', ['-p', String(pid), '-o', 'command='], {encoding:'utf8', timeout:2000}).trim();
-      if (!command.includes('com.apple.WebKit.Networking') ||
-          (!command.includes('Simulator') && !command.includes('CoreSimulator'))) {
-        throw new Error('refuse non-simulator NetworkProcess: ' + command);
-      }
-      recordedProcesses.add(pid);
-      log('intentional_network_kill', {pid, command});
-      process.kill(pid, 'SIGKILL');
-      result = {ok:true, pid, command};
+      throw new Error('NetworkProcess operations disabled for this measurement');
     } else if (url.pathname === '/health') {
       const ports = [443,18443,18444,18080,18082,18083,18090];
       result = {ok:servers.every(server => server.listening) && ports.every(port => listening.has(port)),

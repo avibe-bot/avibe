@@ -1,9 +1,9 @@
-name: WebKit proxy change measurement
+name: WebKit silent close measurement
 
 on:
   push:
     branches:
-      - experiment/webkit-proxy-change
+      - experiment/i3-webkit-silent-close
 
 permissions:
   contents: read
@@ -11,14 +11,14 @@ permissions:
 jobs:
   measure:
     name: iOS ${{ matrix.runtime }}
-    runs-on: macos-26
+    runs-on: xcode-27
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         runtime: ["newest"]
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
     steps:
       - name: Check out experiment
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -43,7 +43,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: webkit-proxy-change-${{ matrix.runtime }}
-          path: ${{ runner.temp }}/webkit-proxy-change-${{ matrix.runtime }}
+          path: |
+            ${{ runner.temp }}/webkit-proxy-change-${{ matrix.runtime }}/*.log
+            ${{ runner.temp }}/webkit-proxy-change-${{ matrix.runtime }}/summary.json
+            ${{ runner.temp }}/webkit-proxy-change-${{ matrix.runtime }}/cert/fixture.jsonl
           if-no-files-found: error
           retention-days: 14
 

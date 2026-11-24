@@ -65,7 +65,7 @@ private final class Browser: NSObject, WKNavigationDelegate {
         self.anchor = anchor
         store = WKWebsiteDataStore(forIdentifier: UUID())
         if let initialRoute {
-            store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: initialRoute)]
+            store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: initialRoute, allowFailover: fixture.allowFailover ?? false)]
         }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = store
@@ -95,7 +95,7 @@ private final class Browser: NSObject, WKNavigationDelegate {
         try await withCheckedThrowingContinuation { continuation in
             javascript = continuation
             javascriptDeadline = Task { @MainActor [weak self] in
-                do { try await Task.sleep(for: .seconds(12)) } catch { return }
+                do { try await Task.sleep(for: .seconds(55)) } catch { return }
                 self?.completeJavaScript(.failure(ProbeError("JavaScript evaluation deadline")))
             }
             webView.callAsyncJavaScript(
@@ -300,7 +300,7 @@ final class WebKitProxyChangeTests: XCTestCase {
               "system":ProcessInfo.processInfo.operatingSystemVersionString, "cases":cases.count])
         var fixtureFailures = 0
         for fixture in cases {
-            let initialRoute = fixture.action == "coldBeforeWebView" ? "direct" : nil
+            let initialRoute = ["coldBeforeWebView", "fixedSilent"].contains(fixture.action) ? "direct" : nil
             let browser = Browser(fixture: fixture, anchor: anchor, initialRoute: initialRoute)
             do {
                 try await run(fixture, browser)
@@ -431,6 +431,16 @@ final class WebKitProxyChangeTests: XCTestCase {
             guard newPID > 1, newPID != oldPID else { throw ProbeError("NetworkProcess restart not demonstrated") }
             _ = try await browser.observe("restart-page", expression:"window.probe.page")
             _ = try await browser.fetch("after-restart")
+        case "fixedSilent":
+            try await browser.load("\(fixture.id)-failure-page")
+            let page = try await browser.observe("failure-page", expression: "window.probe.page")
+            guard page["route"] as? String == "proxy-backend", page["protocol"] as? String == "1.1" else {
+                throw ProbeError("fixed route did not reach the proxy backend")
+            }
+            _ = try await control("/proxy-mode?host=\(fixture.host)&mode=silent")
+            let closed = try await control("/close-proxy?host=\(fixture.host)")
+            guard (closed["closed"] as? Int ?? 0) > 0 else { throw ProbeError("no existing CONNECT closed") }
+            _ = try await browser.fetch("failure-fetch")
         case "failure":
             try await browser.load("\(fixture.id)-failure-page")
             let page = try await browser.observe("failure-page", expression:"window.probe.page")

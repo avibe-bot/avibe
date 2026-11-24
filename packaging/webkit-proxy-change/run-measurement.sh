@@ -16,7 +16,7 @@ import json, sys
 p, stages_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
 data = json.load(open(p))
 stages = [json.loads(line) for line in open(stages_path)]
-names = ("build-for-testing", "product-validation", "simulator-ready", "install", "test-launch", "lifecycle", "direct-minimal", "cold-minimal", "full-matrix")
+names = ("build-for-testing", "product-validation", "simulator-ready", "install", "silent-close")
 if not stages:
     cause = data.get("reason", "setup failed before build")
     stages = [{"stage": name, "status": "skipped", "verdict": "unmeasured", "exit": None, "cause": cause} for name in names]
@@ -86,6 +86,7 @@ else
 fi
 
 runtime_version=${runtime%%|*}
+[[ "$runtime_version" == 27.2 ]] || { echo "Expected pinned iOS 27.2, got $runtime_version" >&2; exit 2; }
 runtime_id=${runtime#*|}
 printf '%s\n' "$runtime" | tee "$out/runtime.txt"
 printf '{"status":"running","label":"%s","runtimeVersion":"%s","runtimeID":"%s"}\n' "$label" "$runtime_version" "$runtime_id" > "$out/summary.json"
@@ -140,7 +141,7 @@ for _ in {1..100}; do
   sleep 0.1
 done
 curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 27 and d["lifecycleCases"] == 3 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 4 and d["lifecycleCases"] == 3 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
 bounded 20 python3 - "$probe_dir/matrix.json" <<'PY'
 import json, socket, sys
 for row in json.load(open(sys.argv[1])):
@@ -159,7 +160,7 @@ PY
 device_type=$(bounded 30 xcrun simctl list devicetypes -j | python3 -c '
 import json, sys
 items=json.load(sys.stdin).get("devicetypes", [])
-for preferred in ("iPhone 15", "iPhone 14", "iPhone 16"):
+for preferred in ("iPhone 18 Pro",):
     for item in items:
         if item.get("name") == preferred:
             print(item["identifier"]); raise SystemExit
@@ -291,11 +292,7 @@ run_stage build-for-testing python3 "$probe_dir/validate-stage.py" timeout 600 \
 run_stage product-validation validate_products
 run_stage simulator-ready python3 "$probe_dir/validate-stage.py" timeout "$boot_timeout" xcrun simctl bootstatus "$device_id" -b
 run_stage install python3 "$probe_dir/validate-stage.py" timeout 60 xcrun simctl install "$device_id" "$app"
-run_stage test-launch test_method test-launch testHostLaunch 150
-run_stage lifecycle run_lifecycle
-run_stage direct-minimal test_method direct-minimal testDirectTLSMinimal 120
-run_stage cold-minimal test_method cold-minimal testColdMinimal 120
-run_stage full-matrix test_method full-matrix testMatrix 900
+run_stage silent-close test_method silent-close testMatrix 480
 
 python3 "$probe_dir/validate-stage.py" timeout 30 xcrun simctl spawn "$device_id" log show --style compact --last 30m \
   --predicate 'process == "com.apple.WebKit.Networking" OR process == "com.apple.WebKit.WebContent"' \
