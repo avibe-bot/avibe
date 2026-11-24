@@ -94,6 +94,7 @@ from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
     extract_initial_default_effort,
+    has_model_config_option,
     resolve_requested_model_and_effort,
 )
 from modules.agents.antigravity.rules import render_session_rules
@@ -346,6 +347,7 @@ class _RuntimeSession:
     current_model: str | None = None
     current_effort: str | None = None
     default_efforts: dict[str, str] = field(default_factory=dict)
+    selection_dirty: bool = False
     activation: RuntimeActivationIdentity | None = None
     active_turn: _ActiveTurn | None = None
     last_activity: float = field(default_factory=time.monotonic)
@@ -1215,6 +1217,26 @@ class AntigravityAgent(BaseAgent):
         )
         await self._remove_ack_reaction(request)
 
+    @staticmethod
+    def _invalidate_session_selection(
+        session: _RuntimeSession,
+        error: BaseException,
+    ) -> None:
+        """Invalidate cached selection state after any failed model/effort apply.
+
+        Preserves ``default_efforts`` and any active ``current_effort`` override so
+        the next turn explicitly reapplies the requested model and still restores
+        the model's baseline effort when an override is cleared.
+        """
+        session.current_model = None
+        session.selection_dirty = True
+        if (
+            isinstance(error, AntigravityModelSelectionError)
+            and error.config_options
+            and has_model_config_option(error.config_options)
+        ):
+            session.config_options = error.config_options
+
     async def handle_message(self, request: AgentRequest) -> None:
         if self._shutting_down or getattr(self.antigravity_config, "enabled", True) is False:
             await self._refuse_disabled_turn(request)
@@ -1250,19 +1272,25 @@ class AntigravityAgent(BaseAgent):
             )
             assert session.native_session_id is not None
 
-            applied = await apply_model_and_effort(
-                session.client,
-                session.native_session_id,
-                session.config_options,
-                model=resolved_model,
-                effort=resolved_effort,
-                current_model=session.current_model,
-                current_effort=session.current_effort,
-                default_effort=session.default_efforts.get(resolved_model),
-            )
+            try:
+                applied = await apply_model_and_effort(
+                    session.client,
+                    session.native_session_id,
+                    session.config_options,
+                    model=resolved_model,
+                    effort=resolved_effort,
+                    current_model=session.current_model,
+                    current_effort=session.current_effort,
+                    default_effort=session.default_efforts.get(resolved_model),
+                    force_reapply=session.selection_dirty,
+                )
+            except BaseException as exc:
+                self._invalidate_session_selection(session, exc)
+                raise
             session.config_options = applied.config_options
             session.current_model = applied.model
             session.current_effort = applied.effort
+            session.selection_dirty = False
             if applied.default_effort is not None:
                 session.default_efforts[applied.model] = applied.default_effort
         except AntigravityResumeUnavailableError as exc:
