@@ -3357,7 +3357,7 @@
   "accessBlocked": {
     "title": "这个地址打不开 Avibe",
     "body": "Avibe 在运行，但不在这个地址打开。",
-    "hint": "在 avibe.bot 登录后，从你的列表里打开它；也可以在运行 Avibe 的那台电脑上直接打开。",
+    "hint": "到运行 Avibe 的那台电脑上打开它。这个 Avibe 绑定了账号的话，也可以在 avibe.bot 登录后从你的列表里打开。",
     "code": "原因：{{code}}",
     "retry": "重试"
   },
@@ -3443,7 +3443,7 @@
     "project_agent_conflict": "该项目的 Agent 已在别处变更，正在重新加载，请再次修改。",
     "project_order_conflict": "项目顺序已在别处变更，列表已刷新，请重新拖动。",
     "invalid_project_order": "无法保存项目顺序，请刷新列表后重试。",
-    "remote_access_host_mismatch": "这个地址打不开 Avibe。在 avibe.bot 登录后从你的列表里打开它，或者在运行 Avibe 的那台电脑上直接打开。",
+    "remote_access_host_mismatch": "这个地址打不开 Avibe。到运行 Avibe 的那台电脑上打开它；这个 Avibe 绑定了账号的话，也可以在 avibe.bot 登录后从你的列表里打开。",
     "remote_access_config_unavailable": "Avibe 无法读取配置。请确认服务运行正常后重试。",
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
     "remote_access_session_secret_missing": "远程访问配置有误（缺少会话密钥）。请重新配对此设备以恢复访问。",
@@ -8525,7 +8525,20 @@
       "gone": "这台设备已经不在列表里了。",
       "lost": "没有收到结果，不确定有没有完成。下面是重新读取到的状态。",
       "offFromAfar": "没有收到回答，这正是关闭成功时的样子：远程访问一关，这台设备就收不到回答了。要再用，回到运行 Avibe 的电脑上重新开启。",
-      "closedFromAfar": "远程访问已关闭。这台设备现在连不上这个 Avibe 了；要再用，回到运行 Avibe 的电脑上重新开启。"
+      "closedFromAfar": "远程访问已关闭。这台设备现在连不上这个 Avibe 了；要再用，回到运行 Avibe 的电脑上重新开启。",
+      "restrictedFromAfar": "已经改了。这台设备打不开这个 Avibe 了，要到那台电脑上才能再改回来。"
+    },
+    "networkOpen": {
+      "body": "同一网络上的设备现在不用登录就能打开这个 Avibe。开启远程访问后，它们要先登录。",
+      "action": "只允许这台电脑",
+      "confirmTitle": "只允许这台电脑？",
+      "confirmBody": "改了之后，这台设备也打不开了，要到那台电脑上才能再改回来。",
+      "closedBody": "只有这台电脑能打开这个 Avibe。"
+    },
+    "proxyAccess": {
+      "body": "经 {{hosts}} 打开的浏览器不用登录，就是这个 Avibe 的所有者；它们不在这张名单里，也不能在这里退出。",
+      "range": "受信任的代理写的是一段地址，这段地址里的每一台机器都能这样进来。",
+      "where": "这是这台电脑的反向代理声明，在它的配置和启动环境里改。"
     },
     "outsideChange": {
       "title": "这个 Avibe 的地址在别处被改了",
