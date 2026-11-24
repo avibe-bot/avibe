@@ -275,8 +275,7 @@ without an Avibe release. Its design, trust chain and client rules are in
 **The channel is not commissioned.** Avibe ships no channel key
 (`vibe/model_hub_runtime/engine_channel_roots.json` has no root), so installed
 clients make no channel request and every publication step stops first. No
-installed Avibe adopts an engine from the channel yet: the client reads and
-checks the index, and the code that would act on it is later work.
+installed Avibe adopts an engine from this public channel yet.
 Commissioning is listed at the end of this section and needs the owner.
 
 ### One signed index, one ledger
@@ -291,22 +290,10 @@ There is one current index. It has no expiry and is never renewed: a client
 follows the highest sequence it has accepted for as long as that is the
 highest it has, and only a promotion or a withdrawal produces a new one.
 
-What the index should say is recorded in a **ledger on the signer host**: the
-next sequence, the exact payload last allocated, and every release identity
-and withdrawal ever allocated. `Publish Model Hub engine channel` is the
-index's only writer, and it plans every change from that ledger. It never
-reads the published object, the bucket or a workflow artifact as the state to
-continue from. If the published index is replaced by an older signed one, or
-deleted, the next publication puts back what the ledger holds, and the signer
-is never led to sign the older state again.
-
-The ledger must not go backward. Restoring it from an old copy is not a
-supported recovery: if the published index was rolled back or removed as
-well, nothing in this tooling can tell that ledger from a current one, and it
-would sign an index that forgets later withdrawals. A lost, damaged or
-doubtful ledger stops the channel until a recovery is separately designed and
-approved. The workflow has no operation that creates, resets or restores a
-ledger.
+The exact bytes of each allocation are committed by reviewed PR, before signing.
+The ledger is additive on protected `master`; artifacts and the public object
+are not allocation authority. A lost, rewritten or uncertain history is an
+operational stop. Never roll back the ledger or allocate from a backup.
 
 Nothing regenerates the index from the list of GitHub releases, and
 `Mirror releases to dl.avibe.bot` refuses to write or delete that object.
@@ -387,15 +374,12 @@ dispatch on `master` and this run's approval.
 | Operation | What it does |
 | --- | --- |
 | `release` | Publishes trusted-checked candidate assets after owner approval. Does not touch the index. |
-| `promote` | Lists an owner-approved, published, mirrored release in the index. Allocates the next sequence. |
-| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Allocates the next sequence. |
-| `resume` | Publishes again, byte for byte, the index the ledger last allocated. No new sequence and no new signature, however long ago it was allocated. |
+| `promote` | Lists an owner-approved, published, mirrored release in the index. Uses the next exact PR allocation. |
+| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Uses the next exact PR allocation. |
+| `resume` | Reuses the original run's signed artifact at the same SHA, after fresh personal approval. Never signs. |
 
-Nothing else allocates a sequence, and nothing runs on a schedule. An index
-does not expire, so there is no renewal to perform or to miss, and no
-operation re-signs an unchanged list. The signer host only has to be up for a
-run that was approved; between runs it can be off, as long as its ledger
-survives.
+Nothing renews an index. If the artifact was lost, repeat the qualified operation
+on the same allocated bytes; never assign the sequence to another payload.
 
 **What a client without the newest index does.** It keeps following the index
 it has. If that index lists a release that a later index withdrew, the client
@@ -416,21 +400,6 @@ one. An engine that only a packaged Avibe bundles can be withdrawn too.
 Clients learn of a withdrawal at their next check; a machine that cannot
 reach the index learns of it when it can.
 
-**When a run fails part way.** The signer commits the exact payload to the
-ledger before it asks avault to sign, and commits the envelope before it
-leaves the job. So a sequence is only ever signed over one payload, and a
-failure leaves one of two states:
-
-- Nothing was allocated. Dispatch the operation again.
-- A sequence was allocated, and its envelope was or was not signed or
-  published. Dispatch `resume`: it signs that same payload if it was never
-  signed, and publishes the identical envelope. Publishing an envelope the
-  bucket already holds writes nothing.
-
-Another operation may also be dispatched instead of `resume`. It is planned
-from the ledger, which already contains the unpublished change, so that
-change is carried into the new index rather than lost. Sequences may skip.
-
 ### Availability of listed releases
 
 `Guard Model Hub engine release` keeps available the engine Avibe packages and
@@ -442,37 +411,9 @@ missing and never overwrites published bytes. It reads the index through the
 keys Avibe ships and holds no channel key and no bucket credential, so it can
 restore pinned bytes but cannot promote a release or undo a withdrawal.
 
-### Authority
+### Hosted signer and writer
 
-The channel workflow separates authority so that no job holds two:
-
-- `authorize` holds no secret. It requires the reviewed workflow, dispatched on
-  `master`, and reads both GitHub Environments from the API: each must exist,
-  require review by a named user, and admit only `master`.
-- `sign` runs on the signer host. The channel key stays inside avault there,
-  beside the ledger. The job holds no bucket credential and runs only this
-  checkout's scripts.
-- `publish` holds the bucket credential and no key. It writes only over the
-  object it read (`If-Match`), or only where none exists (`If-None-Match`). It
-  refuses to replace a stored index signed by the channel key unless the new
-  one strictly follows it, by sequence and by content.
-
-`release`, `sign` and `publish` each prove, before their first privileged step,
-that this run was approved for their Environment by one of its required
-reviewers. A job that names an Environment nobody configured would otherwise
-run unprotected.
-
-Those checks are not an execution boundary for the signer host. A self-hosted
-runner runs whatever its runner group admits, so `sign` names the runner
-group, and that group must admit only this workflow at `refs/heads/master`.
-
-A change counts as published only after the bucket returns the exact envelope
-and the public URL serves those same bytes. The object is cached for 60
-seconds, so the workflow waits for the public URL instead of purging it.
-
-### Hosted-signer proposal (not commissioned)
-
-The hosted workflow is disabled by default. Its proposed ledger is the complete,
+The hosted workflow is disabled by default. Its ledger is the complete,
 protected first-parent history of `master`, not a host directory. Before the root
 can land, the owner must verify required PR review, no force pushes/deletions or
 bypass on master, and distinct named-reviewer environments limited to the master
@@ -500,44 +441,29 @@ or expired, repeat the same promotion/withdrawal; the pinned signer deterministi
 signs only those exact allocated bytes. Actions reruns are refused because the
 approval history is per run, not per attempt. An unexpected public/stored index,
 incomplete history or uncertain ledger is a stop.
-The former host-ledger design below is historical, **not** a way to commission this
-hosted draft. No root, allocation or receipt is supplied by the proposal.
 
 ### Commissioning (owner-held, not done)
 
-Commissioning does not turn `untrusted_rehearsal` into an authority. It remains
-an owner-held action that requires the signer, ledger, protected environments and
-custody boundaries below; this follow-up neither commissions nor verifies them.
+The code alone grants no authority. Before the separate public-root PR, attest
+to the actual master protections, denial of force-push and deletion, exact-master
+environment policies, the owner's personal (not agent-accessible) approval
+identity, and isolation of the two credentials. Do not assume a GitHub account
+shared with an agent proves a human approved a job. Investigate any gap before
+commissioning. No runner group, signing host or on-host ledger is required.
 
-Nothing below exists yet, and this repository creates none of it:
+The owner generates a dedicated fresh key using the reviewed hosted helper
+(`generate`, an explicit `--avault` executable and a new private `--output` file).
+The generator needs avault 0.1.11 or later; the CI exercise uses 0.1.11 and the
+hosted signer and oldest client verifier use the pinned 0.1.10 binary. Only the
+compressed public key is printed. The owner imports the whole credential file
+into the signer environment without printing or transmitting it to an agent.
+The private runbook holds the exact setup commands. Only the public key ID,
+compressed public key and genesis sequence floor belong in the root PR.
 
-- **A channel key.** A dedicated secp256k1 key that is not a wallet key,
-  generated and held inside avault on the signer. avault 0.1.10 cannot generate
-  a secp256k1 key; that needs the avault release that adds
-  `keypair generate --curve secp256k1` (avault#47, not yet released). Clients
-  are unaffected: they only verify, which avault 0.1.10 does.
-- **The public root.** A reviewed change adds the key id, the compressed public
-  key and a sequence floor to `engine_channel_roots.json`. It must not come
-  before the protections below are in place.
-- **The signer host and its runner group.** A self-hosted runner in the group
-  `model-hub-engine-channel-signer`, with avault, its store, the sealed key and
-  a durable directory for the ledger. The group must admit only the channel
-  workflow at `refs/heads/master`. Whether this organization's plan can
-  enforce that restriction is **not verified**. Without it, any workflow run
-  in the repository could reach the signer host, and the signer must not be
-  commissioned. The host is needed only while an approved run signs. It does
-  not have to stay up between runs; the ledger directory has to outlast them.
-- **The ledger.** Created once, by hand on the signer host, with
-  `scripts/model_hub_engine_channel.py initialize-ledger`, for a channel whose
-  key has never signed an index. An empty directory is not proof of that; the
-  owner asserts it. It is never run again. The ledger holds no secret and
-  should be backed up, but a backup is a record, not something to restore and
-  continue from.
-- **Two GitHub Environments**, `model-hub-engine-channel-signer` and
-  `model-hub-engine-channel-writer`, each with required reviewers and a branch
-  policy of exactly `master`, and the repository variables and Environment
-  secrets the workflow names. The writer's bucket credential is separate from
-  the release mirror's.
+The isolated contract test verifies disposable key generation, import, signature
+verification and deterministic re-signing; it does not create environments or
+prove the live approval ceremony. Never enable the hosted path, dispatch a
+production trial, or treat machine-generated approval as an owner sign-off.
 
 ## Managed-runtime manifests
 

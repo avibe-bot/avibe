@@ -1163,7 +1163,9 @@ def test_trusted_channel_prepare_reads_untrusted_artifacts_and_uploads_new_trust
     assert "model-hub-engine-untrusted-rehearsal" in text
     assert "model-hub-engine-trusted-assets" in text
     assert "model-hub-engine-untrusted-assets" in text
-    assert "rehearsal-baselines" in text
+    for job in ("sign", "publish"):
+        assert any(step.get("env", {}).get("REHEARSAL_BASELINES") == "${{ needs.prepare.outputs.baselines }}"
+                   for step in workflow["jobs"][job]["steps"])
     assert "Runtime pass/fail assertions above are rehearsal data" in text
     assert "REHEARSAL_RUN_ID: ${{ inputs.rehearsal_run_id }}" in text
     assert "persist-credentials: false" in text
