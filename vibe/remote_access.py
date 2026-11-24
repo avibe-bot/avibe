@@ -5825,7 +5825,7 @@ def _pairing_failure_after_claim(
     if retired:
         if (marker_persisted and not claim.get('redeem_request') and not claim.get('personal_claim')
                 and result.get('status') == 400 and result.get('error') in ('invalid_pairing_key', 'pairing_key_used')):
-            return {'ok': False, 'status': 400, 'error': 'pairing_input_rejected', 'cause': result['error']}
+            return {'ok': False, 'status': 400, 'error': result['error'], 'input_rejected': True}
         return result
     return {
         **result,
@@ -6417,6 +6417,8 @@ def _redeem_pairing_claim(
             failure = {"ok": False, "error": reason, "status": exc.status}
         else:
             failure = {"ok": False, **exc.payload, "status": exc.status}
+            # Only local retirement of this caller's first send can set the hint.
+            failure.pop("input_rejected", None)
         retry_after = exc.payload.get("retry_after_seconds")
         if exc.status == 429 and type(retry_after) is int and 0 < retry_after <= 2**53:
             failure['retry_after_seconds'] = retry_after

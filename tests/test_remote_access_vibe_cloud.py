@@ -2548,7 +2548,7 @@ def test_pair_preserves_backend_error_response(monkeypatch) -> None:
 
     result = remote_access.pair("vrp_test", "https://backend.test")
 
-    assert result == {"ok": False, "error": "pairing_input_rejected", "cause": "invalid_pairing_key", "status": 400}
+    assert result == {"ok": False, "error": "invalid_pairing_key", "input_rejected": True, "status": 400}
 
 
 def test_pair_queues_lifecycle_status_for_drain(monkeypatch, tmp_path) -> None:

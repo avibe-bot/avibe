@@ -564,7 +564,7 @@ def test_definitive_redeem_failure_retires_prepared_claim(pairing_host, monkeypa
         ),
     )
     result = remote_access.pair("key_bad", "https://backend.test")
-    assert result['error'] == 'pairing_input_rejected' and result['cause'] == 'invalid_pairing_key'
+    assert result == {'ok': False, 'status': 400, 'error': 'invalid_pairing_key', 'input_rejected': True}
     assert not (root / "state/pending-pairing.json").exists()
 
 
@@ -587,9 +587,10 @@ def test_only_known_redeem_rejections_retire_prepared_claim(
     result = remote_access.pair("key_bad", "https://backend.test")
 
     if error_code in ('invalid_pairing_key', 'pairing_key_used'):
-        assert result == {'ok': False, 'status': 400, 'error': 'pairing_input_rejected', 'cause': error_code}
+        assert result == {'ok': False, 'status': 400, 'error': error_code, 'input_rejected': True}
     else:
         assert result['error'] == error_code
+        assert 'input_rejected' not in result
     assert not (root / "state/pending-pairing.json").exists()
 
 
@@ -707,6 +708,7 @@ def test_definitive_failure_marker_write_failure_does_not_promise_recovery(
     )
     result = remote_access.pair("key_bad", "https://backend.test")
     assert result["error"] == "pairing_retirement_failed"
+    assert "input_rejected" not in result
     assert result["pairing"]["retirement_pending"] is False
     journal = root / "state/pending-pairing.json"
     assert json.loads(journal.read_text(encoding="utf-8"))["phase"] == "prepared"
@@ -1502,6 +1504,7 @@ def test_definitive_failure_cannot_retire_superseding_claim(pairing_host, monkey
 
     assert result_b["ok"]
     assert result_a["error"] == "invalid_pairing_key"
+    assert "input_rejected" not in result_a
     saved = V2Config.load().remote_access.vibe_cloud
     assert saved.instance_id == "inst_B"
     assert saved.backend_url == "https://other-backend.test"

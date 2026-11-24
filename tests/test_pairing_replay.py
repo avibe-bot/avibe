@@ -81,6 +81,18 @@ def test_retry_from_disk_uses_identical_wire_request_and_safe_log(setup_replay, 
                     'Pairing redeem attempt=2 result=success next_retry_at=None']
 
 
+@pytest.mark.parametrize('error', ['invalid_pairing_key', 'pairing_key_used'])
+def test_replayed_rejection_never_sets_first_input_hint(setup_replay, error):
+    wire, clock, payload, post = setup_replay
+    assert post(payload).get_json()['replay_state'] == 'scheduled'
+    clock[0] += 2
+    wire.status = 400
+    wire.body = json.dumps({'error': error, 'input_rejected': True}).encode()
+    result = post({}).get_json()
+    assert len(wire.sent) == 2 and wire.sent[0] == wire.sent[1]
+    assert not result['ok'] and 'input_rejected' not in result
+
+
 def test_server_pending_is_a_floor_for_manual_and_auto_then_expiry_stops(setup_replay):
     wire, clock, payload, post = setup_replay
     wire.status, wire.body = 409, b'{"error":"pairing_redeem_pending","retry_after_seconds":7}'
