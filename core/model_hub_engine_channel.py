@@ -851,6 +851,9 @@ class Resolution:
     #: False under a hold: ``target`` may then only be activated from an
     #: engine already verified on this machine.
     download_authorized: bool = False
+    # Display metadata only. Neither field authorizes a stage or activation.
+    offered: ChannelRelease | None = None
+    unmet_minimum: str | None = None
 
 
 def avibe_version_qualifies(avibe_version: str) -> Any | None:
@@ -938,8 +941,6 @@ def resolve(
         return Resolution(ResolutionAction.KEEP, "engine_identity_unrecognized")
     if hold is not None:
         return Resolution(ResolutionAction.KEEP, hold)
-    if not allow_adoption:
-        return Resolution(ResolutionAction.KEEP, "adoption_disabled")
     candidates = [
         release
         for release in payload.releases
@@ -947,5 +948,14 @@ def resolve(
     ]
     newer = max(candidates, key=lambda release: release.revision, default=None)
     if newer is None:
-        return Resolution(ResolutionAction.KEEP, "up_to_date")
+        # A higher minimum is worth showing only when it alone disqualifies
+        # an otherwise eligible forward move on this host.
+        blocked = [r for r in payload.releases if r.revision > current_revision and r.revision >= bundled_revision
+                   and r.asset_release_tag not in revoked and r.asset_release_tag not in quarantined
+                   and r.spec.archive_for(host_platform) is not None and Version(r.min_avibe_version) > running]
+        closest = min(blocked, key=lambda r: r.minimum, default=None)
+        return Resolution(ResolutionAction.KEEP, "adoption_disabled" if not allow_adoption else "up_to_date",
+                          unmet_minimum=closest.min_avibe_version if closest else None)
+    if not allow_adoption:
+        return Resolution(ResolutionAction.KEEP, "adoption_disabled", offered=newer)
     return Resolution(ResolutionAction.ADOPT, "newer_release", newer, download_authorized=True)

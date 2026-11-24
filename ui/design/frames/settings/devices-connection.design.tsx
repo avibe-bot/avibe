@@ -61,11 +61,8 @@ const APP_390 = { ...IPHONE_17_PRO, width: 390, height: 2400 };
 
 function frame(name: string, title: string, size: { width: number; height: number; safeArea?: { top: number; bottom: number } }, props: Partial<ConnectionPageViewProps>, extra: Partial<FrameSpec> & { app?: boolean } = {}): FrameSpec {
   const { app, ...spec } = extra;
-  // 「更改域名」 ships turned off in this release (features.ts): a frame that draws it is the next one's.
-  const shown = { ...base, ...props };
-  const nextRelease = shown.renameEntry !== false && Boolean(shown.address?.eligible);
   return {
-    name, title: nextRelease ? `${title}（更改域名入口：下一版）` : title, ...size, status: 'shipped', themes: ['light'], route,
+    name, title, ...size, status: 'shipped', themes: ['light'], route,
     fixtures: settingsFixtures({}, app ? { nativeShell: IOS_APP_CAPABILITIES } : {}),
     render: settingsPage('remote-access/connection', <ConnectionPageView {...base} {...props} />),
     ...spec,

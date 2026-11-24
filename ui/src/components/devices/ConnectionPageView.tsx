@@ -70,8 +70,6 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   /** 「仅直连和中继」 is offered: the shell takes it and this instance has direct turned on. Not
    *  offered, it is not shown at all, unless it is the choice already made. */
   directOnly?: boolean;
-  /** 「更改域名」 is offered in this release (features.ts). The frames draw it; the page passes the switch. */
-  renameEntry?: boolean;
   refused?: SwitchRefusal;
   /** A switch whose change is on its way: it waits. */
   sending?: ConnectionSetting;
@@ -319,7 +317,7 @@ function RelayRow({ relay, direct, inUse, refused, busy, onChange }: {
 }
 
 export function ConnectionPageView({
-  load, connection, tunnel, remote, via, path, preference, choiceShell, directOnly, renameEntry = true, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
+  load, connection, tunnel, remote, via, path, preference, choiceShell, directOnly, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
   rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindOpen, rebindBusy, ...actions
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
@@ -355,7 +353,7 @@ export function ConnectionPageView({
               </div>
             )}
           </div>
-          {renameEntry && address?.eligible && (
+          {address?.eligible && (
             <Button variant="ghost" size="compact" className="shrink-0 text-destructive-ink" onClick={actions.onChangeDomain}>
               {t('devices.connection.changeDomain')}
             </Button>

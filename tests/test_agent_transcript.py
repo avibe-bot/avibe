@@ -313,6 +313,41 @@ async def test_recovery_facts_survive_without_changing_message_contract(engine, 
     assert "native_search_recovery" not in model
 
 
+@pytest.mark.parametrize("protocol", ["anthropic", "openai_responses"])
+async def test_search_with_unknown_serving_source_is_not_a_size_anchor_after_reload(engine, protocol):
+    from core.agent_core.ai.provider import ModelCapabilities, ModelEndpoint, ModelRequest
+    from core.agent_core.harness.context import budget, last_anchor
+    from core.agent_core.harness.projection import context_view
+    from tests.agent_core.ai.test_hosted_parsing import WEB, WEB_SEARCH_CALL, _anthropic, _message, _responses, _use
+
+    # No served-hop report: the adapter must keep the usage and answer but not the search payload.
+    if protocol == "anthropic":
+        body = _anthropic(_use("search1", "q"), [{"type": "content_block_start", "content_block": {
+            "type": "text", "text": "ok",
+        }}], server_tool_use=0)
+    else:
+        body = _responses([WEB_SEARCH_CALL, {"id": "answer", "type": "message", "content": [
+            {"type": "output_text", "text": "ok"},
+        ]}], {"input_tokens": 990_000})
+    message = await _message(protocol, body, tools=(WEB,), served=False)
+    assert message.content == (text("ok"),) and message.hosted_summary is None
+    assert message.usage and message.usage.input_tokens == (6 if protocol == "anthropic" else 990_000)
+    sid = "ses_search_no_source"
+    with engine.begin() as conn:
+        home = _scope(conn, "C-search-no-source")
+        _session(conn, sid, home)
+        consumed = _row(conn, sid, home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input(sid, consumed, _user("go"))
+    await store.append_response(sid, message, final=True, request={"tokens": 1})
+    rows = await store.load(sid)
+    assert rows[-1].message.usage == message.usage
+    view = context_view(rows)
+    endpoint = ModelEndpoint(protocol, "http://hub.invalid", "model-x", "test", provider="upstream")
+    req = ModelRequest(endpoint, "", view.messages, (), 256)
+    assert budget(req, ModelCapabilities(), transcript=view.messages, anchor=last_anchor(rows, view)).est == 2
+
+
 async def test_hosted_render_epoch_is_response_metadata_not_canonical_message_content(engine):
     with engine.begin() as conn:
         home = _scope(conn, "C-hosted-render-epoch")

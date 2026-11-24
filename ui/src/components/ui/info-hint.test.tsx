@@ -56,3 +56,46 @@ it('opens on mouse hover without taking the page (and the ⓘ itself) away from 
   await act(async () => { fireEvent.pointerEnter(trigger, { pointerType: 'mouse' }); });
   expect(screen.getByText('Help text')).toBeTruthy();
 });
+
+// A hint that holds a link (the Dependencies page's attribution) must let the keyboard reach it.
+const renderLinkHint = () => render(
+  <>
+    <InfoHint hover interactive label="About" content={<a href="https://example.test/project">Project</a>} />
+    <button type="button">Next</button>
+  </>,
+);
+
+it('moves focus into an interactive panel when it is opened from the keyboard, and back on Escape', async () => {
+  renderLinkHint();
+  const trigger = screen.getByLabelText('About');
+  trigger.focus();
+  // Enter or Space on a button is a click with no pointer behind it (detail 0).
+  await act(async () => { fireEvent.click(trigger, { detail: 0 }); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  // Focus lands on the panel itself (it is read out), and the link is the next stop inside it.
+  const link = screen.getByRole('link', { name: 'Project' });
+  const panel = link.closest('[role="dialog"]');
+  expect(panel).not.toBeNull();
+  expect(panel!.contains(document.activeElement)).toBe(true);
+  expect(document.activeElement).not.toBe(trigger);
+  await act(async () => { fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); });
+  // The panel hands focus back once it has gone.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  expect(screen.queryByRole('link', { name: 'Project' })).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+it('does not open an interactive panel just because the keyboard passed over it', async () => {
+  renderLinkHint();
+  const trigger = screen.getByLabelText('About');
+  await act(async () => { trigger.focus(); fireEvent.focus(trigger); });
+  expect(screen.queryByRole('link', { name: 'Project' })).toBeNull();
+});
+
+it('leaves focus on the ⓘ when a pointer opens an interactive panel', async () => {
+  renderLinkHint();
+  const trigger = screen.getByLabelText('About');
+  await act(async () => { fireEvent.pointerEnter(trigger, { pointerType: 'mouse' }); });
+  expect(screen.getByRole('link', { name: 'Project' })).toBeTruthy();
+  expect(document.activeElement).not.toBe(screen.getByRole('link', { name: 'Project' }));
+});

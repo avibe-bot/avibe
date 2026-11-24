@@ -709,6 +709,9 @@ final class WebViewController: UIViewController {
     /// not a queue: repeated requests coalesce, and it is consumed before
     /// the one load it stands for.
     private var hasPendingAutoLoad = false
+    /// The WebView holds an automatic load for the gate: it has nothing of
+    /// the instance on screen until the gate opens.
+    var isHoldingAutomaticLoad: Bool { hasPendingAutoLoad }
     private let pushCoordinator: NativePushCoordinator?
     private let pushOpenedAck: (String, WebOrigin) -> Bool
     private let setBadgeCount: (Int, WebOrigin) -> Bool
@@ -1111,7 +1114,8 @@ final class WebViewController: UIViewController {
     /// host has a route and the listener is closed or being bound again):
     /// nothing is loaded against that port; one pending bit is kept, and
     /// `directAvailabilityDidChange()` loads once when the gate opens.
-    /// Fault: nothing is loaded; the reopen message covers the runtime.
+    /// Fault (something else may hold that port): the same, for as long as
+    /// that lasts.
     private func loadConfiguredInstance() {
         guard !isInvalidatedForAccountTransition else {
             hasPendingAutoLoad = false
@@ -1125,10 +1129,8 @@ final class WebViewController: UIViewController {
                 return
             }
             retainedWebView?.load(URLRequest(url: start ?? instanceOrigin.url))
-        case .held:
+        case .held, .fault:
             hasPendingAutoLoad = true
-        case .fault:
-            hasPendingAutoLoad = false
         }
     }
 
@@ -2090,13 +2092,6 @@ final class WebViewController: UIViewController {
             record.controller.invalidateForAccountTransition()
         }
         rootRecord.navigationController.dismiss(animated: true)
-    }
-
-    /// The direct listener faulted: the reopen message covers the runtime,
-    /// and a child window presented above it must not stay in front of it.
-    /// Its WebViews are released as an account transition releases them.
-    func discardPopupsForListenerFault() {
-        discardAllPopups(animated: false)
     }
 
     private func discardAllPopups(animated: Bool) {

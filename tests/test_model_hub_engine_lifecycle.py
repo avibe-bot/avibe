@@ -970,15 +970,14 @@ def test_package_stale_hint_removal_failure_retention_and_actual_new_bundle(tmp_
 
 
 def test_explicit_required_retry_cannot_clear_current_withdrawal_authority(tmp_path, monkeypatch):
-    from core.model_hub_engine_channel import ResolutionAction
-    from types import SimpleNamespace
+    from core.model_hub_engine_channel import Resolution, ResolutionAction
 
     owner, _supervisor, baseline = owner_fixture(tmp_path, monkeypatch)
     tag = baseline["generation"]["asset_release_tag"]
     value = owner.journal.load()
     value["quarantine"][tag] = "startup_failed"
     owner._save(value)
-    monkeypatch.setattr(owner.channel, "resolve", lambda **_kwargs: SimpleNamespace(
+    monkeypatch.setattr(owner.channel, "resolve", lambda **_kwargs: Resolution(
         action=ResolutionAction.BLOCKED, target=None, reason="withdrawn",
     ))
     with pytest.raises(journal.JournalError, match="withdrawn"):

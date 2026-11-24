@@ -191,23 +191,26 @@ class EngineLifecycleView:
     @staticmethod
     def read(runtime_dir: Path) -> dict[str, Any]:
         try:
+            status = read_document(runtime_dir / "lifecycle-status.json") or {}
+        except JournalError:
+            status = {}
+        try:
             value = EngineJournal(runtime_dir).load()
-            try:
-                status = read_document(runtime_dir / "lifecycle-status.json") or {}
-            except JournalError:
-                status = {}
-            return {
-                **status, "committed": value["active"] if value else None,
-                "previous": value["previous"] if value else None,
-                "staged": value["staged"] if value else [],
-                "pending": value["pending"] if value else None,
-                "quarantine": value["quarantine"] if value else {},
-                "running_last_observed": status.get("running"), "running": None,
-                "state": "blocked" if value and value["blocked"] else status.get("state", "waiting_for_controller"),
-                "reason": value["blocked"] if value and value["blocked"] else status.get("reason"),
-            }
+            blocked = value["blocked"] if value else None
         except JournalError as exc:
-            return {"state": "blocked", "reason": str(exc), "committed": None, "running": None}
+            value, blocked = None, str(exc)
+        return {
+            "committed": value["active"] if value else None,
+            "previous": value["previous"] if value else None,
+            "staged": value["staged"] if value else [],
+            "pending": value["pending"] if value else None,
+            "quarantine": value["quarantine"] if value else {},
+            "running_last_observed": status.get("running"), "running": None,
+            "last_checked_at": status.get("last_checked_at"), "last_result": status.get("last_result"),
+            "journal_block_reason": blocked,
+            "state": "blocked" if blocked else "waiting_for_controller",
+            "reason": blocked or "waiting_for_controller",
+        }
 
 
 class EngineLifecycle:
@@ -232,6 +235,15 @@ class EngineLifecycle:
         self._ready = False
         self._start_context = threading.local()
         self._status: dict[str, Any] = {"state": "recovering", "legacy": None}
+        # Recover observations only. A cached execution/availability decision
+        # can never authorize a new controller to start or select an engine.
+        try:
+            history = read_document(manager.runtime_dir / "lifecycle-status.json") or {}
+        except JournalError:
+            history = {}
+        for key in ("last_checked_at", "last_result"):
+            if isinstance(history.get(key), str):
+                self._status[key] = history[key]
         self._preflight_passed: set[EngineGeneration] = set()
         # Owner-local serialization must precede the supervisor lock and the
         # cross-process mutation fence. It closes the gap between a readiness
@@ -809,7 +821,8 @@ class EngineLifecycle:
         self.running_release = generation.asset_release_tag if run_intent else None
         self._ready = True
         self.withdrawn_current = False
-        self._status.update(state="applied", last_result="applied")
+        self._status.update(state="applied", last_result="withdrawn_to_fallback" if reason == "withdrawal" else "applied",
+                            available=None, min_avibe_version=None)
         self.publish_status()
         return connection
 
@@ -904,11 +917,15 @@ class EngineLifecycle:
         self.withdrawn_current = decision.action.value in {"withdraw", "blocked"}
         if self.withdrawn_current and self.on_withdrawal is not None:
             self.on_withdrawal()
+        offered = decision.target or decision.offered
         self._status.update(
-            state="available" if decision.target else "blocked" if decision.action.value == "blocked" else "up_to_date",
-            available=decision.target.asset_release_tag if decision.target else None,
+            state=("withdrawing" if decision.action.value == "withdraw" else "available" if offered else
+                   "blocked" if decision.action.value == "blocked" else "up_to_date"),
+            available=offered.asset_release_tag if offered else None,
+            min_avibe_version=offered.min_avibe_version if offered else decision.unmet_minimum,
             channel=asdict(channel_status) if channel_status else None,
-            last_checked_at=datetime.now(timezone.utc).isoformat(), reason=decision.reason,
+            last_checked_at=datetime.now(timezone.utc).isoformat(),
+            reason="requires_avibe_update" if decision.unmet_minimum else decision.reason,
         )
         if retry and decision.target is None and decision.action.value == "keep":
             self.retry_required()
