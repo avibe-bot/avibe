@@ -88,7 +88,7 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
     )
     create = mt.prepare(wire, ep, True, None, route, None)
 
-    def follow(tokens, text):
+    def follow(tokens, text, *, mark_result=False):
         parent = mt.Parent(
             route,
             create.fixed,
@@ -100,21 +100,52 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
             time.monotonic() + 60,
         )
         result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call", "content": text}]}
+        if mark_result:
+            result["content"][0]["cache_control"] = {"type": "ephemeral"}
         return mt.prepare(
             replace(wire, body={**wire.body, "messages": [*history, answer, result]}), ep, True, parent, route, None
         )
 
     assert follow(36_406, "result " * 400).mode == "continue"
     assert follow(19_999, "ok").reason == "small_parent"
-    assert follow(20_000, "result " * 400).mode == "continue"
-    # 5,000 additional static bytes push the ratio, but not the floor or suffix guard.
+    # At this size the restored system/tools and suffix alone could explain the usage.
+    assert follow(20_000, "result " * 400).reason == "restorable_text_risk"
+    # 25,761 rendered bytes: exactly 75% of 34,348. Equality is safe to attempt.
+    assert follow(34_347, "result " * 400).reason == "restorable_text_risk"
+    assert follow(34_348, "result " * 400).mode == "continue"
     wire = replace(wire, body={**wire.body, "system": wire.body["system"] + "x" * 5_000})
     create = mt.prepare(wire, ep, True, None, route, None)
     # 30,761 UTF-8 bytes → 7,691 estimated tokens. Equality is sufficient.
     assert follow(23_072, "result " * 400).reason == "large_static_or_delta"
-    assert follow(23_073, "result " * 400).mode == "continue"
+    assert follow(23_073, "result " * 400).reason == "restorable_text_risk"
     assert follow(36_406, "x" * 13_000).reason == "dense_delta_risk"
     assert follow(36_406, "结果 " * 8_000).reason == "large_static_or_delta"
+
+    # Both decisions survive on an actual-send receipt: a rejected delta and a cache-safe full.
+    marker = {"type": "ephemeral"}
+    history = [
+        {
+            "role": "user",
+            "content": [
+                *({"type": "text", "text": "previous"} for _ in range(20)),
+                {"type": "text", "text": "last", "cache_control": marker},
+            ],
+        }
+    ]
+    wire = replace(
+        wire,
+        body={
+            **wire.body,
+            "messages": history,
+            "system": [{"type": "text", "text": wire.body["system"], "cache_control": marker}],
+            "tools": [{**wire.body["tools"][0], "cache_control": marker}],
+        },
+    )
+    create = mt.prepare(wire, ep, True, None, route, None)
+    assert create.mode == "create"
+    attempt = follow(36_406, "x" * 13_000, mark_result=True)
+    assert attempt.mode == "full" and attempt.record["reason"] == "preserve_cache_breakpoints"
+    assert attempt.record["delta_rejection"] == "dense_delta_risk"
 
 
 async def test_create_rejection_replays_once_and_remembers_route():

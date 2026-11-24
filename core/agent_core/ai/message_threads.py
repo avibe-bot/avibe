@@ -19,6 +19,7 @@ from core.agent_core.ai.provider import ModelEndpoint
 BETA = "message-threads-2026-08-12"
 MIN_PARENT_TOKENS = 20_000
 MIN_PARENT_TO_STATIC_RATIO = 3
+MAX_RESTORABLE_PERCENT = 75
 MIN_USAGE_PERCENT = 90
 PARENT_SECONDS = 300
 COOLDOWN_SECONDS = 86400
@@ -314,13 +315,17 @@ def _continuation_budget(full: dict, suffix: list, parent_tokens: int) -> str | 
     # so tool schemas, block framing and structured results are included. Not a tokenizer.
     suffix_bytes = len(encoded(suffix))
     static_bytes = len(encoded([full.get("tools"), full.get("system")]))
-    estimated_tokens = (static_bytes + 1 + suffix_bytes + 3) // 4
+    restorable_bytes = static_bytes + 1 + suffix_bytes  # comma before the final array element
+    estimated_tokens = (restorable_bytes + 3) // 4
     if parent_tokens < MIN_PARENT_TO_STATIC_RATIO * estimated_tokens:
         return "large_static_or_delta"
-    # A relay dropping the parent gets the suffix, NOT the local system/tools. Even
-    # one token per suffix byte must leave most of the first-event floor unexplained.
+    # Bound the bare suffix independently. A relay can also restore the real system/tools
+    # without restoring the conversation: budget all that text at one token per UTF-8 byte,
+    # leaving headroom below the first-event floor. Neither estimate proves provenance.
     if parent_tokens < MIN_PARENT_TO_STATIC_RATIO * suffix_bytes:
         return "dense_delta_risk"
+    if 100 * restorable_bytes > MAX_RESTORABLE_PERCENT * parent_tokens:
+        return "restorable_text_risk"
     return None
 
 
@@ -435,6 +440,9 @@ def prepare(
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
     # Only a create actually sends the marker-stripped full history. For a verified delta,
     # the unsent full body's lookup windows are irrelevant.
+    delta_rejection = (
+        reason if parent is not None and parent.message_id and mode != "continue" and not ordinary else None
+    )
     if mode == "create" and cache_reason:
         reason = cache_reason
         if warm and omitted_mark is not None:
@@ -476,6 +484,8 @@ def prepare(
     # The transport records actual bytes only once a send is handed to HTTPX.
     # A plain send needs no extra serialization to measure the counterfactual.
     record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
+    if delta_rejection and delta_rejection != reason:
+        record["delta_rejection"] = delta_rejection
     if trial:
         record.update(bootstrap_baseline_reads=trial.reads, bootstrap_prior_proven=trial.proven)
     return Attempt(
