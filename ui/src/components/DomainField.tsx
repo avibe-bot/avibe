@@ -8,6 +8,7 @@ export type DomainCheck = 'free' | 'taken' | 'checking' | 'invalid' | 'reclaim';
 /** The name a prefix becomes. */
 export const DOMAIN_SUFFIX = '-app.avibe.bot';
 
+
 /**
  * The domain being claimed, drawn as the address itself: the prefix typed in place, followed by
  * `-app.avibe.bot`, large, with one word under it saying whether it can be had. The same field
@@ -30,7 +31,7 @@ export function DomainField({ name, check, readOnly = false, disabled = false, o
           : check === 'invalid' ? t('domainField.invalid') : null;
   const tone = check === 'free' || check === 'reclaim' ? 'text-mint-ink' : check === 'taken' ? 'text-destructive-ink' : 'text-muted';
   return <div data-domain-field>
-    <label className={cn('flex min-w-0 cursor-text items-baseline rounded-xl border bg-field px-4 py-3 font-mono text-2xl focus-within:ring-2 focus-within:ring-mint/30',
+    <label className={cn('flex min-w-0 cursor-text items-baseline rounded-xl border bg-field px-4 py-3 font-mono text-xl sm:text-2xl focus-within:ring-2 focus-within:ring-mint/30',
       check === 'taken' ? 'border-destructive' : 'border-edge')}>
       {readOnly
         ? <span className="min-w-0 break-all font-semibold">{name}</span>

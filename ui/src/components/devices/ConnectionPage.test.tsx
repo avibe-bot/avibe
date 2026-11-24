@@ -338,6 +338,25 @@ describe('ConnectionPage · 连接诊断与网络路径', () => {
 });
 
 describe('ConnectionPage · the domain', () => {
+  it('names the domain with the claim page\'s field and clean-up: lowercase, trimmed, and a name avibe.bot cannot take is never sent', async () => {
+    const preview = vi.spyOn(devicesApi, 'previewRename');
+    mount('/settings/remote-access/connection/address');
+    const input = await screen.findByRole('textbox', { name: '新名称' });
+    // The shared field: the prefix in place, then the suffix.
+    expect(input.closest('[data-domain-field]')).toBeTruthy();
+    fireEvent.change(input, { target: { value: '  Max Well ' } });
+    expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('max well');
+    expect(screen.getByText(i18n.t('domainField.invalid'))).toBeTruthy();
+    const next = screen.getByRole('button', { name: '继续' });
+    expect(next.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(next);
+    expect(preview).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: ' MaxWell ' } });
+    expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('maxwell');
+    expect(screen.queryByText(i18n.t('domainField.invalid'))).toBeNull();
+    expect(screen.getByRole('button', { name: '继续' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('goes back to the form with the one sentence when the name cannot be taken', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.spyOn(devicesApi, 'previewRename').mockResolvedValue({ confirmationId: 'conf-1', hostname: 'maxwell-app.avibe.bot', isReturn: false, holdDays: 30, releaseAt: '2026-12-23T00:00:00.000Z', healthConnected: false, devices: [] });

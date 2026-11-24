@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
+import { cleanDomainName, validDomainName } from '@/components/domainName';
 import { hasDesktopClient, type DesktopClientState } from './bridge';
 import type { BindField, BindProblem, BindStep, ComputerBinding, EligibleName } from './BindComputerView';
 
@@ -38,7 +39,7 @@ const obj = (value: unknown): Record<string, unknown> | null => value && typeof 
 /** Native's grammar for a new name (machine/hosted/projection.rs `new_prefix`): 2 to 46 lowercase
  *  letters, digits and hyphens, no hyphen first or last, and not `--` in third and fourth place. A
  *  name that fails it stays in the field and is never sent: a refused Check ends the review. */
-export const validPrefix = (name: string) => /^[a-z0-9][a-z0-9-]{0,44}[a-z0-9]$/.test(name) && name.slice(2, 4) !== '--';
+export const validPrefix = validDomainName;
 const hostFor = (prefix: string) => `${prefix}-app.avibe.bot`;
 
 const PROBLEMS: Record<string, BindProblem> = {
@@ -457,7 +458,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
 
   const timer = useRef<number | null>(null);
   const changeName = useCallback((typed: string) => {
-    const name = typed.trim().toLowerCase();
+    const name = cleanDomainName(typed);
     nameRef.current = name;
     if (timer.current !== null) window.clearTimeout(timer.current);
     if (!validPrefix(name)) { setStep({ kind: 'name', name, check: 'invalid' }); return; }
