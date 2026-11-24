@@ -1,4 +1,10 @@
-import type { ApiContextType } from '@/context/ApiContext';
+import type {
+  ApiContextType,
+  WebPushStatus,
+  WebPushStatusPayload,
+  WebPushSubscribeIntent,
+  WebPushSubscriptionResult,
+} from '@/context/ApiContext';
 import { isIosDevice, isStandalonePwa } from './platform';
 import { nativeDeviceLabel } from './deviceReport';
 import {
@@ -25,7 +31,7 @@ export type WebPushSupportState =
   | { supported: true; standalone: boolean; requiresStandalone: boolean }
   | { supported: false; reason: 'unsupported' | 'ios_requires_standalone' };
 
-function urlBase64ToArrayBuffer(value: string): ArrayBuffer {
+export function urlBase64ToArrayBuffer(value: string): ArrayBuffer {
   const padding = '='.repeat((4 - (value.length % 4)) % 4);
   const base64 = (value + padding).replace(/-/g, '+').replace(/_/g, '/');
   const raw = window.atob(base64);
@@ -192,6 +198,11 @@ export type NativePushPendingRegistration = {
   keys: { p256dh: string; auth: string };
   previousEndpoints: string[];
   vapidPublicKey: string;
+  /**
+   * Why it was first posted, kept so that a retry says the same. Absent on a registration
+   * written before this was recorded: a retry of unknown origin is never a press.
+   */
+  intent?: WebPushSubscribeIntent;
 };
 
 export interface NativePushPendingRegistrationStore {
@@ -772,6 +783,9 @@ const browserNativePushPendingRegistrationStore: NativePushPendingRegistrationSt
         },
         previousEndpoints: parsed.previousEndpoints,
         vapidPublicKey: parsed.vapidPublicKey,
+        ...(parsed.intent === 'explicit_enable' || parsed.intent === 'binding_repair'
+          ? { intent: parsed.intent as WebPushSubscribeIntent }
+          : {}),
       };
     } catch {
       return null;
@@ -790,6 +804,21 @@ const browserNativePushPendingRegistrationStore: NativePushPendingRegistrationSt
 
 function getBrowserNativePushDisabledIntentStore(): NativePushDisabledIntentStore {
   return createNativePushDisabledIntentStore(window.localStorage);
+}
+
+/** Posts a subscription, naming an intent only when there is one. */
+function postWebPushSubscription(
+  api: ApiContextType,
+  subscription: PushSubscriptionJSON,
+  deviceLabel: string | undefined,
+  deviceId: string | undefined,
+  previousEndpoints: string[] | undefined,
+  backgroundRotation: boolean | undefined,
+  intent: WebPushSubscribeIntent | undefined,
+): Promise<WebPushSubscriptionResult> {
+  return intent
+    ? api.subscribeWebPush(subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation, intent)
+    : api.subscribeWebPush(subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation);
 }
 
 async function postNativePushRegistration(
@@ -811,7 +840,10 @@ async function postNativePushRegistration(
       throw new Error('native_push_disabled');
     }
     store.write(registration);
-    const result = await api.subscribeWebPush(
+    // A repair after binding is its own request: never also a background rotation.
+    const bindingRepair = registration.intent === 'binding_repair';
+    const result = await postWebPushSubscription(
+      api,
       {
         endpoint: registration.endpoint,
         keys: registration.keys,
@@ -819,7 +851,8 @@ async function postNativePushRegistration(
       await nativeDeviceLabel(),
       undefined,
       registration.previousEndpoints,
-      recoverOnly,
+      bindingRepair ? undefined : recoverOnly,
+      registration.intent,
     );
     if (intent && !intent.store.isCurrentIntentRevision(intent.revision)) {
       await nativePushUnsubscribe();
@@ -827,6 +860,12 @@ async function postNativePushRegistration(
       throw new Error('native_push_stale_intent');
     }
     if (!result.accepted) {
+      if (bindingRepair) {
+        // Final: it was turned off, or is not this device's to take back. Nothing
+        // is left waiting, so no later post can turn it into a new registration.
+        store.clear();
+        throw new Error('binding_repair_not_accepted');
+      }
       if (recoverOnly) {
         await nativePushUnsubscribe();
         store.clear();
@@ -851,6 +890,7 @@ async function enableNativeWebPush(
   options: EnableWebPushOptions,
   respectDisabledIntent: boolean,
   intent?: NativePushIntentContext,
+  subscribeIntent?: WebPushSubscribeIntent,
 ): Promise<PushSubscriptionJSON> {
   const disabledIntentStore =
     options.disabledIntentStore ?? getBrowserNativePushDisabledIntentStore();
@@ -893,6 +933,7 @@ async function enableNativeWebPush(
       keys: subscription.keys,
       previousEndpoints,
       vapidPublicKey: publicKey,
+      ...(subscribeIntent ? { intent: subscribeIntent } : {}),
     },
     options.pendingRegistrationStore ?? browserNativePushPendingRegistrationStore,
     options.recoverOnly,
@@ -939,6 +980,10 @@ async function enableWebPushOnce(
       },
       !explicitEnable,
       intent,
+      // `enableWebPush` is the press, and it alone hands an intent in.
+      (explicitEnable || existingIntent !== undefined) && !options.recoverOnly
+        ? 'explicit_enable'
+        : undefined,
     );
   }
   const support = getWebPushSupportState();
@@ -978,24 +1023,84 @@ async function enableWebPushOnce(
     ...(existing?.endpoint ? [existing.endpoint] : []),
     ...await getRememberedWebPushEndpoints(),
   ];
-  const result = await api.subscribeWebPush(
+  const pressed = explicitEnable && !options.recoverOnly;
+  const result = await postWebPushSubscription(
+    api,
     json,
     undefined,
     await getWebPushDeviceId(),
     previousEndpoints,
     options.recoverOnly,
+    pressed ? 'explicit_enable' : undefined,
   );
   if (options.recoverOnly && !result.accepted) {
     await subscription.unsubscribe();
     throw new Error('recovery_not_authorized');
   }
+  // On a bound Avibe the instance can refuse even a press (the endpoint is a
+  // signed-in account's): the switch must not then read as on.
+  if (pressed && result.accepted === false) {
+    throw new Error('registration_not_accepted');
+  }
   await rememberWebPushEndpoint(endpoint);
   return json;
 }
 
+/** The page is open at a loopback address: in a browser, only on the computer that runs Avibe. */
+export function isLoopbackPage(): boolean {
+  const host = window.location?.hostname ?? '';
+  return host === 'localhost' || host === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+/** What to ask the instance about: this browser's live subscription, else the last endpoint it remembers. */
+export async function browserPushStatusPayload(
+  existing: PushSubscription | null,
+  rememberedEndpoints: string[],
+): Promise<WebPushStatusPayload | undefined> {
+  if (existing) {
+    return {
+      endpoint: existing.endpoint,
+      subscription: existing.toJSON(),
+      device_id: await getWebPushDeviceId(),
+      previous_endpoints: rememberedEndpoints,
+    };
+  }
+  return rememberedEndpoints[0] ? { endpoint: rememberedEndpoints[0] } : undefined;
+}
+
+/**
+ * Whether a repair after binding can be on offer at all, from what is already known: the instance
+ * said so of the endpoint it was asked about, or this browser holds a subscription the instance
+ * does not know, on the computer that runs Avibe, with notifications allowed. Only then is the
+ * repair itself loaded (`webPushBindingRepair.ts`): the first screen never draws it.
+ */
+export function bindingRepairPossible(status: WebPushStatus, existing: PushSubscription | null): boolean {
+  if (status.current_subscription_binding_retired) return true;
+  return Boolean(existing)
+    && !status.current_subscription_enabled
+    && !status.current_subscription_repairable
+    && isLoopbackPage()
+    && typeof Notification !== 'undefined'
+    && Notification.permission === 'granted';
+}
+
+/**
+ * The repair, fetched when first needed. A failed fetch (offline, or a build replaced under an open
+ * page) is said once in the console, with nothing of the subscription or the address, and thrown
+ * on: the caller reads it as "not restored", and the next foreground tries again.
+ */
+async function loadBindingRepair(): Promise<typeof import('./webPushBindingRepair')> {
+  try {
+    return await import('./webPushBindingRepair');
+  } catch (error) {
+    console.warn('The notification repair module failed to load');
+    throw error;
+  }
+}
+
 let webPushLifecycleOperation: Promise<unknown> = Promise.resolve();
 
-function enqueueWebPushLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
+export function enqueueWebPushLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
   const next = webPushLifecycleOperation.then(operation, operation);
   webPushLifecycleOperation = next.then(
     () => undefined,
@@ -1368,6 +1473,29 @@ async function reconcileWebPushOnce(
         });
         return { support, status: 'enabled' };
       }
+      if (serverStatus.current_subscription_binding_retired) {
+        // Binding stopped it and this page is on the computer that runs Avibe:
+        // take the same subscription back, only while notifications are still
+        // allowed. A refusal throws and reads as off.
+        if (nativeState.permission !== 'granted') {
+          return { support, status: 'disabled' };
+        }
+        await runIntentOperation(() => postNativePushRegistration(
+          api,
+          {
+            endpoint: nativeState.endpoint,
+            keys: nativeState.keys,
+            previousEndpoints: [],
+            vapidPublicKey: publicKey,
+            intent: 'binding_repair',
+          },
+          pendingRegistrationStore,
+          undefined,
+          intentStore,
+          intent,
+        ));
+        return { support, status: 'enabled' };
+      }
       if (serverStatus.current_subscription_repairable) {
         try {
           await runIntentOperation(() => enableNativeWebPush(
@@ -1444,17 +1572,20 @@ async function reconcileWebPushOnce(
     const previousEndpoints = await getRememberedWebPushEndpoints();
     const rememberedEndpoint = previousEndpoints[0];
     const serverStatus = await api
-      .getWebPushStatus(
-        existing
-          ? {
-              endpoint: existing.endpoint,
-              subscription: existing.toJSON(),
-              device_id: await getWebPushDeviceId(),
-              previous_endpoints: previousEndpoints,
-            }
-          : rememberedEndpoint ? { endpoint: rememberedEndpoint } : undefined,
-      )
+      .getWebPushStatus(await browserPushStatusPayload(existing, previousEndpoints))
       .catch(() => null);
+    if (serverStatus && bindingRepairPossible(serverStatus, existing)) {
+      const repair = await loadBindingRepair();
+      if (await repair.bindingRepairOffered(api, serverStatus, existing, previousEndpoints)) {
+        const restored = await repair.restoreBrowserPushAfterBinding(
+          api,
+          existing,
+          serverStatus.public_key,
+          previousEndpoints,
+        ).catch(() => false);
+        return { support, status: restored ? 'enabled' : 'disabled' };
+      }
+    }
     const repairable = Boolean(serverStatus && (
       serverStatus.current_subscription_repairable
       || (!existing && Boolean(rememberedEndpoint) && serverStatus.current_subscription_enabled)
@@ -1500,6 +1631,7 @@ async function reconcileWebPushOnce(
 
 /** Refusals: no later attempt with the same subscription and intent can succeed. */
 const NATIVE_PUSH_REFUSALS = new Set([
+  'binding_repair_not_accepted',
   'native_push_disabled',
   'native_push_stale_intent',
   'native_push_registration_not_accepted',
@@ -1556,12 +1688,48 @@ export function reconcileWebPush(
   return webPushReconciliation;
 }
 
+let bindingRestore: Promise<boolean> | null = null;
+
 /**
- * Whether this device gets push notifications, read without changing anything: `on` (this
- * device's subscription is registered and enabled), `off` (push could be turned on here), or
- * `unavailable` (the browser cannot, iOS needs the app on the Home Screen first, push is not set
- * up on the server, or the read failed). Turning it on, or repairing a subscription, is
- * `enableWebPush`'s job.
+ * In a browser on the computer that runs Avibe: when binding this Avibe to an
+ * account stopped this browser's subscription, take it back. Called when the
+ * page opens or comes back to the foreground, never from a worker. It sends
+ * nothing unless the page is at a loopback address and the browser already
+ * allows notifications, and it never asks for permission. Turning notifications
+ * off is honoured: this runs in turn with enabling and disabling, and the
+ * instance refuses a subscription that was turned off. True when this
+ * browser's subscription is enabled again.
+ */
+export function restoreWebPushAfterBinding(api: ApiContextType): Promise<boolean> {
+  if (
+    hasNativeCapability('push')
+    || !getWebPushSupportState().supported
+    || !isLoopbackPage()
+    || typeof Notification === 'undefined'
+    || Notification.permission !== 'granted'
+  ) {
+    return Promise.resolve(false);
+  }
+  bindingRestore ??= enqueueWebPushLifecycleOperation(async () => {
+    try {
+      return await (await loadBindingRepair()).restoreAfterBinding(api);
+    } catch {
+      // The next time the page comes to the foreground tries again.
+      return false;
+    }
+  }).finally(() => {
+    bindingRestore = null;
+  });
+  return bindingRestore;
+}
+
+/**
+ * Whether this device gets push notifications: `on` (this device's subscription is registered
+ * and enabled), `off` (push could be turned on here), or `unavailable` (the browser cannot, iOS
+ * needs the app on the Home Screen first, push is not set up on the server, or the read failed).
+ * It changes nothing, with one exception: a subscription that binding stopped is first taken back
+ * (`restoreWebPushAfterBinding`), so that it is not reported as off for the moment that takes.
+ * Turning it on, or repairing a subscription, is `enableWebPush`'s job.
  */
 export async function readWebPushDeviceState(api: ApiContextType): Promise<'on' | 'off' | 'unavailable'> {
   if (hasNativeCapability('push')) {
@@ -1577,16 +1745,12 @@ export async function readWebPushDeviceState(api: ApiContextType): Promise<'on' 
   if (!getWebPushSupportState().supported) return 'unavailable';
   try {
     const existing = await getExistingWebPushSubscription();
-    const status = await api.getWebPushStatus(existing
-      ? {
-          endpoint: existing.endpoint,
-          subscription: existing.toJSON(),
-          device_id: await getWebPushDeviceId(),
-          previous_endpoints: await getRememberedWebPushEndpoints(),
-        }
-      : undefined);
+    const status = await api.getWebPushStatus(
+      await browserPushStatusPayload(existing, await getRememberedWebPushEndpoints()),
+    );
     if (!status?.ok || !status.configured) return 'unavailable';
-    return existing && status.current_subscription_enabled ? 'on' : 'off';
+    if (existing && status.current_subscription_enabled) return 'on';
+    return (await restoreWebPushAfterBinding(api)) ? 'on' : 'off';
   } catch {
     return 'unavailable';
   }

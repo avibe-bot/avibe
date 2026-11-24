@@ -226,6 +226,8 @@ describe('web push recovery', () => {
       'device-1',
       ['https://push.example.test/sub/old'],
       undefined,
+      // `enableWebPush` is the press.
+      'explicit_enable',
     );
     expect(endpointCache.put).toHaveBeenCalledWith(
       'https://avibe.local/__avibe/web-push-endpoint',
@@ -1292,6 +1294,7 @@ describe('web push recovery', () => {
       undefined,
       ['https://avibe.bot/api/push/apns/registration'],
       undefined,
+      'explicit_enable',
     );
   });
 

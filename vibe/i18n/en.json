@@ -1265,6 +1265,12 @@
     "address_retired": {
       "line": "This Avibe has a new address. People who can access it can open it after signing in at avibe.bot."
     },
+    "bound_address": {
+      "title": "This address no longer opens Avibe",
+      "body": "This Avibe is bound to an account, so other devices sign in first. Sign in at avibe.bot, then open it from your list.",
+      "account_action": "Go to avibe.bot",
+      "local": "Or open it on the computer that runs Avibe (replace the IP in this address with localhost); the switch for remote access is there too."
+    },
     "oauth_error": {
       "sign_in_again": "Sign in again",
       "diagnostics_summary": "Technical details",

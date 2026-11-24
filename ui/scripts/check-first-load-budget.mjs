@@ -52,9 +52,19 @@ const KiB = 1024;
 // #4166 and rc12. If master still crosses 608, whoever merges last resolves
 // it; it is not raised again without him, and no sentence is deleted to fit.
 // Splitting the locale by surface is its own task, not part of #4147.
+//
+// chat 900 -> 904 KiB (2026-11-24, decided by the owner of merges). Temporary,
+// until the locale is split by surface; then back within 900, at the latest
+// by 3.2.9 RC1. Master measured 899.9 KiB after the image preview's touch
+// paging (#4225). #4163 adds 0.6 KiB to every first load (the intent a press
+// on the notification switch carries, the Settings and access-blocked
+// sentences, and the check that decides whether a repair can be on offer) and
+// measures 900.5 KiB; the repair itself was moved off the first screen first
+// (src/lib/webPushBindingRepair.ts loads on demand). It is not raised again
+// without him.
 const BUDGETS = {
   home: 608 * KiB,
-  chat: 900 * KiB,
+  chat: 904 * KiB,
 };
 
 const dist = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
