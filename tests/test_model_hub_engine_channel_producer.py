@@ -1352,6 +1352,7 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
         assert upload["env"][variable] == expression and text.count(expression) == 1
     assert text.count("secrets.R2_") == 3 and "secrets.MODEL_HUB_ENGINE_CHANNEL_R2_" not in text
     assert jobs["sign"]["needs"] == "prepare" and jobs["publish"]["needs"] == ["prepare", "sign"]
+    assert "strategy" not in jobs["publish"] and "matrix.sequence" not in json.dumps(jobs["publish"])
     assert all("if" not in jobs[name] for name in ("sign", "publish"))
     for name in ("sign", "publish"):
         tools, data, *_ = jobs[name]["steps"]

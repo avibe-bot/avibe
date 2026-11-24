@@ -118,6 +118,54 @@ def test_artifact_wait_is_bounded_and_requires_exact_origin(bad):
             artifacts.wait_for_artifact(api, run, sha, name, attempt="1", timeout=0)
 
 
+def test_batch_waits_for_each_public_readback_and_resumes_in_place(monkeypatch):
+    from types import SimpleNamespace
+
+    # Opaque authenticated fixtures here; real signature and tamper checks run
+    # separately on the disposable hosted runner. Use the real CAS/readback loop.
+    payloads = [SimpleNamespace(sequence=n, raw=bytes([n]), releases=(), revoked=()) for n in (1, 2, 3)]
+    by_bytes = {p.raw: p for p in payloads}
+    monkeypatch.setattr(index.producer, "authenticate", lambda raw, **_: by_bytes[raw])
+    monkeypatch.setattr(index.channel, "authenticate", lambda raw, **_: (SimpleNamespace(payload=raw), by_bytes[raw]))
+    events = []
+
+    class Bucket:
+        stored = None
+
+        def read(self):
+            return (self.stored, self.stored.hex()) if self.stored else None
+
+        def replace(self, body, *, etag):
+            assert etag == (self.stored.hex() if self.stored else None)
+            self.stored = body
+            events.append(("write", by_bytes[body].sequence))
+
+    bucket = Bucket()
+    failure = True
+
+    def public():
+        seq = by_bytes[bucket.stored].sequence
+        events.append(("public", seq))
+        if failure and seq == 2:
+            raise TimeoutError("public readback interrupted")
+        return bucket.stored
+
+    rows = [(None, None, None, prev, p, None) for prev, p in zip([None, *payloads[:-1]], payloads)]
+    def publish():
+        index.publish_batch(rows, bucket=bucket, roots=None, verifier=None, envelope_for=lambda p: p.raw, fetch_public=public)
+
+    with pytest.raises(TimeoutError, match="readback"):
+        publish()
+    assert events == [("write", 1), ("public", 1), ("write", 2), ("public", 2)]
+    events.clear()
+    failure = False
+    publish()
+    assert events == [("public", 2), ("write", 3), ("public", 3)]
+    events.clear()
+    publish()
+    assert events == [("public", 3)]
+
+
 def test_artifact_hash_is_checked_before_using_its_single_file():
     from scripts import model_hub_engine_artifact as artifacts
 

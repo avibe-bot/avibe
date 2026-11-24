@@ -21,7 +21,7 @@ jobs:
       - &tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 7b961f642277fb219d90888fba4697f703616085
+          ref: 97cae866c6c00864dfcf907546927ae8b91a3cc7
           path: tools
           persist-credentials: false
       - &ledger
@@ -73,11 +73,9 @@ jobs:
     needs: [prepare, sign]
     runs-on: ubuntu-latest
     permissions: {contents: read, actions: read}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        sequence: ${{ fromJSON(needs.prepare.outputs.sequences) }}
+    # One writer per landed push. The next allocation starts only after the
+    # previous origin and public readbacks finish. Signatures may run in parallel.
+    timeout-minutes: 90
     steps:
       - *tools
       - *ledger
@@ -85,7 +83,6 @@ jobs:
       - name: Verify signed allocation, conditionally write the exact index key and prove public readback
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          ALLOCATION_SEQUENCE: ${{ matrix.sequence }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
