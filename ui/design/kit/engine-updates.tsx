@@ -140,7 +140,10 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
     case 'withdrawing':
       return d('这个版本已被撤回，正在换成安全的版本，模型网关稍后恢复', 'This version was withdrawn. Switching to a safe one; Model Hub is back shortly.');
     case 'stopped':
-      return d('模型网关已停止：这个引擎版本已被撤回。替换它的版本能在本机运行后会自动恢复。', 'Model Hub is stopped: the engine was withdrawn. It restarts once its replacement can run here.');
+      // Product's wording (2026-11-24). The English keeps "can run here": a replacement can be published
+      // and still not run on this machine, and the longer "by itself ... is available" wraps to three
+      // lines at 390 px.
+      return d('模型网关已停止：这个引擎版本已被撤回，替换的版本可用后会自动恢复。', 'Model Hub is stopped: the engine was withdrawn. It restarts once its replacement can run here.');
     case 'cannotStart':
       return d('模型网关已停止：引擎无法启动。请到「诊断与日志」查看原因。', "Model Hub is stopped: the engine can't start. See Diagnostics & Logs for the cause.");
   }
