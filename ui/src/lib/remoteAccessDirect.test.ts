@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import i18n from '../i18n';
-import { deviceUsingText, type DeviceUsing } from './remoteAccessDirect';
+import { deviceUsingText, directCertificateDate, lastConnectionLegs, type DeviceUsing } from './remoteAccessDirect';
 
-// ui/design: settings/remote-access/direct-app-*
+// ui/design: settings/devices-connection/app*
 describe('deviceUsingText', () => {
   const text = async (lang: 'zh' | 'en', using: DeviceUsing) => {
     await i18n.changeLanguage(lang);
@@ -27,5 +27,23 @@ describe('deviceUsingText', () => {
       .toBe('This device is using: Direct (hole punching) · IPv4 · 85 ms');
     expect(await text('en', { kind: 'lan', family: 'ipv6', rttMs: 2 })).toBe('This device is using: Direct (local network) · IPv6 · 2 ms');
     await i18n.changeLanguage('zh');
+  });
+});
+
+// ui/design: settings/devices-connection/diagnostics-direct*
+describe('direct details', () => {
+  it('shows a certificate date only while the certificate is valid', () => {
+    const now = Date.parse('2026-11-22T00:00:00Z');
+    expect(directCertificateDate('2027-02-14T00:00:00Z', now)?.toISOString()).toBe('2027-02-14T00:00:00.000Z');
+    expect(directCertificateDate('2026-11-01T00:00:00Z', now)).toBeNull();
+    expect(directCertificateDate('not a date', now)).toBeNull();
+    expect(directCertificateDate(null, now)).toBeNull();
+  });
+
+  it('reads the last connection\'s race from the App, and nothing where none was recorded', () => {
+    const snapshot = { preferred: 'direct' as const, path: 'ipv6' as const, scope: 'global' as const, rttMs: 38 };
+    expect(lastConnectionLegs({ ...snapshot, lastConnection: { direct: 38, public: 'cancelled', winner: 'direct' } })).toEqual({ direct: 38, public: 'cancelled' });
+    expect(lastConnectionLegs({ ...snapshot, lastConnection: null })).toBeNull();
+    expect(lastConnectionLegs(null)).toBeNull();
   });
 });

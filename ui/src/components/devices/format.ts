@@ -3,7 +3,7 @@ import type { TFunction } from 'i18next';
 
 import type { TranslationKey } from '@/i18n/types';
 import { formatRelativeTime } from '@/lib/relativeTime';
-import type { ClientKind, DeviceClient, DeviceConnection, HealthData, PathKind } from './types';
+import type { ClientKind, Device, DeviceClient, DeviceConnection, HealthData, PathKind } from './types';
 
 const DAY = 86_400_000;
 
@@ -54,6 +54,7 @@ const clientKeys = {
   desktop: 'devices.client.desktop',
   browser: 'devices.client.browser',
   homeScreen: 'devices.client.homeScreen',
+  other: 'devices.kindName.other',
 } as const satisfies Record<ClientKind, TranslationKey>;
 
 /** 「Avibe App 3.2.8 · iOS 26.1」, 「浏览器」. */
@@ -102,3 +103,29 @@ export const healthText = (t: TFunction, language: string, data: HealthData[]) =
 
 /** Capitalise a list that opens a line (English names are lower-case inside a sentence). */
 export const upperFirst = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/** A calendar day (`2026-11-21`) as the locale writes a date, with no time and no time zone shift. */
+export function dayText(day: string, language: string): string {
+  const [year, month, date] = day.split('-').map(Number);
+  if (!year || !month || !date) return day;
+  return new Intl.DateTimeFormat(language, { month: 'short', day: 'numeric' }).format(new Date(year, month - 1, date));
+}
+
+/** A day with its month written out (「12 月 23 日」, December 23): a date a person is told to remember. */
+export function longDay(iso: string, language: string): string {
+  const at = Date.parse(iso);
+  if (!Number.isFinite(at)) return iso;
+  return new Intl.DateTimeFormat(language, { month: 'long', day: 'numeric' }).format(at);
+}
+
+const kindNameKeys = {
+  runtime: 'devices.kindName.runtime',
+  app: 'devices.kindName.app',
+  desktop: 'devices.kindName.desktop',
+  browser: 'devices.kindName.browser',
+  homeScreen: 'devices.kindName.homeScreen',
+  other: 'devices.kindName.other',
+} as const satisfies Record<ClientKind, TranslationKey>;
+
+/** A device's name: its own when it reported one, else what kind of device it is. */
+export const deviceName = (t: TFunction, device: Pick<Device, 'name' | 'client'>) => device.name ?? t(kindNameKeys[device.client.kind]);

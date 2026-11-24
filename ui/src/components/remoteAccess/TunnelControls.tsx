@@ -1,7 +1,6 @@
-// The Cloudflare tunnel's own controls, one component each, so Settings · Remote access and the
-// Devices 「连接方式」 page (ui/design: settings/devices-connection/*) draw the same control with
-// the same options and copy. Props only; each caller owns where the value comes from and when it
-// is applied.
+// The Cloudflare tunnel's own controls, one component each, for the Devices 「连接方式」 page
+// (ui/design: settings/devices-connection/*). 「自动」 is first in every option order. Props only;
+// the caller owns where the value comes from and when it is applied.
 import { useTranslation } from 'react-i18next';
 
 import type { RemoteAccessSettings, TunnelNetworkInterface } from '@/context/ApiContext';
@@ -68,8 +67,8 @@ export function TunnelIpFamilyControl({ value, onChange, disabled }: ControlProp
       ariaLabel={t('remoteAccess.ipFamily')}
       disabled={disabled}
       options={[
-        { id: '4', label: t('remoteAccess.ipV4') },
         { id: 'auto', label: t('remoteAccess.ipAuto') },
+        { id: '4', label: t('remoteAccess.ipV4') },
         { id: '6', label: t('remoteAccess.ipV6') },
       ]}
     />

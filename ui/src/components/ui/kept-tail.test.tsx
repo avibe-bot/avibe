@@ -43,6 +43,29 @@ describe('KeptTail', () => {
     expect(kept(container).at(-1)).toBe('data for you.');
   });
 
+  it('lets a body paragraph fill its lines, keeping only its last few characters together', async () => {
+    await i18n.changeLanguage('zh');
+    const body = '这台电脑会重新向 avibe.bot 登记，用你接下来在 avibe.bot 登录的账号。完成后，旧的设备密钥作废，所有远程设备都会退出、要重新登录。';
+    const { container } = render(<p><KeptTail text={body} /></p>);
+    expect(container.textContent).toBe(body);
+    // The addresses stay whole; the tail is too short to stop the line before it visibly early.
+    expect(kept(container)).toEqual(['avibe.bot', 'avibe.bot', '重新登录。']);
+    const hint = '只有这一次：去 avibe.bot 起个名字、领取域名，然后自动回到「设备」页，在那里添加手机。';
+    expect(kept(render(<p><KeptTail text={hint} /></p>).container).at(-1)).toBe('添加手机。');
+    await i18n.changeLanguage('en');
+    const english = 'The health data this device synced here is deleted once this Avibe\'s owner is confirmed; if that cannot be confirmed it is kept.';
+    expect(kept(render(<p><KeptTail text={english} /></p>).container)).toEqual(['is kept.']);
+  });
+
+  it('keeps no tail in a body paragraph when an address would make it long', async () => {
+    await i18n.changeLanguage('zh');
+    const body = '所有设备都已退出，要在新地址重新登录，这台电脑上的页面不受影响；从现在起请在浏览器里打开 max-app.avibe.bot。';
+    const { container } = render(<p><KeptTail text={body} /></p>);
+    expect(container.textContent).toBe(body);
+    // The address is whole, and nothing more is tied to it.
+    expect(kept(container)).toEqual(['max-app.avibe.bot']);
+  });
+
   it('lets a very long address wrap rather than overflow a phone', async () => {
     await i18n.changeLanguage('en');
     const long = `${'a'.repeat(60)}-app.avibe.bot`;

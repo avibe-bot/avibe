@@ -1,5 +1,9 @@
 import { hasDesktopClient, isClientProjection, presentDesktopClient } from '../desktop/bridge';
-import { desktopDragRegion } from '../lib/desktopShell';
+import { desktopDragRegion, isDesktopShell } from '../lib/desktopShell';
+import { isNativeShell } from '../lib/native';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import { SETUP_REMOTE_ACCESS_PATH } from './devices/paths';
+import { offersRemoteAccessStep } from './onboarding/setupRemoteAccessStep';
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties, type ReactElement, type Ref } from 'react';
 import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
@@ -297,6 +301,7 @@ const setupLanguage = (code: string): AppLanguage => {
 
 export function Wizard() {
   const api = useApi(); const { t, i18n } = useTranslation(); const navigate = useNavigate();
+  const { remote, instanceKind } = useInstanceAuthorization();
   const { control } = useStatus();
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
@@ -586,7 +591,22 @@ export function Wizard() {
     // the lease exists to stop the next write, not to take back a finished setup.
     const desktop = window.__AVIBE_DESKTOP_CLIENT_STATE__;
     // Completion is already durable. Cloud/back/skip must never re-enter initialization.
-    navigate('/', { replace: true });
+    // Where turning remote access on can work from here, Setup offers it once, as its own page;
+    // a status that cannot be read offers nothing.
+    const desktopShell = hasDesktopClient() || isDesktopShell();
+    let paired: boolean | null = null;
+    if (!remote && !desktopShell && !isNativeShell()) {
+      try {
+        const status = await api.remoteAccessStatus();
+        paired = typeof status?.paired === 'boolean' ? status.paired : null;
+      } catch {
+        // Setup is over either way; the step is simply not offered.
+      }
+    }
+    const offer = offersRemoteAccessStep({
+      remote, desktopShell, nativeShell: isNativeShell(), paired, organization: instanceKind === 'organization',
+    });
+    navigate(offer ? SETUP_REMOTE_ACCESS_PATH : '/', { replace: true });
     if (hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local') {
       presentDesktopClient('setup-complete');
     }
