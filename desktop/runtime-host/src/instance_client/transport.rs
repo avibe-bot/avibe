@@ -383,8 +383,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status, 302);
-        let head = server.await.unwrap().to_ascii_lowercase();
-        let agents: Vec<&str> = head.lines().filter(|line| line.starts_with("user-agent:")).collect();
-        assert_eq!(agents, ["user-agent: avibedesktop/0.4.2-rc.3"], "{head}");
+        let head = server.await.unwrap();
+        let agents: Vec<&str> = head
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.eq_ignore_ascii_case("user-agent"))
+            .map(|(_, value)| value.trim())
+            .collect();
+        // The instance matches `AvibeDesktop/` exactly, case included.
+        assert_eq!(agents, ["AvibeDesktop/0.4.2-rc.3"], "{head}");
     }
 }

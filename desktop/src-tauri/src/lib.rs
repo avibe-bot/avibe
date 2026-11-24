@@ -2212,10 +2212,6 @@ fn build_main_child(
         if let Some(script) = direct::shell::page_script(app, label, destination) {
             builder = builder.initialization_script(script);
         }
-        // And who this computer is, for that instance's device list.
-        if let Some(script) = device_description::script(app, destination) {
-            builder = builder.initialization_script(script);
-        }
     }
     if let Some(script) = instance_client::initial_script(app) {
         builder = builder.initialization_script(script);

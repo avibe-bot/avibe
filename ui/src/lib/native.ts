@@ -361,9 +361,13 @@ export async function nativeDeviceDescribe(params: { health_binding?: true } = {
   return callNative<unknown>('device', 'device.describe', params);
 }
 
+/** Announces that the Desktop app has given this document its description (below). */
+export const DESKTOP_DEVICE_EVENT = 'avibe:desktop-device';
+
 /**
- * The Desktop app's `device.describe`, given to the top document of its view of another computer's
- * instance (desktop/src-tauri/src/device_description.rs); undefined anywhere else. Unchecked.
+ * The Desktop app's `device.describe`, given to the Workbench document of its committed view of
+ * another computer's instance when the view is published or the document loads
+ * (desktop/src-tauri/src/device_description.rs); undefined anywhere else, and until then. Unchecked.
  */
 export function desktopDeviceDescription(): unknown {
   if (typeof window === 'undefined') return undefined;
