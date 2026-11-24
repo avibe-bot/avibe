@@ -26,4 +26,9 @@ DEFAULT_PROVIDER_SPECS: tuple[NativeSessionProviderSpec, ...] = (
         module_path="modules.agents.native_sessions.codex",
         class_name="CodexNativeSessionProvider",
     ),
+    NativeSessionProviderSpec(
+        agent_name="antigravity",
+        module_path="modules.agents.native_sessions.antigravity",
+        class_name="AntigravityNativeSessionProvider",
+    ),
 )
