@@ -65,6 +65,9 @@ pub mod webview_macos;
 pub mod webview_windows;
 pub(crate) mod wiring;
 #[cfg(test)]
+#[path = "../../tests/direct/direct_only.rs"]
+mod direct_only_tests;
+#[cfg(test)]
 #[path = "../../tests/direct/wiring.rs"]
 mod wiring_tests;
 

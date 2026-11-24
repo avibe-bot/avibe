@@ -8,17 +8,17 @@
 //! Logs name what happened and nothing else: no host, address, ID or count
 //! that could identify an instance.
 use super::{
-    choices::{Choices, Mode},
+    choices::{Choices, Mode, Reason, Reverted},
     rendezvous::{origin_of, Reply, Request},
     wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
     Client, RefreshOutcome,
 };
 use crate::instance_client;
-use avibe_runtime_host::instance_client::protocol::ClientTarget;
+use avibe_runtime_host::instance_client::protocol::{ClientAction, ClientRequest, ClientTarget};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, SystemTime},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{
     menu::{CheckMenuItem, Submenu},
@@ -32,6 +32,7 @@ use tokio::{
 
 pub(crate) const MENU_AUTOMATIC: &str = "direct-connection-automatic";
 pub(crate) const MENU_TUNNEL: &str = "direct-connection-tunnel";
+pub(crate) const MENU_DIRECT: &str = "direct-connection-direct";
 const MENU_CONNECTION: &str = "direct-connection";
 
 /// How often a session looks at the clock, to notice that the computer slept.
@@ -44,58 +45,79 @@ const LOOK: Duration = Duration::from_secs(5);
 const WAIT: Duration = Duration::from_secs(30);
 
 /// The 「连接方式」 submenu: this computer's choice of path for the instance
-/// on show (ui/design: desktop/connection-choice/menu-*). Its three strings
-/// are the Devices page's own, read by key.
+/// on show (ui/design: desktop/connection-choice/menu-*). Its strings are
+/// the Devices page's own, read by key.
 pub(crate) struct ConnectionMenu<R: Runtime> {
     pub submenu: Submenu<R>,
     pub automatic: CheckMenuItem<R>,
     pub tunnel: CheckMenuItem<R>,
+    /// "Direct and relay only", where the product catalog has its string.
+    /// It is in the submenu only while the instance on show could be routed
+    /// (`ConnectionState::direct`).
+    pub direct: Option<CheckMenuItem<R>>,
+    /// Whether `direct` is in the submenu now.
+    listed: Mutex<bool>,
 }
 
 /// The submenu as words: what every system builds it from. `None` when the
-/// product catalog lacks one of its three strings.
+/// product catalog lacks its title or one of its first two choices.
 struct ConnectionRows {
     title: String,
-    /// The choices in the frame's order, each with its item's ID.
-    choices: [(&'static str, Mode, String); 2],
+    /// The choices in the frame's order, each with its item's ID. The third,
+    /// "direct and relay only", is there when the catalog has its string.
+    choices: Vec<(&'static str, Mode, String)>,
 }
 
 impl ConnectionRows {
     fn read() -> Option<Self> {
         let text = |key: &str| crate::product_text(&format!("devices.connection.{key}"));
+        let mut choices = vec![
+            (MENU_AUTOMATIC, Mode::Automatic, text("automatic")?),
+            (MENU_TUNNEL, Mode::Tunnel, text("tunnelOnly")?),
+        ];
+        choices.extend(text("directOnly").map(|text| (MENU_DIRECT, Mode::Direct, text)));
         Some(Self {
             title: text("title")?,
-            choices: [
-                (MENU_AUTOMATIC, Mode::Automatic, text("automatic")?),
-                (MENU_TUNNEL, Mode::Tunnel, text("tunnelOnly")?),
-            ],
+            choices,
         })
     }
 }
 
-/// What the submenu shows for a choice: whether it can be used, and which
-/// of its items is ticked.
+/// What the submenu shows for a choice: whether it can be used, which of
+/// its items is ticked, and whether "direct and relay only" is offered.
 #[derive(Debug, PartialEq, Eq)]
 struct ConnectionState {
     enabled: bool,
     ticked: Mode,
+    /// The instance on show could be reached on a path that is not the
+    /// tunnel: this system routes, and its address is one the direct path
+    /// serves. Otherwise the third item is absent, not greyed.
+    direct: bool,
 }
 
 impl ConnectionState {
-    /// The choice for the instance on show; `None`, and greyed with
-    /// "automatic" ticked, while this computer's own instance is.
-    fn of(chosen: Option<Mode>) -> Self {
+    /// The choice for the instance on show, and whether it could be routed;
+    /// `None`, and greyed with "automatic" ticked and no third item, while
+    /// this computer's own instance is.
+    fn of(chosen: Option<(Mode, bool)>) -> Self {
         Self {
             enabled: chosen.is_some(),
-            ticked: chosen.unwrap_or_default(),
+            ticked: chosen.map(|(mode, _)| mode).unwrap_or_default(),
+            direct: chosen.is_some_and(|(_, routable)| routable),
         }
     }
 }
 
-/// This computer's choice of path for the instance on show: each account's
-/// instance has its own, and this computer's own instance has none.
-fn chosen(shown: Option<&Published>, wiring: &Wiring) -> Option<Mode> {
-    shown.map(|shown| wiring.mode(&shown.target.account, &shown.target.origin))
+/// This computer's choice of path for the instance on show, and whether
+/// that instance could be routed: each account's instance has its own, and
+/// this computer's own instance has none.
+fn chosen(shown: Option<&Published>, wiring: &Wiring) -> Option<(Mode, bool)> {
+    shown.map(|shown| {
+        (
+            wiring.mode(&shown.target.account, &shown.target.origin),
+            wiring.routable(&shown.target.origin),
+        )
+    })
 }
 
 impl<R: Runtime> ConnectionMenu<R> {
@@ -105,27 +127,42 @@ impl<R: Runtime> ConnectionMenu<R> {
             return Ok(None);
         };
         let state = ConnectionState::of(None);
-        let [automatic, tunnel] = rows.choices;
-        let item = |(id, mode, text): (&str, Mode, String)| {
-            CheckMenuItem::with_id(app, id, text, true, state.ticked == mode, None::<&str>)
+        let item = |(id, mode, text): &(&str, Mode, String)| {
+            CheckMenuItem::with_id(app, *id, text, true, state.ticked == *mode, None::<&str>)
         };
-        let (automatic, tunnel) = (item(automatic)?, item(tunnel)?);
+        let (automatic, tunnel) = (item(&rows.choices[0])?, item(&rows.choices[1])?);
+        let direct = rows.choices.get(2).map(item).transpose()?;
         let submenu =
             Submenu::with_id_and_items(app, MENU_CONNECTION, rows.title, state.enabled, &[&automatic, &tunnel])?;
         Ok(Some(Self {
             submenu,
             automatic,
             tunnel,
+            direct,
+            listed: Mutex::new(false),
         }))
     }
 
-    /// The system ticks whatever was clicked, so both ticks are always set
+    /// The system ticks whatever was clicked, so every tick is always set
     /// from the choice.
-    pub(crate) fn show(&self, chosen: Option<Mode>) {
+    pub(crate) fn show(&self, chosen: Option<(Mode, bool)>) {
         let state = ConnectionState::of(chosen);
         let _ = self.submenu.set_enabled(state.enabled);
         let _ = self.automatic.set_checked(state.ticked == Mode::Automatic);
         let _ = self.tunnel.set_checked(state.ticked == Mode::Tunnel);
+        let Some(direct) = &self.direct else { return };
+        let _ = direct.set_checked(state.ticked == Mode::Direct);
+        let mut listed = lock(&self.listed);
+        if state.direct != *listed {
+            let changed = if state.direct {
+                self.submenu.append(direct)
+            } else {
+                self.submenu.remove(direct)
+            };
+            if changed.is_ok() {
+                *listed = state.direct;
+            }
+        }
     }
 }
 
@@ -133,6 +170,11 @@ pub(crate) struct Direct {
     wiring: Mutex<Wiring>,
     /// Ends a session's task, which then drops its client.
     stops: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+    /// Has a session ask its rendezvous now.
+    asks: Mutex<HashMap<u64, Arc<Notify>>>,
+    /// Where an instance that is being opened again was, by account and
+    /// origin: its new view goes back there once.
+    returns: Mutex<Vec<Return>>,
     /// The instance view the main window held at the last look.
     shown: Mutex<Option<Published>>,
     wake: Notify,
@@ -191,6 +233,8 @@ pub(crate) fn init(app: &AppHandle) {
     let state = Arc::new(Direct {
         wiring: Mutex::new(Wiring::new(routing, proxy_configured, choices)),
         stops: Mutex::new(HashMap::new()),
+        asks: Mutex::new(HashMap::new()),
+        returns: Mutex::new(Vec::new()),
         shown: Mutex::new(None),
         wake: Notify::new(),
         menu: Mutex::new(None),
@@ -206,8 +250,12 @@ pub(crate) fn init(app: &AppHandle) {
             let every = {
                 let shown = lock(&state.shown);
                 let wiring = lock(&state.wiring);
+                // Sooner when a direct-only session has something due.
+                let until = wiring
+                    .deadline()
+                    .map(|at| at.saturating_duration_since(Instant::now()) + Duration::from_millis(50));
                 if wiring.busy() {
-                    Some(LOOK)
+                    Some(until.map_or(LOOK, |until| until.min(LOOK)))
                 } else if wiring.awaits(shown.as_ref()) {
                     Some(WAIT)
                 } else {
@@ -296,6 +344,9 @@ async fn look(app: &AppHandle, state: &Arc<Direct>) {
     }
     // What was kept for a window that has closed went with it.
     native::forget_closed(|window| app.get_webview(window).is_some());
+    if let Some(shown) = &shown {
+        go_back(app, state, shown);
+    }
     pages::refresh(app, state, false);
     refresh_menu(app, state);
 }
@@ -361,7 +412,187 @@ async fn perform(app: &AppHandle, state: &Arc<Direct>, effect: Effect) {
             }
             eprintln!("desktop direct: a session ended");
         }
+        Effect::Strict { session, only } => {
+            let closed = pages::direct_only(state, session, only);
+            if only {
+                eprintln!("desktop direct: a session is direct-only; tunnel connections closed: {}", closed.min(99));
+            } else {
+                eprintln!("desktop direct: a direct-only session connects again");
+            }
+        }
+        Effect::Reload { session, windows } => reload(app, state, session, windows),
+        Effect::Ask { session } => {
+            if let Some(ask) = lock(&state.asks).get(&session) {
+                ask.notify_one();
+            }
+        }
+        Effect::Reopen { runtime } => reopen(app, state, &runtime),
+        Effect::Revert {
+            account,
+            origin,
+            runtime,
+        } => revert(app, state, &account, &origin, &runtime).await,
     }
+}
+
+/// Reloads the windows of a direct-only session, once, now that its link is
+/// up and its listener's tunnel connections are closed: every connection
+/// their pages make from here is the listener's to put on the link.
+///
+/// A window keeps connections across a reload, so afterwards the listener
+/// is asked what it still carries on the tunnel for them. Anything but
+/// nothing is closed again, and said: it would be the tunnel under a choice
+/// that forbids it.
+fn reload(app: &AppHandle, state: &Arc<Direct>, session: u64, windows: Vec<String>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        for window in &windows {
+            if let Some(view) = handle.get_webview(window) {
+                let _ = view.reload();
+            }
+        }
+    });
+    let state = state.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        if pages::public_legs(&state, session).is_some_and(|legs| legs > 0) {
+            let still = lock(&state.wiring).is_direct_only(session);
+            if still {
+                pages::direct_only(&state, session, true);
+                eprintln!("desktop direct: a direct-only session carried tunnel connections after its reload; closed");
+            }
+        }
+    });
+}
+
+/// Where an instance that is being opened again was.
+struct Return {
+    account: String,
+    origin: String,
+    /// The view that is being replaced: the new one has another label.
+    from: String,
+    url: url::Url,
+    asked: Instant,
+}
+
+/// How long a return is kept for a view that has not come.
+const RETURNING: Duration = Duration::from_secs(120);
+
+/// Opens the instance of the view `runtime` again, if it is still the one
+/// on show: the app signs in to the instance afresh and replaces the view
+/// with a new one, which gets its session's route from before its first
+/// load. The view on show stays until the new one is ready.
+///
+/// The new view starts at the instance's first page; it is sent back to
+/// where the old one was once it shows (`go_back`). What was typed and not
+/// sent in the old view is lost.
+fn reopen(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
+    let Some(shown) = lock(&state.shown).clone().filter(|shown| shown.runtime == runtime) else {
+        return;
+    };
+    let Some(client) = app.try_state::<instance_client::Client>() else {
+        return;
+    };
+    lock(&state.wiring).reopening(runtime, Instant::now());
+    let at = app
+        .get_webview(runtime)
+        .and_then(|view| view.url().ok())
+        .filter(|url| origin_of(url.as_str()).as_deref() == Some(shown.target.origin.as_str()));
+    {
+        let mut returns = lock(&state.returns);
+        returns.retain(|kept| kept.account != shown.target.account || kept.origin != shown.target.origin);
+        if let Some(url) = at {
+            returns.push(Return {
+                account: shown.target.account.clone(),
+                origin: shown.target.origin.clone(),
+                from: runtime.to_owned(),
+                url,
+                asked: Instant::now(),
+            });
+        }
+    }
+    let coordinator = client.coordinator.clone();
+    let instance_id = shown.target.instance.clone();
+    let (app, state) = (app.clone(), state.clone());
+    tauri::async_runtime::spawn(async move {
+        // As the app selects the instance it last showed when it starts.
+        let reply = coordinator
+            .request(ClientRequest {
+                version: 1,
+                request_id: "direct-reopen".into(),
+                expected_generation: coordinator.state().generation,
+                action: ClientAction::SelectInstance { instance_id },
+            })
+            .await;
+        if reply.error.is_some() {
+            eprintln!("desktop direct: an instance could not be opened again");
+        }
+        poke(&app);
+        drop(state);
+    });
+}
+
+/// Sends the new view of an instance that was opened again back to where
+/// its old view was, once, when the instance's document is in it.
+fn go_back(app: &AppHandle, state: &Arc<Direct>, shown: &Published) {
+    let found = {
+        let mut returns = lock(&state.returns);
+        returns.retain(|kept| kept.asked.elapsed() < RETURNING);
+        let at = returns.iter().position(|kept| {
+            shown.document
+                && kept.account == shown.target.account
+                && kept.origin == shown.target.origin
+                && kept.from != shown.runtime
+        });
+        at.map(|at| returns.swap_remove(at))
+    };
+    let Some(found) = found else { return };
+    let (handle, window) = (app.clone(), shown.runtime.clone());
+    let _ = app.run_on_main_thread(move || {
+        let Some(view) = handle.get_webview(&window) else { return };
+        // Only from the instance's own first page: a view that has already
+        // gone somewhere else is left where it is.
+        let at_start = view.url().is_ok_and(|url| {
+            origin_of(url.as_str()) == origin_of(found.url.as_str()) && url.path() == "/" && url != found.url
+        });
+        if at_start {
+            let _ = view.navigate(found.url);
+        }
+    });
+}
+
+/// The app sets the choice of the instance of `account` at `origin` back to
+/// automatic itself: it could not be reached on a direct path or the relay
+/// while the tunnel reached it. Every page of the instance hears it, and
+/// the instance is opened again under the automatic choice.
+async fn revert(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, runtime: &str) {
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+    let effects = {
+        let mut wiring = lock(&state.wiring);
+        // Only a choice that is still "direct and relay only": someone may
+        // have chosen otherwise meanwhile.
+        if wiring.mode(account, origin) != Mode::Direct {
+            return;
+        }
+        wiring.revert(
+            account,
+            origin,
+            Reverted {
+                at,
+                reason: Reason::Unreachable,
+                from: Mode::Direct,
+            },
+        )
+    };
+    eprintln!("desktop direct: a direct-only choice was set back to automatic");
+    for effect in effects {
+        Box::pin(perform(app, state, effect)).await;
+    }
+    pages::refresh(app, state, true);
+    refresh_menu(app, state);
+    reopen(app, state, runtime);
 }
 
 fn route(state: &Arc<Direct>, session: u64) -> Option<(String, Material)> {
@@ -372,9 +603,10 @@ fn route(state: &Arc<Direct>, session: u64) -> Option<(String, Material)> {
 
 /// Where the client's listener is. What each window presents to it is that
 /// window's own registration (`pages::register`).
-fn material(client: &Client) -> Option<Material> {
+fn material(client: &Client, exclusive: bool) -> Option<Material> {
     Some(Material {
         proxy: client.route()?.proxy,
+        exclusive,
     })
 }
 
@@ -384,11 +616,18 @@ async fn open(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
     let Some(shown) = lock(&state.shown).clone().filter(|shown| shown.runtime == runtime) else {
         return;
     };
+    // A direct-only instance never gets a session for a view that is
+    // already open: the choice changed since this was decided, and the
+    // next look opens the instance again.
+    if lock(&state.wiring).only(&shown.target) {
+        return;
+    }
     let client = match shown.target.host() {
         Some(host) => Client::new(host, shown.target.instance.clone()).await,
         None => None,
     };
-    let Some((client, material)) = client.and_then(|client| material(&client).map(|material| (client, material)))
+    let Some((client, material)) =
+        client.and_then(|client| material(&client, false).map(|material| (client, material)))
     else {
         // Not an instance the direct path serves (a custom domain), or no
         // loopback port: ask no more for this view for a while.
@@ -402,15 +641,32 @@ async fn open(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
 fn start(app: &AppHandle, state: &Arc<Direct>, session: u64, client: Client) {
     let (stop, stopped) = oneshot::channel();
     lock(&state.stops).insert(session, stop);
+    let ask = Arc::new(Notify::new());
+    lock(&state.asks).insert(session, ask.clone());
     pages::session_started(app, state, session, &client);
     eprintln!("desktop direct: a session started");
-    tauri::async_runtime::spawn(run(app.clone(), state.clone(), session, client, stopped));
+    tauri::async_runtime::spawn(run(app.clone(), state.clone(), session, client, stopped, ask));
+}
+
+/// What a rendezvous request says about the tunnel, whatever came of it:
+/// whether the instance itself answered it. A request that found no page
+/// of the instance, failed on the way, or was not the selection's any more
+/// says nothing.
+fn instance_answered(reply: &Reply) -> bool {
+    matches!(reply, Reply::Ready(_) | Reply::Refused(_) | Reply::Controlled)
 }
 
 /// One session's client, for as long as the session lasts: it asks the
 /// rendezvous through the session's instance view, again before the answer
 /// runs out, and sooner after the computer slept.
-async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Client, mut stopped: oneshot::Receiver<()>) {
+async fn run(
+    app: AppHandle,
+    state: Arc<Direct>,
+    session: u64,
+    mut client: Client,
+    mut stopped: oneshot::Receiver<()>,
+    ask_now: Arc<Notify>,
+) {
     let mut lifetime = client.listener_lifetime();
     let mut pace = Pace::default();
     let mut due = Instant::now();
@@ -425,6 +681,8 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
                 }
                 continue;
             }
+            // A direct-only session that connects again asks at once.
+            _ = ask_now.notified() => due = Instant::now(),
             _ = tokio::time::sleep_until(due.min(Instant::now() + GLANCE)) => {}
         }
         // The timer does not run while the computer sleeps, and the answer
@@ -449,14 +707,30 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
         // The core hears how the request ended in the adapter's own words:
         // it keeps a link through a page that was not ready or a request
         // that failed, and retires it on a refusal or a changed selection.
-        let asking =
-            client.refresh_reply(|endpoint| ask(app.clone(), state.clone(), session, window, origin, endpoint));
+        let answered = Arc::new(Mutex::new(false));
+        let asking = client.refresh_reply(|endpoint| {
+            let (app, state, answered) = (app.clone(), state.clone(), answered.clone());
+            async move {
+                let reply = ask(app, state, session, window, origin, endpoint).await;
+                *lock(&answered) = instance_answered(&reply);
+                reply
+            }
+        });
         let outcome = tokio::select! {
             biased;
             _ = &mut stopped => break false,
             outcome = asking => outcome,
         };
-        let effects = lock(&state.wiring).probed(session, outcome == RefreshOutcome::Renewed);
+        let effects = {
+            let mut wiring = lock(&state.wiring);
+            let mut effects = wiring.probed(session, outcome == RefreshOutcome::Renewed);
+            // The tunnel carried the request to the instance and back, and
+            // no link came of it.
+            if outcome == RefreshOutcome::Retired && *lock(&answered) {
+                effects.extend(wiring.unlinked(session, Instant::now()));
+            }
+            effects
+        };
         for effect in effects {
             perform(&app, &state, effect).await;
         }
@@ -472,6 +746,7 @@ async fn run(app: AppHandle, state: Arc<Direct>, session: u64, mut client: Clien
         state.wake.notify_one();
     }
     lock(&state.stops).remove(&session);
+    lock(&state.asks).remove(&session);
     // Every window's registration is revoked, then the listener goes with
     // the client.
     pages::session_ending(&state, session);
@@ -566,9 +841,12 @@ pub(crate) struct AtCreation {
 
 /// The main window's instance view for `destination` is about to be created,
 /// on the main thread. When this account's instance has answered a
-/// rendezvous before, this starts its client and returns the route, which
+/// rendezvous before, or its choice is "the direct path and the relay
+/// only", this starts its client and returns the route, which
 /// `window_created` puts in place before the view's first load; otherwise
-/// `None`, and the view is created as it always was.
+/// `None`, and the view is created as it always was. (A direct-only
+/// instance whose view is made without a route is opened again, or has its
+/// choice set back, at the next look: `Wiring::reconcile`.)
 pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Option<AtCreation> {
     let state = direct(app).filter(|state| state.available)?;
     let target = target_at(app, destination)?;
@@ -587,8 +865,9 @@ pub(crate) fn instance_view_route(app: &AppHandle, destination: &url::Url) -> Op
             return None;
         }
     }
+    let exclusive = lock(&state.wiring).only(&target);
     let client = tauri::async_runtime::block_on(Client::new(&host, target.instance.clone()))?;
-    let material = material(&client)?;
+    let material = material(&client, exclusive)?;
     // Where the route is the window's arguments, there is none without them.
     let arguments = native::arguments(&host, &material);
     if arguments.is_none() && lock(&state.wiring).routes_at_creation() {
@@ -734,6 +1013,7 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
     let mode = match id {
         MENU_AUTOMATIC => Mode::Automatic,
         MENU_TUNNEL => Mode::Tunnel,
+        MENU_DIRECT => Mode::Direct,
         _ => return false,
     };
     let Some(state) = direct(app) else { return true };
@@ -753,15 +1033,29 @@ pub(crate) fn menu_event(app: &AppHandle, id: &str) -> bool {
 pub(crate) mod app_lock_menu;
 
 /// The choice of path for the instance of `account` at `origin` is now
-/// `mode`: from the menu, or from a page of that instance. Nothing reloads.
-/// Returns the choice's place among this run's choices (`Wiring::choice`).
+/// `mode`: from the menu, or from a page of that instance. Between
+/// "automatic" and "Cloudflare tunnel only" nothing reloads. A choice to or
+/// from "the direct path and the relay only" opens the instance again, if
+/// it is the one on show: its windows were made for the other kind of
+/// route. Returns the choice's place among this run's choices
+/// (`Wiring::choice`).
 fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mode: Mode) -> u64 {
-    let (effects, order) = {
+    let (effects, order, reopens) = {
         let mut wiring = lock(&state.wiring);
+        let before = wiring.mode(account, origin);
         let effects = wiring.choose(account, origin, mode);
-        (effects, wiring.choice(account, origin).1)
+        (effects, wiring.choice(account, origin).2, Wiring::reopens(before, mode))
     };
     refresh_menu(app, state);
+    let on_show = lock(&state.shown)
+        .as_ref()
+        .filter(|shown| reopens && shown.target.account == account && shown.target.origin == origin)
+        .map(|shown| shown.runtime.clone());
+    // Noted before anything else looks: the view on show is about to be
+    // replaced, and gets no session of its own meanwhile.
+    if let Some(runtime) = &on_show {
+        lock(&state.wiring).reopening(runtime, Instant::now());
+    }
     let (app, state) = (app.clone(), state.clone());
     tauri::async_runtime::spawn(async move {
         for effect in effects {
@@ -769,6 +1063,9 @@ fn choose(app: &AppHandle, state: &Arc<Direct>, account: &str, origin: &str, mod
         }
         // Every page of the instance hears the choice, and its menu shows it.
         pages::refresh(&app, &state, true);
+        if let Some(runtime) = on_show {
+            reopen(&app, &state, &runtime);
+        }
         // "Automatic" starts a session for the instance on show, where a
         // route can be put on an open window.
         state.wake.notify_one();

@@ -34,8 +34,18 @@
     if (!message || typeof message !== 'object') return;
     const order = typeof message.preferenceOrder === 'number' ? message.preferenceOrder : 0;
     if (message.preference && typeof message.preference === 'object' && order >= preferenceOrder) {
+      // The page hears a choice that changed while it was open (the app's
+      // menu, another window, or the app setting it back itself), as the
+      // phone App tells it: a window event. Not the first one it is given,
+      // which it reads with `direct.preference()`.
+      const changed = preference !== null && JSON.stringify(preference) !== JSON.stringify(message.preference);
       preference = message.preference;
       preferenceOrder = order;
+      if (changed) {
+        const detail = { ...preference };
+        emit('direct.preferenceChanged', detail);
+        window.dispatchEvent(new CustomEvent('avibe:native:direct.preferenceChanged', { detail }));
+      }
     }
     const next = message.status;
     if (next && typeof next === 'object' && (status === null || next.sequence > status.sequence)) {
@@ -95,8 +105,8 @@
       case 'direct.handover':
         return ask(method, {});
       case 'direct.setPreference':
-        if (params?.mode !== 'automatic' && params?.mode !== 'tunnel') {
-          return Promise.reject({ code: 'invalid_argument', message: 'The mode is automatic or tunnel.' });
+        if (params?.mode !== 'automatic' && params?.mode !== 'tunnel' && params?.mode !== 'direct') {
+          return Promise.reject({ code: 'invalid_argument', message: 'The mode is automatic, tunnel or direct.' });
         }
         return ask(method, { mode: params.mode });
       default:
@@ -116,7 +126,7 @@
       contract: 1,
       platform: 'desktop',
       shellVersion: version,
-      capabilities: Object.freeze({ direct: 3, directPreference: 1 }),
+      capabilities: Object.freeze({ direct: 3, directPreference: 2 }),
       call,
       on,
     }),

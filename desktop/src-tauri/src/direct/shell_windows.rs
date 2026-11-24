@@ -120,6 +120,7 @@ pub fn arguments(host: &str, material: &Material) -> Option<String> {
     Some(super::window_arguments(&webview_windows::route_argument(
         host,
         material.proxy,
+        !material.exclusive,
     )?))
 }
 

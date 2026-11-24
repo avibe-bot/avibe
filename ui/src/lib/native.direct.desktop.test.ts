@@ -243,7 +243,8 @@ describe('the desktop direct bridge', () => {
     await expect(bridge.call('direct.preference')).resolves.toEqual({ mode: 'automatic', reverted: null });
     expect(requests).toHaveLength(0);
 
-    await expect(bridge.call('direct.setPreference', { mode: 'direct' })).rejects.toMatchObject({
+    // Not a choice the app has.
+    await expect(bridge.call('direct.setPreference', { mode: 'relay' })).rejects.toMatchObject({
       code: 'invalid_argument',
     });
     expect(requests).toHaveLength(0);
@@ -275,6 +276,43 @@ describe('the desktop direct bridge', () => {
     deliver({ preference: { mode: 'automatic', reverted: null }, preferenceOrder: 5 });
     await expect(choice()).resolves.toEqual({ mode: 'automatic', reverted: null });
     expect(requests).toHaveLength(0);
+  });
+
+  it('offers the third choice, and tells the page of a choice that changes while it is open', async () => {
+    await load({ ...state(1, null), preference: { mode: 'automatic', reverted: null }, preferenceOrder: 3 });
+    const bridge = window.avibeNative!;
+    // `directPreference` 2: "direct and relay only" can be chosen.
+    expect(bridge.capabilities).toMatchObject({ direct: 3, directPreference: 2 });
+    const heard: unknown[] = [];
+    const told: unknown[] = [];
+    const listen = (event: Event) => heard.push((event as CustomEvent).detail);
+    window.addEventListener('avibe:native:direct.preferenceChanged', listen);
+    const stop = bridge.on('direct.preferenceChanged', (choice: unknown) => told.push(choice));
+    try {
+      // The first choice a document is given is read, not announced.
+      expect(heard).toEqual([]);
+
+      const chosen = bridge.call('direct.setPreference', { mode: 'direct' });
+      expect(requests[0]).toMatchObject({ method: 'direct.setPreference', params: { mode: 'direct' } });
+      const direct = { mode: 'direct', reverted: null };
+      deliver({ preference: direct, preferenceOrder: 4, reply: { id: requests[0].id, result: direct } });
+      await expect(chosen).resolves.toEqual(direct);
+      expect(heard).toEqual([direct]);
+
+      // The app set it back itself: when, why and from which choice.
+      const reverted = { mode: 'automatic', reverted: { at: 1795000000000, reason: 'unreachable', from: 'direct' } };
+      deliver({ preference: reverted, preferenceOrder: 5 });
+      expect(heard).toEqual([direct, reverted]);
+      await expect(bridge.call('direct.preference')).resolves.toEqual(reverted);
+      // The same choice again, and an older one arriving late, announce nothing.
+      deliver({ preference: reverted, preferenceOrder: 6 });
+      deliver({ preference: direct, preferenceOrder: 4 });
+      expect(heard).toEqual([direct, reverted]);
+      expect(told).toEqual(heard);
+    } finally {
+      window.removeEventListener('avibe:native:direct.preferenceChanged', listen);
+      stop();
+    }
   });
 
   it('asks the shell for the choice when none was delivered', async () => {

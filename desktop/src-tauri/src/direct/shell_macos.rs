@@ -56,7 +56,15 @@ pub fn install(
                 return;
             }
             let (username, password) = registration.native_login();
-            let _ = webview_macos::install_route(webview, main, &host, material.proxy, username, password);
+            let _ = webview_macos::install_route(
+                webview,
+                main,
+                &host,
+                material.proxy,
+                username,
+                password,
+                !material.exclusive,
+            );
         });
     });
 }

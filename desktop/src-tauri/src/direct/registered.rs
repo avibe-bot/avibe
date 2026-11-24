@@ -59,6 +59,16 @@ impl Registered {
         });
     }
 
+    /// How many tunnel connections the listener carries for these windows
+    /// now, busy or quiet.
+    pub fn public_legs(&self) -> usize {
+        self.windows
+            .values()
+            .filter_map(|registration| self.handover.window_census(registration))
+            .map(|census| census.quiet + census.busy)
+            .sum()
+    }
+
     /// The session is ending: every registration is revoked.
     pub fn revoke_all(&mut self) {
         self.keep(|_| false);

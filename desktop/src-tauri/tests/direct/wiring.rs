@@ -1,5 +1,5 @@
 use super::{
-    choices::{Choices, Mode},
+    choices::{Choices, Mode, Reason, Reverted},
     shell::{remote_instance_permission, window_arguments, WRY_DEFAULT_ARGUMENTS},
     wiring::{Effect, Material, Pace, Published, Routing, Target, Wiring},
     RefreshOutcome,
@@ -39,6 +39,7 @@ fn away(origin: &str, runtime: &str) -> Published {
 fn material(port: u16) -> Material {
     Material {
         proxy: format!("127.0.0.1:{port}").parse().unwrap(),
+        exclusive: false,
     }
 }
 
@@ -494,11 +495,13 @@ fn an_instance_the_direct_path_cannot_name_gets_no_session() {
 fn choices_read_what_they_can_and_treat_the_rest_as_automatic() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("direct-paths.json");
-    // A later build's mode, an entry of another shape, and one this build reads.
+    // A later build's mode, an entry of another shape, one this build reads,
+    // and one whose record of a reversion this build cannot read (the phone
+    // App's, which names no `from`).
     std::fs::write(
         &path,
         format!(
-            r#"{{"version":1,"choices":{{"{ACCOUNT} {ONE}":{{"mode":"relay","reverted":null}},"{ACCOUNT} {TWO}":7,"account-2 {ONE}":{{"mode":"tunnel","reverted":{{"at":1,"reason":"unreachable"}}}}}},"reached":["{ACCOUNT} {TWO}"]}}"#
+            r#"{{"version":1,"choices":{{"{ACCOUNT} {ONE}":{{"mode":"relay","reverted":null}},"{ACCOUNT} {TWO}":7,"account-2 {ONE}":{{"mode":"tunnel","reverted":null}},"account-2 {TWO}":{{"mode":"tunnel","reverted":{{"at":1,"reason":"unreachable"}}}},"account-3 {ONE}":{{"mode":"direct"}}}},"reached":["{ACCOUNT} {TWO}"]}}"#
         ),
     )
     .unwrap();
@@ -506,6 +509,10 @@ fn choices_read_what_they_can_and_treat_the_rest_as_automatic() {
     assert_eq!(choices.mode(ACCOUNT, ONE), Mode::Automatic);
     assert_eq!(choices.mode(ACCOUNT, TWO), Mode::Automatic);
     assert_eq!(choices.mode("account-2", ONE), Mode::Tunnel);
+    // Unreadable as a whole: automatic, and set back by nobody.
+    assert_eq!(choices.mode("account-2", TWO), Mode::Automatic);
+    assert_eq!(choices.reverted("account-2", TWO), None);
+    assert_eq!(choices.mode("account-3", ONE), Mode::Direct);
     assert!(choices.reached(ACCOUNT, TWO));
     assert!(!choices.reached(ACCOUNT, ONE));
 
@@ -533,6 +540,53 @@ fn choices_read_what_they_can_and_treat_the_rest_as_automatic() {
     let mut choices = Choices::load(nested.clone());
     choices.set(ACCOUNT, ONE, Mode::Tunnel);
     assert_eq!(Choices::load(nested).mode(ACCOUNT, ONE), Mode::Tunnel);
+}
+
+/// "The direct path and the relay only" is kept like any choice. When the
+/// app sets it back to automatic itself, that is kept with it, with when
+/// and from which choice, until the next choice someone makes.
+#[test]
+fn the_direct_only_choice_is_kept_and_a_reversion_stands_until_the_next_choice() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("direct-paths.json");
+    let mut choices = Choices::load(path.clone());
+    choices.set(ACCOUNT, ONE, Mode::Direct);
+    assert_eq!(Choices::load(path.clone()).mode(ACCOUNT, ONE), Mode::Direct);
+    assert_eq!(choices.reverted(ACCOUNT, ONE), None);
+    assert!(std::fs::read_to_string(&path).unwrap().contains(r#""mode":"direct""#));
+
+    let reverted = Reverted {
+        at: 1_795_000_000_000,
+        reason: Reason::Unreachable,
+        from: Mode::Direct,
+    };
+    choices.revert(ACCOUNT, ONE, reverted);
+    for choices in [&choices, &Choices::load(path.clone())] {
+        assert_eq!(choices.mode(ACCOUNT, ONE), Mode::Automatic);
+        assert_eq!(choices.reverted(ACCOUNT, ONE), Some(reverted));
+        // Another instance, and another account's same instance, have none.
+        assert_eq!(choices.reverted(ACCOUNT, TWO), None);
+        assert_eq!(choices.reverted("account-2", ONE), None);
+    }
+    // On disk in the phone App's words, with the choice it came from.
+    let kept: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        kept["choices"][format!("{ACCOUNT} {ONE}")],
+        serde_json::json!({
+            "mode": "automatic",
+            "reverted": { "at": 1_795_000_000_000u64, "reason": "unreachable", "from": "direct" },
+        })
+    );
+
+    // Chosen again, whatever is chosen: the reversion is forgotten, and an
+    // automatic entry with nothing to say is not kept at all.
+    choices.set(ACCOUNT, ONE, Mode::Automatic);
+    assert_eq!(choices.reverted(ACCOUNT, ONE), None);
+    assert!(!std::fs::read_to_string(&path).unwrap().contains(ONE));
+    choices.revert(ACCOUNT, ONE, reverted);
+    choices.set(ACCOUNT, ONE, Mode::Tunnel);
+    assert_eq!(choices.mode(ACCOUNT, ONE), Mode::Tunnel);
+    assert_eq!(Choices::load(path).reverted(ACCOUNT, ONE), None);
 }
 
 /// A Windows window of another computer's instance refuses notifications,
@@ -1007,16 +1061,16 @@ fn an_app_window_joins_the_published_session_or_else_the_newest_early_one_with_a
 #[test]
 fn a_choice_is_read_with_its_place_among_the_choices_made() {
     let mut wiring = live();
-    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, 0));
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, None, 0));
     wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
-    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, 1));
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, None, 1));
     // Any choice moves the order on, so a reading made before it is older
     // for every page, also one of another instance.
     wiring.choose(ACCOUNT, TWO, Mode::Tunnel);
-    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, 2));
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, None, 2));
     wiring.choose(ACCOUNT, ONE, Mode::Automatic);
-    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, 3));
-    assert_eq!(wiring.choice(ACCOUNT, TWO), (Mode::Tunnel, 3));
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, None, 3));
+    assert_eq!(wiring.choice(ACCOUNT, TWO), (Mode::Tunnel, None, 3));
 }
 
 #[test]

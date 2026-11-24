@@ -12,7 +12,10 @@
 //!
 //! What crosses is the path's kind, two counters and the choice of path. No
 //! address, peer, relay, host, or anything of the listener's.
-use super::{choices::Mode, AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath};
+use super::{
+    choices::{Mode, Reason, Reverted},
+    AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
@@ -107,14 +110,29 @@ fn word(family: AddressFamily) -> &'static str {
     }
 }
 
-/// `direct.preference()`. The desktop app never sets a choice back itself.
-pub fn preference(mode: Mode) -> Value {
+fn mode_word(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Automatic => "automatic",
+        Mode::Tunnel => "tunnel",
+        Mode::Direct => "direct",
+    }
+}
+
+/// `direct.preference()`, and what `direct.preferenceChanged` carries: the
+/// choice, and the app's own setting-back of it while that stands, in the
+/// phone App's shape with the choice it was set back `from`. `mode` here is
+/// the choice ("direct": the direct path and the relay only), not the path
+/// in use, which is `direct.status().preferred`.
+pub fn preference(mode: Mode, reverted: Option<Reverted>) -> Value {
     json!({
-        "mode": match mode {
-            Mode::Automatic => "automatic",
-            Mode::Tunnel => "tunnel",
-        },
-        "reverted": null,
+        "mode": mode_word(mode),
+        "reverted": reverted.map(|reverted| json!({
+            "at": reverted.at,
+            "reason": match reverted.reason {
+                Reason::Unreachable => "unreachable",
+            },
+            "from": mode_word(reverted.from),
+        })),
     })
 }
 
@@ -210,9 +228,9 @@ pub struct Told {
 }
 
 impl Told {
-    pub fn new(mode: Mode, order: u64) -> Self {
+    pub fn new(mode: Mode, reverted: Option<Reverted>, order: u64) -> Self {
         Self {
-            preference: preference(mode),
+            preference: preference(mode, reverted),
             order,
         }
     }
