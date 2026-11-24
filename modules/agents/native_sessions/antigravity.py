@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Mapping, Sequence
 from datetime import datetime
-from typing import Any, TypeVar
+from typing import Any
 
 from modules.agents.acp import ACP_AUTH_REQUIRED, AcpClient, AcpRpcError, AcpTransportError
 from modules.agents.antigravity.agent import (
@@ -28,19 +27,8 @@ from .types import BackendSessionTitle, NativeResumeSession
 
 logger = logging.getLogger(__name__)
 
-_T = TypeVar("_T")
 _CLIENT_INFO = {"name": "avibe-native-sessions", "version": "1.0.0"}
 _MAX_LIST_PAGES = 20
-
-
-def _run_coro(coro: Coroutine[Any, Any, _T]) -> _T:
-    """Run an async coroutine from sync provider methods, even inside a running loop."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
@@ -164,8 +152,22 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
         finally:
             await client.close()
 
-    def list_metadata(self, working_path: str) -> list[NativeResumeSession]:
-        raw_sessions = _run_coro(self._list_raw_sessions(working_path))
+    @staticmethod
+    def _ensure_no_running_loop(method_name: str) -> None:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        raise RuntimeError(
+            f"AntigravityNativeSessionProvider.{method_name}() cannot be called from a running "
+            f"event loop; await {method_name}_async() or run via asyncio.to_thread() instead."
+        )
+
+    @staticmethod
+    def _format_sessions(
+        raw_sessions: Sequence[Mapping[str, Any]],
+        working_path: str,
+    ) -> list[NativeResumeSession]:
         items: list[NativeResumeSession] = []
         for entry in raw_sessions:
             native_session_id = str(entry.get("sessionId") or "").strip()
@@ -190,6 +192,31 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
             )
         return items
 
+    @classmethod
+    def _resolve_title(
+        cls,
+        items: Sequence[NativeResumeSession],
+        *,
+        native_session_id: str,
+        first_user_message: str | None = None,
+    ) -> BackendSessionTitle | None:
+        for item in items:
+            if item.native_session_id != native_session_id:
+                continue
+            title = normalize_title_text(str(item.locator.get("title") or ""))
+            if title and not cls.is_placeholder_title(title):
+                return BackendSessionTitle(title=title, source="backend", confidence="high")
+            break
+        return derive_first_prompt_title(first_user_message or "")
+
+    async def list_metadata_async(self, working_path: str) -> list[NativeResumeSession]:
+        raw_sessions = await self._list_raw_sessions(working_path)
+        return self._format_sessions(raw_sessions, working_path)
+
+    def list_metadata(self, working_path: str) -> list[NativeResumeSession]:
+        self._ensure_no_running_loop("list_metadata")
+        return asyncio.run(self.list_metadata_async(working_path))
+
     def hydrate_preview(self, item: NativeResumeSession) -> NativeResumeSession:
         preview = str(item.locator.get("title") or "").strip()
         item.last_agent_message = preview
@@ -200,6 +227,22 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
     def is_placeholder_title(cls, title: str) -> bool:
         return title.strip().lower() in cls._PLACEHOLDER_TITLES
 
+    async def get_title_async(
+        self,
+        *,
+        working_path: str,
+        native_session_id: str,
+        first_user_message: str | None = None,
+    ) -> BackendSessionTitle | None:
+        if not native_session_id:
+            return derive_first_prompt_title(first_user_message or "")
+        items = await self.list_metadata_async(working_path)
+        return self._resolve_title(
+            items,
+            native_session_id=native_session_id,
+            first_user_message=first_user_message,
+        )
+
     def get_title(
         self,
         *,
@@ -209,11 +252,9 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
     ) -> BackendSessionTitle | None:
         if not native_session_id:
             return derive_first_prompt_title(first_user_message)
-        for item in self.list_metadata(working_path):
-            if item.native_session_id != native_session_id:
-                continue
-            title = normalize_title_text(str(item.locator.get("title") or ""))
-            if title and not self.is_placeholder_title(title):
-                return BackendSessionTitle(title=title, source="backend", confidence="high")
-            break
-        return derive_first_prompt_title(first_user_message)
+        items = self.list_metadata(working_path)
+        return self._resolve_title(
+            items,
+            native_session_id=native_session_id,
+            first_user_message=first_user_message,
+        )

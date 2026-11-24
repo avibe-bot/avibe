@@ -2059,7 +2059,12 @@ class SessionHandler(BaseHandler):
             await asyncio.to_thread(settings_manager.set_channel_routing, settings_key, routing)
 
             agent_label = agent.capitalize()
-            preview = self._get_resume_preview(context, agent=agent, session_id=session_id)
+            preview = await asyncio.to_thread(
+                self._get_resume_preview,
+                context,
+                agent=agent,
+                session_id=session_id,
+            )
             confirmation = self._build_resume_confirmation(
                 agent_label=agent_label,
                 session_id=session_id,

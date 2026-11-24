@@ -931,7 +931,7 @@ class AntigravityAgent(BaseAgent):
             if uri.startswith(("file://", "http://", "https://")):
                 return f"![image]({uri})"
             if os.path.isabs(uri):
-                return f"![image]({Path(uri).resolve().as_uri()})"
+                return f"![image]({Path(uri).as_uri()})"
         return None
 
     def _build_prompt_blocks_sync(

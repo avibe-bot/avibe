@@ -1783,3 +1783,142 @@ async def test_antigravity_logout_without_logout_capability_distinguishes_active
         "logout_unsupported",
     )
     assert fixture.rpc_methods() == ["initialize"]
+
+
+# ---------------------------------------------------------------------------
+# 15. Native title backfill & session discovery stay off the controller loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_antigravity_title_backfill_and_native_discovery_do_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+
+    from core.handlers.command_handlers import CommandHandlers
+    from core.services import sessions as sessions_service
+    from modules.agents.native_sessions.service import AgentNativeSessionService
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.settings_service import upsert_scope
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "avibe-home"))
+    ensure_sqlite_state()
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_ag_backfill",
+                now="2026-07-26T08:00:00Z",
+            )
+            session = sessions_service.create_session(conn, scope_id=scope_id, agent_backend="antigravity")
+    finally:
+        engine.dispose()
+
+    loop_thread_id = threading.get_ident()
+    seen_threads: list[int] = []
+
+    async def _slow_list_raw_sessions(self: AntigravityNativeSessionProvider, path: str) -> list[dict[str, Any]]:
+        seen_threads.append(threading.get_ident())
+        await asyncio.sleep(0.2)
+        return [
+            {
+                "sessionId": "ag-sess-slow",
+                "cwd": path,
+                "title": "Offloaded Antigravity Title",
+                "updatedAt": "2026-07-26T08:01:00Z",
+            }
+        ]
+
+    monkeypatch.setattr(AntigravityNativeSessionProvider, "_list_raw_sessions", _slow_list_raw_sessions)
+
+    # 15a. Sync provider entry points fail fast on a running loop instead of blocking via .result().
+    provider = AntigravityNativeSessionProvider(cli_path="agy")
+    with pytest.raises(RuntimeError, match="running event loop"):
+        provider.list_metadata(str(workdir))
+    with pytest.raises(RuntimeError, match="running event loop"):
+        provider.get_title(native_session_id="ag-sess-slow", working_path=str(workdir))
+
+    # 15b. Async provider entry points and asyncio.to_thread(sync) run non-blockingly.
+    async def _measure_timer() -> float:
+        started = time.monotonic()
+        await asyncio.sleep(0.01)
+        return time.monotonic() - started
+
+    async_items, async_timer = await asyncio.gather(
+        provider.list_metadata_async(str(workdir)),
+        _measure_timer(),
+    )
+    assert async_timer < 0.1
+    assert len(async_items) == 1
+    assert async_items[0].native_session_id == "ag-sess-slow"
+    async_title = await provider.get_title_async(working_path=str(workdir), native_session_id="ag-sess-slow")
+    assert async_title is not None and async_title.title == "Offloaded Antigravity Title"
+
+    thread_items, thread_timer = await asyncio.gather(
+        asyncio.to_thread(provider.list_metadata, str(workdir)),
+        _measure_timer(),
+    )
+    assert thread_timer < 0.1
+    assert len(thread_items) == 1
+    assert seen_threads[-1] != loop_thread_id
+
+    # 15c. CommandHandlers._list_recent_native_sessions_async offloads native session listing.
+    cmd_controller = SimpleNamespace(
+        config=SimpleNamespace(platform="slack"),
+        im_client=SimpleNamespace(),
+        settings_manager=SimpleNamespace(),
+        session_manager=SimpleNamespace(),
+        get_cwd=lambda _ctx: str(workdir),
+        get_native_session_service=lambda: AgentNativeSessionService(providers=[provider]),
+        agent_service=SimpleNamespace(agents={"antigravity": object()}),
+    )
+    handlers = CommandHandlers(cmd_controller)
+    ctx = MessageContext(user_id="U1", channel_id="C1", platform="slack")
+    (listed_path, listed_sessions), cmd_timer = await asyncio.gather(
+        handlers._list_recent_native_sessions_async(ctx, limit=10),
+        _measure_timer(),
+    )
+    assert cmd_timer < 0.1
+    assert listed_path == str(workdir)
+    assert [item.native_session_id for item in listed_sessions] == ["ag-sess-slow"]
+    assert seen_threads[-1] != loop_thread_id
+
+    # 15d. AntigravityAgent._maybe_backfill_session_title does not stall the controller event loop.
+    seen_threads.clear()
+    agy_cfg = _antigravity_config("agy")
+    controller = _DummyController(_app_config(agy_cfg))
+    agent = AntigravityAgent(controller, agy_cfg, rules_base_dir=tmp_path / "rules")
+    req = _make_request(message="hello", workdir=workdir)
+    req.context.platform_specific["agent_session_id"] = session["id"]
+
+    existing_tasks = set(asyncio.all_tasks())
+    agent._maybe_backfill_session_title(req, "ag-sess-slow")
+    backfill_tasks = [task for task in asyncio.all_tasks() if task not in existing_tasks]
+    assert len(backfill_tasks) == 1
+
+    # Yield to let the backfill task enter asyncio.to_thread; timer must fire well before 200ms.
+    timer_elapsed = await _measure_timer()
+    assert timer_elapsed < 0.1
+
+    await asyncio.gather(*backfill_tasks)
+    assert seen_threads and seen_threads[-1] != loop_thread_id
+
+    engine = create_sqlite_engine()
+    try:
+        with engine.connect() as conn:
+            row = sessions_service.get_session(conn, session["id"])
+    finally:
+        engine.dispose()
+    assert row is not None
+    assert row["title"] == "Offloaded Antigravity Title"
