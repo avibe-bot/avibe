@@ -314,6 +314,8 @@ class RawCallOutcome:
     # and provider ``request-id`` values cannot be conflated. The client and
     # provenance writer re-validate this tuple before persistence.
     response_correlation_ids: tuple[tuple[str, str], ...] = ()
+    # Closed diagnostic fields only. Not classification or retry inputs.
+    thread_error_fields: tuple[tuple[str, str], ...] = ()
     # Identity captured by the engine admission, not by a later evidence writer.
     engine_release: str | None = None
 

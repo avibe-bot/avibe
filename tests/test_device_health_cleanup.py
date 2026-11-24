@@ -64,6 +64,7 @@ def test_loopback_signout_fences_without_purging_unverified_health(install, monk
     store = MobileStore()
     cookie, viewer, target = phone(install, "local-owner-phone")
     install.remote_access.vibe_cloud.instance_secret = "fixture-runtime-credential"
+    install.save()
     identity, payload = code_for(store, viewer)
     mid = registry.pair(store, payload, identity)["device_id"]
     _, unused = code_for(store, viewer)
@@ -122,6 +123,7 @@ def test_deferred_loopback_cleanup_does_not_retarget(install, monkeypatch, chang
         identity, payload = code_for(store, viewer)
         mid = registry.pair(store, payload, identity)['device_id']
     install.remote_access.vibe_cloud.instance_secret = 'test-device-secret'
+    install.save()
     def no_cloud(*_):
         pytest.fail('unexpected owner lookup')
     with monkeypatch.context() as m:
@@ -131,8 +133,8 @@ def test_deferred_loopback_cleanup_does_not_retarget(install, monkeypatch, chang
         monkeypatch.setattr(permissions, 'get_current_permissions', no_cloud)
     if change == 'binding':
         install.remote_access.vibe_cloud.instance_secret = 'replacement-device-secret'
-    elif change == 'new_login':
         install.save()
+    elif change == 'new_login':
         phone(install, 'phone')
     elif change in ('expired', 'different_link'):
         with get_cached_sqlite_engine().begin() as conn:
@@ -157,6 +159,7 @@ def test_deferred_private_store_failure_expires_without_erasure(install, monkeyp
     identity, payload = code_for(store, viewer)
     mid = registry.pair(store, payload, identity)['device_id']
     install.remote_access.vibe_cloud.instance_secret = 'test-device-secret'
+    install.save()
     local, origin = ui_server.app.test_client(), 'http://127.0.0.1:5123'
     assert sign_out(local, target + '/sign-out', origin).get_json()['health_cleanup_pending']
     def unavailable(*args, **kwargs):

@@ -12260,6 +12260,7 @@ class ModelHubService:
                         and terminal_outcome_category(outcome, decision) != "engine_down"
                         else None
                     ),
+                    data={"thread_error_fields": dict(outcome.thread_error_fields)} if thread_attempt and outcome.thread_error_fields else None,
                     local_error_detail=format_os_errno(outcome.os_errno),
                     status=decision.downstream_status or (
                         outcome.http_status
