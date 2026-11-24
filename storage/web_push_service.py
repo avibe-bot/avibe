@@ -481,9 +481,33 @@ def count_enabled(conn: Connection, *, user_key: str | None = None) -> int:
     return int(conn.execute(stmt).scalar_one())
 
 
+_DELIVERY_GENERATION = 'remote_access.push_delivery_generation.v1'
+
+
+def record_binding_retirement(conn, binding, now):
+    stmt = sqlite_insert(state_meta).values(key=_DELIVERY_GENERATION, value_json=json.dumps(binding), updated_at=str(now))
+    conn.execute(stmt.on_conflict_do_update(index_elements=['key'], set_={'value_json': stmt.excluded.value_json,
+                                                                          'updated_at': stmt.excluded.updated_at}))
+
+
+def _delivery_generation():
+    return func.coalesce(select(state_meta.c.value_json).where(state_meta.c.key == _DELIVERY_GENERATION).scalar_subquery(), '')
+
+
+def _delivery_rows():
+    # One snapshot for the endpoint and the retirement preceding its selection.
+    return select(web_push_subscriptions, _delivery_generation().label('_delivery_generation'))
+
+
+def _same_delivery_generation(subscription):
+    if subscription and str(subscription.get('user_key', '')).startswith('remote:'):
+        return _delivery_generation() == subscription.get('_delivery_generation')
+    return True
+
+
 def list_enabled(conn: Connection, *, user_key: str | None = None) -> list[dict[str, Any]]:
     from storage.device_functions import delivery_allowed
-    stmt = select(web_push_subscriptions).where(web_push_subscriptions.c.enabled == 1, delivery_allowed())
+    stmt = _delivery_rows().where(web_push_subscriptions.c.enabled == 1, delivery_allowed())
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     rows = conn.execute(stmt).mappings().all()
@@ -533,7 +557,7 @@ def get_enabled_by_endpoint(
 
 def get_deliverable_by_endpoint(conn: Connection, *, endpoint: str, user_key: str):
     from storage.device_functions import delivery_allowed
-    row = conn.execute(select(web_push_subscriptions).where(web_push_subscriptions.c.endpoint==endpoint,
+    row = conn.execute(_delivery_rows().where(web_push_subscriptions.c.endpoint==endpoint,
         web_push_subscriptions.c.user_key==user_key, web_push_subscriptions.c.enabled==1, delivery_allowed())).mappings().first()
     return _row_to_dict(row) if row else None
 
@@ -543,10 +567,11 @@ def mark_send_success(
     *,
     endpoint: str,
     badge_count: int | None = None,
+    subscription: dict | None = None,
 ) -> None:
     now = _utc_now_iso()
     result = conn.execute(
-        web_push_subscriptions.update()
+        web_push_subscriptions.update().where(_same_delivery_generation(subscription))
         .where(web_push_subscriptions.c.endpoint == endpoint)
         .where(web_push_subscriptions.c.enabled == 1)
         .values(last_success_at=now, last_failure_at=None, provider_invalidated_at=None, failure_count=0, updated_at=now)
@@ -562,7 +587,7 @@ def mark_send_success(
         )
 
 
-def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False) -> None:
+def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False, subscription: dict | None = None) -> None:
     now = _utc_now_iso()
     values = {
         "last_failure_at": now,
@@ -573,7 +598,7 @@ def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False)
         values["enabled"] = 0
         values["provider_invalidated_at"] = now
     result = conn.execute(
-        web_push_subscriptions.update()
+        web_push_subscriptions.update().where(_same_delivery_generation(subscription))
         .where(web_push_subscriptions.c.endpoint == endpoint)
         .where(web_push_subscriptions.c.enabled == 1)
         .values(**values)

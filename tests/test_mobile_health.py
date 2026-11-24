@@ -603,6 +603,29 @@ def test_unconfirmed_eligibility_pauses_without_revoking_or_purging(store, mobil
     assert store.status()["connected"] and _health_days(store) == before
 
 
+def test_delayed_owner_check_cannot_purge_after_same_instance_rotation(store, mobile_http, monkeypatch):
+    from config.v2_config import V2Config
+
+    paired, _ = pair_device(store)
+    auth = {'Authorization': f"Bearer {paired['credential']}"}
+    client, projection = mobile_http
+    assert client.put('/api/mobile/device/v1/health/days', json=upload_payload(), headers=auth).status_code == 200
+    before = _health_days(store)
+
+    def late_answer(_):
+        config = V2Config.load()
+        config.remote_access.vibe_cloud.instance_secret = 'new-fixture-key'
+        config.save()
+        return SimpleNamespace(source='live', projection={**projection, 'access': {'owner': {'email': 'prior@example.test'}}})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(permissions, 'get_current_permissions', late_answer)
+        with pytest.raises(MobileError, match='instance_eligibility_unavailable'):
+            mobile_health.current_identity(store)
+    assert _health_days(store) == before and before > 0
+    assert client.put('/api/mobile/device/v1/health/days', json=upload_payload(seq=2), headers=auth).status_code == 200
+
+
 def test_live_permissions_unavailability_pauses_and_device_signout_revokes(store, mobile_http, monkeypatch):
     client, _ = mobile_http
     paired, _ = pair_device(store)

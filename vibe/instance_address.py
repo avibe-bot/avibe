@@ -25,10 +25,11 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, IO, Mapping
 from urllib.parse import urlsplit
 
 from config import paths
+from vibe.binding_admission import OperationBusy, admitted
 from config.atomic_io import write_atomic
 
 logger = logging.getLogger(__name__)
@@ -123,14 +124,15 @@ class Binding:
 
     active_host: str
     instance_id: str
-    secret_digest: str
+    registry_binding: str
+    epoch: str | None
     paired: bool
     instance_kind: str
     backend_origin: str
 
     @property
     def pairing(self) -> tuple[str, str]:
-        return self.instance_id, self.secret_digest
+        return self.epoch or '', self.registry_binding
 
 
 _BINDING_CACHE: tuple[tuple[Any, ...], Binding | None] | None = None
@@ -138,6 +140,7 @@ _binding_failure_logged: tuple[Any, ...] | None = None
 
 
 def _binding_from_config(config: Any) -> Binding:
+    from vibe.account_session_revoke import pairing_epoch
     cloud = config.remote_access.vibe_cloud
     active = ""
     try:
@@ -153,11 +156,12 @@ def _binding_from_config(config: Any) -> Binding:
             backend = f"https://{parsed_backend.netloc.lower()}"
     except ValueError:
         backend = ""
-    secret = str(cloud.instance_secret or "")
+    from vibe.device_metadata import binding_key
     return Binding(
         active_host=active,
         instance_id=str(cloud.instance_id or "").strip(),
-        secret_digest=hashlib.sha256(secret.encode("utf-8")).hexdigest() if secret else "",
+        epoch=pairing_epoch(config),
+        registry_binding=binding_key(cloud.instance_id, cloud.session_secret),
         paired=bool(cloud.is_runtime_paired()),
         instance_kind=str(cloud.instance_kind or ""),
         backend_origin=backend,
@@ -268,7 +272,9 @@ class _PairingChanged(Exception):
 
 def _require_instance(instance_id: str) -> None:
     current = current_binding()
-    if current is None or current.instance_id != instance_id:
+    if current is None:
+        raise OSError("instance address: local pairing temporarily unreadable")
+    if current.instance_id != instance_id:
         raise _PairingChanged()
 
 
@@ -287,23 +293,9 @@ def _update_state(instance_id: str, mutate: Callable[[dict[str, Any]], None]) ->
 # --- receipts -----------------------------------------------------------------
 
 
-_receipt_key_cache: tuple[str, bytes] | None = None
-
-
 def _receipt_key() -> bytes:
-    global _receipt_key_cache
-
-    path = str(_state_path())
-    cached = _receipt_key_cache
-    if cached is not None and cached[0] == path:
-        return cached[1]
-    with _LOCK:
-        key = _stored_receipt_key()
-        _receipt_key_cache = (str(_state_path()), key)
-        return key
-
-
-def _stored_receipt_key() -> bytes:
+    # A reset in a separate process deletes this file. Do not retain its key
+    # across requests; a device snapshot reads it once before its DB transaction.
     with _LOCK:
         binding = current_binding()
         instance_id = binding.instance_id if binding else ""
@@ -325,7 +317,11 @@ def _stored_receipt_key() -> bytes:
 def receipt_for_session(session_id: str) -> str:
     """The keyed one-way value a browser posts back after clearing (rule F2)."""
 
-    digest = hmac.new(_receipt_key(), _RECEIPT_CONTEXT + session_id.encode("utf-8"), hashlib.sha256).digest()
+    return _receipt_with_key(_receipt_key(), session_id)
+
+
+def _receipt_with_key(key: bytes, session_id: str) -> str:
+    digest = hmac.new(key, _RECEIPT_CONTEXT + session_id.encode("utf-8"), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
@@ -426,7 +422,7 @@ _authority: _Authority | None = None
 _authority_epoch = 0  # raised whenever authority is dropped; a late read cannot restore it
 _quiet: set[str] = set()
 _quiet_loaded_for: str | None = None
-_inflight: dict[str, int] = {}
+_inflight: dict[str, list[IO[str]]] = {}
 _last_read_started: float | None = None
 _last_read_failed: float | None = None
 _read_refused = False  # the last read got a definitive refusal from avibe.bot
@@ -499,6 +495,25 @@ def _drop_authority() -> None:
         _authority_epoch += 1
 
 
+def _cleanup_lease_path() -> Path:
+    from vibe.binding_admission import publication_lease_path
+    return publication_lease_path()
+
+
+def cleanup_publication_lock():
+    from storage.lock import MigrationFileLock
+    return MigrationFileLock(_cleanup_lease_path(), timeout_seconds=_DRAIN_TIMEOUT_SECONDS)
+
+
+def drain_for_reset() -> None:
+    """Called after sealing reset. No new cleaning headers may pass the fence."""
+    from vibe.binding_admission import reset_in_progress
+    if not reset_in_progress():
+        raise RuntimeError('reset intent required')
+    with cleanup_publication_lock():
+        pass  # marker remains durable after all earlier senders have finished
+
+
 def _note_standing_refusal(binding: Binding, code: str) -> None:
     """avibe.bot named a refusal that only a new binding of remote access ends."""
 
@@ -522,6 +537,9 @@ def _read_refusal_for(binding: Binding | None) -> tuple[int, str] | None:
 
 
 def _cleanup_allowed_locked(host: str, binding: Binding) -> bool:
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return False
     authority = _authority
     if authority is None or not binding.paired or authority.pairing != binding.pairing:
         return False
@@ -631,11 +649,24 @@ def begin_cleanup_response(raw_host: str | None) -> bool | None:
     try:
         if not _cleanup_allowed_locked(host, binding):
             return False
-        # Counted while the role lock is held: a name turned quiet after this
-        # sees the response in its drain; one turned quiet before is refused above.
-        with _DRAINED:
-            _inflight[host] = _inflight.get(host, 0) + 1
-        return True
+        # Register before the final generation/fence check. Once we release
+        # this lease a writer can publish, even if its process is not ours.
+        from storage.lock import try_shared_file_lease
+        from vibe import binding_health
+        lease = try_shared_file_lease(_cleanup_lease_path())
+        if lease is None:
+            return None
+        try:
+            if (binding != current_binding() or not _cleanup_allowed_locked(host, binding)
+                    or binding_health.rejected_at_epoch(binding.epoch) is not None):
+                return False
+            with _DRAINED:
+                _inflight.setdefault(host, []).append(lease)
+                lease = None
+            return True
+        finally:
+            if lease is not None:
+                lease.close()
     finally:
         _LOCK.release()
 
@@ -643,11 +674,11 @@ def begin_cleanup_response(raw_host: str | None) -> bool | None:
 def end_cleanup_response(raw_host: str | None) -> None:
     host = normalize_host(raw_host)
     with _DRAINED:
-        remaining = _inflight.get(host, 0) - 1
-        if remaining > 0:
-            _inflight[host] = remaining
-        else:
-            _inflight.pop(host, None)
+        leases = _inflight.get(host)
+        if leases:
+            leases.pop().close()
+            if not leases:
+                del _inflight[host]
         _DRAINED.notify_all()
 
 
@@ -660,7 +691,7 @@ def _quiet_and_drain(binding: Binding, journal: dict[str, Any]) -> dict[str, Any
         _set_journal(binding, journal)
     with _DRAINED:
         deadline = _monotonic() + _DRAIN_TIMEOUT_SECONDS
-        while _inflight.get(host, 0) > 0:
+        while _inflight.get(host):
             remaining = deadline - _monotonic()
             if remaining <= 0:
                 raise RuntimeError("cleanup responses did not drain")
@@ -740,7 +771,8 @@ def _read_is_stale_locked(read: _StateRead) -> bool:
     every point a read is applied, however long ago it was taken.
     """
 
-    if read.epoch != _authority_epoch:
+    from vibe.binding_health import rejected_at_epoch
+    if read.epoch != _authority_epoch or rejected_at_epoch(read.binding.epoch) is not None:
         return True
     current = current_binding()
     if current is None or current.pairing != read.binding.pairing:
@@ -851,6 +883,14 @@ def refresh_state(*, force: bool = False, wait: bool = True, again: bool = False
 
 
 def _apply_state(read: _StateRead) -> bool:
+    try:
+        with admitted('address'):
+            return _apply_admitted_state(read)
+    except OperationBusy:
+        return False
+
+
+def _apply_admitted_state(read: _StateRead) -> bool:
     global _authority
 
     global _known_cleanup
@@ -1154,9 +1194,7 @@ def preview(prefix: Any, actor: tuple[str, ...]) -> dict[str, Any]:
     }
 
 
-def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str, Any]]:
-    """Second request: write the intent, start the operation, wait briefly for avibe.bot."""
-
+def _admit_change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[Binding, str]:
     binding = current_binding()
     reason = _eligibility(binding)
     if reason is not None or binding is None:
@@ -1198,6 +1236,17 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
         state["journal"] = journal
         state["last_operation"] = None
         _save_state(state)
+    return binding, operation_id
+
+
+def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str, Any]]:
+    try:
+        with admitted('address'):
+            binding, operation_id = _admit_change(confirmation_id, actor)
+    except OperationBusy:
+        raise AddressError(409, 'operation_in_progress') from None
+    # The durable journal now owns admission. Release the OS lock before waking
+    # the worker or waiting for it: the worker needs that same lock to proceed.
     _wake_worker()
     deadline = _monotonic() + _FIRST_ANSWER_WAIT_SECONDS
     with _first_answer:
@@ -1408,6 +1457,14 @@ def _set_journal(binding: Binding, journal: dict[str, Any] | None, *, last: dict
 
 
 def _advance_operation() -> float:
+    try:
+        with admitted('address'):
+            return _advance_admitted_operation()
+    except OperationBusy:
+        return 15.0 if _any_journal_stored() else 0.0
+
+
+def _advance_admitted_operation() -> float:
     """Run the journal as far as it can go now; return seconds until the next try (0 = idle)."""
 
     binding = current_binding()
@@ -1576,6 +1633,22 @@ def _refuse_operation(binding: Binding, journal: dict[str, Any], failure: dict[s
 def _apply_committed(binding: Binding, journal: dict[str, Any]) -> float:
     """Apply a committed change. Every step is recorded and safe to repeat."""
 
+    from vibe.binding_health import rejected_at
+
+    if rejected_at(_load_config()) is not None:
+        # The issuer may already have renamed this instance. Retire only local
+        # reconciliation; a receipt is not authority for more destructive work.
+        _drop_authority()
+        from storage.lock import MigrationLockTimeout
+        try:
+            with cleanup_publication_lock():
+                _set_journal(binding, None, last={
+                    'operation_id': journal.get('operation_id'), 'hostname': journal['target_hostname'],
+                    'state': 'interrupted', 'error': 'reconciliation_interrupted', 'status': 409,
+                })
+        except MigrationLockTimeout:
+            return 1.0
+        return 0.0
     steps = dict(journal.get("steps") or {})
     target = journal["target_hostname"]
     local = journal.get("origin") == "local"
@@ -1750,7 +1823,7 @@ def _flip(binding: Binding, journal: dict[str, Any], read: _StateRead, target: s
     def mutate(config: Any) -> None:
         cloud = config.remote_access.vibe_cloud
         current = _binding_from_config(config)
-        if (current.instance_id, current.active_host) != expected or current.secret_digest != binding.secret_digest:
+        if (current.instance_id, current.active_host) != expected or current.pairing != binding.pairing:
             raise RuntimeError("the pairing changed while the address was being switched")
         cloud.public_url = public_url
         cloud.redirect_uri = f"{public_url}/auth/callback"
@@ -1829,7 +1902,7 @@ def _snapshot_devices(binding: Binding, hostname: str) -> None:
     ensure_sqlite_state()
     _require_instance(binding.instance_id)
     registry_binding = remote_access.device_binding(_load_config())
-    _receipt_key()  # before the write transaction: the key's first read takes the role lock
+    key = _receipt_key()  # never take the role lock inside the DB write transaction
     with get_cached_sqlite_engine().begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
         instance_address_clearing.snapshot(
@@ -1838,7 +1911,7 @@ def _snapshot_devices(binding: Binding, hostname: str) -> None:
             hostname=hostname,
             binding=registry_binding,
             now=int(_wall()),
-            receipt_hash_for=lambda session_id: receipt_hash(receipt_for_session(session_id)),
+            receipt_hash_for=lambda session_id: receipt_hash(_receipt_with_key(key, session_id)),
         )
 
 
@@ -1857,7 +1930,7 @@ def _end_sessions(binding: Binding, previous: str) -> None:
     registry_binding = remote_access.device_binding(config)
     now = int(_wall())
     ensure_sqlite_state()
-    _receipt_key()  # before the write transaction: the key's first read takes the role lock
+    key = _receipt_key()  # never take the role lock inside the DB write transaction
 
     def snapshot(conn: Any) -> None:
         if previous:
@@ -1867,7 +1940,7 @@ def _end_sessions(binding: Binding, previous: str) -> None:
                 hostname=previous,
                 binding=registry_binding,
                 now=now,
-                receipt_hash_for=lambda session_id: receipt_hash(receipt_for_session(session_id)),
+                receipt_hash_for=lambda session_id: receipt_hash(_receipt_with_key(key, session_id)),
             )
 
     from vibe.account_session_revoke import pairing_epoch

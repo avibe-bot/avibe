@@ -148,7 +148,7 @@ def address(monkeypatch):
     for name, value in (
         ("_authority", None), ("_quiet", set()), ("_quiet_loaded_for", None), ("_inflight", {}),
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
-        ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
+        ("_BINDING_CACHE", None), ("_hooks", {}),
         ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
         ("_read_refused", False), ("_standing_refusal", None), ("_read_refusal", None), ("_endpoint_absent", None), ("_held_checked_at", None),
     ):
@@ -1607,6 +1607,28 @@ def test_b1_a_journal_is_not_left_idle_while_the_pairing_is_unreadable(address):
     assert binding().active_host == NEW
 
 
+def test_rejected_committed_rename_retires_reconciliation_not_cloud_change(address, monkeypatch):
+    from vibe import binding_health
+
+    plane, _ = address
+    phone = health_pairing()
+    rename_to('new')
+    before_commit = plane.state()
+    monkeypatch.setattr(plane, 'state', lambda: before_commit)
+    assert instance_address._advance_operation() > 0
+    committed = instance_address._journal(binding())
+    assert committed['phase'] == 'committed' and plane.active == NEW
+    binding_health._set(settings_service.load_config(), rejected=True)
+    assert binding_health.rejected_at(settings_service.load_config()) is not None
+    calls = len(plane.calls)
+    assert instance_address._advance_operation() == 0
+    assert instance_address._journal(binding()) is None
+    last = instance_address._load_state(binding().instance_id)['last_operation']
+    assert last['state'] == 'interrupted' and last['operation_id'] == committed['operation_id']
+    assert binding().active_host == OLD and plane.active == NEW and len(plane.calls) == calls
+    assert phone and active_health_devices()
+
+
 def test_b5_the_state_from_before_our_own_commit_does_not_end_the_journal(address):
     plane, _ = address
     phone = health_pairing()
@@ -1921,6 +1943,65 @@ def test_b2_a_read_disowned_by_a_401_cannot_grant_cleaning_or_move_the_address(a
     assert is_cleaning(get(NEW))  # only a read made after the refusal grants it again
 
 
+def test_rename_intent_blocks_pairing_before_redeem_and_releases_after_apply(address, monkeypatch):
+    rename_to("new")
+    calls = []
+    monkeypatch.setattr(remote_access, "_normalize_pairing_backend_url", lambda value: calls.append(value) or (None, "test_boundary"))
+    assert remote_access.pair("fixture-key", "https://issuer.invalid")["error"] == "operation_in_progress"
+    assert not calls
+    run()
+    assert binding().active_host == NEW
+    assert remote_access.pair("fixture-key", "https://issuer.invalid")["error"] == "test_boundary"
+    assert calls == ["https://issuer.invalid"]
+
+
+def test_prepared_pairing_blocks_rename_without_consuming_confirmation(address):
+    from config.v2_config import V2Config
+
+    plane, _ = address
+    confirmation = instance_address.preview("new", ("loopback",))["confirmation_id"]
+    record = remote_access._new_pairing_claim(V2Config.load(), "https://issuer.invalid", "fixture", pairing_key="fixture-key")
+    remote_access._write_pending_pairing_record(record)
+    before = list(plane.calls)
+    with pytest.raises(instance_address.AddressError) as caught:
+        instance_address.change(confirmation, ("loopback",))
+    assert caught.value.code == "operation_in_progress" and plane.calls == before
+    assert remote_access._read_pending_pairing_record() == (record, None)
+    assert remote_access._retire_pending_pairing(operation_id=record["operation_id"])
+    assert instance_address.change(confirmation, ("loopback",))[0] == 202
+
+
+def test_rename_worker_retries_unreadable_binding_without_another_hint(address, monkeypatch):
+    plane, _ = address
+    rename_to("new")
+    read_binding = instance_address.current_binding
+    interrupted = False
+
+    def intermittent_read():
+        nonlocal interrupted
+        if plane.operations and not interrupted:
+            interrupted = True  # first guard after the issuer committed
+            return None
+        return read_binding()
+
+    monkeypatch.setattr(instance_address, "current_binding", intermittent_read)
+    waits = []
+
+    def wait(timeout):
+        if waits and timeout is None:
+            raise StopIteration  # no external wake arrives: worker would now stay idle
+        assert len(waits) < 10, "rename did not finish"
+        waits.append(timeout)
+
+    monkeypatch.setattr(instance_address._worker_wake, "wait", wait)
+    with pytest.raises(StopIteration):
+        instance_address._worker_loop()
+    assert interrupted and len(waits) > 1
+    assert binding().active_host == NEW
+    requests = [payload["operation_id"] for _, suffix, payload in plane.calls if suffix == "hostname-renames"]
+    assert len(requests) == 2 and requests[0] == requests[1]
+
+
 def test_e7_the_last_check_before_the_headers_never_waits_for_the_role_lock(address):
     import threading
 
@@ -1979,12 +2060,13 @@ def test_b8_a_settings_save_cannot_write_the_address_and_a_new_pairing_inherits_
         with pytest.raises(ValueError, match="not by a settings save"):
             api.save_config({"remote_access": {"vibe_cloud": {field: value}}}, generic_remote_access=True)
     assert binding().active_host == NEW
-    # Clearing a field and then setting it in a second save is the same write in two steps.
-    api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
+    # AV-13 supersedes B8's empty-value exception: Off is not an unpair.
+    with pytest.raises(ValueError, match="binding is not changed by saving settings"):
+        api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
     with pytest.raises(ValueError, match="not by a settings save"):
         api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": f"https://{OLD}/auth/callback"}}},
                         generic_remote_access=True)
-    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "redirect_uri", f"https://{NEW}/auth/callback"))
+    assert settings_service.load_config().remote_access.vibe_cloud.redirect_uri == f"https://{NEW}/auth/callback"
     # Turning remote access off through the same save still works.
     api.save_config({"remote_access": {"vibe_cloud": {"enabled": False}}}, generic_remote_access=True)
     assert settings_service.load_config().remote_access.vibe_cloud.enabled is False
