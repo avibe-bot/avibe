@@ -21,10 +21,13 @@ import { useDraft } from './draft';
 /** What the strip says. Several backend states share one. */
 export type EngineUpdateSentence =
   | 'current' | 'notChecked' | 'checking' | 'available' | 'updating' | 'waitingForIdle'
-  | 'undone' | 'unfinished' | 'needsAvibe' | 'cannotCheck' | 'withdrawing' | 'stopped';
+  | 'undone' | 'unfinished' | 'replaced' | 'needsAvibe' | 'cannotCheck' | 'withdrawing' | 'stopped' | 'cannotStart';
 
 /** The strip's one button: what it does, and whether it is doing it now. */
 export type EngineUpdateButton = { does: 'check' | 'update' | 'retryUpdate' | 'retryCheck'; busy?: boolean };
+
+/** `blocked` because the running build was withdrawn and the one build named to replace it cannot run here. */
+const WITHDRAWN_REASONS = new Set(['engine_withdrawn', 'engine_withdrawn_without_fallback']);
 
 export type EngineUpdateView = { sentence: EngineUpdateSentence; button: EngineUpdateButton };
 
@@ -52,7 +55,8 @@ export function engineUpdateView(dep: DependencyItem): EngineUpdateView | null {
     case 'available':
       return { sentence: 'available', button: { does: 'update' } };
     case 'deferred':
-      return { sentence: 'waitingForIdle', button: { does: 'retryUpdate' } };
+      // Nothing failed: the button is the same "do it now" as when the build was first offered.
+      return { sentence: 'waitingForIdle', button: { does: 'update' } };
     case 'rolled_back':
       // A candidate that failed its check before the switch was never running: nothing was put back.
       return dep.last_result === 'preflight_failed' ? unfinished : undone;
@@ -67,13 +71,18 @@ export function engineUpdateView(dep: DependencyItem): EngineUpdateView | null {
     case 'waiting_for_controller':
       return { sentence: 'cannotCheck', button: { does: 'retryCheck' } };
     case 'blocked':
-      return { sentence: 'stopped', button: { does: 'check' } };
+      // Only the one build named with the withdrawal can replace it, never a newer release; a check
+      // switches to it as soon as it can run here. Any other cause is not cleared by a release, so
+      // that sentence promises nothing and points at Diagnostics.
+      return { sentence: WITHDRAWN_REASONS.has(dep.update_reason ?? '') ? 'stopped' : 'cannotStart', button: { does: 'check' } };
     case 'idle':
     case 'up_to_date':
     case 'applied':
       if (offered) return { sentence: 'available', button: { does: 'update' } };
       if (dep.last_result === 'rolled_back') return undone;
       if (dep.last_result === 'preflight_failed') return unfinished;
+      // A withdrawal is said when it happens, not beside the switch: what happened, and that it works.
+      if (dep.last_result === 'withdrawn_to_fallback') return { sentence: 'replaced', button: { does: 'check' } };
       return { sentence: dep.last_checked_at ? 'current' : 'notChecked', button: { does: 'check' } };
   }
 }
@@ -89,10 +98,12 @@ const SENTENCE_ICON: Record<EngineUpdateSentence, { icon: ComponentType<{ classN
   waitingForIdle: { icon: Clock3, className: 'text-muted' },
   undone: { icon: AlertTriangle, className: 'text-gold-ink' },
   unfinished: { icon: AlertTriangle, className: 'text-gold-ink' },
+  replaced: { icon: AlertTriangle, className: 'text-gold-ink' },
   needsAvibe: { icon: Info, className: 'text-gold-ink' },
   cannotCheck: { icon: WifiOff, className: 'text-muted', quiet: true },
   withdrawing: { icon: AlertTriangle, className: 'text-gold-ink' },
   stopped: { icon: AlertCircle, className: 'text-destructive-ink' },
+  cannotStart: { icon: AlertCircle, className: 'text-destructive-ink' },
 };
 
 function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): string {
@@ -120,6 +131,8 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
       return d(`上次更新没有成功，已换回 v${running}，模型网关照常可用`, `The last update didn't work, so v${running} was put back. Model Hub works as before.`);
     case 'unfinished':
       return d(`上次更新没有完成，仍在使用 v${running}，模型网关照常可用`, `The last update didn't finish. Still on v${running}; Model Hub works as before.`);
+    case 'replaced':
+      return d(`之前的版本已被撤回，已换成 v${running}，模型网关照常可用`, `The earlier version was withdrawn; v${running} replaced it. Model Hub works as before.`);
     case 'needsAvibe':
       return d(`新版引擎需要 Avibe ${dep.min_avibe_version} 或更高版本，请先更新 Avibe`, `A newer engine needs Avibe ${dep.min_avibe_version} or later. Update Avibe first.`);
     case 'cannotCheck':
@@ -127,9 +140,13 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
     case 'withdrawing':
       return d('这个版本已被撤回，正在换成安全的版本，模型网关稍后恢复', 'This version was withdrawn. Switching to a safe one; Model Hub is back shortly.');
     case 'stopped':
-      return d('模型网关已停止：现在没有可以安全运行的引擎版本。Avibe 的其他功能不受影响。', 'Model Hub is stopped: no engine version is safe to run right now. The rest of Avibe is not affected.');
+      return d('模型网关已停止：这个引擎版本已被撤回。替换它的版本能在本机运行后会自动恢复。', 'Model Hub is stopped: the engine was withdrawn. It restarts once its replacement can run here.');
+    case 'cannotStart':
+      return d('模型网关已停止：引擎无法启动。请到「诊断与日志」查看原因。', "Model Hub is stopped: the engine can't start. See Diagnostics & Logs for the cause.");
   }
 }
+
+const ALERTS = new Set<EngineUpdateSentence>(['undone', 'unfinished', 'replaced', 'stopped', 'cannotStart']);
 
 function StripButton({ button }: { button: EngineUpdateButton }) {
   const d = useDraft();
@@ -170,21 +187,14 @@ export function EngineUpdateStrip({ dep }: { dep: DependencyItem }) {
     <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-6" data-engine-updates={view.sentence}>
       <div className="flex min-w-0 items-start gap-2 text-[12px] leading-snug">
         <Icon className={clsx('mt-px size-3.5 shrink-0', className)} />
-        <div className="flex min-w-0 flex-col gap-1">
-          <p
-            role={view.sentence === 'undone' || view.sentence === 'unfinished' || view.sentence === 'stopped' ? 'alert' : 'status'}
-            className={view.sentence === 'stopped' ? 'text-destructive-ink' : quiet ? 'text-muted' : 'text-foreground'}
+        <p
+            role={ALERTS.has(view.sentence) ? 'alert' : 'status'}
+            className={view.sentence === 'stopped' || view.sentence === 'cannotStart' ? 'text-destructive-ink' : quiet ? 'text-muted' : 'text-foreground'}
           >
-            {sentence}
-          </p>
-          {!automatic && (
-            <p className="text-muted">
-              {d('不会自动安装新版本；被撤回的版本仍会自动换掉。', "New versions aren't installed automatically. A withdrawn version is still replaced.")}
-            </p>
-          )}
-        </div>
+          {sentence}
+        </p>
       </div>
-      <div className="flex shrink-0 flex-row-reverse items-center justify-between gap-3 md:flex-row md:justify-end">
+      <div className="flex shrink-0 items-center justify-between gap-3 md:justify-end">
         <div className="flex items-center gap-2">
           <span className="whitespace-nowrap text-[12px] text-muted">{label}</span>
           <ToggleSwitch enabled={automatic} onClick={() => undefined} label={label} />

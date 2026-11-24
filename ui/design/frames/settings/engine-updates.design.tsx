@@ -54,16 +54,18 @@ const deps = (engine: Partial<DependencyItem>) => [
   dep('tmux', '3.5a', { required: false }),
 ];
 
-// "Pinned" stops being true once the engine updates by itself, and the line named the upstream project.
+// "Pinned" stops being true once the engine updates by itself, and the line named the upstream project;
+// the title carried its internal initials. Both read the same in every build.
 const copy = {
+  'settings.dependencies.items.model-hub-engine.label': { zh: '模型网关引擎', en: 'Model Hub engine' },
   'settings.dependencies.items.model-hub-engine.detail': {
     zh: '在本机运行模型网关的引擎。',
     en: 'The local engine that runs Model Hub.',
   },
 };
 
-const state = (name: string, title: string, engine: Partial<DependencyItem>, channel = true): FrameSpec[] => {
-  const fixtures = settingsFixtures({ '/api/dependencies': { ok: true, deps: deps(engine) } }, channel ? { copy } : {});
+const state = (name: string, title: string, engine: Partial<DependencyItem>): FrameSpec[] => {
+  const fixtures = settingsFixtures({ '/api/dependencies': { ok: true, deps: deps(engine) } }, { copy });
   return [
     { name, title: `设置 · 依赖 · 引擎更新 · ${title}`, width: 1440, height: 960, status: 'proposed', route, fixtures, render: page },
     { name: `${name}-phone`, title: `设置 · 依赖 · 引擎更新 · ${title} · 手机`, width: 390, height: 1400, status: 'proposed', route, fixtures, render: page },
@@ -77,6 +79,10 @@ const designFrames = frames([
   ...state('waiting-for-idle', '等空闲后更新', { update_state: 'deferred', update_reason: 'waiting_for_idle', available_release: NEXT }),
   // `rolled_back` lasts until the next check; the recorded result keeps the notice after it.
   ...state('undone', '更新被撤销，已换回上一个版本', { last_result: 'rolled_back', last_checked_at: ago(2) }),
+  // A withdrawal is said when it happens: the build was replaced, and Model Hub works.
+  ...state('withdrawn', '运行的版本被撤回，已换成安全的版本', {
+    active_release: 'model-hub-engine-v8.0.63-1', update_state: 'up_to_date', last_result: 'withdrawn_to_fallback', last_checked_at: ago(3),
+  }),
   ...state('needs-avibe', '需要更新的 Avibe', { update_state: 'requires_avibe_update', update_reason: 'requires_avibe_update', min_avibe_version: '3.2.7' }),
   ...state('cannot-check', '离线或读不到发布列表', { update_state: 'unavailable', update_reason: 'fetch_failed', last_checked_at: ago(130) }),
   ...state('automatic-off', '关闭自动更新', { auto_update: false, update_state: 'available', update_reason: null, available_release: NEXT, min_avibe_version: '3.2.6' }),
@@ -85,10 +91,10 @@ const designFrames = frames([
     status: 'error', action_class: 'operator_only', reason: 'model_hub_engine_install_inspection_failed',
     active_release: null, update_state: 'blocked', update_reason: 'engine_withdrawn', last_checked_at: ago(1),
   }),
-  // This build ships no channel: the row is the one shipped today, with nothing added.
+  // This build ships no channel: the row is the one shipped today, with nothing added but the new name and line.
   ...state('channel-off', '本版本未启用更新通道（与今天相同）', {
     active_release: null, default_release: 'model-hub-engine-v8.0.63-1', update_state: 'uncommissioned', update_reason: 'uncommissioned', last_checked_at: null,
-  }, false),
+  }),
 ]);
 
 export default designFrames;
