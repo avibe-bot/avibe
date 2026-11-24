@@ -1232,7 +1232,7 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertEqual(owned, .owned)
+        XCTAssertTrue(owned)
 
         let extra = LoopbackClient(port: fixture.port)
         try? await extra.send(canonicalHead)
@@ -1259,7 +1259,7 @@ final class DirectConnectListenerTests: XCTestCase {
             within: 3
         )
 
-        XCTAssertEqual(owned, .owned)
+        XCTAssertTrue(owned)
         let rest = try await slow.receiveUntilClosed()
         XCTAssertEqual(rest, Data())
         client.close()
@@ -1438,9 +1438,9 @@ final class DirectConnectListenerTests: XCTestCase {
 
             let rejected = makeLifecycle(in: published ? "rebinding" : "binding", published: published)
             XCTAssertTrue(rejected.ready(g))
-            XCTAssertTrue(rejected.reject(g, DirectListenerFailureCause(.foreign)))
+            XCTAssertTrue(rejected.reject(g, DirectListenerFailureCause(.ownership)))
             XCTAssertEqual(rejected.phase, .failed(generation: g))
-            XCTAssertEqual(rejected.failure?.cause, DirectListenerFailureCause(.foreign))
+            XCTAssertEqual(rejected.failure?.cause, DirectListenerFailureCause(.ownership))
 
             let failsServing = makeLifecycle(in: "serving", published: published)
             let aborted = DirectListenerFailureCause(.socket, code: ECONNABORTED)
@@ -1514,18 +1514,19 @@ final class DirectConnectListenerTests: XCTestCase {
         XCTAssertNil(lifecycle.beginBind())
     }
 
-    /// What a cause says about the port: only a bind that found it in use,
-    /// or something that accepted there and was not this listener, may be
-    /// someone else's. A closed or refusing port is not.
-    func testOnlyAPortInUseOrAForeignAnswerMayBeSomeoneElses() {
+    /// What a cause says about the port: only a bind that found it in use
+    /// may mean someone else's. A closed or refusing port does not; and a
+    /// check that fails after this listener's own exclusive bind does not
+    /// either, because only this listener accepts on the port then.
+    func testOnlyABindThatFoundThePortInUseMayMeanSomeoneElses() {
         XCTAssertTrue(DirectListenerFailureCause(.bind, code: EADDRINUSE).portMayBeForeign)
         XCTAssertTrue(DirectListenerFailureCause(.waiting, code: EADDRINUSE).portMayBeForeign)
-        XCTAssertTrue(DirectListenerFailureCause(.foreign).portMayBeForeign)
         for cause in [
             DirectListenerFailureCause(.bind),
             DirectListenerFailureCause(.bind, code: EACCES),
             DirectListenerFailureCause(.waiting, code: ENETDOWN),
             DirectListenerFailureCause(.ownership),
+            DirectListenerFailureCause(.ownership, code: EADDRINUSE),
             DirectListenerFailureCause(.deadline),
             DirectListenerFailureCause(.socket, code: ECONNABORTED),
             // In use is a bind's answer; a serving socket that fails with
@@ -2489,36 +2490,34 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertEqual(owned, .owned)
+        XCTAssertTrue(owned)
         let otherNonce = await DirectConnectListener.ownershipCheck(
             port: fixture.port.rawValue,
             nonce: "another-nonce",
             within: 1
         )
-        // Something accepted and gave another answer: not this listener,
-        // and possibly someone else.
-        XCTAssertEqual(otherNonce, .foreign)
+        XCTAssertFalse(otherNonce)
 
-        // A socket that accepts and never answers is not this listener
-        // either, and WebKit would not fail over from it.
+        // A socket that accepts and never answers is not this listener.
         let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
         let silent = await DirectConnectListener.ownershipCheck(
             port: control.socket.port,
             nonce: nonce,
             within: 0.5
         )
-        XCTAssertEqual(silent, .foreign)
+        XCTAssertFalse(silent)
 
-        // A port nobody listens on: closed or refusing, which WebKit leaves
-        // by itself.
+        // Nor is a port nobody listens on; the check ends at its window.
         let freed = control.socket.port
         control.close()
+        let started = ContinuousClock.now
         let nobody = await DirectConnectListener.ownershipCheck(
             port: freed,
             nonce: nonce,
             within: 0.5
         )
-        XCTAssertEqual(nobody, .unanswered)
+        XCTAssertFalse(nobody)
+        XCTAssertLessThan(started.duration(to: ContinuousClock.now), .seconds(3))
         XCTAssertEqual(fixture.plans.planCount, 0)
     }
 
@@ -2556,7 +2555,7 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertEqual(owned, .owned)
+        XCTAssertTrue(owned)
         XCTAssertTrue(lifecycle.confirm(binding.generation))
         XCTAssertNil(lifecycle.failure)
 
@@ -2638,7 +2637,7 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertEqual(owned, .owned)
+        XCTAssertTrue(owned)
         let lifecycle = await fixture.listener.lifecycle
         XCTAssertTrue(lifecycle.confirm(binding.generation))
         let client = LoopbackClient(port: fixture.port)
@@ -2674,7 +2673,7 @@ final class DirectConnectListenerTests: XCTestCase {
                 nonce: nonce,
                 within: 10
             )
-            XCTAssertEqual(owned, .owned)
+            XCTAssertTrue(owned)
             outcome = "bound again"
         } catch {
             outcome = "refused: \(error)"

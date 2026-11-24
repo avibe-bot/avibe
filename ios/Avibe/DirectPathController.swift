@@ -309,12 +309,11 @@ struct DirectListenerFailure: Equatable, Sendable {
         case bind
         /// The bind was left waiting by the system.
         case waiting
-        /// Nothing answered the ownership check on the port.
+        /// The port was bound, and this listener did not answer the
+        /// ownership check on it in what was left of the attempt's bound.
         case ownership
-        /// The attempt ran out of time.
+        /// The attempt ran out of time before its check could begin.
         case deadline
-        /// Something else holds the port, or answered on it.
-        case foreign
         /// The listening socket failed while it was serving.
         case socket
     }
@@ -407,8 +406,8 @@ enum DirectLoadGate: Equatable, Sendable {
     /// ends within its own bound or the watchdog's.
     case held
     /// The host has a route, and something else may hold the listener's
-    /// port: a bind found it in use, or what accepted there did not answer
-    /// as this listener. Nothing may be loaded against that port by anyone,
+    /// port: a bind found it in use. Nothing may be loaded against that
+    /// port by anyone,
     /// for as long as that lasts, in the foreground or the background:
     /// WebKit would send it to whatever holds the port. No wait on this
     /// value may end in a load. It is not terminal: the port is bound again
@@ -1527,7 +1526,7 @@ final class DirectPathController {
                 }
                 return false
             }
-            let ownership = await DirectConnectListener.ownershipCheck(
+            let owned = await DirectConnectListener.ownershipCheck(
                 port: binding.port,
                 nonce: listener.ownershipNonce,
                 within: rebindSeconds
@@ -1539,8 +1538,8 @@ final class DirectPathController {
                 // Confirmed only if this bind is still verifying: a failure
                 // recorded first wins. Not owned, or failed meanwhile: this
                 // listener is not kept either.
-                guard ownership == .owned, listener.lifecycle.confirm(binding.generation) else {
-                    listener.lifecycle.reject(binding.generation, Self.cause(of: ownership))
+                guard owned, listener.lifecycle.confirm(binding.generation) else {
+                    listener.lifecycle.reject(binding.generation, DirectListenerFailureCause(.ownership))
                     if !self.hearFailure(of: listener, "the first bind was not confirmed") {
                         self.retireAndStop()
                     }
@@ -1663,19 +1662,6 @@ final class DirectPathController {
     /// where Network reported it.
     func listenerDidFail(_ failed: DirectConnectListener) {
         hearFailure(of: failed, "the listening socket failed")
-    }
-
-    /// What an ownership check that did not find this listener says about
-    /// the port.
-    private nonisolated static func cause(
-        of ownership: DirectConnectListener.Ownership
-    ) -> DirectListenerFailureCause {
-        switch ownership {
-        case .foreign:
-            return DirectListenerFailureCause(.foreign)
-        case .unanswered, .owned:
-            return DirectListenerFailureCause(.ownership)
-        }
     }
 
     /// Whether `listener` is this controller's and its lifecycle is in a
@@ -2086,10 +2072,13 @@ final class DirectPathController {
     ///
     /// `seconds` bounds the whole attempt, spent in two parts: the close
     /// and the bind end at it, and the ownership check then has what is
-    /// left of it as its own window. The check ends itself at that window
-    /// with what it found. No second deadline runs beside it, so a port
-    /// that accepted and gave another answer, or none, is known as such
-    /// (`foreign`), and not as an attempt that merely ran out of time.
+    /// left of it as its own window, and ends itself there. No second
+    /// deadline runs beside it, so what is recorded says which part
+    /// failed: `deadline` when the bound ran out before the check could
+    /// begin, `ownership` when the port was bound and this listener did
+    /// not answer on it in what was left. Neither says the port is someone
+    /// else's: the bind is exclusive, so after it only this listener
+    /// accepts there, and the attempt's failure closes its socket.
     nonisolated static func bindAndCheck(
         _ listener: DirectConnectListener,
         port: UInt16,
@@ -2115,12 +2104,12 @@ final class DirectPathController {
                 - Double(spent.components.seconds)
                 - Double(spent.components.attoseconds) / 1e18
             if left > 0 {
-                let ownership = await DirectConnectListener.ownershipCheck(
+                let owned = await DirectConnectListener.ownershipCheck(
                     port: binding.port,
                     nonce: nonce,
                     within: left
                 )
-                failure = ownership == .owned ? nil : cause(of: ownership)
+                failure = owned ? nil : DirectListenerFailureCause(.ownership)
             } else {
                 failure = DirectListenerFailureCause(.deadline)
             }

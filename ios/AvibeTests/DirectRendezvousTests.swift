@@ -541,8 +541,8 @@ final class DirectRendezvousTests: XCTestCase {
     }
 
     /// `listener_faults` is what the instance accepts and nothing more: at
-    /// most five entries, the newest, each with exactly a step (one of the
-    /// six), a code and the seconds away, all within its bounds; no time,
+    /// most five entries, the newest, each with exactly a step (one it
+    /// knows), a code and the seconds away, all within its bounds; no time,
     /// address, port or identifier; and no field at all when there is
     /// nothing to report. (The instance ignores the whole list for one
     /// entry it does not accept: `vibe/direct_rendezvous.py`.)
@@ -569,11 +569,12 @@ final class DirectRendezvousTests: XCTestCase {
                 + "{\"step\":\"socket\",\"code\":53,\"background_seconds\":0}]}"
         )
 
-        // Every step is one the instance knows.
-        let steps: [DirectListenerFailure.Step] = [.bind, .waiting, .ownership, .deadline, .foreign, .socket]
+        // Every step is one the instance knows (it also accepts
+        // `foreign`, which the App never sends).
+        let steps: [DirectListenerFailure.Step] = [.bind, .waiting, .ownership, .deadline, .socket]
         XCTAssertEqual(
             steps.map(\.rawValue),
-            ["bind", "waiting", "ownership", "deadline", "foreign", "socket"]
+            ["bind", "waiting", "ownership", "deadline", "socket"]
         )
 
         // Seven failures: the last five. Seconds away outside what the

@@ -915,6 +915,58 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(harness.status("instance-1").preferred, .direct)
     }
 
+    /// The return's check is not answered in time on the port the App has
+    /// just bound (a phone just woken): a failed attempt, and not a
+    /// stranger. The gate opens, because that attempt's failure closes its
+    /// socket and WebKit fails over; the failure is on record as
+    /// `ownership`; the background's closure is published; and the next
+    /// attempt serves.
+    @MainActor
+    func testACheckNotAnsweredOnTheReturnLeavesTheGateOpenAndIsRecordedAsOwnership() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(timing: .recovering, test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let runtime = try XCTUnwrap(harness.lastOpened)
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: listening)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let relayed = LoopbackClient(port: port)
+        let stream = try await establishDirect(relayed, harness: harness)
+
+        harness.enterBackground()
+        try await eventually { stream.isCancelled }
+        relayed.close()
+        try await eventually { harness.controller.listenerState == .closedForBackground }
+
+        // As the attempt's own completion does when the bound ends with
+        // the port bound and the check unanswered.
+        let unanswered = DirectListenerFailureCause(.ownership)
+        let (cause, held) = try await harness.enterForegroundFailingItsBind(
+            binding: nil,
+            ready: unanswered
+        )
+        XCTAssertEqual(cause, unanswered)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+
+        try await eventually { held.values.count == 1 }
+        XCTAssertEqual(held.values.first??.preferred, .tunnel)
+        XCTAssertEqual(held.values.first??.closure, 1)
+        XCTAssertEqual(harness.controller.listenerFailures.map(\.step), [.ownership])
+        XCTAssertEqual(harness.controller.listenerFailures.first?.portMayBeForeign, false)
+        if let recovery = harness.controller.listenerRecovery {
+            // The next attempt is not yet through.
+            XCTAssertFalse(recovery.portMayBeForeign)
+            XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+        }
+
+        try await eventually { harness.controller.listenerState == .ready }
+        XCTAssertNil(harness.controller.listenerRecovery)
+        XCTAssertEqual(harness.controller.loadGate(for: runtime), .open)
+        XCTAssertEqual(try harness.listenerPort(since: listening), port)
+        XCTAssertEqual(harness.status("instance-1").closure, 1)
+    }
+
     /// The App leaves while the port is still not ours: nothing is bound
     /// or tried while it is away, and the return is a new stay, with its
     /// own first attempt and its own `since`. What was known of the port
@@ -1723,13 +1775,13 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     /// One attempt's bound is spent on the bind and then on the ownership
-    /// check, and the check's own answer is the attempt's: a port that
-    /// accepts and gives another answer is `foreign` when the bound ends,
-    /// not an attempt that merely ran out of time (which would leave a
-    /// routed host's loads free to go to whatever holds the port). The
-    /// same listener, asked for its own nonce, serves; with no time at all,
-    /// the bound is what ended the attempt.
-    func testAnAttemptThatFindsAnotherAnswerOnThePortSaysSoWhenItsBoundEnds() async throws {
+    /// check, and the record says which part failed. A check that is not
+    /// answered on the port this listener has just bound is `ownership`
+    /// when the bound ends: not `deadline` (the bind was in time), and not
+    /// a stranger, because the bind is exclusive and only this listener
+    /// accepts there. The same listener, asked for its own nonce, serves;
+    /// with no time at all, the bound is what ended the attempt.
+    func testACheckNotAnsweredOnTheListenersOwnPortIsAFailedCheckAndNotAStranger() async throws {
         let listener = DirectConnectListener(
             limits: .patient,
             planner: { _ in nil },
@@ -1744,25 +1796,25 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertTrue(lifecycle.confirm(first.generation))
         XCTAssertTrue(lifecycle.beginClose())
 
-        // The port accepts and answers, but not for the nonce asked: what
-        // a stranger on the port looks like to the check.
+        // The port is bound and accepts, and the nonce asked for is never
+        // answered: what a listener too slow to answer looks like.
         let started = ContinuousClock.now
-        let foreign = await DirectPathController.bindAndCheck(
+        let unanswered = await DirectPathController.bindAndCheck(
             listener,
             port: first.port,
-            nonce: "not-this-listener",
+            nonce: "never-answered",
             within: 1
         )
         let took = started.duration(to: ContinuousClock.now)
-        XCTAssertEqual(foreign.failure, DirectListenerFailureCause(.foreign))
-        XCTAssertEqual(foreign.failure?.portMayBeForeign, true)
+        XCTAssertEqual(unanswered.failure, DirectListenerFailureCause(.ownership))
+        XCTAssertEqual(unanswered.failure?.portMayBeForeign, false)
         // The bind returned, so its generation is known and can be failed.
-        let generation = try XCTUnwrap(foreign.generation)
+        let generation = try XCTUnwrap(unanswered.generation)
         XCTAssertEqual(lifecycle.phase, .verifying(generation: generation, rebind: true))
-        // Within its bound, with the pause between two checks to spare.
+        // The check had the rest of the bound, and ended with it.
         XCTAssertGreaterThanOrEqual(took, .milliseconds(900))
         XCTAssertLessThan(took, .seconds(3))
-        XCTAssertTrue(lifecycle.failUnconfirmed(try XCTUnwrap(foreign.failure)))
+        XCTAssertTrue(lifecycle.failUnconfirmed(try XCTUnwrap(unanswered.failure)))
 
         // The next attempt, asking for this listener's own nonce: owned.
         let owned = await DirectPathController.bindAndCheck(
@@ -1988,14 +2040,15 @@ private final class Harness {
     /// Returns to the foreground and fails the bind that return makes, by
     /// telling the lifecycle what Network, or the attempt's own bound,
     /// tells it, before anyone else hears: `binding` if the bind is caught
-    /// while it is binding, `ready` if its socket had just become ready.
+    /// while it is binding (`nil`: not then), `ready` once its socket has
+    /// become ready.
     /// The attempt binds off the main actor and can only be confirmed on
     /// it, so this watches the lifecycle and gives the main actor up only
     /// while the bind has not begun. Returns the cause it recorded and the
     /// status request it made right after the return, which that return
     /// holds.
     func enterForegroundFailingItsBind(
-        binding: DirectListenerFailureCause,
+        binding: DirectListenerFailureCause?,
         ready: DirectListenerFailureCause
     ) async throws -> (cause: DirectListenerFailureCause, held: Recorder<DirectPathStatus?>) {
         let lifecycle = try await listener().lifecycle
@@ -2006,7 +2059,10 @@ private final class Harness {
             watching: while ContinuousClock.now < deadline {
                 switch lifecycle.phase {
                 case .binding(let generation, true):
-                    if lifecycle.reject(generation, binding) {
+                    // With no cause for a bind still binding, wait here for
+                    // its socket to be ready, without giving the main actor
+                    // up: the attempt cannot be confirmed meanwhile.
+                    if let binding, lifecycle.reject(generation, binding) {
                         return (binding, held)
                     }
                 case .verifying(let generation, true):

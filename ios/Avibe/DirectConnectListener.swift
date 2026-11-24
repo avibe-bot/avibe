@@ -1776,39 +1776,28 @@ actor DirectConnectListener {
         }
     }
 
-    /// What an ownership check found on the port.
-    enum Ownership: Equatable, Sendable {
-        /// This listener's own accept loop answered.
-        case owned
-        /// Nothing accepted a connection there in time: the port is closed
-        /// or refusing.
-        case unanswered
-        /// Something accepted and did not give this listener's answer, or
-        /// gave none: the port may be someone else's.
-        case foreign
-    }
-
     /// Connects to `port` on the loopback address and asks the listener
-    /// there for `nonce`. `owned` only when this listener's own accept loop
+    /// there for `nonce`. True only when this listener's own accept loop
     /// answered. A liveness and correlation check for the App's own port,
-    /// not authentication against a hostile local process.
+    /// not authentication against a hostile local process. It is made
+    /// after this listener's own exclusive bind of the port, so a "no" is
+    /// this listener not answering in time (slow, or its spare connection
+    /// taken), never someone else's answer: a stranger on the port shows
+    /// as the bind failing in use, before any check.
     static func ownershipCheck(
         port: UInt16,
         nonce: String,
         within seconds: TimeInterval
-    ) async -> Ownership {
+    ) async -> Bool {
         // Tried again until the window ends: one attempt can find the spare
-        // connection briefly taken (`spareHeadSeconds`). What the last
-        // attempt found is the answer.
-        var found = Ownership.unanswered
+        // connection briefly taken (`spareHeadSeconds`).
         let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
         while ContinuousClock.now < deadline, !Task.isCancelled {
             let remaining = ContinuousClock.now.duration(to: deadline)
             let remainingSeconds = Double(remaining.components.seconds)
                 + Double(remaining.components.attoseconds) / 1e18
-            found = await checkOwnershipOnce(port: port, nonce: nonce, within: remainingSeconds)
-            if found == .owned {
-                return .owned
+            if await checkOwnershipOnce(port: port, nonce: nonce, within: remainingSeconds) {
+                return true
             }
             // Never past the window: the pause is the lesser of 50 ms and
             // what remains.
@@ -1818,16 +1807,16 @@ actor DirectConnectListener {
             }
             try? await Task.sleep(for: min(.milliseconds(50), left))
         }
-        return found
+        return false
     }
 
     private static func checkOwnershipOnce(
         port: UInt16,
         nonce: String,
         within seconds: TimeInterval
-    ) async -> Ownership {
+    ) async -> Bool {
         guard seconds > 0, let endpointPort = NWEndpoint.Port(rawValue: port) else {
-            return .unanswered
+            return false
         }
         // The loopback address itself, whatever proxy the system has: a
         // check carried by a proxy would say nothing about this port.
@@ -1842,23 +1831,9 @@ actor DirectConnectListener {
         defer {
             stream.cancel()
         }
-        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
         do {
-            try await directDeadline(seconds) {
+            return try await directDeadline(seconds) {
                 try await stream.connect()
-            }
-        } catch {
-            return .unanswered
-        }
-        // Something accepted. From here, anything but this listener's own
-        // answer is someone else's, or nobody's.
-        let left = ContinuousClock.now.duration(to: deadline)
-        let leftSeconds = Double(left.components.seconds) + Double(left.components.attoseconds) / 1e18
-        guard leftSeconds > 0 else {
-            return .foreign
-        }
-        do {
-            let received = try await directDeadline(leftSeconds) {
                 try await stream.write(Data("OWNER \(nonce) HTTP/1.1\r\n\r\n".utf8))
                 var received = Data()
                 while let data = try await stream.read(maxLength: 1024) {
@@ -1867,11 +1842,10 @@ actor DirectConnectListener {
                         break
                     }
                 }
-                return received
+                return received == DirectConnectWire.ownershipAnswer(nonce: nonce)
             }
-            return received == DirectConnectWire.ownershipAnswer(nonce: nonce) ? .owned : .foreign
         } catch {
-            return .foreign
+            return false
         }
     }
 }
@@ -2316,12 +2290,13 @@ struct DirectListenerFailureCause: Equatable, Sendable {
         }
     }
 
-    /// Something else may hold the port: the bind found it in use, or what
-    /// accepted there did not answer as this listener. WebKit does not fail
-    /// over from a port that accepts, so its loads would go to whatever
-    /// holds it.
+    /// Something else may hold the port: the bind found it in use. WebKit
+    /// does not fail over from a port that accepts, so its loads would go
+    /// to whatever holds it. Nothing else says so: the bind is exclusive,
+    /// so once it has succeeded only this listener accepts on the port, and
+    /// a check that then goes unanswered is this listener's own.
     var portMayBeForeign: Bool {
-        step == .foreign || ((step == .bind || step == .waiting) && code == EADDRINUSE)
+        (step == .bind || step == .waiting) && code == EADDRINUSE
     }
 }
 
