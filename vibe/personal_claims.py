@@ -309,9 +309,14 @@ class _Flow:
             try:
                 if self.cancelled:
                     if not self._declined_upstream:
-                        # A transient failure below retries this same decline.
                         self._decline_attempted = True
-                        client.decline(ticket)
+                        try:
+                            client.decline(ticket)
+                        except ClaimError as exc:
+                            if exc.code in ("control_plane_unreachable", "rate_limited"):
+                                raise  # retried below (the view reads "waiting" meanwhile)
+                            # Best effort: a refused decline leaves at most a hold that expires.
+                            # Local consent is already fenced, and the person only cancelled.
                     self.update("declined", code="subject_mismatch" if mismatch else "declined")
                     return
                 if grant is None:

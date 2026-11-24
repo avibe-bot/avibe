@@ -733,11 +733,36 @@ describe('ConnectionPageView', () => {
     expect(screen.getByText(said('隧道现在临时用 HTTP/2 连着，没有按固定的边缘网络 IP；保存的设置没有变。'))).toBeTruthy();
   });
 
-  it('offers this device 「自动」 and 「仅 Cloudflare 隧道」 only, and never a number of seconds', () => {
-    view({ remote: true, preference: { mode: 'tunnel', reverted: { at: '2026-11-21T01:00:00.000Z', reason: 'unreachable' } } });
+  it('offers this device 「自动」 and 「仅 Cloudflare 隧道」 only where 「仅直连和中继」 is not offered, and never a number of seconds', () => {
+    view({ remote: true, preference: { mode: 'tunnel', reverted: { at: '2026-11-21T01:00:00.000Z', reason: 'unreachable', from: 'tunnel' } } });
     const choice = screen.getByRole('radiogroup', { name: '这台设备' });
     expect(within(choice).getAllByRole('radio').map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ']);
+    expect(document.body.textContent).not.toContain('仅直连和中继');
     expect(document.body.textContent).not.toMatch(/\d+\s*秒/);
+  });
+
+  it('offers 「仅直连和中继」 third where it is offered, and keeps it listed while it is the choice', () => {
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: null } });
+    const choice = screen.getByRole('radiogroup', { name: '这台设备' });
+    const radios = within(choice).getAllByRole('radio');
+    expect(radios.map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ', '仅直']);
+    expect(radios[2].textContent).toContain('建立连接时经过一次 Cloudflare 隧道，之后只走直连和中继。');
+    unmount();
+
+    // Chosen, then direct turned off on the instance: the choice made is still the one shown.
+    view({ remote: true, directOnly: false, preference: { mode: 'direct', reverted: null } });
+    expect(screen.getByRole('radio', { name: /^仅直连和中继/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('says which choice went back to automatic, and by which shell', () => {
+    const at = '2026-11-21T01:00:00.000Z';
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });
+    expect(document.body.textContent).toMatch(/「仅直连和中继」.*连不上，App 已自己改回「自动」。/);
+    unmount();
+
+    view({ remote: true, directOnly: true, choiceShell: 'desktop', preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });
+    expect(document.body.textContent).toMatch(/「仅直连和中继」.*连不上，Avibe Desktop 已自己改回「自动」。/);
+    expect(document.body.textContent).toContain('选「仅直连和中继」后连不上，Avibe Desktop 会自己改回「自动」。');
   });
 
   it('shows names still kept for the account with their real days, and never calls the list clean', () => {

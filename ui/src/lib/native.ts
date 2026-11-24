@@ -1077,6 +1077,12 @@ function directBridge(): AvibeNative | null {
   return native && (native.capabilities.direct ?? 0) >= 1 ? native : null;
 }
 
+/** The shell that answers `direct` (the phone App, or a Desktop window of another computer's
+ *  instance), for the path choice on 「连接方式」 (src/lib/nativeDirectChoice.ts). */
+export function nativeDirectShell(): AvibeNative | null {
+  return directBridge();
+}
+
 function directVersion(): number {
   return directBridge()?.capabilities.direct ?? 0;
 }

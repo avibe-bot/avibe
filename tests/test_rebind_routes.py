@@ -165,6 +165,23 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
     assert len(peer.calls) == 2 and not redeems and not binding_admission.reset_in_progress()
 
 
+@pytest.mark.parametrize('decline', [(200, {'status': 'declined'}), (400, {'error': 'invalid_request'}),
+                                     (409, {'error': 'installation_unverified'})])
+def test_cancel_before_return_reads_as_cancelled(machine, decline):
+    peer, redeemed = machine
+    browser = ui_server.app.test_client()
+    hdr = csrf_headers(browser)
+    ident = browser.post(ROOT, base_url=ORIGIN, headers=hdr, json={}).get_json()['claim_id']
+    peer.outcomes.append((*decline, None))
+    assert browser.post(ROOT + '/' + ident + '/cancel', base_url=ORIGIN, headers=hdr, json={}).status_code == 200
+    flow = claims.rebind_claims._get(ident)
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] not in ('pending', 'cancelling'), timeout=5)
+    # Whatever avibe.bot answers to the best-effort decline, the person only pressed Cancel.
+    view = browser.get(ROOT + '/' + ident, base_url=ORIGIN).get_json()
+    assert (view['state'], view['code']) == ('declined', 'declined')
+    assert sum('decline' in body for _, body in peer.calls) == 1 and not redeemed
+
 
 def test_cancel_at_avibe_bot_returns_here_as_cancelled(machine):
     peer, redeemed = machine

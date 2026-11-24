@@ -2318,3 +2318,40 @@ def test_clearing_list_migration_round_trip_keeps_the_registry(tmp_path):
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT session_id FROM remote_device_sessions").fetchall() == [("old",)]
         assert db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'instance_address%'").fetchall() == []
+
+
+@pytest.mark.parametrize("hint,delay", [(48, 5.0), (2, 2.0), (None, 5.0)])
+def test_an_accepted_rename_says_applying_at_once_and_is_asked_again_within_seconds(address, monkeypatch, hint, delay):
+    plane, _ = address
+    monkeypatch.setattr(instance_address, "_FIRST_ANSWER_WAIT_SECONDS", 12.0)
+    answer = plane.rename
+    pending = [True]
+
+    def accepted_first(body):
+        if pending.pop() if pending else False:
+            return {"status": "pending", "operation_id": body["operation_id"],
+                    **({"retry_after_seconds": hint} if hint is not None else {})}
+        return answer(body)
+
+    plane.rename = accepted_first
+    confirmation = instance_address.preview("new", ("loopback",))["confirmation_id"]
+    steps = []
+
+    def one_worker_step(timeout=None):
+        # The worker sends once; the route must not wait for avibe.bot's commit.
+        steps.append(instance_address._advance_operation())
+
+    monkeypatch.setattr(instance_address._first_answer, "wait", one_worker_step)
+    status, body = instance_address.change(confirmation, ("loopback",))
+    assert (status, body) == (202, {"ok": True, "state": "applying"})
+    assert steps == [delay]  # answered after the first reply, not after 12 seconds
+    journal = instance_address._journal(binding())
+    assert journal["phase"] == "intent" and journal["accepted"] and journal["may_have_landed"]
+    assert instance_address.describe()["operation"] == {"state": "applying", "hostname": NEW, "error": None}
+    # A restart keeps the operation: the same request is sent again and its receipt applied.
+    monkeypatch.setattr(instance_address, "_BINDING_CACHE", None)
+    monkeypatch.setattr(instance_address, "_confirmations", {})
+    run()
+    sent = [call[2]["operation_id"] for call in plane.calls if call[1] == "hostname-renames"]
+    assert sent == [journal["operation_id"]] * 2
+    assert binding().active_host == NEW and instance_address._journal(binding()) is None
