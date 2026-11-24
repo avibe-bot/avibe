@@ -5823,6 +5823,11 @@ def _pairing_failure_after_claim(
         cause=str(result.get("error") or "pairing_failed"),
     )
     if retired:
+        if claim.get('personal_claim') and result.get('error') == 'pairing_key_expired' and not marker_persisted:
+            # A stale response did not retire this request. Do not turn a
+            # missing or superseding journal into permission to start again.
+            from vibe import pairing_replay
+            return pairing_replay.reconciliation_required()
         if (marker_persisted and not claim.get('redeem_request') and not claim.get('personal_claim')
                 and result.get('status') == 400 and result.get('error') in ('invalid_pairing_key', 'pairing_key_used')):
             return {'ok': False, 'status': 400, 'error': result['error'], 'input_rejected': True}

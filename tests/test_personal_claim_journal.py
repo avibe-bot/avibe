@@ -20,11 +20,40 @@ def test_expired_unconsumed_grant_retires_only_its_claim_attempt(claim_peer, mon
 
     with monkeypatch.context() as patch:
         patch.setattr(remote_access, '_json_request', expired)
-        _claim()
+        outcome = _claim()
+        assert (outcome['state'], outcome['code']) == ('error', 'fresh_claim_required')
     assert remote_access._read_pending_pairing_record() == (None, None)
     assert 'claim_id' not in claims._outcome()
     assert not pairing_replay.orphaned_delivery()
     assert _claim()['state'] == 'bound'
+
+
+@pytest.mark.parametrize('journal_lost', [False, True])
+def test_claim_poll_distinguishes_retired_expiry_from_lost_journal(claim_peer, monkeypatch, journal_lost):
+    from tests.test_personal_claims import _start, callback_proof
+    from vibe import ui_server
+
+    sends = []
+    def expired(_url, request, **kwargs):
+        sends.append(request['redeem_request_id'])
+        if journal_lost:
+            remote_access._pending_pairing_path().unlink()
+        raise remote_access.BackendRequestError(400, {'error': 'pairing_key_expired'})
+
+    monkeypatch.setattr(remote_access, '_json_request', expired)
+    client = ui_server.app.test_client()
+    start = _start(client).get_json()
+    ident = start['claim_id']
+    callback = client.get(f'/remote/claim/callback?claim_id={ident}&state={callback_proof(start)}', base_url='http://localhost')
+    assert callback.status_code == 303
+    flow = claims.redirect_claims._get(ident)
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] == 'error', timeout=3)
+    expected = 'pairing_needs_reconciliation' if journal_lost else 'fresh_claim_required'
+    for _ in range(2):
+        assert client.get('/api/remote-access/claims/' + ident).get_json()['code'] == expected
+    assert (claims._outcome().get('claim_id') == ident) is journal_lost
+    assert len(sends) == 1 and claim_peer.decisions == ['owner-id']
 
 
 def test_explicit_key_leaves_settled_personal_request_with_its_owner(claim_peer, monkeypatch):

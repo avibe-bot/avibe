@@ -324,6 +324,11 @@ class _Flow:
                                 if not paired.get('ok'):
                                     if paired.get('error') in ('local_binding_changed', 'pairing_superseded_after_redeem'):
                                         raise ClaimError('local_binding_changed')
+                                    if paired.get('error') == 'pairing_key_expired' and paired.get('status') == 400:
+                                        # This exact unused grant was retired. Finish without
+                                        # accepting again or treating a lost journal as proof.
+                                        self.update('error', code='fresh_claim_required')
+                                        return
                                     if paired.get('error') == 'pairing_needs_reconciliation' or not _journal_for(ticket.id):
                                         raise ClaimError('pairing_needs_reconciliation')
                                     raise ClaimError('pairing_recovery_required')
