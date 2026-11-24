@@ -1115,6 +1115,8 @@
       "antigravityAdcMissing": "ADC credentials were not found on this host. Run the command below in a terminal, then refresh.",
       "antigravityAdcCommandHint": "Authenticate Application Default Credentials in your terminal:",
       "antigravityCredentialsUnverified": "Credentials are present, but authentication has not been confirmed. Use Test connection below to verify.",
+      "antigravityAdcSaveNeedsAuth": "Agent Platform settings were saved, but Application Default Credentials were not found. Run the command below in a terminal, then refresh status to finish connecting.",
+      "antigravityApiKeyUnconfirmed": "Settings were saved, but Gemini API key authentication could not be confirmed. Check the key and base URL, then try again.",
       "vibeyDescription": "Built-in agent · models and routes managed in Model Hub",
       "backToBackends": "Back to backends",
       "gatewayOff": "Model Hub is off, so {{name}} has no model to run on.",

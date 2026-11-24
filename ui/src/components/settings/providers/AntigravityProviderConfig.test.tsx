@@ -258,4 +258,212 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     expect(await screen.findByText(en.onboarding.connection.antigravityDialogIntro)).toBeTruthy();
     expect(await screen.findByText(en.settings.backends.antigravityPersonalAutomationNotice)).toBeTruthy();
   });
+
+  it('keeps BackendConnectionDialog open with ADC recovery guidance when Agent Platform saves without ADC, and connects once refresh confirms ADC', async () => {
+    const onClose = vi.fn();
+    const onConnected = vi.fn(async () => {});
+    const missingAdcAuth = authState({
+      auth_mode: 'agent-platform',
+      authenticated: false,
+      credentials_present: false,
+      adc_present: false,
+      gcp_project: 'prod-agent-proj',
+      gcp_location: 'us-central1',
+      adc_command: 'gcloud auth application-default login',
+      error: 'adc_missing',
+    });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'none', ready: false }));
+    mock.api.getAntigravityAuth.mockResolvedValue(missingAdcAuth);
+    mock.api.saveAntigravityAuth.mockResolvedValue({ ...missingAdcAuth, restart: { ok: true } });
+
+    render(
+      wrap(
+        <BackendConnectionDialog
+          backend="antigravity"
+          method="api_key"
+          onClose={onClose}
+          onConnected={onConnected}
+          onWriteState={vi.fn()}
+        />,
+      ),
+    );
+
+    const platformRadio = await screen.findByRole('radio', { name: en.settings.backends.antigravityMethodAgentPlatformCompact });
+    await waitFor(() => expect((platformRadio as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(platformRadio);
+
+    fireEvent.change(screen.getByLabelText(en.settings.backends.antigravityGcpProjectLabel), {
+      target: { value: 'prod-agent-proj' },
+    });
+    fireEvent.change(screen.getByLabelText(en.settings.backends.antigravityGcpLocationLabel), {
+      target: { value: 'us-central1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+
+    await waitFor(() =>
+      expect(mock.api.saveAntigravityAuth).toHaveBeenCalledWith({
+        auth_mode: 'agent-platform',
+        gcp_project: 'prod-agent-proj',
+        gcp_location: 'us-central1',
+      }),
+    );
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(en.settings.backends.antigravityAdcSaveNeedsAuth);
+    expect(screen.getByText('gcloud auth application-default login')).toBeTruthy();
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // Once ADC is set up on the host, refreshing status confirms auth and completes the dialog.
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external', ready: true }));
+    mock.api.getAntigravityAuth.mockResolvedValue(
+      authState({
+        auth_mode: 'agent-platform',
+        authenticated: true,
+        credentials_present: true,
+        adc_present: true,
+        gcp_project: 'prod-agent-proj',
+        gcp_location: 'us-central1',
+        adc_command: 'gcloud auth application-default login',
+        error: null,
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.refresh }));
+
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+
+  it('completes BackendConnectionDialog when Agent Platform save confirms authenticated ADC', async () => {
+    const onClose = vi.fn();
+    const onConnected = vi.fn(async () => {});
+    const readyAuth = authState({
+      auth_mode: 'agent-platform',
+      authenticated: true,
+      credentials_present: true,
+      adc_present: true,
+      gcp_project: 'ready-proj',
+      gcp_location: 'global',
+      error: null,
+    });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external', ready: true }));
+    mock.api.getAntigravityAuth
+      .mockResolvedValueOnce(authState({ adc_present: true }))
+      .mockResolvedValue(readyAuth);
+    mock.api.saveAntigravityAuth.mockResolvedValue({ ...readyAuth, restart: { ok: true } });
+
+    render(
+      wrap(
+        <BackendConnectionDialog
+          backend="antigravity"
+          method="api_key"
+          onClose={onClose}
+          onConnected={onConnected}
+          onWriteState={vi.fn()}
+        />,
+      ),
+    );
+
+    const platformRadio = await screen.findByRole('radio', { name: en.settings.backends.antigravityMethodAgentPlatformCompact });
+    await waitFor(() => expect((platformRadio as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(platformRadio);
+
+    fireEvent.change(screen.getByLabelText(en.settings.backends.antigravityGcpProjectLabel), {
+      target: { value: 'ready-proj' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+
+    await waitFor(() => expect(onConnected).toHaveBeenCalledOnce());
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+
+  it('does not complete BackendConnectionDialog when Gemini API key save returns unauthenticated', async () => {
+    const onClose = vi.fn();
+    const onConnected = vi.fn(async () => {});
+    const unverifiedKeyAuth = authState({
+      auth_mode: 'gemini-api-key',
+      authenticated: false,
+      credentials_present: true,
+      has_api_key: true,
+      api_key_masked: 'AIza…badk',
+      error: 'invalid_credentials',
+    });
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'none', ready: true }));
+    mock.api.getAntigravityAuth
+      .mockResolvedValueOnce(authState())
+      .mockResolvedValue(unverifiedKeyAuth);
+    mock.api.saveAntigravityAuth.mockResolvedValue({ ...unverifiedKeyAuth, restart: { ok: true } });
+
+    render(
+      wrap(
+        <BackendConnectionDialog
+          backend="antigravity"
+          method="api_key"
+          onClose={onClose}
+          onConnected={onConnected}
+          onWriteState={vi.fn()}
+        />,
+      ),
+    );
+
+    const keyInput = await screen.findByLabelText(en.settings.backends.antigravityApiKeyLabel);
+    fireEvent.change(keyInput, { target: { value: 'AIzaSyInvalidKey1234' } });
+    fireEvent.click(screen.getByRole('button', { name: en.onboarding.connection.saveConnect }));
+
+    await waitFor(() =>
+      expect(mock.api.saveAntigravityAuth).toHaveBeenCalledWith({
+        auth_mode: 'gemini-api-key',
+        api_key: 'AIzaSyInvalidKey1234',
+        base_url: null,
+      }),
+    );
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain(en.settings.backends.antigravityApiKeyUnconfirmed);
+    expect(screen.queryByText(en.onboarding.connection.connected)).toBeNull();
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not complete BackendConnectionDialog when OAuth finishes without confirmed authentication', async () => {
+    const onClose = vi.fn();
+    const onConnected = vi.fn(async () => {});
+    mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'none', ready: false }));
+    mock.api.getAntigravityAuth.mockResolvedValue(
+      authState({
+        auth_mode: 'oauth-personal',
+        authenticated: false,
+        credentials_present: false,
+        error: 'not_logged_in',
+      }),
+    );
+    mock.api.startOAuthWeb.mockResolvedValue({
+      ok: true,
+      flow_id: 'flow_unconfirmed',
+      backend: 'antigravity',
+      state: 'success',
+    });
+
+    render(
+      wrap(
+        <BackendConnectionDialog
+          backend="antigravity"
+          method="oauth"
+          onClose={onClose}
+          onConnected={onConnected}
+          onWriteState={vi.fn()}
+        />,
+      ),
+    );
+
+    const signInButton = await screen.findByRole('button', { name: en.settings.backends.antigravitySignInGoogle });
+    fireEvent.click(signInButton);
+
+    const alerts = await screen.findAllByRole('alert');
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0].textContent).toContain(en.onboarding.connection.unconfirmed);
+    expect(onConnected).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

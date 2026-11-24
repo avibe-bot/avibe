@@ -19,6 +19,13 @@ import './connection.css';
 type DialogInitialMethod = 'oauth' | 'api_key';
 type OAuthMethod = 'oauth-personal' | 'oauth-business';
 type Editable = 'method' | 'api_key' | 'base_url' | 'gcp_project' | 'gcp_location';
+type ObservationResult = {
+  current: boolean;
+  readConfirmed: boolean;
+  authConfirmed: boolean;
+  auth: AntigravityAuthState | null;
+  authFeedback: string;
+};
 
 const ANTIGRAVITY_MODES: readonly AntigravityAuthMode[] = ['oauth-personal', 'oauth-business', 'gemini-api-key', 'agent-platform'];
 
@@ -36,6 +43,43 @@ const OAUTH_META = {
 
 const isAntigravityAuthMode = (value: string | null | undefined): value is AntigravityAuthMode =>
   ANTIGRAVITY_MODES.includes(value as AntigravityAuthMode);
+
+const isAuthVerified = (fresh: AntigravityAuthState | null, expectedMode?: AntigravityAuthMode): boolean => {
+  if (!fresh?.ok || !fresh.authenticated || fresh.auth_mode_uncertain || Boolean(fresh.error)) {
+    return false;
+  }
+  if (!isAntigravityAuthMode(fresh.auth_mode)) {
+    return false;
+  }
+  if (expectedMode && fresh.auth_mode !== expectedMode) {
+    return false;
+  }
+  if (fresh.auth_mode === 'agent-platform' && !fresh.adc_present) {
+    return false;
+  }
+  if (fresh.auth_mode === 'gemini-api-key' && !fresh.has_api_key) {
+    return false;
+  }
+  return true;
+};
+
+type UnconfirmedAuthKey =
+  | 'settings.backends.antigravityAdcSaveNeedsAuth'
+  | 'settings.backends.antigravityApiKeyUnconfirmed'
+  | 'onboarding.connection.unconfirmed';
+
+const unconfirmedAuthKey = (
+  fresh: AntigravityAuthState,
+  expectedMode: AntigravityAuthMode,
+): UnconfirmedAuthKey => {
+  if (expectedMode === 'agent-platform' && (fresh.error === 'adc_missing' || !fresh.adc_present)) {
+    return 'settings.backends.antigravityAdcSaveNeedsAuth';
+  }
+  if (expectedMode === 'gemini-api-key' && (fresh.error === 'invalid_credentials' || fresh.error === 'missing_api_key')) {
+    return 'settings.backends.antigravityApiKeyUnconfirmed';
+  }
+  return 'onboarding.connection.unconfirmed';
+};
 
 const isValidBaseUrl = (value: string): boolean => {
   const trimmed = value.trim();
@@ -90,6 +134,7 @@ export function AntigravityConnectionForm({
 
   const observation = useRef(0);
   const touched = useRef(new Set<Editable>());
+  const pendingExpectedMode = useRef<AntigravityAuthMode | null>(null);
   const lifetime = useRef({ mounted: true, busy: false });
   const callbacks = useRef({ onConnected, onWriteState });
 
@@ -105,7 +150,9 @@ export function AntigravityConnectionForm({
 
   const invalidateObservation = () => { observation.current += 1; };
 
-  const observe = useCallback(({ receiptError = '' }: { receiptError?: string } = {}) => {
+  const observe = useCallback(({ expectedMode, receiptError = '' }: {
+    expectedMode?: AntigravityAuthMode; receiptError?: string;
+  } = {}): Promise<ObservationResult> => {
     const token = ++observation.current;
     const current = () => lifetime.current.mounted && token === observation.current;
 
@@ -113,7 +160,9 @@ export function AntigravityConnectionForm({
       api.getBackendConnection('antigravity'),
       api.getAntigravityAuth(),
     ]).then(([application, authResult]) => {
-      if (!current()) return false;
+      if (!current()) {
+        return { current: false, readConfirmed: false, authConfirmed: false, auth: null, authFeedback: '' };
+      }
 
       const messages = receiptError ? [receiptError] : [];
       const connection = application.status === 'fulfilled' ? application.value : null;
@@ -125,38 +174,51 @@ export function AntigravityConnectionForm({
         );
       }
 
-      let hasAuth = false;
+      let freshAuth: AntigravityAuthState | null = null;
       let nextAuthReadable = false;
       if (authResult.status === 'rejected') {
         messages.push(errorMessage(authResult.reason) || t('onboarding.connection.readFailed'));
       } else if (!authResult.value.ok) {
         messages.push(authResult.value.message || t('onboarding.connection.readFailed'));
       } else {
-        const fresh = authResult.value;
-        setAuth(fresh);
+        freshAuth = authResult.value;
+        setAuth(freshAuth);
         nextAuthReadable = true;
         setFields((prev) => ({
-          base_url: touched.current.has('base_url') ? prev.base_url : fresh.base_url || '',
-          gcp_project: touched.current.has('gcp_project') ? prev.gcp_project : fresh.gcp_project || '',
-          gcp_location: touched.current.has('gcp_location') ? prev.gcp_location : fresh.gcp_location || '',
+          base_url: touched.current.has('base_url') ? prev.base_url : freshAuth?.base_url || '',
+          gcp_project: touched.current.has('gcp_project') ? prev.gcp_project : freshAuth?.gcp_project || '',
+          gcp_location: touched.current.has('gcp_location') ? prev.gcp_location : freshAuth?.gcp_location || '',
         }));
-        if (!compact && !touched.current.has('method') && isAntigravityAuthMode(fresh.auth_mode)) {
-          setMethod(fresh.auth_mode);
+        if (!compact && !touched.current.has('method') && isAntigravityAuthMode(freshAuth.auth_mode)) {
+          setMethod(freshAuth.auth_mode);
         }
-        hasAuth = Boolean(fresh.authenticated || fresh.credentials_present);
       }
 
-      const confirmed = messages.length === 0;
+      const readConfirmed = messages.length === 0;
+      const authVerified = isAuthVerified(freshAuth, expectedMode);
+      const authConfirmed = readConfirmed && authVerified;
+      const authFeedback = expectedMode && freshAuth && !authVerified
+        ? (() => {
+            const key = unconfirmedAuthKey(freshAuth, expectedMode);
+            if (key !== 'onboarding.connection.unconfirmed') return t(key);
+            return freshAuth.message?.trim() || t(key);
+          })()
+        : '';
+      if (authFeedback) {
+        messages.push(authFeedback);
+      }
+
+      const allConfirmed = messages.length === 0;
       setStatus((s) => ({
         ...s,
         loading: false,
         authReadable: nextAuthReadable,
         error: [...new Set(messages)].join(' '),
-        applyPending: !confirmed,
-        connected: confirmed && hasAuth && Boolean(connection?.ready),
-        savedDisabled: confirmed && hasAuth && connection?.enabled === false,
+        applyPending: !allConfirmed,
+        connected: authConfirmed && Boolean(connection?.ready),
+        savedDisabled: authConfirmed && connection?.enabled === false,
       }));
-      return confirmed;
+      return { current: true, readConfirmed, authConfirmed, auth: freshAuth, authFeedback };
     });
   }, [api, compact, t]);
 
@@ -166,20 +228,49 @@ export function AntigravityConnectionForm({
     return () => { observation.current += 1; };
   }, [connectionRevision, observe]);
 
-  const refreshObservation = (options: { receiptError?: string } = {}) => {
+  const refreshObservation = (options: { expectedMode?: AntigravityAuthMode; receiptError?: string } = {}) => {
     setStatus((s) => ({ ...s, connected: false, savedDisabled: false, error: options.receiptError ?? '' }));
     return observe(options);
   };
 
+  const handleRefresh = async () => {
+    if (lifetime.current.busy || active) return;
+    const expectedMode = pendingExpectedMode.current ?? undefined;
+    const observed = await refreshObservation({ expectedMode });
+    if (!lifetime.current.mounted || !observed.current) return;
+    if (expectedMode && observed.readConfirmed && observed.authConfirmed) {
+      pendingExpectedMode.current = null;
+      touched.current.delete('method');
+      await callbacks.current.onConnected?.();
+    }
+  };
+
   const confirmOAuth = async (applicationError = '') => {
-    const confirmed = await refreshObservation({ receiptError: applicationError });
-    if (!confirmed) throw new Error(t('onboarding.connection.applyPending'));
+    pendingExpectedMode.current = oauthAuthMode;
+    const observed = await refreshObservation({ expectedMode: oauthAuthMode, receiptError: applicationError });
+    if (!observed.current) return;
+    if (!observed.readConfirmed) throw new Error(t('onboarding.connection.applyPending'));
+    if (!observed.authConfirmed) throw new Error(observed.authFeedback || t('onboarding.connection.unconfirmed'));
+    pendingExpectedMode.current = null;
     touched.current.delete('method');
     await callbacks.current.onConnected?.();
   };
 
-  const observeOAuthFailure = async (receiptError: string) => { await refreshObservation({ receiptError }); };
-  const changeOAuthActive = (value: boolean) => { if (value) invalidateObservation(); setActive(value); };
+  const observeOAuthFailure = async (receiptError: string) => {
+    pendingExpectedMode.current = null;
+    await refreshObservation({ receiptError });
+  };
+  const changeOAuthActive = (value: boolean) => {
+    if (value) {
+      pendingExpectedMode.current = null;
+      invalidateObservation();
+    }
+    setActive(value);
+  };
+  const handleOAuthCancel = () => {
+    pendingExpectedMode.current = null;
+    invalidateObservation();
+  };
 
   const oauthAuthMode: OAuthMethod = method === 'oauth-business' ? 'oauth-business' : 'oauth-personal';
   const oauth = useBackendOAuth({
@@ -187,18 +278,21 @@ export function AntigravityConnectionForm({
     authMode: oauthAuthMode,
     onSuccess: confirmOAuth,
     onFailure: observeOAuthFailure,
-    onCancel: invalidateObservation,
+    onCancel: handleOAuthCancel,
     onActiveChange: changeOAuthActive,
     onPendingChange: onWriteState,
   });
 
-  const removed = (result: OAuthWebMutationResult) => refreshObservation({
-    receiptError: !result.ok
-      ? result.error || result.detail || t('onboarding.connection.saveFailed')
-      : result.restart?.ok === false
-        ? result.restart.message || t('onboarding.connection.applyFailed')
-        : '',
-  });
+  const removed = (result: OAuthWebMutationResult) => {
+    pendingExpectedMode.current = null;
+    return refreshObservation({
+      receiptError: !result.ok
+        ? result.error || result.detail || t('onboarding.connection.saveFailed')
+        : result.restart?.ok === false
+          ? result.restart.message || t('onboarding.connection.applyFailed')
+          : '',
+    }).then((observed) => observed.readConfirmed);
+  };
 
   const busy = status.saving || active;
   useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
@@ -220,6 +314,7 @@ export function AntigravityConnectionForm({
     try {
       await action();
     } catch (err) {
+      pendingExpectedMode.current = null;
       if (lifetime.current.mounted) await observe({ receiptError: errorMessage(err) || fallbackError });
     } finally {
       lifetime.current.busy = false;
@@ -230,23 +325,40 @@ export function AntigravityConnectionForm({
 
   const save = () => {
     if (!canSave || lifetime.current.busy) return;
-    const payload = method === 'gemini-api-key'
+    const requestedMode: AntigravityAuthMode = method === 'gemini-api-key' ? 'gemini-api-key' : 'agent-platform';
+    const payload = requestedMode === 'gemini-api-key'
       ? { auth_mode: 'gemini-api-key' as const, api_key: apiKey.trim() || undefined, base_url: fields.base_url.trim() || null }
       : { auth_mode: 'agent-platform' as const, gcp_project: fields.gcp_project.trim(), gcp_location: fields.gcp_location.trim() || null };
     return runMutation(t('onboarding.connection.saveFailed'), async () => {
+      pendingExpectedMode.current = null;
       const result = await api.saveAntigravityAuth(payload);
       if (!lifetime.current.mounted) return;
       if (!result.ok) throw new Error(result.message || result.detail || result.error || t('onboarding.connection.saveFailed'));
       if (result.notices) surfaceBackendNotices(result.notices, showToast, t);
       if (result.partial) showToast(result.detail || result.warning || t('onboarding.connection.partial'), 'warning');
 
+      pendingExpectedMode.current = requestedMode;
       const receiptError = result.restart?.ok === false ? result.restart.message || t('onboarding.connection.applyFailed') : '';
-      const confirmed = await observe({ receiptError });
-      if (!lifetime.current.mounted || !confirmed) return;
+      const observed = await observe({ expectedMode: requestedMode, receiptError });
+      if (!lifetime.current.mounted || !observed.current || !observed.readConfirmed) return;
 
-      if (method === 'gemini-api-key') { setApiKey(''); setEditingKey(false); }
-      const keys: Editable[] = method === 'gemini-api-key' ? ['api_key', 'base_url', 'method'] : ['gcp_project', 'gcp_location', 'method'];
-      keys.forEach((key) => touched.current.delete(key));
+      if (requestedMode === 'gemini-api-key') {
+        if (observed.auth?.has_api_key) {
+          setApiKey('');
+          setEditingKey(false);
+          touched.current.delete('api_key');
+        }
+        touched.current.delete('base_url');
+      } else {
+        touched.current.delete('gcp_project');
+        touched.current.delete('gcp_location');
+      }
+      if (observed.auth?.auth_mode === requestedMode) {
+        touched.current.delete('method');
+      }
+
+      if (!observed.authConfirmed) return;
+      pendingExpectedMode.current = null;
       await callbacks.current.onConnected?.();
     });
   };
@@ -254,6 +366,7 @@ export function AntigravityConnectionForm({
   const removeApiKey = () => {
     if (lifetime.current.busy || !window.confirm(t('onboarding.connection.removeConfirm'))) return;
     return runMutation(t('onboarding.connection.readFailed'), async () => {
+      pendingExpectedMode.current = null;
       const result = await api.removeBackendApiKey('antigravity');
       if (!lifetime.current.mounted) return;
       if (!result.ok) throw new Error(result.detail || result.error || t('onboarding.connection.saveFailed'));
@@ -267,11 +380,12 @@ export function AntigravityConnectionForm({
 
   const selectMethod = (value: AntigravityAuthMode) => {
     if (busy || status.loading) return;
+    pendingExpectedMode.current = null;
     invalidateObservation();
     oauth.resetToIdle();
     touched.current.add('method');
     setMethod(value);
-    setStatus((s) => ({ ...s, error: '', connected: false }));
+    setStatus((s) => ({ ...s, error: '', connected: false, savedDisabled: false, applyPending: false }));
   };
 
   const updateField = (key: 'base_url' | 'gcp_project' | 'gcp_location', value: string) => {
@@ -280,7 +394,7 @@ export function AntigravityConnectionForm({
   };
 
   const oauthMeta = OAUTH_META[oauthAuthMode];
-  const oauthSignedIn = status.authReadable && Boolean(auth?.authenticated) && auth?.auth_mode === oauthAuthMode;
+  const oauthSignedIn = status.authReadable && isAuthVerified(auth, oauthAuthMode);
   const canRemoveOAuth = status.authReadable && Boolean(auth?.authenticated || auth?.credentials_present);
   const needsCode = oauth.state === 'awaiting_code' && (
     oauth.callbackKind === 'code' || oauth.callbackKind === 'redirect' || (!oauth.callbackKind && Boolean(oauth.url) && !oauth.deviceCode)
@@ -339,7 +453,7 @@ export function AntigravityConnectionForm({
           <>
             {compact && <p className="connection-intro">{t(METHOD_META[method].intro)}</p>}
             {status.applyPending && (
-              <div><Button variant="secondary" disabled={busy} onClick={() => void refreshObservation()}>{t('onboarding.connection.refresh')}</Button></div>
+              <div><Button variant="secondary" disabled={busy} onClick={() => void handleRefresh()}>{t('onboarding.connection.refresh')}</Button></div>
             )}
             {status.connected && (
               <p className="connection-confirmed" role="status"><CheckCircle2 size={16} />{t('onboarding.connection.connected')}</p>
@@ -353,7 +467,7 @@ export function AntigravityConnectionForm({
             {status.error && (
               <div role="alert" className="connection-error">
                 {status.error}
-                {!auth && <Button variant="secondary" onClick={() => void refreshObservation()}>{t('common.retry')}</Button>}
+                {!auth && <Button variant="secondary" onClick={() => void handleRefresh()}>{t('common.retry')}</Button>}
               </div>
             )}
 
@@ -366,14 +480,14 @@ export function AntigravityConnectionForm({
                   notice={method === 'oauth-personal' ? personalAutomationNotice : undefined}
                   startButtonLabel={t(oauthMeta.signIn)} signedInLabel={t(oauthMeta.signedIn)}
                   onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure}
-                  onCancel={invalidateObservation} onActiveChange={changeOAuthActive}
+                  onCancel={handleOAuthCancel} onActiveChange={changeOAuthActive}
                 />
                 {method === 'oauth-business' && enterpriseTerminalBlock}
               </div>
             ) : (
               <>
                 {method === 'oauth-personal' && personalAutomationNotice}
-                {oauth.error && <p className="connection-error" role="alert">{oauth.error}</p>}
+                {oauth.error && oauth.error !== status.error && <p className="connection-error" role="alert">{oauth.error}</p>}
                 {!oauth.isActive ? (
                   <div className="connection-account">
                     <h3>{t(oauthMeta.title)}</h3>
