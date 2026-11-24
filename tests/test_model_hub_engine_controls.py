@@ -53,6 +53,14 @@ def test_policy_endpoint_changes_only_engine_setting_and_survives_legacy_read(tm
     assert V2Config.from_payload(after).update.model_hub_engine_auto_update is True
 
 
+@pytest.mark.parametrize("damaged", [b"{", b'{"update":"not an object"}'])
+def test_recovery_defaults_cannot_enable_routine_adoption(tmp_path, monkeypatch, damaged):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
+    paths.get_config_path().write_bytes(damaged)
+    assert auto_update_enabled() is False
+
+
 @pytest.mark.asyncio
 async def test_pollable_check_never_adopts_or_claims_active_and_update_intent_is_not_lost(tmp_path, monkeypatch):
     owner, supervisor, _ = owner_fixture(tmp_path, monkeypatch)
@@ -71,6 +79,12 @@ async def test_pollable_check_never_adopts_or_claims_active_and_update_intent_is
     snapshot = await adapter.engine_status()
     assert snapshot["active_release"] is None and snapshot["available_release"] == candidate.asset_release_tag
     assert not entered.is_set() and not snapshot["auto_update"]
+    from vibe import api
+    monkeypatch.setattr("vibe.model_hub_client.engine_control_sync", lambda action: snapshot)
+    monkeypatch.setattr("vibe.model_hub_runtime.installer.EngineRuntimeManager", lambda **_: owner.manager)
+    row = api._model_hub_engine_dependency_status()
+    assert row["available_release"] == candidate.asset_release_tag and not row["has_update"]
+    assert row["latest_version"] == before["runtime_version"] != candidate.runtime_version
     job = await adapter.request_engine_operation()
     try:
         assert await asyncio.to_thread(entered.wait, 5)

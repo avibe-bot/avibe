@@ -11613,10 +11613,9 @@ def _model_hub_engine_dependency_status() -> dict:
             "active_release", "default_release", "available_release", "min_avibe_version", "auto_update",
             "update_state", "update_reason", "last_checked_at", "last_result", "operation_id",
         )}
-    row.update(fields)
-    if fields["available_release"]:
-        row.update(has_update=True, latest_version=fields["available_release"].removeprefix("model-hub-engine-").rsplit("-", 1)[0])
-    return row
+    # Legacy install action repairs the required manifest, never the optional
+    # channel offer. Keep its target/version mismatch paired with that action.
+    return {**row, **fields}
 
 
 def _model_hub_engine_files_status() -> dict:

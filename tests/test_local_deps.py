@@ -2067,7 +2067,7 @@ def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,
         "load",
-        classmethod(lambda _cls: SimpleNamespace(update=SimpleNamespace(model_hub_engine_auto_update=True))),
+        classmethod(lambda _cls: SimpleNamespace(whole_config_recovery=False, recovered_sections=(), update=SimpleNamespace(model_hub_engine_auto_update=True))),
     )
     monkeypatch.setattr(
         api,
@@ -2245,7 +2245,7 @@ def test_dependencies_status_projects_show_runtime_identity_without_pairing(monk
     monkeypatch.setattr(
         api.V2Config,
         "load",
-        classmethod(lambda _cls: SimpleNamespace(update=SimpleNamespace(model_hub_engine_auto_update=True))),
+        classmethod(lambda _cls: SimpleNamespace(whole_config_recovery=False, recovered_sections=(), update=SimpleNamespace(model_hub_engine_auto_update=True))),
     )
 
     import core.show_runtime as show_runtime

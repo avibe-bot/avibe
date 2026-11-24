@@ -15,7 +15,10 @@ def auto_update_enabled() -> bool:
     from config.v2_config import V2Config
 
     try:
-        return V2Config.load().update.model_hub_engine_auto_update is True
+        config = V2Config.load()
+        if config.whole_config_recovery or "update" in config.recovered_sections:
+            return False
+        return config.update.model_hub_engine_auto_update is True
     except FileNotFoundError:
         return True
     except (OSError, ValueError):
