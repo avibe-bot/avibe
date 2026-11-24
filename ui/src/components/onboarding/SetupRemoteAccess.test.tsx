@@ -13,6 +13,16 @@ import { offersRemoteAccessStep } from './setupRemoteAccessStep';
 
 // ui/design: setup/remote-access/*
 vi.mock('../Wizard', () => ({ SetupHeader: () => null }));
+// The real page activity, with a way to show the page again in a test.
+const reactivation = vi.hoisted(() => ({ listeners: new Set<() => void>() }));
+vi.mock('../../lib/pageActivity', async (original) => {
+  const actual = await original<typeof import('../../lib/pageActivity')>();
+  return { ...actual, onPageReactivated: (listener: () => void) => {
+    reactivation.listeners.add(listener);
+    const stop = actual.onPageReactivated(listener);
+    return () => { reactivation.listeners.delete(listener); stop(); };
+  } };
+});
 
 const mount = () => render(
   <MemoryRouter initialEntries={['/setup/remote-access']}>
@@ -50,6 +60,24 @@ describe('Setup · remote access', () => {
     expect(offersRemoteAccessStep({ ...local, nativeShell: true })).toBe(false);
     // An organization's Avibe is not bound by a person's claim.
     expect(offersRemoteAccessStep({ ...local, organization: true })).toBe(false);
+  });
+
+  it('in the Desktop App, goes on to Devices when the page is shown again and the claim dialog bound it', async () => {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    try {
+      const status = vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: false, paired: false, running: false } as never);
+      mount();
+      await screen.findByRole('button', { name: '开启远程访问' });
+      await waitFor(() => expect(status).toHaveBeenCalledTimes(1));
+      expect(screen.queryByText('devices')).toBeNull();
+      // Back from the shell's claim dialog, now bound.
+      status.mockResolvedValue({ ok: true, enabled: true, paired: true, running: true } as never);
+      for (const listener of reactivation.listeners) listener();
+      expect(await screen.findByText('devices')).toBeTruthy();
+      expect(status).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('turns on with the same claim as the Devices page, and skipping is a link to the workbench', async () => {
