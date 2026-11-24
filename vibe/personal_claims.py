@@ -192,6 +192,7 @@ class _Flow:
         self.admitted_owner = admitted_owner
         self._cleanup_client = None
         self._decline_attempted = False
+        self._declined_upstream = False
         self.mode, self.locale, self.origin = mode, locale, origin
         self.expected, self.confirm, self.show = expected, confirm, show
         self.lock = threading.Condition()
@@ -238,7 +239,7 @@ class _Flow:
                     or not self._browser or not self._proof or not _matches(self._browser, browser) or not _matches(self._proof, state)):
                 raise ClaimError("invalid_return")
             self._browser = self._proof = None
-            self._decline_attempted = True  # already declined upstream; nothing to send
+            self._declined_upstream = self._decline_attempted = True  # avibe.bot already declined it
             self.cancelled = True
             self.update("cancelling")
             self.lock.notify_all()
@@ -307,7 +308,8 @@ class _Flow:
             self._check_time()
             try:
                 if self.cancelled:
-                    if not self._decline_attempted:
+                    if not self._declined_upstream:
+                        # A transient failure below retries this same decline.
                         self._decline_attempted = True
                         client.decline(ticket)
                     self.update("declined", code="subject_mismatch" if mismatch else "declined")

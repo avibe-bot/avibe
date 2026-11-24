@@ -427,3 +427,17 @@ def test_cancel_at_avibe_bot_returns_an_ordinary_claim_as_cancelled(claim_peer, 
     assert (view["state"], view["code"]) == ("declined", "declined")
     assert len(claim_peer.calls) == calls  # declined there already: no decline, no accept
     _assert_bad_return(back(client, url))
+
+
+def test_local_cancel_still_retries_a_decline_after_a_transient_failure(claim_peer, owner_browser):
+    origin, environ = owner_browser
+    client = ui_server.app.test_client()
+    body = _start(client, origin, environ).get_json()
+    claim_peer.outcomes += [(503, {}, None), (200, {"status": "declined"}, None)]
+    path = "/api/remote-access/claims/" + body["claim_id"]
+    assert client.post(path + "/cancel", base_url=origin, environ_base=environ, json={},
+                       headers=csrf_headers(client, origin)).status_code == 200
+    flow = claims.redirect_claims._get(body["claim_id"])
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view["state"] == "declined", timeout=5)
+    assert claim_peer.decisions == ["decline", "decline"]  # retried, not reported after the 503
