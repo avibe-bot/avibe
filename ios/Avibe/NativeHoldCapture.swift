@@ -636,7 +636,17 @@ final class NativeHoldCapture {
         // longer one: it is not followed any more.
         if let hold, !hold.recognised,
            !(hold.webView === webView && surfaces.contains { $0.id == hold.surface && $0.rect.contains(hold.origin) }) {
-            cancelHold(hold, why: "withdrawn")
+            // Most often the tap that focuses the composer: the page took the
+            // press for itself, so the App was not told of the lift, and the
+            // focused composer left the list before the App learnt of it.
+            // Asked, the touch says whether it lifted: then it was a tap, and
+            // is counted as one by its own length.
+            if let lifted = hold.touch?().liftedAt {
+                if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                cancelHold(hold, why: "tap")
+            } else {
+                cancelHold(hold, why: "withdrawn")
+            }
         }
         return true
     }
