@@ -8410,7 +8410,19 @@
       "noCertificate": "no valid certificate",
       "lastConnection": "Last connection",
       "lastConnectionLegs": "direct {{direct}} / Cloudflare {{public}}",
-      "lastConnectionNone": "none recorded on this device"
+      "lastConnectionNone": "none recorded on this device",
+      "directOnly": "Direct and relay only",
+      "directOnlyHint": "Uses the Cloudflare tunnel once to connect, then only direct and relay.",
+      "choiceHintDesktop": "This choice is for this device only. If Direct and relay only then cannot connect, Avibe Desktop goes back to Automatic by itself.",
+      "choiceHintDesktopPlain": "This choice is for this device only.",
+      "choiceRevertedDirectUndated": "Direct and relay only could not connect, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectToday": "Direct and relay only could not connect today at {{time}}, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectYesterday": "Direct and relay only could not connect yesterday at {{time}}, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectDated": "Direct and relay only could not connect on {{date}} at {{time}}, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopUndated": "Direct and relay only could not connect, so Avibe Desktop went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopToday": "Direct and relay only could not connect today at {{time}}, so Avibe Desktop went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopYesterday": "Direct and relay only could not connect yesterday at {{time}}, so Avibe Desktop went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopDated": "Direct and relay only could not connect on {{date}} at {{time}}, so Avibe Desktop went back to Automatic by itself."
     },
     "rename": {
       "title": "Change the domain",
