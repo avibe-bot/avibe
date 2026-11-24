@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { RemoteAccessStatus } from '@/context/ApiContext';
 import {
-  activityFromWire, addressFromWire, claimProblem, connectionFromWire, devicesFromWire, rebindFromWire, rebindRefusal, rebindUnavailable,
+  activityFromWire, addressFromWire, claimProblem, connectionFromWire, pairingHold, devicesFromWire, rebindFromWire, rebindRefusal, rebindUnavailable,
   renameRefusal, signedOutFromWire, tunnelFromStatus,
 } from './wire';
 
@@ -185,6 +185,28 @@ describe('tunnelFromStatus', () => {
     expect(read({ tunnel_quality: sample() }, NOW + 200_000).state).toBe('unknown');
     expect(read({ paired: false, running: false }).state).toBe('unknown');
     expect(tunnelFromStatus(null).state).toBe('unknown');
+  });
+});
+
+describe('pairingHold', () => {
+  const of = (pending: Record<string, unknown> | null) => pairingHold({ pending_pairing: pending as never });
+  it('holds the button only where the person has nothing to decide', () => {
+    expect(of({ phase: 'prepared', can_resume: true, replay_state: 'scheduled', next_retry_at: 1_700_000_000 })).toEqual({ kind: 'finishing' });
+    expect(of({ phase: 'unknown', can_resume: false, replay_state: 'needs_reconciliation' })).toEqual({ kind: 'support' });
+    expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'desktop_app' })).toEqual({ kind: 'desktop' });
+    expect(of({ phase: 'prepared', can_resume: true, replay_state: 'manual', operation_owner: 'desktop_app' })).toEqual({ kind: 'desktop' });
+    expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'cli' })).toEqual({ kind: 'support' });
+    expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated' })).toEqual({ kind: 'support' });
+  });
+  it('leaves 「开启远程访问」 where pressing it continues, and for none or a state it does not know', () => {
+    expect(of({ phase: 'prepared', can_resume: true, replay_state: 'manual' })).toBeUndefined();
+    expect(of({ phase: 'applied', can_resume: true, replay_state: 'local_archive' })).toBeUndefined();
+    expect(of({ phase: 'prepared', can_resume: false, replay_state: 'terminated', operation_owner: 'personal_claim' })).toBeUndefined();
+    expect(of(null)).toBeUndefined();
+    expect(of({ phase: 'prepared', can_resume: true })).toBeUndefined();
+    expect(of({ phase: 'invalid', can_resume: false })).toBeUndefined();
+    expect(of({ phase: 'prepared', can_resume: false, replay_state: 'newer' })).toBeUndefined();
+    expect(pairingHold(null)).toBeUndefined();
   });
 });
 

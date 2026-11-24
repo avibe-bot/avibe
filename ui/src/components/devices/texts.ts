@@ -4,6 +4,7 @@
 import type { TFunction } from 'i18next';
 
 import type { TranslationKey } from '@/i18n/types';
+import { SUPPORT_EMAIL } from './features';
 import { longDay } from './format';
 import type { ClaimProblem, OptimizeState, RebindRefusal, RenameRefusal } from './types';
 
@@ -22,6 +23,9 @@ const problemKeys = {
   active_pairing_recent: 'devices.claim.problem.activeElsewhere',
   local_binding_changed: 'devices.claim.problem.bindingChanged',
   claim_in_progress: 'devices.claim.problem.inProgress',
+  pairing_needs_reconciliation: 'devices.hold.supportPlain',
+  // Another step on this computer kept the press from being taken: the page's own 「没有完成，请再试一次」.
+  pairing_local_busy: 'devices.problem.failed',
 } as const satisfies Record<Exclude<ClaimProblem['code'], 'rate_limited' | 'unknown'>, TranslationKey>;
 
 /**
@@ -37,7 +41,7 @@ export function claimProblemText(t: TFunction, problem: ClaimProblem, terminal =
       ? t('devices.claim.problem.rateLimited', { count: problem.seconds })
       : t('devices.claim.problem.rateLimitedSoon');
   }
-  return t(problemKeys[problem.code]);
+  return t(problemKeys[problem.code], { email: SUPPORT_EMAIL });
 }
 
 const refusalKeys = {

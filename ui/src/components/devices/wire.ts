@@ -7,7 +7,7 @@ import type { RemoteAccessSettings, RemoteAccessStatus } from '@/context/ApiCont
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '@/lib/tunnelQuality';
 import type {
   AccountResult, AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
-  DirectState, HealthData, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
+  DirectState, HealthData, PairingHold, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
   SignedOutDevice, SwitchSetting, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
 } from './types';
 
@@ -219,8 +219,33 @@ export function tunnelFromStatus(status: RemoteAccessStatus | null, now: number 
 const CLAIM_CODES = new Set([
   'link_required', 'expired', 'declined', 'pairing_recovery_required', 'fresh_claim_required', 'name_taken',
   'binding_unavailable', 'paired_installation_loopback_required', 'active_pairing_recent', 'local_binding_changed',
-  'invalid_return',
+  'invalid_return', 'pairing_needs_reconciliation', 'pairing_local_busy',
 ]);
+
+/**
+ * The saved pairing request the instance reports (`pending_pairing`, #4210), as what the page says.
+ * Nothing where 「开启远程访问」 continues it, for none, or for a state this page does not know.
+ * Pressing it starts a claim, whose start first settles a saved request of this page's own: it
+ * sends the same request again when it waits for that (`manual`), saves it here when avibe.bot
+ * accepted it (`local_archive`), or lets a new claim replace one that ended. Never a new key.
+ */
+export function pairingHold(status: Pick<RemoteAccessStatus, 'pending_pairing'> | null | undefined): PairingHold | undefined {
+  const pending = status?.pending_pairing;
+  // Avibe Desktop's own request is finished there, whatever its state.
+  if (pending?.operation_owner === 'desktop_app') return { kind: 'desktop' };
+  switch (pending?.replay_state) {
+    case 'scheduled':
+      return { kind: 'finishing' };
+    case 'needs_reconciliation':
+      return { kind: 'support' };
+    case 'terminated':
+      // This page's own ended attempt leaves room for a new one. Anyone else's (the terminal's) is
+      // not this computer's to send again, and only support settles it.
+      return pending.operation_owner === 'personal_claim' ? undefined : { kind: 'support' };
+    default:
+      return undefined;
+  }
+}
 
 /** A claim's local outcome name (never the hosted user code) as what the page says. */
 export function claimProblem(code: string | undefined, extra: { claimId?: string; seconds?: number } = {}): ClaimProblem {

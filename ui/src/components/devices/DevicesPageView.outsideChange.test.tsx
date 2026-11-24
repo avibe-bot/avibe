@@ -10,7 +10,7 @@ import type { Device, Reach } from './types';
 
 // The notice about an address changed elsewhere, once 「更改域名」 is turned on (features.ts) and the
 // instance has binding again: the full sentence and the way to bind again come back.
-vi.mock('./features', () => ({ RENAME_ENTRY_ENABLED: true, SUPPORT_EMAIL: 'support@avibe.bot' }));
+vi.mock('./features', async (original) => ({ ...await original<typeof import('./features')>(), RENAME_ENTRY_ENABLED: true }));
 
 const host = 'max-app.avibe.bot';
 const on: Reach = { state: 'on', host, tunnel: 'up', ms: 120 };

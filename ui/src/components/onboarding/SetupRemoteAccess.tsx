@@ -10,7 +10,7 @@ import { DEVICES_PATH } from '../devices/paths';
 import type { ClaimProblem } from '../devices/types';
 import { useClaimFlow, type ClaimEnd } from '../devices/useClaimFlow';
 import { useRebindOffered } from '../devices/useRebindOffered';
-import { claimProblem } from '../devices/wire';
+import { claimProblem, pairingHold } from '../devices/wire';
 import { SetupRemoteAccessView } from './SetupRemoteAccessView';
 
 export function SetupRemoteAccess() {
@@ -26,11 +26,13 @@ export function SetupRemoteAccess() {
   }, [navigate]);
   const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd });
 
-  // Opened again while bound (the back button after turning it on): nothing to offer here.
+  // Opened again while bound (the back button after turning it on): nothing to offer here. A saved
+  // pairing request the person has nothing to decide about is said on the Devices page.
   useEffect(() => {
     let current = true;
     void devicesApi.status().then((status) => {
-      if (current && status.paired === true) navigate(DEVICES_PATH, { replace: true });
+      const hold = status.paired === true ? undefined : pairingHold(status);
+      if (current && (status.paired === true || hold)) navigate(DEVICES_PATH, { replace: true });
     }).catch(() => undefined);
     return () => { current = false; };
   }, [navigate]);

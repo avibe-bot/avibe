@@ -216,6 +216,18 @@ const designFrames = frames([
     { reach: { state: 'off', surface: 'browser', problem: { code: 'unknown', raw: 'local_claim_unavailable' } }, devices: onlyHost }),
   frame('off-unreachable', '未开启 · 点了开启，但连不上 avibe.bot', at(700),
     { reach: { state: 'off', surface: 'browser', problem: { code: 'unreachable' } }, devices: onlyHost }),
+  // A saved pairing request this computer has not settled (#4210), where the person has nothing to
+  // decide. Where pressing 「开启远程访问」 continues it, the page is plain 'off'.
+  frame('hold-finishing', '保存的绑定请求 · 电脑在自己收尾：「正在完成绑定…」，不写时间，没有按钮', at(700),
+    { reach: { state: 'off', surface: 'browser', hold: { kind: 'finishing' } }, devices: onlyHost }),
+  frame('hold-desktop', '保存的绑定请求 · 由 Avibe Desktop 管理：一句话，没有按钮（浏览器打不开 Desktop）', at(700),
+    { reach: { state: 'off', surface: 'browser', hold: { kind: 'desktop' } }, devices: onlyHost }),
+  frame('hold-support', '保存的绑定请求 · 死路：没法确认，不会再重试，联系 support@avibe.bot，没有按钮，不提 key', at(700),
+    { reach: { state: 'off', surface: 'browser', hold: { kind: 'support' } }, devices: onlyHost }),
+  frame('hold-support-phone', '死路 · 375 宽', PHONE,
+    { reach: { state: 'off', surface: 'browser', hold: { kind: 'support' } }, devices: onlyHost }),
+  frame('off-local-busy', '未开启 · 点了开启，这台电脑上另一步正在进行，没有被接受：页面已有的「没有完成，请再试一次」', at(700),
+    { reach: { state: 'off', surface: 'browser', problem: { code: 'pairing_local_busy' } }, devices: onlyHost }),
   frame('off-desktop', '未开启 · 在 Avibe Desktop 里：走 App 自己的账号登录', at(700),
     { reach: { state: 'off', surface: 'desktop', account: null, name: '' }, devices: onlyHost }),
   frame('waiting', '请求已发出，avibe.bot 上还没有确认：可以取消', at(640),

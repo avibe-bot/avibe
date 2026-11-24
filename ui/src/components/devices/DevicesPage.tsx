@@ -26,10 +26,12 @@ import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
 import { useNow } from './useNow';
 import { useOptimizeRoute } from './useOptimizeRoute';
 import { useRebindOffered } from './useRebindOffered';
-import { claimProblem, tunnelFromStatus, type DevicesSnapshot } from './wire';
+import { claimProblem, pairingHold, tunnelFromStatus, type DevicesSnapshot } from './wire';
 
 const REFRESH_MS = 30_000;
 const FOLLOW_MS = 2_000;
+/** A saved pairing request Avibe is sending again by itself is read again this often. */
+const FOLLOW_HOLD_MS = 5_000;
 const EMPTY: DevicesSnapshot = { devices: [], unlinkedHealth: [], signedOut: [], bulk: null };
 
 const hostOf = (status: RemoteAccessStatus | null): string | null => {
@@ -236,6 +238,16 @@ export function DevicesPage() {
     return () => window.clearInterval(timer);
   }, [connecting, load, recovering]);
 
+  // A saved pairing request this computer has not settled (#4210) is the owner's to see. One that
+  // Avibe sends again by itself is followed until it settles.
+  const hold = owner && status && !status.paired ? pairingHold(status) : undefined;
+  const finishing = hold?.kind === 'finishing';
+  useEffect(() => {
+    if (!finishing) return undefined;
+    const timer = window.setInterval(() => { void load(); }, FOLLOW_HOLD_MS);
+    return () => window.clearInterval(timer);
+  }, [finishing, load]);
+
   const activity = feed.items;
   const nextCursor = feed.cursor;
   const loadOlder = useCallback(async () => {
@@ -286,7 +298,9 @@ export function DevicesPage() {
   // from here or from the App: the page says so and offers nothing.
   else if ((!status.paired || !host) && instanceKind === 'organization') reach = { state: 'off', surface: 'browser', problem: { code: 'organization' } };
   else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', account: null, name: '' };
-  else if (!status.paired || !host) reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue };
+  else if (!status.paired || !host) {
+    reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue, hold };
+  }
   else if (status.running || status.pid_state === 'unknown') {
     const tunnel = tunnelFromStatus(status, now, justStarted);
     reach = {

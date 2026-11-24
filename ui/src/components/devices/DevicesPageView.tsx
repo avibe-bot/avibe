@@ -26,13 +26,14 @@ import { OpenNewAddress } from './OpenNewAddress';
 import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
 import { RENAME_ENTRY_ENABLED, SUPPORT_EMAIL } from './features';
+import { PairingHoldRow } from './hold';
 import { claimProblemText } from './texts';
 import {
   RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
   newestFirst, othersSignedIn, remoteDevices, signOutNeedsConfirm,
 } from './rules';
 import type {
-  AccountResult, AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, Reach, SignOutNotice,
+  AccountResult, AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, PairingHold, Reach, SignOutNotice,
   SignedOutDevice, UnlinkedHealth,
 } from './types';
 
@@ -192,10 +193,15 @@ function ReachCard({ reach, operate = false, optimize, terminal = true, actions 
   }
   if (reach.state === 'off' && reach.surface === 'browser') {
     const { problem } = reach;
+    // A saved pairing request that is not settled takes the place of a new binding: what can be done
+    // is its own. A claim refused because only support can settle one is the same.
+    const held: PairingHold | undefined = reach.hold ?? (problem?.code === 'pairing_needs_reconciliation' ? { kind: 'support' } : undefined);
     // An address that cannot start a claim, or an organization's Avibe, has no button to press.
-    const noAction = problem?.code === 'link_required' || problem?.code === 'organization';
+    const noAction = Boolean(held) || problem?.code === 'link_required' || problem?.code === 'organization';
+    const said = held ? undefined : problem;
     return (
       <SettingsPanel title={t('devices.reach.title')} description={t('devices.reach.lead')} actions={offBadge}>
+        {held && <PairingHoldRow hold={held} />}
         {!noAction && (
           <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center">
             <Button variant="brand" disabled={reach.busy} onClick={actions.onTurnOn}>
@@ -205,13 +211,13 @@ function ReachCard({ reach, operate = false, optimize, terminal = true, actions 
             <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.reach.firstTime')} /></p>
           </div>
         )}
-        {problem && (
+        {said && (
           <div role="alert" className="flex flex-col gap-2 border-t border-border px-5 py-3 md:flex-row md:items-center md:justify-between">
             <p className={`text-[12px] leading-relaxed ${noAction ? 'text-foreground' : 'text-destructive-ink'}`}>
-              <KeptTail text={claimProblemText(t, problem, terminal)} />
+              <KeptTail text={claimProblemText(t, said, terminal)} />
             </p>
-            {problem.code === 'claim_in_progress' && problem.claimId && (
-              <Button variant="secondary" size="xs" className="shrink-0" onClick={() => actions.onCancelClaim?.(problem.claimId)}>
+            {said.code === 'claim_in_progress' && said.claimId && (
+              <Button variant="secondary" size="xs" className="shrink-0" onClick={() => actions.onCancelClaim?.(said.claimId)}>
                 {t('devices.claim.cancelOther')}
               </Button>
             )}

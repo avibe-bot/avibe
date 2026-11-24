@@ -118,15 +118,26 @@ export type SignOutNotice = {
 export type ClaimProblem =
   | { code: 'link_required' | 'organization' | 'invalid_return' | 'expired' | 'declined' | 'unreachable'
       | 'pairing_recovery_required' | 'fresh_claim_required' | 'name_taken' | 'binding_unavailable'
-      | 'paired_installation_loopback_required' | 'active_pairing_recent' | 'local_binding_changed' }
+      | 'paired_installation_loopback_required' | 'active_pairing_recent' | 'local_binding_changed'
+      | 'pairing_needs_reconciliation' | 'pairing_local_busy' }
   | { code: 'claim_in_progress'; claimId?: string }
   | { code: 'rate_limited'; seconds?: number }
   | { code: 'unknown'; raw: string };
 
+/**
+ * A pairing request this computer saved and has not settled (#4210), where the person has nothing
+ * to decide. Where pressing 「开启远程访问」 continues it (it waits to be sent again, avibe.bot
+ * accepted it and saving it here is not done, or this page's own earlier one ended), there is no
+ * hold: the button is the way on.
+ * `finishing`: Avibe sends the same request again by itself; nothing to press. `desktop`: Avibe
+ * Desktop owns it. `support`: it cannot be confirmed, and only support can settle it.
+ */
+export type PairingHold = { kind: 'finishing' | 'desktop' | 'support' };
+
 /** How this Avibe is reached. */
 export type Reach =
   /** Not bound, in a browser: one action, the name is chosen at avibe.bot. */
-  | { state: 'off'; surface: 'browser'; busy?: boolean; problem?: ClaimProblem }
+  | { state: 'off'; surface: 'browser'; busy?: boolean; problem?: ClaimProblem; hold?: PairingHold }
   /** The Desktop App on this computer: its own account sign-in is the sign-in. */
   | { state: 'off'; surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
   /** Turning on. `waiting`: the request is open and not approved at avibe.bot yet; it can be

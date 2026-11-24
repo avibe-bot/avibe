@@ -5,6 +5,7 @@ import { ArrowRight, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { ClaimFields } from '../devices/claim';
+import { SupportLine } from '../devices/hold';
 import { claimProblemText } from '../devices/texts';
 import type { ClaimProblem, NameState } from '../devices/types';
 import { Button } from '../ui/button';
@@ -28,8 +29,10 @@ export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
   const claim = props.surface === 'desktop' && props.account !== null ? props : null;
   const signIn = props.surface === 'desktop' && props.account === null;
   const browser = props.surface === 'browser' ? props : null;
-  // An address that cannot start a claim has nothing to press here: the sentence, then go on.
-  const noAction = browser?.problem?.code === 'link_required';
+  // An address that cannot start a claim, or a saved request only support can settle, has nothing
+  // to press here: the sentence, then go on.
+  const support = browser?.problem?.code === 'pairing_needs_reconciliation';
+  const noAction = browser?.problem?.code === 'link_required' || support;
   return (
     <div className="onboarding-shell">
       <SetupHeader />
@@ -52,7 +55,7 @@ export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
                   )}
                   {browser?.problem && (
                     <p role="alert" className={`border-t border-border px-5 py-3 text-[12px] leading-relaxed ${noAction ? 'text-foreground' : 'text-destructive-ink'}`}>
-                      <KeptTail text={claimProblemText(t, browser.problem, browser.terminal ?? true)} />
+                      {support ? <SupportLine /> : <KeptTail text={claimProblemText(t, browser.problem, browser.terminal ?? true)} />}
                     </p>
                   )}
                 </div>

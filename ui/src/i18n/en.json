@@ -3508,7 +3508,10 @@
     "provider_error": "The provider rejected the request.",
     "endpoint_not_configured": "The provider endpoint is not configured.",
     "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first.",
-    "sandbox_curve_unsupported": "This Avibe's secure sandbox can't create Solana keys yet. Nothing was saved. Update Avibe, then try again."
+    "sandbox_curve_unsupported": "This Avibe's secure sandbox can't create Solana keys yet. Nothing was saved. Update Avibe, then try again.",
+    "pairing_key_used": "This pairing key has already been used. Create a new key at avibe.bot, then paste it here.",
+    "pairing_needs_reconciliation": "This pairing can't be confirmed, and this computer won't retry it; a new key can't replace it. Email support@avibe.bot; until then, don't delete Avibe's files.",
+    "pairing_local_busy": "Another pairing step is running on this computer, so this one wasn't accepted. Try again in a moment."
   },
   "modelHub": {
     "errors": {
@@ -8592,6 +8595,12 @@
     },
     "notice": {
       "dismiss": "Got it"
+    },
+    "hold": {
+      "finishing": "Finishing the binding…",
+      "desktop": "This binding is finished in Avibe Desktop.",
+      "support": "This binding can't be confirmed, and this computer won't retry it. Email <mail>{{email}}</mail>; until then, don't delete Avibe's files.",
+      "supportPlain": "This binding can't be confirmed, and this computer won't retry it. Email {{email}}; until then, don't delete Avibe's files."
     }
   }
 }

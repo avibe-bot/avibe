@@ -119,6 +119,31 @@ describe('Setup · remote access', () => {
     expect(await screen.findByText('workbench')).toBeTruthy();
   });
 
+  it('says a saved pairing request only support can settle in one sentence, then only goes on', async () => {
+    vi.spyOn(devicesApi, 'startClaim').mockRejectedValue(new DevicesApiError(409, 'pairing_needs_reconciliation', { state: 'error', code: 'pairing_needs_reconciliation' }));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '开启远程访问' }));
+
+    const line = await screen.findByText(said('这次绑定没法确认是否成功，这台电脑不会再重试。请联系 support@avibe.bot；在那之前不要删除 Avibe 的文件。'));
+    expect(line.closest('p')?.querySelector('a')?.getAttribute('href')).toBe('mailto:support@avibe.bot');
+    expect(screen.queryByRole('button', { name: '开启远程访问' })).toBeNull();
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(document.body.textContent).not.toMatch(/key|密钥/i);
+  });
+
+  it('says a saved pairing request with nothing to decide on the Devices page; one the button continues stays here', async () => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: false, paired: false, running: false, pending_pairing: { phase: 'prepared', can_resume: true, replay_state: 'scheduled' } } as never);
+    const { unmount } = mount();
+    expect(await screen.findByText('devices')).toBeTruthy();
+    unmount();
+
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: false, paired: false, running: false, pending_pairing: { phase: 'prepared', can_resume: true, replay_state: 'manual' } } as never);
+    mount();
+    expect(await screen.findByRole('button', { name: '开启远程访问' })).toBeTruthy();
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(screen.queryByText('devices')).toBeNull();
+  });
+
   it('has nothing to offer on an instance that is already bound', async () => {
     vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: true, paired: true, running: true } as never);
     mount();
