@@ -16,10 +16,11 @@ from tests.test_personal_claims import claim_peer as claim_peer  # noqa: F401
 from vibe import cli, pairing_replay as replay, remote_access as ra
 from vibe.support_contact import SUPPORT_EMAIL
 
-NEEDS_CHECK = ("Avibe could not confirm whether this binding worked, so this computer will not try again.\n"
-               f"Email {SUPPORT_EMAIL}; until then, do not delete Avibe's files.\n")
-FINISHING = "Avibe is finishing binding this computer.\nTo continue, run: vibe remote pair\n"
-TRY_AGAIN = "Binding this computer did not finish.\nTo try again, run: vibe remote pair\n"
+# The Devices page's English, word for word (ui/src/i18n/en.json devices.hold.*, devices.problem.failed).
+NEEDS_CHECK = ("This binding can't be confirmed, and this computer won't retry it. "
+               f"Email {SUPPORT_EMAIL}; until then, don't delete Avibe's files.\n")
+FINISHING = "Finishing the binding.\nTo continue, run: vibe remote pair\n"
+TRY_AGAIN = "That did not go through. Try again.\nTo try again, run: vibe remote pair\n"
 # Never offered where the result is not this computer's own first send of a key typed now.
 KEY_OFFERS = ("get a new", "enter it here", "new_pairing_key", "fresh", "substitute", "vibe remote pair")
 
@@ -205,7 +206,7 @@ def test_ended_desktop_app_request_is_left_to_the_app(setup_replay, capsys, no_p
     capsys.readouterr()
     assert run_pair() == 1
     err = lines(capsys)
-    assert err == "Remote access on this computer is managed by the Avibe desktop app.\n"
+    assert err == "This binding is finished in Avibe Desktop.\n"
     assert not any(offer in err.lower() for offer in KEY_OFFERS)
     assert len(wire.sent) == 1
 
@@ -347,3 +348,15 @@ def test_a_pasted_key_leaves_an_unfinished_sign_in_alone(monkeypatch, capsys, re
                              "in the Avibe app or a browser; continue it there.\n")
     assert [path.read_bytes() for path in evidence] == before
     assert len(sends) == 1 and "fixture-unrelated-key" not in sends
+
+
+def test_terminal_words_are_the_devices_page_words():
+    import json
+    from pathlib import Path
+
+    en = json.loads((Path(__file__).resolve().parents[1] / "ui/src/i18n/en.json").read_text(encoding="utf-8"))
+    hold, failed = en["devices"]["hold"], en["devices"]["problem"]["failed"]
+    assert cli.PAIRING_FINISHING[0] == hold["finishing"].rstrip("…") + "."
+    assert cli.PAIRING_TRY_AGAIN[0] == failed
+    assert "This binding is finished in Avibe Desktop." == hold["desktop"]
+    assert NEEDS_CHECK == hold["supportPlain"].replace("{{email}}", SUPPORT_EMAIL) + "\n"

@@ -16422,16 +16422,18 @@ def _err(line: str) -> None:
     print(line, file=sys.stderr)
 
 
-PAIRING_FINISHING = ("Avibe is finishing binding this computer.", "To continue, run: vibe remote pair")
-PAIRING_TRY_AGAIN = ("Binding this computer did not finish.", "To try again, run: vibe remote pair")
+# Word for word the Devices page's English (devices.hold.* and devices.problem.failed),
+# without its ellipsis and with the one command that continues or retries.
+PAIRING_FINISHING = ("Finishing the binding.", "To continue, run: vibe remote pair")
+PAIRING_TRY_AGAIN = ("That did not go through. Try again.", "To try again, run: vibe remote pair")
 
 
 def _print_pairing_needs_check() -> None:
     # The one dead end: nothing is sent again, and no new key is offered in its place.
     from vibe.support_contact import SUPPORT_EMAIL
 
-    _err("Avibe could not confirm whether this binding worked, so this computer will not try again.")
-    _err(f"Email {SUPPORT_EMAIL}; until then, do not delete Avibe's files.")
+    _err(f"This binding can't be confirmed, and this computer won't retry it. "
+         f"Email {SUPPORT_EMAIL}; until then, don't delete Avibe's files.")
 
 
 def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
@@ -16451,7 +16453,7 @@ def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
              "in the Avibe app or a browser; continue it there.")
         return True
     if state == "terminated" and result.get("operation_owner") == "desktop_app":
-        _err("Remote access on this computer is managed by the Avibe desktop app.")
+        _err("This binding is finished in Avibe Desktop.")
         return True
     if state == "terminated" and result.get("operation_owner") == "personal_claim":
         _err("This sign-in has ended. Start again from the page or command that began it.")
