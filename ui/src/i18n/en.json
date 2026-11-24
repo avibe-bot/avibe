@@ -8525,7 +8525,19 @@
       "gone": "That device is no longer in the list.",
       "lost": "No answer came back, so it is not known whether it went through. What is shown below was read again.",
       "offFromAfar": "No answer came back, which is what turning it off looks like from here: once remote access is off, this device cannot be answered. To use it again, turn it back on at the computer running Avibe.",
-      "closedFromAfar": "Remote access is off. This device can no longer reach this Avibe; to use it again, turn it back on at the computer running Avibe."
+      "closedFromAfar": "Remote access is off. This device can no longer reach this Avibe; to use it again, turn it back on at the computer running Avibe.",
+      "restrictedFromAfar": "Done. This device can no longer open this Avibe; change it back on that computer."
+    },
+    "networkOpen": {
+      "body": "Devices on the same network can open this Avibe without signing in. After you turn on remote access, they sign in first.",
+      "action": "This computer only",
+      "confirmTitle": "This computer only?",
+      "confirmBody": "After this, this device can't open it either; change it back on that computer."
+    },
+    "proxyAccess": {
+      "body": "Browsers that open {{hosts}} are not signed in and act as this Avibe's owner; they are not on this list and cannot be signed out here.",
+      "range": "The trusted proxy is declared as a range of addresses, and every machine in that range gets in this way.",
+      "where": "This is this computer's reverse-proxy declaration. Change it in the computer's configuration and start-up environment."
     },
     "outsideChange": {
       "title": "This Avibe's address was changed somewhere else",
