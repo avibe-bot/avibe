@@ -31,7 +31,7 @@ export type EngineUpdateContext = {
 /** `blocked` because the running build was withdrawn and the one build named to replace it cannot run here. */
 const WITHDRAWN_REASONS = new Set(['engine_withdrawn', 'engine_withdrawn_without_fallback']);
 
-/** States in which the engine's owner is at work, so the row reads again by itself until it settles. */
+/** States in which the engine's owner is at work now. */
 const WORKING_STATES = new Set(['recovering', 'checking', 'updating', 'rolling_back', 'withdrawing']);
 
 const CHECK: EngineUpdateButton = { does: 'check', label: 'check' };
@@ -54,8 +54,22 @@ export const engineUpdatesApply = (dependency: Pick<DependencyItem, 'id' | 'upda
 export const engineBuildVersion = (release: string | null | undefined): string | null =>
   release ? release.replace(/^model-hub-engine-/, '').replace(/^v/i, '') : null;
 
-export const engineUpdateIsWorking = (dependency: Pick<DependencyItem, 'id' | 'update_state'>): boolean =>
-  engineUpdatesApply(dependency) && WORKING_STATES.has(dependency.update_state ?? '');
+/**
+ * How soon the row should read itself again because the engine's owner will change it without
+ * being asked, or `null` when it will not: every few seconds while the owner is at work; slowly
+ * while an update waits for idle (the owner tries again every five minutes) or a build is offered
+ * with routine updates on (the next routine pass installs it). Otherwise an open page would go on
+ * saying "waiting" or "available" after the engine had updated.
+ */
+export const engineUpdateRereadMs = (
+  dependency: Pick<DependencyItem, 'id' | 'update_state' | 'auto_update'>,
+): number | null => {
+  if (!engineUpdatesApply(dependency)) return null;
+  if (WORKING_STATES.has(dependency.update_state ?? '')) return 3_000;
+  if (dependency.update_state === 'deferred') return 30_000;
+  if (dependency.update_state === 'available' && dependency.auto_update !== false) return 60_000;
+  return null;
+};
 
 /** The twenty states as the sentences a person sees; `null` where the row stays as it was. */
 export function engineUpdateView(dep: DependencyItem, context: EngineUpdateContext = {}): EngineUpdateView | null {
@@ -63,11 +77,12 @@ export function engineUpdateView(dep: DependencyItem, context: EngineUpdateConte
   if (context.working === 'check') return { sentence: 'checking', button: { ...CHECK, busy: true } };
   if (context.working === 'update') return { sentence: 'updating', button: { ...UPDATE, busy: true } };
   // A candidate is `available_release` and nothing else (`latest_version` and `has_update` serve
-  // repair). Whether it may be installed is the state's to say: a cached or fallback target
-  // reported beside `unavailable`, `rejected` or `blocked` is not an offer.
+  // repair), and it is an offer only in `available`: a tag left beside a quiet state is not a
+  // fresh decision, and one beside `unavailable`, `rejected` or `blocked` is a cache or a fallback.
   const offered = Boolean(dep.available_release) && dep.available_release !== dep.active_release;
-  // No field names the build that failed, and `rolled_back` lasts only until the next check: the
-  // last recorded result keeps these notices until another update is tried.
+  // `rolled_back` lasts only until the next check, so the last recorded result keeps these notices
+  // until another update is tried. That record is history: it names no build, and a retry takes
+  // whatever is eligible now, which need not be the build that failed.
   const undone: EngineUpdateView = { sentence: 'undone', button: RETRY_UPDATE };
   const unfinished: EngineUpdateView = { sentence: 'unfinished', button: RETRY_UPDATE };
   const settled = (): EngineUpdateView => {
@@ -106,13 +121,14 @@ export function engineUpdateView(dep: DependencyItem, context: EngineUpdateConte
       return { sentence: 'cannotCheck', button: RETRY_CHECK };
     case 'blocked':
       // Only the one build named with the withdrawal can replace it, never a newer release; a check
-      // switches to it as soon as it can run here. Any other cause is not cleared by a release, so
-      // that sentence promises nothing and points at Diagnostics.
+      // selects it as soon as it can run here (an engine that was stopped stays stopped until it is
+      // needed). Any other cause is not cleared by a release, so that sentence promises nothing and
+      // points at Diagnostics.
       return { sentence: WITHDRAWN_REASONS.has(dep.update_reason ?? '') ? 'stopped' : 'cannotStart', button: CHECK };
     case 'idle':
     case 'up_to_date':
     case 'applied':
     default:
-      return offered ? { sentence: 'available', button: UPDATE } : settled();
+      return settled();
   }
 }

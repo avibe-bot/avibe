@@ -22,7 +22,7 @@ import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { InfoHint } from '../ui/info-hint';
 import { EngineUpdateStrip } from './EngineUpdateStrip';
-import { engineBuildVersion, engineUpdateIsWorking, engineUpdateView } from './engineUpdateView';
+import { engineBuildVersion, engineUpdateRereadMs, engineUpdateView } from './engineUpdateView';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
@@ -75,16 +75,18 @@ export const SettingsDependenciesPage: React.FC = () => {
   const [engineSettingBusy, setEngineSettingBusy] = useState(false);
   useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
 
-  // Work the engine's owner started by itself (a routine update, a withdrawal) is read again until
-  // it settles, so the row does not sit on "Updating…" until the page is reopened.
+  // What the engine's owner does by itself (a routine update, a retry once Model Hub is idle, a
+  // withdrawal) is read again until it settles, so an open page does not go on saying "Updating…"
+  // or "waiting" after the engine has changed.
   const engineCheck = checks['model-hub-engine'];
-  const engineSettling = engineWorking === null && !engineCheck.checking && engineCheck.error === null
-    && engineCheck.data !== null && engineUpdateIsWorking(engineCheck.data);
+  const engineRereadMs = engineWorking === null && !engineCheck.checking && engineCheck.error === null && engineCheck.data !== null
+    ? engineUpdateRereadMs(engineCheck.data)
+    : null;
   useEffect(() => {
-    if (!engineSettling) return undefined;
-    const timer = window.setTimeout(() => void refreshDependencies('model-hub-engine'), 3_000);
+    if (engineRereadMs === null) return undefined;
+    const timer = window.setTimeout(() => void refreshDependencies('model-hub-engine'), engineRereadMs);
     return () => window.clearTimeout(timer);
-  }, [engineSettling, engineCheck.data, refreshDependencies]);
+  }, [engineRereadMs, engineCheck.data, refreshDependencies]);
   // A closed backend reason/message is often a snake_case token rather than human copy. Localize any
   // token-shaped string through the shared errors namespace so the user never
   // sees a raw identifier; fall back to a human message or the generic failure.
@@ -126,17 +128,19 @@ export const SettingsDependenciesPage: React.FC = () => {
     setEngineWorking(kind);
     setEngineUpdateFailed(false);
     try {
-      const receipt = await api.runEngineOperation(kind);
-      if (kind === 'update' && receipt.update_state === 'applied') {
-        showToast(t('settings.dependencies.engineUpdates.updated'), 'success');
-      } else if (receipt.job_id === undefined) {
-        // Refused before any work began: the row may not change, so say it here.
-        showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.updateUnfinished'), 'error');
+      const result = await api.runEngineOperation(kind);
+      // Every settled outcome (applied, waiting for idle, undone, nothing newer) is the row's own
+      // sentence once it is read again, and an unconfirmed one is whatever the row then says. Only a
+      // refusal may leave the row as it was, so that is said here.
+      if (result.outcome === 'refused') {
+        showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.cannotUpdate'), 'error');
       }
-      // Every other outcome (waiting for idle, undone, nothing newer) is the row's own sentence.
-      setEngineUpdateFailed(kind === 'update' && receipt.update_state === 'failed');
+      setEngineUpdateFailed(
+        kind === 'update' && result.outcome === 'settled' && result.kind === 'update'
+        && result.status === 'failed' && result.update_state === 'failed',
+      );
     } catch {
-      showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.updateUnfinished'), 'error');
+      // The server did not answer: the read below fails too, and the row says so.
     } finally {
       await refreshDependencies('model-hub-engine');
       setEngineWorking(null);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { DependencyItem, EngineUpdateState } from '@/context/ApiContext';
-import { engineBuildVersion, engineUpdateIsWorking, engineUpdatesApply, engineUpdateView } from './engineUpdateView';
+import { engineBuildVersion, engineUpdateRereadMs, engineUpdatesApply, engineUpdateView } from './engineUpdateView';
 
 const RUNNING = 'model-hub-engine-v8.0.63-2';
 const NEXT = 'model-hub-engine-v8.0.70-1';
@@ -69,9 +69,9 @@ describe('engineUpdateView', () => {
     expect(seen({ update_state: 'available', available_release: RUNNING })).toBe('current / check');
     // With routine updates off the candidate is still reported, and still offered.
     expect(seen({ update_state: 'available', available_release: NEXT, auto_update: false })).toBe('available / update (update)');
-    expect(seen({ update_state: 'up_to_date', available_release: NEXT })).toBe('available / update (update)');
-    // A cached or fallback target beside a failed refresh or a stopped engine is not an upgrade.
-    for (const update_state of ['unavailable', 'rejected', 'offline', 'blocked', 'withdrawing', 'recovering', 'requires_avibe_update', 'waiting_for_controller'] as const) {
+    // A tag left beside a quiet state is not a fresh decision; one beside a failed refresh or a
+    // stopped engine is a cache or a fallback, not an upgrade.
+    for (const update_state of ['idle', 'up_to_date', 'applied', 'unavailable', 'rejected', 'offline', 'blocked', 'withdrawing', 'recovering', 'requires_avibe_update', 'waiting_for_controller'] as const) {
       expect(seen({ update_state, available_release: NEXT })).not.toContain('available');
     }
   });
@@ -107,10 +107,19 @@ describe('engineUpdateView', () => {
     expect(seen({ update_state: 'idle', last_checked_at: null })).toBe('notChecked / check');
   });
 
-  it('reads again by itself only while the engine owner is at work', () => {
-    const working = (['idle', 'recovering', 'checking', 'up_to_date', 'available', 'updating', 'deferred', 'rolling_back', 'withdrawing', 'blocked', 'uncommissioned'] as const)
-      .filter((update_state) => engineUpdateIsWorking({ id: 'model-hub-engine', update_state }));
-    expect(working).toEqual(['recovering', 'checking', 'updating', 'rolling_back', 'withdrawing']);
+  it('reads again by itself only where the engine owner will change the row unasked', () => {
+    const delay = (update_state: EngineUpdateState, auto_update = true) => engineUpdateRereadMs({ id: 'model-hub-engine', update_state, auto_update });
+    for (const state of ['recovering', 'checking', 'updating', 'rolling_back', 'withdrawing'] as const) expect([state, delay(state)]).toEqual([state, 3_000]);
+    // The owner tries a deferred update again by itself, so an open page must catch up with it.
+    expect(delay('deferred')).toBe(30_000);
+    expect(delay('deferred', false)).toBe(30_000);
+    // An offered build is installed by the next routine pass only while routine updates are on.
+    expect(delay('available')).toBe(60_000);
+    expect(delay('available', false)).toBeNull();
+    for (const state of ['idle', 'up_to_date', 'applied', 'rolled_back', 'failed', 'blocked', 'unavailable', 'requires_avibe_update', 'uncommissioned', 'opted_out'] as const) {
+      expect([state, delay(state)]).toEqual([state, null]);
+    }
+    expect(engineUpdateRereadMs({ id: 'avault', update_state: 'updating' })).toBeNull();
   });
 
   it('shows a build tag without its fixed prefix and keeps the build revision', () => {

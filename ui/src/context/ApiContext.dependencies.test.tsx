@@ -87,7 +87,7 @@ describe('Model Hub engine update operations', () => {
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
     const outcome = result.current.runEngineOperation('check');
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(await outcome).toMatchObject({ ok: true, status: 'succeeded', update_state: 'available' });
+    expect(await outcome).toMatchObject({ ok: true, status: 'succeeded', update_state: 'available', outcome: 'settled' });
     expect(paths()).toEqual([
       'POST /api/dependencies/model-hub-engine/check',
       'GET /api/dependencies/model-hub-engine/install/engine-1',
@@ -99,32 +99,30 @@ describe('Model Hub engine update operations', () => {
   it('returns a refusal as a result, not a thrown error or a finished operation', async () => {
     apiFetch.mockImplementation(async () => json({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' }, 503));
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    expect(await result.current.runEngineOperation('update')).toEqual({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' });
+    expect(await result.current.runEngineOperation('update')).toEqual({
+      ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller', outcome: 'refused',
+    });
     expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 
-  it('waits out a running check and then asks for the update once more', async () => {
+  it('waits out a running check and never sends the update a second time by itself', async () => {
     vi.useFakeTimers();
     const answers = [
       json({ ok: false, error: 'operation_busy', operation_id: 'engine-check' }, 409),
       json({ ok: true, job_id: 'engine-check', kind: 'check', status: 'succeeded', update_state: 'available' }),
-      json({ ok: true, job_id: 'engine-update', kind: 'update', status: 'running', update_state: 'updating' }, 202),
-      json({ ok: true, job_id: 'engine-update', kind: 'update', status: 'succeeded', update_state: 'applied' }),
     ];
     apiFetch.mockImplementation(async () => answers.shift());
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
     const outcome = result.current.runEngineOperation('update');
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(await outcome).toMatchObject({ job_id: 'engine-update', status: 'succeeded', update_state: 'applied' });
+    expect(await outcome).toMatchObject({ job_id: 'engine-check', kind: 'check', status: 'succeeded', outcome: 'settled' });
     expect(paths()).toEqual([
       'POST /api/dependencies/model-hub-engine/update',
       'GET /api/dependencies/model-hub-engine/install/engine-check',
-      'POST /api/dependencies/model-hub-engine/update',
-      'GET /api/dependencies/model-hub-engine/install/engine-update',
     ]);
   });
 
-  it('stops polling a receipt the owner no longer has', async () => {
+  it('reports a receipt the owner no longer has as unknown, not as a failure', async () => {
     vi.useFakeTimers();
     const answers = [
       json({ ok: true, job_id: 'engine-9', kind: 'update', status: 'running' }, 202),
@@ -134,8 +132,19 @@ describe('Model Hub engine update operations', () => {
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
     const outcome = result.current.runEngineOperation('update');
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(await outcome).toMatchObject({ ok: false, status: 'failed', error: 'job_not_found' });
+    expect(await outcome).toEqual({ ok: false, error: 'job_not_found', outcome: 'unknown' });
     expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports an operation still running when the wait runs out as unknown', async () => {
+    vi.useFakeTimers();
+    apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => (init?.method === 'POST'
+      ? json({ ok: true, job_id: 'engine-slow', kind: 'update', status: 'running' }, 202)
+      : json({ ok: true, job_id: 'engine-slow', kind: 'update', status: 'running', update_state: 'updating' })));
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    const outcome = result.current.runEngineOperation('update');
+    await vi.advanceTimersByTimeAsync(431_000);
+    expect(await outcome).toMatchObject({ status: 'running', outcome: 'unknown' });
   });
 
   it('sends the automatic-update switch as one boolean', async () => {

@@ -42,8 +42,6 @@ const TONE_CLASS: Record<Tone, string> = {
 
 function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): string {
   const { t } = useTranslation();
-  // With no live engine the row can only name the files on disk, which carry no build revision.
-  const running = engineBuildVersion(dep.active_release) ?? String(dep.version ?? '').replace(/^v/i, '');
   const next = engineBuildVersion(dep.available_release);
   switch (sentence) {
     case 'current':
@@ -64,12 +62,13 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
       return next
         ? t('settings.dependencies.engineUpdates.waitingForIdleTo', { version: next })
         : t('settings.dependencies.engineUpdates.waitingForIdle');
+    // What happened last is history and names no build; the badge above says what runs now.
     case 'undone':
-      return t('settings.dependencies.engineUpdates.undone', { version: running });
+      return t('settings.dependencies.engineUpdates.undone');
     case 'unfinished':
-      return t('settings.dependencies.engineUpdates.unfinished', { version: running });
+      return t('settings.dependencies.engineUpdates.unfinished');
     case 'replaced':
-      return t('settings.dependencies.engineUpdates.replaced', { version: running });
+      return t('settings.dependencies.engineUpdates.replaced');
     case 'needsAvibe':
       return t('settings.dependencies.engineUpdates.needsAvibe', { version: dep.min_avibe_version });
     case 'cannotCheck':

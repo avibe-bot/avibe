@@ -892,7 +892,7 @@ export type ApiContextType = {
   getMacOSLoginSessionStatus: () => Promise<MacOSLoginSessionStatus>;
   installDependency: (dep: string) => Promise<InstallResult>;
   /** Ask the Model Hub engine's owner to check its update channel, or to update now, and wait for the result. */
-  runEngineOperation: (kind: 'check' | 'update') => Promise<EngineOperationReceipt>;
+  runEngineOperation: (kind: 'check' | 'update') => Promise<EngineOperationResult>;
   /** Turn the Model Hub engine's routine updates on or off. */
   setEngineAutoUpdate: (enabled: boolean) => Promise<{ ok: boolean; auto_update?: boolean }>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
@@ -2405,6 +2405,14 @@ export type EngineOperationReceipt = {
   update_state?: EngineUpdateState;
   update_reason?: string | null;
 };
+
+/**
+ * What became of one request. `settled`: the receipt finished, and its `status` and `update_state`
+ * are the outcome. `refused`: no work began (no controller, a manifest override). `unknown`: the
+ * result could not be confirmed (the wait ran out, or the owner no longer has the receipt), which
+ * is not evidence that anything failed.
+ */
+export type EngineOperationResult = EngineOperationReceipt & { outcome: 'settled' | 'refused' | 'unknown' };
 
 export type EngineUpdateState =
   | 'idle' | 'recovering' | 'checking' | 'up_to_date' | 'available' | 'requires_avibe_update'
@@ -4296,33 +4304,31 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // The engine's owner answers a check or update with a receipt at once; the work itself is polled
   // through the dependency install job route. The page says the outcome in place, so a refusal is
-  // returned, not toasted.
-  const startAndPollEngineOperation = async (kind: 'check' | 'update'): Promise<EngineOperationReceipt> => {
+  // returned, not toasted. Nothing is ever sent twice: a request that cannot be confirmed is
+  // reported as unknown, and the page reads the row again.
+  const startAndPollEngineOperation = async (kind: 'check' | 'update'): Promise<EngineOperationResult> => {
     const base = '/api/dependencies/model-hub-engine';
     // Covers a download, the candidate's isolated start, and the wait for running work to finish.
     const deadline = Date.now() + 430_000;
-    const done = (receipt: EngineOperationReceipt) => receipt.status === 'succeeded' || receipt.status === 'failed';
-    const settle = async (jobId: string, first: EngineOperationReceipt): Promise<EngineOperationReceipt> => {
+    const done = (receipt: EngineOperationReceipt) => receipt?.status === 'succeeded' || receipt?.status === 'failed';
+    const settle = async (jobId: string, first: EngineOperationReceipt): Promise<EngineOperationResult> => {
       let last = first;
       while (!done(last) && Date.now() < deadline) {
         await sleep(1000);
         last = await getJson(`${base}/install/${encodeURIComponent(jobId)}`, { handleError: false }) as EngineOperationReceipt;
-        // A receipt the owner no longer has (it keeps the most recent few) will never finish.
-        if (last?.status === undefined) return { ...last, ok: false, status: 'failed' };
+        // A receipt the owner no longer has will never finish.
+        if (last?.status === undefined) break;
       }
-      return done(last) ? last : { ...last, ok: false, status: 'failed' };
+      return { ...last, outcome: done(last) ? 'settled' : 'unknown' };
     };
-    const start = async (): Promise<EngineOperationReceipt> => {
-      const started = await postJson(`${base}/${kind}`, {}, { handleError: false }) as EngineOperationReceipt;
-      return typeof started?.job_id === 'string' ? settle(started.job_id, started) : { ...started, ok: false };
-    };
-    const first = await start();
-    // An update asked for while a check runs is refused with that check's id: wait for it, then ask once more.
-    if (kind === 'update' && first.error === 'operation_busy' && typeof first.operation_id === 'string') {
-      await settle(first.operation_id, { ok: true, status: 'running' });
-      return start();
+    const started = await postJson(`${base}/${kind}`, {}, { handleError: false }) as EngineOperationReceipt;
+    if (typeof started?.job_id === 'string') return settle(started.job_id, started);
+    // An update asked for while a check runs is refused with that check's id. Wait for the check,
+    // so the row is read after it; whether to update is then the user's to ask again.
+    if (started?.error === 'operation_busy' && typeof started.operation_id === 'string') {
+      return settle(started.operation_id, { ok: true, kind: 'check', status: 'running' });
     }
-    return first;
+    return { ...started, ok: false, outcome: 'refused' };
   };
 
   const startAndPollAgentInstall = async (name: string): Promise<InstallResult> => {

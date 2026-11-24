@@ -6,7 +6,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsDependenciesPage } from './SettingsDependenciesPage';
-import type { DependencyItem, DependencyReadOptions, EngineOperationReceipt } from '@/context/ApiContext';
+import type { DependencyItem, DependencyReadOptions, EngineOperationResult } from '@/context/ApiContext';
 
 const api = vi.hoisted(() => ({
   installDependency: vi.fn(),
@@ -73,7 +73,7 @@ beforeEach(() => {
       ? engineRow
       : { id, kind: 'tool', required: false, installed: true, version: '1.0.0', status: 'ready' })),
   }));
-  api.runEngineOperation.mockResolvedValue({ ok: true, job_id: 'engine-1', status: 'succeeded', update_state: 'up_to_date' } satisfies EngineOperationReceipt);
+  api.runEngineOperation.mockResolvedValue({ ok: true, job_id: 'engine-1', kind: 'check', status: 'succeeded', update_state: 'up_to_date', outcome: 'settled' } satisfies EngineOperationResult);
   api.setEngineAutoUpdate.mockResolvedValue({ ok: true, auto_update: false });
 });
 
@@ -118,26 +118,27 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
     expect(showToast).not.toHaveBeenCalled();
   });
 
-  it('updates in one click with no confirmation, and says so when it applied', async () => {
+  it('updates in one click with no confirmation, and the row itself shows the result', async () => {
     engineRow = engine({ update_state: 'available', available_release: NEXT });
     api.runEngineOperation.mockImplementation(async () => {
       engineRow = engine({ active_release: NEXT, update_state: 'applied', last_result: 'applied' });
-      return { ok: true, job_id: 'engine-2', status: 'succeeded', update_state: 'applied' };
+      return { ok: true, job_id: 'engine-2', kind: 'update', status: 'succeeded', update_state: 'applied', outcome: 'settled' };
     });
     await renderPage();
     await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
     expect(strip()!.textContent).toContain(`${KEY}.available:8.0.70-1`);
     await userEvent.click(stripButton('update.action.update'));
     await waitFor(() => expect(api.runEngineOperation).toHaveBeenCalledWith('update'));
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith(`${KEY}.updated`, 'success'));
     await waitFor(() => expect(screen.getByText('settings.dependencies.statusReady · v8.0.70-1')).toBeTruthy());
     expect(strip()?.dataset.engineUpdates).toBe('current');
+    // The new build in the badge is the confirmation; an "updated" toast could be wrong after a withdrawal.
+    expect(showToast).not.toHaveBeenCalled();
   });
 
   it('shows the work in the button while this page waits for it', async () => {
     engineRow = engine({ update_state: 'available', available_release: NEXT });
-    let finish: (receipt: EngineOperationReceipt) => void = () => undefined;
-    api.runEngineOperation.mockReturnValue(new Promise<EngineOperationReceipt>((resolve) => { finish = resolve; }));
+    let finish: (result: EngineOperationResult) => void = () => undefined;
+    api.runEngineOperation.mockReturnValue(new Promise<EngineOperationResult>((resolve) => { finish = resolve; }));
     await renderPage();
     await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
     await userEvent.click(stripButton('update.action.update'));
@@ -146,8 +147,8 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
     // Repair waits for the update too.
     const reinstall = within(card()).getByRole('button', { name: 'settings.dependencies.reinstall' }) as HTMLButtonElement;
     expect(reinstall.disabled).toBe(true);
-    finish({ ok: true, job_id: 'engine-3', status: 'succeeded', update_state: 'deferred', update_reason: 'waiting_for_idle' });
     engineRow = engine({ update_state: 'deferred', update_reason: 'waiting_for_idle', available_release: NEXT });
+    finish({ ok: true, job_id: 'engine-3', kind: 'update', status: 'succeeded', update_state: 'deferred', update_reason: 'waiting_for_idle', outcome: 'settled' });
     await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('waitingForIdle'));
     // Nothing failed, so the button is still Update and nothing is toasted.
     expect(stripButton('update.action.update')).toBeTruthy();
@@ -158,7 +159,7 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
     engineRow = engine({ update_state: 'available', available_release: NEXT });
     api.runEngineOperation.mockImplementation(async () => {
       engineRow = engine({ update_state: 'failed', update_reason: 'engine_operation_failed' });
-      return { ok: false, job_id: 'engine-4', status: 'failed', update_state: 'failed' };
+      return { ok: false, job_id: 'engine-4', kind: 'update', status: 'failed', update_state: 'failed', outcome: 'settled' };
     });
     await renderPage();
     await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
@@ -172,11 +173,53 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
   });
 
   it('says a refused request in a toast, because the row may not change', async () => {
-    api.runEngineOperation.mockResolvedValue({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' });
+    api.runEngineOperation.mockResolvedValue({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller', outcome: 'refused' });
     await renderPage();
     await waitFor(() => expect(strip()).not.toBeNull());
     await userEvent.click(stripButton('update.action.check'));
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(`${KEY}.cannotCheck`, 'error'));
+  });
+
+  it('claims nothing about an outcome it could not confirm, and reads the row again', async () => {
+    engineRow = engine({ update_state: 'available', available_release: NEXT });
+    api.runEngineOperation.mockResolvedValue({ ok: false, error: 'job_not_found', outcome: 'unknown' });
+    await renderPage();
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
+    const reads = api.listDependencies.mock.calls.length;
+    await userEvent.click(stripButton('update.action.update'));
+    await waitFor(() => expect(api.listDependencies.mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
+    expect(showToast).not.toHaveBeenCalled();
+  });
+
+  it('does not take a failed check for a failed update', async () => {
+    // A check asked for while an update runs is answered with the update's receipt, and the reverse.
+    api.runEngineOperation.mockImplementation(async () => {
+      engineRow = engine({ update_state: 'failed', update_reason: 'engine_operation_failed' });
+      return { ok: false, job_id: 'engine-5', kind: 'check', status: 'failed', update_state: 'failed', outcome: 'settled' };
+    });
+    engineRow = engine({ update_state: 'available', available_release: NEXT });
+    await renderPage();
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
+    await userEvent.click(stripButton('update.action.update'));
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('unfinished'));
+    expect(stripButton('update.action.check')).toBeTruthy();
+  });
+
+  it('reads the row again by itself while an update waits for idle', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      engineRow = engine({ update_state: 'deferred', update_reason: 'waiting_for_idle', available_release: NEXT });
+      await renderPage();
+      await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('waitingForIdle'));
+      // The owner installs it once Model Hub is idle; nobody asked this page to look.
+      engineRow = engine({ active_release: NEXT, update_state: 'up_to_date', last_result: 'applied' });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('current'));
+      expect(screen.getByText('settings.dependencies.statusReady · v8.0.70-1')).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('turns automatic updates off in one click', async () => {

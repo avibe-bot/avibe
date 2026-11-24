@@ -1033,9 +1033,9 @@
         "waitingForIdle": "模型网关正在工作，空闲后会自动更新",
         "waitingForIdleTo": "模型网关正在工作，空闲后会自动更新到 v{{version}}",
         "waitingForIdleManual": "模型网关正在工作，这次没有更新，等它空闲后再试",
-        "undone": "上次更新没有成功，已换回 v{{version}}，模型网关照常可用",
-        "unfinished": "上次更新没有完成，仍在使用 v{{version}}，模型网关照常可用",
-        "replaced": "之前的版本已被撤回，已换成 v{{version}}，模型网关照常可用",
+        "undone": "上次更新没有成功，已换回之前的版本，模型网关照常可用",
+        "unfinished": "上次更新没有完成，版本没有变，模型网关照常可用",
+        "replaced": "之前的版本已被撤回，已换成安全的版本，模型网关照常可用",
         "needsAvibe": "新版引擎需要 Avibe {{version}} 或更高版本，请先更新 Avibe",
         "cannotCheck": "暂时无法检查更新，当前版本不受影响",
         "withdrawing": "这个版本已被撤回，正在换成安全的版本，模型网关稍后恢复",
@@ -1044,8 +1044,7 @@
         "autoUpdate": "自动更新",
         "checkingButton": "检查中…",
         "updatingButton": "更新中…",
-        "updated": "模型网关引擎已更新。",
-        "updateUnfinished": "更新没有完成，当前版本不受影响。",
+        "cannotUpdate": "现在无法更新，当前版本不受影响。",
         "settingFailed": "设置没有更改成功，请重试。"
       },
       "items": {
