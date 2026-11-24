@@ -20,6 +20,7 @@ export const BACKEND_TEXT: Record<Backend, string> = {
   claude: 'text-mint-ink',
   opencode: 'text-cyan-ink',
   codex: 'text-violet-ink',
+  antigravity: 'text-cyan-ink',
   vibey: 'text-mint-ink',
 };
 
@@ -28,6 +29,7 @@ export const BACKEND_DOT: Record<Backend, string> = {
   claude: 'bg-mint',
   opencode: 'bg-cyan',
   codex: 'bg-violet',
+  antigravity: 'bg-cyan',
   vibey: 'bg-mint',
 };
 
@@ -36,6 +38,7 @@ export const BACKEND_CHIP: Record<Backend, string> = {
   claude: 'bg-mint-soft border-mint/40 text-mint-ink',
   opencode: 'bg-cyan-soft border-cyan/40 text-cyan-ink',
   codex: 'bg-violet-soft border-violet/40 text-violet-ink',
+  antigravity: 'bg-cyan-soft border-cyan/40 text-cyan-ink',
   vibey: 'bg-mint-soft border-mint/40 text-mint-ink',
 };
 
@@ -49,6 +52,7 @@ export const AGENT_ID_TO_BACKEND: Record<string, NativeCliBackend> = {
   'claude-code': 'claude',
   opencode: 'opencode',
   codex: 'codex',
+  antigravity: 'antigravity',
 };
 
 // Distinct backends a skill serves, in canonical order, from its linked

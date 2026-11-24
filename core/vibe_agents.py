@@ -79,6 +79,7 @@ RECOMMENDED_AGENT_MODELS = {
     "claude": "claude-opus-5-5",
     "codex": "gpt-5.6-sol",
     "opencode": "openai/gpt-5.6-sol",
+    "antigravity": "gemini-4-neon",
 }
 _UNSET = object()
 
@@ -2221,7 +2222,13 @@ def iter_global_agent_files(source: str) -> list[tuple[Path, str]]:
             home / ".config" / "opencode" / "agents",
         ]
         return [(path, "opencode") for directory in search_dirs for path in sorted(directory.glob("*.md"))]
-    raise ValueError("--from must be one of: claude, codex, opencode")
+    if source_key == "antigravity":
+        search_dirs = [
+            home / ".gemini" / "config" / "agents",
+            home / ".agents" / "agents",
+        ]
+        return [(path, "antigravity") for directory in search_dirs for path in sorted(directory.glob("*.md"))]
+    raise ValueError("--from must be one of: claude, codex, opencode, antigravity")
 
 
 def _clean_optional(value: Any) -> Optional[str]:

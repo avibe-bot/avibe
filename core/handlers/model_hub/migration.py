@@ -573,7 +573,7 @@ def _blocked_item(
         id=item_id, source_id=source_id, backend=cast(Any, backend),
         kind="api_key", masked_detail="", proposed_action="reauth",
         selected=False, notes_key=f"settings.models.migration.blocked.{reason}",
-        vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode"}[backend],
+        vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode", "antigravity": "gemini"}[backend],
         protocol="anthropic" if backend == "claude" else "openai_responses",
         display_name=display_name_for_backend(backend),
         source_paths=source_paths, shell_variables=shell_variables,

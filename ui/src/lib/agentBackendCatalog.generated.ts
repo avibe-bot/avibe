@@ -81,5 +81,26 @@ export const BACKEND_CATALOG = [
     "builtin": false,
     "description_key": "settings.backends.codexDescription",
     "settings_route": "/settings/backends/codex"
+  },
+  {
+    "id": "antigravity",
+    "display_name": "Antigravity",
+    "config_key": "antigravity",
+    "default_cli": "agy",
+    "default_enabled": false,
+    "latest_probe": [
+      "github",
+      "google-antigravity/antigravity-cli"
+    ],
+    "capabilities": {
+      "supports_cli": true,
+      "supports_native_sessions": true,
+      "supports_runtime_refresh": true,
+      "supports_web_oauth": true,
+      "supports_install": true
+    },
+    "builtin": false,
+    "description_key": "settings.backends.antigravityDescription",
+    "settings_route": "/settings/backends/antigravity"
   }
 ] as const;

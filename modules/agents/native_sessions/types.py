@@ -8,7 +8,7 @@ from typing import Any, Literal
 from modules.agents.catalog import NativeCliBackend
 
 AgentName = NativeCliBackend
-AgentPrefix = Literal["oc", "cc", "cx"]
+AgentPrefix = Literal["oc", "cc", "cx", "ag"]
 
 
 @dataclass(slots=True)

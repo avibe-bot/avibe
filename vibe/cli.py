@@ -5938,7 +5938,7 @@ def _catalog_mismatches(
 
 def _agent_value_warning_fields(agent) -> dict:
     """Best-effort, non-fatal warnings when an Agent's model/effort is unknown (``_catalog_mismatches``)."""
-    if agent.backend not in ("claude", "codex"):
+    if agent.backend not in ("claude", "codex", "antigravity"):
         return {}
     warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort)
     if not warnings:
@@ -9121,8 +9121,8 @@ def _session_queue_remove(args, invocation: _ServiceInvocation):
 
 
 #: The one model family each single-vendor native CLI runs; Vibey and OpenCode run every family on their menus.
-_NATIVE_BACKEND_VENDORS = {"claude": "anthropic", "codex": "openai"}
-_VENDOR_FAMILY_LABELS = {"anthropic": "Claude", "openai": "GPT"}
+_NATIVE_BACKEND_VENDORS = {"claude": "anthropic", "codex": "openai", "antigravity": "gemini"}
+_VENDOR_FAMILY_LABELS = {"anthropic": "Claude", "openai": "GPT", "gemini": "Gemini"}
 
 
 def _remote_hub_agent_reader():

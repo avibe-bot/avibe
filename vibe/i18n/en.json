@@ -534,6 +534,7 @@
       "opencode": "Enable the OpenCode backend, install the OpenCode CLI, or set OPENCODE_CLI_PATH.",
       "claude": "Enable the Claude Code backend and make sure the Claude Code CLI path is configured.",
       "codex": "Enable the Codex backend, install the Codex CLI, or set CODEX_CLI_PATH.",
+      "antigravity": "Enable the Antigravity backend, install the Antigravity CLI (agy), or configure its CLI path.",
       "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
     },
     "processMessageFailed": "Error: {error}",

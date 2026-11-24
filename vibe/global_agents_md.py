@@ -43,6 +43,7 @@ GLOBAL_INSTRUCTION_FILENAME: dict[str, str] = {
     "claude": "CLAUDE.md",
     "codex": "AGENTS.md",
     "opencode": "AGENTS.md",
+    "antigravity": "AGENTS.md",
 }
 #: Every backend with a global instructions file, in catalog order: Vibey, built in, and the native CLIs.
 GLOBAL_PROMPT_BACKENDS: tuple[str, ...] = tuple(
@@ -73,6 +74,9 @@ def global_instruction_path(backend: str, home: Path | None = None) -> Path:
         return get_codex_home(home) / GLOBAL_INSTRUCTION_FILENAME["codex"]
     if backend == "opencode":
         return _opencode_global_dir(home) / GLOBAL_INSTRUCTION_FILENAME["opencode"]
+    if backend == "antigravity":
+        base = home if home is not None else Path.home()
+        return base / ".gemini" / GLOBAL_INSTRUCTION_FILENAME["antigravity"]
     raise ValueError(f"Unsupported agent backend: {backend!r}")
 
 

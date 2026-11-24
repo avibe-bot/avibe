@@ -8164,7 +8164,11 @@ class ModelHubService:
         return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
-        if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
+        if (
+            mode not in {"hub", "direct"}
+            or (backend == "vibey" and mode != "hub")
+            or (backend == "antigravity" and mode != "direct")
+        ):
             raise ModelHubError("mode_switch_blocked")
 
         # A mode is a launch input like any other: running work finishes in the

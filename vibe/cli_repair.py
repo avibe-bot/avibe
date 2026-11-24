@@ -13,8 +13,18 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-PACKAGES = {"claude": "@anthropic-ai/claude-code", "opencode": "opencode-ai", "codex": "@openai/codex"}
-BREW_NAMES = {"claude": "claude-code", "opencode": "opencode", "codex": "codex"}
+PACKAGES: dict[str, str | None] = {
+    "claude": "@anthropic-ai/claude-code",
+    "opencode": "opencode-ai",
+    "codex": "@openai/codex",
+    "antigravity": None,
+}
+BREW_NAMES: dict[str, str | None] = {
+    "claude": "claude-code",
+    "opencode": "opencode",
+    "codex": "codex",
+    "antigravity": None,
+}
 REPAIR_PATH_CONFLICT = "avibe: repair blocked by another resolvable opencode"
 
 
@@ -35,40 +45,43 @@ def identify_repair_source(backend: str, selected: str, *, home: Path | None = N
     try:
         target = original.resolve()
         package = PACKAGES[backend]
-        package_parts = Path(package).parts
-        if os.name == "nt" and original.name.lower() == backend + ".cmd":
-            manifest = original.parent / "node_modules" / package / "package.json"
-            if manifest.is_file() and manifest.stat().st_size < 65536 and original.stat().st_size < 16384:
-                wrapper = original.read_text(encoding="utf-8").replace("\\", "/").lower()
-                if ("%~dp0" in wrapper or "%dp0%" in wrapper) and "node_modules/" + package in wrapper:
-                    if json.loads(manifest.read_text(encoding="utf-8")).get("name") == package:
-                        return RepairSource("npm", str(original), package, original.parent)
-        for directory in target.parents:
-            if tuple(directory.parts[-len(package_parts) :]) != package_parts:
-                continue
-            modules = directory.parents[len(package_parts) - 1]
-            if modules.name != "node_modules":
-                continue
-            manifest = directory / "package.json"
-            if not manifest.is_file() or manifest.stat().st_size >= 65536:
-                return None
-            if json.loads(manifest.read_text(encoding="utf-8")).get("name") != package:
-                return None
-            if modules.parent.name == "lib":
-                prefix = modules.parent.parent
-            elif os.name == "nt" and original.parent == modules.parent:
-                prefix = modules.parent
-            else:
-                # A project-local npm install is not an npm-global prefix.
-                return None
-            return RepairSource("npm", str(original), package, prefix)
-        for root in target.parents:
-            if root.name not in {"Cellar", "Caskroom"}:
-                continue
-            relative = target.relative_to(root)
-            if relative.parts[0] != BREW_NAMES[backend]:
-                return None
-            return RepairSource("brew", str(original), BREW_NAMES[backend], root.parent, root.name == "Caskroom")
+        if package is not None:
+            package_parts = Path(package).parts
+            if os.name == "nt" and original.name.lower() == backend + ".cmd":
+                manifest = original.parent / "node_modules" / package / "package.json"
+                if manifest.is_file() and manifest.stat().st_size < 65536 and original.stat().st_size < 16384:
+                    wrapper = original.read_text(encoding="utf-8").replace("\\", "/").lower()
+                    if ("%~dp0" in wrapper or "%dp0%" in wrapper) and "node_modules/" + package in wrapper:
+                        if json.loads(manifest.read_text(encoding="utf-8")).get("name") == package:
+                            return RepairSource("npm", str(original), package, original.parent)
+            for directory in target.parents:
+                if tuple(directory.parts[-len(package_parts) :]) != package_parts:
+                    continue
+                modules = directory.parents[len(package_parts) - 1]
+                if modules.name != "node_modules":
+                    continue
+                manifest = directory / "package.json"
+                if not manifest.is_file() or manifest.stat().st_size >= 65536:
+                    return None
+                if json.loads(manifest.read_text(encoding="utf-8")).get("name") != package:
+                    return None
+                if modules.parent.name == "lib":
+                    prefix = modules.parent.parent
+                elif os.name == "nt" and original.parent == modules.parent:
+                    prefix = modules.parent
+                else:
+                    # A project-local npm install is not an npm-global prefix.
+                    return None
+                return RepairSource("npm", str(original), package, prefix)
+        brew_name = BREW_NAMES[backend]
+        if brew_name is not None:
+            for root in target.parents:
+                if root.name not in {"Cellar", "Caskroom"}:
+                    continue
+                relative = target.relative_to(root)
+                if relative.parts[0] != brew_name:
+                    return None
+                return RepairSource("brew", str(original), brew_name, root.parent, root.name == "Caskroom")
         if backend == "claude":
             native = home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude")
             versions = home / ".local" / "share" / "claude" / "versions"
@@ -77,6 +90,10 @@ def identify_repair_source(backend: str, selected: str, *, home: Path | None = N
         if backend == "opencode" and original == home / ".opencode" / "bin" / "opencode":
             if not original.is_symlink() or target.parent == original.parent:
                 return RepairSource("native", str(original))
+        if backend == "antigravity":
+            native = home / ".local" / "bin" / ("agy.exe" if os.name == "nt" else "agy")
+            if original == native and (not original.is_symlink() or target.parent == original.parent):
+                return RepairSource("native", str(native))
     except (OSError, ValueError, TypeError, AttributeError):
         return None
     return None

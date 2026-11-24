@@ -36,6 +36,9 @@ from core.handlers import session_handler as sh
         ("CronCreate", {"cron": "0 9 * * *", "prompt": "x"}),
         ("CronCreate", {"cron": "0 9 * * *", "prompt": "x", "durable": False}),
         ("Workflow", {"script": "export const meta = {}"}),
+        ("schedule", {"DurationSeconds": 60, "Prompt": "ping"}),
+        ("invoke_subagent", {"name": "helper", "prompt": "do work"}),
+        ("define_subagent", {"name": "helper", "instructions": "be helpful"}),
     ],
 )
 def test_session_only_background_calls_are_denied(tool_name, tool_input):
@@ -101,6 +104,7 @@ def test_agent_denial_points_out_that_concurrency_survives():
 _SCHEDULER_DENIALS = (
     ("CronCreate", {"cron": "0 9 * * *", "prompt": "x"}),
     ("ScheduleWakeup", {"delaySeconds": 600, "prompt": "x", "reason": "y"}),
+    ("schedule", {"DurationSeconds": 60, "Prompt": "ping"}),
 )
 
 
@@ -133,9 +137,9 @@ def test_embedded_task_examples_parse_against_the_real_cli():
     from vibe import cli  # imported lazily; the policy itself pulls in no CLI
 
     examples = _embedded_task_examples()
-    # CronCreate embeds 2 (--message, --shell); ScheduleWakeup embeds 3
-    # (one-shot --message, recurring --message, --shell).
-    assert len(examples) == 5
+    # CronCreate embeds 2 (--message, --shell); ScheduleWakeup and Antigravity
+    # `schedule` each embed 3 (one-shot --message, recurring --message, --shell).
+    assert len(examples) == 8
     for example in examples:
         argv = shlex.split(example)[1:]  # drop the leading `vibe`
         cli.build_parser().parse_args(argv)  # SystemExit(2) if an example rots

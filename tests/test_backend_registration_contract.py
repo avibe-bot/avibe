@@ -34,7 +34,8 @@ NATIVE = frozenset(NATIVE_CLI_BACKENDS)
 # Mappings remain literal when their per-backend values are the implementation.
 PYTHON_DECLARATIONS = {
     ("config/v2_config.py", "Dict", NATIVE): (2, "native", "Config serialization/recovery plus the avault tool; the built-in backend has no section."),
-    ("config/v2_config.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Built-in model catalogs and legacy vendor credentials."),
+    ("config/v2_config.py", "Set", frozenset({"claude", "codex", "antigravity"})): (2, "native_subset", "Built-in model catalogs."),
+    ("config/v2_config.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Fixed-menu Hub-capable native backends."),
     ("config/v2_config.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Released two-vendor model/credential migration."),
     ("config/v2_config.py", "Pairs", NATIVE): (1, "native", "Per-CLI auto-update config objects."),
     ("core/agent_auth_service.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Two vendor-specific login implementations."),
@@ -56,32 +57,32 @@ PYTHON_DECLARATIONS = {
     ("core/services/session_fork.py", "Set", frozenset({"codex", "opencode"})): (1, "native_subset", "Native forks that can trim a running turn."),
     ("modules/agents/model_hub.py", "Set", frozenset({"codex", "opencode"})): (2, "native_subset", "Request-scoped native gateway attribution for Codex and OpenCode multiplexing."),
     ("core/services/skills.py", "Dict", NATIVE): (1, "native", "askill native CLI ids."),
-    ("core/session_turns.py", "Set", frozenset({"claude", "codex", "vibey"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
+    ("core/session_turns.py", "Set", frozenset({"claude", "codex", "antigravity", "vibey"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
     ("core/vibe_agents.py", "Dict", NATIVE): (1, "native", "Native recommendations; Avibe uses its configured Hub catalog."),
     ("scripts/ci_scenario_evidence.py", "Tuple", frozenset({"codex", "opencode"})): (1, "native_subset", "Versions a release E2E shard must name: the two agent CLIs its workflow installs from npm; Claude Code arrives inside claude-agent-sdk."),
     ("scripts/incus_tenant.py", "Dict", NATIVE): (1, "native", "Bootstrap config with backend-specific fields."),
     ("scripts/prepare_regression.py", "Dict", NATIVE): (2, "native", "Regression config with backend-specific fields; known legacy CLI executable paths."),
     ("vibe/api.py", "Dict", NATIVE): (1, "native", "Public runtime config plus the avault tool; the built-in backend has no section."),
     ("vibe/api.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "OAuth relay configuration."),
-    ("vibe/api.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Masked vendor credentials."),
-    ("vibe/backend_model_catalog.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Bundled model catalog files."),
-    ("vibe/backend_model_catalog.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Backends with bundled model catalogs."),
-    ("vibe/cli.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Native-only model picker refresh."),
-    ("vibe/cli.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "The one model family each single-vendor native CLI runs (Session model refusals)."),
+    ("vibe/api.py", "Tuple", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Masked vendor credentials."),
+    ("vibe/backend_model_catalog.py", "Dict", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Bundled model catalog files."),
+    ("vibe/backend_model_catalog.py", "Set", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Backends with bundled model catalogs."),
+    ("vibe/cli.py", "Tuple", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Native-only model picker refresh."),
+    ("vibe/cli.py", "Dict", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "The one model family each single-vendor native CLI runs (Session model refusals)."),
     ("vibe/desktop_backends.py", "Dict", NATIVE): (1, "native", "CLI package install specifications."),
     ("vibe/cli_health.py", "Dict", NATIVE): (1, "native", "Backend-specific native CLI version grammars, not another Agent universe."),
     ("vibe/cli_repair.py", "Dict", NATIVE): (2, "native", "npm package and Homebrew formula coordinates for source-preserving native CLI repair."),
     ("vibe/global_agents_md.py", "Dict", NATIVE): (1, "native", "Native global instruction filenames."),
-    ("core/mcp_hub/native.py", "Tuple", frozenset({"claude", "codex", "opencode"})): (1, "native", "Native MCP config files Hub reads as the connection store."),
+    ("core/mcp_hub/native.py", "Tuple", NATIVE): (1, "native", "Native MCP config files Hub reads as the connection store."),
     ("vibe/model_hub_runtime/adapter.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Native subscription vendors."),
     ("vibe/model_hub_runtime/state.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Vendor aliases, including provider names."),
-    ("storage/alembic/versions/20260529_0007_backfill_scope_agent_names.py", "Set", NATIVE): (1, "native", "Immutable released migration predating Avibe."),
-    ("storage/alembic/versions/20260530_0008_remove_legacy_default_agent.py", "Set", NATIVE): (1, "native", "Immutable released migration predating Avibe."),
+    ("storage/alembic/versions/20260529_0007_backfill_scope_agent_names.py", "Set", frozenset({"claude", "codex", "opencode"})): (1, "native_subset", "Immutable released migration predating Avibe and Antigravity."),
+    ("storage/alembic/versions/20260530_0008_remove_legacy_default_agent.py", "Set", frozenset({"claude", "codex", "opencode"})): (1, "native_subset", "Immutable released migration predating Avibe and Antigravity."),
 }
 
 TYPESCRIPT_DECLARATIONS = {
-    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex", "opencode"})): (1, "native", "MCP Hub native source labels."),
-    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex"})): (
+    ("ui/src/context/ApiContext.tsx", NATIVE): (1, "native", "MCP Hub native source labels."),
+    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex", "antigravity"})): (
         4, "native_subset", "Account-level native auth endpoints; OpenCode uses provider auth.",
     ),
     ("ui/src/components/settings/BackendTestPanel.tsx", frozenset({"claude", "codex"})): (
