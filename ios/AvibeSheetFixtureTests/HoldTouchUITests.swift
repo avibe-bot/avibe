@@ -313,8 +313,15 @@ final class HoldTouchUITests: XCTestCase {
         input.tap()
         XCTAssertTrue(waitFor("focus=yes"), facts())
         XCTAssertTrue(waitFor("surfaces=plain"), facts())
-        web.buttons["Hide keyboard"].tap()
-        XCTAssertTrue(waitFor("focus=no"), facts())
+        // The page may still be scrolling for the keyboard, and a tap then can land beside the
+        // button (a loaded runner, 11-24: it came up over the Control box): tap again until the
+        // page says the input lost its focus.
+        var blurred = false
+        for _ in 0..<3 where !blurred {
+            web.buttons["Hide keyboard"].tap()
+            blurred = waitFor("focus=no", timeout: 4)
+        }
+        XCTAssertTrue(blurred, facts())
         // Named again, where it now is.
         XCTAssertTrue(waitFor("surfaces=input+plain"), facts())
         holdTheInputAndRequireACleanEnd(count: 1)
@@ -451,7 +458,7 @@ final class HoldTouchUITests: XCTestCase {
 
     /// Everything the page says of itself, for a failure's message.
     private func facts() -> String {
-        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap="]
+        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap=", "ends="]
         return "page: " + names.compactMap { label(beginning: $0) }.joined(separator: " ")
             + "; App: " + evidence()
     }

@@ -123,6 +123,7 @@ final class FixtureHoldViewController: UIViewController {
       <p id="s-press">press=none</p>
       <p id="s-drag">drag=none</p>
       <p id="s-tap">tap=none</p>
+      <p id="s-ends">ends=none</p>
       <div id="row">
         <textarea id="input" class="holdable" aria-label="Message"></textarea>
         <button id="send" type="button">Send</button>
@@ -233,8 +234,31 @@ final class FixtureHoldViewController: UIViewController {
         press = { id: event.pointerId, x: event.clientX, y: event.clientY, at: performance.now(),
           take: null, own: false, armed: false, failed: false, recognised: false,
           timer: setTimeout(ownStart, HOLD_MS + GRACE_MS) };
+        // As the composer's gesture (components/voice/useHoldToTalk): a finger's press is the
+        // element's until it ends, wherever the finger goes.
+        try { input.setPointerCapture(event.pointerId); } catch (error) { /* followed without capture */ }
         state("pressing");
       });
+      // And, as there, a capture the system took away ends the press: a hold as the system's.
+      // After a pointer up the press is already over, so its own release says nothing.
+      input.addEventListener("lostpointercapture", (event) => {
+        if (!press || event.pointerId !== press.id) return;
+        pressed("lost");
+        if (press.recognised || press.own) end("system");
+        else drop();
+      });
+      // Where each pointer's end went, whoever had it (the last eight): `type:target`. When a
+      // press does not end, this says whether its pointer up, its cancel or the loss of its
+      // capture reached the page at all, and on what.
+      const endsSeen = [];
+      const where = (node) => (node && node.id) || (node && node.nodeName ? node.nodeName.toLowerCase() : "none");
+      for (const type of ["pointerup", "pointercancel", "lostpointercapture", "touchend", "touchcancel"]) {
+        document.addEventListener(type, (event) => {
+          endsSeen.push(type.replace("pointer", "p").replace("lostpcapture", "lost").replace("touch", "t") + ":" + where(event.target));
+          if (endsSeen.length > 8) endsSeen.shift();
+          set("s-ends", "ends=" + endsSeen.join(","));
+        }, { capture: true, passive: true });
+      }
       input.addEventListener("touchstart", (event) => { if (touchHeld) event.preventDefault(); }, { passive: false });
       // What a tap on the input did, step by step: its touch start (`+pd` when the page
       // prevented the default), its pointer up, its touch end (`+ask` when the page asked for
