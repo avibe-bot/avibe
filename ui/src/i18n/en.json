@@ -1026,6 +1026,29 @@
       "backendsTitle": "Agent backends",
       "backendsDetail": "Claude · OpenCode · Codex — managed in the Backends tab.",
       "manageBackends": "Manage in Backends",
+      "engineUpdates": {
+        "current": "Up to date · checked {{time}}",
+        "recovering": "Reading the engine's state…",
+        "available": "v{{version}} is available",
+        "updating": "Updating…",
+        "updatingTo": "Updating to v{{version}}…",
+        "waitingForIdle": "Model Hub is busy. The update is tried again by itself once it is idle.",
+        "waitingForIdleManual": "Model Hub is busy, so it wasn't updated. Try again once it is idle.",
+        "undone": "The last update didn't work, so the previous version was put back. Model Hub works as before.",
+        "unfinished": "The last update didn't finish. Model Hub still works.",
+        "attemptUnfinished": "The last attempt didn't finish. Model Hub still works.",
+        "replaced": "The earlier version was withdrawn and replaced with a safe one. Model Hub works as before.",
+        "needsAvibe": "A newer engine needs Avibe {{version}} or later. Update Avibe first.",
+        "cannotCheck": "Can't check for updates right now. The current version is not affected.",
+        "withdrawing": "This version was withdrawn. Switching to a safe one; Model Hub is back shortly.",
+        "stopped": "Model Hub is stopped: the engine was withdrawn. It works again once its replacement can run here.",
+        "cannotStart": "Model Hub is stopped: the engine can't start. See Diagnostics & Logs for the cause.",
+        "autoUpdate": "Auto-update",
+        "checkingButton": "Checking…",
+        "updatingButton": "Updating…",
+        "cannotUpdate": "Can't update right now. The current version is not affected.",
+        "settingFailed": "Couldn't change the setting. Try again."
+      },
       "items": {
         "askill": {
           "label": "askill",
@@ -1036,8 +1059,10 @@
           "detail": "Vault custody core — required for local Vault operations."
         },
         "model-hub-engine": {
-          "label": "Model Hub engine (CPA)",
-          "detail": "Pinned CLIProxyAPI runtime used by Model Hub."
+          "label": "Model Hub engine",
+          "detail": "The local engine that runs Model Hub.",
+          "attribution": "Built on the open-source project <project>CLIProxyAPI</project> (CPA).",
+          "attributionLabel": "About this engine"
         },
         "show-runtime": {
           "label": "Show Page runtime",
