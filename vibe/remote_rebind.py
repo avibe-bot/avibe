@@ -240,9 +240,16 @@ TEXT = {
         "Run this and choose another:\n" + COMMAND
     ),
     # The address is the account that confirmed the refusal at avibe.bot, never the Owner's.
+    # A computer that was bound before takes a claim only from a browser at its own address
+    # (the way out of refused_loopback); a link would be refused again. No reset is offered.
     "refused_other_account": (
         "The Avibe this computer used is not under {email}. Sign in to avibe.bot with the\n"
-        "account that owns it, then run:\n" + COMMAND
+        "account that owns it, in a browser at this computer's own address.\n"
+        "Use the browser on this computer, or from another computer through SSH port\n"
+        "forwarding:\n"
+        "    ssh -L {port}:127.0.0.1:{port} <user>@<this-server>\n"
+        "then open http://127.0.0.1:{port} there, go to Devices and turn on remote\n"
+        "access."
     ),
     "refused_unexplained": (
         "avibe.bot refused this request and gave no reason. Nothing was bound.\n"
@@ -739,7 +746,7 @@ def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True) -> 
         from vibe.personal_claim_client import confirming_email
 
         email = confirming_email(view.get("confirming_account_email"))
-        _say("refused_other_account", email=email) if email else _say("refused_unexplained")
+        _say("refused_other_account", email=email, port=ctx.port) if email else _say("refused_unexplained")
         return 1
     if code in LINK_REFUSALS:
         seconds = view.get("retry_after_seconds")

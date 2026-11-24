@@ -697,6 +697,8 @@ def test_other_account_names_only_the_confirming_address_and_offers_no_reset(ter
     assert not terminal.prompts and "new computer" not in out
     if shown:
         assert ("The Avibe this computer used is not under b@example.test. Sign in to avibe.bot with the\n"
-                "account that owns it, then run:\n  vibe remote rebind") in out
+                "account that owns it, in a browser at this computer's own address.") in out
+        # The way that works for a computer bound before; a link would be refused again.
+        assert "ssh -L 5123:127.0.0.1:5123" in out and "vibe remote rebind" not in out
     else:
         assert "gave no reason" in out and "not under" not in out and "Injected" not in out and "***" not in out
