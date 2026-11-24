@@ -6,13 +6,16 @@ import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SettingsDependenciesPage } from './SettingsDependenciesPage';
-import type { DependencyItem, DependencyReadOptions, EngineOperationResult } from '@/context/ApiContext';
+import type { DependencyItem, DependencyReadOptions } from '@/context/ApiContext';
+import type { EngineOperationResult } from './engineOperations';
 
 const api = vi.hoisted(() => ({
   installDependency: vi.fn(),
   listDependencies: vi.fn(),
-  runEngineOperation: vi.fn(),
+  engineOperationRequest: vi.fn(),
   setEngineAutoUpdate: vi.fn(),
+  // The request-to-outcome wait has its own tests (engineOperations.test.ts); here it is one call.
+  runEngineOperation: vi.fn(),
 }));
 const showToast = vi.hoisted(() => vi.fn());
 
@@ -21,6 +24,9 @@ vi.mock('@/context/ApiContext', async (loadOriginal) => {
   return { ...original, useApi: () => api };
 });
 vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast }) }));
+vi.mock('./engineOperations', () => ({
+  runEngineOperation: (_request: unknown, kind: 'check' | 'update') => api.runEngineOperation(kind),
+}));
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, values?: Record<string, unknown>) => (values?.version ? `${key}:${String(values.version)}` : key),
@@ -168,7 +174,7 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
     expect(stripButton('update.action.retry')).toBeTruthy();
     cleanup();
     await renderPage();
-    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('unfinished'));
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('attemptUnfinished'));
     expect(stripButton('update.action.check')).toBeTruthy();
   });
 
@@ -193,17 +199,35 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
   });
 
   it('does not take a failed check for a failed update', async () => {
-    // A check asked for while an update runs is answered with the update's receipt, and the reverse.
+    // A request can be answered with the receipt of the other operation, so the receipt says what failed.
     api.runEngineOperation.mockImplementation(async () => {
       engineRow = engine({ update_state: 'failed', update_reason: 'engine_operation_failed' });
       return { ok: false, job_id: 'engine-5', kind: 'check', status: 'failed', update_state: 'failed', outcome: 'settled' };
     });
-    engineRow = engine({ update_state: 'available', available_release: NEXT });
     await renderPage();
-    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('available'));
-    await userEvent.click(stripButton('update.action.update'));
-    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('unfinished'));
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('current'));
+    await userEvent.click(stripButton('update.action.check'));
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('cannotCheck'));
+    expect(stripButton('update.action.retry')).toBeTruthy();
+    // A later visit knows only that something did not finish, and names neither.
+    cleanup();
+    await renderPage();
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('attemptUnfinished'));
     expect(stripButton('update.action.check')).toBeTruthy();
+  });
+
+  it('keeps Check usable while the engine owner recovers after a start', async () => {
+    engineRow = engine({ update_state: 'recovering', update_reason: 'engine_journal_unavailable', active_release: null });
+    await renderPage();
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('notChecked'));
+    expect((stripButton('update.action.check') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('keeps the repair target line on a channel build whose engine needs repair', async () => {
+    engineRow = engine({ status: 'upgrade_required', update_state: 'up_to_date' });
+    await renderPage();
+    await screen.findByText('settings.dependencies.targetVersion:8.0.63');
+    expect(strip()).toBeNull();
   });
 
   it('reads the row again by itself while an update waits for idle', async () => {

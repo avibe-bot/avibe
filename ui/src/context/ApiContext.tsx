@@ -891,8 +891,9 @@ export type ApiContextType = {
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   getMacOSLoginSessionStatus: () => Promise<MacOSLoginSessionStatus>;
   installDependency: (dep: string) => Promise<InstallResult>;
-  /** Ask the Model Hub engine's owner to check its update channel, or to update now, and wait for the result. */
-  runEngineOperation: (kind: 'check' | 'update') => Promise<EngineOperationResult>;
+  /** One request to the Model Hub engine's owner: start a check or an update, or read a receipt.
+   *  Answers with the body whatever the status, so a refusal is a result (`engineOperations.ts`). */
+  engineOperationRequest: (action: 'check' | 'update' | { job: string }) => Promise<EngineOperationReceipt>;
   /** Turn the Model Hub engine's routine updates on or off. */
   setEngineAutoUpdate: (enabled: boolean) => Promise<{ ok: boolean; auto_update?: boolean }>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
@@ -2405,14 +2406,6 @@ export type EngineOperationReceipt = {
   update_state?: EngineUpdateState;
   update_reason?: string | null;
 };
-
-/**
- * What became of one request. `settled`: the receipt finished, and its `status` and `update_state`
- * are the outcome. `refused`: no work began (no controller, a manifest override). `unknown`: the
- * result could not be confirmed (the wait ran out, or the owner no longer has the receipt), which
- * is not evidence that anything failed.
- */
-export type EngineOperationResult = EngineOperationReceipt & { outcome: 'settled' | 'refused' | 'unknown' };
 
 export type EngineUpdateState =
   | 'idle' | 'recovering' | 'checking' | 'up_to_date' | 'available' | 'requires_avibe_update'
@@ -4302,35 +4295,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { ...last, ok: false, status: 'failed', message: tRef.current('settings.dependencies.installFailed') };
   };
 
-  // The engine's owner answers a check or update with a receipt at once; the work itself is polled
-  // through the dependency install job route. The page says the outcome in place, so a refusal is
-  // returned, not toasted. Nothing is ever sent twice: a request that cannot be confirmed is
-  // reported as unknown, and the page reads the row again.
-  const startAndPollEngineOperation = async (kind: 'check' | 'update'): Promise<EngineOperationResult> => {
-    const base = '/api/dependencies/model-hub-engine';
-    // Covers a download, the candidate's isolated start, and the wait for running work to finish.
-    const deadline = Date.now() + 430_000;
-    const done = (receipt: EngineOperationReceipt) => receipt?.status === 'succeeded' || receipt?.status === 'failed';
-    const settle = async (jobId: string, first: EngineOperationReceipt): Promise<EngineOperationResult> => {
-      let last = first;
-      while (!done(last) && Date.now() < deadline) {
-        await sleep(1000);
-        last = await getJson(`${base}/install/${encodeURIComponent(jobId)}`, { handleError: false }) as EngineOperationReceipt;
-        // A receipt the owner no longer has will never finish.
-        if (last?.status === undefined) break;
-      }
-      return { ...last, outcome: done(last) ? 'settled' : 'unknown' };
-    };
-    const started = await postJson(`${base}/${kind}`, {}, { handleError: false }) as EngineOperationReceipt;
-    if (typeof started?.job_id === 'string') return settle(started.job_id, started);
-    // An update asked for while a check runs is refused with that check's id. Wait for the check,
-    // so the row is read after it; whether to update is then the user's to ask again.
-    if (started?.error === 'operation_busy' && typeof started.operation_id === 'string') {
-      return settle(started.operation_id, { ok: true, kind: 'check', status: 'running' });
-    }
-    return { ...started, ok: false, outcome: 'refused' };
-  };
-
   const startAndPollAgentInstall = async (name: string): Promise<InstallResult> => {
     const started = await postJson(`/api/agent/${encodeURIComponent(name)}/install`, {});
     const jobId = typeof started?.job_id === 'string' ? started.job_id : null;
@@ -4604,7 +4568,9 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getMacOSLoginSessionStatus: () => getJson('/api/macos/login-session'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
-    runEngineOperation: (kind) => startAndPollEngineOperation(kind),
+    engineOperationRequest: (action) => (typeof action === 'string'
+      ? postJson(`/api/dependencies/model-hub-engine/${action}`, {}, { handleError: false })
+      : getJson(`/api/dependencies/model-hub-engine/install/${encodeURIComponent(action.job)}`, { handleError: false })),
     setEngineAutoUpdate: (enabled) => postJson('/api/dependencies/model-hub-engine/auto-update', { enabled }, { handleError: false }),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name, cliPath) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime${cliPath === undefined ? '' : `?cli_path=${encodeURIComponent(cliPath)}`}`),

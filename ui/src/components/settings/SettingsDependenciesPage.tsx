@@ -22,6 +22,7 @@ import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
 import { InfoHint } from '../ui/info-hint';
 import { EngineUpdateStrip } from './EngineUpdateStrip';
+import { runEngineOperation } from './engineOperations';
 import { engineBuildVersion, engineUpdateRereadMs, engineUpdateView } from './engineUpdateView';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
@@ -68,10 +69,10 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const { checks, refresh: refreshDependencies, checking, loginSessionState } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
-  // The engine check or update this page started; its last update's failure, which a fresh read
-  // cannot tell from a failed check; and the switch's change on its way.
+  // The engine check or update this page started; which of its own operations ended as failed,
+  // which a fresh read cannot tell apart; and the switch's change on its way.
   const [engineWorking, setEngineWorking] = useState<'check' | 'update' | null>(null);
-  const [engineUpdateFailed, setEngineUpdateFailed] = useState(false);
+  const [engineFailed, setEngineFailed] = useState<'check' | 'update' | null>(null);
   const [engineSettingBusy, setEngineSettingBusy] = useState(false);
   useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
 
@@ -126,19 +127,21 @@ export const SettingsDependenciesPage: React.FC = () => {
   const runEngine = async (kind: 'check' | 'update') => {
     if (busy !== null || engineWorking !== null) return;
     setEngineWorking(kind);
-    setEngineUpdateFailed(false);
+    setEngineFailed(null);
     try {
-      const result = await api.runEngineOperation(kind);
+      const result = await runEngineOperation(api.engineOperationRequest, kind);
       // Every settled outcome (applied, waiting for idle, undone, nothing newer) is the row's own
       // sentence once it is read again, and an unconfirmed one is whatever the row then says. Only a
       // refusal may leave the row as it was, so that is said here.
       if (result.outcome === 'refused') {
         showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.cannotUpdate'), 'error');
       }
-      setEngineUpdateFailed(
-        kind === 'update' && result.outcome === 'settled' && result.kind === 'update'
-        && result.status === 'failed' && result.update_state === 'failed',
-      );
+      // A request can be answered with the receipt of the other operation already running, so the
+      // receipt's own kind says what failed.
+      if (result.outcome === 'settled' && result.status === 'failed' && result.update_state === 'failed'
+        && (result.kind === 'check' || result.kind === 'update')) {
+        setEngineFailed(result.kind);
+      }
     } catch {
       // The server did not answer: the read below fails too, and the row says so.
     } finally {
@@ -256,6 +259,7 @@ export const SettingsDependenciesPage: React.FC = () => {
             const attribution = id === 'model-hub-engine' ? (
               <InfoHint
                 hover
+                interactive
                 align="center"
                 collisionPadding={16}
                 label={t('settings.dependencies.items.model-hub-engine.attributionLabel')}
@@ -303,9 +307,12 @@ export const SettingsDependenciesPage: React.FC = () => {
             const persistedFailure = d.status === 'error' && d.reason
               ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
               : null;
-            const engineView = engineUpdateView(d, { working: engineWorking, updateFailed: engineUpdateFailed });
+            const engineView = engineUpdateView(d, { working: engineWorking, failed: engineFailed });
             // A stopped engine (`blocked`) reads as an error with nothing to repair: the strip says why.
             const engineStopped = engineView !== null && d.update_state === 'blocked';
+            // The strip is drawn for a ready or a stopped engine; a row that needs repair, or whose
+            // inspection failed, stays as it was, repair target line included.
+            const engineStripShown = engineView !== null && !checkFailure && !notice && (engineStopped || d.status === 'ready');
             const engineStrip = engineView && (
               <EngineUpdateStrip
                 dep={d}
@@ -337,7 +344,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 detail={
                   <>
                     {t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
-                    {d.id === 'model-hub-engine' && d.latest_version && !engineView && (
+                    {d.id === 'model-hub-engine' && d.latest_version && !engineStripShown && (
                       <span className="mt-1 block font-mono text-[11px]">
                         {t('settings.dependencies.targetVersion', {
                           version: String(d.latest_version).replace(/^v/i, ''),
@@ -383,7 +390,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                     {notice}
                     {persistedFailure && <div role="alert" className="mt-1 text-destructive-ink">{persistedFailure}</div>}
                   </div>
-                ) : engineStopped ? (
+                ) : engineStripShown && engineStopped ? (
                   <div className="border-t border-destructive/30 pt-4">{engineStrip}</div>
                 ) : persistedFailure ? (
                   <div
@@ -396,7 +403,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                   <div className="border-t border-border pt-3">
                     <AvaultAuthorizationNotice forceVisible />
                   </div>
-                ) : engineStrip && d.status === 'ready' ? (
+                ) : engineStripShown ? (
                   <div className="border-t border-border pt-4">{engineStrip}</div>
                 ) : undefined}
               />

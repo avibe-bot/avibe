@@ -15,6 +15,9 @@ import { ToggleSwitch } from './SettingsPrimitives';
 
 type Tone = 'quiet' | 'plain' | 'stopped';
 
+// Only a stopped engine interrupts: a notice about the last update stays for days, and must not
+// be announced as urgent on every visit.
+
 // One spinner at a time, and it is the button's: the sentence keeps a still icon while work runs.
 const SENTENCE: Record<EngineUpdateSentence, { icon: ComponentType<{ className?: string }>; iconClassName: string; tone: Tone; alert?: boolean }> = {
   current: { icon: Check, iconClassName: 'text-mint-ink', tone: 'quiet' },
@@ -24,9 +27,10 @@ const SENTENCE: Record<EngineUpdateSentence, { icon: ComponentType<{ className?:
   available: { icon: ArrowUpCircle, iconClassName: 'text-cyan-ink', tone: 'plain' },
   updating: { icon: ArrowUpCircle, iconClassName: 'text-cyan-ink', tone: 'plain' },
   waitingForIdle: { icon: Clock3, iconClassName: 'text-muted', tone: 'plain' },
-  undone: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain', alert: true },
-  unfinished: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain', alert: true },
-  replaced: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain', alert: true },
+  undone: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain' },
+  unfinished: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain' },
+  attemptUnfinished: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain' },
+  replaced: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain' },
   needsAvibe: { icon: Info, iconClassName: 'text-gold-ink', tone: 'plain' },
   cannotCheck: { icon: WifiOff, iconClassName: 'text-muted', tone: 'quiet' },
   withdrawing: { icon: AlertTriangle, iconClassName: 'text-gold-ink', tone: 'plain' },
@@ -47,9 +51,9 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
     case 'current':
       return t('settings.dependencies.engineUpdates.current', { time: formatRelativeTime(dep.last_checked_at, t) });
     case 'notChecked':
-      return t('settings.dependencies.engineUpdates.notChecked');
+      return t('update.status.notChecked');
     case 'checking':
-      return t('settings.dependencies.engineUpdates.checking');
+      return t('update.status.checking');
     case 'available':
       return t('settings.dependencies.engineUpdates.available', { version: next });
     case 'updating':
@@ -67,6 +71,8 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
       return t('settings.dependencies.engineUpdates.undone');
     case 'unfinished':
       return t('settings.dependencies.engineUpdates.unfinished');
+    case 'attemptUnfinished':
+      return t('settings.dependencies.engineUpdates.attemptUnfinished');
     case 'replaced':
       return t('settings.dependencies.engineUpdates.replaced');
     case 'needsAvibe':

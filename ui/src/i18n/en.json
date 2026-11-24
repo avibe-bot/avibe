@@ -1025,8 +1025,6 @@
       "manageBackends": "Manage in Backends",
       "engineUpdates": {
         "current": "Up to date · checked {{time}}",
-        "notChecked": "Not checked for updates yet",
-        "checking": "Checking for updates…",
         "available": "v{{version}} is available",
         "updating": "Updating…",
         "updatingTo": "Updating to v{{version}}…",
@@ -1035,6 +1033,7 @@
         "waitingForIdleManual": "Model Hub is busy, so it wasn't updated. Try again once it is idle.",
         "undone": "The last update didn't work, so the previous version was put back. Model Hub works as before.",
         "unfinished": "The last update didn't finish, so nothing changed. Model Hub works as before.",
+        "attemptUnfinished": "The last attempt didn't finish, so nothing changed. Model Hub works as before.",
         "replaced": "The earlier version was withdrawn and replaced with a safe one. Model Hub works as before.",
         "needsAvibe": "A newer engine needs Avibe {{version}} or later. Update Avibe first.",
         "cannotCheck": "Can't check for updates right now. The current version is not affected.",

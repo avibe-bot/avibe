@@ -72,79 +72,27 @@ describe('dependency inspection transport', () => {
   });
 });
 
-describe('Model Hub engine update operations', () => {
+describe('Model Hub engine update requests', () => {
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
-  const paths = () => apiFetch.mock.calls.map(([path, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${path}`);
 
-  it('starts a check with an empty body and polls its receipt until it settles', async () => {
-    vi.useFakeTimers();
-    const answers = [
-      json({ ok: true, job_id: 'engine-1', operation_id: 'engine-1', kind: 'check', status: 'running', update_state: 'checking' }, 202),
-      json({ ok: true, job_id: 'engine-1', kind: 'check', status: 'running', update_state: 'checking' }),
-      json({ ok: true, job_id: 'engine-1', kind: 'check', status: 'succeeded', update_state: 'available' }),
-    ];
-    apiFetch.mockImplementation(async () => answers.shift());
+  it('starts a check or an update with an empty body and reads a receipt by its id', async () => {
+    apiFetch.mockImplementation(async () => json({ ok: true, job_id: 'engine-1', status: 'running' }, 202));
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    const outcome = result.current.runEngineOperation('check');
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(await outcome).toMatchObject({ ok: true, status: 'succeeded', update_state: 'available', outcome: 'settled' });
-    expect(paths()).toEqual([
+    await result.current.engineOperationRequest('check');
+    await result.current.engineOperationRequest('update');
+    await result.current.engineOperationRequest({ job: 'engine-1' });
+    expect(apiFetch.mock.calls.map(([path, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${path}`)).toEqual([
       'POST /api/dependencies/model-hub-engine/check',
-      'GET /api/dependencies/model-hub-engine/install/engine-1',
+      'POST /api/dependencies/model-hub-engine/update',
       'GET /api/dependencies/model-hub-engine/install/engine-1',
     ]);
     expect(apiFetch.mock.calls[0][1].body).toBe('{}');
   });
 
-  it('returns a refusal as a result, not a thrown error or a finished operation', async () => {
+  it('answers a refusal with its body, not a thrown error', async () => {
     apiFetch.mockImplementation(async () => json({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' }, 503));
     const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    expect(await result.current.runEngineOperation('update')).toEqual({
-      ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller', outcome: 'refused',
-    });
-    expect(apiFetch).toHaveBeenCalledTimes(1);
-  });
-
-  it('waits out a running check and never sends the update a second time by itself', async () => {
-    vi.useFakeTimers();
-    const answers = [
-      json({ ok: false, error: 'operation_busy', operation_id: 'engine-check' }, 409),
-      json({ ok: true, job_id: 'engine-check', kind: 'check', status: 'succeeded', update_state: 'available' }),
-    ];
-    apiFetch.mockImplementation(async () => answers.shift());
-    const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    const outcome = result.current.runEngineOperation('update');
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(await outcome).toMatchObject({ job_id: 'engine-check', kind: 'check', status: 'succeeded', outcome: 'settled' });
-    expect(paths()).toEqual([
-      'POST /api/dependencies/model-hub-engine/update',
-      'GET /api/dependencies/model-hub-engine/install/engine-check',
-    ]);
-  });
-
-  it('reports a receipt the owner no longer has as unknown, not as a failure', async () => {
-    vi.useFakeTimers();
-    const answers = [
-      json({ ok: true, job_id: 'engine-9', kind: 'update', status: 'running' }, 202),
-      json({ ok: false, error: 'job_not_found' }, 404),
-    ];
-    apiFetch.mockImplementation(async () => answers.shift());
-    const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    const outcome = result.current.runEngineOperation('update');
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(await outcome).toEqual({ ok: false, error: 'job_not_found', outcome: 'unknown' });
-    expect(apiFetch).toHaveBeenCalledTimes(2);
-  });
-
-  it('reports an operation still running when the wait runs out as unknown', async () => {
-    vi.useFakeTimers();
-    apiFetch.mockImplementation(async (_path: string, init?: RequestInit) => (init?.method === 'POST'
-      ? json({ ok: true, job_id: 'engine-slow', kind: 'update', status: 'running' }, 202)
-      : json({ ok: true, job_id: 'engine-slow', kind: 'update', status: 'running', update_state: 'updating' })));
-    const { result } = renderHook(useApi, { wrapper: ApiProvider });
-    const outcome = result.current.runEngineOperation('update');
-    await vi.advanceTimersByTimeAsync(431_000);
-    expect(await outcome).toMatchObject({ status: 'running', outcome: 'unknown' });
+    expect(await result.current.engineOperationRequest('update')).toEqual({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' });
   });
 
   it('sends the automatic-update switch as one boolean', async () => {

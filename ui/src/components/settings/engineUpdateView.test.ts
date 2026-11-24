@@ -31,7 +31,7 @@ describe('engineUpdateView', () => {
   it('folds every reported state into one sentence and one button', () => {
     const states: Record<EngineUpdateState, string | null> = {
       idle: 'current / check',
-      recovering: 'checking / check busy',
+      recovering: 'notChecked / check',
       checking: 'checking / check busy',
       up_to_date: 'current / check',
       available: 'available / update (update)',
@@ -43,7 +43,7 @@ describe('engineUpdateView', () => {
       rolled_back: 'undone / retry (update)',
       withdrawing: 'withdrawing / update (update) busy',
       blocked: 'cannotStart / check',
-      failed: 'unfinished / check',
+      failed: 'attemptUnfinished / check',
       offline: 'cannotCheck / retry',
       uncommissioned: null,
       opted_out: null,
@@ -99,7 +99,10 @@ describe('engineUpdateView', () => {
   it('shows this page\'s own operation while it runs, and what it knows about its failure', () => {
     expect(seen({ update_state: 'up_to_date' }, { working: 'check' })).toBe('checking / check busy');
     expect(seen({ update_state: 'available', available_release: NEXT }, { working: 'update' })).toBe('updating / update (update) busy');
-    expect(seen({ update_state: 'failed' }, { updateFailed: true })).toBe('unfinished / retry (update)');
+    expect(seen({ update_state: 'failed' }, { failed: 'update' })).toBe('unfinished / retry (update)');
+    // A failed check is not reported as an update that did not finish.
+    expect(seen({ update_state: 'failed' }, { failed: 'check' })).toBe('cannotCheck / retry');
+    expect(seen({ update_state: 'failed' })).toBe('attemptUnfinished / check');
     expect(seen({ update_state: 'uncommissioned' }, { working: 'check' })).toBeNull();
   });
 
@@ -109,7 +112,9 @@ describe('engineUpdateView', () => {
 
   it('reads again by itself only where the engine owner will change the row unasked', () => {
     const delay = (update_state: EngineUpdateState, auto_update = true) => engineUpdateRereadMs({ id: 'model-hub-engine', update_state, auto_update });
-    for (const state of ['recovering', 'checking', 'updating', 'rolling_back', 'withdrawing'] as const) expect([state, delay(state)]).toEqual([state, 3_000]);
+    for (const state of ['checking', 'updating', 'rolling_back', 'withdrawing'] as const) expect([state, delay(state)]).toEqual([state, 3_000]);
+    // Recovery can wait a long time for Model Hub to be idle: read slowly, and keep Check usable.
+    expect(delay('recovering')).toBe(10_000);
     // The owner tries a deferred update again by itself, so an open page must catch up with it.
     expect(delay('deferred')).toBe(30_000);
     expect(delay('deferred', false)).toBe(30_000);

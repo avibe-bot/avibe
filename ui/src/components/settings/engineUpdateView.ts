@@ -8,8 +8,8 @@ import type { DependencyItem } from '@/context/ApiContext';
 /** What the strip says. Several backend states share one sentence. */
 export type EngineUpdateSentence =
   | 'current' | 'notChecked' | 'checking' | 'available' | 'updating' | 'waitingForIdle'
-  | 'undone' | 'unfinished' | 'replaced' | 'needsAvibe' | 'cannotCheck' | 'withdrawing'
-  | 'stopped' | 'cannotStart';
+  | 'undone' | 'unfinished' | 'attemptUnfinished' | 'replaced' | 'needsAvibe' | 'cannotCheck'
+  | 'withdrawing' | 'stopped' | 'cannotStart';
 
 /** The strip's one button: what it does, and whether that work is running now. */
 export type EngineUpdateButton = {
@@ -24,15 +24,16 @@ export type EngineUpdateView = { sentence: EngineUpdateSentence; button: EngineU
 export type EngineUpdateContext = {
   /** The operation this page started and is still waiting on. */
   working?: 'check' | 'update' | null;
-  /** This page's last update ended as `failed`: the read alone cannot tell that from a failed check. */
-  updateFailed?: boolean;
+  /** Which of this page's own operations ended as `failed`: the read alone cannot tell a failed
+   *  check from a failed update. */
+  failed?: 'check' | 'update' | null;
 };
 
 /** `blocked` because the running build was withdrawn and the one build named to replace it cannot run here. */
 const WITHDRAWN_REASONS = new Set(['engine_withdrawn', 'engine_withdrawn_without_fallback']);
 
-/** States in which the engine's owner is at work now. */
-const WORKING_STATES = new Set(['recovering', 'checking', 'updating', 'rolling_back', 'withdrawing']);
+/** States in which the engine's owner is at work now, and done within moments. */
+const WORKING_STATES = new Set(['checking', 'updating', 'rolling_back', 'withdrawing']);
 
 const CHECK: EngineUpdateButton = { does: 'check', label: 'check' };
 const UPDATE: EngineUpdateButton = { does: 'update', label: 'update' };
@@ -57,15 +58,17 @@ export const engineBuildVersion = (release: string | null | undefined): string |
 /**
  * How soon the row should read itself again because the engine's owner will change it without
  * being asked, or `null` when it will not: every few seconds while the owner is at work; slowly
- * while an update waits for idle (the owner tries again every five minutes) or a build is offered
- * with routine updates on (the next routine pass installs it). Otherwise an open page would go on
- * saying "waiting" or "available" after the engine had updated.
+ * while it recovers after a start (usually moments, but it waits for Model Hub to be idle and
+ * retries with a growing delay), while an update waits for idle (the owner tries again every five
+ * minutes) or a build is offered with routine updates on (the next routine pass installs it).
+ * Otherwise an open page would go on saying "waiting" or "available" after the engine had updated.
  */
 export const engineUpdateRereadMs = (
   dependency: Pick<DependencyItem, 'id' | 'update_state' | 'auto_update'>,
 ): number | null => {
   if (!engineUpdatesApply(dependency)) return null;
   if (WORKING_STATES.has(dependency.update_state ?? '')) return 3_000;
+  if (dependency.update_state === 'recovering') return 10_000;
   if (dependency.update_state === 'deferred') return 30_000;
   if (dependency.update_state === 'available' && dependency.auto_update !== false) return 60_000;
   return null;
@@ -94,6 +97,9 @@ export function engineUpdateView(dep: DependencyItem, context: EngineUpdateConte
   };
   switch (dep.update_state) {
     case 'recovering':
+      // No check has run since the owner started, and none is running: recovery waits for Model Hub
+      // to be idle and can take long. A check asks for recovery first, so the button stays usable.
+      return { sentence: 'notChecked', button: CHECK };
     case 'checking':
       return { sentence: 'checking', button: { ...CHECK, busy: true } };
     case 'updating':
@@ -110,8 +116,11 @@ export function engineUpdateView(dep: DependencyItem, context: EngineUpdateConte
       // A candidate that failed its check before the switch was never running: nothing was put back.
       return dep.last_result === 'preflight_failed' ? unfinished : undone;
     case 'failed':
-      // A fresh read cannot tell a failed check from a failed update, so the safe next step is a check.
-      return { sentence: 'unfinished', button: context.updateFailed ? RETRY_UPDATE : CHECK };
+      // A failed check and a failed update read the same. This page says which only for its own
+      // operation; otherwise the sentence names neither, and the safe next step is a check.
+      if (context.failed === 'update') return unfinished;
+      if (context.failed === 'check') return { sentence: 'cannotCheck', button: RETRY_CHECK };
+      return { sentence: 'attemptUnfinished', button: CHECK };
     case 'requires_avibe_update':
       return { sentence: 'needsAvibe', button: CHECK };
     case 'offline':
