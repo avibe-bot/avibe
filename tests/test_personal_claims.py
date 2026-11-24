@@ -380,3 +380,28 @@ def test_redirect_start_has_no_csrf_or_host_exception(claim_peer):
     for extra in ({"mode": "desktop"}, {"return_origin": "http://localhost"}, {"accepted_subject": "owner-id"}):
         assert client.post("/api/remote-access/claims", json=extra, headers=csrf_headers(client)).status_code == 400
     assert not claim_peer.calls
+
+
+def test_other_account_refusal_reaches_the_starter_only_and_keeps_the_installation(claim_peer, monkeypatch, caplog):
+    request = claim_peer.request
+
+    def respond(method, path, body, headers):
+        request(method, path, body, headers)
+        if path == "/api/v1/claims":
+            claim_peer.result[1]["ordinary_decision_readback"] = True
+
+    monkeypatch.setattr(claim_peer, "request", respond)
+    installation = local.ensure_installation_id()
+    claim_peer.outcomes.append((409, {"error": "binding_unavailable", "reason": "other_account",
+                                      "confirming_account_email": "b@example.test"}, None))
+    caplog.set_level("DEBUG")
+    result = claims.run_link(show_link=lambda _: None, expected_subject="owner-id")
+    assert result["code"] == "other_account" and result["confirming_account_email"] == "b@example.test"
+    assert any(call[1].get("read_decision") is True for call in claim_peer.calls)
+    assert local._installation_id() == installation and not V2Config.load().remote_access.vibe_cloud.instance_id
+    # The address is in this claim's view, never in a log or a file this flow writes.
+    assert "b@example.test" not in caplog.text
+    from config import paths
+
+    state_dir = paths.get_state_dir()
+    assert not [p for p in state_dir.rglob("*") if p.is_file() and b"b@example.test" in p.read_bytes()]

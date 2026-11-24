@@ -17,7 +17,7 @@ from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe.binding_admission import OperationBusy, admitted
 from vibe import desktop_local_instance as local, remote_access
 from vibe.personal_claim_client import (
-    ClaimError, ClaimsClient, ConfirmedRefusal, ConstrainedClaimsClient, Grant, Pending, Ticket,
+    ClaimError, ClaimsClient, ConfirmedRefusal, OtherAccountRefusal, ConstrainedClaimsClient, Grant, Pending, Ticket,
     local_origin, loopback_origin, return_proof, text,
 )
 
@@ -395,7 +395,9 @@ class _Flow:
                             pass  # An unconfirmed cleanup never reports that the hold is free.
                     self._cleanup_client = None
         except (ClaimError, local.LocalInstanceError) as exc:
-            self.update("error", code=exc.code, **({"retry_after_seconds": exc.retry_after} if getattr(exc, "retry_after", 0) else {}))
+            self.update("error", code=exc.code, **({"retry_after_seconds": exc.retry_after} if getattr(exc, "retry_after", 0) else {}),
+                        **({"confirming_account_email": exc.confirming_account_email}
+                           if isinstance(exc, OtherAccountRefusal) else {}))
         except OperationBusy:
             self.update("error", code="operation_in_progress")
         except MigrationLockTimeout:

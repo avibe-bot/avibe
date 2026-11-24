@@ -120,6 +120,8 @@ export type ClaimProblem =
       | 'pairing_recovery_required' | 'fresh_claim_required' | 'name_taken' | 'binding_unavailable'
       | 'paired_installation_loopback_required' | 'active_pairing_recent' | 'local_binding_changed' }
   | { code: 'claim_in_progress'; claimId?: string }
+  /** Refused at avibe.bot by another account: `email` is the account that confirmed it, never the Owner. */
+  | { code: 'other_account'; email: string }
   | { code: 'rate_limited'; seconds?: number }
   | { code: 'unknown'; raw: string };
 

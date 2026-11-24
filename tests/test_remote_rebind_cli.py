@@ -679,3 +679,24 @@ def test_start_never_sends_a_person_to_edit_the_setting_while_binding_work_stand
     assert err == "Remote access was not started: " + sentence + "\n"
     # Nothing was changed, and the unfinished work is still where it was.
     assert cli.paths.get_config_path().read_bytes() == settings and remote_rebind.read_state()[0] == before
+
+
+@pytest.mark.parametrize("email,shown", [
+    ("b@example.test", True), (None, False), ("b@example.test\nInjected line", False), ("a***@b***", False),
+])
+def test_other_account_names_only_the_confirming_address_and_offers_no_reset(terminal, monkeypatch, capsys, email, shown):
+    # A computer whose installation still maps to someone's Avibe, joined in the browser from another account.
+    local.ensure_installation_id()
+    monkeypatch.setattr(personal_claims, "run_link", lambda **_: {
+        "state": "error", "code": "other_account", **({"confirming_account_email": email} if email else {})})
+    monkeypatch.setattr(binding_reset, "reset_interactively", lambda **_: pytest.fail("a reset was offered"))
+
+    assert remote_rebind.run() == 1
+
+    out = capsys.readouterr().out
+    assert not terminal.prompts and "new computer" not in out
+    if shown:
+        assert ("The Avibe this computer used is not under b@example.test. Sign in to avibe.bot with the\n"
+                "account that owns it, then run:\n  vibe remote rebind") in out
+    else:
+        assert "gave no reason" in out and "not under" not in out and "Injected" not in out and "***" not in out

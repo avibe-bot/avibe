@@ -8131,6 +8131,7 @@
         "freshClaim": "The reply from avibe.bot was lost after you accepted, and it cannot be asked for again. This computer is not bound. Turn it on and approve once more.",
         "nameTaken": "That domain was taken before the binding finished. Nothing was bound. Turn it on again and choose another name.",
         "unexplained": "avibe.bot refused this request and gave no reason. Nothing was bound.",
+        "otherAccount": "The Avibe this computer used is not under {{email}}. Sign in to avibe.bot with the account that owns it, then try again.",
         "loopbackRequired": "avibe.bot refused: this computer has been bound before, and a computer like that is bound from a browser at its own address. Nothing was bound.",
         "activeElsewhere": "avibe.bot refused: that Avibe is running on another computer that was active in the last 15 minutes. Nothing was bound. To move it to this computer: quit Avibe on that computer, wait 15 minutes and try again. If that computer is no longer yours to reach: delete that Avibe on avibe.bot and bind again; its access list is lost, and its name is kept for your account for 30 days.",
         "bindingChanged": "This computer's binding has just changed. Nothing more was done here.",

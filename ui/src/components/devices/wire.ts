@@ -223,7 +223,23 @@ const CLAIM_CODES = new Set([
 ]);
 
 /** A claim's local outcome name (never the hosted user code) as what the page says. */
-export function claimProblem(code: string | undefined, extra: { claimId?: string; seconds?: number } = {}): ClaimProblem {
+// The confirming account's address as the instance checked it: printable, no spaces, quotes or
+// angle brackets, one `@` and a dotted domain. Anything else is the unexplained refusal.
+const CONFIRMING_EMAIL = /^[^\s@<>"]{1,64}@[^\s@<>"]+\.[^\s@<>".]+$/;
+// Control, zero-width, direction and other invisible format characters (Unicode Cc and Cf).
+const unprintable = (value: string) => [...value].some((c) => /\p{Cc}|\p{Cf}/u.test(c));
+const confirmingEmail = (value: string | undefined) =>
+  value && value.length <= 254 && CONFIRMING_EMAIL.test(value) && !unprintable(value)
+    && !value.split('@')[1].includes('..') ? value : undefined;
+
+export function claimProblem(
+  code: string | undefined,
+  extra: { claimId?: string; seconds?: number; confirmingEmail?: string } = {},
+): ClaimProblem {
+  if (code === 'other_account') {
+    const email = confirmingEmail(extra.confirmingEmail);
+    return email ? { code, email } : { code: 'binding_unavailable' };
+  }
   if (code === 'claim_in_progress') return { code, claimId: extra.claimId };
   if (code === 'rate_limited') return { code, seconds: extra.seconds };
   if (code === 'control_plane_unreachable') return { code: 'unreachable' };

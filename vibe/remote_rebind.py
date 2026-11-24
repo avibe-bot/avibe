@@ -239,6 +239,11 @@ TEXT = {
         "That domain was taken before the binding finished. Nothing was bound.\n"
         "Run this and choose another:\n" + COMMAND
     ),
+    # The address is the account that confirmed the refusal at avibe.bot, never the Owner's.
+    "refused_other_account": (
+        "The Avibe this computer used is not under {email}. Sign in to avibe.bot with the\n"
+        "account that owns it, then run:\n" + COMMAND
+    ),
     "refused_unexplained": (
         "avibe.bot refused this request and gave no reason. Nothing was bound.\n"
         "To try again:\n" + COMMAND
@@ -730,6 +735,12 @@ def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True) -> 
     if code == "already_bound":
         _say("already_bound")
         return 0
+    if code == "other_account":
+        from vibe.personal_claim_client import confirming_email
+
+        email = confirming_email(view.get("confirming_account_email"))
+        _say("refused_other_account", email=email) if email else _say("refused_unexplained")
+        return 1
     if code in LINK_REFUSALS:
         seconds = view.get("retry_after_seconds")
         _say(LINK_REFUSALS[code], seconds=seconds if type(seconds) is int and seconds > 0 else 60)

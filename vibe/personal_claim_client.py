@@ -73,6 +73,29 @@ def text(value, limit: int) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit and value.strip() == value and value.isprintable()
 
 
+# One address, as avibe.bot's ordinary other-account refusal names the account that confirmed it:
+# printable, no whitespace, angle brackets or quotes, one ``@`` and a dotted domain.
+_EMAIL = re.compile(r'[^\s@<>"]{1,64}@[^\s@<>"]+\.[^\s@<>".]+')
+
+
+def confirming_email(value) -> str | None:
+    if text(value, 254) and _EMAIL.fullmatch(value) and ".." not in value.partition("@")[2]:
+        return value
+    return None
+
+
+class OtherAccountRefusal(ClaimError):
+    """The ordinary refusal confirmed by another account. ``confirming_account_email`` is that
+    account's address (never the Owner's); it goes to this claim's starter only, never to a log."""
+
+    def __init__(self, email: str):
+        super().__init__("other_account")
+        self.confirming_account_email = email
+
+    def __repr__(self):
+        return "OtherAccountRefusal('other_account')"
+
+
 def _instant(value: str) -> float:
     try:
         when = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -165,6 +188,13 @@ class ClaimsClient:
                 and reason in ("paired_installation_loopback_required", "active_pairing_recent")
                 and data == {"error": "binding_unavailable", "reason": reason}):
             raise ClaimError(reason)
+        # Only the tagged read carries it, and only with exactly these three fields; anything else
+        # is the unexplained refusal. It never offers a reset.
+        if (reading and reason == "other_account"
+                and set(data) == {"error", "reason", "confirming_account_email"} and data["error"] == "binding_unavailable"):
+            email = confirming_email(data["confirming_account_email"])
+            if email:
+                raise OtherAccountRefusal(email)
 
     def __init__(self, backend_url: str):
         self._target, error = remote_access._normalize_pairing_backend_url(backend_url)

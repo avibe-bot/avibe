@@ -46,6 +46,39 @@ def test_ordinary_reason_requires_negotiation_and_closed_shape(issuer, ack, reas
     assert not isinstance(caught.value, ConfirmedRefusal)
 
 
+@pytest.mark.parametrize(('ack', 'extra', 'expected'), [
+    (True, {'confirming_account_email': 'b@example.test'}, 'other_account'),
+    (False, {'confirming_account_email': 'b@example.test'}, 'binding_unavailable'),
+    (True, {}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b@example.test', 'owner_hint': 'a***@b***'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b@example.test', 'recovery': 'reset_as_new'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b@example.test\nx'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b@exa\u202emple.test'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b example@example.test'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'not-an-address'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b@localhost'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': '<b@example.test>'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': 'b@' + 'x' * 250 + '.test'}, 'binding_unavailable'),
+    (True, {'confirming_account_email': ['b@example.test']}, 'binding_unavailable'),
+])
+def test_other_account_carries_only_a_valid_confirming_address(issuer, ack, extra, expected):
+    from vibe.personal_claim_client import OtherAccountRefusal
+
+    peer, flags = issuer
+    flags['ordinary_decision_readback'] = ack
+    client = ClaimsClient('https://avibe.bot')
+    ticket = start(client)
+    peer.outcomes.append((409, {'error': 'binding_unavailable', 'reason': 'other_account', **extra}, None))
+    with pytest.raises(ClaimError) as caught:
+        client.observe(ticket)
+    assert caught.value.code == expected
+    assert isinstance(caught.value, OtherAccountRefusal) is (expected == 'other_account')
+    assert not isinstance(caught.value, ConfirmedRefusal)  # never a reset permission
+    if expected == 'other_account':
+        assert caught.value.confirming_account_email == 'b@example.test'
+        assert 'example' not in repr(caught.value) + str(caught.value)
+
+
 @pytest.mark.parametrize(('fields', 'outcome'), [
     ({'reason': 'other_account', 'owner_hint': 'a***@b***', 'recovery': 'reset_as_new'}, 'other_account'),
     ({'reason': 'predecessor_unrecoverable', 'recovery': 'reset_as_new'}, 'predecessor_unrecoverable'),
