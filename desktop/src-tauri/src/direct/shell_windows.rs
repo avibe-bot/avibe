@@ -126,7 +126,9 @@ pub fn arguments(host: &str, material: &Material) -> Option<String> {
 
 /// The route of an open window cannot be taken off: when its client is
 /// dropped the listener's port closes, and the route's own `DIRECT` carries
-/// the window on the tunnel. What is taken off, before that, is the answer
+/// the window on the tunnel. (A direct-only instance's route has no
+/// `DIRECT`: its window then fails, until the instance is opened again.)
+/// What is taken off, before that, is the answer
 /// to the listener's challenge, so the credential leaves the window with
 /// the session.
 ///
