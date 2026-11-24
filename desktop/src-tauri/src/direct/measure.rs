@@ -3,10 +3,11 @@ use super::{
     clock::Clock, connect::Authority, credentials::Grant, public, transport::Stream, AddressFamily, Handover,
     SelectedPath, WindowRegistration,
 };
+use futures_util::{FutureExt, StreamExt};
 use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{body::Bytes, client::conn::http1, Request};
 use hyper_util::rt::TokioIo;
-use iroh::TransportAddr;
+use iroh::{endpoint::PathEvent, TransportAddr};
 use serde::Serialize;
 use std::{
     future::Future,
@@ -114,12 +115,41 @@ async fn bounded<T>(clock: &Clock, end: Duration, f: impl Future<Output = Result
     tokio::select! {biased; _=expiry=>Err(Error::Timeout), result=f=>if clock.now() >= end {Err(Error::Timeout)} else {result}}
 }
 
+struct Samples<'a> {
+    times: Vec<Duration>,
+    first_error: Option<Error>,
+    // Checks at the send and completed-body boundaries, not just when the
+    // outer HTTP driver happens to wake. The tunnel needs no path check.
+    unchanged: Box<dyn FnMut() -> bool + Send + 'a>,
+}
+impl<'a> Samples<'a> {
+    fn new(check: impl FnMut() -> bool + Send + 'a) -> Self {
+        Self {
+            times: Vec::with_capacity(COUNT),
+            first_error: None,
+            unchanged: Box::new(check),
+        }
+    }
+    fn check(&mut self) -> Result<(), Error> {
+        if (self.unchanged)() {
+            Ok(())
+        } else {
+            Err(Error::Failed)
+        }
+    }
+    fn finish(mut self, mut leg: Leg, result: Result<(), Error>) -> Leg {
+        leg.error = self.first_error.or(result.err());
+        leg.finish(&mut self.times);
+        leg
+    }
+}
+
 async fn requests<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send>(
     socket: S,
     host: &Authority,
     clock: &Clock,
     end: Duration,
-    times: &mut Vec<Duration>,
+    samples: &mut Samples<'_>,
 ) -> Result<(), Error> {
     let (mut sender, driver) = http1::Builder::new()
         .max_buf_size(16 * 1024)
@@ -133,27 +163,31 @@ async fn requests<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send
                 .header("Cache-Control", "no-cache, no-store")
                 .body(Empty::<Bytes>::new())
                 .map_err(|_| Error::Failed)?;
+            samples.check()?;
             let start = clock.now();
-            let elapsed = bounded(clock, end.min(start.saturating_add(PER_SAMPLE)), async {
+            let (elapsed, healthy) = bounded(clock, end.min(start.saturating_add(PER_SAMPLE)), async {
                 let response = sender.send_request(req).await.map_err(|_| Error::Failed)?;
-                if response.status() != 200 {
-                    return Err(Error::Failed);
-                }
+                let status = response.status();
                 let bytes = Limited::new(response.into_body(), 8192)
                     .collect()
                     .await
                     .map_err(|_| Error::Failed)?
                     .to_bytes();
                 let elapsed = clock.now().saturating_sub(start);
-                let json: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| Error::Failed)?;
-                if json.get("status").and_then(|v| v.as_str()) != Some("ok") {
-                    return Err(Error::Failed);
-                }
-                Ok(elapsed)
+                let healthy = status == 200
+                    && serde_json::from_slice::<serde_json::Value>(&bytes)
+                        .is_ok_and(|json| json.get("status").and_then(|v| v.as_str()) == Some("ok"));
+                Ok((elapsed, healthy))
             })
             .await?;
-            if index > 0 {
-                times.push(elapsed);
+            samples.check()?;
+            if index == 0 {
+                continue; // Fully consumed; only timed responses contribute to ok/error.
+            }
+            if !healthy {
+                samples.first_error.get_or_insert(Error::Failed);
+            } else {
+                samples.times.push(elapsed);
             }
         }
         Ok(())
@@ -171,12 +205,12 @@ async fn probe(
     open: impl Future<Output = Option<Stream>>,
     clock: &Clock,
     end: Duration,
-    times: &mut Vec<Duration>,
+    samples: &mut Samples<'_>,
 ) -> Result<(), Error> {
     let raw = open.await.ok_or(Error::Failed)?;
     let name = ServerName::try_from(host.host().to_owned()).map_err(|_| Error::Failed)?;
     let socket = connector?.connect(name, raw).await.map_err(|_| Error::Failed)?;
-    requests(socket, host, clock, end, times).await
+    requests(socket, host, clock, end, samples).await
 }
 
 fn selected(link: &super::Link) -> Option<(TransportAddr, Leg)> {
@@ -215,6 +249,19 @@ fn selected(link: &super::Link) -> Option<(TransportAddr, Leg)> {
     Some((addr.clone(), leg))
 }
 
+// Read every transition already published since subscription. Selection is
+// measured from one original path only; stop at its first change, even if it
+// changes back in the same scheduler turn. Never reconstruct lost history.
+fn unchanged(events: &mut (impl futures_util::Stream<Item = bool> + Unpin)) -> bool {
+    loop {
+        match events.next().now_or_never() {
+            None => return true,
+            Some(Some(false)) => continue,
+            _ => return false,
+        }
+    }
+}
+
 async fn current_leg(
     host: &Authority,
     current: Option<(&Handover, &WindowRegistration)>,
@@ -234,17 +281,25 @@ async fn current_leg(
         return None;
     }
     let link = h.links.borrow().clone()?;
-    let (addr, mut leg) = selected(&link)?;
+    let events = link.conn.path_events(); // subscribe before taking the baseline
+    let (addr, leg) = selected(&link)?;
+    let mut events = events.map(|event| match event {
+        PathEvent::Opened { .. } => false,
+        PathEvent::Closed { remote_addr, .. } => remote_addr == addr,
+        // Selected is an edge, not a periodic snapshot; even a return to the
+        // same address ends this observation. Lagged/unknown also fail closed.
+        _ => true,
+    });
     let valid = || {
         owner.is_alive()
             && h.links.borrow().as_ref().is_some_and(|l| Arc::ptr_eq(l, &link))
             && selected(&link).is_some_and(|(a, _)| a == addr)
     };
-    let mut times = Vec::with_capacity(COUNT);
+    let mut samples = Samples::new(|| valid() && unchanged(&mut events));
     let mut result = Err(Error::Failed);
     grant
         .until_revoked(async {
-            let operation = probe(host, tls(), link.open(host), clock, end, &mut times);
+            let operation = probe(host, tls(), link.open(host), clock, end, &mut samples);
             tokio::pin!(operation);
             let guarded = std::future::poll_fn(|cx| {
                 if valid() {
@@ -256,9 +311,7 @@ async fn current_leg(
             result = bounded(clock, end, guarded).await;
         })
         .await;
-    leg.error = result.err();
-    leg.finish(&mut times);
-    Some(leg)
+    Some(samples.finish(leg, result))
 }
 
 /// Fixed target, native-selected host only. `None` skips the current leg,
@@ -274,14 +327,11 @@ pub async fn measure(
     let (current, tunnel) = if let Some(host) = Authority::managed(host) {
         let port = current.map_or(0, |(h, _)| h.port);
         let tunnel = async {
-            let mut times = Vec::with_capacity(COUNT);
-            let mut leg = Leg::new("tunnel", None, None);
+            let mut samples = Samples::new(|| true);
+            let leg = Leg::new("tunnel", None, None);
             let dial = async { public::open(&host, port).await.ok().map(|s| Box::new(s) as Stream) };
-            leg.error = bounded(&clock, end, probe(&host, tls(), dial, &clock, end, &mut times))
-                .await
-                .err();
-            leg.finish(&mut times);
-            Some(leg)
+            let result = bounded(&clock, end, probe(&host, tls(), dial, &clock, end, &mut samples)).await;
+            Some(samples.finish(leg, result))
         };
         tokio::join!(current_leg(&host, current, &clock, end), tunnel)
     } else {
