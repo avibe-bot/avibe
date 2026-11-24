@@ -57,11 +57,12 @@ logger = logging.getLogger(__name__)
 STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
-# A heavily used controller reached its working heap (0.9-1.05 M tracked objects)
-# within five minutes of start and did not grow over two hours. Until the freeze,
-# every full collection rescans that heap: minutes 10-120 after each restart held
-# 212-321 collections over 200 ms (76-195 s of pauses). Ten minutes lets startup
-# work settle first; the heap then matched the heap at two hours.
+# A heavily used controller tracked 0.9-1.05 M objects within five minutes of start,
+# and the count did not trend up over two hours. Until the freeze, every full
+# collection rescans them: minutes 10-120 after each restart held 212-321 collections
+# over 200 ms (76-195 s of pauses). Counts are not identity: which objects a ten-minute
+# freeze retains (recovery still running, later first-use imports left unfrozen) is
+# an unmeasured trade-off, bounded by the same unfreeze rollback.
 WARM_FREEZE_AFTER_SECONDS = 600
 _MAX_GC_REPORTS = 64
 _MAX_OWN_CODES = 200_000

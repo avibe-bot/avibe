@@ -41,9 +41,9 @@ def test_freeze_fires_on_the_first_warm_full_collection_even_with_open_streams(m
     collect()
     assert not calls  # not armed
     assert w.arm_warm_freeze() == "armed"
-    clock[0] = wd.WARM_FREEZE_AFTER_SECONDS - 1
-    collect()  # before the warm-up
-    clock[0] = wd.WARM_FREEZE_AFTER_SECONDS + 1
+    clock[0] = 599
+    collect()  # before the ten-minute warm-up
+    clock[0] = 600
     collect(1)  # not a full collection
     assert not calls
     collect()  # three model streams open: it fires anyway
