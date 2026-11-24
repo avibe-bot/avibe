@@ -188,6 +188,7 @@ def test_cancel_at_avibe_bot_returns_here_as_cancelled(machine):
     browser = ui_server.app.test_client()
     hdr = csrf_headers(browser)
     body = browser.post(ROOT, base_url=ORIGIN, headers=hdr, json={}).get_json()
+    assert peer.calls[0][1]['cancel_return'] is True and 'predecessor' in peer.calls[0][1]
     ident = body['claim_id']
     base = '/remote/claim/callback?claim_id=' + ident + '&state=' + callback_proof(body)
     calls = len(peer.calls)

@@ -263,7 +263,9 @@ class ClaimsClient:
         if mode == "redirect":
             if not local_origin(origin):
                 raise ClaimError("link_required")
-            payload.update(return_origin=origin, redirect_state_challenge=s256(state))
+            # Cancelling at avibe.bot may then bring the browser back here (outcome=declined).
+            # Older instances do not send it, and avibe.bot keeps sending their browsers to /app.
+            payload.update(return_origin=origin, redirect_state_challenge=s256(state), cancel_return=True)
         payload.update(self._start_constraints(mode, origin))
         status, d, _ = self._post("", payload)
         self._check_start_ack(d)

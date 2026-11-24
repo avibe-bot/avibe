@@ -332,6 +332,7 @@ def test_cancel_and_return_require_current_browser_and_claim(claim_peer, owner_b
     response = _start(client, origin, environ)
     assert response.status_code == 201, response.get_json()
     assert claim_peer.calls[0][1]["return_origin"] == origin
+    assert claim_peer.calls[0][1]["cancel_return"] is True  # avibe.bot may bring a cancel back here
     body = response.get_json()
     nonce = response.headers["Set-Cookie"].split(";")[0]
     url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
