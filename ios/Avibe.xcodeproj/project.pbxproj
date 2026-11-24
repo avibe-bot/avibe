@@ -51,6 +51,7 @@
 		1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000D3 /* SessionNotificationTests.swift */; };
 		100000000000000000000146 /* SystemScheduleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000146 /* SystemScheduleTests.swift */; };
 		1000000000000000000000E1 /* WebKitReadiness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000000E1 /* WebKitReadiness.swift */; };
+		100000000000000000000161 /* WebKitReadinessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000161 /* WebKitReadinessTests.swift */; };
 		1000000000000000000001F2 /* FixtureStoreRemoval.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2000000000000000000001F2 /* FixtureStoreRemoval.swift */; };
 		10000000000000000000000E /* MobileAccount.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000011 /* MobileAccount.swift */; };
 		10000000000000000000000F /* MobileAuthTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000012 /* MobileAuthTransport.swift */; };
@@ -259,6 +260,7 @@
 		2000000000000000000000D3 /* SessionNotificationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNotificationTests.swift; sourceTree = "<group>"; };
 		200000000000000000000146 /* SystemScheduleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemScheduleTests.swift; sourceTree = "<group>"; };
 		2000000000000000000000E1 /* WebKitReadiness.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebKitReadiness.swift; sourceTree = "<group>"; };
+		200000000000000000000161 /* WebKitReadinessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebKitReadinessTests.swift; sourceTree = "<group>"; };
 		2000000000000000000001F2 /* FixtureStoreRemoval.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FixtureStoreRemoval.swift; sourceTree = "<group>"; };
 		200000000000000000000011 /* MobileAccount.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAccount.swift; sourceTree = "<group>"; };
 		200000000000000000000012 /* MobileAuthTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MobileAuthTransport.swift; sourceTree = "<group>"; };
@@ -535,6 +537,7 @@
 				2000000000000000000000D3 /* SessionNotificationTests.swift */,
 				200000000000000000000146 /* SystemScheduleTests.swift */,
 				2000000000000000000000E1 /* WebKitReadiness.swift */,
+				200000000000000000000161 /* WebKitReadinessTests.swift */,
 				2000000000000000000001F2 /* FixtureStoreRemoval.swift */,
 				2000000000000000000000C0 /* NativePushCoordinatorTests.swift */,
 				2000000000000000000000B3 /* PushNotificationTests.swift */,
@@ -1111,6 +1114,7 @@
 				1000000000000000000000D3 /* SessionNotificationTests.swift in Sources */,
 				100000000000000000000146 /* SystemScheduleTests.swift in Sources */,
 				1000000000000000000000E1 /* WebKitReadiness.swift in Sources */,
+				100000000000000000000161 /* WebKitReadinessTests.swift in Sources */,
 				1000000000000000000001F2 /* FixtureStoreRemoval.swift in Sources */,
 				1000000000000000000000C0 /* NativePushCoordinatorTests.swift in Sources */,
 				1000000000000000000000AA /* PushNotificationTests.swift in Sources */,

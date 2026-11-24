@@ -338,10 +338,17 @@ class _Flow:
             self._check_time()
             try:
                 if self.cancelled:
-                    # Desktop releases machine admission before best-effort decline I/O.
+                    # Desktop releases machine admission before best-effort decline I/O
+                    # (run's outer finally, _decline_if_live).
                     if self.mode != "desktop":
                         self._decline_attempted = True
-                        client.decline(ticket)
+                        try:
+                            client.decline(ticket)
+                        except ClaimError as exc:
+                            if exc.code in ("control_plane_unreachable", "rate_limited"):
+                                raise  # retried below (the view reads "waiting" meanwhile)
+                            # Best effort: a refused decline leaves at most a hold that expires.
+                            # Local consent is already fenced, and the person only cancelled.
                     self.update("declined", code="subject_mismatch" if mismatch else "declined")
                     return
                 if grant is None:

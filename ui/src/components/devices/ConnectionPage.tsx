@@ -13,7 +13,8 @@ import { hasDesktopClient } from '@/desktop/bridge';
 import { liveStreamVia, subscribeLiveStreamVia } from '@/lib/liveStreamVia';
 import { nativeDirectAvailable, nativeDirectPathReported } from '@/lib/native';
 import {
-  nativeDirectChoiceAvailable, onNativeDirectChoiceChanged, readNativeDirectChoice, setNativeDirectChoice,
+  nativeDirectChoiceAvailable, nativeDirectChoiceShell, nativeDirectOnlyAvailable, onNativeDirectChoiceChanged,
+  readNativeDirectChoice, setNativeDirectChoice,
   type NativeDirectChoice,
 } from '@/lib/nativeDirectChoice';
 import { onPageReactivated } from '@/lib/pageActivity';
@@ -58,7 +59,7 @@ const storedValue = (connection: ConnectionState, setting: TunnelSetting): strin
 
 const preferenceOf = (choice: NativeDirectChoice): DirectPreference => ({
   mode: choice.mode,
-  reverted: choice.revertedAt === null ? null : { at: new Date(choice.revertedAt).toISOString(), reason: 'unreachable' },
+  reverted: choice.reverted === null ? null : { at: new Date(choice.reverted.at).toISOString(), reason: 'unreachable', from: choice.reverted.from },
 });
 
 type Preview = RenamePreview & { name: string };
@@ -238,18 +239,25 @@ export function ConnectionPage() {
   }, [readAddress, readRebind, readStatus]);
   const flow = useClaimFlow({ kind: 'rebind', locale: i18n.language, onEnd: onRebindEnd, returned });
 
-  // ── the Avibe App's own path and choice ──
+  // ── the shell's own path and choice (the Avibe App, a Desktop window) ──
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
   const nativePath = useNativeDirectPath(pageVia);
   const [preference, setPreference] = useState<DirectPreference | undefined>();
   useEffect(() => {
     if (!nativeDirectChoiceAvailable()) return undefined;
     let current = true;
-    void readNativeDirectChoice().then((choice) => { if (current && choice) setPreference(preferenceOf(choice)); });
+    const read = () => { void readNativeDirectChoice().then((choice) => { if (current && choice) setPreference(preferenceOf(choice)); }); };
+    read();
     const stop = onNativeDirectChoiceChanged((choice) => setPreference(preferenceOf(choice)));
+    // A Desktop shell before `directPreference` 2 sends no event when its own menu changes the
+    // choice: coming back to the page reads it again, and so does the page's own refresh.
+    const stopReactivated = onPageReactivated(read);
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') read(); }, REFRESH_MS);
     return () => {
       current = false;
       stop();
+      stopReactivated();
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -606,10 +614,13 @@ export function ConnectionPage() {
       tunnel={tunnel}
       remote={remote}
       via={pageVia === 'direct' ? 'direct' : pageVia === 'other' && remote ? 'tunnel' : null}
-      // The shell's own path: the Avibe App, and a Desktop window of another computer's instance
-      // (which has no choice to offer here yet). A browser has none, and the page says so.
+      // The shell's own path: the Avibe App, and a Desktop window of another computer's instance.
+      // A browser has none, and the page says so.
       path={preference || nativeDirectAvailable() ? deviceUsing(nativePath, pageVia, nativeDirectPathReported()) : undefined}
       preference={preference}
+      choiceShell={nativeDirectChoiceShell() ?? undefined}
+      // 「仅直连和中继」 where the shell takes it and this instance has direct turned on.
+      directOnly={nativeDirectOnlyAvailable() && connection !== null && connection.direct !== 'off' && connection.direct !== 'unknown'}
       refused={refused}
       // A switch the instance has accepted and not written yet waits like one being sent.
       sending={sending ?? connection?.switching?.setting}

@@ -57,6 +57,7 @@ const status: RemoteAccessStatus = {
 
 const WIDE = { width: 1440, height: 1300 };
 const PHONE = { width: 375, height: 2000 };
+const APP_390 = { ...IPHONE_17_PRO, width: 390, height: 2400 };
 
 function frame(name: string, title: string, size: { width: number; height: number; safeArea?: { top: number; bottom: number } }, props: Partial<ConnectionPageViewProps>, extra: Partial<FrameSpec> & { app?: boolean } = {}): FrameSpec {
   const { app, ...spec } = extra;
@@ -78,14 +79,29 @@ const designFrames = frames([
   frame('remote-domain-only', '连接方式 · 同一个版本从远处看：也只有域名一行，不提重新绑定', WIDE,
     { ...remote, address: { ...address, eligible: false, ineligibleReason: 'address_state_unknown' }, rebind: undefined }),
   frame('remote-browser', '连接方式 · 浏览器远程打开：走的是 Cloudflare 隧道；重新绑定要回到那台电脑上做', WIDE, remote),
-  frame('desktop-window', '连接方式 · Avibe Desktop 里打开另一台电脑的实例的窗口：说这台设备走的路径，这里还没有选择可改', WIDE,
-    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null } }),
+  frame('desktop-window', '连接方式 · Avibe Desktop 里打开另一台电脑的实例的窗口：说这台设备走的路径，选择和 App 一样', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null }, preference: { mode: 'automatic', reverted: null }, choiceShell: 'desktop', directOnly: true }),
+  frame('desktop-window-v1', '连接方式 · Avibe Desktop 窗口，外壳还在 directPreference 1：只有「自动 / 仅 Cloudflare 隧道」两项，提示只说只管这台设备', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null }, preference: { mode: 'automatic', reverted: null }, choiceShell: 'desktop', directOnly: false }),
+  frame('desktop-window-direct-only', '连接方式 · Avibe Desktop 窗口选了「仅直连和中继」：「这台设备」照旧说实际走的路线', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null }, preference: { mode: 'direct', reverted: null }, choiceShell: 'desktop', directOnly: true }),
+  frame('desktop-window-direct-reverted', '连接方式 · Avibe Desktop 选「仅直连和中继」连不上，自己改回了「自动」（Desktop 只会从这一项改回）', WIDE,
+    { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'direct' } }, choiceShell: 'desktop', directOnly: true }),
+  frame('desktop-window-no-direct', '连接方式 · Avibe Desktop 窗口，实例没开直连：不出现「仅直连和中继」，提示只说只管这台设备', WIDE,
+    { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: null }, choiceShell: 'desktop', connection: connection({ direct: 'off' }) }),
   frame('app', '连接方式 · Avibe App：「这台设备」只有 自动 / 仅 Cloudflare 隧道，自动在前', { ...IPHONE_17_PRO, height: 2300 },
     { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null } }, { app: true }),
   frame('app-tunnel-only', '连接方式 · Avibe App 选了「仅 Cloudflare 隧道」', { ...IPHONE_17_PRO, height: 2300 },
     { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'tunnel', reverted: null } }, { app: true }),
   frame('app-reverted', '连接方式 · App 连不上后自己改回了「自动」：只带时间，不带秒数', { ...IPHONE_17_PRO, height: 2300 },
-    { ...remote, path: null, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable' } } }, { app: true }),
+    { ...remote, path: null, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'tunnel' } } }, { app: true }),
+  // 「仅直连和中继」: only where the shell takes it (`directPreference` 2) and this instance has direct on.
+  frame('app-direct-offered', '连接方式 · Avibe App，实例开了直连：第三项「仅直连和中继」 · 390 宽', APP_390,
+    { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null }, directOnly: true }, { app: true }),
+  frame('app-direct-only', '连接方式 · Avibe App 选了「仅直连和中继」：「这台设备」照旧说实际走的路线（这里是中继） · 390 宽', APP_390,
+    { ...remote, via: 'direct', path: { kind: 'relay', rttMs: 85 }, preference: { mode: 'direct', reverted: null }, directOnly: true }, { app: true }),
+  frame('app-direct-reverted', '连接方式 · App 选「仅直连和中继」连不上，自己改回了「自动」：同样的句式 · 390 宽', APP_390,
+    { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'direct' } }, directOnly: true }, { app: true }),
   frame('loading', '连接方式 · 第一次读', { width: 1440, height: 700 }, { load: 'loading', connection: null }),
   frame('unavailable', '连接方式 · 现在读不准状态：不显示这些设置，可以重试', { width: 1440, height: 700 }, { load: 'unavailable', connection: null }),
 
