@@ -485,7 +485,8 @@ class BaseAgent(ABC):
         async def _run(delay: float | None = None) -> None:
             if delay:
                 await asyncio.sleep(delay)
-            updated = self._backfill_session_title_once(
+            updated = await asyncio.to_thread(
+                self._backfill_session_title_once,
                 agent_session_id=agent_session_id,
                 native_session_id=str(native_session_id),
                 working_path=working_path,
