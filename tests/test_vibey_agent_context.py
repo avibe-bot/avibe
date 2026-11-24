@@ -572,7 +572,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
         harness.controller.hub_source_id = "src_threshold01"
-        for turn, body in ((1, tokens(11_000)), (2, tokens(12_000)), (3, "and now?")):
+        for turn, body in ((1, tokens(11_000)), (2, tokens(11_900)), (3, "and now?")):
             phase["turn"] = turn
             await _turn(harness, body)
 
