@@ -1,10 +1,10 @@
-# A shared ACP runtime, with Antigravity as its first backend
+# A shared ACP client, with Antigravity as its first backend
 
 Design specification, 2026-11-24. Scope and parity checklist: [#4244](https://github.com/avibe-bot/avibe/issues/4244), rows A–G. This plan replaces the issue's proposed ownership of transport, sessions and events, not its product scope.
 
 ## Outcome and non-goals
 
-A user selects **Antigravity**, uses Google's unmodified `agy acp` and works from the same Web, IM and Harness surfaces as the other native CLI backends. A second built-in ACP backend must not need a second transport, session lifecycle or turn translator. ACP is an implementation protocol, not a backend users select. No public plugin SDK, arbitrary-command registration, migration of other backends, Antigravity Bots, alternate Google client identity, or Antigravity as a model source for Vibey. API-key login is in product scope; it is not required for development or for the manual CLI evidence below.
+A user selects **Antigravity**, uses Google's unmodified `agy acp` and works from the same Web, IM and Harness surfaces as the other native CLI backends. A second built-in ACP backend can reuse the transport, ACP session protocol operations and standard update mapping. ACP is an implementation protocol, not a backend users select. No public plugin SDK, arbitrary-command registration, migration of other backends, Antigravity Bots, alternate Google client identity, or Antigravity as a model source for Vibey. API-key login is in product scope; it is not required for development or for the manual CLI evidence below.
 
 ## Basis and limits of the evidence
 
