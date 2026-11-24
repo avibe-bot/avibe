@@ -48,6 +48,18 @@ def test_support_address_is_the_shared_constant():
     assert "Contact Avibe support" not in NEEDS_CHECK
 
 
+def record_typed_keys(monkeypatch):
+    """After the saved request was sent: any further redeem is recorded and never reaches the network."""
+    typed = []
+
+    def record(url, payload, **kwargs):
+        typed.append(payload.get("pairing_key"))
+        raise AssertionError("no redeem may be sent here")
+
+    monkeypatch.setattr(ra, "_json_request", record)
+    return typed
+
+
 # --- a saved, installation-bound request -------------------------------------------------
 
 
@@ -81,17 +93,18 @@ def test_manual_continue_sends_the_same_request_exactly_once(setup_replay, capsy
 
 
 @pytest.mark.parametrize("entered", [None, "another-key"])
-def test_needs_check_sends_nothing_and_offers_no_key(setup_replay, capsys, no_prompt, entered):
+def test_needs_check_sends_nothing_and_offers_no_key(setup_replay, monkeypatch, capsys, no_prompt, entered):
     wire, clock, payload, post = setup_replay
     post(payload)
     # What a crash leaves after the send was reserved and before its result was written.
     replay._save({**replay._state(ra._read_pending_pairing_record()[0]), "mode": "unsettled"})
+    typed = record_typed_keys(monkeypatch)
     for advance in (0, 61, 901):
         clock[0] += advance
         capsys.readouterr()
         assert run_pair(entered) == 1
         assert_needs_check(lines(capsys))
-    assert len(wire.sent) == 1
+    assert len(wire.sent) == 1 and typed == []
 
 
 def test_needs_check_json_is_the_backend_payload(setup_replay, capsys, no_prompt):
@@ -153,11 +166,12 @@ def test_received_but_not_archived_without_a_receipt_needs_check(setup_replay, m
     with monkeypatch.context() as m:
         m.setattr(ra, "_write_pending_pairing_record", fail_archive)
         post(payload)
+    typed = record_typed_keys(monkeypatch)
     for entered in (None, "another-key"):
         capsys.readouterr()
         assert run_pair(entered) == 1
         assert_needs_check(lines(capsys))
-    assert len(wire.sent) == 1
+    assert len(wire.sent) == 1 and typed == []
 
 
 def test_received_with_a_receipt_is_archived_here_without_sending(setup_replay, monkeypatch, capsys, no_prompt):
