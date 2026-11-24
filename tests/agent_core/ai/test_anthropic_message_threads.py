@@ -22,6 +22,46 @@ from tests.agent_core.ai.test_anthropic_prompt_cache import SUCCESS, _breakpoint
 BETA = "message-threads-2026-08-12"
 
 
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-fable-5-2"])
+def test_signed_create_carries_engine_thinking_policy_into_delta(tmp_path, monkeypatch, model):
+    import time
+    from core.agent_core.ai import message_threads as mt
+    from core.agent_core.ai._common import WireRequest
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ep = _request(model_id=model, source_id="test-source").endpoint
+    history = [
+        {"role": "assistant", "content": [{"type": "thinking", "thinking": "fixture", "signature": "fixture"}]},
+        {"role": "user", "content": "previous"},
+    ]
+    base = {"model": model, "stream": True, "messages": history, "thinking": {"type": "adaptive"}}
+    wire = WireRequest("https://fixture.invalid/messages", {}, base)
+    route = mt.route_key(ep, True)
+    create = mt.prepare(wire, ep, True, None, route, None)
+    expected = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
+    assert create.wire.body["thinking"] == expected
+    answer = {"role": "assistant", "content": "ok"}
+    parent = mt.Parent(
+        route,
+        create.fixed,
+        len(history),
+        create.history,
+        mt.message_digest([answer]),
+        "msg_fixture",
+        24000,
+        time.monotonic() + 60,
+        pinned_drop_block=create.pinned_drop_block,
+    )
+    follow = replace(wire, body={**base, "messages": [*history, answer, {"role": "user", "content": "next"}]})
+    delta = mt.prepare(follow, ep, True, parent, route, None)
+    assert delta.mode == "continue" and delta.pinned_drop_block
+    assert delta.wire.body["thinking"] == expected and delta.wire.body["messages"] == follow.body["messages"][-1:]
+    assert mt.prepare(follow, ep, True, None, route, "ordinary_replay").wire.body is follow.body
+    assert (
+        mt.prepare(wire, ep, False, None, route, None).wire.body["thinking"] == base["thinking"] == {"type": "adaptive"}
+    )
+
+
 async def test_create_rejection_replays_once_and_remembers_route():
     sent = []
 
@@ -79,6 +119,7 @@ async def test_create_rejection_replays_once_and_remembers_route():
         "unclosed",
         "initial_content",
         "upstream_fallback",
+        "thread_400",
     ],
 )
 async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_path):
@@ -128,6 +169,18 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
             if case == "breakdown_only":
                 text = good.replace(
                     '"cache_read_input_tokens":22000', '"cache_creation":{"ephemeral_1h_input_tokens":22000}'
+                )
+            if case == "thread_400":
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "not_the_contract",
+                            "message": "private fixture",
+                            "details": {"error_code": "thread_fingerprint_mismatch"},
+                        }
+                    },
                 )
             if case == "unknown":
                 return httpx.Response(404, json={"error": {"details": {"error_code": "thread_not_found"}}})
@@ -179,7 +232,13 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
             assert json.loads(before.body) == seen[1]
     assert isinstance(result[-1], Done)
     assert "LOST" not in repr(result) and "lost" not in repr(result)
-    if case in ("ok", "breakdown_only", "low", "missing", "early_tool", "unknown"):
+    if case == "thread_400":
+        failed, replay = obs.attempts
+        assert failed["failure"] == "http_400"
+        assert failed["error_code"] == "thread_fingerprint_mismatch"
+        assert failed["error_type"] == "invalid_request_error"
+        assert "private fixture" not in repr(obs.attempts) and "error_code" not in replay
+    if case in ("ok", "breakdown_only", "low", "missing", "early_tool", "unknown", "thread_400"):
         assert seen[1]["thread"] == {"type": "continue", "previous_message_id": "msg_parent"}
         assert "system" not in seen[1] and "tools" not in seen[1] and len(seen[1]["messages"]) == 1
         if case not in ("ok", "breakdown_only"):

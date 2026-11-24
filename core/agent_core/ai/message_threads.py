@@ -64,6 +64,7 @@ class Parent:
     reads: int = 0
     trial: bootstrap.Trial | None = None
     terminal_mark: bool = False
+    pinned_drop_block: bool = False
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
@@ -197,6 +198,7 @@ class Attempt:
     record: dict
     capture_warm: bool
     trial: bootstrap.Trial | None
+    pinned_drop_block: bool = False
 
     async def check_reads(self, route: bytes, reads: int) -> None:
         if self.trial is None:
@@ -258,6 +260,90 @@ def terminal_mark(body: dict) -> bool:
     messages = body["messages"]
     blocks = messages[-1]["content"] if messages else None
     return bool(isinstance(blocks, list) and blocks and "cache_control" in blocks[-1])
+
+
+def _engine_adds_drop_block(full: dict) -> bool:
+    """Mirror the shipped CPA preserved-thinking default on the supported gateway model IDs.
+
+    On a delta CPA no longer sees the signed blocks that caused it to derive the create's fixed fields.
+    Never invent this policy for unknown models, disabled thinking, explicit bindings or forced tool use.
+    """
+    model = full["model"].lower().rsplit("/", 1)[-1].split("[", 1)[0]
+    # Only identify provider IDs whose wire capability is known. Other models still try threads normally.
+    if model not in {
+        "claude-opus-5-5",
+        "claude-fable-5-2",
+        "claude-fable-5.2",
+        "claude-fable-5-1",
+        "claude-fable-5.1",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-haiku-5.5",
+    }:
+        return False
+    thinking = full.get("thinking", {"type": "adaptive"})
+    if not isinstance(thinking, dict) or "block_binding" in thinking:
+        return False
+    if thinking.get("type") != "adaptive" and not (
+        thinking.get("type") == "enabled" and ("opus" in model or "fable" in model)
+    ):
+        return False
+    choice = full.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") in ("tool", "any"):
+        return False
+    return any(
+        isinstance(block.get(key), str) and block[key].strip()
+        for msg in full["messages"]
+        if isinstance(msg["content"], list)
+        for block in msg["content"]
+        for tag, key in (("thinking", "signature"), ("redacted_thinking", "data"))
+        if block.get("type") == tag
+    )
+
+
+def record_http_error(record: dict, status: int, body: str) -> None:
+    """Copy only contract enums, never arbitrary provider strings, into durable send telemetry."""
+    if status != 400:
+        return
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return
+    details = error.get("details")
+    code = details.get("error_code") if isinstance(details, dict) else None
+    if isinstance(code, str):
+        record["error_code"] = (
+            code
+            if code
+            in {
+                "thread_not_found",
+                "thread_fingerprint_mismatch",
+                "thread_already_continued",
+                "thread_continue_in_flight",
+                "thread_unsupported_request",
+            }
+            else "other"
+        )
+    kind = error.get("type")
+    if isinstance(kind, str):
+        record["error_type"] = (
+            kind
+            if kind
+            in {
+                "invalid_request_error",
+                "api_error",
+                "not_found_error",
+                "authentication_error",
+                "permission_error",
+                "rate_limit_error",
+                "overloaded_error",
+                "request_too_large",
+            }
+            else "other"
+        )
 
 
 def _contains_image(messages: list) -> bool:
@@ -387,6 +473,18 @@ def prepare(
             msg = msgs[omitted_mark]
             unmarked = [{k: v for k, v in b.items() if k != "cache_control"} for b in msg["content"]]
             body["messages"] = [*msgs[:omitted_mark], {**msg, "content": unmarked}, *msgs[omitted_mark + 1 :]]
+    pinned_drop_block = gateway and (
+        (mode == "create" and _engine_adds_drop_block(body))
+        or (mode == "continue" and parent is not None and parent.pinned_drop_block)
+    )
+    if pinned_drop_block:
+        body = {
+            **body,
+            "thinking": {
+                **body.get("thinking", {"type": "adaptive"}),
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+            },
+        }
     if mode != "full":
         betas.append(BETA)
         if gateway:
@@ -414,4 +512,5 @@ def prepare(
         record,
         capture_warm,
         trial,
+        pinned_drop_block,
     )

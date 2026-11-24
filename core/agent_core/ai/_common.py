@@ -1883,6 +1883,7 @@ async def drive_sse_stream(
     translate: WireTranslator,
     refused: Callable[[ProviderError], bool] | None = None,
     on_send: Callable[[int], None] | None = None,
+    on_http_error: Callable[[int, str], None] | None = None,
     bound_pin_handback: bool = False,
 ) -> AsyncIterator[Any]:
     """Own the complete request/stream/terminal/cleanup lifecycle.
@@ -1983,6 +1984,8 @@ async def drive_sse_stream(
                             headers=response.headers,
                         )
                     else:
+                        if body is not None and on_http_error is not None:
+                            on_http_error(response.status_code, body)
                         if body is None:
                             candidate = assembler.aborted(cancel.reason)
                         elif (
