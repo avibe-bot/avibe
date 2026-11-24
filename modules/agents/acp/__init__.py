@@ -1,0 +1,53 @@
+"""Controller-independent Agent Client Protocol (ACP) stdio client and event parser."""
+
+from modules.agents.acp.client import (
+    ACP_AUTH_REQUIRED,
+    DEFAULT_PROTOCOL_VERSION,
+    JSONRPC_INTERNAL_ERROR,
+    JSONRPC_METHOD_NOT_FOUND,
+    AcpClient,
+    AcpRpcError,
+    AcpTransportError,
+    NotificationCallback,
+    ServerRequestCallback,
+)
+from modules.agents.acp.events import (
+    AcpAvailableCommand,
+    AcpAvailableCommandsUpdate,
+    AcpConfigOptionUpdate,
+    AcpDiffBlock,
+    AcpMessageChunkUpdate,
+    AcpSessionInfoUpdate,
+    AcpSessionUpdate,
+    AcpThoughtChunkUpdate,
+    AcpToolCallUpdate,
+    AcpUnknownUpdate,
+    AcpUsageUpdate,
+    parse_diff_blocks,
+    parse_session_update,
+)
+
+__all__ = [
+    "ACP_AUTH_REQUIRED",
+    "DEFAULT_PROTOCOL_VERSION",
+    "JSONRPC_INTERNAL_ERROR",
+    "JSONRPC_METHOD_NOT_FOUND",
+    "AcpAvailableCommand",
+    "AcpAvailableCommandsUpdate",
+    "AcpClient",
+    "AcpConfigOptionUpdate",
+    "AcpDiffBlock",
+    "AcpMessageChunkUpdate",
+    "AcpRpcError",
+    "AcpSessionInfoUpdate",
+    "AcpSessionUpdate",
+    "AcpThoughtChunkUpdate",
+    "AcpToolCallUpdate",
+    "AcpTransportError",
+    "AcpUnknownUpdate",
+    "AcpUsageUpdate",
+    "NotificationCallback",
+    "ServerRequestCallback",
+    "parse_diff_blocks",
+    "parse_session_update",
+]
