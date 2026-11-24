@@ -1084,6 +1084,20 @@ export function bindingRepairPossible(status: WebPushStatus, existing: PushSubsc
     && Notification.permission === 'granted';
 }
 
+/**
+ * The repair, fetched when first needed. A failed fetch (offline, or a build replaced under an open
+ * page) is said once in the console, with nothing of the subscription or the address, and thrown
+ * on: the caller reads it as "not restored", and the next foreground tries again.
+ */
+async function loadBindingRepair(): Promise<typeof import('./webPushBindingRepair')> {
+  try {
+    return await import('./webPushBindingRepair');
+  } catch (error) {
+    console.warn('The notification repair module failed to load');
+    throw error;
+  }
+}
+
 let webPushLifecycleOperation: Promise<unknown> = Promise.resolve();
 
 export function enqueueWebPushLifecycleOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -1561,7 +1575,7 @@ async function reconcileWebPushOnce(
       .getWebPushStatus(await browserPushStatusPayload(existing, previousEndpoints))
       .catch(() => null);
     if (serverStatus && bindingRepairPossible(serverStatus, existing)) {
-      const repair = await import('./webPushBindingRepair');
+      const repair = await loadBindingRepair();
       if (await repair.bindingRepairOffered(api, serverStatus, existing, previousEndpoints)) {
         const restored = await repair.restoreBrowserPushAfterBinding(
           api,
@@ -1698,7 +1712,7 @@ export function restoreWebPushAfterBinding(api: ApiContextType): Promise<boolean
   }
   bindingRestore ??= enqueueWebPushLifecycleOperation(async () => {
     try {
-      return await (await import('./webPushBindingRepair')).restoreAfterBinding(api);
+      return await (await loadBindingRepair()).restoreAfterBinding(api);
     } catch {
       // The next time the page comes to the foreground tries again.
       return false;

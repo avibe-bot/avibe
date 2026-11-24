@@ -315,6 +315,32 @@ describe('a browser on the computer that runs Avibe, after binding', () => {
   });
 });
 
+describe('when the repair cannot be loaded', () => {
+  afterEach(() => {
+    vi.doUnmock('./webPushBindingRepair');
+  });
+
+  it('says so in one line that names neither the subscription nor the address, and reads as not restored', async () => {
+    browser({ live: true });
+    const { api, subscribeWebPush } = instance();
+    vi.doMock('./webPushBindingRepair', () => {
+      throw new Error(`Failed to fetch dynamically imported module: http://127.0.0.1:5123/assets/x.js ${OLD}`);
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { restoreWebPushAfterBinding, reconcileWebPush } = await load();
+
+    await expect(restoreWebPushAfterBinding(api)).resolves.toBe(false);
+    await expect(reconcileWebPush(api)).resolves.toMatchObject({ status: 'disabled' });
+
+    expect(warn.mock.calls).toEqual([
+      ['The notification repair module failed to load'],
+      ['The notification repair module failed to load'],
+    ]);
+    expect(subscribeWebPush).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+});
+
 describe('a native registration that is waiting for the instance', () => {
   const ENDPOINT = 'https://avibe.bot/api/push/apns/native-current';
   const waiting = (intent?: unknown): NativePushPendingRegistration => ({
