@@ -16492,7 +16492,9 @@ def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
         _err("This pairing key expired before it was used. Get a new one at https://avibe.bot, then enter it here:")
         _err("  vibe remote pair")
         return True
-    if error_code == "pairing_input_rejected" and result.get("cause") in {"invalid_pairing_key", "pairing_key_used"}:
+    if result.get("input_rejected") is True and error_code in {"invalid_pairing_key", "pairing_key_used"}:
+        # The backend sets this only for a key entered now, refused on its first
+        # send, after it retired that record. A replay never carries it.
         _err("This pairing key was not accepted. Check it, or get a new one at https://avibe.bot, then enter it here:")
         _err("  vibe remote pair")
         return True

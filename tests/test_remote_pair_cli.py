@@ -232,7 +232,7 @@ def test_ended_request_copy_follows_its_owner(monkeypatch, capsys, no_prompt, ow
 
 @pytest.mark.parametrize("error", ["invalid_pairing_key", "pairing_key_used"])
 def test_a_replay_refused_as_invalid_or_used_needs_check(monkeypatch, capsys, no_prompt, error):
-    # Only the backend's pairing_input_rejected names this command's own first send.
+    # Without the backend's input_rejected flag the refusal is not about this command's own first send.
     monkeypatch.setattr(ra, "pending_pairing_record_exists", lambda: True)
     monkeypatch.setattr(ra, "pair", lambda *a, **kw: {"ok": False, "error": error, "status": 400})
     monkeypatch.setattr(ra, "pending_pairing_status", lambda config: None)
@@ -310,6 +310,10 @@ def test_first_send_refused_key_is_checked_or_replaced(pairing_host, monkeypatch
     assert lines(capsys) == ("This pairing key was not accepted. Check it, or get a new one at https://avibe.bot, "
                              "then enter it here:\n  vibe remote pair\n")
     assert not ra.pending_pairing_record_exists()
+    # The Web form reads the same backend answer: its error code stays as it was.
+    assert run_pair("typo-key", json_output=True) == 1
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"] == error and out["input_rejected"] is True
 
 
 def test_typed_key_with_unknown_outcome_is_never_replaced(pairing_host, monkeypatch, capsys, no_prompt):
