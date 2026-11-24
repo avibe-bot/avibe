@@ -1312,7 +1312,7 @@ def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mis
     lost = review_mind(previous.replace("\n- keep CI green", ""), previous)
     assert lost.problems() == [
         "mind.md lost its structure: its Mission started with 2 live entries and now has 1, with 0 more newly marked "
-        '"- [x]"; put back, whole, each entry that is not finished, and mark each finished one "- [x]" where it stands: '
+        '"- [x]"; put back, whole, each entry that is not finished (one that still waits on an answer is not), and mark each finished one "- [x]" where it stands: '
         'an entry leaves the Mission only at a later consolidation, after one has kept it as "- [x]"'
     ]
     assert review_mind(None, previous).structure == "it is not a readable file"
@@ -1477,7 +1477,7 @@ def test_goals_past_its_limit_only_by_entries_the_turn_marked_asks_no_repair():
     assert review.over == (("Goals", 194, 83),) and review.problems() == [
         "mind.md is over its length limits: Goals is about 194 tokens, at most 83 (take about 115 out); condense it: in "
         'Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or drop '
-        "them (about 78 tokens of it), then move finished detail out of live entries"
+        "them (about 78 tokens of it), keeping what in them still binds, then move finished detail out of live entries"
     ]
     # Without the old one it fits but for the entry just marked: nothing to repair, and the cut shows the live ones.
     fresh = review_mind(marked.replace("- [x] old: " + "o" * 300 + "\n", ""), started, 8_000)
@@ -1522,7 +1522,7 @@ def test_a_mind_past_a_section_limit_is_shown_cut_per_section_with_every_heading
         "mind.md is over its length limits: Goals is about 3,281 tokens, at most 2,000 (take about 1,381 out); "
         "condense it: "
         'in Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or '
-        "drop them, then move finished detail out of live entries"
+        "drop them, keeping what in them still binds, then move finished detail out of live entries"
     ]
     # Each section past its limit is told its own way to condense.
     every = _mind(**{"## Agreements": lessons * 8, "## Mission": "- the mission", "# 3. Key decisions": lessons * 8,

@@ -217,7 +217,8 @@ Do the looking back in your thinking, or as text outside the <checkpoint> block;
 - Change only what the looking back found changed; leave everything else, its wording included, as it is. Put all the changes in one edit call. At your first consolidation, replace each section's placeholder line, such as "(none yet: mission)", with its content; a section with nothing yet keeps its placeholder.
 - Make small changes for small shifts. If your understanding at some layer has changed at its root (for example, you realize the user really wants something other than what you thought), rewrite that section, and write one sentence outside the block: I used to think ..., now I think ..., because ....
 - Memory keeps condensing: merge recurring concrete lessons into a more general principle; fold overturned decisions into the decision that replaced them; let go of details you no longer need. The original conversation stays stored, so a detail you let go can be looked up again.
-- In Goals, every entry under Mission and Workstreams starts with a box: "- [ ]" while it is live (in progress, waiting, or owed), "- [x]" once it is finished (done, withdrawn, or replaced). Write an entry's status as what happened, and say the user decided it only where they did. Never delete or merge a live entry. An entry leaves in two steps. First it is marked: give a box to each entry that has none, and check "- [x]" on each one that has finished; an entry you mark in this consolidation stays where it stands, whole, even when Goals is over its limit (what the next context shows of an over-limit section leaves finished entries out first). Then, at a later consolidation, it is folded: the entries that already show "- [x]" in the mind.md you were given are history; merge them into one short line under their heading, for example "- [x] Earlier: the importer shipped; the audit was withdrawn; the first migration plan was replaced", and let the oldest drop off that line as it grows. The mission changes only when the user explicitly changes it.
+- In Goals, every entry under Mission and Workstreams starts with a box: "- [ ]" while it is live (in progress, waiting, or owed), "- [x]" once it is finished (done, withdrawn, or replaced). Waiting is live: an entry whose work is done but whose answer, approval, or confirmation is still owed, by the user or by anyone, stays "- [ ]" (a proposal delivered and still awaiting the user's choice is live). Write an entry's status as what happened, and say the user decided it only where they did. Never delete or merge a live entry. The mission changes only when the user explicitly changes it.
+- An entry leaves Goals in two steps. First it is marked: give a box to each entry that has none, and check "- [x]" on each one that has finished; an entry you mark in this consolidation stays where it stands, whole, even when Goals is over its limit (what the next context shows of an over-limit section leaves finished entries out first). Then, at a later consolidation, it is folded: the entries that already show "- [x]" in the mind.md you were given are history. Before you fold one, move whatever in it still binds (an agreement, a condition the user set, an obligation with a date) to Agreements or onto a live entry; only the outcome folds. Merge the outcomes into one short line under their heading, for example "- [x] Earlier: the importer shipped; the audit was withdrawn; the first migration plan was replaced", and let the oldest drop off that line as it grows.
 - Keep every heading line exactly as it is. Each section's length limit: Where I stand {limit_1:,}, Goals {limit_2:,}, Key decisions {limit_3:,}, Lessons {limit_4:,} tokens.{mind_sizes}
 
 3. Check the memo (memo.md)
@@ -1293,15 +1294,16 @@ def _normalized(text: str) -> list[str]:
 #: What the repair asks of a mind that lost a heading line, and of one that lost a live Mission entry (section 10).
 HEADINGS_ADVICE = "keep every heading line of it exactly as it is, in order"
 MISSION_ADVICE = (
-    'put back, whole, each entry that is not finished, and mark each finished one "- [x]" where it stands: an entry '
-    'leaves the Mission only at a later consolidation, after one has kept it as "- [x]"'
+    'put back, whole, each entry that is not finished (one that still waits on an answer is not), and mark each '
+    'finished one "- [x]" where it stands: an entry leaves the Mission only at a later consolidation, after one has '
+    'kept it as "- [x]"'
 )
 #: How the repair says to condense each section past its limit (section 10), by the section's title.
 CONDENSE_ADVICE: Mapping[str, str] = {
     "Where I stand": "in Where I stand, merge agreements that overlap and drop those the user has since replaced",
     "Goals": (
         'in Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or '
-        "drop them{finished}, then move finished detail out of live entries"
+        "drop them{finished}, keeping what in them still binds, then move finished detail out of live entries"
     ),
     "Key decisions": "in Key decisions, fold overturned decisions into the ones that replaced them",
     "Lessons": "in Lessons, merge recurring lessons into principles",
