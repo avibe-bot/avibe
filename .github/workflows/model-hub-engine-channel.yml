@@ -1,30 +1,20 @@
-name: Publish Model Hub engine channel
+name: Publish Model Hub engine assets
 
 # Disabled until reviewed public-root commissioning and explicit owner enablement.
-# Signer and writer enter separate protected environments concurrently after prepare.
-# A bounded run-scoped artifact handoff does not transfer either credential.
+# Asset publication is separate from the automatic index workflow.
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "release: publish trusted-checked assets. promote | revoke: change the index. resume: use the exact original signed artifact in a newly approved run."
+        description: "release: publish trusted-checked assets only"
         required: true
         type: choice
-        options: [release, promote, revoke, resume]
+        options: [release]
       asset_release_tag:
         description: "Engine release to publish, promote or withdraw"
         type: string
       rehearsal_run_id:
         description: "Untrusted rehearsal run to review before this owner-approved publication/promotion"
-        type: string
-      source_run_id:
-        description: "Recovery only: original first-attempt run with the signed artifact at this exact master SHA"
-        type: string
-      rollback_to:
-        description: "Withdrawal only: the listed release that withdrawn machines move to"
-        type: string
-      reason:
-        description: "Withdrawal only: public, credential-free explanation"
         type: string
 
 permissions: {}
@@ -66,12 +56,10 @@ jobs:
           set -euo pipefail
           test "$HOSTED_COMMISSIONED" = true
           test "$GITHUB_RUN_ATTEMPT" = 1  # approvals are not attempt-scoped: recover by fresh dispatch
-          for environment in model-hub-engine-channel-signer model-hub-engine-channel-writer; do
-            python3 scripts/model_hub_engine_channel.py authorize \
-              --environment "$environment" --operation "$OPERATION"
-          done
+          python3 scripts/model_hub_engine_channel.py authorize \
+            --environment model-hub-engine-channel-writer --operation "$OPERATION"
           case "$OPERATION" in
-            release|promote|revoke)
+            release)
               if ! [[ "$ASSET_RELEASE_TAG" =~ ^model-hub-engine-v[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]]; then
                 echo "::error::$OPERATION needs an engine release tag"
                 exit 1
@@ -81,7 +69,7 @@ jobs:
   prepare:
     name: trusted prepare
     needs: authorize
-    if: inputs.operation == 'release' || inputs.operation == 'promote'
+    if: inputs.operation == 'release'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:
@@ -167,19 +155,6 @@ jobs:
             echo 'Runtime pass/fail assertions above are rehearsal data, not authenticated proof against a malicious candidate. Owner approval for this exact run and digest remains the promotion authority.'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Availability before advertisement: a promotion needs every asset served,
-      # byte for byte, by the release and by the mirror clients try first.
-      - name: Require the published release and its mirror
-        if: inputs.operation == 'promote'
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python3 scripts/model_hub_engine_qualification.py availability \
-            --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG" \
-            --work-dir "$RUNNER_TEMP/availability"
-
       - name: Hand the trusted-checked assets to the release job
         if: inputs.operation == 'release'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -246,112 +221,3 @@ jobs:
           fi
           python3 scripts/model_hub_engine_release_guard.py --manifest "$manifest" fetch \
             --output-dir "$RUNNER_TEMP/published"
-
-  sign:
-    needs: [authorize, prepare]
-    if: >-
-      always() && needs.authorize.result == 'success' &&
-      ((inputs.operation == 'promote' && needs.prepare.result == 'success') ||
-      (contains(fromJSON('["revoke","resume"]'), inputs.operation) && needs.prepare.result == 'skipped'))
-    runs-on: ubuntu-latest
-    environment: model-hub-engine-channel-signer
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 30f56a109c9fc13f23f789159ff05524632cce2c
-          path: tools
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          path: ledger
-          fetch-depth: 0
-          persist-credentials: false
-          sparse-checkout: |
-            vibe/model_hub_runtime/engine_channel_roots.json
-          sparse-checkout-cone-mode: false
-      - name: Require current run approval from the exact protected environment
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --data ledger \
-            --authorize-only --avault /usr/bin/true --output /dev/null
-      - name: Fetch digest-pinned avault using reviewed tooling
-        run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/avault-path"
-      - name: Sign the exact PR allocation (candidate tree is data only)
-        id: signed
-        if: inputs.operation != 'resume'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          HOSTED_SIGNING_BUNDLE: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE }}
-          REHEARSAL_BASELINES: ${{ needs.prepare.outputs.baselines }}
-          ROLLBACK_TO: ${{ inputs.rollback_to }}
-          REASON: ${{ inputs.reason }}
-        run: |
-          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --role sign --data ledger \
-            --avault "$(cat "$RUNNER_TEMP/avault-path")" --output "$RUNNER_TEMP/model-hub-engine.json"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: inputs.operation != 'resume'
-        with:
-          name: ${{ steps.signed.outputs.artifact_name }}
-          path: ${{ runner.temp }}/model-hub-engine.json
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    needs: [authorize, prepare]
-    if: >-
-      always() && needs.authorize.result == 'success' &&
-      ((inputs.operation == 'promote' && needs.prepare.result == 'success') ||
-      (contains(fromJSON('["revoke","resume"]'), inputs.operation) && needs.prepare.result == 'skipped'))
-    runs-on: ubuntu-latest
-    environment: model-hub-engine-channel-writer
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      actions: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 30f56a109c9fc13f23f789159ff05524632cce2c
-          path: tools
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.sha }}
-          path: ledger
-          fetch-depth: 0
-          persist-credentials: false
-          sparse-checkout: |
-            vibe/model_hub_runtime/engine_channel_roots.json
-          sparse-checkout-cone-mode: false
-      - name: Require current run approval from the exact protected environment
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --data ledger \
-            --authorize-only --avault /usr/bin/true --output /dev/null
-      - name: Fetch digest-pinned avault using reviewed tooling
-        run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/avault-path"
-      - name: Wait for the immutable signed artifact, verify, conditionally replace and read back
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          REHEARSAL_BASELINES: ${{ needs.prepare.outputs.baselines }}
-          ROLLBACK_TO: ${{ inputs.rollback_to }}
-          REASON: ${{ inputs.reason }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_SECRET_ACCESS_KEY }}
-          R2_ACCOUNT_ID: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_ACCOUNT_ID }}
-          AWS_DEFAULT_REGION: auto
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-        run: |
-          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --role publish --data ledger \
-            --avault "$(cat "$RUNNER_TEMP/avault-path")" --output /dev/null

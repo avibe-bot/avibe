@@ -1,0 +1,95 @@
+name: Publish signed Model Hub engine index
+
+on:
+  push:
+    branches: [master]
+    paths: ['patches/model-hub-engine-channel-ledger/**']
+
+permissions: {}
+env:
+  HOSTED_COMMISSIONED: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED }}
+
+jobs:
+  prepare:
+    if: github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master' && vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions: {contents: read, actions: read, pull-requests: read, checks: read, issues: read}
+    timeout-minutes: 90
+    outputs:
+      sequences: ${{ steps.proof.outputs.sequences }}
+    steps:
+      - &tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 7b961f642277fb219d90888fba4697f703616085
+          path: tools
+          persist-credentials: false
+      - &ledger
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: ledger
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: vibe/model_hub_runtime/engine_channel_roots.json
+          sparse-checkout-cone-mode: false
+      - &verifier
+        name: Fetch pinned verifier
+        run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/verifier"
+      - name: Prove actual merged allocations, exact-head review, checks and rehearsal
+        id: proof
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I tools/scripts/model_hub_engine_index.py prepare --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
+
+  sign:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        sequence: ${{ fromJSON(needs.prepare.outputs.sequences) }}
+    steps:
+      - *tools
+      - *ledger
+      - *verifier
+      - name: Sign only the allocated bytes
+        id: signed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ALLOCATION_SEQUENCE: ${{ matrix.sequence }}
+          HOSTED_SIGNING_BUNDLE: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE }}
+        run: python3 -I tools/scripts/model_hub_engine_index.py sign --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: ${{ steps.signed.outputs.artifact_name }}
+          path: ${{ runner.temp }}/model-hub-engine.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [prepare, sign]
+    runs-on: ubuntu-latest
+    permissions: {contents: read, actions: read}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        sequence: ${{ fromJSON(needs.prepare.outputs.sequences) }}
+    steps:
+      - *tools
+      - *ledger
+      - *verifier
+      - name: Verify signed allocation, conditionally write the exact index key and prove public readback
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ALLOCATION_SEQUENCE: ${{ matrix.sequence }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        run: python3 -I tools/scripts/model_hub_engine_index.py publish --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"

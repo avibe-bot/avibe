@@ -6,6 +6,7 @@ import io
 import json
 import zipfile
 import os
+import re
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from scripts import model_hub_engine_hosted as hosted
+from scripts import model_hub_engine_index as index
 from tests.engine_channel_support import manifest_bytes
 
 
@@ -26,48 +28,30 @@ def fixture(tmp_path):
     repo = tmp_path / "data"
     repo.mkdir()
     hosted.git(repo, "init", "-q")
+    (repo / "before").touch()
+    before = commit(repo)
     change = hosted.producer.Promote(manifest_bytes(), "3.2.6")
     raw = hosted.producer.plan_payload(None, change, now=datetime(2026, 1, 1, tzinfo=timezone.utc), sequence=1)
     path = repo / hosted.LEDGER / "0000000000000001.payload.json"
     path.parent.mkdir(parents=True)
     path.write_bytes(raw)
     sha = commit(repo)
-    return repo, sha, path, change, raw
+    return repo, before, sha, path, change, raw
 
 
-def api_at(sha):
-    def get(path):
-        if path.endswith("/git/ref/heads/master"):
-            return {"object": {"sha": sha}}
-        assert path.endswith("/pulls")
-        return [{"merged_at": "2026-01-01", "merge_commit_sha": path.split("/")[-2], "base": {
-            "ref": "master", "repo": {"full_name": hosted.producer.REPOSITORY}}}]
-    return get
-
-
-@pytest.mark.parametrize("failure", ["rewritten", "deleted", "wrong_change", "not_pr", "stale_run", "unrecorded_published", "sequence_gap"])
+@pytest.mark.parametrize("failure", ["rewrite", "deleted", "sequence_gap", "noncanonical"])
 def test_refuses_before_any_signature(tmp_path, failure):
-    repo, sha, path, change, raw = fixture(tmp_path)
-    operation, published = "promote", None
-    if failure == "rewritten":
-        path.write_bytes(raw + b"\n")
-        sha = commit(repo)
-    elif failure == "deleted":
+    repo, before, sha, path, _, raw = fixture(tmp_path)
+    if failure == "deleted":
         path.unlink()
-        sha = commit(repo)
-    elif failure == "wrong_change":
-        change = hosted.producer.Promote(manifest_bytes(), "3.2.8")
-    elif failure == "unrecorded_published":
-        published = b"not the predecessor"
     elif failure == "sequence_gap":
-        path.with_name("0000000000000003.payload.json").write_bytes(raw)
-        sha = commit(repo)
-    api = api_at("0" * 40 if failure == "stale_run" else sha)
-    if failure == "not_pr":
-        api = lambda p: [] if p.endswith("pulls") else {"object": {"sha": sha}}  # noqa: E731
-    with pytest.raises((hosted.Error, hosted.channel.ChannelError)):
-        hosted.validate(repo, sha, operation=operation, roots=hosted.channel.TrustRoots(),
-                        verifier=None, published=published, api=api, change=change)
+        path.rename(path.with_name("0000000000000003.payload.json"))
+    else:
+        if failure == "noncanonical":
+            hosted.git(repo, "reset", "--soft", before)
+        path.write_bytes(raw + b"\n")
+    with pytest.raises(hosted.Error):
+        index.records(repo, before, commit(repo))
 
 
 @pytest.mark.skipif(not os.environ.get("AVIBE_TEST_HOSTED_KEYGEN"), reason="throwaway key only on isolated CI runner")
@@ -75,17 +59,17 @@ def test_isolated_owner_keygen_through_signed_pr_receipt_and_identical_resume(tm
     # Only test-owned homes/stores; production root, domain payload and ledger never supplied.
     keygen = Path(os.environ["AVIBE_TEST_HOSTED_KEYGEN"])
     signer = Path(os.environ["AVIBE_TEST_AVAULT_VERIFIER"])
-    repo, sha, payload_path, change, raw = fixture(tmp_path)
+    repo, before, sha, payload_path, change, raw = fixture(tmp_path)
     credential = tmp_path / "private.json"
     result = subprocess.run([os.sys.executable, "-I", hosted.__file__, "generate", "--avault", str(keygen),
                              "--output", str(credential)], check=True, capture_output=True)
     public = result.stdout.decode().strip()
-    assert hosted.re.fullmatch(r"0[23][0-9a-f]{64}", public) and not result.stderr
+    assert re.fullmatch(r"0[23][0-9a-f]{64}", public) and not result.stderr
     roots_doc = {"schema_version": 1, "sequence_floor": 1, "roots": [{"key_id": "fixture", "public_key": public}]}
     roots = hosted.channel.parse_trust_roots(json.dumps(roots_doc).encode())
     verifier = hosted.producer.avault_verifier(str(signer))
-    assert hosted.validate(repo, sha, operation="promote", roots=roots, verifier=verifier, published=None,
-                           api=api_at(sha), change=change) == (raw, None)
+    [(_, _, _, parent, payload, operation)] = index.records(repo, before, sha)
+    assert parent is None and payload.raw == raw and operation == change
     secret = json.loads(credential.read_bytes())
     home = tmp_path / "only-on-test-runner"
     home.mkdir(mode=0o700)
@@ -98,7 +82,14 @@ def test_isolated_owner_keygen_through_signed_pr_receipt_and_identical_resume(tm
         roots=roots, verifier=verifier, sign=lambda request: json.loads(hosted.avault_run(signer, ["sign"], home, data=request))["signature"])
     assert again == envelope
     for published in (None, envelope):
-        assert hosted.validate(repo, sha, operation="resume", roots=roots, verifier=verifier, published=published, api=api_at(sha)) == (raw, None)
+        hosted.check_published(published, raw, None, roots, verifier)
+    # A stale writer cannot overwrite the first published allocation. Both
+    # bad signature and divergent predecessor are rejected before the CAS.
+    with pytest.raises(hosted.Error, match="diverges"):
+        hosted.check_published(envelope, b"different allocation", None, roots, verifier)
+    with pytest.raises(hosted.Error, match="superseding"):
+        index.wait_for_parent(lambda: envelope, allowed=[], parent=None, roots=roots, verifier=verifier, timeout=0)
+    index.wait_for_parent(lambda: envelope, allowed=[raw], parent=None, roots=roots, verifier=verifier, timeout=0)
     # Tampering after signing is never authenticated as the original bytes.
     with pytest.raises(hosted.channel.ChannelError):
         hosted.channel.authenticate(envelope.replace(b'"fixture"', b'"wrong"'), roots=roots, verifier=verifier)
@@ -109,9 +100,9 @@ def test_artifact_wait_is_bounded_and_requires_exact_origin(bad):
     from scripts import model_hub_engine_artifact as artifacts
 
     sha, run = "f" * 40, "123"
-    name = artifacts.artifact_name(run, sha, 1, b"public fixture")
+    name = artifacts.artifact_name(run, sha, 1, b"public fixture", attempt="1")
     source = {"run_attempt": 2 if bad == "attempt" else 1, "head_sha": sha, "head_branch": "master", "id": 123,
-              "event": "pull_request" if bad == "event" else "workflow_dispatch", "path": hosted.producer.WORKFLOW_PATH,
+              "event": "pull_request" if bad == "event" else "push", "path": index.INDEX_WORKFLOW,
               "repository": {"full_name": hosted.producer.REPOSITORY, "id": 100}}
     row = {"name": name, "id": 42, "expired": bad == "expired", "digest": "" if bad == "digest" else "sha256:" + sha + "0" * 24,
            "workflow_run": {"head_sha": "a" * 40 if bad == "sha" else sha, "id": 1 if bad == "run" else 123,
@@ -121,10 +112,10 @@ def test_artifact_wait_is_bounded_and_requires_exact_origin(bad):
             return source
         return {"total_count": 2 if bad == "ambiguous" else 1, "artifacts": [] if bad == "missing" else [row]}
     if bad == "ok":
-        assert artifacts.wait_for_artifact(api, run, sha, name, timeout=0) == (42, row["digest"])
+        assert artifacts.wait_for_artifact(api, run, sha, name, attempt="1", timeout=0) == (42, row["digest"])
     else:
         with pytest.raises(hosted.Error):
-            artifacts.wait_for_artifact(api, run, sha, name, timeout=0)
+            artifacts.wait_for_artifact(api, run, sha, name, attempt="1", timeout=0)
 
 
 def test_artifact_hash_is_checked_before_using_its_single_file():
@@ -137,8 +128,3 @@ def test_artifact_hash_is_checked_before_using_its_single_file():
     assert artifacts.unpack(raw, "sha256:" + hashlib.sha256(raw).hexdigest()) == b"public envelope fixture"
     with pytest.raises(hosted.Error, match="digest"):
         artifacts.unpack(raw, "sha256:" + "0" * 64)
-
-
-def test_a_rerun_cannot_reuse_approvals_from_the_first_attempt():
-    with pytest.raises(hosted.Error, match="fresh run"):
-        hosted.check_fresh_approvals(None, "123", "2")

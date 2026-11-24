@@ -317,12 +317,7 @@ Nothing regenerates the index from the list of GitHub releases, and
    only byte-checked assets in a separate trusted artifact namespace. The
    existing protected writer environment then requires explicit owner approval
    for this run and digest before publishing immutable, non-latest assets.
-4. **Promote.** After the mirror holds the release, dispatch
-   `operation: promote` with the same rehearsal run id. Trusted prepare checks
-   the same exact context and availability. The existing protected signer and
-   writer approvals then authorize allocation, signing and publication of the
-   index. Owner authorization is the promotion authority, not a rehearsal
-   receipt.
+4. **Promote.** After the mirror holds the release, merge the reviewed allocation PR. The index workflow verifies the designated rehearsal and published bytes before scheduling the signer. Asset publication alone never changes the index.
 
 The trusted prepare job verifies the workflow run is the intended dispatch on
 `master`, the run attempt and commit, the current reviewed candidate, the
@@ -368,18 +363,7 @@ from `untrusted_rehearsal` and no owner approval can be inferred from it.
 
 ### Operations
 
-Each run of the channel workflow is one of these, and every one needs a manual
-dispatch on `master` and this run's approval.
-
-| Operation | What it does |
-| --- | --- |
-| `release` | Publishes trusted-checked candidate assets after owner approval. Does not touch the index. |
-| `promote` | Lists an owner-approved, published, mirrored release in the index. Uses the next exact PR allocation. |
-| `revoke` | Withdraws a release, naming the listed release affected machines move to and a public, credential-free reason. Uses the next exact PR allocation. |
-| `resume` | Reuses the original run's signed artifact at the same SHA, after fresh personal approval. Never signs. |
-
-Nothing renews an index. If the artifact was lost, repeat the qualified operation
-on the same allocated bytes; never assign the sequence to another payload.
+Asset publication is independent. For the index, **promotion and withdrawal use the same allocation PR**. Merge adds one canonical payload at the next sequence; no index dispatch, approval dialog, receipt PR or renewal follows. A withdrawal names its fallback and a public reason. After a failed run, rerun **all jobs of the original push** (including signing), not a different commit. The allocation is unchanged; deterministic signing reproduces the identical envelope.
 
 **What a client without the newest index does.** It keeps following the index
 it has. If that index lists a release that a later index withdrew, the client
@@ -413,57 +397,46 @@ restore pinned bytes but cannot promote a release or undo a withdrawal.
 
 ### Hosted signer and writer
 
-The hosted workflow is disabled by default. Its ledger is the complete,
-protected first-parent history of `master`, not a host directory. Before the root
-can land, the owner must verify required PR review, no force pushes/deletions or
-bypass on master, and distinct named-reviewer environments limited to the master
-branch. The signer environment has only a dedicated channel signing credential;
-the writer has only its separate index credential. The owner explicitly enables
-the hosted path only after the public root and protections are reviewed.
+The index workflow is disabled until commissioning. Add exactly one new file at
+`patches/model-hub-engine-channel-ledger/<16-digit-sequence>.payload.json`, starting at 1.
+Use the exact bytes returned by `plan_payload`, without an extra newline. For promotion,
+put `Engine-Rehearsal: <run-id>` in the reviewed **head commit message**. An editable PR
+body is not evidence. Existing allocations must not be modified, renamed or deleted.
 
-Each allocation PR adds the exact payload as
-`patches/model-hub-engine-channel-ledger/<16-digit-sequence>.payload.json`, starting
-at 1. No extra fields or newline: use the bytes returned by `plan_payload`. Existing
-records must never be edited, renamed or removed. After verifying the rehearsal,
-the approved signer independently compares the allocation with the requested change,
-signs only matching bytes and verifies the signature against the public root.
-One lead dispatch of `promote` or `revoke` makes both protected environments
-pending after trusted preparation. In **Review deployments**, the owner selects
-both and approves once. The GitHub UI ceremony must be verified at commissioning;
-hermetic CI cannot attest to a live environment approval. The writer has no signer
-dependency in its job graph: it waits at most five minutes for the immutable
-signed artifact, verifies its repository, workflow, run, first attempt, SHA,
-sequence, allocation digest, archive digest, signature and exact payload, then
-uses conditional replacement and proves public read-back. No receipt PR or second
-routine dispatch. All recovery requires a **new dispatch and fresh approvals**:
-`resume` names the original run ID at the same SHA to reuse its artifact. If lost
-or expired, repeat the same promotion/withdrawal; the pinned signer deterministically
-signs only those exact allocated bytes. Actions reruns are refused because the
-approval history is per run, not per attempt. An unexpected public/stored index,
-incomplete history or uncertain ledger is a stop.
+On a master push, the job without signing or bucket credentials binds each actual ledger
+addition to the corresponding merged PR, file blob, reviewed head and required CI. A
+merge-group test is not a landing. The signer runs pinned code on a separate runner.
+The writer independently verifies the run/attempt-bound artifact, its archive digest,
+client signature and exact allocated payload. It waits for the exact predecessor,
+uses its ETag for replacement, and verifies both bucket and public bytes. No global
+concurrency group coalesces withdrawals. A denied read, failed conditional write or
+superseding version is not authority to retry without the check.
+
+**Trust boundary:** anyone who can change the master workflows is trusted with signing.
+These checks prevent accidental publication through the standard workflow; they cannot
+isolate its authors. A compromised signing key requires replacing the client trust root.
+Only the dedicated upload step uses the existing mirror repository credentials. Those
+credentials have bucket-wide write access: leakage can damage other releases, including
+the application update index and wheels, but cannot forge an engine signature. The
+exact object key is a client restriction, not a server-side permission. The ordinary
+release mirror's index exclusion is unchanged.
 
 ### Commissioning (owner-held, not done)
 
-The code alone grants no authority. Before the separate public-root PR, attest
-to the actual master protections, denial of force-push and deletion, exact-master
-environment policies, the owner's personal (not agent-accessible) approval
-identity, and isolation of the two credentials. Do not assume a GitHub account
-shared with an agent proves a human approved a job. Investigate any gap before
-commissioning. No runner group, signing host or on-host ledger is required.
+Production key generation is a separate owner operation **after the trusted signer
+has merged** and the release lead has notified Product. This PR does not generate a
+production key, set credentials, ship a root, enable the workflow or publish an index.
 
 The owner generates a dedicated fresh key using the reviewed hosted helper
 (`generate`, an explicit `--avault` executable and a new private `--output` file).
 The generator needs avault 0.1.11 or later; the CI exercise uses 0.1.11 and the
 hosted signer and oldest client verifier use the pinned 0.1.10 binary. Only the
-compressed public key is printed. The owner imports the whole credential file
-into the signer environment without printing or transmitting it to an agent.
+compressed public key is printed. The owner configures the signer credential without printing or transmitting it to an agent.
 The private runbook holds the exact setup commands. Only the public key ID,
 compressed public key and genesis sequence floor belong in the root PR.
 
 The isolated contract test verifies disposable key generation, import, signature
-verification and deterministic re-signing; it does not create environments or
-prove the live approval ceremony. Never enable the hosted path, dispatch a
-production trial, or treat machine-generated approval as an owner sign-off.
+verification and deterministic re-signing; it never exercises a production key or bucket.
 
 ## Managed-runtime manifests
 

@@ -1016,10 +1016,11 @@ class FakeBucket:
 
     def __call__(self, command):
         verb = command[2]
-        if verb == "list-objects-v2":
-            listing = {"Contents": [{"Key": producer.INDEX_KEY, "Size": len(self.stored)}]} if self.stored is not None else {}
-            return subprocess.CompletedProcess(command, 0, json.dumps(listing), "")
+        assert verb in {"get-object", "put-object"}
+        assert command[command.index("--key") + 1] == producer.INDEX_KEY
         if verb == "get-object":
+            if self.stored is None:
+                return subprocess.CompletedProcess(command, 254, "", "An error occurred (NoSuchKey) when calling the GetObject operation: missing")
             Path(command[command.index("json") + 1]).write_bytes(self.stored)
             return subprocess.CompletedProcess(command, 0, json.dumps({"ETag": self.etag()}), "")
         assert verb == "put-object"
@@ -1036,6 +1037,17 @@ class FakeBucket:
         self.stored = Path(command[command.index("--body") + 1]).read_bytes()
         self.version += 1
         return subprocess.CompletedProcess(command, 0, "{}", "")
+
+
+@pytest.mark.parametrize("code,operation,rc", [("403", "GetObject", 254), ("AccessDenied", "GetObject", 254),
+                                             ("404", "HeadObject", 254), ("404", "GetObject", 1)])
+def test_failed_exact_read_is_not_authority_for_a_genesis_write(code, operation, rc) -> None:
+    def denied(command):
+        assert command[2] == "get-object" and command[command.index("--key") + 1] == producer.INDEX_KEY
+        return subprocess.CompletedProcess(command, rc, "", f"An error occurred ({code}) when calling the {operation} operation: refused")
+
+    with pytest.raises(producer.ProducerError, match="could not be read"):
+        producer.IndexBucket("avibe", "https://example.invalid", denied).read()
 
 
 def _envelope(signer: Signer, current, operation, *, sequence=None) -> bytes:
@@ -1278,8 +1290,8 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
     workflow = _jobs()
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
-    assert inputs["operation"]["options"] == list(producer.OPERATION_POLICY)
-    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rollback_to", "reason", "source_run_id"}
+    assert inputs["operation"]["options"] == ["release"]
+    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id"}
     # Creating a ledger is owner commissioning, run by hand; no step of this workflow reaches it.
     scripts = "\n".join(step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"])
     for forbidden in ("initialize-ledger", "--first-sequence", "first_publication", "restore-ledger"):
@@ -1296,11 +1308,7 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
 
 def test_every_privileged_job_follows_authorization_and_proves_approval_before_its_first_privileged_step() -> None:
     jobs = _jobs()["jobs"]
-    privileged = {
-        "release": producer.WRITER_ENVIRONMENT,
-        "sign": producer.SIGNER_ENVIRONMENT,
-        "publish": producer.WRITER_ENVIRONMENT,
-    }
+    privileged = {"release": producer.WRITER_ENVIRONMENT}
 
     assert {name for name, job in jobs.items() if "environment" in job} == set(privileged)
     for name, environment in privileged.items():
@@ -1319,26 +1327,39 @@ def test_every_privileged_job_follows_authorization_and_proves_approval_before_i
 
 
 def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither_key_nor_ledger() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    jobs = _jobs()["jobs"]
+    index = WORKFLOW.with_name("model-hub-engine-index.yml")
+    text = index.read_text(encoding="utf-8")
+    workflow = yaml.safe_load(text)
+    jobs = workflow["jobs"]
+    assert workflow[True] == {"push": {"branches": ["master"], "paths": ["patches/model-hub-engine-channel-ledger/**"]}}
+    assert set(jobs) == {"prepare", "sign", "publish"}
+    assert "concurrency" not in workflow and workflow["permissions"] == {}
+    assert all("environment" not in job for job in jobs.values())
+    assert "secrets." not in json.dumps(jobs["prepare"])
 
     def mentions(job: str, needle: str) -> bool:
         return needle in json.dumps(jobs[job])
 
     assert jobs["sign"]["runs-on"] == "ubuntu-latest"
     assert mentions("sign", "secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE") and not mentions("sign", "AWS_")
-    for name in ("authorize", "prepare", "release", "publish"):
+    for name in ("prepare", "publish"):
         assert not mentions(name, "HOSTED_SIGNING_BUNDLE")
-    assert "secrets.R2_" not in text and text.count("secrets.MODEL_HUB_ENGINE_CHANNEL_R2_") == 3
-    assert jobs["publish"]["if"] == jobs["sign"]["if"]
-    assert jobs["publish"]["needs"] == jobs["sign"]["needs"] == ["authorize", "prepare"]
+    upload = jobs["publish"]["steps"][-1]
+    assert "model_hub_engine_index.py publish" in upload["run"]
+    for variable, secret in (("AWS_ACCESS_KEY_ID", "R2_ACCESS_KEY_ID"), ("AWS_SECRET_ACCESS_KEY", "R2_SECRET_ACCESS_KEY"),
+                             ("R2_ACCOUNT_ID", "R2_ACCOUNT_ID")):
+        expression = "${{ secrets." + secret + " }}"
+        assert upload["env"][variable] == expression and text.count(expression) == 1
+    assert text.count("secrets.R2_") == 3 and "secrets.MODEL_HUB_ENGINE_CHANNEL_R2_" not in text
+    assert jobs["sign"]["needs"] == "prepare" and jobs["publish"]["needs"] == ["prepare", "sign"]
+    assert all("if" not in jobs[name] for name in ("sign", "publish"))
     for name in ("sign", "publish"):
         tools, data, *_ = jobs[name]["steps"]
         assert re.fullmatch("[a-f0-9]{40}", tools["with"]["ref"]) and tools["with"]["path"] == "tools"
         assert data["with"]["path"] == "ledger" and data["with"]["fetch-depth"] == 0
         assert not mentions(name, "download-artifact") and not mentions(name, "python3 ledger/")
     assert all(job.get("permissions", {}).get("contents") != "write" for name, job in jobs.items() if name != "release")
-    assert mentions("sign", "needs.prepare.outputs.baselines")
+    assert mentions("sign", "needs.prepare.outputs.sequences")
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:
