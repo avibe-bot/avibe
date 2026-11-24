@@ -1019,9 +1019,11 @@ To look again:
 `vibe remote rebind --help` and the changed lines of `vibe remote pair --help`
 are in `vibe/cli.py` (`_remote_rebind_help_text`, `_remote_pair_examples_text`).
 They carry the same sentences as C2, D1 and F1 in short form: the names say 30
-days, the browser way carries Product's sentence, and the pair help says that
-pairing over a bound computer replaces the binding, signs every remote device
-out, and leaves remote access off where it was off.
+days, the browser way carries Product's sentence (signed-in devices reconnect by
+themselves), and the pair help says that pairing over a bound computer replaces
+the binding: if the address stays the same, signed-in devices reconnect by
+themselves; if it changes, the new address has to be opened on them; and remote
+access stays off where it was off (lead, November 24).
 
 ## What was decided, and what is open
 
