@@ -18,6 +18,8 @@ pub struct PathStatus {
     pub preferred: PreferredPath,
     pub sequence: u64,
     pub closure: u64,
+    /// Cumulative failed strict CONNECT opens, not closures of live streams.
+    pub strict_failures: u64,
 }
 impl PathStatus {
     pub(super) fn publish(tx: &watch::Sender<Self>, path: Option<SelectedPath>, closed: bool) {
@@ -51,6 +53,18 @@ pub struct Handover {
 impl Handover {
     fn owned_listener(&self) -> Option<Arc<ListenerAccess>> {
         self.listener.upgrade().filter(|l| l.owned())
+    }
+    /// Select the policy for subsequent authenticated CONNECTs. Pending opens
+    /// retain their policy and established streams are never migrated.
+    pub fn set_direct_only(&self, enabled: bool) {
+        if let Some(listener) = self.owned_listener() {
+            listener.policy.set_direct_only(enabled);
+        }
+    }
+    /// Retire all public legs of this session (including setup and busy ones),
+    /// and fence late public commits. The count is local, not peer acknowledgement.
+    pub fn close_public(&self) -> usize {
+        self.owned_listener().map_or(0, |l| l.policy.close_public())
     }
     /// Independently usable while the session task holds its Client for refresh.
     pub fn window_credential(&self, window: &str) -> Option<WindowRegistration> {

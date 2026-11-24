@@ -5,7 +5,10 @@ use super::{
     connect::{parse_connect, Authority, Head},
     credentials::Windows,
     public,
-    transport::{Link, Stream},
+    quiet::{PublicTicket, SessionPolicy},
+    strict,
+    transport::{Committed, Link, Stream},
+    PathStatus,
 };
 use std::{
     future::Future,
@@ -37,6 +40,7 @@ pub(super) struct Listener {
 // the owner's decision to retire. Only Listener owns shutdown.
 pub(super) struct ListenerAccess {
     pub windows: Arc<Windows>,
+    pub(super) policy: SessionPolicy,
     retired: AtomicBool,
     health: watch::Receiver<()>,
     task: JoinHandle<()>,
@@ -63,8 +67,18 @@ impl Listener {
             self.access.task.abort();
         }
     }
-    pub(super) async fn bind(host: Authority, links: watch::Receiver<Option<Arc<Link>>>) -> Option<Self> {
-        Self::bind_with_port(host, links, |h, port| async move { public::open(&h, port).await }).await
+    pub(super) async fn bind(
+        host: Authority,
+        links: watch::Receiver<Option<Arc<Link>>>,
+        status: watch::Sender<PathStatus>,
+    ) -> Option<Self> {
+        Self::bind_with_port(
+            host,
+            links,
+            status,
+            |h, port| async move { public::open(&h, port).await },
+        )
+        .await
     }
     pub(super) fn is_alive(&self) -> bool {
         self.access.is_alive()
@@ -76,13 +90,14 @@ impl Listener {
     pub(super) async fn bind_via<F, Fut>(
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
+        status: watch::Sender<PathStatus>,
         open_public: F,
     ) -> Option<Self>
     where
         F: Fn(Authority) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Option<TcpStream>> + Send + 'static,
     {
-        Self::bind_with_port(host, links, move |h, _| {
+        Self::bind_with_port(host, links, status, move |h, _| {
             let f = open_public(h);
             async move { f.await.ok_or(public::OpenError::Unreachable) }
         })
@@ -91,6 +106,7 @@ impl Listener {
     async fn bind_with_port<F, Fut>(
         host: Authority,
         links: watch::Receiver<Option<Arc<Link>>>,
+        status: watch::Sender<PathStatus>,
         open_public: F,
     ) -> Option<Self>
     where
@@ -107,6 +123,10 @@ impl Listener {
         let accept_fault = Arc::new(tokio::sync::Notify::new());
         #[cfg(test)]
         let fault = accept_fault.clone();
+        let policy = SessionPolicy::default();
+        let accept_policy = policy.clone();
+        let timing = strict::Timing::default();
+        let boot_clock = super::clock::Clock::default();
         let task = tokio::spawn(async move {
             let _live = live;
             let mut clients = JoinSet::new();
@@ -124,10 +144,24 @@ impl Listener {
                 let keys=keys.clone();
                 let links = links.clone();
                 let dial = open_public.clone();
+                let policy = accept_policy.clone();
+                let status = status.clone();
+                let budget = timing.strict_open;
+                let clock = boot_clock.clone();
                 clients.spawn(async move {
+                    let mut failed = false;
                     serve(socket, &h, &keys, || async {
+                        let Some(ticket) = policy.sample() else {
+                            let host = &h;
+                            let opened = strict::open(links.clone(), &clock, budget, |l| async move {
+                                let stream = l.open(host).await?;
+                                Some(Backend::Direct(stream, l.commit_stream()?))
+                            }).await;
+                            failed = opened.is_none();
+                            return opened;
+                        };
                         let link = links.borrow().clone();
-                        let fallback = async { dial(h.clone(), port).await.map(Backend::Public) };
+                        let fallback = async { dial(h.clone(), port).await.map(|s| Backend::Public(s, ticket)) };
                         match link {
                             Some(l) if l.usable() => {
                                 l.plan
@@ -138,9 +172,11 @@ impl Listener {
                                     .await
                             }
                             _ => timeout(Duration::from_secs(8), fallback).await.ok()?.ok(),
-                        }
+                        }?.commit()
                     })
                     .await;
+                    // Never publish under the registration validity read lock.
+                    if failed { status.send_modify(|s| s.strict_failures = s.strict_failures.saturating_add(1)); }
                 });
             }
             // No new accepts. Notify route owners before draining live streams.
@@ -154,6 +190,7 @@ impl Listener {
                 windows,
                 task,
                 health,
+                policy,
                 retired: AtomicBool::new(false),
             }),
             port,
@@ -184,9 +221,17 @@ async fn accept_with_retry<T, F: Future<Output = std::io::Result<T>>>(
         }
     }
 }
-enum Backend {
-    Direct(Stream, Arc<Link>),
-    Public(TcpStream),
+enum Backend<G = Committed> {
+    Direct(Stream, G),
+    Public(TcpStream, PublicTicket),
+}
+impl Backend<Arc<Link>> {
+    fn commit(self) -> Option<Backend> {
+        match self {
+            Self::Direct(s, link) => Some(Backend::Direct(s, link.commit_stream()?)),
+            Self::Public(s, ticket) => Some(Backend::Public(s, ticket)),
+        }
+    }
 }
 async fn serve<F: Future<Output = Option<Backend>>>(
     mut browser: TcpStream,
@@ -231,19 +276,17 @@ async fn serve<F: Future<Output = Option<Backend>>>(
                     .await;
                 return;
             };
-            let (mut stream, _direct, public_copy) = match backend {
-                Backend::Direct(s, link) => {
-                    let Some(guard) = link.commit_stream() else {
+            let (mut stream, _direct) = match backend {
+                Backend::Direct(s, guard) => (s, guard),
+                Backend::Public(s, ticket) => {
+                    if let Some(copy) = ticket.commit(&grant.legs, &browser, &s) {
+                        copy.serve(browser, s, &data[end..]).await;
+                    } else {
                         let _ = browser
                             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                             .await;
-                        return;
-                    };
-                    (s, Some(guard), None)
-                }
-                Backend::Public(s) => {
-                    let copy = grant.legs.commit(&browser, &s);
-                    (Box::new(s) as Stream, None, Some(copy))
+                    }
+                    return;
                 }
             };
             if browser
@@ -254,11 +297,7 @@ async fn serve<F: Future<Output = Option<Backend>>>(
             {
                 return;
             }
-            if let Some(copy) = public_copy {
-                copy.copy(browser, stream).await;
-            } else {
-                let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
-            }
+            let _ = tokio::io::copy_bidirectional(&mut browser, &mut stream).await;
         })
         .await;
 }
@@ -279,7 +318,11 @@ mod tests {
     async fn authenticated_connect_without_a_backend_returns_502_then_closes() {
         let host = Authority::managed("desk-app.avibe.bot").unwrap();
         let (_tx, rx) = watch::channel(None);
-        let l = Listener::bind_via(host.clone(), rx, |_| ready(None)).await.unwrap();
+        let l = Listener::bind_via(host.clone(), rx, watch::channel(PathStatus::default()).0, |_| {
+            ready(None)
+        })
+        .await
+        .unwrap();
         let mut browser = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
         let request = format!(
             "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
