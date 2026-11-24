@@ -5913,7 +5913,7 @@ def pending_pairing_record_exists() -> bool:
 
 
 def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
-    """Project advisory local actions, never journal credentials or provenance.
+    """Project the local operation owner and actions, never journal credentials.
 
     Atomic publication permits a read-only snapshot here. ``pair`` must still
     re-read and validate ownership under the configuration lock before acting.
@@ -5945,14 +5945,13 @@ def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
         can_resume = current_fingerprint == record["target_fingerprint"] or (
             phase == "redeemed" and current_fingerprint == record["source_fingerprint"]
         )
-    if replay.get('replay_state') == 'terminated':
-        replay['operation_owner'] = ('desktop_app' if record.get('desktop_enrollment') else
-                                     'personal_claim' if record.get('personal_claim') else 'cli')
     if can_resume and phase in {'redeemed', 'applied', 'retirement_pending'}:
         replay['replay_state'] = 'local_archive'
     return {
         "phase": phase,
         "can_resume": can_resume,
+        "operation_owner": ("desktop_app" if record.get("desktop_enrollment") else
+                            "personal_claim" if record.get("personal_claim") else "cli"),
         **replay,
     }
 

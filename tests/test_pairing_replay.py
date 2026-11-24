@@ -68,7 +68,8 @@ def test_retry_from_disk_uses_identical_wire_request_and_safe_log(setup_replay, 
     wire.status, wire.body = status, body
     with caplog.at_level(logging.INFO, logger='vibe.pairing_replay'):
         assert post(payload).get_json()['error'] == 'pairing_redeem_indeterminate'
-        assert view() == dict(phase='prepared', can_resume=True, replay_state='scheduled', next_retry_at=clock[0]+2)
+        assert view() == dict(phase='prepared', can_resume=True, operation_owner='desktop_app',
+                              replay_state='scheduled', next_retry_at=clock[0]+2)
         replay.tick()
         assert len(wire.sent) == 1
         wire.status, wire.body = 200, json.dumps(_response('replayed')).encode()
@@ -137,6 +138,21 @@ def test_exhaustion_survives_restart_manual_attempt_does_not_reset_budget(setup_
     assert len(wire.sent) == before + 1 and view()['replay_state'] == 'manual'
 
 
+def test_owner_http_status_keeps_desktop_ownership_when_retries_go_manual(setup_replay, desktop_host):
+    wire, clock, payload, post = setup_replay
+    post(payload)
+
+    def status():
+        return desktop_host.get('/api/remote-access/status').get_json()['pending_pairing']
+
+    scheduled = status()
+    assert (scheduled['operation_owner'], scheduled['replay_state']) == ('desktop_app', 'scheduled')
+    clock[0] = replay._state(ra._read_pending_pairing_record()[0])['deadline'] + 1
+    manual = status()
+    assert manual == dict(phase='prepared', can_resume=True, operation_owner='desktop_app', replay_state='manual')
+    assert len(wire.sent) == 1
+
+
 def test_rate_limit_advice_is_not_shortened(setup_replay):
     wire, clock, payload, post = setup_replay
     wire.status, wire.advice = 429, '90'
@@ -169,7 +185,8 @@ def test_upgrade_cannot_distinguish_legacy_deliveries(setup_replay, monkeypatch,
     record['prepared_at'] = clock[0] - age
     ra._write_pending_pairing_record(record)
     replay._path().unlink()
-    assert view() == dict(phase='prepared', can_resume=False, replay_state='needs_reconciliation')
+    assert view() == dict(phase='prepared', can_resume=False, replay_state='needs_reconciliation',
+                          operation_owner='desktop_app')
     before = ra._pending_pairing_path().read_bytes()
     for advance in (0, 60, 901):
         clock[0] += advance
@@ -209,7 +226,8 @@ def test_received_success_cannot_be_automatically_redeemed_again(setup_replay, m
         return write(record)
     monkeypatch.setattr(ra, '_write_pending_pairing_record', fail_archive)
     assert post(payload).get_json()['pairing']['recoverable'] is False
-    assert view() == dict(phase='prepared', can_resume=False, replay_state='needs_reconciliation')
+    assert view() == dict(phase='prepared', can_resume=False, replay_state='needs_reconciliation',
+                          operation_owner='desktop_app')
     clock[0] += 120
     replay.tick()
     assert post({}).get_json()['error'] == 'pairing_needs_reconciliation'

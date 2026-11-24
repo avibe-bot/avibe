@@ -275,6 +275,7 @@ def test_http_failure_reload_and_keyless_recovery_keep_redeemed_credentials(
     projection = fresh.get("/api/remote-access/status").get_json()["pending_pairing"]
     assert projection == {
         "phase": "redeemed" if failure_point == "save" else "applied", "can_resume": True,
+        "operation_owner": "cli",
         "replay_state": "local_archive",
     }
     second = fresh.post(
@@ -324,7 +325,7 @@ def test_pending_status_projects_only_phase_and_action(pairing_host, phase):
         claim["retirement"] = {"kind": "definitive_redeem_failure", "error": "invalid_pairing_key"}
     remote_access._write_pending_pairing_record(claim)
     assert remote_access.pending_pairing_status(V2Config.load()) == {
-        "phase": phase, "can_resume": phase == "retirement_pending",
+        "phase": phase, "can_resume": phase == "retirement_pending", "operation_owner": "cli",
         **({"replay_state": "local_archive"} if phase == "retirement_pending" else {}),
     }
     remote_access._pending_pairing_path().write_text("{invalid")
@@ -421,7 +422,7 @@ def test_owner_status_advertises_only_identity_valid_recovery(
     response = owner.get("/api/remote-access/status")
     assert response.status_code == 200
     assert response.get_json()["pending_pairing"] == {
-        "phase": phase, "can_resume": can_resume,
+        "phase": phase, "can_resume": can_resume, "operation_owner": "cli",
         **({"replay_state": "local_archive"} if can_resume else {}),
     }
     assert journal.read_bytes() == original_record
@@ -441,7 +442,7 @@ def test_owner_status_does_not_offer_resume_without_readable_config(pairing_host
     response = ui_server.app.test_client().get("/api/remote-access/status")
     assert response.status_code == 200
     assert response.get_json()["pending_pairing"] == {
-        "phase": "redeemed", "can_resume": False,
+        "phase": "redeemed", "can_resume": False, "operation_owner": "cli",
     }
     assert journal.read_bytes() == original_record
 

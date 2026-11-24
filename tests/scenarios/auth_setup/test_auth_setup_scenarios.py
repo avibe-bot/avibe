@@ -1333,7 +1333,7 @@ def test_cloud_pairing_recovery_closed_loop(monkeypatch, tmp_path, capsys, consu
         else:
             client = app.test_client()
             pending = client.get("/api/remote-access/status").get_json()["pending_pairing"]
-            assert pending == {"phase": "redeemed", "can_resume": True, "replay_state": "local_archive"}
+            assert pending == {"phase": "redeemed", "can_resume": True, "replay_state": "local_archive", "operation_owner": "cli"}
             response = client.post(
                 "/api/remote-access/vibe-cloud/pair",
                 json={"pairing_key": ""},

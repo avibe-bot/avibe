@@ -38,6 +38,7 @@ def test_explicit_key_leaves_settled_personal_request_with_its_owner(claim_peer,
     with monkeypatch.context() as patch:
         patch.setattr(remote_access, '_json_request', rejected)
         assert _claim()['code'] == 'pairing_recovery_required'
+        assert remote_access.pending_pairing_status(V2Config.load())['operation_owner'] == 'personal_claim'
         evidence = [remote_access._pending_pairing_path(), pairing_replay._path(), claims._marker()]
         before = [path.read_bytes() for path in evidence]
         decisions = list(claim_peer.decisions)
