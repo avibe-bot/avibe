@@ -1,0 +1,334 @@
+"""One connection, explicit half-duplex gates, no background speech replay."""
+from __future__ import annotations
+
+import asyncio
+import base64
+import contextlib
+import json
+import re
+import time
+from uuid import uuid4
+
+from aiohttp import WSMsgType, web
+
+from .codec import Codec, Utterance
+from .host import Host
+from .pairing import Pairing
+
+WAKE_IDS = {"xiaowai-xiaowai", "hi-xiaowai", "xiaowai-tongxue"}
+AUDIO = {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
+
+
+class ScopeEnded(ValueError):
+    """A device connection no longer owns permission to initiate work."""
+
+
+class ConnectionScope:
+    """One connection owns its guarded effects, tasks and host cleanup."""
+
+    def __init__(self, pairing, generation, device_id, authorization, ws, host):
+        self.pairing = pairing
+        self.generation = generation
+        self.device_id = device_id
+        self.authorization = authorization
+        self.open_attempted = False
+        self.ws, self.host = ws, host
+        self.tasks = set()
+        self.ended = False
+        self.conversation_id = None
+        self.cleanup_task = None
+
+    def spawn(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self.tasks.add(task)
+
+        def settled(done):
+            if not done.cancelled():
+                done.exception()  # Also consume failures that race scope shutdown.
+            self.tasks.discard(done)
+
+        task.add_done_callback(settled)
+        return task
+
+    async def _effect(self, factory):
+        async def invoke():
+            if self.ended or not self.pairing.accepts(
+                self.device_id, self.authorization, generation=self.generation
+            ):
+                raise ScopeEnded("device_scope_ended")
+            return await factory()
+        return await self.spawn(invoke())
+
+    async def call(self, action, **arguments):
+        if action not in {"open", "transcribe", "speech"}:
+            raise ValueError("invalid_scope_operation")
+
+        async def invoke():
+            if action == "open":
+                self.open_attempted = True
+            result = await self.host.call(action, **arguments)
+            if action == "open":
+                # Own cleanup before returning through any cancellable await.
+                self.conversation_id = result["conversation_id"]
+            return result
+        return await self._effect(invoke)
+
+    async def answer(self, conversation_id, request_id, text):
+        return await self._effect(lambda: self.host.answer(conversation_id, request_id, text))
+
+    async def prepare(self, request):
+        return await self._effect(lambda: self.ws.prepare(request))
+
+    async def send_json(self, value):
+        await self._effect(lambda: self.ws.send_json(value))
+
+    async def send_bytes(self, value):
+        await self._effect(lambda: self.ws.send_bytes(value))
+
+    async def watch(self):
+        while True:
+            if self.ended or not self.pairing.active(self.generation):
+                raise ScopeEnded("device_scope_ended")
+            await asyncio.sleep(0.25)
+
+    async def close(self):
+        if self.cleanup_task is None:
+            self.ended = True
+            self.cleanup_task = asyncio.create_task(self._close())
+        await asyncio.shield(self.cleanup_task)
+
+    async def _close(self):
+        self.ended = True
+        tasks = tuple(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.conversation_id is not None:
+            conversation_id, self.conversation_id = self.conversation_id, None
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.host.call("close", conversation_id=conversation_id), 2)
+        elif self.open_attempted:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.host.call("close_device", device_id=self.device_id), 2)
+        if self.ws.prepared:
+            await self.ws.close()
+
+
+class Conversation:
+    def __init__(self, ws, scope, *, inactivity: float = 20, threshold: int = 600, settling: float = 0.2, device_id: str = ""):
+        self.ws = ws
+        self.host = scope
+        self.scope = scope
+        self.inactivity = inactivity
+        self.threshold = threshold
+        self.settling = settling
+        self.device_id = device_id
+        self.conversation_id = None
+        self.session_id = str(uuid4())
+        self.request_id = ""
+        self.playback_id = ""
+        self.codec = Codec()
+        self.incoming: asyncio.Queue = asyncio.Queue(maxsize=12)
+
+    async def receive(self):
+        async for message in self.ws:
+            if message.type == WSMsgType.TEXT:
+                payload = json.loads(message.data)
+                if not isinstance(payload, dict):
+                    raise ValueError("invalid_control")
+                if payload.get("type") == "abort":
+                    raise ValueError("device_aborted")
+            elif message.type == WSMsgType.BINARY:
+                payload = message.data
+            else:
+                break
+            # Overflow terminates the connection; dropping control could reopen a stale gate.
+            self.incoming.put_nowait(payload)
+        raise ValueError("device_disconnected")
+
+    async def event(self, timeout: float):
+        return await asyncio.wait_for(self.incoming.get(), timeout)
+
+    async def send(self, kind: str, state: str, *, playback=False):
+        await self.scope.send_json({"type": kind, "state": state, "session_id": self.session_id,
+                                 "request_id": self.request_id,
+                                 **({"playback_id": self.playback_id} if playback else {})})
+
+    async def ack(self, kind: str, state: str, *, playback=False, discard_audio=False):
+        deadline = time.monotonic() + 5
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            event = await self.event(remaining)
+            if isinstance(event, bytes) and discard_audio:
+                continue
+            expected = {"type": kind, "state": state, "session_id": self.session_id,
+                        "request_id": self.request_id,
+                        **({"playback_id": self.playback_id} if playback else {})}
+            if not isinstance(event, dict) or any(event.get(k) != v for k, v in expected.items()):
+                raise ValueError("control_mismatch")
+            if state == "drained" and (
+                event.get("boundary") != "queues_empty_after_output_write"
+                or type(event.get("tail_guard_ms")) is not int or event["tail_guard_ms"] < 80
+            ):
+                raise ValueError("invalid_drain_evidence")
+            return
+
+    async def run(self):
+        hello = await self.event(10)
+        if (
+            not isinstance(hello, dict) or hello.get("type") != "hello" or hello.get("version") != 2
+            or hello.get("audio_params") != AUDIO
+            or not isinstance(hello.get("features"), dict)
+            or type(hello["features"].get("avibe_voice")) is not int
+            or hello["features"]["avibe_voice"] != 1
+        ):
+            raise ValueError("voice_capability_required")
+        await self.scope.send_json({"type": "hello", "version": 2, "transport": "websocket",
+                                 "session_id": self.session_id, "audio_params": AUDIO,
+                                 "avibe_voice": {"version": 1, "route_revision": 4}})
+        wake = await self.event(self.inactivity)
+        if (
+            not isinstance(wake, dict) or wake.get("type") != "listen" or wake.get("state") != "detect"
+            or type(wake.get("protocol_version")) is not int or wake["protocol_version"] != 1
+            or type(wake.get("route_revision")) is not int or wake["route_revision"] != 4
+            or wake.get("wakeword_id") not in WAKE_IDS
+            or wake.get("session_id") != self.session_id
+        ):
+            raise ValueError("invalid_wake")
+        opened = await self.host.call("open", device_id=self.device_id)
+        self.conversation_id = opened["conversation_id"]
+        for _ in range(128):
+            self.request_id = str(uuid4())
+            self.codec.decoder.reset_state()
+            await self.send("listen", "start")
+            await self.ack("listen", "start")
+            utterance = Utterance(self.threshold)
+            deadline = time.monotonic() + self.inactivity
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                event = await self.event(remaining)
+                if not isinstance(event, bytes):
+                    raise ValueError("unexpected_control")
+                if utterance.feed(self.codec.decode(event)):
+                    break
+            await self.send("listen", "stop")
+            await self.ack("listen", "stop", discard_audio=True)
+            frames = await asyncio.wait_for(self.reply_frames(utterance), 55)
+            if frames is None:
+                return
+            self.playback_id = str(uuid4())
+            await self.send("tts", "start", playback=True)
+            await self.ack("playback", "started", playback=True)
+            for frame in frames:
+                await self.scope.send_bytes(frame)
+                await asyncio.sleep(0.06)
+            await self.send("tts", "stop", playback=True)
+            await self.ack("playback", "drained", playback=True)
+            await asyncio.sleep(self.settling)
+
+    async def reply_frames(self, utterance: Utterance) -> list[bytes] | None:
+        transcript = await self.host.call("transcribe", audio=base64.b64encode(utterance.wav()).decode("ascii"))
+        text = transcript["text"]
+        if re.sub(r"[\s。！？,.!?，]", "", text) == "先不聊了":
+            return None
+        speech = await self.host.answer(self.conversation_id, self.request_id, text)
+        response = await self.host.call("speech", text=speech)
+        return self.codec.output_frames(base64.b64decode(response["audio"], validate=True))
+
+
+def create_app(pairing: Pairing, host=None, *, inactivity=20, threshold=600, settling=0.2,
+               provision=None, generation=None) -> web.Application:
+    generation = pairing.read().get("generation", 0) if generation is None else generation
+    app = web.Application()
+    connections: dict[web.WebSocketResponse, ConnectionScope] = {}
+    selected_host = host or Host()
+    # Only failed Authorization attempts consume this bounded, per-peer budget.
+    # Five failures impose a 60-second cooldown; a valid retry clears its count.
+    ota_failures: dict[str, tuple[int, float]] = {}
+    stopping = False
+
+    async def ota(request):
+        if stopping or not pairing.active(generation):
+            if provision is not None:
+                provision.close()
+            raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
+        device_id = request.headers.get("Device-Id", "")
+        authorization = request.headers.get("Authorization")
+        if authorization is not None:
+            now = time.monotonic()
+            for peer, (_, expiry) in tuple(ota_failures.items()):
+                if expiry <= now:
+                    del ota_failures[peer]
+            peer = request.remote or ""
+            count, expiry = ota_failures.get(peer, (0, now + 60))
+            if count >= 5 or (peer not in ota_failures and len(ota_failures) >= 64):
+                raise web.HTTPTooManyRequests(headers={"Cache-Control": "no-store", "Retry-After": "60"})
+            if len(request.headers.getall("Authorization")) != 1 or not pairing.accepts(device_id, authorization, generation=generation):
+                ota_failures[peer] = (count + 1, now + 60 if count == 4 else expiry)
+                raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
+            ota_failures.pop(peer, None)
+            # This is the actual local address, not the untrusted Host header or
+            # stale pairing artifact. No credential is echoed on rediscovery.
+            address = request.transport.get_extra_info("sockname") if request.transport else None
+            if not address:
+                raise web.HTTPServiceUnavailable(headers={"Cache-Control": "no-store"})
+            host, port = address[:2]
+            authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+            payload = {"websocket": {"url": f"ws://{authority}/device/ws", "version": 2}}
+        else:
+            # A present but wrong/empty bearer must never fall back to bootstrap.
+            payload = provision.response(device_id) if provision is not None else None
+        if payload is None:
+            raise web.HTTPForbidden(headers={"Cache-Control": "no-store"})
+        # The firmware's OTA check only receives local WebSocket configuration:
+        # no activation, MQTT, firmware update, instance or model credentials.
+        return web.json_response(payload, headers={"Cache-Control": "no-store"})
+
+    async def websocket(request):
+        device_id = request.headers.get("Device-Id", "")
+        authorization = request.headers.get("Authorization", "")
+        if stopping or not pairing.accepts(device_id, authorization, generation=generation):
+            raise web.HTTPUnauthorized()
+        if connections:
+            raise web.HTTPConflict()
+        ws = web.WebSocketResponse(max_msg_size=16384, heartbeat=15, timeout=1)
+        scope = ConnectionScope(pairing, generation, device_id, authorization, ws, selected_host)
+        connections[ws] = scope  # Reserve before the first await.
+        try:
+            await scope.prepare(request)
+            conversation = Conversation(ws, scope, inactivity=inactivity, threshold=threshold,
+                                        settling=settling, device_id=device_id)
+            tasks = [scope.spawn(conversation.receive()), scope.spawn(conversation.run()), scope.spawn(scope.watch())]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in done:
+                task.result()
+        except ScopeEnded:
+            if not ws.prepared:
+                # Returning an unprepared WebSocketResponse would let aiohttp
+                # prepare it automatically outside the connection's guard.
+                raise web.HTTPUnauthorized() from None
+        except (ValueError, KeyError, TypeError, asyncio.TimeoutError, asyncio.QueueFull, ConnectionError):
+            # Payload-free close, no transcripts, credentials or protocol bodies in logs.
+            pass
+        finally:
+            try:
+                await scope.close()
+            finally:
+                connections.pop(ws, None)
+        return ws
+
+    async def shutdown(_app):
+        nonlocal stopping
+        stopping = True
+        if provision is not None:
+            provision.close()
+        await asyncio.gather(*(scope.close() for scope in tuple(connections.values())))
+
+    app.router.add_get("/device/ws", websocket)
+    app.router.add_post("/device/ota", ota)
+    app.on_shutdown.append(shutdown)
+    return app

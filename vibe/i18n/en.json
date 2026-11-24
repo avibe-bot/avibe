@@ -1,4 +1,12 @@
 {
+  "device": {
+    "chatOnly": "I can chat and offer suggestions here. To have work performed, send the specific task in signed-in Avibe Web.",
+    "pluginMissing": "The optional avibe-device package is not installed in this Avibe environment.",
+    "expired": "Device voice request expired.",
+    "localOnly": "Device voice requires the local host.",
+    "invalidRequest": "Invalid device voice request.",
+    "unavailable": "Device voice request could not be completed."
+  },
   "systemSchedule": {
     "waitingForDevice": "Waiting for your device to return the result.",
     "enableOnDevice": "No phone that can receive this has Alarms and reminders turned on. Ask the user to turn it on in Devices before proposing another."
