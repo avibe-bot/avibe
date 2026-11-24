@@ -30,6 +30,8 @@ import {
   dependencyHasInstallAction,
   dependencyNeedsStartupRepair,
   dependencyNeedsUpgrade,
+  engineBuildVersion,
+  engineUpdatesApply,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
@@ -53,7 +55,12 @@ const DEP_META: Record<string, DepMeta> = {
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
 };
 
-export const SettingsDependenciesPage: React.FC = () => {
+type SettingsDependenciesPageProps = {
+  /** The Model Hub engine row's update strip (ui/design: settings/engine-updates/*). */
+  engineUpdates?: React.ComponentType<{ dep: DependencyItem }>;
+};
+
+export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> = ({ engineUpdates: EngineUpdates }) => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
@@ -111,7 +118,9 @@ export const SettingsDependenciesPage: React.FC = () => {
       return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
     }
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
-    return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
+    // The engine's channel builds differ by build revision, so its row names the running build.
+    const version = (EngineUpdates && engineUpdatesApply(d) && engineBuildVersion(d.active_release)) || d.version;
+    return version ? `${word} · v${String(version).replace(/^v/i, '')}` : word;
   };
 
   const statusVariant = (d: DependencyItem): 'secondary' | 'success' | 'warning' | 'destructive' => {
@@ -217,6 +226,9 @@ export const SettingsDependenciesPage: React.FC = () => {
             const persistedFailure = d.status === 'error' && d.reason
               ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
               : null;
+            const engineUpdates = EngineUpdates && engineUpdatesApply(d) ? EngineUpdates : null;
+            // A stopped engine (`blocked`) reads as an error with nothing to repair: the strip says why.
+            const engineStopped = Boolean(engineUpdates) && d.update_state === 'blocked';
             return (
               <SettingsResourceRow
                 key={id}
@@ -234,7 +246,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                 detail={
                   <>
                     {t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
-                    {d.id === 'model-hub-engine' && d.latest_version && (
+                    {d.id === 'model-hub-engine' && d.latest_version && !engineUpdates && (
                       <span className="mt-1 block font-mono text-[11px]">
                         {t('settings.dependencies.targetVersion', {
                           version: String(d.latest_version).replace(/^v/i, ''),
@@ -280,6 +292,10 @@ export const SettingsDependenciesPage: React.FC = () => {
                     {notice}
                     {persistedFailure && <div role="alert" className="mt-1 text-destructive-ink">{persistedFailure}</div>}
                   </div>
+                ) : engineUpdates && engineStopped ? (
+                  <div className="border-t border-destructive/30 pt-4">
+                    {React.createElement(engineUpdates, { dep: d })}
+                  </div>
                 ) : persistedFailure ? (
                   <div
                     role="alert"
@@ -290,6 +306,10 @@ export const SettingsDependenciesPage: React.FC = () => {
                 ) : d.id === 'avault' && d.authorization_required ? (
                   <div className="border-t border-border pt-3">
                     <AvaultAuthorizationNotice forceVisible />
+                  </div>
+                ) : engineUpdates && d.status === 'ready' ? (
+                  <div className="border-t border-border pt-4">
+                    {React.createElement(engineUpdates, { dep: d })}
                   </div>
                 ) : undefined}
               />

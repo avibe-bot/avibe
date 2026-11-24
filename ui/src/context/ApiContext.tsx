@@ -2371,7 +2371,26 @@ export type DependencyItem = {
   inspection_error?: { kind: string; message: string } | null;
   /** avault only: the binary cannot read the Vault key until the user authorizes it once. */
   authorization_required?: boolean;
+  /** Model Hub engine only: its own update channel (docs/plans/model-hub-engine-channel.md, section 5).
+   *  Releases are full build tags (`model-hub-engine-v8.0.63-2`). `latest_version` and `has_update`
+   *  above serve repair only; an update is offered from `available_release` and `update_state`. */
+  active_release?: string | null;
+  default_release?: string | null;
+  available_release?: string | null;
+  min_avibe_version?: string | null;
+  auto_update?: boolean;
+  update_state?: EngineUpdateState;
+  update_reason?: string | null;
+  last_checked_at?: string | null;
+  last_result?: string | null;
+  operation_id?: string | null;
 };
+
+export type EngineUpdateState =
+  | 'idle' | 'recovering' | 'checking' | 'up_to_date' | 'available' | 'requires_avibe_update'
+  | 'updating' | 'deferred' | 'applied' | 'rolling_back' | 'rolled_back' | 'withdrawing' | 'blocked'
+  | 'failed' | 'offline' | 'uncommissioned' | 'opted_out' | 'unavailable' | 'rejected'
+  | 'waiting_for_controller';
 
 /** avault's one-time macOS Keychain authorization (see vibe/avault_authorization.py). */
 export type AvaultAuthorizationAttempt = {
