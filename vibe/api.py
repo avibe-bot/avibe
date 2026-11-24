@@ -14271,7 +14271,7 @@ async def get_antigravity_auth_async() -> dict:
     cli_health = await detect_cli_async(configured_cli or default_cli, "antigravity")
     if cli_health["status"] == "ok":
         binary = cli_health["path"] or runtime_agent_cli_path(
-            configured_cli or default_cli, "antigravity", resolve_agent_paths=True
+            configured_cli or default_cli, default_cli, resolve_agent_paths=True
         )
         probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
     else:
