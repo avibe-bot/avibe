@@ -68,6 +68,7 @@ def render_engine_config(
     if host != "127.0.0.1":
         raise EngineStateError("model hub engine must bind to 127.0.0.1")
     payload: dict[str, Any] = {
+        "server": {"server-id": runtime_secrets.server_id},
         "host": host,
         "port": port,
         "tls": {"enable": False, "cert": "", "key": ""},

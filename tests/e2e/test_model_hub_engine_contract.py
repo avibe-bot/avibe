@@ -21,6 +21,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -128,10 +129,9 @@ def _secret_masked_sha(data: bytes) -> str:
 def test_engine_keeps_avibe_config_content_across_start_and_hot_reload(tmp_path, monkeypatch) -> None:
     """The engine applies Avibe's config.yaml as written, at start and on PUT reload.
 
-    Every load replaces the plaintext management key with a salted bcrypt hash
-    and re-encodes the file (CPA ``config_load.go``), so the bytes Avibe wrote
-    never survive a load. Everything else must: no migrated, dropped, added or
-    renamed setting, and the key Avibe holds must still authenticate.
+    CPA may re-encode YAML, hash the management key and persist its own server
+    identity. The identity must survive reload, all Avibe settings must survive
+    both loads, and the key held by Avibe must still authenticate.
     """
     written: dict[str, str] = {}
     original_write = engine_config.write_atomic
@@ -173,9 +173,16 @@ def test_engine_keeps_avibe_config_content_across_start_and_hot_reload(tmp_path,
         after_reload = config_path.read_bytes()
 
     evidence = {}
+    server_ids = []
     for phase, avibe_text, on_disk in (("start", start_text, after_start), ("reload", reload_text, after_reload)):
         rendered, plaintext = _without_secret(avibe_text)
         loaded, stored = _without_secret(on_disk.decode())
+        # Avibe supplies the same instance identity on every render. Check the
+        # effective identity as well as full document equality after load.
+        server_id = loaded.get("server", {}).get("server-id")
+        assert isinstance(server_id, str) and uuid.UUID(server_id).version == 4
+        assert str(uuid.UUID(server_id)) == server_id
+        server_ids.append(server_id)
         evidence[phase] = {
             "avibe_sha": _sha(avibe_text.encode()),
             "file_sha": _sha(on_disk),
@@ -187,8 +194,10 @@ def test_engine_keeps_avibe_config_content_across_start_and_hot_reload(tmp_path,
             "added_keys": sorted(set(loaded) - set(rendered)),
             "dropped_keys": sorted(set(rendered) - set(loaded)),
         }
+    evidence["stable_server_id"] = server_ids[0] == server_ids[1]
     evidence["get_config_shape"] = _shape(settings)
     _write_evidence(tmp_path, evidence)
+    assert evidence["stable_server_id"], "hot reload changed the engine server identity"
     for phase in ("start", "reload"):
         assert evidence[phase]["content_equal_without_secret"], evidence[phase]
         assert evidence[phase]["stored_secret_kind"] in {"bcrypt", "plaintext"}, evidence[phase]

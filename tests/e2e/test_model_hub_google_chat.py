@@ -148,13 +148,13 @@ async def _chat_gateway(tmp_path, monkeypatch, upstream, *, model="gemini-3-pro-
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize(("finish", "buffered_reason", "stream_reason"), [
     ("STOP", "stop", "stop"),
-    ("MAX_TOKENS", "max_tokens", "max_tokens"),
+    ("MAX_TOKENS", "length", "length"),
     ("SAFETY", "content_filter", "content_filter"),
 ])
 async def test_chat_google_text_finish_reason_and_usage(
     tmp_path, monkeypatch, stream, finish, buffered_reason, stream_reason,
 ):
-    """Record native_finish_reason too: CPA's public length value is not standard Chat; SAFETY maps to content_filter."""
+    """Chat normalizes the public finish reason; the native field retains the Google value."""
     requests = []
 
     async def upstream(request):
@@ -241,19 +241,17 @@ async def test_chat_google_tool_round_trip_restores_signature_and_explicit_carri
         )
         tool = copy.deepcopy(call_message["tool_calls"][0])
         tool.pop("index", None)
-        # The Chat output still lacks the signature; since v8.0.63 the engine
-        # restores it on replay itself. The input-carrier control below is
-        # deliberately separate.
-        assert THOUGHT_SIGNATURE not in json.dumps(frames)
-        assert "extra_content" not in tool
+        # v8.1.2 emits the provider signature on the public Chat tool call.
+        # Replay that exact carrier, and separately simulate a client that drops it.
+        assert tool["extra_content"]["google"]["thought_signature"] == THOUGHT_SIGNATURE
         assert tool["type"] == "function"
         assert tool["id"]
         assert tool["function"]["name"] == "weather"
         assert json.loads(tool["function"]["arguments"]) == TOOL_ARGS
         assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
         assert frames[-1]["usage"] == CHAT_USAGE
-        if supply_signature:
-            tool["extra_content"] = {"google": {"thought_signature": THOUGHT_SIGNATURE}}
+        if not supply_signature:
+            del tool["extra_content"]
         messages.extend([
             {"role": "assistant", "content": None, "tool_calls": [tool]},
             {"role": "tool", "tool_call_id": tool["id"], "content": TOOL_RESULT},
@@ -318,7 +316,7 @@ async def test_chat_google_stream_terminal_boundaries(tmp_path, monkeypatch, end
         ]
         # A finishReason completes the stream whether usage shares its frame,
         # follows it, or never arrives; usage alone does not.
-        assert reasons == ([("max_tokens", "max_tokens")] if complete else []), frames
+        assert reasons == ([("length", "max_tokens")] if complete else []), frames
         usages = [frame["usage"] for frame in frames if "usage" in frame]
         with_usage = {"same_frame", "usage_with_candidate", "usage_only"}
         assert usages == ([CHAT_USAGE] if ending in with_usage else []), frames

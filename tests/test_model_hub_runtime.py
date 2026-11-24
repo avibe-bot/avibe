@@ -1869,6 +1869,21 @@ def test_config_generation_is_private_and_never_logs_secrets(
         store.prepare_instance("install-1")
 
 
+def test_engine_server_identity_migration_keeps_legacy_credentials(tmp_path: Path) -> None:
+    store = EngineStateStore(tmp_path / "state")
+    directory, initial = store.prepare_instance("install-1")
+    path = directory / "runtime-secrets.json"
+    legacy = {"management_key": initial.management_key, "gateway_token": initial.gateway_token}
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+    _, migrated = store.prepare_instance("install-1")
+    assert migrated.management_key == initial.management_key
+    assert migrated.gateway_token == initial.gateway_token
+    assert EngineStateStore(store.root).prepare_instance("install-1")[1] == migrated
+    path.write_text(json.dumps({**legacy, "server_id": "invalid"}), encoding="utf-8")
+    with pytest.raises(EngineStateError, match="invalid engine server identity"):
+        store.prepare_instance("install-1")
+
+
 def test_engine_config_declares_text_only_input_only_on_openai_compatibility_models(
     tmp_path: Path,
 ) -> None:
