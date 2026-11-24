@@ -23,6 +23,7 @@ use std::time::Duration;
 
 pub mod app_lock;
 mod app_windows;
+mod device_description;
 pub mod direct;
 pub mod instance_client;
 mod instance_credentials;
@@ -2209,6 +2210,10 @@ fn build_main_child(
     // Its page is told this window's path, and may ask for a hand-over.
     if disposable {
         if let Some(script) = direct::shell::page_script(app, label, destination) {
+            builder = builder.initialization_script(script);
+        }
+        // And who this computer is, for that instance's device list.
+        if let Some(script) = device_description::script(app, destination) {
             builder = builder.initialization_script(script);
         }
     }

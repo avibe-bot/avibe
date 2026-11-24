@@ -438,6 +438,7 @@ pub(crate) fn init(app: &AppHandle, bundle: &Url) -> Result<(), ClientError> {
         .map_err(failure)?
         .join("instance-client.json");
     let mut store = ConnectionStore::new(path);
+    crate::device_description::prepare(app);
     let device_name = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| app.package_info().name.clone());
@@ -473,7 +474,7 @@ pub(crate) fn init(app: &AppHandle, bundle: &Url) -> Result<(), ClientError> {
             store,
             local_origin: app.state::<Shell>().active_origin.clone(),
         },
-        Arc::new(HttpTransport::new()?),
+        Arc::new(HttpTransport::new(&app.package_info().version.to_string())?),
         credentials,
         Arc::new(crate::instance_passkeys::NativePasskeys::new(app.clone())),
     );

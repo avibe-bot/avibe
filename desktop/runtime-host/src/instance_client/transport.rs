@@ -62,9 +62,14 @@ pub struct HttpTransport {
     client: reqwest::Client,
 }
 impl HttpTransport {
-    pub fn new() -> Result<Self, ClientError> {
+    /// `app_version` is the Desktop app's package version. Every request,
+    /// the instance's `/auth/callback` included, names the app as
+    /// `AvibeDesktop/<version>`: the instance labels the sign-in it records
+    /// from that (`vibe/device_metadata.py`). A label, never a credential.
+    pub fn new(app_version: &str) -> Result<Self, ClientError> {
         Ok(Self {
             client: reqwest::Client::builder()
+                .user_agent(format!("AvibeDesktop/{app_version}"))
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(20))
@@ -337,5 +342,49 @@ impl NativeSession {
             return Err(ClientError::new("instance_session_missing"));
         }
         Ok(cookies)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// The instance tells a Desktop sign-in from a browser's by this header
+    /// on its `/auth/callback`; without it the sign-in is listed as an
+    /// unnamed browser.
+    #[tokio::test]
+    async fn every_request_names_the_desktop_app_and_its_version() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 1024];
+            while !received.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "the request ended before its headers did");
+                received.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 302 Found\r\nLocation: /\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(received).unwrap()
+        });
+        let transport = HttpTransport::new("0.4.2-rc.3").unwrap();
+        let response = transport
+            .send(Request {
+                method: Method::GET,
+                url: Url::parse(&format!("http://{address}/auth/callback?code=c&state=s")).unwrap(),
+                headers: HeaderMap::new(),
+                body: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.status, 302);
+        let head = server.await.unwrap().to_ascii_lowercase();
+        let agents: Vec<&str> = head.lines().filter(|line| line.starts_with("user-agent:")).collect();
+        assert_eq!(agents, ["user-agent: avibedesktop/0.4.2-rc.3"], "{head}");
     }
 }

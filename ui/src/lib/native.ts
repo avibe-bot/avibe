@@ -77,12 +77,12 @@ export type NativeAppInfo = {
 };
 
 /**
- * `device.describe`: who this iPhone is, as the page reports it to the
- * instance's device list (`POST /api/devices/self`). Display and grouping
+ * `device.describe`: who this iPhone or computer is, as the page reports it to
+ * the instance's device list (`POST /api/devices/self`). Display and grouping
  * only. `installation_id` is derived per instance by the App.
  */
 export type NativeDeviceDescription = {
-  kind: 'iphone_app';
+  kind: 'iphone_app' | 'desktop_app';
   display_name: string;
   installation_id?: string;
   aliases: Array<{ source: 'health' | 'schedule'; id: string }>;
@@ -359,6 +359,15 @@ export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
 
 export async function nativeDeviceDescribe(params: { health_binding?: true } = {}): Promise<unknown> {
   return callNative<unknown>('device', 'device.describe', params);
+}
+
+/**
+ * The Desktop app's `device.describe`, given to the top document of its view of another computer's
+ * instance (desktop/src-tauri/src/device_description.rs); undefined anywhere else. Unchecked.
+ */
+export function desktopDeviceDescription(): unknown {
+  if (typeof window === 'undefined') return undefined;
+  return (window as unknown as { __AVIBE_DESKTOP_DEVICE__?: unknown }).__AVIBE_DESKTOP_DEVICE__;
 }
 
 /** Establishes a connection only; request completion comes from the instance API. */
