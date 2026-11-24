@@ -119,6 +119,7 @@ done < <(python3 - "$probe_dir/matrix.json" <<'PY'
 import json, sys
 for row in json.load(open(sys.argv[1])):
     ip = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
+    if row.get("companion"): print(ip, f"{row['companion']}.webkit-proxy.test")
     print(ip, f"{row['id']}.webkit-proxy.test")
 for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
     print("127.0.0.1", f"{case_id}.webkit-proxy.test")
@@ -145,13 +146,16 @@ for _ in {1..100}; do
   sleep 0.1
 done
 curl --max-time 2 --silent --fail http://127.0.0.1:18090/health | tee "$out/fixture-health.json"
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 4 and d["lifecycleCases"] == 3 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True and d["cases"] == 9 and d["lifecycleCases"] == 3 and len(d["listening"]) == 7 and len(d["originAddresses"]) == 2' "$out/fixture-health.json"
 bounded 20 python3 - "$probe_dir/matrix.json" <<'PY'
 import json, socket, sys
 for row in json.load(open(sys.argv[1])):
     host = row["id"] + ".webkit-proxy.test"
     expected = "127.0.0.2" if row["origin"] == "h2" else "127.0.0.1"
     actual = {r[4][0] for r in socket.getaddrinfo(host, 443, socket.AF_INET)}
+    if row.get("companion"):
+        other = row["companion"] + ".webkit-proxy.test"
+        assert {r[4][0] for r in socket.getaddrinfo(other, 443, socket.AF_INET)} == {expected}, other
     assert actual == {expected}, (host, expected, actual)
 for case_id in ("lifecycle-reload", "lifecycle-recreate", "lifecycle-relaunch"):
     host = case_id + ".webkit-proxy.test"

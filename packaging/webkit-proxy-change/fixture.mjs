@@ -16,7 +16,8 @@ const lifecycleCases = [
   {id: 'lifecycle-recreate', origin: 'h1', proxy: 'h1'},
   {id: 'lifecycle-relaunch', origin: 'h1', proxy: 'h1'},
 ];
-const byHost = new Map([...cases, ...lifecycleCases].map(c => [`${c.id}.webkit-proxy.test`, c]));
+const companions = cases.filter(c => c.companion).map(c => ({...c, id:c.companion}));
+const byHost = new Map([...cases, ...companions, ...lifecycleCases].map(c => [`${c.id}.webkit-proxy.test`, c]));
 const key = fs.readFileSync(`${out}/key.pem`);
 const cert = fs.readFileSync(`${out}/cert.pem`);
 const events = [];
@@ -296,10 +297,12 @@ const control = http.createServer(async (req,res) => {
       result = {ok:true, requests:events.filter(e => (e.event === 'request' || e.event === 'websocket')
         && e.id === url.searchParams.get('id'))};
     } else if (url.pathname === '/close-proxy') {
-      const host = url.searchParams.get('host'); const connections = [];
+      const host = url.searchParams.get('host'); const connections = []; const drained = [];
       for (const [id, entry] of proxyConnections) if (entry.host === host) {
+        drained.push(new Promise(resolve => entry.client.once('close', resolve)));
         connections.push(id); entry.client.destroy(); entry.upstream.destroy();
       }
+      await Promise.all(drained);
       result = log('proxy_forced_close', {ok:true, host, closed:connections.length, connections});
     } else if (url.pathname === '/close-origin') {
       const host = url.searchParams.get('host'); const connections = [];

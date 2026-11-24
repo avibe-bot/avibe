@@ -13,6 +13,7 @@ private struct ProbeCase: Decodable {
     let action: String
     let listener: String?
     let allowFailover: Bool?
+    let companion: String?
     var host: String { "\(id).webkit-proxy.test" }
 }
 
@@ -64,7 +65,11 @@ private final class Browser: NSObject, WKNavigationDelegate {
         self.fixture = fixture
         self.anchor = anchor
         store = WKWebsiteDataStore(forIdentifier: UUID())
-        if let initialRoute {
+        if let companion = fixture.companion {
+            let strict = Self.proxy(for: fixture.host, mode: "direct", allowFailover: false)
+            let normal = Self.proxy(for: "\(companion).webkit-proxy.test", mode: "direct", allowFailover: true)
+            store.proxyConfigurations = fixture.action == "strictFirst" ? [strict, normal] : [normal, strict]
+        } else if let initialRoute {
             store.proxyConfigurations = [Self.proxy(for: fixture.host, mode: initialRoute, allowFailover: fixture.allowFailover ?? false)]
         }
         let configuration = WKWebViewConfiguration()
@@ -92,14 +97,14 @@ private final class Browser: NSObject, WKNavigationDelegate {
         self.window = window
     }
 
-    func load(_ id: String, timeout: Double = 20) async throws {
+    func load(_ id: String, host: String? = nil, timeout: Double = 20) async throws {
         try await withCheckedThrowingContinuation { continuation in
             navigation = continuation
             navigationDeadline = Task { @MainActor [weak self] in
                 do { try await Task.sleep(for: .seconds(timeout)) } catch { return }
                 self?.completeNavigation(.failure(ProbeError("navigation timeout: \(id)")))
             }
-            webView.load(URLRequest(url: URL(string: "https://\(fixture.host)/page?id=\(id)")!))
+            webView.load(URLRequest(url: URL(string: "https://\(host ?? fixture.host)/page?id=\(id)")!))
         }
     }
 
@@ -131,6 +136,17 @@ private final class Browser: NSObject, WKNavigationDelegate {
         let continuation = javascript
         javascript = nil
         continuation?.resume(with: result)
+    }
+
+    func checkColdFallback() async throws {
+        let fresh = Browser(fixture: fixture, anchor: anchor)
+        await fresh.route("absent", allowFailover: true)
+        do {
+            try await fresh.load("\(fixture.id)-cold-positive")
+            let page = try await fresh.observe("cold-positive", expression: "window.probe.page")
+            guard page["route"] as? String == "origin" else { throw ProbeError("origin control failed") }
+        } catch { await fresh.close(); throw error }
+        await fresh.close()
     }
 
     func fetch(_ label: String) async throws -> [String: Any] {
@@ -312,7 +328,8 @@ final class WebKitProxyChangeTests: XCTestCase {
               "system":ProcessInfo.processInfo.operatingSystemVersionString, "cases":cases.count])
         var fixtureFailures = 0
         for fixture in cases {
-            let initialRoute = ["coldBeforeWebView", "fixedSilent"].contains(fixture.action) ? "direct" : nil
+            let initialRoute = fixture.action == "reverseAbsent" ? "absent"
+                : ["coldBeforeWebView", "fixedSilent", "rewriteSilent"].contains(fixture.action) ? "direct" : nil
             let browser = Browser(fixture: fixture, anchor: anchor, initialRoute: initialRoute)
             do {
                 try await run(fixture, browser)
@@ -443,7 +460,47 @@ final class WebKitProxyChangeTests: XCTestCase {
             guard newPID > 1, newPID != oldPID else { throw ProbeError("NetworkProcess restart not demonstrated") }
             _ = try await browser.observe("restart-page", expression:"window.probe.page")
             _ = try await browser.fetch("after-restart")
-        case "fixedSilent":
+        case "reverseAbsent":
+            for enabled in [false, true] {
+                let absent = try await control("/absent-check?host=\(fixture.host)")
+                guard absent["ok"] as? Bool == true else { throw ProbeError("listener not absent") }
+                if enabled { await browser.route("absent", allowFailover: true) }
+                let label = enabled ? "after-revert" : "before-revert"
+                do {
+                    try await browser.load("\(fixture.id)-\(label)")
+                } catch let error as NSError {
+                    // A browser-reported load failure is data; a harness timeout is not.
+                    guard error.domain == NSURLErrorDomain || error.domain == "WebKitErrorDomain" else { throw error }
+                    await browser.record(label, ["ok":false,"domain":error.domain,"code":error.code])
+                    continue
+                }
+                let page = try await browser.observe(label, expression: "window.probe.page")
+                guard enabled, page["route"] as? String == "origin" else {
+                    throw ProbeError("strict absent-listener precondition or origin evidence missing")
+                }
+            }
+            // The same hostname must be reachable in a fresh independently
+            // configured store, even if the already-loaded store stayed strict.
+            try await browser.checkColdFallback()
+        case "strictFirst", "normalFirst":
+            let other = try XCTUnwrap(fixture.companion) + ".webkit-proxy.test"
+            // One data store, one unchanged pair of routes, one proxy port. Each
+            // page fetch is same-origin. Record missed matches, too: skipping
+            // the other host on a mismatch would hide an order dependency.
+            for (role, host) in [("strict", fixture.host), ("normal", other)] {
+                try await browser.load("\(fixture.id)-\(role)-page", host: host)
+                let page = try await browser.observe("\(role)-page", expression: "window.probe.page")
+                _ = try await control("/proxy-mode?host=\(host)&mode=silent")
+                let proxy = try await control("/close-proxy?host=\(host)")
+                let origin = try await control("/close-origin?host=\(host)")
+                let viaProxy = page["route"] as? String == "proxy-backend"
+                let id = try XCTUnwrap(page[viaProxy ? "proxyConnection" : "tcpConnection"] as? String)
+                guard ((viaProxy ? proxy : origin)["connections"] as? [String])?.contains(id) == true else {
+                    throw ProbeError("live page socket was not closed")
+                }
+                _ = try await browser.fetch("\(role)-fetch")
+            }
+        case "fixedSilent", "rewriteSilent":
             try await browser.load("\(fixture.id)-failure-page")
             let page = try await browser.observe("failure-page", expression: "window.probe.page")
             guard page["route"] as? String == "proxy-backend", page["protocol"] as? String == "1.1" else {
@@ -451,7 +508,15 @@ final class WebKitProxyChangeTests: XCTestCase {
             }
             _ = try await control("/proxy-mode?host=\(fixture.host)&mode=silent")
             let closed = try await control("/close-proxy?host=\(fixture.host)")
-            guard (closed["closed"] as? Int ?? 0) > 0 else { throw ProbeError("no existing CONNECT closed") }
+            guard let old = page["proxyConnection"] as? String,
+                  (closed["connections"] as? [String])?.contains(old) == true else {
+                throw ProbeError("live CONNECT was not closed")
+            }
+            if fixture.action == "rewriteSilent" {
+                // Only the failover bit changes, after all the host's old
+                // CONNECTs have closed. Still the same store, WebView and port.
+                await browser.route("direct", allowFailover: false)
+            }
             _ = try await browser.fetch("failure-fetch")
         case "failure":
             try await browser.load("\(fixture.id)-failure-page")
