@@ -100,12 +100,35 @@ def wait_for_parent(fetch, *, allowed, parent, roots, verifier, timeout=600, sle
         value = fetch()
         current = None if value is None else producer.authenticate(value, roots=roots, verifier=verifier)
         if (current is None and parent is None) or (current and current.raw in allowed):
-            return
+            return current
         if current and (parent is None or current.sequence >= parent.sequence):
             raise hosted.Error("unexpected or superseding index; refusing stale publication")
         if time.monotonic() >= deadline:
             raise hosted.Error("predecessor not published; rerun the original push after recovery")
         sleep(5)
+
+
+def publish_batch(entries, *, bucket, roots, verifier, envelope_for, fetch_public=producer.fetch_public_index):
+    """One writer drains one landed push. Each public readback precedes the next PUT."""
+    def read():
+        stored = bucket.read()
+        return stored[0] if stored else None
+
+    parent = entries[0][3]
+    current = wait_for_parent(read, allowed=[row[4].raw for row in entries] + ([parent.raw] if parent else []),
+                              parent=parent, roots=roots, verifier=verifier)
+    for _, _, _, previous, payload, _ in entries:
+        # On recovery the authenticated origin can already hold an exact later
+        # member of this batch. Don't rewrite predecessors. Recheck the current
+        # member itself, including both reads, even if no PUT is necessary.
+        if current and payload.sequence < current.sequence:
+            continue
+        envelope = envelope_for(payload)
+        if producer.authenticate(envelope, roots=roots, verifier=verifier).raw != payload.raw:
+            raise hosted.Error("signed envelope differs from landed bytes")
+        producer.publish(envelope, bucket=bucket, roots=roots, verifier=verifier, fetch_public=fetch_public,
+                         guard=lambda stored, raw=payload.raw, prev=previous: hosted.check_published(
+                             stored, raw, prev.raw if prev else None, roots, verifier))
 
 
 def main(argv=None):
@@ -140,11 +163,11 @@ def main(argv=None):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fp:
             print("sequences=" + json.dumps([row[4].sequence for row in entries]), file=fp)
         return
-    seq = int(os.environ["ALLOCATION_SEQUENCE"])
-    parent, payload = next(row[3:5] for row in entries if row[4].sequence == seq)
     run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
-    name = artifacts.artifact_name(run, sha, seq, payload.raw, attempt=attempt)
     if args.role == "sign":
+        seq = int(os.environ["ALLOCATION_SEQUENCE"])
+        payload = next(row[4] for row in entries if row[4].sequence == seq)
+        name = artifacts.artifact_name(run, sha, seq, payload.raw, attempt=attempt)
         credential = json.loads(os.environ.pop("HOSTED_SIGNING_BUNDLE"))
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary)
@@ -157,20 +180,16 @@ def main(argv=None):
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fp:
             print(f"artifact_name={name}", file=fp)
         return
-    identifier, digest = artifacts.wait_for_artifact(qualification._api(token), run, sha, name, attempt=attempt)
-    envelope = artifacts.download(identifier, digest, token)
-    if producer.authenticate(envelope, roots=roots, verifier=verifier).raw != payload.raw:
-        raise hosted.Error("signed envelope differs from landed bytes")
+    def envelope_for(payload):
+        name = artifacts.artifact_name(run, sha, payload.sequence, payload.raw, attempt=attempt)
+        identifier, digest = artifacts.wait_for_artifact(qualification._api(token), run, sha, name, attempt=attempt)
+        return artifacts.download(identifier, digest, token)
+
     account = os.environ["R2_ACCOUNT_ID"]
     if not re.fullmatch(r"[0-9a-f]{32}", account):
         raise hosted.Error("unexpected writer endpoint")
     bucket = producer.IndexBucket("avibe", f"https://{account}.r2.cloudflarestorage.com", producer._run_command)
-    def read():
-        stored = bucket.read()
-        return stored[0] if stored else None
-    wait_for_parent(read, allowed=[payload.raw] + ([parent.raw] if parent else []), parent=parent, roots=roots, verifier=verifier)
-    producer.publish(envelope, bucket=bucket, roots=roots, verifier=verifier,
-                     guard=lambda stored: hosted.check_published(stored, payload.raw, parent.raw if parent else None, roots, verifier))
+    publish_batch(entries, bucket=bucket, roots=roots, verifier=verifier, envelope_for=envelope_for)
 
 
 if __name__ == "__main__":
