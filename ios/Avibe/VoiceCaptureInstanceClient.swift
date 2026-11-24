@@ -211,7 +211,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         // A fault is waited for as a held gate is: in front the listener
         // re-binds by itself (#4233), and coming to the front is when it
         // clears; a fault that lasts the wait is the answer.
-        while isActive(), gate() == .held || gate() == .fault, now() < deadline, !Task.isCancelled {
+        while isActive(), [DirectLoadGate.held, .fault].contains(gate()), now() < deadline, !Task.isCancelled {
             await sleep(step)
         }
         return gate()
