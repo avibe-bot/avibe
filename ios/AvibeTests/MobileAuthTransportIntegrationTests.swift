@@ -427,10 +427,12 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
         addTeardownBlock {
             server.stop()
         }
+        // About the tokens once the control-plane document is ready, not the
+        // readiness deadline: on the iOS 27.2 simulator a new page takes 4-5 s.
         let transport = MobileAuthTransport(
             controlPlaneURL: baseURL,
             websiteDataStore: .nonPersistent(),
-            deadlines: MobileAuthTransportDeadlines.testing(5_000)
+            deadlines: Self.readyAfterWebContentLaunch
         )
         defer {
             _ = transport.invalidate()

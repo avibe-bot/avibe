@@ -306,7 +306,7 @@ describe('ImageViewerProvider — retained route activity owns global keys', () 
 
 // Touch dismissal is tested through the real zoom wrapper and modal. The existing
 // paging suite cannot catch gesture ownership, release thresholds or cancellation.
-describe('ImageViewerProvider — touch dismissal', () => {
+describe('ImageViewerProvider — touch paging and dismissal', () => {
   const touch = (target: Element, type: string, x: number, y: number, time: number, count = 1) => {
     const point = { identifier: 1, clientX: x, clientY: y, pageX: x, pageY: y, target };
     const event = new Event(type, { bubbles: true, cancelable: true });
@@ -318,10 +318,10 @@ describe('ImageViewerProvider — touch dismissal', () => {
     fireEvent(target, event);
     return event;
   };
-  const setup = (reduced = false) => {
+  const setup = (reduced = false, initial = GALLERY[0], images = GALLERY) => {
     render(<MotionPreferenceContext.Provider value={reduced}>
-      <I18nextProvider i18n={i18n}><ImageViewerProvider images={GALLERY}>
-        <Opener src={GALLERY[0]} />
+      <I18nextProvider i18n={i18n}><ImageViewerProvider images={images}>
+        <Opener src={initial} />
       </ImageViewerProvider></I18nextProvider>
     </MotionPreferenceContext.Provider>);
     screen.getByText('open').focus();
@@ -388,7 +388,7 @@ describe('ImageViewerProvider — touch dismissal', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
-  it('locks a horizontal start out for its whole sequence and never pages', async () => {
+  it('never turns a horizontal start into vertical dismissal', async () => {
     const { wrapper, stage } = setup();
     touch(wrapper, 'touchstart', 100, 100, 0);
     touch(wrapper, 'touchmove', 120, 110, 20);
@@ -398,6 +398,124 @@ describe('ImageViewerProvider — touch dismissal', () => {
     await finish();
     expect(stage.style.translate).toBe('0px 0px');
     expect(screen.getByText('1 / 3')).toBeTruthy();
+  });
+
+  it.each(['distance', 'velocity'])('slides to the adjacent image by %s and synchronizes the controls', async (kind) => {
+    const { wrapper, stage } = setup(false, GALLERY[1]);
+    const dx = kind === 'distance' ? window.innerWidth * 0.3 : 60;
+    const time = kind === 'distance' ? 500 : 50;
+    touch(wrapper, 'touchstart', 400, 300, 0);
+    touch(wrapper, 'touchmove', 400 - dx, 310, time);
+    expect(stage.style.translate).toBe(`${-dx}px 0px`);
+    const next = document.querySelector('[data-viewer-neighbor="next"]') as HTMLElement;
+    expect(next.style.visibility).toBe('visible');
+    expect(next.querySelector('img')?.getAttribute('src')).toBe(GALLERY[2]);
+    expect(next.style.translate).toBe(`${window.innerWidth - dx}px 0px`);
+    expect(screen.getByText('2 / 3').style.opacity).toBe('1');
+    touch(wrapper, 'touchend', 400 - dx, 310, time + 1);
+    await finish();
+    expect(screen.getByText('3 / 3')).toBeTruthy();
+    expect(document.querySelector('.react-transform-component img')?.getAttribute('src')).toBe(GALLERY[2]);
+    expect(screen.getByLabelText('Download').getAttribute('href')).toContain('med_3');
+    fireEvent.click(screen.getByLabelText('Previous'));
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+  });
+
+  it('pages right and never switches its locked axis to dismissal', async () => {
+    const { wrapper } = setup(false, GALLERY[1]);
+    touch(wrapper, 'touchstart', 200, 200, 0);
+    touch(wrapper, 'touchmove', 240, 205, 100);
+    touch(wrapper, 'touchmove', 500, 600, 500);
+    touch(wrapper, 'touchend', 500, 600, 700);
+    await finish();
+    expect(screen.getByText('1 / 3')).toBeTruthy();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it.each([false, true])('returns a short paused horizontal drag (reduced=%s)', async (reduced) => {
+    const { wrapper, stage } = setup(reduced, GALLERY[1]);
+    touch(wrapper, 'touchstart', 300, 300, 0);
+    touch(wrapper, 'touchmove', 250, 300, 20);
+    touch(wrapper, 'touchend', 250, 300, 500);
+    expect(stage.style.translate).toBe('0px 0px');
+    if (reduced) expect(stage.style.transition).toBe('none');
+    else expect(stage.style.transition).toContain('290ms');
+    await finish();
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+  });
+
+  it.each([{ initial: GALLERY[0], dx: 300 }, { initial: GALLERY[2], dx: -300 }])('rubber bands at the end without wrapping ($initial)', async ({ initial, dx }) => {
+    const { wrapper, stage } = setup(false, initial);
+    touch(wrapper, 'touchstart', 400, 300, 0);
+    touch(wrapper, 'touchmove', 400 + dx, 300, 30);
+    const x = Number.parseFloat(stage.style.translate);
+    expect(Math.abs(x)).toBeGreaterThan(0);
+    expect(Math.abs(x)).toBeLessThan(64);
+    touch(wrapper, 'touchend', 400 + dx, 300, 40);
+    await finish();
+    expect(document.querySelector('.react-transform-component img')?.getAttribute('src')).toBe(initial);
+    expect(stage.style.translate).toBe('0px 0px');
+  });
+
+  it.each(['pinch', 'touchcancel'])('cancels horizontal navigation on %s', async (kind) => {
+    const { wrapper } = setup(false, GALLERY[1]);
+    touch(wrapper, 'touchstart', 400, 300, 0);
+    touch(wrapper, 'touchmove', 100, 300, 50);
+    if (kind === 'pinch') touch(wrapper, 'touchstart', 100, 300, 60, 2);
+    else touch(wrapper, 'touchcancel', 100, 300, 60);
+    touch(wrapper, 'touchend', 100, 300, 70);
+    await finish();
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+  });
+
+  it('lets a pinch interrupt the pending page settlement', async () => {
+    const { wrapper } = setup(false, GALLERY[1]);
+    touch(wrapper, 'touchstart', 400, 300, 0);
+    touch(wrapper, 'touchmove', 100, 300, 50);
+    touch(wrapper, 'touchend', 100, 300, 60);
+    touch(wrapper, 'touchstart', 200, 300, 70, 2);
+    await finish();
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+  });
+
+  it('yields horizontal gestures to the left edge, controls, zoom and a single-image view', async () => {
+    const { wrapper, stage } = setup(false, GALLERY[1]);
+    for (const [target, x] of [[wrapper, 10], [screen.getByLabelText('Close'), 400]] as const) {
+      touch(target, 'touchstart', x, 300, 0);
+      touch(target, 'touchmove', x - 300, 300, 50);
+      touch(target, 'touchend', x - 300, 300, 60);
+      await finish();
+      expect(screen.getByText('2 / 3')).toBeTruthy();
+      expect(stage.style.translate).toBe('0px 0px');
+    }
+    fireEvent.click(screen.getByLabelText('Zoom in'));
+    await finish();
+    expect(transformScale(document.querySelector('.react-transform-component'))).toBeGreaterThan(1);
+    touch(wrapper, 'touchstart', 400, 300, 1000);
+    touch(wrapper, 'touchmove', 100, 300, 1050);
+    touch(wrapper, 'touchend', 100, 300, 1060);
+    await finish();
+    expect(screen.getByText('2 / 3')).toBeTruthy();
+    cleanup();
+    const single = setup(false, GALLERY[0], [GALLERY[0]]);
+    touch(single.wrapper, 'touchstart', 400, 300, 2000);
+    touch(single.wrapper, 'touchmove', 100, 300, 2050);
+    touch(single.wrapper, 'touchend', 100, 300, 2060);
+    await finish();
+    expect(single.stage.style.translate).toBe('0px 0px');
+    expect(screen.queryByLabelText('Next')).toBeNull();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+
+  it('keeps reduced-motion paging finger-driven and commits without an exit slide', async () => {
+    const { wrapper, stage } = setup(true, GALLERY[1]);
+    touch(wrapper, 'touchstart', 400, 300, 0);
+    touch(wrapper, 'touchmove', 100, 300, 100);
+    expect(stage.style.translate).toBe('-300px 0px');
+    touch(wrapper, 'touchend', 100, 300, 110);
+    expect(screen.getByText('3 / 3')).toBeTruthy();
+    expect(stage.style.translate).toBe('0px 0px');
+    expect(stage.style.transition).toBe('none');
   });
 
   it('rubber bands upward within 24px and never dismisses an upward drag', async () => {

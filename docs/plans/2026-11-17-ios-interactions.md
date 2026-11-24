@@ -29,7 +29,9 @@ and its image-dismiss prototype. This change introduces no copy or API fields.
 - Reduced motion retains finger tracking but no shrinking, instant return,
   and a 140ms opacity-only exit. Mouse, keyboard, focus return, pinch and
   double-click behavior remain owned by the existing modal/zoom components.
-  Horizontal swipes do not page; arrows and keys do.
+  Originally, horizontal swipes did not page; arrows and keys did. The owner
+  superseded that scope on 2026-11-24: see
+  [image preview swiping](2026-11-24-image-preview-swiping.md).
 
 ## Delivery boundaries
 
