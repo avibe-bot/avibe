@@ -85,9 +85,9 @@ export function deviceFromWire(raw: unknown, listed?: Device['group']): Device |
     account: text(record(row.account).email),
     person: group === 'others' ? text(record(row.account).email) : undefined,
     pushOnly: row.push_only === true || undefined,
-    // The instance's own answer, on the host row only, and only when it is exactly `true`: null
+    // The instance's own answer, on the host row only, and only an exact `true` or `false`: null
     // (not known, or not Avibe's to close) and a missing field both leave the row silent.
-    networkOpen: id === 'host' && kind.kind === 'host' && row.network_open === true ? true : undefined,
+    networkOpen: id === 'host' && kind.kind === 'host' && typeof row.network_open === 'boolean' ? row.network_open : undefined,
   };
 }
 

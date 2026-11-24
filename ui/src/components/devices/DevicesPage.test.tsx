@@ -753,7 +753,9 @@ describe('DevicesPageView', () => {
 
 describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open to its network)', () => {
   const zh = { body: '同一网络上的设备现在不用登录就能打开这个 Avibe。开启远程访问后，它们要先登录。', action: '只允许这台电脑' };
+  const closed = { body: '只有这台电脑能打开这个 Avibe。要让同一网络上的设备也能打开，在「服务」里改控制台服务的地址。', action: '去「服务」' };
   const openHost: Device = { ...macbook, networkOpen: true };
+  const closedHost: Device = { ...macbook, networkOpen: false };
   const fromPhone: Device = { ...openHost, self: undefined };
   const lan = () => mount('/settings/remote-access', 'owner', false);
 
@@ -771,7 +773,7 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
   it('on the computer itself: one press, one request, and the row is read again', async () => {
     const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([openHost]));
     const restrict = vi.spyOn(devicesApi, 'restrictToThisComputer').mockImplementation(async () => {
-      devices.mockResolvedValue(snapshot([macbook]));
+      devices.mockResolvedValue(snapshot([closedHost]));
     });
     mount();
     expect(await screen.findByText(said(zh.body))).toBeTruthy();
@@ -783,9 +785,44 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
     expect(screen.queryByRole('dialog')).toBeNull();
     await waitFor(() => expect(restrict).toHaveBeenCalledOnce());
     expect(restrict).toHaveBeenCalledWith();
-    await waitFor(() => expect(screen.queryByText(said(zh.body))).toBeNull());
+    // The row now says the other position, with the way back, and no longer offers the button.
+    expect(await screen.findByText(said(closed.body))).toBeTruthy();
+    expect(screen.queryByText(said(zh.body))).toBeNull();
+    expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
     expect(devices.mock.calls.length).toBeGreaterThan(reads);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('on the computer itself, closed: says so, and the way back is Settings · Service, never a request', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([closedHost]));
+    const restrict = vi.spyOn(devicesApi, 'restrictToThisComputer').mockResolvedValue();
+    render(
+      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'personal', instanceRole: 'owner', capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true } }}>
+        <MemoryRouter initialEntries={['/settings/remote-access']}>
+          <Routes>
+            <Route path="/settings/remote-access" element={<DevicesPage />} />
+            <Route path="/settings/service" element={<Where />} />
+          </Routes>
+        </MemoryRouter>
+      </InstanceAuthorizationContext.Provider>,
+    );
+    expect(await screen.findByText(said(closed.body))).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: closed.action }));
+
+    expect((await screen.findByTestId('where')).textContent).toBe('/settings/service');
+    expect(restrict).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['the instance does not say (null, or bound)', macbook],
+    ['the row is not the device the page is open on', { ...closedHost, self: undefined } as Device],
+  ])('says nothing about "only this computer" when %s', async (_label, device) => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([device]));
+    mount();
+    await screen.findByText(device.name!);
+    expect(screen.queryByText(said(closed.body))).toBeNull();
+    expect(screen.queryByRole('button', { name: closed.action })).toBeNull();
   });
 
   it('from another device: asks first, and cancelling changes nothing', async () => {

@@ -56,10 +56,12 @@ export type Device = {
   person?: string;
   /** No sign-in left on it, only a notification registration: signing it out stops those. */
   pushOnly?: boolean;
-  /** Only on the computer that runs Avibe, and only when the instance says so outright
-   *  (`network_open: true`): it is not bound, and other devices on its network open it without
-   *  signing in, through a listener Avibe itself can close. Never set from a missing or null answer. */
-  networkOpen?: true;
+  /** Only on the computer that runs Avibe, and only the instance's outright answer about an Avibe
+   *  that is not bound (`network_open` of its row). `true`: other devices on its network open it
+   *  without signing in, through a listener Avibe itself can close. `false`: only this computer
+   *  opens it. Absent when the instance does not say, says null (not known, or not Avibe's to
+   *  close), or is bound: never filled in from a missing answer. */
+  networkOpen?: boolean;
   recent?: DeviceActivity[];
 };
 

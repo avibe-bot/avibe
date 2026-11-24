@@ -8532,7 +8532,9 @@
       "body": "Devices on the same network can open this Avibe without signing in. After you turn on remote access, they sign in first.",
       "action": "This computer only",
       "confirmTitle": "This computer only?",
-      "confirmBody": "After this, this device can't open it either; change it back on that computer."
+      "confirmBody": "After this, this device can't open it either; change it back on that computer.",
+      "closedBody": "Only this computer can open this Avibe. To let devices on the same network open it too, change the console server's address in Service.",
+      "closedAction": "Open Service"
     },
     "proxyAccess": {
       "body": "Browsers that open {{hosts}} are not signed in and act as this Avibe's owner; they are not on this list and cannot be signed out here.",

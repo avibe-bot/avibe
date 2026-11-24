@@ -17,10 +17,11 @@ const row = (extra: Record<string, unknown>) => ({
 describe('devicesFromWire · what the instance says about its own network', () => {
   const hostRow = (extra: Record<string, unknown>) => devicesFromWire({ mine: [row({ id: 'host', kind: 'host', ...extra })] }).devices[0];
 
-  it('takes "open to the network" only from an outright true on the computer\'s own row', () => {
+  it('takes "open to the network" only from an outright true or false on the computer\'s own row', () => {
     expect(hostRow({ network_open: true }).networkOpen).toBe(true);
-    // Not known, not Avibe's to close, loopback only, bound (no field), or anything else: silent.
-    for (const value of [false, null, undefined, 'true', 1, {}]) {
+    expect(hostRow({ network_open: false }).networkOpen).toBe(false);
+    // Not known, not Avibe's to close, bound (no field), or anything else: silent, never "closed".
+    for (const value of [null, undefined, 'true', 'false', 1, 0, {}]) {
       expect(hostRow({ network_open: value }).networkOpen).toBeUndefined();
     }
     // The fact is the computer's: no other row carries it, whatever it claims.

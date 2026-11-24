@@ -516,6 +516,7 @@ export function DevicesPage() {
         if (devices.find((each) => each.kind === 'host')?.self) void restrictToThisComputer(false);
         else setConfirm('this-computer-only');
       }}
+      onOpenService={() => go('/settings/service')}
       onOpenDevice={(id) => setDetail(id)}
       onCloseDevice={() => setDetail(undefined)}
       onFunctionChange={changeFunction}

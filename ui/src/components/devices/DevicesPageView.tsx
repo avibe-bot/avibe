@@ -61,6 +61,8 @@ export type DevicesPageActions = {
   onOpenRebind?: () => void;
   /** 「只允许这台电脑」 under the computer's row: asked first when pressed from another device. */
   onThisComputerOnly?: () => void;
+  /** To Settings · Service, where the address this Avibe listens on is chosen. */
+  onOpenService?: () => void;
   onOpenDevice?: (id: string) => void;
   onCloseDevice?: () => void;
   onFunctionChange?: (deviceId: string, kind: FunctionKind, on: boolean) => void;
@@ -773,11 +775,21 @@ export function DevicesPageView({
             <DeviceRow device={each} onOpen={actions.onOpenDevice} />
             {/* Not bound, and the instance says other devices on its network get in without signing
                 in: one line under the computer's own row, with the way back to this computer only. */}
-            {owner && each.kind === 'host' && each.networkOpen && problem !== 'restrictedFromAfar' && (
+            {owner && each.kind === 'host' && each.networkOpen === true && problem !== 'restrictedFromAfar' && (
               <div className="flex flex-col gap-2.5 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-4">
                 <p className="text-[12px] leading-relaxed text-foreground"><KeptTail text={t('devices.networkOpen.body')} /></p>
                 <Button variant="secondary" size="xs" className="shrink-0 self-start md:self-auto" disabled={busy} onClick={actions.onThisComputerOnly}>
                   {t('devices.networkOpen.action')}
+                </Button>
+              </div>
+            )}
+            {/* The other position, said on the computer itself: only it opens this Avibe, and the
+                way back is where the listening address is chosen. No one-press way to open it up. */}
+            {owner && each.kind === 'host' && each.self && each.networkOpen === false && (
+              <div className="flex flex-col gap-2.5 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-4">
+                <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.networkOpen.closedBody')} /></p>
+                <Button variant="ghost" size="xs" className="shrink-0 self-start md:self-auto" onClick={actions.onOpenService}>
+                  {t('devices.networkOpen.closedAction')}
                 </Button>
               </div>
             )}
