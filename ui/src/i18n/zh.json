@@ -3510,7 +3510,7 @@
     "avault_upgrade_required": "这需要更新的 avault。请先在「设置 → 依赖」中更新。",
     "sandbox_curve_unsupported": "当前 Avibe 的安全沙箱还不能创建 Solana 密钥，没有保存任何内容。请更新 Avibe 后重试。",
     "pairing_key_used": "这个 pairing key 已经用过了。请回到 avibe.bot 重新生成一个 key，然后粘贴到这里。",
-    "pairing_needs_reconciliation": "这次配对没法确认是否成功，这台电脑不会再重试，新的 key 也不能代替它。请联系 support@avibe.bot；在那之前不要删除 Avibe 的文件。",
+    "pairing_needs_reconciliation": "这次绑定没法确认是否成功，这台电脑不会再重试，新的 key 也不能代替它。请联系 support@avibe.bot；在那之前不要删除 Avibe 的文件。",
     "pairing_local_busy": "这台电脑上另一步配对正在进行，这次没有被接受。请稍后再试。"
   },
   "modelHub": {

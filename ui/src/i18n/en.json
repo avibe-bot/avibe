@@ -3510,7 +3510,7 @@
     "avault_upgrade_required": "This needs a newer avault. Update it under Settings → Dependencies first.",
     "sandbox_curve_unsupported": "This Avibe's secure sandbox can't create Solana keys yet. Nothing was saved. Update Avibe, then try again.",
     "pairing_key_used": "This pairing key has already been used. Create a new key at avibe.bot, then paste it here.",
-    "pairing_needs_reconciliation": "This pairing can't be confirmed, and this computer won't retry it; a new key can't replace it. Email support@avibe.bot; until then, don't delete Avibe's files.",
+    "pairing_needs_reconciliation": "This binding can't be confirmed, and this computer won't retry it; a new key can't replace it. Email support@avibe.bot; until then, don't delete Avibe's files.",
     "pairing_local_busy": "Another pairing step is running on this computer, so this one wasn't accepted. Try again in a moment."
   },
   "modelHub": {
