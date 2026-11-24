@@ -35,7 +35,11 @@ fn the_submenu_is_the_devices_pages_title_and_its_choices_in_order() {
     let text = |key: &str| crate::product_text(&format!("devices.connection.{key}"));
     assert_eq!(Some(&rows.title), text("title").as_ref());
     let mut expected = vec![
-        (MENU_AUTOMATIC, Mode::Automatic, text("automatic").expect("catalog string")),
+        (
+            MENU_AUTOMATIC,
+            Mode::Automatic,
+            text("automatic").expect("catalog string"),
+        ),
         (MENU_TUNNEL, Mode::Tunnel, text("tunnelOnly").expect("catalog string")),
     ];
     expected.extend(text("directOnly").map(|text| (MENU_DIRECT, Mode::Direct, text)));
@@ -96,10 +100,16 @@ fn the_third_choice_is_offered_only_for_an_instance_that_could_be_routed() {
     let live = Wiring::new(Routing::Live, false, Choices::unsaved());
     assert!(offered(&live, ONE));
     assert!(!offered(&live, custom));
-    assert!(offered(&Wiring::new(Routing::AtCreation, false, Choices::unsaved()), ONE));
+    assert!(offered(
+        &Wiring::new(Routing::AtCreation, false, Choices::unsaved()),
+        ONE
+    ));
     // A configured proxy, or a system that cannot route one window's host.
     assert!(!offered(&Wiring::new(Routing::Live, true, Choices::unsaved()), ONE));
-    assert!(!offered(&Wiring::new(Routing::Unsupported, false, Choices::unsaved()), ONE));
+    assert!(!offered(
+        &Wiring::new(Routing::Unsupported, false, Choices::unsaved()),
+        ONE
+    ));
     // Whatever the choice is now, also when it is the third one.
     let mut chosen_direct = Wiring::new(Routing::Live, false, Choices::unsaved());
     chosen_direct.choose("account-1", ONE, Mode::Direct);

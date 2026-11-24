@@ -326,6 +326,10 @@ pub struct Wiring {
     armed: Vec<String>,
     /// The instance view that is being opened again, and since when.
     reopening: Option<(String, Instant)>,
+    /// The view that an opening-again brought, until a session holds it.
+    /// One that comes without a session is not opened again a second time:
+    /// the tunnel has just carried its sign-in, and no route could be made.
+    reopened: Option<String>,
 }
 
 impl Wiring {
@@ -343,6 +347,7 @@ impl Wiring {
             again: Vec::new(),
             armed: Vec::new(),
             reopening: None,
+            reopened: None,
         }
     }
 
@@ -661,10 +666,12 @@ impl Wiring {
         if self
             .reopening
             .as_ref()
-            .is_some_and(|(runtime, _)| published.map_or(true, |shown| shown.runtime != *runtime))
+            .is_some_and(|(runtime, _)| published.is_none_or(|shown| shown.runtime != *runtime))
         {
-            // The view that was being replaced is gone.
+            // The view that was being replaced is gone, and the one on show
+            // now, if any, is what replaced it.
             self.reopening = None;
+            self.reopened = published.map(|shown| shown.runtime.clone());
         }
         // A direct-only instance's view is never left without a session's
         // route, whatever document is in it: it is opened again with one.
@@ -675,8 +682,12 @@ impl Wiring {
                     && (session.runtime.as_deref() == Some(shown.runtime.as_str())
                         || session.windows.contains(&shown.runtime))
             });
+            if held && self.reopened.as_deref() == Some(shown.runtime.as_str()) {
+                self.reopened = None;
+            }
             if !held && !self.is_reopening(now) {
-                let effect = if self.permitted(&shown.target) {
+                let came_without = self.reopened.as_deref() == Some(shown.runtime.as_str());
+                let effect = if self.permitted(&shown.target) && !came_without {
                     // Opening it again is making its link again.
                     self.made_again(&shown.target, now);
                     self.reopening = Some((shown.runtime.clone(), now));
@@ -842,8 +853,7 @@ impl Wiring {
         // carries nothing, and asking again would only renew it. A new
         // client makes a new one.
         only.failed.push(now);
-        only.failed
-            .retain(|at| now.saturating_duration_since(*at) < CARRYING.1);
+        only.failed.retain(|at| now.saturating_duration_since(*at) < CARRYING.1);
         if only.failed.len() < CARRYING.0 {
             return Vec::new();
         }

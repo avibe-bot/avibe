@@ -415,7 +415,8 @@ async fn perform(app: &AppHandle, state: &Arc<Direct>, effect: Effect) {
         Effect::Strict { session, only } => {
             let closed = pages::direct_only(state, session, only);
             if only {
-                eprintln!("desktop direct: a session is direct-only; tunnel connections closed: {}", closed.min(99));
+                let some = if closed > 0 { "some" } else { "none" };
+                eprintln!("desktop direct: a session is direct-only; tunnel connections closed: {some}");
             } else {
                 eprintln!("desktop direct: a direct-only session connects again");
             }
@@ -533,7 +534,9 @@ fn reopen(app: &AppHandle, state: &Arc<Direct>, runtime: &str) {
 }
 
 /// Sends the new view of an instance that was opened again back to where
-/// its old view was, once, when the instance's document is in it.
+/// its old view was, once, at the first look that finds the instance's
+/// document in it: the page a choice was made on is the page its result
+/// is read on.
 fn go_back(app: &AppHandle, state: &Arc<Direct>, shown: &Published) {
     let found = {
         let mut returns = lock(&state.returns);
@@ -549,13 +552,14 @@ fn go_back(app: &AppHandle, state: &Arc<Direct>, shown: &Published) {
     let Some(found) = found else { return };
     let (handle, window) = (app.clone(), shown.runtime.clone());
     let _ = app.run_on_main_thread(move || {
-        let Some(view) = handle.get_webview(&window) else { return };
-        // Only from the instance's own first page: a view that has already
-        // gone somewhere else is left where it is.
-        let at_start = view.url().is_ok_and(|url| {
-            origin_of(url.as_str()) == origin_of(found.url.as_str()) && url.path() == "/" && url != found.url
-        });
-        if at_start {
+        let Some(view) = handle.get_webview(&window) else {
+            return;
+        };
+        // Only while the view shows the instance, and is not there already.
+        let elsewhere = view
+            .url()
+            .is_ok_and(|url| origin_of(url.as_str()) == origin_of(found.url.as_str()) && url != found.url);
+        if elsewhere {
             let _ = view.navigate(found.url);
         }
     });
@@ -651,9 +655,15 @@ fn start(app: &AppHandle, state: &Arc<Direct>, session: u64, client: Client) {
 /// What a rendezvous request says about the tunnel, whatever came of it:
 /// whether the instance itself answered it. A request that found no page
 /// of the instance, failed on the way, or was not the selection's any more
-/// says nothing.
+/// says nothing; nor does an answer that may be the tunnel's own (a
+/// time-out, a rate limit, a server error), which the core also takes for
+/// a request that got nowhere.
 fn instance_answered(reply: &Reply) -> bool {
-    matches!(reply, Reply::Ready(_) | Reply::Refused(_) | Reply::Controlled)
+    match reply {
+        Reply::Ready(_) | Reply::Controlled => true,
+        Reply::Refused(status) => (400..500).contains(status) && !matches!(status, 408 | 429),
+        Reply::NotReady | Reply::Failed | Reply::SelectionChanged => false,
+    }
 }
 
 /// One session's client, for as long as the session lasts: it asks the

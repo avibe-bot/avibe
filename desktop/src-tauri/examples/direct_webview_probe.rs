@@ -1297,10 +1297,7 @@ mod macos_probe {
                 PASSWORD,
                 false,
             );
-            let (before, asked_before) = (
-                keeping.accepted(),
-                asked_of.map(|proxy| proxy.asked().len()),
-            );
+            let (before, asked_before) = (keeping.accepted(), asked_of.map(|proxy| proxy.asked().len()));
             let loaded = load(&view, &format!("http://{reachable}/"), "kept");
             pump_until(Duration::from_millis(500), || false);
             let straight = keeping.accepted() - before;

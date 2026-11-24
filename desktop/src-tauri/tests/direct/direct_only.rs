@@ -139,10 +139,7 @@ fn a_direct_only_instance_is_routed_before_its_first_load_from_its_first_open() 
         assert_eq!(wiring.reconcile(Some(&shown(ONE, VIEW)), |_| true, now), []);
         // An app window opened from it is routed as it is made, too.
         let created_for = (routing == Routing::AtCreation).then_some(session);
-        assert_eq!(
-            wiring.app_window_created("show-1", ACCOUNT, ONE, created_for).len(),
-            1
-        );
+        assert_eq!(wiring.app_window_created("show-1", ACCOUNT, ONE, created_for).len(), 1);
         assert!(wiring.routes(session, "show-1"));
         // Connecting: the listener serves the tunnel, as any does.
         assert!(!wiring.is_direct_only(session));
@@ -212,10 +209,7 @@ fn a_drop_fails_clearly_for_ten_seconds_and_then_connects_again_through_the_tunn
     assert!(wiring.is_direct_only(session));
     // The shell looks again exactly when that time is up.
     assert_eq!(wiring.deadline(), Some(dropped + seconds(10)));
-    assert_eq!(
-        wiring.reconcile(Some(&published), |_| true, dropped + seconds(9)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, dropped + seconds(9)), []);
     // The requests that failed meanwhile are the core's to count; they
     // change nothing here.
     assert_eq!(wiring.path(session, false, 7, dropped + seconds(9)), []);
@@ -228,10 +222,7 @@ fn a_drop_fails_clearly_for_ten_seconds_and_then_connects_again_through_the_tunn
     assert!(!wiring.is_direct_only(session));
     assert_eq!(wiring.deadline(), None);
     // Once: the next look starts nothing again.
-    assert_eq!(
-        wiring.reconcile(Some(&published), |_| true, dropped + seconds(11)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, dropped + seconds(11)), []);
     assert_eq!(
         wiring.path(session, true, 7, dropped + seconds(13)),
         [strict(session, true), reload(session, &[VIEW])]
@@ -244,10 +235,7 @@ fn a_drop_fails_clearly_for_ten_seconds_and_then_connects_again_through_the_tunn
     assert_eq!(wiring.path(session, true, 7, again + seconds(4)), []);
     assert!(wiring.is_direct_only(session));
     assert_eq!(wiring.deadline(), None);
-    assert_eq!(
-        wiring.reconcile(Some(&published), |_| true, again + seconds(30)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, again + seconds(30)), []);
 }
 
 /// The choice is set back when the tunnel reaches the instance and no link
@@ -270,10 +258,7 @@ fn the_choice_is_set_back_only_when_the_instance_is_heard_from_and_no_link_comes
     let mut wiring = chosen(Routing::Live);
     let session = connecting(&mut wiring, VIEW, now);
     assert_eq!(wiring.unlinked(session, now + seconds(2)), []);
-    assert_eq!(
-        wiring.reconcile(Some(&published), |_| true, now + seconds(21)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(21)), []);
     assert_eq!(
         wiring.reconcile(Some(&published), |_| true, now + seconds(22)),
         [revert(ONE, VIEW)]
@@ -288,10 +273,7 @@ fn the_choice_is_set_back_only_when_the_instance_is_heard_from_and_no_link_comes
         [strict(session, true), reload(session, &[VIEW])]
     );
     assert_eq!(wiring.deadline(), None);
-    assert_eq!(
-        wiring.reconcile(Some(&published), |_| true, now + seconds(60)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(60)), []);
     // Once linked, an answer that comes to nothing is not this rule's.
     assert_eq!(wiring.unlinked(session, now + seconds(61)), []);
     assert_eq!(wiring.unlinked(session, now + seconds(62)), []);
@@ -383,10 +365,7 @@ fn a_third_drop_in_ten_minutes_sets_the_choice_back_once_the_instance_is_heard_f
     let published = shown(ONE, "main-runtime-2");
     let second = wiring.open(target(ONE), material(), None, now + seconds(130));
     assert_eq!(wiring.window_created(second, "main-runtime-2").len(), 1);
-    assert_eq!(
-        wiring.reconcile(Some(&published), |_| true, now + seconds(131)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(131)), []);
     assert_eq!(
         wiring.path(second, true, 0, now + seconds(132)),
         [strict(second, true), reload(second, &["main-runtime-2"])]
@@ -462,10 +441,7 @@ fn a_direct_only_view_without_a_session_is_opened_again_or_its_choice_set_back()
     assert_eq!(wiring.reconcile(Some(&published), |_| true, now), [reopen(VIEW)]);
     // Once: while the new view is on its way, nothing more.
     for second in [1, 30, 59] {
-        assert_eq!(
-            wiring.reconcile(Some(&published), |_| true, now + seconds(second)),
-            []
-        );
+        assert_eq!(wiring.reconcile(Some(&published), |_| true, now + seconds(second)), []);
     }
     // It did not come: asked again.
     assert_eq!(
@@ -476,10 +452,7 @@ fn a_direct_only_view_without_a_session_is_opened_again_or_its_choice_set_back()
     let session = wiring.open(target(ONE), material(), None, now + seconds(61));
     assert_eq!(wiring.window_created(session, "main-runtime-2").len(), 1);
     let replaced = shown(ONE, "main-runtime-2");
-    assert_eq!(
-        wiring.reconcile(Some(&replaced), |_| true, now + seconds(62)),
-        []
-    );
+    assert_eq!(wiring.reconcile(Some(&replaced), |_| true, now + seconds(62)), []);
     assert!(!wiring.awaits(Some(&replaced)));
 
     // Its listener ends for good. The route is not taken off the view,
@@ -490,6 +463,32 @@ fn a_direct_only_view_without_a_session_is_opened_again_or_its_choice_set_back()
     );
     assert_eq!(
         wiring.reconcile(Some(&replaced), |_| true, now + seconds(100)),
+        [reopen("main-runtime-2")]
+    );
+
+    // The instance was opened again, the tunnel carried its sign-in, and
+    // the new view came without a session all the same (no client could be
+    // started for it): it is not opened again and again. The choice is
+    // set back.
+    let mut wiring = chosen(Routing::Live);
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), [reopen(VIEW)]);
+    assert_eq!(
+        wiring.reconcile(Some(&replaced), |_| true, now + seconds(3)),
+        [revert(ONE, "main-runtime-2")]
+    );
+    // A view that came with its session, and lost it later, is opened
+    // again like any other.
+    let mut wiring = chosen(Routing::Live);
+    assert_eq!(wiring.reconcile(Some(&published), |_| true, now), [reopen(VIEW)]);
+    let session = wiring.open(target(ONE), material(), None, now + seconds(1));
+    assert_eq!(wiring.window_created(session, "main-runtime-2").len(), 1);
+    assert_eq!(wiring.reconcile(Some(&replaced), |_| true, now + seconds(2)), []);
+    assert_eq!(
+        wiring.listener_ended(session, now + seconds(90)),
+        [retire(session, &[])]
+    );
+    assert_eq!(
+        wiring.reconcile(Some(&replaced), |_| true, now + seconds(90)),
         [reopen("main-runtime-2")]
     );
 

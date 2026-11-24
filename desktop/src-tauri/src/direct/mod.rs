@@ -55,6 +55,9 @@ mod strict;
 #[path = "../../tests/direct/strict.rs"]
 mod strict_tests;
 // muda builds macOS menus only on the main thread, which a test never runs on.
+#[cfg(test)]
+#[path = "../../tests/direct/direct_only.rs"]
+mod direct_only_tests;
 #[cfg(all(test, windows))]
 #[path = "../../tests/direct/menu.rs"]
 mod menu_tests;
@@ -64,9 +67,6 @@ pub mod webview_macos;
 #[cfg(windows)]
 pub mod webview_windows;
 pub(crate) mod wiring;
-#[cfg(test)]
-#[path = "../../tests/direct/direct_only.rs"]
-mod direct_only_tests;
 #[cfg(test)]
 #[path = "../../tests/direct/wiring.rs"]
 mod wiring_tests;
