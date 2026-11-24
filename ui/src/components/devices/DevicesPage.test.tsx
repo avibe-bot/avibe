@@ -851,6 +851,8 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
       status.mockRejectedValue(new DevicesApiError(503, 'remote_access_host_mismatch', {}));
     });
     lan();
+    // Before the change the page offers to turn remote access on, as on any Avibe that is not bound.
+    expect(await screen.findByRole('button', { name: i18n.t('devices.reach.turnOn') })).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: zh.action }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: zh.action }));
 
@@ -859,6 +861,9 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
     // The offer is gone, and the page does not add "cannot read remote access" to what it just said.
     expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
     expect(screen.queryByText(said(i18n.t('devices.reach.unknown')))).toBeNull();
+    // Nor does it keep offering what was last read: turning remote access on would ask an
+    // instance that no longer answers this device.
+    expect(screen.queryByRole('button', { name: i18n.t('devices.reach.turnOn') })).toBeNull();
   });
 
   it.each([

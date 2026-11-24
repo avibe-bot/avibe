@@ -212,7 +212,8 @@ const designFrames = frames([
   frame('off-network-open-confirm-phone', '同上 · 375 宽', PHONE,
     { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })], confirm: 'this-computer-only' }),
   frame('off-restricted-from-afar', '确认并得到回答以后：这台设备已经打不开，页面说明，不再提供那个按钮', at(700),
-    { reach: { state: 'unknown' }, devices: [macbook({ networkOpen: true })], problem: 'restrictedFromAfar' }),
+    // What was last read (not bound, open to the network) is still in hand, and is not offered.
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })], problem: 'restrictedFromAfar' }),
   frame('off-organization', '未开启 · 这台电脑自己的记录说它是组织的 Avibe：不提供个人的开启，一句话', at(700),
     { reach: { state: 'off', surface: 'browser', problem: { code: 'organization' } }, devices: onlyHost }),
   frame('off-phone', '未开启 · 375 宽', PHONE, { reach: { state: 'off', surface: 'browser' }, devices: onlyHost }),

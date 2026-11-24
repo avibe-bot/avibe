@@ -754,8 +754,10 @@ export function DevicesPageView({
         </Notice>
       ))}
       {/* After turning remote access off from afar, not reading its state is the expected result:
-          the notice below says so, and the card does not add "cannot be read" to it. */}
-      {owner && !((problem === 'offFromAfar' || problem === 'closedFromAfar' || problem === 'restrictedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
+          the notice below says so, and the card does not add "cannot be read" to it. After this
+          device shut itself out with 「只允许这台电脑」 nothing here can be asked of the instance any
+          more, whatever was last read: the card and its 「开启远程访问」 are not offered. */}
+      {owner && problem !== 'restrictedFromAfar' && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
       {signOutNotice && <SignOutNoticeCard notice={signOutNotice} rebindOffered={rebindOffered} onDismiss={actions.onDismissNotice} />}
       {problem && (
