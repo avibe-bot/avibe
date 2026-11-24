@@ -13,6 +13,7 @@ from modules.agents.acp import ACP_AUTH_REQUIRED, AcpClient, AcpRpcError, AcpTra
 from modules.agents.antigravity.agent import (
     build_antigravity_command,
     build_antigravity_env,
+    resolve_antigravity_cli_path,
 )
 from modules.agents.antigravity.auth import authenticate_antigravity_client
 
@@ -100,22 +101,23 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
         config: Any = None,
     ) -> tuple[tuple[str, ...], dict[str, str]]:
         effective_config = config if config is not None else self._effective_config()
-        cli_path = (
+        raw_cli_path = (
             self._cli_path
             or getattr(effective_config, "cli_path", None)
             or getattr(effective_config, "binary", None)
             or "agy"
         )
+        resolved_cli = resolve_antigravity_cli_path(raw_cli_path)
         extra_args = self._extra_args or tuple(getattr(effective_config, "extra_args", None) or ())
         # Passive session listing MUST NOT pass --dangerously-skip-permissions.
         command = build_antigravity_command(
-            str(cli_path).strip() or "agy",
+            resolved_cli,
             execution=False,
             extra_args=extra_args,
         )
         env = build_antigravity_env(
             effective_config,
-            cli_path=command[0],
+            cli_path=resolved_cli,
             working_dir=working_path or None,
         )
         return command, env

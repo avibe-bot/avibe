@@ -823,3 +823,142 @@ def test_extract_antigravity_oauth_url_buffers_split_pty_chunks() -> None:
     assert extract_antigravity_oauth_url(part1 + "&state=eof-only", eof=True) == (
         "https://accounts.google.com/o/oauth2/auth?client_id=agy&state=eof-only"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. Desktop-managed runtime resolves bare `agy` before command & env build
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_desktop_runtime_resolves_bare_agy_before_command_and_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from core import agent_auth_service as auth_mod
+    from modules.agents.native_sessions.service import AgentNativeSessionService
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    private_dir = tmp_path / "desktop-private" / "antigravity" / "bin"
+    private_dir.mkdir(parents=True)
+    empty_path_dir = tmp_path / "empty-path"
+    empty_path_dir.mkdir()
+
+    state_file = tmp_path / "desktop-state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "authenticated": True,
+                "next_session_num": 2,
+                "sessions": {
+                    "sess-desktop-1": {
+                        "sessionId": "sess-desktop-1",
+                        "cwd": str(workdir),
+                        "title": "Desktop session",
+                        "history": [],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    private_shim = _create_fake_agy_shim(
+        private_dir,
+        state_file=state_file,
+        name="agy",
+    )
+
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("PATH", str(empty_path_dir))
+
+    resolve_calls: list[tuple[str, bool]] = []
+
+    def _fake_resolve_cli_path(binary: str, *, include_npm_global: bool = True, **_kwargs: Any) -> str | None:
+        resolve_calls.append((binary, include_npm_global))
+        if binary == "agy":
+            return str(private_shim)
+        return None
+
+    desktop_env_calls: list[str] = []
+
+    def _fake_desktop_env(backend: str, executable: Any, base_env: Any = None) -> dict[str, str] | None:
+        desktop_env_calls.append(str(executable))
+        if backend == "antigravity" and str(executable) == str(private_shim):
+            merged = dict(base_env or os.environ)
+            merged["AVIBE_DESKTOP_TEST_MARKER"] = "derived-from-resolved-path"
+            return merged
+        return None
+
+    monkeypatch.setattr("vibe.cli_paths.resolve_cli_path", _fake_resolve_cli_path)
+    monkeypatch.setattr(agy_agent_module, "desktop_backend_subprocess_environment", _fake_desktop_env)
+
+    bare_cfg = _antigravity_config("agy")
+    provider = AntigravityNativeSessionProvider(cli_path="agy", config=bare_cfg)
+    command, env = provider._build_launch(str(workdir), config=bare_cfg)
+
+    assert command[0] == str(private_shim)
+    assert "--dangerously-skip-permissions" not in command
+    assert desktop_env_calls[-1] == str(private_shim)
+    assert env["AVIBE_DESKTOP_TEST_MARKER"] == "derived-from-resolved-path"
+    assert ("agy", False) in resolve_calls
+
+    # End-to-end native session discovery via AgentNativeSessionService succeeds off PATH.
+    service = AgentNativeSessionService(providers=[provider])
+    discovered = await asyncio.to_thread(service.list_recent_sessions, str(workdir))
+    assert len(discovered) == 1
+    assert discovered[0].native_session_id == "sess-desktop-1"
+    assert discovered[0].locator["title"] == "Desktop session"
+
+    # Direct AntigravityAgent construction with bare selector also resolves off-loop for command + env.
+    controller = _DummyController(_app_config(bare_cfg))
+    agent = AntigravityAgent(controller, bare_cfg, rules_base_dir=tmp_path / "rules")
+    req = _make_request(message="hello", workdir=workdir)
+    agent.ensure_agent_session_id(req)
+    spec, launch_env, _ = await agent._build_launch(
+        req,
+        runtime_key=req.composite_session_id,
+        resolved_model="model-alpha",
+    )
+    assert spec.command[0] == str(private_shim)
+    assert launch_env["AVIBE_DESKTOP_TEST_MARKER"] == "derived-from-resolved-path"
+
+    # Auth service defaults to catalog CLI ("agy"), never backend id ("antigravity").
+    auth_svc = auth_mod.AgentAuthService.__new__(auth_mod.AgentAuthService)
+    auth_svc.controller = SimpleNamespace(config=SimpleNamespace(agents=SimpleNamespace(antigravity=SimpleNamespace(cli_path=None))))
+    assert auth_svc._get_cli_binary("antigravity") == str(private_shim)
+    auth_svc.controller = SimpleNamespace(config=SimpleNamespace(antigravity=SimpleNamespace(binary="")))
+    assert auth_svc._get_cli_binary("antigravity") == "agy"
+
+
+# ---------------------------------------------------------------------------
+# 9. Harness ACP execution survives a shadowing `tests` package on PYTHONPATH
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_antigravity_harness_acp_ignores_shadowing_tests_package(tmp_path: Path) -> None:
+    import os
+
+    from modules.agents.acp import AcpClient
+    from tests.helpers.antigravity_harness import HARNESS_PATH, create_fake_agy_shim
+
+    decoy_root = tmp_path / "decoy-site-packages"
+    (decoy_root / "tests").mkdir(parents=True)
+    (decoy_root / "tests" / "__init__.py").write_text("# shadows repo tests package\n", encoding="utf-8")
+
+    shim = create_fake_agy_shim(
+        tmp_path,
+        state_file=tmp_path / "state.json",
+        launch_log=tmp_path / "launches.jsonl",
+        name="fake-agy-shadowed",
+    )
+    repo_root = HARNESS_PATH.parents[2]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(decoy_root), str(repo_root)])
+
+    async with AcpClient([str(shim), "acp", "--disable-telemetry"], cwd=str(tmp_path), env=env) as client:
+        await client.initialize(client_info={"name": "test", "version": "1.0"})
+        assert client.agent_info["name"] == "fake-acp-server"

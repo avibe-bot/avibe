@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
 import shlex
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     from modules.im.base import FileAttachment
 
 HARNESS_PATH = Path(__file__).resolve()
-REPO_ROOT = HARNESS_PATH.parents[2]
 SENTINEL_SESSION_TITLE = "TOP-SECRET-EXISTING-SESSION-TITLE-999"
 
 _AUTH_DEFAULT_METHODS = [
@@ -505,10 +505,23 @@ def _run_login(cfg: dict[str, Any], state_file: Path) -> int:
     return 0
 
 
+def _load_fake_acp_server_class() -> type[Any]:
+    module_name = "_avibe_fake_acp_server"
+    cached = sys.modules.get(module_name)
+    if cached is not None:
+        return cached.FakeAcpServer
+    server_path = HARNESS_PATH.with_name("fake_acp_server.py")
+    spec = importlib.util.spec_from_file_location(module_name, server_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load fake ACP server from {server_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module.FakeAcpServer
+
+
 def _run_acp(cfg: dict[str, Any], state_file: Path, rpc_log: Path | None, auth_mode: bool) -> int:
-    if str(REPO_ROOT) not in sys.path:
-        sys.path.insert(0, str(REPO_ROOT))
-    from tests.helpers.fake_acp_server import FakeAcpServer
+    FakeAcpServer = _load_fake_acp_server_class()
 
     class _AuditingFakeAcpServer(FakeAcpServer):
         def _dispatch(self, msg: dict[str, Any]) -> None:

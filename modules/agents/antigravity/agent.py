@@ -188,6 +188,31 @@ def _config_cli_path(config: Any) -> str:
     return text or "agy"
 
 
+def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
+    """Resolve an Antigravity CLI selector without invoking ``npm``.
+
+    On desktop-managed runtimes, delegates to ``runtime_agent_cli_path`` so
+    bare selectors and stale desktop paths resolve to the published private
+    desktop install (or user-installed ``agy`` outside the GUI PATH). Outside
+    desktop runtimes, bare selectors (no path separator) are still resolved via
+    ``resolve_cli_path(..., include_npm_global=False)`` while explicit missing
+    paths stay untouched to preserve ``cli_not_found`` reporting.
+    """
+    selected = str(raw_cli_path).strip() if raw_cli_path is not None else ""
+    selected = selected or "agy"
+    from config.v2_compat import runtime_agent_cli_path
+    from vibe.cli_paths import resolve_cli_path
+    from vibe.upgrade import is_desktop_managed_runtime
+
+    if is_desktop_managed_runtime():
+        return runtime_agent_cli_path(selected, "agy", resolve_agent_paths=True)
+    expanded = Path(os.path.expanduser(selected))
+    has_path_separator = os.sep in selected or (os.altsep is not None and os.altsep in selected)
+    if not expanded.is_absolute() and not has_path_separator:
+        return resolve_cli_path(selected, include_npm_global=False) or selected
+    return selected
+
+
 def _config_extra_args(config: Any) -> tuple[str, ...]:
     raw = getattr(config, "extra_args", None)
     if not raw:
@@ -500,7 +525,10 @@ class AntigravityAgent(BaseAgent):
         runtime_key: str,
         resolved_model: str,
     ) -> tuple[AntigravityLaunchSpec, dict[str, str], dict[str, Any] | None]:
-        cli_path = _config_cli_path(self.antigravity_config)
+        cli_path = await asyncio.to_thread(
+            resolve_antigravity_cli_path,
+            _config_cli_path(self.antigravity_config),
+        )
         extra_args = _config_extra_args(self.antigravity_config)
         command = build_antigravity_command(
             cli_path,

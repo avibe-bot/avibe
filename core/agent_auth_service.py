@@ -17,7 +17,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend, is_builtin_backend
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    default_cli_for_backend,
+    display_name_for_backend,
+    is_builtin_backend,
+)
 
 from core.backend_failure import terminal_backend_failure_output
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
@@ -799,9 +805,10 @@ class AgentAuthService:
                     backend,
                     exc_info=True,
                 )
+        default_cli = default_cli_for_backend(backend) or backend
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
         if runtime_projected:
-            return cli_path or backend
+            return cli_path or default_cli
         from config.v2_compat import runtime_agent_cli_path
 
         if backend == "claude":
@@ -811,7 +818,7 @@ class AgentAuthService:
             from vibe.claude_config import normalize_claude_cli_path
 
             cli_path = normalize_claude_cli_path(cli_path)
-        return runtime_agent_cli_path(cli_path, backend, resolve_agent_paths=True)
+        return runtime_agent_cli_path(cli_path, default_cli, resolve_agent_paths=True)
 
     def _resolve_backend_probe_cwd(self, backend: str, *, prepare: bool = False) -> str:
         """Resolve the configured runtime cwd without mutating it by default."""
