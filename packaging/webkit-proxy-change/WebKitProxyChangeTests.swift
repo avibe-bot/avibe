@@ -74,7 +74,19 @@ private final class Browser: NSObject, WKNavigationDelegate {
         webView.navigationDelegate = self
         let controller = UIViewController()
         controller.view.addSubview(webView)
-        let window = UIWindow(frame: webView.frame)
+        // The host has the UIScene life cycle (the iOS 27 SDK requires it),
+        // and a window outside a scene is not shown there: the WebView goes
+        // into the host's scene. Without one it is made as before, and the
+        // line says so, because that WebView is not on screen.
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window: UIWindow
+        if let scene {
+            window = UIWindow(windowScene: scene)
+            window.frame = webView.frame
+        } else {
+            window = UIWindow(frame: webView.frame)
+        }
+        print("PROBE window: \(scene == nil ? "no window scene, off screen" : "in the host's window scene")")
         window.rootViewController = controller
         window.makeKeyAndVisible()
         self.window = window

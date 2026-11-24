@@ -52,6 +52,11 @@ def validate_bundle(app: Path, build_log: Path) -> None:
     # artifacts can be checked without recreating the runner's directory.
     host_info = plistlib.loads((app / "Info.plist").read_bytes())
     test_info = plistlib.loads((test / "Info.plist").read_bytes())
+    # The iOS 27 SDK ends a host without the UIScene life cycle at launch,
+    # minutes later and without a test result: find it here instead.
+    scenes = host_info.get("UIApplicationSceneManifest", {}).get("UISceneConfigurations", {})
+    delegates = [c.get("UISceneDelegateClassName") for c in scenes.get("UIWindowSceneSessionRoleApplication", [])]
+    require(delegates == ["ProbeSceneDelegate"], f"{app.name}: no UIScene life cycle in Info.plist")
     expected_relative_output = Path("PlugIns/WebKitProxyChangeTests.xctest") / test_info["CFBundleExecutable"]
     links = [shlex.split(line) for line in build_log.read_text().splitlines() if " -bundle_loader " in line]
     require(len(links) == 1, f"expected one XCTest link command, found {len(links)}")

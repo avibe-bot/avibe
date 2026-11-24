@@ -6,23 +6,56 @@ import WebKit
 
 @main
 final class ProbeApp: UIResponder, UIApplicationDelegate {
-    var window: UIWindow?
-
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        let window = UIWindow(frame: UIScreen.main.bounds)
+        true
+    }
+
+    // The iOS 27 SDK launches no app without the UIScene life cycle
+    // (run 45392005030: "UIScene life cycle is required for apps built with
+    // this SDK"). The window, and the lifecycle run that needs it, now
+    // belong to the scene. The class is given here as well as by name in
+    // the Info.plist, so the host does not depend on a name lookup.
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(
+            name: "Default Configuration",
+            sessionRole: connectingSceneSession.role
+        )
+        configuration.delegateClass = ProbeSceneDelegate.self
+        return configuration
+    }
+}
+
+@objc(ProbeSceneDelegate)
+final class ProbeSceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+    /// One lifecycle run per process, whatever the scene does afterwards.
+    private static var startedLifecycle = false
+
+    func scene(
+        _ scene: UIScene,
+        willConnectTo session: UISceneSession,
+        options connectionOptions: UIScene.ConnectionOptions
+    ) {
+        guard let windowScene = scene as? UIWindowScene else { return }
+        let window = UIWindow(windowScene: windowScene)
         window.rootViewController = UIViewController()
         window.rootViewController?.view.backgroundColor = .white
         window.makeKeyAndVisible()
         self.window = window
-        if let request = LifecycleRequest(arguments: ProcessInfo.processInfo.arguments) {
-            Task { @MainActor in
-                await LifecycleRunner(request: request, window: window).run()
-            }
+        guard !Self.startedLifecycle,
+              let request = LifecycleRequest(arguments: ProcessInfo.processInfo.arguments)
+        else { return }
+        Self.startedLifecycle = true
+        Task { @MainActor in
+            await LifecycleRunner(request: request, window: window).run()
         }
-        return true
     }
 }
 
