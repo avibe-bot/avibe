@@ -599,6 +599,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The listener's last few failures, for the rendezvous request.
+    var directListenerFailures: [DirectListenerFailure] {
+        directPathController?.listenerFailures ?? []
+    }
+
     /// Answers `direct.handover` for the runtime's WebViews; `nil` without a
     /// direct transport.
     var directHandoverProvider: DirectHandoverProvider? {

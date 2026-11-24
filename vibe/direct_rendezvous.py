@@ -48,6 +48,33 @@ _UNIQUE_LOCAL_V6 = ipaddress.ip_network("fc00::/7")
 _KIND_ORDER = {"lan": 0, "ipv6": 1}
 
 
+def log_listener_faults(faults: Any) -> None:
+    """Log a valid batch after the shared decoder has accepted the request body.
+
+    Listener faults obey the same body limits as every other field. Bodies the
+    decoder rejects are still rejected; a malformed or over-five batch in a
+    decoded request is ignored in full and does not change the offer.
+    """
+    if not isinstance(faults, list) or len(faults) > 5:
+        return
+    for fault in faults:
+        if (
+            not isinstance(fault, dict)
+            or fault.keys() != {"step", "code", "background_seconds"}
+            or fault["step"] not in ("bind", "waiting", "ownership", "deadline", "foreign", "socket")
+            or type(fault["code"]) is not int
+            or not -(2**31) <= fault["code"] < 2**31
+            or type(fault["background_seconds"]) is not int
+            or not 0 <= fault["background_seconds"] < 2**31
+        ):
+            return
+    for fault in faults:
+        logger.info(
+            "direct rendezvous listener_fault step=%s code=%d background_seconds=%d",
+            fault["step"], fault["code"], fault["background_seconds"],
+        )
+
+
 def is_endpoint_id(value: Any) -> bool:
     return isinstance(value, str) and _ENDPOINT_ID_RE.fullmatch(value) is not None
 

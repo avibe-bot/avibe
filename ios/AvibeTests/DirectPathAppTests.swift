@@ -164,110 +164,6 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
     }
 
-    @MainActor
-    func testAListenerFaultCoversOnlyARoutedRuntimeOnceAndIsMarkedOnce() async throws {
-        let marker = FaultMarkerSpy(marked: false)
-        let timing = RuntimeOpenManualTiming()
-        let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(
-            directTransport: transport,
-            directFaultMarker: marker,
-            runtimeOpenTiming: timing
-        ) {
-            listening = try listeningSockets()
-        }
-        let first = try await select("instance-1", in: app)
-        let port = try directListenerPort(of: app, since: listening)
-        XCTAssertFalse(app.directFaultCovers(first))
-        var shownWhileMarking: [Bool] = []
-        // The App owns this spy; its observer must not retain the App back.
-        marker.whileMarking = { [weak app] in
-            guard let app else {
-                return XCTFail("The App was released before the fault was marked")
-            }
-            shownWhileMarking.append(app.directListenerFault)
-        }
-        addTeardownBlock { @MainActor [weak app] in
-            XCTAssertNil(app, "The fault-marker observer must not keep the fixture App alive")
-        }
-
-        // The App's port is taken while it is in the background: the return
-        // cannot re-bind it, which is the listener fault.
-        NotificationCenter.default.post(
-            name: UIApplication.didEnterBackgroundNotification,
-            object: nil
-        )
-        try await eventually { await !LoopbackClient.canConnect(to: port) }
-        let squatter = try ControlListener(
-            family: AF_INET,
-            address: "127.0.0.1",
-            port: port.rawValue,
-            reuseAddress: true
-        )
-        defer { squatter.close() }
-        NotificationCenter.default.post(
-            name: UIApplication.willEnterForegroundNotification,
-            object: nil
-        )
-        try await eventually { app.directListenerFault }
-        // The marker was written before the fault was shown.
-        XCTAssertEqual(shownWhileMarking, [false])
-        // Retry does not rebuild under the reopen message, and the runtime
-        // that was open keeps its WebView under it.
-        XCTAssertEqual(app.directLoadGate(for: first), .fault)
-        XCTAssertFalse(app.mayReload(first))
-        XCTAssertFalse(app.authorizeReload(of: first))
-        XCTAssertFalse(app.presentsDirectFaultOnly(first))
-        // Another return does not report it again.
-        NotificationCenter.default.post(
-            name: UIApplication.didEnterBackgroundNotification,
-            object: nil
-        )
-        NotificationCenter.default.post(
-            name: UIApplication.willEnterForegroundNotification,
-            object: nil
-        )
-        try await Task.sleep(for: .milliseconds(300))
-
-        XCTAssertTrue(app.directListenerFault)
-        XCTAssertEqual(marker.marks, 1)
-        XCTAssertTrue(app.directFaultCovers(first))
-        // A page behind the fault gets the bridge's `failed`, never a
-        // status that reads as ready.
-        let page = try await showRuntimePage(app, first)
-        let surface = try await page.directSurface()
-        XCTAssertEqual(surface, #"{"capability":1,"status":"failed"}"#)
-        page.close()
-
-        // An instance the fault left unrouted opens and is not covered: an
-        // ordinary page, with its WebView and its Retry.
-        let second = try await select("instance-2", in: app)
-        XCTAssertFalse(app.directFaultCovers(second))
-        XCTAssertFalse(app.presentsDirectFaultOnly(second))
-        XCTAssertTrue(app.mayReload(second))
-        XCTAssertTrue(app.directListenerFault)
-        XCTAssertEqual(marker.marks, 1)
-
-        // The routed instance opened again under the fault: the reopen
-        // message alone, with no WebView made for it and no Retry.
-        let reopened = try await select("instance-1", in: app)
-        XCTAssertTrue(app.directFaultCovers(reopened))
-        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
-        XCTAssertFalse(app.mayReload(reopened))
-        XCTAssertEqual(marker.marks, 1)
-        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
-        XCTAssertNil(app.runtimeOpenAttempt?.deadline)
-
-        // The process-terminal fault has no later callback to end a new
-        // attempt. Its automatic timer is already retired, so advancing far
-        // past the ordinary budget cannot replace the reopen message.
-        timing.advance(by: .seconds(120))
-        XCTAssertEqual(app.route, .browser(reopened))
-        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
-        XCTAssertNil(app.runtimeOpenNotice)
-    }
-
     // MARK: The creation and reload boundaries
 
     private func enterBackground() {
@@ -323,10 +219,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertFalse(app.mayReload(runtime))
 
         let reopened = try await waitForBrowser("instance-1", in: app)
-        if app.directListenerFault {
-            XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
-            XCTAssertFalse(app.mayReload(reopened))
-        } else {
+        if !theSimulatorRefusedABind(of: app) {
             XCTAssertEqual(app.directLoadGate(for: reopened), .open)
             XCTAssertFalse(app.presentsDirectFaultOnly(reopened))
             XCTAssertTrue(app.mayReload(reopened))
@@ -399,7 +292,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.route, .browser(second))
 
         // Held again, then signed out: the return leaves the account page.
-        guard !app.directListenerFault else {
+        guard !theSimulatorRefusedABind(of: app) else {
             return
         }
         enterBackground()
@@ -416,84 +309,6 @@ final class DirectPathAppTests: XCTestCase {
         try await settle()
         XCTAssertNil(app.route.runtime)
         XCTAssertNotEqual(app.route, .loading)
-    }
-
-    /// A held open whose return fails: the loading route ends as the reopen
-    /// message alone, with no WebView and no Retry, the fault is marked
-    /// once, and an instance without a route still opens as an ordinary
-    /// page.
-    @MainActor
-    func testAHeldOpenEndsAsTheReopenMessageWhenTheReBindFails() async throws {
-        let marker = FaultMarkerSpy(marked: false)
-        let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(directTransport: transport, directFaultMarker: marker) {
-            listening = try listeningSockets()
-        }
-        _ = try await select("instance-1", in: app)
-        let port = try directListenerPort(of: app, since: listening)
-
-        enterBackground()
-        try await eventually { await !LoopbackClient.canConnect(to: port) }
-        let squatter = try ControlListener(
-            family: AF_INET,
-            address: "127.0.0.1",
-            port: port.rawValue,
-            reuseAddress: true
-        )
-        defer { squatter.close() }
-        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        try await settle()
-        XCTAssertEqual(app.route, .loading)
-
-        enterForeground()
-        try await eventually { app.directListenerFault }
-        let runtime = try await waitForBrowser("instance-1", in: app)
-        XCTAssertTrue(app.presentsDirectFaultOnly(runtime))
-        XCTAssertEqual(app.directLoadGate(for: runtime), .fault)
-        XCTAssertFalse(app.mayReload(runtime))
-        XCTAssertEqual(marker.marks, 1)
-
-        let second = try await select("instance-2", in: app)
-        XCTAssertFalse(app.presentsDirectFaultOnly(second))
-        XCTAssertTrue(app.mayReload(second))
-        XCTAssertEqual(marker.marks, 1)
-    }
-
-    @MainActor
-    func testListenerRebindFailureDoesNotFailAnUnroutedRuntimeAttempt() async throws {
-        let marker = FaultMarkerSpy(marked: false)
-        let transport = StandInDirectTransport()
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(
-            directTransport: transport,
-            directFaultMarker: marker
-        ) {
-            listening = try listeningSockets()
-        }
-        _ = try await select("instance-1", in: app)
-        let port = try directListenerPort(of: app, since: listening)
-
-        enterBackground()
-        try await eventually { await !LoopbackClient.canConnect(to: port) }
-        let squatter = try ControlListener(
-            family: AF_INET,
-            address: "127.0.0.1",
-            port: port.rawValue,
-            reuseAddress: true
-        )
-        defer { squatter.close() }
-
-        let ordinary = try await select("instance-2", in: app)
-        let attemptID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
-        XCTAssertFalse(app.directFaultCovers(ordinary))
-
-        enterForeground()
-        try await eventually { app.directListenerFault }
-        XCTAssertEqual(app.route, .browser(ordinary))
-        XCTAssertEqual(app.runtimeOpenAttempt?.id, attemptID)
-        XCTAssertNotEqual(app.runtimeOpenAttempt?.phase, .failed)
-        XCTAssertEqual(marker.marks, 1)
     }
 
     /// Without a transport nothing is gated: Retry reloads at once, and the
@@ -4021,10 +3836,7 @@ final class DirectPathAppTests: XCTestCase {
 
         enterForeground()
         try await eventually { app.directLoadGate(for: runtime) != .held }
-        guard !app.directListenerFault else {
-            // The fault dropped the held load.
-            try await settle()
-            XCTAssertEqual(starts, 0)
+        guard !theSimulatorRefusedABind(of: app) else {
             return
         }
         try await eventually { starts == 1 }
@@ -4034,7 +3846,7 @@ final class DirectPathAppTests: XCTestCase {
         enterForeground()
         try await eventually { app.directLoadGate(for: runtime) != .held }
         try await settle()
-        guard !app.directListenerFault else {
+        guard !theSimulatorRefusedABind(of: app) else {
             return
         }
         XCTAssertEqual(starts, 1)
@@ -4135,7 +3947,9 @@ final class DirectPathAppTests: XCTestCase {
         enterForeground()
         XCTAssertEqual(provider(), .held)
         try await eventually { provider() != .held }
-        XCTAssertEqual(provider(), app.directListenerFault ? .fault : .open)
+        if !theSimulatorRefusedABind(of: app) {
+            XCTAssertEqual(provider(), .open)
+        }
     }
 
     /// A child window is presented above the view the reopen message
@@ -4487,7 +4301,9 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(atOpen.routes, [.loading, .browser(runtime)])
         // Still in flight when it settled.
         XCTAssertFalse(app.mobileSessionCoordinator.isCurrentRuntime(runtime))
-        if !app.directListenerFault {
+        // Selected with the open, unless the return's first bind failed:
+        // the selection then waits for the attempt that serves.
+        if !theSimulatorRefusedABind(of: app) {
             XCTAssertEqual(transport.selections.last?.runtime, runtime)
         }
 
@@ -4651,92 +4467,6 @@ final class DirectPathAppTests: XCTestCase {
 
 
     // MARK: With a transport, with notifications on
-
-    /// The fault exists only with a transport; the launch after it has none.
-    @MainActor
-    func testListenerFaultFallsBackToPublicPathOnNextLaunchWithNotificationsOn() async throws {
-        try await requireAHostWithoutNotificationPermission()
-        try assertSocketScanSeesListeners()
-        let notifications = try NotificationsOn()
-        var listening: Set<ListeningSocket> = []
-        let app = try await makeApp(
-            directTransport: StandInDirectTransport(),
-            notifications: notifications
-        ) {
-            listening = try listeningSockets()
-        }
-        let defaults = try XCTUnwrap(appDefaults)
-        let first = try await openWithNotificationsOn(
-            "instance-1",
-            in: app,
-            notifications: notifications
-        ) {
-            _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        }
-        defer { first.page.close() }
-        XCTAssertFalse(app.directFaultCovers(first.runtime))
-
-        // The App's port is taken while it is in the background: the return
-        // cannot bind it again, which is the listener fault.
-        let port = try directListenerPort(of: app, since: listening)
-        enterBackground()
-        try await eventually { await !LoopbackClient.canConnect(to: port) }
-        let squatter = try ControlListener(
-            family: AF_INET,
-            address: "127.0.0.1",
-            port: port.rawValue,
-            reuseAddress: true
-        )
-        defer { squatter.close() }
-        enterForeground()
-        try await eventually { app.directListenerFault }
-        // The reopen message covers the runtime, and the next launch is marked.
-        XCTAssertTrue(app.directFaultCovers(first.runtime))
-        XCTAssertNotNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
-
-        // Opened again under the fault, with its provider update in flight:
-        // the reopen message alone.
-        let before = notifications.providerPatches.arrivals
-        _ = try app.mobileSessionCoordinator.selectInstance(id: "instance-1")
-        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
-            notifications.providerPatches.arrivals > before
-        }
-        try await eventually { app.route != .loading }
-        guard case .browser(let reopened) = app.route else {
-            notifications.providerPatches.releaseAll()
-            return XCTFail("The reopen under the fault ended at \(app.route).")
-        }
-        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
-        try await eventually {
-            notifications.providerPatches.releaseAll()
-            return app.mobileSessionCoordinator.isCurrentRuntime(reopened)
-        }
-        XCTAssertEqual(app.route, .browser(reopened))
-        XCTAssertTrue(app.presentsDirectFaultOnly(reopened))
-
-        // The next launch, with the same preferences and the same device:
-        // no transport, so the restored instance loads on the public path.
-        let nextTransport = StandInDirectTransport()
-        let arrivals = notifications.providerPatches.arrivals
-        let next = try await makeApp(
-            directTransport: nextTransport,
-            reusingDefaults: defaults,
-            notifications: notifications
-        )
-        XCTAssertNil(next.directStatusProvider)
-        XCTAssertNil(defaults.object(forKey: UserDefaultsDirectFaultMarker.key))
-        let restored = try await openWithNotificationsOn(
-            "instance-1",
-            in: next,
-            notifications: notifications,
-            afterArrivals: arrivals
-        ) {}
-        defer { restored.page.close() }
-        XCTAssertFalse(next.directListenerFault)
-        XCTAssertEqual(next.directLoadGate(for: restored.runtime), .open)
-        XCTAssertFalse(next.presentsDirectFaultOnly(restored.runtime))
-        XCTAssertEqual(nextTransport.selections.count, 0)
-    }
 
 
     /// Runs `open` and checks that its provider update reaches the control
@@ -6692,15 +6422,14 @@ final class DirectPathAppTests: XCTestCase {
             let first = Recorder<DirectPathStatus?>()
             fixture.app.directStatusProvider?(instance) { first.record($0) }
             try await eventually { first.values.count == 1 }
-            if let status = first.values.first ?? nil {
+            // (If the simulator refused the re-bind, the closure is
+            // published by the attempt that serves or finds the port
+            // closed: that run covers no return that served at once.)
+            if !theSimulatorRefusedABind(of: fixture.app) {
+                let status = try XCTUnwrap(first.values.first ?? nil, "\(order)")
                 XCTAssertEqual(status.closure, 1, "\(order)")
                 try await Task.sleep(for: .milliseconds(300))
                 XCTAssertEqual(directStatus(fixture.app, instance)?.closure, 1, "\(order)")
-            } else {
-                // The simulator refused the re-bind: the held answer is the
-                // bridge's `failed`, and the App shows the reopen message.
-                // This run covers no successful return.
-                XCTAssertTrue(fixture.app.directListenerFault, "\(order)")
             }
             fixture.close()
         }
@@ -7338,15 +7067,27 @@ final class DirectPathAppTests: XCTestCase {
 
     /// Why the App routed no host, as far as the App itself says. Two things
     /// leave a host on the public path with nothing selected and no listener
-    /// to find, both by design: the listener faulted (seen on CI after one
-    /// of the simulator's system services was interrupted, run 44934936305),
-    /// or its first bind and ownership check were slower than the App's
-    /// listener wait (1 s). The App reports only the first.
+    /// to find, both by design: the listener's first bind or its check
+    /// failed (seen on CI after one of the simulator's system services was
+    /// interrupted, run 44934936305), or they were slower than the App's
+    /// listener wait (1 s). The App records only the first.
     @MainActor
     private func whyNoHostIsRouted(by app: AppModel) -> String {
-        app.directListenerFault
-            ? "The App routed no host: its listener faulted, so the host loads on the public path, nothing is selected and no listener serves."
-            : "The App routed no host and reports no listener fault: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+        let failures = app.directListenerFailures
+            .map { "\($0.step.rawValue) \($0.code.map(String.init) ?? "-")" }
+        return failures.isEmpty
+            ? "The App routed no host and recorded no listener failure: its first bind was slower than the listener wait, so the host loads on the public path, nothing is selected and no listener serves."
+            : "The App routed no host: its listener failed (\(failures.joined(separator: ", "))), so the host loads on the public path and nothing is selected."
+    }
+
+    /// Whether a bind of the listener's port, or its check, failed in this
+    /// test: the simulator can refuse one (seen on CI, run 44934936305).
+    /// The App then binds the port again by itself, so what a test says of
+    /// a return that served at its first attempt does not apply to that
+    /// run.
+    @MainActor
+    private func theSimulatorRefusedABind(of app: AppModel) -> Bool {
+        !app.directListenerFailures.isEmpty
     }
 
     /// The App's direct listener, found from outside: the one new listening

@@ -11,6 +11,9 @@ project-scoped mutations return a clear ``project_no_folder`` error.
 from __future__ import annotations
 
 import asyncio
+import os
+from pathlib import Path
+import shutil
 
 import pytest
 
@@ -105,6 +108,44 @@ def test_skills_guarded_preserves_missing_project_path_for_effective_editor(monk
     )
 
     assert str(tmp_path) in result["error"]["message"]
+
+
+@pytest.mark.integration
+def test_large_global_list_with_managed_askill(tmp_path, monkeypatch):
+    """Point AVIBE_TEST_ASKILL_RELEASE_DIR at the downloaded release assets for this host."""
+    release_dir = os.environ.get("AVIBE_TEST_ASKILL_RELEASE_DIR")
+    if not release_dir:
+        pytest.skip("requires an explicit local release asset; no network or installed CLI fallback")
+    assets = Path(release_dir).resolve(strict=True)
+
+    # Only substitute the download transport. The real installer checks the
+    # pinned digest, then the HTTP handler discovers and spawns that binary.
+    def local_asset(url, path, *, size, timeout):
+        source = assets / url.rsplit("/", 1)[-1]
+        assert source.stat().st_size == size
+        shutil.copyfile(source, path)
+
+    monkeypatch.setattr(api, "fetch_to_path", local_asset)
+    home = Path.home()  # isolated by conftest
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.chdir(tmp_path)
+    installed = api.install_askill()
+    assert installed["ok"], installed
+    assert Path(api.resolve_cli_path("askill")).parent == home / ".local" / "bin"
+
+    names = {f"fixture-{i:03}" for i in range(235)}
+    description = "large skill description " * 40 + "end"
+    for name in names:
+        skill = home / ".agents" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n", encoding="utf-8")
+
+    res = app.test_client().get("/api/skills?scope=global")
+    body = res.get_json()
+    assert res.status_code == 200 and body["ok"], body.get("error")
+    assert len(res.content) > 64 * 1024
+    assert body["count"] == len(body["skills"]) == len(names)
+    assert {s["name"] for s in body["skills"]} == names
 
 
 def test_list_degrades_to_global_with_flag(folderless, monkeypatch):

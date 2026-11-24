@@ -1,7 +1,8 @@
 /* @vitest-environment jsdom */
+/* @vitest-environment-options {"url": "http://127.0.0.1:5123/settings/service"} */
 
 import { createInstance } from 'i18next';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter } from 'react-router-dom';
@@ -17,6 +18,10 @@ const statusContext = vi.hoisted(() => ({
 
 vi.mock('../../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../../context/StatusContext', () => ({ useStatus: () => statusContext }));
+const authorization = vi.hoisted(() => ({ capabilities: { is_instance_owner: true } }));
+vi.mock('@/context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => authorization }));
+const apiFetch = vi.hoisted(() => vi.fn());
+vi.mock('@/lib/apiFetch', () => ({ apiFetch }));
 vi.mock('./SettingsPageShell', () => ({
   SettingsPageShell: ({ children }: { children: React.ReactNode }) => children,
 }));
@@ -43,6 +48,7 @@ const renderPage = () => {
 afterEach(() => {
   cleanup();
   statusContext.status = { state: 'running', service_pid: 4321 };
+  authorization.capabilities = { is_instance_owner: true };
   vi.clearAllMocks();
   vi.restoreAllMocks();
 });
@@ -84,5 +90,78 @@ describe('service control refused by the server', () => {
     expect(statusContext.control).toHaveBeenCalledWith('start');
     expect(await screen.findByText(en.settings.startRefused)).toBeTruthy();
     expect((start as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe('the console server host on an Avibe bound to an account', () => {
+  it.each([
+    ['bound', { instance_id: 'fixture-instance' }, true],
+    ['not bound', { instance_id: '' }, false],
+  ])('%s: says whether a network address still lets other devices in', async (_label, vibe_cloud, said) => {
+    api.getConfig.mockResolvedValue({ ui: { setup_host: '192.168.1.20' }, remote_access: { vibe_cloud } });
+    renderPage();
+
+    expect(await screen.findByText(en.settings.consoleServerHint)).toBeTruthy();
+    expect(Boolean(screen.queryByText(en.settings.consoleServerBound))).toBe(said);
+  });
+});
+
+describe('saving the console server host', () => {
+  const saveHost = async (host: string) => {
+    api.getConfig.mockResolvedValue({
+      ui: { setup_host: '127.0.0.1', setup_port: 5123 },
+      remote_access: { vibe_cloud: { instance_id: 'fixture-instance' } },
+    });
+    api.mutateConfig.mockResolvedValue({});
+    renderPage();
+    const field = await screen.findByLabelText(en.dashboard.host);
+    // One edit: the field puts its default back when emptied, so it cannot be cleared and retyped.
+    fireEvent.change(field, { target: { value: host } });
+    await userEvent.click(screen.getByRole('button', { name: en.common.saveAndRestart }));
+  };
+  const hostsWritten = () => api.mutateConfig.mock.calls.map(([changes]) => changes[0].value);
+
+  it('writes nothing for an address the server cannot listen on, and says so', async () => {
+    await saveHost('192.168.1');
+
+    expect(await screen.findByText(en.settings.consoleServerInvalidHost)).toBeTruthy();
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('takes the host back out of the configuration when the server refuses to listen there', async () => {
+    apiFetch.mockResolvedValue({ ok: false, status: 400 });
+    await saveHost('192.168.1.20');
+
+    expect(await screen.findByText(en.common.saveFailed)).toBeTruthy();
+    expect(hostsWritten()).toEqual(['192.168.1.20', '127.0.0.1']);
+  });
+
+  it('keeps a page on this computer where it is when the host becomes a network address', async () => {
+    apiFetch.mockResolvedValue({ ok: true, status: 200 });
+    await saveHost('192.168.1.20');
+
+    expect(await screen.findByText(en.dashboard.uiRestartMessage)).toBeTruthy();
+    expect(hostsWritten()).toEqual(['192.168.1.20']);
+    // The bound line stays beside the result: this is when it matters.
+    expect(screen.getByText(en.settings.consoleServerBound)).toBeTruthy();
+    expect(JSON.parse(apiFetch.mock.calls[0][1].body)).toEqual({ host: '192.168.1.20', port: 5123 });
+  });
+});
+
+describe('the console server address for someone who is not the owner', () => {
+  it('is shown, with nothing to edit and no save for it, and the rest of the page stays', async () => {
+    authorization.capabilities = { is_instance_owner: false };
+    api.getConfig.mockResolvedValue({ ui: { setup_host: 'fd00::4', setup_port: 6000 } });
+    renderPage();
+
+    expect(await screen.findByText('[fd00::4]:6000')).toBeTruthy();
+    expect(screen.getByText(en.settings.consoleServerOwnerOnly)).toBeTruthy();
+    expect(screen.queryByLabelText(en.dashboard.host)).toBeNull();
+    expect(screen.queryByLabelText(en.dashboard.port)).toBeNull();
+    expect(screen.queryByRole('button', { name: en.common.saveAndRestart })).toBeNull();
+    // Run control and the instance name are as before.
+    expect(screen.getByRole('button', { name: en.common.restart })).toBeTruthy();
+    expect(screen.getByRole('button', { name: en.common.save })).toBeTruthy();
   });
 });

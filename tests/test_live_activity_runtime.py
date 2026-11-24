@@ -25,6 +25,9 @@ BODY = {
 
 @pytest.fixture
 def state():
+    from config.v2_config import V2Config
+
+    V2Config.default().save()
     ensure_sqlite_state()
     engine = create_sqlite_engine()
     with engine.begin() as conn:

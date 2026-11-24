@@ -48,7 +48,7 @@ def publication_lease_path():
 
 
 def reset_intent_path():
-    return paths.get_state_dir() / 'remote-binding-reset.json'
+    return paths.get_remote_binding_reset_path()
 
 
 def reset_in_progress():
