@@ -122,10 +122,14 @@ fn mode_word(mode: Mode) -> &'static str {
 /// choice, and the app's own setting-back of it while that stands, in the
 /// phone App's shape with the choice it was set back `from`. `mode` here is
 /// the choice ("direct": the direct path and the relay only), not the path
-/// in use, which is `direct.status().preferred`.
+/// in use, which is `direct.status().preferred`. `pendingRelaunch` is the
+/// phone App's word for a choice that waits for the App to be opened again;
+/// here a choice takes effect by reopening the instance, at once, so it is
+/// always false.
 pub fn preference(mode: Mode, reverted: Option<Reverted>) -> Value {
     json!({
         "mode": mode_word(mode),
+        "pendingRelaunch": false,
         "reverted": reverted.map(|reverted| json!({
             "at": reverted.at,
             "reason": match reverted.reason {

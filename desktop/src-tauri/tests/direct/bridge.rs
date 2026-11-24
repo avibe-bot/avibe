@@ -125,17 +125,17 @@ fn a_hand_over_is_answered_in_the_phones_words() {
     );
     assert_eq!(
         bridge::preference(Mode::Tunnel, None),
-        json!({ "mode": "tunnel", "reverted": null })
+        json!({ "mode": "tunnel", "pendingRelaunch": false, "reverted": null })
     );
     assert_eq!(
         bridge::preference(Mode::Automatic, None),
-        json!({ "mode": "automatic", "reverted": null })
+        json!({ "mode": "automatic", "pendingRelaunch": false, "reverted": null })
     );
     // "The direct path and the relay only": the choice's own word, which is
     // not the status's `preferred`.
     assert_eq!(
         bridge::preference(Mode::Direct, None),
-        json!({ "mode": "direct", "reverted": null })
+        json!({ "mode": "direct", "pendingRelaunch": false, "reverted": null })
     );
     // Set back by the app itself: when, why, and from which choice, as the
     // phone App says it.
@@ -150,6 +150,7 @@ fn a_hand_over_is_answered_in_the_phones_words() {
         ),
         json!({
             "mode": "automatic",
+            "pendingRelaunch": false,
             "reverted": { "at": 1_795_000_000_000u64, "reason": "unreachable", "from": "direct" },
         })
     );
@@ -262,7 +263,8 @@ fn the_choice_of_path_is_delivered_with_its_order() {
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &state);
     assert!(
-        script.contains(r#""preference":{"mode":"tunnel","reverted":null},"preferenceOrder":4"#),
+        script
+            .contains(r#""preference":{"mode":"tunnel","pendingRelaunch":false,"reverted":null},"preferenceOrder":4"#),
         "{script}"
     );
     let reply = Message::Reply {
@@ -272,7 +274,9 @@ fn the_choice_of_path_is_delivered_with_its_order() {
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &reply);
     assert!(
-        script.contains(r#""preference":{"mode":"automatic","reverted":null},"preferenceOrder":5"#),
+        script.contains(
+            r#""preference":{"mode":"automatic","pendingRelaunch":false,"reverted":null},"preferenceOrder":5"#
+        ),
         "{script}"
     );
     // The order is beside the choice, never inside what `direct.preference()` answers.
