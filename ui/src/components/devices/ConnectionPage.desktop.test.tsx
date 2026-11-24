@@ -96,6 +96,24 @@ describe('ConnectionPage · in an Avibe Desktop window of another computer\'s in
     expect(document.body.textContent).not.toContain('浏览器只走 Cloudflare 隧道');
   });
 
+  it('sees a choice the app\'s own menu changed once the page is back, without an event (version 1)', async () => {
+    install(said('ipv4', 'local'));
+    await mount('direct');
+    const group = await screen.findByRole('radiogroup', { name: '这台设备' });
+    await waitFor(() => expect(within(group).getByRole('radio', { name: /^自动/ }).getAttribute('aria-checked')).toBe('true'));
+
+    // The shell's menu: a new choice delivered to the bridge, and no event.
+    (window as unknown as { __AVIBE_DIRECT_DELIVER__: (message: unknown) => void }).__AVIBE_DIRECT_DELIVER__({ preference: { mode: 'tunnel', reverted: null }, preferenceOrder: 9 });
+    expect(within(group).getByRole('radio', { name: /^仅 Cloudflare/ }).getAttribute('aria-checked')).toBe('false');
+
+    // The window lost focus to the menu, then has it back.
+    const focus = vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+    window.dispatchEvent(new Event('blur'));
+    focus.mockReturnValue(true);
+    window.dispatchEvent(new Event('focus'));
+    await waitFor(() => expect(within(group).getByRole('radio', { name: /^仅 Cloudflare/ }).getAttribute('aria-checked')).toBe('true'));
+  });
+
   it('never calls a relayed path direct: on the relay the 「直连」 row is not marked in use', async () => {
     install(said('relay'));
     // The stream came in by the direct ingress, as a relayed one does.

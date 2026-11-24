@@ -246,11 +246,18 @@ export function ConnectionPage() {
   useEffect(() => {
     if (!nativeDirectChoiceAvailable()) return undefined;
     let current = true;
-    void readNativeDirectChoice().then((choice) => { if (current && choice) setPreference(preferenceOf(choice)); });
+    const read = () => { void readNativeDirectChoice().then((choice) => { if (current && choice) setPreference(preferenceOf(choice)); }); };
+    read();
     const stop = onNativeDirectChoiceChanged((choice) => setPreference(preferenceOf(choice)));
+    // A Desktop shell before `directPreference` 2 sends no event when its own menu changes the
+    // choice: coming back to the page reads it again, and so does the page's own refresh.
+    const stopReactivated = onPageReactivated(read);
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') read(); }, REFRESH_MS);
     return () => {
       current = false;
       stop();
+      stopReactivated();
+      window.clearInterval(timer);
     };
   }, []);
 

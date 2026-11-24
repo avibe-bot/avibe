@@ -183,9 +183,12 @@ from the phone App:
   shows. Between `"automatic"` and `"tunnel"` it reloads nothing; choosing
   `"direct"`, or leaving it, reopens the instance. The desktop app sets a
   choice back itself only from `"direct"` (`reverted.from` is always
-  `"direct"`), never from `"tunnel"`. It delivers `direct.preferenceChanged`
-  as the window event `avibe:native:direct.preferenceChanged`, as the App
-  does, whenever the choice changes while the page is open.
+  `"direct"`), never from `"tunnel"`. From `directPreference` version 2 it
+  delivers `direct.preferenceChanged` as the window event
+  `avibe:native:direct.preferenceChanged`, as the App does, whenever the
+  choice changes while the page is open. Version 1 sends no event: a change
+  made in the app's own menu is seen when the page reads the choice again
+  (Devices › Connection does so each time the page is shown again).
 - A request reaches the shell as a link to `avibe-app://direct` that the
   shell refuses to follow, carrying a token only that window's bridge script
   has. No command or message handler is given to the instance's origin. On
