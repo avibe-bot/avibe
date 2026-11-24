@@ -736,7 +736,10 @@ With a transport:
     covered** (held or fault), so an unrouted host never is, and neither is
     a routed one whose port is merely closed: its page already loads over
     the public origin, and direct comes back when the listener serves.
-  - **While its loads wait:** the thin progress line over the page. If
+  - **While its loads wait after an attempt has failed,** or while
+    something else may hold the port: the thin progress line over the
+    page. An ordinary return's first attempt shows nothing; it is over in
+    well under a second. If
     the page's web content process ended meanwhile, the skeleton stands in
     for the blank WebView.
   - **Past `listenerRecoveryPatience`** (10 s, counted from when this
@@ -748,7 +751,10 @@ With a transport:
     the line again while it runs, the message back as soon as it failed
     too. Nothing asks the user to reopen the App, and no state needs it.
   - **An open under way** has its own line, rows and failure screen; a
-    held open waits in its slot and goes on when the gate opens.
+    held open waits in its slot and goes on when the gate opens. Their
+    Retry is offered under the fault gate too: nothing is reloaded against
+    a port someone else may hold, but the tap binds the port again, and
+    the reload can be made once it is the App's.
   - **The one cause an attempt cannot cure** is a port someone else holds.
     The App keeps trying and shows the message with Retry; it is cured
     when the other holder lets go. The App does not move to another WebKit

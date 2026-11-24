@@ -509,13 +509,14 @@ private struct BrowserScreen: View {
                         } description: {
                             Text("browser.error.body")
                         } actions: {
-                            // Retry is offered only while the shell may
-                            // reload: on WebKit's normal path, with a
-                            // serving listener, or with its port closed.
-                            // While the listener is on a return's first
-                            // attempt it is not shown; it returns when
-                            // that settles.
-                            if appModel.mayReload(runtime) {
+                            // Retry is offered while the shell may
+                            // reload (WebKit's normal path, a serving
+                            // listener, or its port closed), and while
+                            // something else may hold the listener's port,
+                            // where the tap binds the port again. During
+                            // a return's first attempt it is not shown;
+                            // it returns when that settles.
+                            if appModel.offersRetry(for: runtime) {
                                 Button("browser.error.retry") {
                                     showsAccountFallback = false
                                     guard let attempt else {

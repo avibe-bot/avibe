@@ -2913,10 +2913,28 @@ final class AppModel: ObservableObject {
     }
 
     /// The Retry tap itself: decides again, now, whether the reload may be
-    /// made, and hears a failure already recorded first.
+    /// made, and hears a failure already recorded first. While something
+    /// else may hold the listener's port nothing is reloaded, but the tap
+    /// is not wasted: the port is bound again now, as the recovery's own
+    /// Retry does, and the reload can be made once it is the App's.
     func authorizeReload(of runtime: MobileRuntimeContext) -> Bool {
         directPathController?.settleRecordedFault()
+        if directLoadGate(for: runtime) == .fault {
+            directPathController?.retryListenerNow()
+        }
         return mayReload(runtime)
+    }
+
+    /// Whether Retry is offered for `runtime`: when the reload may be made,
+    /// and also while something else may hold the listener's port, where
+    /// the tap binds the port again.
+    func offersRetry(for runtime: MobileRuntimeContext) -> Bool {
+        switch directLoadGate(for: runtime) {
+        case .open, .fault:
+            return true
+        case .held:
+            return false
+        }
     }
 
     // MARK: The listener's recovery
@@ -2927,9 +2945,9 @@ final class AppModel: ObservableObject {
         /// wait for it (its host has no route, or the port is closed and
         /// WebKit leaves it by itself for the public origin).
         case none
-        /// Its loads wait for the listener, which is being bound again (a
-        /// return's first attempt, or a port something else may hold): the
-        /// page stays, with the thin line.
+        /// Its loads wait for the listener, which is being bound again
+        /// after an attempt that failed, or while something else may hold
+        /// its port: the page stays, with the thin line.
         case connecting
         /// They still wait past the patience: the message with Retry.
         /// The attempts go on underneath.
@@ -2938,13 +2956,16 @@ final class AppModel: ObservableObject {
 
     /// What to show over `runtime` for the listener's recovery. Read from
     /// the controller each time; only a runtime whose loads the gate does
-    /// not let through is covered, so an unrouted one never is.
+    /// not let through is covered, so an unrouted one never is. An
+    /// ordinary return's first attempt (no attempt has failed, and the
+    /// port was the App's) shows nothing: it is over in well under a
+    /// second, and a line on every return would only flicker.
     func listenerRecoveryPresentation(
         for runtime: MobileRuntimeContext
     ) -> ListenerRecoveryPresentation {
         guard
             let directPathController,
-            directPathController.listenerRecovery != nil
+            let recovery = directPathController.listenerRecovery
         else {
             return .none
         }
@@ -2952,7 +2973,12 @@ final class AppModel: ObservableObject {
         case .open:
             return .none
         case .held, .fault:
-            return listenerRecoveryIsOverdue ? .unreachable : .connecting
+            if listenerRecoveryIsOverdue {
+                return .unreachable
+            }
+            return recovery.lastFailure != nil || recovery.portMayBeForeign
+                ? .connecting
+                : .none
         }
     }
 
@@ -2970,6 +2996,9 @@ final class AppModel: ObservableObject {
         guard let directPathController else {
             return
         }
+        // A failure already recorded is heard first, so that it is not
+        // taken for the failure of the attempt this press starts.
+        directPathController.settleRecordedFault()
         if let recovery = directPathController.listenerRecovery {
             listenerRetryAfter = recovery.lastFailure?.at ?? recovery.since
             listenerRecoveryIsOverdue = false

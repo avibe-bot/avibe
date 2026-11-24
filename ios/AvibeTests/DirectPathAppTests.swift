@@ -159,10 +159,11 @@ final class DirectPathAppTests: XCTestCase {
         // Nothing is shown, or bound, in the background.
         XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .none)
 
-        // The return, in its own turn: the page's loads wait, with the line.
+        // The return, in its own turn: the page's loads wait for the first
+        // attempt, as on every return, with nothing shown yet.
         enterForeground()
         XCTAssertEqual(app.directLoadGate(for: first), .held)
-        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .connecting)
+        XCTAssertEqual(app.listenerRecoveryPresentation(for: first), .none)
         XCTAssertFalse(app.listenerRecoveryIsOverdue)
 
         // Past the wait, the message with Retry. Something else may hold
@@ -172,6 +173,8 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.directLoadGate(for: first), .fault)
         XCTAssertFalse(app.mayReload(first))
         XCTAssertFalse(app.authorizeReload(of: first))
+        // Retry is offered all the same: its tap binds the port again.
+        XCTAssertTrue(app.offersRetry(for: first))
         XCTAssertEqual(app.route, .browser(first))
         XCTAssertEqual(app.runtimeIdentity, identity)
         XCTAssertNil(app.runtimeOpenNotice)
@@ -2341,6 +2344,7 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.directLoadGate(for: runtime), .open)
         XCTAssertNil(app.directLoadGateProvider(for: runtime))
         XCTAssertEqual(app.listenerRecoveryPresentation(for: runtime), .none)
+        XCTAssertTrue(app.offersRetry(for: runtime))
         enterBackground()
         XCTAssertTrue(app.mayReload(runtime))
         enterForeground()
