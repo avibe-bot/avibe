@@ -754,6 +754,15 @@ describe('ConnectionPageView', () => {
     expect(screen.getByRole('radio', { name: /^仅直连和中继/ }).getAttribute('aria-checked')).toBe('true');
   });
 
+  it('says under 「仅直连和中继」 when the App takes it only after it is opened again', () => {
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null, pendingRelaunch: true } });
+    const option = screen.getByRole('radio', { name: /^仅直连和中继/ });
+    expect(option.textContent).toContain('重新打开 App 后生效。');
+    unmount();
+    view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null } });
+    expect(document.body.textContent).not.toContain('重新打开 App 后生效');
+  });
+
   it('says which choice went back to automatic, and by which shell', () => {
     const at = '2026-11-21T01:00:00.000Z';
     const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });

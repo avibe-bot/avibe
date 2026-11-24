@@ -100,6 +100,8 @@ const designFrames = frames([
     { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null }, directOnly: true }, { app: true }),
   frame('app-direct-only', '连接方式 · Avibe App 选了「仅直连和中继」：「这台设备」照旧说实际走的路线（这里是中继） · 390 宽', APP_390,
     { ...remote, via: 'direct', path: { kind: 'relay', rttMs: 85 }, preference: { mode: 'direct', reverted: null }, directOnly: true }, { app: true }),
+  frame('app-direct-relaunch', '连接方式 · Avibe App 选了「仅直连和中继」，要重新打开 App 才生效：选项下面一句 · 390 宽', APP_390,
+    { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'direct', reverted: null, pendingRelaunch: true }, directOnly: true }, { app: true }),
   frame('app-direct-reverted', '连接方式 · App 选「仅直连和中继」连不上，自己改回了「自动」：同样的句式 · 390 宽', APP_390,
     { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'direct' } }, directOnly: true }, { app: true }),
   frame('loading', '连接方式 · 第一次读', { width: 1440, height: 700 }, { load: 'loading', connection: null }),

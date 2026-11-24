@@ -264,6 +264,9 @@ function PreferenceGroup({ path, preference, shell = 'app', directOnly, onChange
               <span className="min-w-0">
                 <span className="block text-[13px] font-medium text-foreground">{label}</span>
                 <span className="block text-[11px] leading-relaxed text-muted"><KeptTail fill text={text} /></span>
+                {id === 'direct' && preference.pendingRelaunch && (
+                  <span role="status" className="mt-0.5 block text-[11px] leading-relaxed text-gold-ink">{t('devices.connection.directOnlyRelaunch')}</span>
+                )}
               </span>
             </button>
           );
