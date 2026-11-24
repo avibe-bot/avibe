@@ -112,8 +112,10 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         case forbidden
         /// Anything else the instance answered.
         case server(Int, String?)
-        /// The App's local listener for this instance failed
-        /// (`DirectLoadGate.fault`): nothing is loaded against it.
+        /// The App's local listener for this instance cannot serve now
+        /// (`DirectLoadGate.fault`: another process holds its port; it
+        /// recovers by itself): nothing is loaded against it, and the take
+        /// is kept and sent again by itself.
         case directFault
         /// The client was closed before this request was made (its take is
         /// over): provably nothing was sent.
@@ -206,7 +208,10 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         step: Duration = gateStep
     ) async -> DirectLoadGate {
         let deadline = now() + limit
-        while isActive(), gate() == .held, now() < deadline, !Task.isCancelled {
+        // A fault is waited for as a held gate is: in front the listener
+        // re-binds by itself (#4233), and coming to the front is when it
+        // clears; a fault that lasts the wait is the answer.
+        while isActive(), [DirectLoadGate.held, .fault].contains(gate()), now() < deadline, !Task.isCancelled {
             await sleep(step)
         }
         return gate()

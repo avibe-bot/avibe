@@ -1326,6 +1326,11 @@ def test_model_hub_engine_dependency_status_projects_exact_avibe_pin(
     expected,
 ):
     class Manager:
+        manifest_path = manifest_url = None
+
+        def bundled_manifest(self):
+            return None
+
         def __init__(self, *, offline):
             assert offline is True
 
@@ -2062,7 +2067,7 @@ def test_dependencies_status_shape(monkeypatch):
     monkeypatch.setattr(
         api.V2Config,
         "load",
-        classmethod(lambda _cls: SimpleNamespace()),
+        classmethod(lambda _cls: SimpleNamespace(whole_config_recovery=False, recovered_sections=(), update=SimpleNamespace(model_hub_engine_auto_update=True))),
     )
     monkeypatch.setattr(
         api,
@@ -2240,7 +2245,7 @@ def test_dependencies_status_projects_show_runtime_identity_without_pairing(monk
     monkeypatch.setattr(
         api.V2Config,
         "load",
-        classmethod(lambda _cls: SimpleNamespace()),
+        classmethod(lambda _cls: SimpleNamespace(whole_config_recovery=False, recovered_sections=(), update=SimpleNamespace(model_hub_engine_auto_update=True))),
     )
 
     import core.show_runtime as show_runtime

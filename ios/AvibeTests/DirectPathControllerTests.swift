@@ -1446,8 +1446,9 @@ final class DirectPathControllerTests: XCTestCase {
     /// What the Action Button's voice take does with that gate: its client
     /// waits out a held gate (five seconds) and then loads, so the gate of
     /// a port that may be someone else's must never read as held. It reads
-    /// as the refusing value at once, in front and in the background, and
-    /// the client then loads nothing and says so.
+    /// as the refusing value, and the client settles on it in the background
+    /// at once and in front after at most `gateWait` (the listener re-binds
+    /// in front, #4241), with no load, and says so.
     @MainActor
     func testAVoiceTakeLoadsNothingWhileAStrangerHoldsThePort() async throws {
         let listening = try listeningSockets()
@@ -1485,15 +1486,26 @@ final class DirectPathControllerTests: XCTestCase {
             if !inFront {
                 harness.enterBackground()
             }
-            // Settled at once, with no wait that could end in a load.
+            // In the background settled at once; in front after the client's
+            // whole wait (a clock the steps advance), and on the fault, never
+            // on a value that would load.
             var slept = 0
+            var clock = ContinuousClock.now
             let settled = await VoiceCaptureInstanceClient.settledGate(
                 gate: gate,
                 isActive: { inFront },
-                sleep: { _ in slept += 1 }
+                sleep: { step in
+                    slept += 1
+                    clock += step
+                },
+                now: { clock }
             )
             XCTAssertEqual(settled, .fault, "in front: \(inFront)")
-            XCTAssertEqual(slept, 0, "in front: \(inFront)")
+            XCTAssertEqual(
+                slept,
+                inFront ? Int(VoiceCaptureInstanceClient.gateWait / VoiceCaptureInstanceClient.gateStep) : 0,
+                "in front: \(inFront)"
+            )
 
             let client = VoiceCaptureInstanceClient(
                 target: VoiceCaptureTarget(
@@ -1503,8 +1515,7 @@ final class DirectPathControllerTests: XCTestCase {
                     storeIdentifier: store
                 ),
                 gate: gate,
-                isActive: { inFront },
-                sleep: { _ in }
+                isActive: { inFront }
             )
             do {
                 _ = try await client.status()
