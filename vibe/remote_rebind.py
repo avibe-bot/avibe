@@ -244,7 +244,7 @@ TEXT = {
     # (the way out of refused_loopback); a link would be refused again. No reset is offered.
     "refused_other_account": (
         "The Avibe this computer used is not under {email}. Sign in to avibe.bot with the\n"
-        "account that owns it, in a browser at this computer's own address.\n"
+        "account that owns it.\n"
         "Use the browser on this computer, or from another computer through SSH port\n"
         "forwarding:\n"
         "    ssh -L {port}:127.0.0.1:{port} <user>@<this-server>\n"
