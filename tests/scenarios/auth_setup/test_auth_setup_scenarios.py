@@ -242,6 +242,34 @@ def test_constrained_browser_refusal_then_confirmed_reset(rebind_machine, monkey
     assert not redeems and not binding_admission.reset_in_progress()
 
 
+def test_cancel_at_avibe_bot_returns_the_initiating_browser_to_a_declined_rebind(rebind_machine):
+    """AUTH-SETUP-215: cancelled on avibe.bot, the initiating browser comes back to a declined attempt."""
+    from tests.test_personal_claims import callback_proof
+    from tests.test_rebind_routes import ROOT as claims_path, ORIGIN
+
+    peer, redeems = rebind_machine
+    before = V2Config.load().remote_access.vibe_cloud
+    client = app.test_client()
+    headers = csrf_headers(client, base_url=ORIGIN)
+    body = client.post(claims_path, base_url=ORIGIN, headers=headers, json={}).get_json()
+    sent = len(peer.calls)
+    back = client.get('/remote/claim/callback', base_url=ORIGIN, params={
+        'claim_id': body['claim_id'], 'state': callback_proof(body), 'outcome': 'declined'})
+    assert back.status_code == 303 and back.headers['Location'] == '/settings/remote-access'
+    path = claims_path + '/' + body['claim_id']
+    deadline = time.monotonic() + 5
+    while (view := client.get(path, base_url=ORIGIN).get_json())['state'] not in ('declined', 'error', 'bound'):
+        assert time.monotonic() < deadline
+        time.sleep(.02)
+    assert (view['state'], view['code']) == ('declined', 'declined')
+    # Declined there already: nothing more asked of avibe.bot, nothing redeemed, the binding untouched.
+    assert len(peer.calls) == sent and not redeems
+    assert V2Config.load().remote_access.vibe_cloud == before
+    status = client.get('/api/remote-access/rebind', base_url=ORIGIN).get_json()
+    assert status['binding_state'] == 'bound' and status['can_start']
+    assert remote_access._read_pending_pairing_record() == (None, None)
+
+
 def test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account(bound_terminal, monkeypatch, capsys):
     """AUTH-SETUP-212: the command as typed, through the parser, admission and dispatch.
 
