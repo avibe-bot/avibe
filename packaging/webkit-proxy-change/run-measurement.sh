@@ -49,6 +49,10 @@ for r in json.load(sys.stdin).get("runtimes", []):
     if not r.get("isAvailable") or r.get("platform") != "iOS":
         continue
     version = r.get("version", "")
+    # The hosted image also includes a same-version device-specific bundle.
+    # Match the general ios-shell runtime, not the lexically last identifier.
+    if selector == "newest" and r.get("identifier") != "com.apple.CoreSimulator.SimRuntime.iOS-27-2":
+        continue
     try: parsed = tuple(int(x) for x in version.split("."))
     except ValueError: continue
     if selector == "17.0" and parsed != (17, 0): continue
