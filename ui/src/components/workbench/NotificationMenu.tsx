@@ -11,6 +11,7 @@ import { NOTIFICATIONS_SETTINGS_PATH } from '../../lib/notificationPreferences';
 import { BotAvatar } from '../ui/bot-avatar';
 import { Switch } from '../ui/switch';
 import { WebPushControl } from './WebPushControl';
+import { DesktopNotificationEnable } from './DesktopNotificationEnable';
 
 function CategoryRow({
   icon,
@@ -110,6 +111,12 @@ export function NotificationMenu({ onNavigate }: { onNavigate?: () => void }) {
             <span className="text-[11px] text-muted">{t('workbench.notifications.device')}</span>
             <WebPushControl />
           </div>
+        </>
+      )}
+      {desktop && (
+        <>
+          <div className="mx-1 my-1 h-px bg-border" />
+          <div className="px-1"><DesktopNotificationEnable /></div>
         </>
       )}
       <button
