@@ -1222,7 +1222,7 @@ def test_signpath_test_signing_is_a_dispatch_only_isolated_lane():
     submit, upload = sign["steps"]
     assert all("run" not in item for item in sign["steps"])
     assert submit["uses"] == (
-        "signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092"
+        "signpath/github-action-submit-signing-request@4a84eb4ad763290f059275786f2deed97c2c672b"
     )
     assert submit["with"] == {
         "api-token": "${{ secrets.SIGNPATH_TEST_API_TOKEN }}",
