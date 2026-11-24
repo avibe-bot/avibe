@@ -44,6 +44,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -758,13 +759,14 @@ def github_api(path: str, *, token: str | None) -> Any:
         raise ProducerError(f"GitHub could not be read for {path}: {type(exc).__name__}") from exc
 
 
-def run_context_problems(environ: Mapping[str, str], *, events: frozenset[str] = frozenset({"workflow_dispatch"})) -> list[str]:
+def run_context_problems(environ: Mapping[str, str], *, events: frozenset[str] = frozenset({"workflow_dispatch"}),
+                         workflow_path: str = WORKFLOW_PATH) -> list[str]:
     """Why this run is not the reviewed finalizer on the default branch."""
 
     expected = {
         "GITHUB_REPOSITORY": REPOSITORY,
         "GITHUB_REF": f"refs/heads/{DEFAULT_BRANCH}",
-        "GITHUB_WORKFLOW_REF": f"{REPOSITORY}/{WORKFLOW_PATH}@refs/heads/{DEFAULT_BRANCH}",
+        "GITHUB_WORKFLOW_REF": f"{REPOSITORY}/{workflow_path}@refs/heads/{DEFAULT_BRANCH}",
     }
     problems = [
         f"{name} is {environ.get(name)!r}, not {value!r}" for name, value in expected.items() if environ.get(name) != value
@@ -889,17 +891,18 @@ class IndexBucket:
     def read(self) -> tuple[bytes, str] | None:
         """The stored index and its ETag; ``None`` when the key is absent."""
 
-        listing = self._s3api("list-objects-v2", "--prefix", INDEX_KEY, "--output", "json")
-        if listing.returncode != 0:
-            raise ProducerError("the bucket could not be listed")
-        contents = (json.loads(listing.stdout) if listing.stdout.strip() else {}).get("Contents") or []
-        if not any(item.get("Key") == INDEX_KEY for item in contents):
-            return None
+        # An object-scoped token has no ListBucket permission. Read exactly
+        # one key and bind the CAS to the ETag returned with those same bytes.
         with tempfile.TemporaryDirectory(prefix="avibe-engine-channel-") as temporary:
             path = Path(temporary) / "index"
             fetched = self._s3api("get-object", "--key", INDEX_KEY, "--output", "json", str(path))
             if fetched.returncode != 0:
-                raise ProducerError("the stored index could not be read")
+                if fetched.returncode == 254 and re.match(
+                    r"^An error occurred \((NoSuchKey|404)\) when calling the GetObject operation:",
+                    (fetched.stderr or "").strip(),
+                ):
+                    return None
+                raise ProducerError("the stored index could not be read; access denied is not absence")
             etag = json.loads(fetched.stdout).get("ETag")
             if not isinstance(etag, str) or not etag:
                 raise ProducerError("the stored index has no ETag to replace it against")

@@ -1,4 +1,4 @@
-"""Read a single immutable artifact from one approved, SHA-bound first run attempt.
+"""Read one immutable envelope from the exact merged-index run and attempt.
 
 GitHub's zip digest identifies transport bytes, not signing authority. The caller
 must independently verify the inner envelope against the PR allocation and root.
@@ -19,18 +19,20 @@ Error = producer.ProducerError
 ZIP_LIMIT = MAX_ENVELOPE_BYTES + 65536
 
 
-def artifact_name(run, sha, sequence, raw):
+def artifact_name(run, sha, sequence, raw, *, attempt):
+    if not re.fullmatch(r"[1-9][0-9]{0,9}", attempt):
+        raise Error("invalid run attempt")
     if not re.fullmatch(r"[1-9][0-9]{0,19}", run) or not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise Error("invalid artifact coordinates")
-    return f"engine-{run}-attempt-1-{sha}-{sequence}-{hashlib.sha256(raw).hexdigest()}"
+    return f"engine-{run}-attempt-{attempt}-{sha}-{sequence}-{hashlib.sha256(raw).hexdigest()}"
 
 
-def wait_for_artifact(api, run, sha, name, *, timeout=300, clock=time.monotonic, sleep=time.sleep):
+def wait_for_artifact(api, run, sha, name, *, attempt, timeout=300, clock=time.monotonic, sleep=time.sleep):
     base = f"/repos/{producer.REPOSITORY}/actions/runs/{run}"
     source = api(base) or {}
-    if (str(source.get("id")) != run or source.get("run_attempt") != 1 or source.get("head_sha") != sha
-            or source.get("head_branch") != "master" or source.get("event") != "workflow_dispatch"
-            or source.get("path") != producer.WORKFLOW_PATH or (source.get("repository") or {}).get("full_name") != producer.REPOSITORY):
+    if (str(source.get("id")) != run or str(source.get("run_attempt")) != attempt or source.get("head_sha") != sha
+            or source.get("head_branch") != "master" or source.get("event") != "push"
+            or source.get("path") != ".github/workflows/model-hub-engine-index.yml" or (source.get("repository") or {}).get("full_name") != producer.REPOSITORY):
         raise Error("artifact source is not the exact channel workflow, repo, ref, SHA, run and attempt")
     deadline = clock() + timeout
     while True:
@@ -49,7 +51,7 @@ def wait_for_artifact(api, run, sha, name, *, timeout=300, clock=time.monotonic,
                 raise Error("artifact metadata does not match this allocation")
             return row["id"], row["digest"]
         if clock() >= deadline:
-            raise Error("signed artifact unavailable before deadline; fresh approval required for recovery")
+            raise Error("signed artifact unavailable before deadline; rerun all jobs on the same original push")
         sleep(5)
 
 
