@@ -11,10 +11,10 @@ from typing import Any, TypeVar
 
 from modules.agents.acp import ACP_AUTH_REQUIRED, AcpClient, AcpRpcError, AcpTransportError
 from modules.agents.antigravity.agent import (
-    _authenticate_session_client,
     build_antigravity_command,
     build_antigravity_env,
 )
+from modules.agents.antigravity.auth import authenticate_antigravity_client
 
 from .base import (
     NativeSessionProvider,
@@ -133,7 +133,7 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
         try:
             await client.start()
             await client.initialize(client_info=_CLIENT_INFO, client_capabilities={})
-            await _authenticate_session_client(client, getattr(config, "auth_mode", None))
+            await authenticate_antigravity_client(client, getattr(config, "auth_mode", None))
             if not client.supports_list:
                 return []
 

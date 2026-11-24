@@ -41,7 +41,9 @@ def test_runtime_auth_alone_is_not_a_saved_configuration(monkeypatch, tmp_path):
     for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY"):
         monkeypatch.setenv(name, "fixture-runtime-not-an-import")
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://127.0.0.1:12345")
-    assert all(agent.mode == "hub" for agent in store.load().agents.values())
+    loaded_agents = store.load().agents
+    assert all(agent.mode == "hub" for backend, agent in loaded_agents.items() if backend != "antigravity")
+    assert loaded_agents["antigravity"].mode == "direct"
     assert service.migration_scan()["items"] == []
     assert adapter.provisioned == []
 

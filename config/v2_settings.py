@@ -141,6 +141,7 @@ class RoutingSettings:
     opencode_agent: Optional[str] = None
     claude_agent: Optional[str] = None
     codex_agent: Optional[str] = None
+    antigravity_agent: Optional[str] = None
 
 
 # Retired per-backend spellings of a scope's model and effort (``claude_model``,
@@ -190,6 +191,7 @@ def routing_from_stored_payload(payload: Optional[dict]) -> RoutingSettings:
         opencode_agent=payload.get("opencode_agent"),
         claude_agent=payload.get("claude_agent"),
         codex_agent=payload.get("codex_agent"),
+        antigravity_agent=payload.get("antigravity_agent"),
     )
 
 
@@ -308,6 +310,7 @@ def _parse_routing(payload: dict) -> RoutingSettings:
         opencode_agent=payload.get("opencode_agent"),
         claude_agent=payload.get("claude_agent"),
         codex_agent=payload.get("codex_agent"),
+        antigravity_agent=payload.get("antigravity_agent"),
     )
 
 

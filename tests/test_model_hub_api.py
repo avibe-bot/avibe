@@ -4673,6 +4673,7 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     assert {backend: agent["cli_present"] for backend, agent in agents.items()} == {
+        "antigravity": False,
         "claude": True,
         "codex": True,
         "opencode": False,
@@ -4690,6 +4691,7 @@ def test_agents_endpoint_projects_backend_enablement(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     assert {backend: agent["backend_enabled"] for backend, agent in agents.items()} == {
+        "antigravity": False,
         "claude": True,
         "codex": False,
         "opencode": False,
@@ -5089,6 +5091,7 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "codex": "gpt-5.3-codex",
     }.get(backend)
     service.named_agents_override = lambda backend: {
+        "antigravity": [],
         "claude": [("pm", "claude-sonnet-4-6"), ("reviewer", "claude-opus-4-6")],
         "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],

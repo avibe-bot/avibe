@@ -34,8 +34,8 @@ NATIVE = frozenset(NATIVE_CLI_BACKENDS)
 # Mappings remain literal when their per-backend values are the implementation.
 PYTHON_DECLARATIONS = {
     ("config/v2_config.py", "Dict", NATIVE): (2, "native", "Config serialization/recovery plus the avault tool; the built-in backend has no section."),
-    ("config/v2_config.py", "Set", frozenset({"claude", "codex", "antigravity"})): (2, "native_subset", "Built-in model catalogs."),
-    ("config/v2_config.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Fixed-menu Hub-capable native backends."),
+    ("config/v2_config.py", "Set", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Built-in model catalogs."),
+    ("config/v2_config.py", "Set", frozenset({"claude", "codex"})): (2, "native_subset", "Fixed-menu Hub-capable native backends."),
     ("config/v2_config.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Released two-vendor model/credential migration."),
     ("config/v2_config.py", "Pairs", NATIVE): (1, "native", "Per-CLI auto-update config objects."),
     ("core/agent_auth_service.py", "Set", frozenset({"claude", "codex", "antigravity"})): (3, "native_subset", "Account-level native auth/test/logout backends."),

@@ -535,6 +535,7 @@ def _run_acp(cfg: dict[str, Any], state_file: Path, rpc_log: Path | None, auth_m
         server_cfg.setdefault("configOptions", _AUTH_DEFAULT_CONFIG_OPTIONS)
     else:
         server_cfg = dict(cfg)
+        server_cfg.setdefault("authMethods", _AUTH_DEFAULT_METHODS)
 
     asyncio.run(_AuditingFakeAcpServer(state_file=state_file, config=server_cfg).run())
     return 0

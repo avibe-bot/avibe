@@ -770,3 +770,56 @@ async def test_localized_zh_failure_and_incomplete_turn_copy(tmp_path: Path) -> 
         assert results[0][2].get("terminal_error") == "Antigravity turn stopped incomplete (max_tokens)."
     finally:
         await agent_stop.shutdown_runtime()
+
+
+@pytest.mark.asyncio
+async def test_try_reuse_antigravity_login_rejects_cross_mode_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import agent_auth_service as auth_mod
+
+    probe_calls: list[str] = []
+
+    async def _fake_probe(binary: str, *, config: Any = None, auth_mode: str | None = None, **kwargs: Any) -> dict[str, Any]:
+        probe_calls.append(str(auth_mode))
+        return {"ok": True, "authenticated": True}
+
+    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _fake_probe)
+
+    service = auth_mod.AgentAuthService.__new__(auth_mod.AgentAuthService)
+    saved_mode = {"value": "oauth-personal"}
+    service._resolve_backend_config = lambda backend: SimpleNamespace(auth_mode=saved_mode["value"])
+    service._get_cli_binary = lambda backend: "agy"
+
+    # Switching oauth-personal -> oauth-business must NOT reuse the existing login.
+    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-business")) is False
+    assert probe_calls == []
+
+    # Switching oauth-business -> oauth-personal must NOT reuse the existing login.
+    saved_mode["value"] = "oauth-business"
+    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-personal")) is False
+    assert probe_calls == []
+
+    # Matching saved OAuth mode is allowed to probe and reuse.
+    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-business")) is True
+    assert probe_calls == ["oauth-business"]
+
+
+def test_extract_antigravity_oauth_url_buffers_split_pty_chunks() -> None:
+    from modules.agents.antigravity.auth import extract_antigravity_oauth_url
+
+    part1 = "Open URL: \x1b[36mhttps://accounts.google.com/o/oauth2/auth?client_id=agy"
+    part2 = "&state=split-token-123\x1b[0m"
+    part3 = "\nPaste code: "
+
+    # Incomplete chunk without boundary must not publish a truncated URL before EOF.
+    assert extract_antigravity_oauth_url(part1, eof=False) is None
+    assert extract_antigravity_oauth_url(part1 + "&state=half", eof=False) is None
+
+    # ANSI escape boundary or newline terminates the URL cleanly.
+    expected = "https://accounts.google.com/o/oauth2/auth?client_id=agy&state=split-token-123"
+    assert extract_antigravity_oauth_url(part1 + part2, eof=False) == expected
+    assert extract_antigravity_oauth_url(part1 + part2 + part3, eof=False) == expected
+
+    # At EOF, a non-terminated URL at the end of output is still extracted.
+    assert extract_antigravity_oauth_url(part1 + "&state=eof-only", eof=True) == (
+        "https://accounts.google.com/o/oauth2/auth?client_id=agy&state=eof-only"
+    )

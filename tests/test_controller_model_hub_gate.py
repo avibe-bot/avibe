@@ -163,7 +163,7 @@ def test_controller_builds_one_model_hub_aggregate_by_default_or_explicit_enable
     assert refresh_callbacks == [controller._model_hub_snapshot_refresh_completed]
     # MH-LIMITS-001: a models.dev copy landing takes the same refresh path.
     assert arrival_callbacks == [controller._model_hub_snapshot_refresh_completed]
-    assert presence_probes == [(["claude", "codex", "opencode"], False)]
+    assert presence_probes == [(["agy", "claude", "codex", "opencode"], False)]
     probe_failure[0] = True
     captured["cli_presence_refresh"](True, ("opencode",))
     assert captured["cli_present_override"]("codex") is True
