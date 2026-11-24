@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import {
   ArrowUpRight,
   AlertTriangle,
@@ -20,6 +20,10 @@ import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
+import { InfoHint } from '../ui/info-hint';
+import { EngineUpdateStrip } from './EngineUpdateStrip';
+import { runEngineOperation } from './engineOperations';
+import { engineBuildVersion, engineUpdateRereadMs, engineUpdateView } from './engineUpdateView';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
@@ -41,6 +45,11 @@ import { AvaultAuthorizationNotice } from '../ui/avault-authorization-notice';
 // runtime and CPA auto-install during `vibe runtime prepare`; this page surfaces
 // their status and offers manual re-check / install / repair. Backend CLIs are
 // managed on the Backends tab — linked, not duplicated.
+// The Model Hub engine also updates by itself between Avibe releases: its row
+// carries one strip for that (ui/design: settings/engine-updates/*).
+
+/** The open-source project the Model Hub engine is built on, named beside the row's title. */
+const ENGINE_UPSTREAM_URL = 'https://github.com/router-for-me/CLIProxyAPI';
 
 type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 
@@ -60,7 +69,25 @@ export const SettingsDependenciesPage: React.FC = () => {
 
   const { checks, refresh: refreshDependencies, checking, loginSessionState } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
+  // The engine check or update this page started; which of its own operations ended as failed,
+  // which a fresh read cannot tell apart; and the switch's change on its way.
+  const [engineWorking, setEngineWorking] = useState<'check' | 'update' | null>(null);
+  const [engineFailed, setEngineFailed] = useState<'check' | 'update' | null>(null);
+  const [engineSettingBusy, setEngineSettingBusy] = useState(false);
   useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
+
+  // What the engine's owner does by itself (a routine update, a retry once Model Hub is idle, a
+  // withdrawal) is read again until it settles, so an open page does not go on saying "Updating…"
+  // or "waiting" after the engine has changed.
+  const engineCheck = checks['model-hub-engine'];
+  const engineRereadMs = engineWorking === null && !engineCheck.checking && engineCheck.error === null && engineCheck.data !== null
+    ? engineUpdateRereadMs(engineCheck.data)
+    : null;
+  useEffect(() => {
+    if (engineRereadMs === null) return undefined;
+    const timer = window.setTimeout(() => void refreshDependencies('model-hub-engine'), engineRereadMs);
+    return () => window.clearTimeout(timer);
+  }, [engineRereadMs, engineCheck.data, refreshDependencies]);
   // A closed backend reason/message is often a snake_case token rather than human copy. Localize any
   // token-shaped string through the shared errors namespace so the user never
   // sees a raw identifier; fall back to a human message or the generic failure.
@@ -97,6 +124,46 @@ export const SettingsDependenciesPage: React.FC = () => {
     }
   };
 
+  const runEngine = async (kind: 'check' | 'update') => {
+    if (busy !== null || engineWorking !== null) return;
+    setEngineWorking(kind);
+    setEngineFailed(null);
+    try {
+      const result = await runEngineOperation(api.engineOperationRequest, kind);
+      // Every settled outcome (applied, waiting for idle, undone, nothing newer) is the row's own
+      // sentence once it is read again, and an unconfirmed one is whatever the row then says. Only a
+      // refusal may leave the row as it was, so that is said here.
+      if (result.outcome === 'refused') {
+        showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.cannotUpdate'), 'error');
+      }
+      // A request can be answered with the receipt of the other operation already running, so the
+      // receipt's own kind says what failed.
+      if (result.outcome === 'settled' && result.status === 'failed' && result.update_state === 'failed'
+        && (result.kind === 'check' || result.kind === 'update')) {
+        setEngineFailed(result.kind);
+      }
+    } catch {
+      // The server did not answer: the read below fails too, and the row says so.
+    } finally {
+      await refreshDependencies('model-hub-engine');
+      setEngineWorking(null);
+    }
+  };
+
+  const setEngineAutoUpdate = async (enabled: boolean) => {
+    if (engineSettingBusy) return;
+    setEngineSettingBusy(true);
+    try {
+      const result = await api.setEngineAutoUpdate(enabled);
+      if (!result?.ok) showToast(t('settings.dependencies.engineUpdates.settingFailed'), 'error');
+    } catch {
+      showToast(t('settings.dependencies.engineUpdates.settingFailed'), 'error');
+    } finally {
+      await refreshDependencies('model-hub-engine');
+      setEngineSettingBusy(false);
+    }
+  };
+
   const statusText = (d: DependencyItem) => {
     if (checks[d.id]?.reconciling && dependencyIsStartupRepairing(d, checks[d.id].reconcilingDependencies)) return t('settings.dependencies.installing');
         // Closed non-installed failure states render distinctly, ahead
@@ -111,7 +178,9 @@ export const SettingsDependenciesPage: React.FC = () => {
       return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
     }
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
-    return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
+    // The engine's channel builds differ by build revision, so its row names the running build.
+    const version = (engineUpdateView(d) && engineBuildVersion(d.active_release)) || d.version;
+    return version ? `${word} · v${String(version).replace(/^v/i, '')}` : word;
   };
 
   const statusVariant = (d: DependencyItem): 'secondary' | 'success' | 'warning' | 'destructive' => {
@@ -186,6 +255,25 @@ export const SettingsDependenciesPage: React.FC = () => {
                 aria-label={t('settings.dependencies.checking')}
               />
             ) : null;
+            // Attribution, so it shows in every build and every state of the row.
+            const attribution = id === 'model-hub-engine' ? (
+              <InfoHint
+                hover
+                interactive
+                align="center"
+                collisionPadding={16}
+                label={t('settings.dependencies.items.model-hub-engine.attributionLabel')}
+                contentClassName="w-auto max-w-[calc(100vw-2rem)]"
+                content={
+                  <Trans
+                    i18nKey="settings.dependencies.items.model-hub-engine.attribution"
+                    components={{
+                      project: <a href={ENGINE_UPSTREAM_URL} target="_blank" rel="noreferrer" className="font-medium text-foreground underline underline-offset-2" />,
+                    }}
+                  />
+                }
+              />
+            ) : null;
             if (!d) {
               return (
                 <SettingsResourceRow
@@ -194,6 +282,7 @@ export const SettingsDependenciesPage: React.FC = () => {
                   tileClassName={meta.tileCls}
                   iconClassName={meta.iconCls}
                   title={t(`settings.dependencies.items.${id}.label`, { defaultValue: `settings.dependencies.items.${id}.label` })}
+                  badges={attribution}
                   detail={t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
                   actions={
                     <>
@@ -212,11 +301,29 @@ export const SettingsDependenciesPage: React.FC = () => {
             const startupRepairPending = Boolean(check.reconciling) && dependencyNeedsStartupRepair(d);
             const showAction = dependencyHasInstallAction(d);
             const repairBlockedBySidecar = false;
-            const dependencyOperationBusy = busy !== null || check.checking || check.error !== null;
+            const dependencyOperationBusy = busy !== null || check.checking || check.error !== null
+              || (id === 'model-hub-engine' && engineWorking !== null);
             const notice = null;
             const persistedFailure = d.status === 'error' && d.reason
               ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
               : null;
+            const engineView = engineUpdateView(d, { working: engineWorking, failed: engineFailed });
+            // A stopped engine (`blocked`) reads as an error with nothing to repair: the strip says why.
+            const engineStopped = engineView !== null && d.update_state === 'blocked';
+            // The strip is drawn for a ready or a stopped engine; a row that needs repair, or whose
+            // inspection failed, stays as it was, repair target line included.
+            const engineStripShown = engineView !== null && !checkFailure && !notice && (engineStopped || d.status === 'ready');
+            const engineStrip = engineView && (
+              <EngineUpdateStrip
+                dep={d}
+                view={engineView}
+                disabled={busy !== null || engineWorking !== null || check.checking}
+                autoUpdateBusy={engineSettingBusy}
+                onCheck={() => void runEngine('check')}
+                onUpdate={() => void runEngine('update')}
+                onAutoUpdateChange={(enabled) => void setEngineAutoUpdate(enabled)}
+              />
+            );
             return (
               <SettingsResourceRow
                 key={id}
@@ -225,16 +332,19 @@ export const SettingsDependenciesPage: React.FC = () => {
                 iconClassName={meta.iconCls}
                 title={t(`settings.dependencies.items.${id}.label`, { defaultValue: `settings.dependencies.items.${id}.label` })}
                 badges={
-                  d.required && (
-                    <Badge variant="secondary" className="font-mono uppercase tracking-[0.08em]">
-                      {t('settings.dependencies.required')}
-                    </Badge>
-                  )
+                  <>
+                    {attribution}
+                    {d.required && (
+                      <Badge variant="secondary" className="font-mono uppercase tracking-[0.08em]">
+                        {t('settings.dependencies.required')}
+                      </Badge>
+                    )}
+                  </>
                 }
                 detail={
                   <>
                     {t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
-                    {d.id === 'model-hub-engine' && d.latest_version && (
+                    {d.id === 'model-hub-engine' && d.latest_version && !engineStripShown && (
                       <span className="mt-1 block font-mono text-[11px]">
                         {t('settings.dependencies.targetVersion', {
                           version: String(d.latest_version).replace(/^v/i, ''),
@@ -280,6 +390,8 @@ export const SettingsDependenciesPage: React.FC = () => {
                     {notice}
                     {persistedFailure && <div role="alert" className="mt-1 text-destructive-ink">{persistedFailure}</div>}
                   </div>
+                ) : engineStripShown && engineStopped ? (
+                  <div className="border-t border-destructive/30 pt-4">{engineStrip}</div>
                 ) : persistedFailure ? (
                   <div
                     role="alert"
@@ -291,6 +403,8 @@ export const SettingsDependenciesPage: React.FC = () => {
                   <div className="border-t border-border pt-3">
                     <AvaultAuthorizationNotice forceVisible />
                   </div>
+                ) : engineStripShown ? (
+                  <div className="border-t border-border pt-4">{engineStrip}</div>
                 ) : undefined}
               />
             );

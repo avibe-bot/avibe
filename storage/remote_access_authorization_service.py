@@ -349,8 +349,8 @@ def browser_session_is_revoked(session_id: str, *, now: int, binding: str = "",
                     state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + session_id
                 )
             ).scalar_one_or_none()
-            if raw is None and binding and subject:
-                return fenced(conn, binding, subject, session_id, auth_time, now)
+            if binding and subject and fenced(conn, binding, subject, session_id, auth_time, now):
+                return True
     except OperationalError as exc:
         # Fresh storage before bootstrap predates every revocation. A missing
         # registry table on a populated DB is NOT permission to bypass a fence.

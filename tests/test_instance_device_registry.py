@@ -279,8 +279,9 @@ def test_push_identity_survives_login_and_capability_follows_subscription(instal
         assert count_enabled(conn, user_key="remote:member") == 0
 
 
+@pytest.mark.parametrize('boundary', ['device-sign-out', 'binding-retirement'])
 @pytest.mark.parametrize("path", ["/api/web-push/status", "/api/web-push/subscriptions"])
-def test_inflight_push_registration_cannot_restore_signed_out_delivery(install, monkeypatch, path):
+def test_inflight_push_registration_cannot_restore_signed_out_delivery(install, monkeypatch, path, boundary):
     from storage import device_registry, web_push_service
 
     c = client(login(install, "subject", "member"))
@@ -302,6 +303,9 @@ def test_inflight_push_registration_cannot_restore_signed_out_delivery(install, 
     def revoke_before_transaction(conn, identity, *, now):
         # Force the ordering: HTTP authorization succeeded, then sign-out committed,
         # then the registration handler tries to mutate the subscription.
+        if boundary == 'binding-retirement':
+            device_registry.retire_binding(identity['_device_binding'], now=now)
+            return original(conn, identity, now=now)
         _, count, _, _ = device_registry.sign_out(
             identity["_device_binding"],
             "subject",

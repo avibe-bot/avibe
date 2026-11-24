@@ -367,6 +367,46 @@ def _edit_of(entry):
     }
 
 
+@pytest.mark.parametrize(
+    ("searches", "reported"),
+    [
+        (0, Usage(2, 463, 490_572, 2_252, 203)),
+        (1, Usage(4, 20_655, 986_120, 9_317, 15_262)),
+        (2, Usage(6, 865, 914_820, 13_843, 640)),
+        (3, Usage(6, 6_528, 773_893, 387_655, 4_585)),
+    ],
+)
+def test_hosted_response_counts_once_in_growth_not_as_a_billed_usage_anchor(searches, reported):
+    # Recorded Claude usage counters; small replay payloads stand in for the search results. Offered tools
+    # are the same in every request. Only a response that actually ran a provider tool should be skipped.
+    rows = Rows()
+    rows.input("ask")
+    tools = (hosted_tool_spec("web_search"),)
+
+    def request():
+        return make_request(context_view(rows.rows).messages, tools=tools)
+
+    def record(reply):
+        rows.add("response", reply, payload={"request": request_facts(request())})
+
+    record(AssistantMessage((text("ok"),), ORIGIN, "stop", usage=_usage(490_000)))
+    rows.input("more")  # one token since the prior response
+    payload = {"type": "web_search_tool_result", "encrypted_content": "x" * 450}  # 508 bytes on replay
+    calls = tuple(
+        HostedToolBlock(f"s{i}", "web_search", HostedAction("search", queries=("q",)),
+                        HostedRecord(status="completed"), HostedNative("src_served00001", (payload,)))
+        for i in range(searches)
+    )
+    reply = AssistantMessage((ANTHROPIC_THINKING, *calls), ORIGIN, "stop", usage=reported,
+                             hosted_summary=HostedSummary() if calls else None)
+    record(reply)
+    rows.input("next")
+    if searches:
+        assert _est(rows, request()) == 490_000 + 2 + reported.reasoning_tokens + 127 * searches
+    else:
+        assert _est(rows, request()) == 493_289 + 1  # this single-pass response becomes the new anchor
+
+
 def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged():
     rows, anchored, result = _anchored_rows()
     messages = context_view(rows.rows).messages

@@ -115,6 +115,12 @@ _RETAINED_OWNER_ROUTES = {
     # An unbound setup Owner may restrict which devices can open this host.
     ("POST", "/api/devices/host/network-access"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("GET", "/api/remote-access/rebind"),
+    ("POST", "/api/remote-access/rebind/claims"),
+    ("GET", "/api/remote-access/rebind/claims/{claim_id}"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/cancel"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
@@ -206,11 +212,12 @@ def test_complete_registered_api_management_inventory():
     # + 8 device function, activity and Health ticket methods.
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
+    # + 6 constrained local rebind/reset methods (Owner and local operator).
     # + 1 host network restriction (Owner, separately limited to unbound installations).
     # + 2 Antigravity auth status/config methods (Member, like Claude/Codex auth) and
     #   1 Antigravity model catalog read (Editor, like Claude/Codex models).
     # Three independent engine channel controls are owner-only, including metadata refresh.
-    assert len(endpoints) == 381
+    assert len(endpoints) == 387
     for method in ("GET", "POST"):
         assert (method, "/api/backend/antigravity/auth") in endpoints
         assert http_authorization_policy(method, "/api/backend/antigravity/auth").minimum_role == "member"

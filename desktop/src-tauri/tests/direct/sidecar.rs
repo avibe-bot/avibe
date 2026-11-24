@@ -203,6 +203,7 @@ async fn run(changed_selection: bool) {
         "the CONNECT probe is not a browser stream"
     );
     use base64::{engine::general_purpose::STANDARD, Engine};
+    handover.set_direct_only(true);
     let credential = handover.window_credential("to-close").unwrap();
     let mut closing = super::credential_tests::connect_as(&client, &credential, 200).await;
     super::credential_tests::echo(&mut closing).await;
@@ -273,6 +274,10 @@ async fn run(changed_selection: bool) {
             super::HandoverResult::Done { closed: 1, kept: 0 }
         );
         assert_retired_read(mine.read(&mut [0]).await);
+        // Only the remaining public window is cut off. The committed direct
+        // stream `r` and the other session still exchange payload below.
+        assert_eq!(handover.close_public(), 1);
+        assert_retired_read(two.read(&mut [0]).await);
         foreign.write_all(b"z").await.unwrap();
         assert_eq!(foreign.read_u8().await.unwrap(), b'z');
         assert!(
@@ -336,7 +341,8 @@ async fn run(changed_selection: bool) {
         super::PathStatus {
             preferred: super::PreferredPath::Tunnel,
             sequence: 2,
-            closure: u64::from(!changed_selection)
+            closure: u64::from(!changed_selection),
+            strict_failures: 0,
         }
     );
     assert_eq!(

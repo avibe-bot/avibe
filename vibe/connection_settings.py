@@ -5,6 +5,7 @@ file lock. The operation id is a writer fence, never a browser capability.
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -220,6 +221,41 @@ class Journal:
         except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
             raise ConnectionError("connection_state_unavailable", 503) from exc
         return {"version": 1, "binding": relay_pairing(config), "operation": None, "outcome": None, "returnedToAutomatic": None}
+
+    def file_version(self) -> str | None:
+        # #4114 replaces the file atomically, under config_file_lock. lstat also
+        # identifies a truncated or unreadable file without trusting its contents.
+        try:
+            s = self.path.lstat()
+        except FileNotFoundError:
+            return None
+        return hashlib.sha256(f'{s.st_dev}:{s.st_ino}:{s.st_mode}:{s.st_size}:{s.st_ctime_ns}:{s.st_mtime_ns}'.encode()).hexdigest()
+
+    def for_binding_cutover(self, config):
+        """Under the config lock, select only corroborated, still-provisional pins."""
+        version = self.file_version()
+        if version is None or not relay_pairing(config) or self.path.is_symlink() or not self.path.is_file():
+            return version, {}
+        try:
+            state = self.load(config)  # returns an empty state for another credential
+            rollback = {}
+            for slot in ('operation', 'priorRepair', 'debt'):
+                op = state.get(slot)
+                if not op or op['setting'] not in AUTOMATIC or op.get('unverifiedSave'):
+                    continue  # a stopped connector saves immediately, with no verification
+                key = op['setting']
+                _, before = validated_change({'setting': key, 'to': op['from']})
+                _, candidate = validated_change({'setting': key, 'to': op['to']})
+                if value(config, key) == candidate:
+                    rollback.setdefault(FIELDS[key], before)
+        except (ConnectionError, RecursionError, TypeError, ValueError):
+            return version, {}  # unreadable evidence cannot select network settings
+        return version, rollback
+
+    def retire_version(self, version):
+        """Only after config publication, still under the same writer lock."""
+        if version is not None and self.file_version() == version:
+            self.path.unlink()
 
     def save(self, state: dict) -> None:
         write_atomic(self.path, json.dumps(state, separators=(",", ":")))

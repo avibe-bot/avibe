@@ -21,9 +21,14 @@ pub(super) async fn echo_socket() -> Option<tokio::net::TcpStream> {
 }
 pub(super) async fn public_browser(client: &mut super::Client) -> tokio::net::TcpStream {
     use super::listener::Listener;
-    client.listener = Listener::bind_via(client.host.clone(), client.links.subscribe(), |_| echo_socket())
-        .await
-        .unwrap();
+    client.listener = Listener::bind_via(
+        client.host.clone(),
+        client.links.subscribe(),
+        client.status.clone(),
+        |_| echo_socket(),
+    )
+    .await
+    .unwrap();
     let window = client.handover().window_credential("instance-view").unwrap();
     let mut s = super::credential_tests::connect_as(client, &window, 200).await;
     s.write_all(b"x").await.unwrap();
@@ -142,7 +147,8 @@ fn relay_upgrade_updates_preference_once_without_claiming_a_closure() {
             PathStatus {
                 preferred: path.map(PreferredPath::Direct).unwrap_or_default(),
                 sequence: seq,
-                closure: 0
+                closure: 0,
+                strict_failures: 0,
             }
         );
     }

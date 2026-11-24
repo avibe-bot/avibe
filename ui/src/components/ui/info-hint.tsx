@@ -19,6 +19,13 @@ interface InfoHintProps {
   hover?: boolean;
   /** Width of the revealed panel. Defaults to the 16rem hint width. */
   contentClassName?: string;
+  /** Space kept between the panel and the screen's edge, for a panel wide enough to reach it on a phone. */
+  collisionPadding?: number;
+  /** The panel holds something to act on (a link). Opened from the keyboard (Enter or Space), focus
+   *  moves to the panel, so it is read out and its control is the next Tab stop; Escape returns to
+   *  the ⓘ. Tabbing past the ⓘ does not open it, since a panel that takes focus must be asked for.
+   *  Mouse hover and touch are unchanged. */
+  interactive?: boolean;
 }
 
 // A small "ⓘ" affordance that reveals a hint on click / tap — uniform across
@@ -45,6 +52,8 @@ export const InfoHint: React.FC<InfoHintProps> = ({
   trigger,
   hover = false,
   contentClassName,
+  collisionPadding,
+  interactive = false,
 }) => {
   const [open, setOpen] = React.useState(false);
   // Hover-close is deferred so the pointer can travel from the trigger into the
@@ -67,6 +76,8 @@ export const InfoHint: React.FC<InfoHintProps> = ({
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
   const returningFocus = React.useRef(false);
   const openedByFocus = React.useRef(false);
+  // A click with no pointer behind it (Enter or Space on the ⓘ) reports detail 0.
+  const openedByKeyboard = React.useRef(false);
 
   // Only a mouse hovers. A tap reports pointerType 'touch' and is left to the
   // click handler, so a phone gets one clean toggle instead of open-then-close.
@@ -81,7 +92,7 @@ export const InfoHint: React.FC<InfoHintProps> = ({
       // Keyboard focus only: a tap or click also focuses the ⓘ, and opening on that focus fought
       // the tap's own toggle (Chromium on a phone opened and closed it in one tap).
       onFocus: (event: React.FocusEvent<HTMLButtonElement>) => {
-        if (returningFocus.current || !isKeyboardFocus(event.currentTarget)) return;
+        if (interactive || returningFocus.current || !isKeyboardFocus(event.currentTarget)) return;
         openedByFocus.current = true;
         cancelClose();
         setOpen(true);
@@ -104,6 +115,7 @@ export const InfoHint: React.FC<InfoHintProps> = ({
           type="button"
           aria-label={label}
           {...hoverProps}
+          onClick={(event) => { openedByKeyboard.current = event.detail === 0; }}
           className={cn(
             trigger
               ? 'inline-flex shrink-0 items-center outline-none transition'
@@ -117,8 +129,13 @@ export const InfoHint: React.FC<InfoHintProps> = ({
       <PopoverContent
         align={align}
         sideOffset={6}
-        // Don't steal focus from the trigger on hover-open, so tabbing isn't trapped.
-        onOpenAutoFocus={(event) => event.preventDefault()}
+        collisionPadding={collisionPadding}
+        // Don't steal focus from the trigger on hover-open, so tabbing isn't trapped. A panel with a
+        // control in it, asked for from the keyboard, takes focus so that control can be reached.
+        onOpenAutoFocus={(event) => {
+          if (!(interactive && openedByKeyboard.current)) event.preventDefault();
+          openedByKeyboard.current = false;
+        }}
         onCloseAutoFocus={(event) => {
           event.preventDefault();
           returningFocus.current = true;

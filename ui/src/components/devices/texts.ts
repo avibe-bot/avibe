@@ -22,7 +22,7 @@ const problemKeys = {
   active_pairing_recent: 'devices.claim.problem.activeElsewhere',
   local_binding_changed: 'devices.claim.problem.bindingChanged',
   claim_in_progress: 'devices.claim.problem.inProgress',
-} as const satisfies Record<Exclude<ClaimProblem['code'], 'rate_limited' | 'unknown'>, TranslationKey>;
+} as const satisfies Record<Exclude<ClaimProblem['code'], 'rate_limited' | 'unknown' | 'other_account'>, TranslationKey>;
 
 /**
  * Why remote access was not turned on, in one sentence. An unknown code is said with its code.
@@ -31,6 +31,7 @@ const problemKeys = {
  */
 export function claimProblemText(t: TFunction, problem: ClaimProblem, terminal = true): string {
   if (problem.code === 'unknown') return t('devices.claim.problem.unknown', { code: problem.raw });
+  if (problem.code === 'other_account') return t('devices.claim.problem.otherAccount', { email: problem.email });
   if (problem.code === 'link_required' && !terminal) return t('devices.claim.problem.linkRequiredHere');
   if (problem.code === 'rate_limited') {
     return problem.seconds

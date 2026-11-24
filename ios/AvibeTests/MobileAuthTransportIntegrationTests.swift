@@ -1926,9 +1926,12 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
             defaults: defaults,
             operations: registry.operations
         )
+        if let accountStore {
+            registry.own(accountStore)
+        }
         let unownedIdentifier = UUID()
         addTeardownBlock {
-            let remaining = await registry.removeCreatedIdentifiers()
+            let remaining = await registry.removeCreatedIdentifiers(leavingWebKitHolds: true)
             XCTAssertTrue(remaining.isEmpty)
         }
         // Someone else's store, alive and on disk, with no network session.
@@ -2000,13 +2003,15 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
     ) -> AccountWebsiteDataStore {
         let registry = RealNamedDataStoreRegistry()
         addTeardownBlock {
-            let remaining = await registry.removeCreatedIdentifiers()
+            let remaining = await registry.removeCreatedIdentifiers(leavingWebKitHolds: true)
             XCTAssertTrue(remaining.isEmpty)
         }
-        return AccountWebsiteDataStore(
+        let store = AccountWebsiteDataStore(
             defaults: defaults,
             operations: registry.operations
         )
+        registry.own(store)
+        return store
     }
 
     private func waitUntilListed(
@@ -2101,6 +2106,13 @@ private final class RealNamedDataStoreRegistry {
 
     private(set) var createdIdentifiers = Set<UUID>()
     private var stores: [WeakStore] = []
+    /// What of the test holds the stores made here (the account stores
+    /// over them), weakly.
+    private var owners: [@MainActor () -> Bool] = []
+
+    func own(_ object: AnyObject) {
+        owners.append { [weak object] in object != nil }
+    }
 
     var operations: AccountWebsiteDataStoreOperations {
         AccountWebsiteDataStoreOperations(
@@ -2136,11 +2148,29 @@ private final class RealNamedDataStoreRegistry {
     /// Removes every store made here, once WebKit has let go of it: WebKit
     /// finishes creating a new store's directories after it is returned, and
     /// a store removed before that has its directories made again afterwards.
-    func removeCreatedIdentifiers() async -> Set<UUID> {
+    /// `leavingWebKitHolds`: for a teardown, where a store WebKit alone still
+    /// holds (nothing of the test alive) is left to later removals
+    /// (`FixtureStoreRemoval`) instead of reported. A test that checks the
+    /// removal itself keeps the strict default.
+    func removeCreatedIdentifiers(leavingWebKitHolds: Bool = false) async -> Set<UUID> {
         let clock = ContinuousClock()
         let released = clock.now.advanced(by: .seconds(5))
         while stores.contains(where: { $0.store != nil }), clock.now < released {
             try? await Task.sleep(for: .milliseconds(10))
+        }
+        if leavingWebKitHolds {
+            let owners = owners
+            for identifier in createdIdentifiers.sorted(by: {
+                $0.uuidString < $1.uuidString
+            }) {
+                let failure = await FixtureStoreRemoval.remove(identifier) {
+                    owners.contains { $0() }
+                }
+                if failure == nil {
+                    createdIdentifiers.remove(identifier)
+                }
+            }
+            return createdIdentifiers
         }
         for attempt in 0..<50 {
             for identifier in createdIdentifiers.sorted(by: {
