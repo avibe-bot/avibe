@@ -31,6 +31,8 @@ import { isVoiceMessage } from '../../lib/voiceMessage';
 import { useRegisterComposerTarget, type ComposeTarget, type ComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { composeReady } from './composeReady';
 import type { SessionActivityItemKind, SessionActivityState, SessionRuntimeState, VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
+import { isNativeShell } from '../../lib/native';
+import { isIosDevice } from '../../lib/platform';
 import { apiFetch } from '../../lib/apiFetch';
 import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
@@ -4653,6 +4655,10 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
     : [];
   const headerSessionActions = [...botActions, ...(sessionActions ?? [])];
   const hasSessionActions = writable && headerSessionActions.length > 0;
+  // Compact also serves narrow desktop windows, which keep their session menu.
+  const mobileDevice = isNativeShell() || isIosDevice()
+    || (typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent));
+  const showCompactSessionActions = hasSessionActions && !(mobileDevice && showPageMode);
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   const header = (
@@ -4736,7 +4742,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             back-to-chat button. */}
         {/* In Show Page mode the order is: annotation control, launch/back, Share.
             Share exists only there — never on the plain chat header. */}
-        {(showLaunchControl || showShareControl || hasSessionActions) && (
+        {(showLaunchControl || showShareControl || showCompactSessionActions) && (
           <div className="ml-auto flex items-center gap-1.5">
             {showPageActions.annotate && writable && (
               <ShowPageAnnotateControl
@@ -4768,7 +4774,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onOpenChange={onShareOpenChange}
               />
             )}
-            {hasSessionActions && (
+            {showCompactSessionActions && (
               <ChatSessionActionMenu
                 actions={headerSessionActions}
                 label={t('workbench.sessionActions')}
