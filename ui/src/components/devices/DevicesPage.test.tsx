@@ -753,7 +753,7 @@ describe('DevicesPageView', () => {
 
 describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open to its network)', () => {
   const zh = { body: '同一网络上的设备现在不用登录就能打开这个 Avibe。开启远程访问后，它们要先登录。', action: '只允许这台电脑' };
-  const closed = { body: '只有这台电脑能打开这个 Avibe。要让同一网络上的设备也能打开，在「服务」里改控制台服务的地址。', action: '去「服务」' };
+  const closed = { body: '只有这台电脑能打开这个 Avibe。' };
   const openHost: Device = { ...macbook, networkOpen: true };
   const closedHost: Device = { ...macbook, networkOpen: false };
   const fromPhone: Device = { ...openHost, self: undefined };
@@ -785,7 +785,7 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
     expect(screen.queryByRole('dialog')).toBeNull();
     await waitFor(() => expect(restrict).toHaveBeenCalledOnce());
     expect(restrict).toHaveBeenCalledWith();
-    // The row now says the other position, with the way back, and no longer offers the button.
+    // The row now says the other position, and no longer offers the button.
     expect(await screen.findByText(said(closed.body))).toBeTruthy();
     expect(screen.queryByText(said(zh.body))).toBeNull();
     expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
@@ -793,25 +793,19 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
-  it('on the computer itself, closed: says so, and the way back is Settings · Service, never a request', async () => {
+  it('on the computer itself, closed: says the fact and offers nothing to press under the row', async () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([closedHost]));
-    const restrict = vi.spyOn(devicesApi, 'restrictToThisComputer').mockResolvedValue();
-    render(
-      <InstanceAuthorizationContext.Provider value={{ remote: false, instanceKind: 'personal', instanceRole: 'owner', capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true } }}>
-        <MemoryRouter initialEntries={['/settings/remote-access']}>
-          <Routes>
-            <Route path="/settings/remote-access" element={<DevicesPage />} />
-            <Route path="/settings/service" element={<Where />} />
-          </Routes>
-        </MemoryRouter>
-      </InstanceAuthorizationContext.Provider>,
+    mount();
+    const line = (await screen.findByText(said(closed.body))).closest('p')!;
+    // One way to let other devices in is offered on this page, remote access: no second one here.
+    expect(line.textContent).toBe(closed.body);
+    expect(line.querySelector('button, a')).toBeNull();
+    expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
+    // The buttons the page has are the ones it had: turning remote access on, and the row itself.
+    expect(screen.getAllByRole('button').map((each) => each.textContent)).toEqual(
+      expect.arrayContaining([i18n.t('devices.reach.turnOn')]),
     );
-    expect(await screen.findByText(said(closed.body))).toBeTruthy();
-
-    fireEvent.click(screen.getByRole('button', { name: closed.action }));
-
-    expect((await screen.findByTestId('where')).textContent).toBe('/settings/service');
-    expect(restrict).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: /服务|Service/ })).toBeNull();
   });
 
   it.each([
@@ -822,7 +816,6 @@ describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open
     mount();
     await screen.findByText(device.name!);
     expect(screen.queryByText(said(closed.body))).toBeNull();
-    expect(screen.queryByRole('button', { name: closed.action })).toBeNull();
   });
 
   it('from another device: asks first, and cancelling changes nothing', async () => {

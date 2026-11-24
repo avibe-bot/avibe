@@ -199,7 +199,7 @@ const designFrames = frames([
     { reach: { state: 'off', surface: 'browser' }, devices: onlyHost }),
   frame('off-network-open', '未绑定 · 监听地址是网络地址：本机那一行下面一句，和「只允许这台电脑」（在这台电脑上看）', at(700),
     { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true, networkOpen: true })] }),
-  frame('off-this-computer-only', '同上 · 在这台电脑上按下之后（不问，直接生效）：这一行说明只有这台电脑能打开，改回去的入口是「服务」', at(700),
+  frame('off-this-computer-only', '同上 · 在这台电脑上按下之后（不问，直接生效）：这一行只说事实，只有这台电脑能打开，没有按钮', at(700),
     { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true, networkOpen: false })] }),
   frame('off-this-computer-only-phone', '同上 · 375 宽', PHONE,
     { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true, networkOpen: false })] }),

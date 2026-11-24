@@ -61,8 +61,6 @@ export type DevicesPageActions = {
   onOpenRebind?: () => void;
   /** 「只允许这台电脑」 under the computer's row: asked first when pressed from another device. */
   onThisComputerOnly?: () => void;
-  /** To Settings · Service, where the address this Avibe listens on is chosen. */
-  onOpenService?: () => void;
   onOpenDevice?: (id: string) => void;
   onCloseDevice?: () => void;
   onFunctionChange?: (deviceId: string, kind: FunctionKind, on: boolean) => void;
@@ -785,15 +783,13 @@ export function DevicesPageView({
                 </Button>
               </div>
             )}
-            {/* The other position, said on the computer itself: only it opens this Avibe, and the
-                way back is where the listening address is chosen. No one-press way to open it up. */}
+            {/* The other position, said on the computer itself: the fact, and nothing to press. The
+                one way to let other devices in that this page offers is remote access; whoever
+                opened the Avibe to its network changes that where they did, in Settings · Service. */}
             {owner && each.kind === 'host' && each.self && each.networkOpen === false && (
-              <div className="flex flex-col gap-2.5 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-4">
-                <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.networkOpen.closedBody')} /></p>
-                <Button variant="ghost" size="xs" className="shrink-0 self-start md:self-auto" onClick={actions.onOpenService}>
-                  {t('devices.networkOpen.closedAction')}
-                </Button>
-              </div>
+              <p className="border-b border-border px-5 py-3 text-[12px] leading-relaxed text-muted last:border-b-0">
+                <KeptTail text={t('devices.networkOpen.closedBody')} />
+              </p>
             )}
           </Fragment>
         ))}
