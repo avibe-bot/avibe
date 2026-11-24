@@ -756,6 +756,81 @@ fn a_view_that_was_to_be_replaced_is_asked_for_again_until_another_is_on_show() 
         );
         at += seconds(due);
     }
+    // Nothing else need happen for it to be asked again: the shell is told
+    // when to look (`next_look`), also with no session and none that could
+    // start, as under "Cloudflare tunnel only" and where a route is given
+    // only at creation. Looking exactly when told, and only then:
+    for (routing, mode) in [
+        (Routing::Live, Mode::Tunnel),
+        (Routing::AtCreation, Mode::Tunnel),
+        (Routing::AtCreation, Mode::Automatic),
+    ] {
+        let case = format!("{mode:?}, live: {}", routing == Routing::Live);
+        let (look, wait) = (seconds(5), seconds(30));
+        let mut wiring = chosen(routing);
+        let session = linked(&mut wiring, VIEW, now);
+        assert_eq!(
+            wiring.choose(ACCOUNT, ONE, mode).len(),
+            1,
+            "{case} ends session {session}"
+        );
+        // The shell says the view is being replaced before anything looks.
+        wiring.reopening(VIEW, now);
+        // The request fails outright a second later.
+        wiring.reopen_refused(VIEW, &target(ONE), now + seconds(1));
+        let mut at = now + seconds(1);
+        let mut asked = Vec::new();
+        let mut looks = 0;
+        while at < now + seconds(200) {
+            let sleep = wiring
+                .next_look(Some(&published), at, look, wait)
+                .expect("a look is due");
+            at += sleep;
+            looks += 1;
+            assert!(looks < 100, "{case}: the shell would spin");
+            if wiring.reconcile(Some(&published), |_| true, at) == [reopen(VIEW)] {
+                asked.push(at.saturating_duration_since(now).as_secs());
+                // The shell asks, and this time the request brings nothing.
+                wiring.reopening(VIEW, at);
+            }
+        }
+        // 10 s after the failure, then a minute after each asking.
+        assert_eq!(asked.get(..4), Some(&[11, 71, 131, 191][..]), "{case}: {asked:?}");
+        // Something due that no look has dealt with is looked at within a
+        // second, and not in a spin.
+        assert_eq!(
+            wiring.next_look(Some(&published), at + seconds(300), look, wait),
+            Some(seconds(1)),
+            "{case}"
+        );
+        // Another view on show: nothing is due any more.
+        let replaced = shown(ONE, "main-runtime-2");
+        let _ = wiring.reconcile(Some(&replaced), |_| true, at + seconds(1));
+        assert!(
+            wiring
+                .next_look(Some(&replaced), at + seconds(2), look, wait)
+                .is_none_or(|sleep| sleep == look || sleep == wait),
+            "{case}"
+        );
+    }
+    // With nothing to replace, no session and none that could start, the
+    // shell waits for a poke.
+    let mut idle = Wiring::new(Routing::Live, false, Choices::unsaved());
+    idle.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert_eq!(idle.next_look(Some(&published), now, seconds(5), seconds(30)), None);
+    // With a session, the usual pace or what is due, whichever is sooner.
+    let mut paced = chosen(Routing::Live);
+    let session = linked(&mut paced, VIEW, now);
+    assert_eq!(
+        paced.next_look(Some(&published), now, seconds(5), seconds(30)),
+        Some(seconds(5))
+    );
+    assert_eq!(paced.path(session, false, 2, 0, now + seconds(1)), []);
+    assert_eq!(
+        paced.next_look(Some(&published), now + seconds(8), seconds(5), seconds(30)),
+        Some(seconds(3) + Duration::from_millis(50))
+    );
+
     // A failure of another view's request, or one that comes when nothing
     // is being replaced, changes nothing.
     wiring.reopen_refused("main-runtime-9", &target(ONE), at);

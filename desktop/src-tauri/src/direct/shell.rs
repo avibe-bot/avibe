@@ -252,20 +252,11 @@ pub(crate) fn init(app: &AppHandle) {
         loop {
             // Nothing runs while no instance of another computer is on show
             // or none could get a session: only a poke starts a look then.
+            // (Except what time alone brings due: a direct-only session's
+            // next step, or an instance that is to be asked for again.)
             let every = {
                 let shown = lock(&state.shown);
-                let wiring = lock(&state.wiring);
-                // Sooner when a direct-only session has something due.
-                let until = wiring
-                    .deadline()
-                    .map(|at| at.saturating_duration_since(Instant::now()) + Duration::from_millis(50));
-                if wiring.busy() {
-                    Some(until.map_or(LOOK, |until| until.min(LOOK)))
-                } else if wiring.awaits(shown.as_ref()) {
-                    Some(WAIT)
-                } else {
-                    None
-                }
+                lock(&state.wiring).next_look(shown.as_ref(), Instant::now(), LOOK, WAIT)
             };
             match every {
                 Some(every) => tokio::select! {

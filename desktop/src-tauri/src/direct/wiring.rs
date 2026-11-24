@@ -730,6 +730,15 @@ impl Wiring {
             if held && self.reopened.as_deref() == Some(shown.runtime.as_str()) {
                 self.reopened = None;
             }
+            // A view that a session holds is not one to be replaced.
+            if held
+                && self
+                    .reopening
+                    .as_ref()
+                    .is_some_and(|replaced| replaced.runtime == shown.runtime && now >= replaced.until)
+            {
+                self.reopening = None;
+            }
             if !held && !self.is_reopening(now) {
                 let came_without = self.reopened.as_deref() == Some(shown.runtime.as_str());
                 let effect = if self.permitted(&shown.target) && !came_without {
@@ -830,9 +839,10 @@ impl Wiring {
         effects
     }
 
-    /// When time alone next changes something for a direct-only session
-    /// (`only_in_time`), so the shell looks then and not only at its usual
-    /// pace.
+    /// When time alone next changes something: for a direct-only session
+    /// (`only_in_time`), or for a view that is to be replaced, whose
+    /// instance is asked for again then. The shell looks then, and not only
+    /// at its usual pace (`next_look`).
     pub fn deadline(&self) -> Option<Instant> {
         self.sessions
             .iter()
@@ -843,7 +853,45 @@ impl Wiring {
                 } => Some(since + UNLINKED.0),
                 _ => None,
             })
+            .chain(self.reopening.as_ref().map(|replaced| replaced.until))
             .min()
+    }
+
+    /// How long the shell waits for its next look when nothing pokes it;
+    /// `None`: until something does. `look` while any session exists, and
+    /// `wait` while the view on show may still get one by itself; sooner
+    /// for what time alone brings due (`deadline`), which is waited for
+    /// even when there is no session and none to wait for: a view that
+    /// left "the direct path and the relay only" has neither, and its
+    /// instance is still to be asked for again.
+    ///
+    /// Something due that a look has not dealt with yet is looked at
+    /// within a second, and not faster than that for as long as it stays.
+    pub fn next_look(
+        &self,
+        published: Option<&Published>,
+        now: Instant,
+        look: Duration,
+        wait: Duration,
+    ) -> Option<Duration> {
+        let pace = if self.busy() {
+            Some(look)
+        } else if self.awaits(published) {
+            Some(wait)
+        } else {
+            None
+        };
+        let due = self.deadline().map(|at| {
+            if at > now {
+                at.saturating_duration_since(now) + Duration::from_millis(50)
+            } else {
+                Duration::from_secs(1)
+            }
+        });
+        match (pace, due) {
+            (Some(pace), Some(due)) => Some(pace.min(due)),
+            (pace, due) => pace.or(due),
+        }
     }
 
     /// The session's client says whether a direct link is up (`linked`),
