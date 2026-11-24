@@ -372,9 +372,9 @@ const designFrames = frames([
   // While 「更改域名」 and binding again are not in the release (features.ts), the notice says the fact
   // and sends the owner to support; once both are, it says rebind and take the name back.
   frame('outside-change', '地址在这台 Avibe 之外被改了：醒目提示，说事实，请联系 support@avibe.bot（重新绑定和更改域名上线后换回原来那句）', at(1100),
-    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: false }),
   frame('outside-change-phone', '地址在别处被改了 · 375 宽', { width: 375, height: 1500 },
-    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: false }),
 
   // 8. Adding a device.
   frame('empty', '刚开启，只有主机：「添加设备」直接摆在列表里（iPhone）', at(760), { reach: on, devices: onlyHost }),

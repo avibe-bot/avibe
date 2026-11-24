@@ -124,9 +124,15 @@ function Consequences({ host, address }: { host: string; address: AddressState }
   );
 }
 
-/** The list for a name that was given up: just now (`fresh`), or looked at again later. */
-function CleanupDialog({ title, oldHost, retired, onClose }: { title: string; oldHost: string; retired: RetiredName | null; onClose?: () => void }) {
-  const { t } = useTranslation();
+/** The list for a name that was given up: just now (`kept`, said first), or looked at again later. */
+function CleanupDialog({ title, oldHost, retired, kept, onClose }: {
+  title: string; oldHost: string; retired: RetiredName | null; kept?: boolean; onClose?: () => void;
+}) {
+  const { t, i18n } = useTranslation();
+  // The name just given up is kept for this account, until the day the instance reports.
+  const keptText = retired?.releaseAt
+    ? t('devices.rename.keptUntil', { host: oldHost, date: longDay(retired.releaseAt, i18n.language) })
+    : t('devices.rename.keptPlain');
   return (
     <Dialog open onOpenChange={(open) => { if (!open) onClose?.(); }}>
       <DialogContent className="max-w-lg content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
@@ -134,6 +140,7 @@ function CleanupDialog({ title, oldHost, retired, onClose }: { title: string; ol
           <DialogTitle className="text-balance">{title}</DialogTitle>
           <DialogDescription><KeptTail text={t('devices.rename.cleaning')} /></DialogDescription>
         </DialogHeader>
+        {kept && <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={keptText} /></p>}
         {retired
           ? <DeviceChecklist devices={retired.devices} host={oldHost} after />
           : <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.rename.listUnread')} /></p>}
@@ -175,6 +182,7 @@ export function RenameDialogs({ host, rename, address, devices, rebindOffered = 
         title={t('devices.rename.doneTitle', { host: rename.hostname })}
         oldHost={rename.previous}
         retired={rename.retired}
+        kept
         onClose={actions.onRenameClose}
       />
     );

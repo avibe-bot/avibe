@@ -648,13 +648,13 @@ describe('DevicesPage · devices', () => {
     vi.useRealTimers();
   });
 
-  it('says an address changed somewhere else with a way out that exists in this release', async () => {
+  it('says an address changed somewhere else with a way out that exists on an instance without binding again', async () => {
     vi.spyOn(devicesApi, 'address').mockResolvedValue({
       hostname: 'sam-app.avibe.bot', eligible: true, retired: [], healthConnected: false,
       unrecognizedChange: { previousHostname: host, hostname: 'sam-app.avibe.bot' },
     });
-    // Even where binding again exists: 「更改域名」 does not in this release.
-    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(true);
+    // An instance without binding again (before #4133): the fact and support, no button.
+    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(false);
     mount();
 
     expect(await screen.findByText('这个 Avibe 的地址在别处被改了')).toBeTruthy();

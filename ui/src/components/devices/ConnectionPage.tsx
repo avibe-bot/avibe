@@ -22,7 +22,6 @@ import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview } from './api';
 import { clearClaimMarker, returnRefusal } from './claimFlow';
 import { ConnectionPageView } from './ConnectionPageView';
-import { RENAME_ENTRY_ENABLED } from './features';
 import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_PATH } from './paths';
 import { renameDevices } from './rules';
 import type {
@@ -423,7 +422,7 @@ export function ConnectionPage() {
     }
     if (step) return step;
     // Where this Avibe's name cannot be changed here there is no dialog, whatever the address says.
-    if (!addressOpen || !address || !address.eligible || !RENAME_ENTRY_ENABLED) return undefined;
+    if (!addressOpen || !address || !address.eligible) return undefined;
     // Reopened: a change that was refused meanwhile is said first.
     return operation?.state === 'failed'
       ? { step: 'form', name: '', refusal: operation.error ?? { code: 'unknown', raw: 'unknown' }, earlier: true }
@@ -431,7 +430,7 @@ export function ConnectionPage() {
   }, [address, addressOpen, operation, step]);
 
   // The rename's own address on an Avibe whose name cannot be changed here is the connection page.
-  const noRename = addressOpen && address !== undefined && address !== null && (!address.eligible || !RENAME_ENTRY_ENABLED) && !operation && !step;
+  const noRename = addressOpen && address !== undefined && address !== null && !address.eligible && !operation && !step;
   useEffect(() => {
     if (noRename) navigate(CONNECTION_PATH, { replace: true, state: location.state });
   }, [location.state, navigate, noRename]);
@@ -642,7 +641,6 @@ export function ConnectionPage() {
       onOpenDiagnostics={() => setDiagnosticsOpen(true)}
       onCloseDiagnostics={() => setDiagnosticsOpen(false)}
       onRunDiagnostics={runDiagnostics}
-      renameEntry={RENAME_ENTRY_ENABLED}
       onChangeDomain={() => go(CONNECTION_ADDRESS_PATH)}
       onShowCleanup={(retired: RetiredName) => setStep({ step: 'cleanup', retired })}
       onRenameNameChange={(name) => {

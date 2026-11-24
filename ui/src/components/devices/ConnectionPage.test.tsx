@@ -17,7 +17,6 @@ import type { AddressState, ConnectionState, TunnelChange } from './types';
 // ui/design: settings/devices-connection/*, settings/devices-rename/*
 // The rename's own behaviour is tested with its entry turned on; this release ships it off
 // (features.ts, ConnectionPage.renameOff.test.tsx).
-vi.mock('./features', () => ({ RENAME_ENTRY_ENABLED: true }));
 const host = 'max-app.avibe.bot';
 const settings = { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: 'auto', edge_bind_address: '' } as const;
 const connection = (extra: Partial<ConnectionState> = {}): ConnectionState => ({ settings: { ...settings }, interfaces: [], direct: 'ready', ...extra });
@@ -398,6 +397,8 @@ describe('ConnectionPage · the domain', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
     expect(await screen.findByText(`域名已改为 ${newHost}`)).toBeTruthy();
     expect(screen.getAllByText(newHost).length).toBeGreaterThan(0);
+    // The name given up is kept for this account, until the day the instance reports.
+    expect(screen.getByRole('dialog').textContent).toContain(`12月23日之前只有你的账号能拿回 ${host}；之后别人可以领取。`);
   });
 
   it('shows a device clearing its old-address data while the clean-up dialog is open', async () => {
