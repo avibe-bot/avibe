@@ -50,4 +50,23 @@ describe('nativeDirectMeasure', () => {
     shell('ios', 0, async () => null);
     expect(await measureNativeDirect()).toBe('failed');
   });
+
+  it('reads an answer it cannot place as no result: another basis, a path it cannot name, the tunnel as the current path', async () => {
+    const answer = (extra: object) => async () => ({
+      measuredAt: 1, basis: 'warm-https-health', samples: 5,
+      current: { kind: 'relay', scope: null, relayRegion: null, ok: 5, medianMs: 1, maxMs: 2, error: null },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 5, medianMs: 1, maxMs: 2, error: null },
+      ...extra,
+    });
+    shell('ios', 1, answer({ basis: 'cold-connect' }));
+    expect(await measureNativeDirect()).toBe('failed');
+    shell('ios', 1, answer({ current: { kind: 'quic', ok: 5 } }));
+    expect(await measureNativeDirect()).toBe('failed');
+    shell('ios', 1, answer({ current: { kind: 'tunnel', ok: 5, medianMs: 1, maxMs: 2 } }));
+    expect(await measureNativeDirect()).toBe('failed');
+    shell('ios', 1, answer({ tunnel: { kind: 'relay', ok: 5, medianMs: 1, maxMs: 2 } }));
+    expect(await measureNativeDirect()).toBe('failed');
+    shell('ios', 1, answer({ current: null }));
+    expect(await measureNativeDirect()).toMatchObject({ current: null });
+  });
 });

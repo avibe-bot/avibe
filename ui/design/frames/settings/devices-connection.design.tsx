@@ -166,9 +166,10 @@ const designFrames = frames([
     { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { running: true, result: measured() } } }),
   frame('diagnostics-measure-busy', '线路测速 · 另一次还在测：一句话，可以稍后再试', WIDE,
     { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { error: 'busy' } } }),
-  frame('diagnostics-direct-phone', '直连和线路测速 · 375 宽', { width: 375, height: 1100 },
+  frame('diagnostics-direct-phone', '直连和线路测速 · 375 宽：两条都没测全，最长的样子', { width: 375, height: 1100 },
     { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: null }, measure: { result: measured({
-      current: { kind: 'ipv4', scope: 'local', relayRegion: null, ok: 5, medianMs: 4, maxMs: 9, error: null },
+      current: { kind: 'relay', scope: null, relayRegion: 'euw1', ok: 3, medianMs: 85, maxMs: 1430, error: 'timeout' },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 2, medianMs: 212, maxMs: 2600, error: 'failed' },
     }) } } }),
   frame('diagnostics-phone', '连接诊断与网络路径 · 375 宽', { width: 375, height: 900 }, { diagnostics: { status, now: DESIGN_NOW, diagnostics: null } }),
 ]);

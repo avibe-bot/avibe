@@ -61,12 +61,19 @@ export async function measureNativeDirect(): Promise<DirectMeasurement | 'busy' 
     const answer = await native.call<unknown>('direct.measure');
     if (!answer || typeof answer !== 'object') return 'failed';
     const raw = answer as Record<string, unknown>;
+    // Another way of measuring would not be the same numbers: read as no result.
+    if (raw.basis !== 'warm-https-health') return 'failed';
     if (typeof raw.measuredAt !== 'number' || !Number.isFinite(raw.measuredAt)) return 'failed';
+    // A path this page cannot name is not "none in use": the whole answer is unreadable.
+    const current = raw.current === null ? null : leg(raw.current);
+    if (raw.current !== null && (current === null || current.kind === 'tunnel')) return 'failed';
+    const tunnel = raw.tunnel === null ? null : leg(raw.tunnel);
+    if (raw.tunnel !== null && (tunnel === null || tunnel.kind !== 'tunnel')) return 'failed';
     return {
       measuredAt: raw.measuredAt,
       samples: typeof raw.samples === 'number' && raw.samples > 0 ? raw.samples : 5,
-      current: leg(raw.current),
-      tunnel: leg(raw.tunnel),
+      current,
+      tunnel,
     };
   } catch (error) {
     return error && typeof error === 'object' && (error as { code?: unknown }).code === 'busy' ? 'busy' : 'failed';
