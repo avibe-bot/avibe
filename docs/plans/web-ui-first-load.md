@@ -74,7 +74,8 @@ them imports `modelHubSurface.css` itself.
 locale (home), and that plus a conversation's preloads (chat). Budgets: 600 KiB
 home (608 for a few hours on 2026-11-20, back to 600 once the Ask Vibey receiver
 and the new-project dialog moved off the first screen; both reasons are in the
-script), 900 KiB chat. Raise one only in the change that needs it, with the reason;
+script), 900 KiB chat (904 since 2026-11-24, temporary; the reason and its end
+are in the script). Raise one only in the change that needs it, with the reason;
 first move what the first screen does not draw off it.
 
 ## 5. Brotli

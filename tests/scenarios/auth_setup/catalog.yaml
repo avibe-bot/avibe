@@ -1509,7 +1509,7 @@ scenarios:
     layer: scenario
     backend: personal-claims
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_claim_redirect_through_pairing_journal
-    reason: Owner browser on loopback or an admitted private-network origin. Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
+    reason: Owner returns on the initiating loopback or private-network origin before publication. After publication only loopback retains the local claim outcome; old private-origin poll and replay are refused without name or account. Real routes, return proof and journal; only control plane and connector are peers.
   - id: AUTH-SETUP-915
     name: Signing out a device revokes its Runtime cookie before the issuer accepts its account sign-out
     status: covered

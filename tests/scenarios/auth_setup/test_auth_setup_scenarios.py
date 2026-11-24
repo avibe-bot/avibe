@@ -140,14 +140,24 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
     callback = client.get(url, base_url=origin, environ_base=environ)
     assert callback.status_code == 303 and callback.headers["Location"] == "/settings/remote-access"
     assert callback.headers["Referrer-Policy"] == "no-referrer"
-    _assert_bad_return(client.get(url, base_url=origin, environ_base=environ))
+    # Wait for publication and completion on the computer, not by disclosing
+    # the result to the now-retired private origin. A replay is checked below
+    # only after publication, so worker scheduling cannot change its meaning.
     end = time.monotonic() + 8
     while time.monotonic() < end:
-        outcome = client.get("/api/remote-access/claims/" + ident, base_url=origin, environ_base=environ).get_json()
-        if outcome["state"] in ("error", "bound"):
+        outcome = client.get('/api/remote-access/claims/' + ident, base_url='http://localhost').get_json()
+        if outcome['state'] in ('error', 'bound'):
             break
         time.sleep(.02)
-    assert outcome["state"] == "bound", outcome
+    assert outcome['state'] == 'bound', outcome
+    replay = client.get(url, base_url=origin, environ_base=environ)
+    if environ:
+        poll = client.get('/api/remote-access/claims/' + ident, base_url=origin, environ_base=environ)
+        assert poll.status_code == replay.status_code == 503
+        assert poll.get_json() == replay.get_json() == {'ok': False, 'error': 'remote_access_host_mismatch'}
+        assert 'Location' not in replay.headers
+    else:
+        _assert_bad_return(replay)
     assert service_adoptions == ["inst_A"]
     assert outcome["account"] == {"email": "actual@fixture.test"} and outcome["hostname"] == "fixture.avibe.bot"
     assert claim_peer.decisions == ["owner-id"]

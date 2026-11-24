@@ -1656,7 +1656,7 @@ def test_terminal_delete_rejects_forwarded_origin_proxy_without_terminating(monk
     monkeypatch.setenv("VIBE_UI_ENABLE_TERMINAL", "1")
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.setattr(ui_server, "TERMINAL_SUPPORTED", True)
-    _save_remote_config(tmp_path)
+    V2Config.default().save()  # Unbound: exercise the terminal's own Origin check first.
     terminated: list[str] = []
 
     class _FakeService:
@@ -1681,6 +1681,12 @@ def test_terminal_delete_rejects_forwarded_origin_proxy_without_terminating(monk
     response = client.delete("/api/terminal/local-session", base_url="http://127.0.0.1:5123", headers=headers)
 
     assert response.status_code == 403
+    assert terminated == []
+
+    # An incomplete pairing no longer grants proxy access to reach the handler.
+    _save_remote_config(tmp_path)
+    refused = client.delete("/api/terminal/local-session", base_url="http://127.0.0.1:5123", headers=headers)
+    assert refused.status_code == 503 and refused.get_json()["error"] == "remote_access_host_mismatch"
     assert terminated == []
 
 
