@@ -2018,6 +2018,10 @@ final class AppModel: ObservableObject {
         else {
             return false
         }
+        // This press replaces a request kept from an earlier one, before
+        // anything is asked: hearing a recorded failure can announce a gate
+        // change in this same turn, which must not make the kept one too.
+        heldRuntimeRetry = nil
         guard authorizeReload(of: attempt.runtime) else {
             holdRetryWhilePortMayBeForeign(.open, of: attempt)
             return false
@@ -2069,6 +2073,10 @@ final class AppModel: ObservableObject {
         else {
             return false
         }
+        // This press replaces a request kept from an earlier one, before
+        // anything is asked: hearing a recorded failure can announce a gate
+        // change in this same turn, which must not make the kept one too.
+        heldRuntimeRetry = nil
         guard authorizeReload(of: attempt.runtime) else {
             holdRetryWhilePortMayBeForeign(.cachedPage, of: attempt)
             return false
@@ -2090,6 +2098,10 @@ final class AppModel: ObservableObject {
         else {
             return false
         }
+        // This press replaces a request kept from an earlier one, before
+        // anything is asked: hearing a recorded failure can announce a gate
+        // change in this same turn, which must not make the kept one too.
+        heldRuntimeRetry = nil
         guard authorizeReload(of: attempt.runtime) else {
             holdRetryWhilePortMayBeForeign(.offlineCachedPage, of: attempt)
             return false
