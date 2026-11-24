@@ -1,0 +1,261 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { createInstance } from 'i18next';
+import { I18nextProvider } from 'react-i18next';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
+import { BackendConnectionDialog } from '@/components/onboarding/BackendConnectionDialog';
+import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
+import { modelsApi } from '../models/modelsApi';
+import { BackendTestPanel } from '../BackendTestPanel';
+import { AntigravityProviderConfig } from './AntigravityProviderConfig';
+import type { AntigravityAuthState, BackendConnectionState } from '@/context/ApiContext';
+
+const mock = vi.hoisted(() => ({
+  toast: vi.fn(),
+  api: {
+    getConfig: vi.fn(),
+    detectCli: vi.fn(),
+    mutateConfig: vi.fn(),
+    getBackendRuntime: vi.fn(),
+    restartBackend: vi.fn(),
+    getBackendConnection: vi.fn(),
+    getAntigravityAuth: vi.fn(),
+    saveAntigravityAuth: vi.fn(),
+    antigravityModels: vi.fn(),
+    startOAuthWeb: vi.fn(),
+    getOAuthWebStatus: vi.fn(),
+    submitOAuthWebCode: vi.fn(),
+    cancelOAuthWeb: vi.fn(),
+    removeBackendAuth: vi.fn(),
+    removeBackendApiKey: vi.fn(),
+    testBackendAuth: vi.fn(),
+  },
+}));
+
+vi.mock('@/context/ApiContext', () => ({ useApi: () => mock.api }));
+vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: mock.toast }) }));
+vi.mock('../models/useModelHubCapability', () => ({ useModelHubCapability: () => true }));
+
+const i18n = createInstance();
+await i18n.init({
+  lng: 'en',
+  fallbackLng: false,
+  resources: { en: { translation: en }, zh: { translation: zh } },
+});
+
+const wrap = (node: React.ReactNode) => (
+  <MemoryRouter>
+    <I18nextProvider i18n={i18n}>{node}</I18nextProvider>
+  </MemoryRouter>
+);
+
+const connection = (patch: Partial<BackendConnectionState> = {}): BackendConnectionState => ({
+  ok: true,
+  backend: 'antigravity',
+  installed: true,
+  cli_status: 'ok',
+  enabled: true,
+  auth: 'none',
+  application: 'applied',
+  ready: true,
+  entry_eligible: true,
+  supply_mode: 'direct',
+  ...patch,
+});
+
+const authState = (patch: Partial<AntigravityAuthState> = {}): AntigravityAuthState => ({
+  ok: true,
+  auth_mode: 'oauth-personal',
+  authenticated: false,
+  credentials_present: false,
+  catalog_available: true,
+  cli_installed: true,
+  cli_version: '1.5.16',
+  has_api_key: false,
+  api_key_masked: null,
+  base_url: null,
+  gcp_project: null,
+  gcp_location: null,
+  adc_present: false,
+  adc_command: 'gcloud auth application-default login',
+  ...patch,
+});
+
+beforeEach(async () => {
+  await i18n.changeLanguage('en');
+  vi.resetAllMocks();
+  mock.api.getConfig.mockResolvedValue({ agents: { antigravity: { enabled: true, cli_path: 'agy' } } });
+  mock.api.detectCli.mockResolvedValue({ found: true, status: 'ok', path: '/usr/local/bin/agy' });
+  mock.api.getBackendRuntime.mockResolvedValue({
+    ok: true,
+    name: 'antigravity',
+    cli_path: 'agy',
+    resolved_path: '/usr/local/bin/agy',
+    status: 'ok',
+    enabled: true,
+    installed: true,
+    current_version: '1.5.16',
+    process_status: 'running',
+  });
+  mock.api.getBackendConnection.mockResolvedValue(connection());
+  mock.api.getAntigravityAuth.mockResolvedValue(authState());
+  mock.api.saveAntigravityAuth.mockResolvedValue({ ...authState({ authenticated: true }), restart: { ok: true } });
+  mock.api.antigravityModels.mockResolvedValue({ ok: true, models: ['gemini-4-neon', 'gemini-3.8-flash'] });
+  mock.api.cancelOAuthWeb.mockResolvedValue({ ok: true });
+  mock.api.removeBackendApiKey.mockResolvedValue({ ok: true, restart: { ok: true } });
+  vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
+    { backend: 'antigravity', cli_present: true, mode: 'direct', menu_kind: 'fixed' },
+  ]);
+  vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [] });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+describe('Antigravity settings, auth flows, and onboarding', () => {
+  it.each([
+    [
+      'en',
+      'With a personal Google sign-in, Google allows Antigravity for work you direct yourself. Google says this sign-in does not cover unattended runs or task queues, such as scheduled Tasks, Watches, or work passed from one Agent to another. For automation, sign in with an API key or Agent Platform instead; both are billed by usage.',
+    ],
+    [
+      'zh',
+      '用个人 Google 账号登录时，Google 允许你本人指挥 Antigravity 工作。Google 说明这种登录不包含无人值守的运行和任务队列，例如定时任务、Watch，以及由别的 Agent 转交的工作。需要自动化时，请改用 API key 或 Agent Platform 登录，这两种按用量计费。',
+    ],
+  ] as const)('shows the exact %s personal automation notice above the OAuth sign-in link and completes paste-code flow', async (lang, exactNotice) => {
+    await i18n.changeLanguage(lang);
+    mock.api.startOAuthWeb.mockResolvedValue({
+      ok: true,
+      flow_id: 'flow_agy',
+      backend: 'antigravity',
+      state: 'awaiting_code',
+      callback_kind: 'code',
+      url: 'https://accounts.google.com/o/oauth2/v2/auth?code=1',
+    });
+    mock.api.submitOAuthWebCode.mockResolvedValue({ ok: true });
+
+    render(wrap(<AntigravityProviderConfig />));
+
+    const notice = await screen.findByText(exactNotice);
+    const signInLabel = lang === 'en' ? en.settings.backends.antigravitySignInGoogle : zh.settings.backends.antigravitySignInGoogle;
+    const signInButton = screen.getByRole('button', { name: signInLabel });
+    expect(notice.compareDocumentPosition(signInButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(mock.api.testBackendAuth).not.toHaveBeenCalled();
+
+    fireEvent.click(signInButton);
+    await waitFor(() => expect(mock.api.startOAuthWeb).toHaveBeenCalledWith('antigravity', false, 'oauth-personal'));
+
+    const openLink = await screen.findByRole('link', {
+      name: lang === 'en' ? en.settings.models.oauth.openSignIn : zh.settings.models.oauth.openSignIn,
+    });
+    expect(notice.compareDocumentPosition(openLink) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    const codeInput = screen.getByPlaceholderText(
+      lang === 'en' ? en.settings.backends.antigravityCallbackCodePlaceholder : zh.settings.backends.antigravityCallbackCodePlaceholder,
+    );
+    fireEvent.change(codeInput, { target: { value: 'paste-code-123' } });
+    fireEvent.click(screen.getByRole('button', { name: lang === 'en' ? en.common.submit : zh.common.submit }));
+    await waitFor(() => expect(mock.api.submitOAuthWebCode).toHaveBeenCalledWith('antigravity', 'flow_agy', 'paste-code-123'));
+  });
+
+  it('supports Gemini Enterprise terminal fallback, Gemini API key save/remove, and Agent Platform ADC status', async () => {
+    mock.api.getAntigravityAuth.mockResolvedValue(
+      authState({
+        auth_mode: 'gemini-api-key',
+        authenticated: true,
+        credentials_present: true,
+        has_api_key: true,
+        api_key_masked: 'AIza…9xyz',
+        base_url: 'https://generativelanguage.googleapis.com',
+        gcp_project: 'demo-proj',
+        gcp_location: 'global',
+        adc_present: false,
+      }),
+    );
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+
+    render(wrap(<AntigravityProviderConfig />));
+
+    // Starts on saved Gemini API key mode
+    expect(await screen.findByText('AIza…9xyz')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.settings.backends.antigravityApiKeyRemove }));
+    await waitFor(() => expect(mock.api.removeBackendApiKey).toHaveBeenCalledWith('antigravity'));
+
+    // Switch to Gemini Enterprise and check terminal fallback command
+    fireEvent.click(screen.getByRole('radio', { name: en.settings.backends.antigravityMethodEnterprise }));
+    expect(screen.getByText('agy')).toBeTruthy();
+
+    // Switch to Agent Platform and save project + location
+    fireEvent.click(screen.getByRole('radio', { name: en.settings.backends.antigravityMethodAgentPlatform }));
+    expect(screen.getByText('gcloud auth application-default login')).toBeTruthy();
+    fireEvent.change(screen.getByLabelText(en.settings.backends.antigravityGcpProjectLabel), {
+      target: { value: 'prod-agent-proj' },
+    });
+    fireEvent.change(screen.getByLabelText(en.settings.backends.antigravityGcpLocationLabel), {
+      target: { value: 'us-central1' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: en.common.save }));
+    await waitFor(() =>
+      expect(mock.api.saveAntigravityAuth).toHaveBeenCalledWith({
+        auth_mode: 'agent-platform',
+        gcp_project: 'prod-agent-proj',
+        gcp_location: 'us-central1',
+      }),
+    );
+  });
+
+  it('keeps BackendSupplyModeCard Direct-only for Antigravity without offering Model Hub', async () => {
+    render(wrap(<BackendSupplyModeCard backend="antigravity" />));
+    const direct = await screen.findByRole('radio', { name: /Own login/ });
+    expect(direct.getAttribute('aria-checked')).toBe('true');
+    expect(screen.queryByRole('radio', { name: /Managed by Model Hub/ })).toBeNull();
+    expect(modelsApi.scanMigration).not.toHaveBeenCalled();
+  });
+
+  it('pre-selects an Avibe-owned model in BackendTestPanel and shows structured auth/catalog/inference results', async () => {
+    mock.api.testBackendAuth.mockResolvedValue({
+      ok: true,
+      duration_ms: 210,
+      excerpt: 'Hi there!',
+      authenticated: true,
+      catalog_available: true,
+      inference_verified: true,
+    });
+
+    render(wrap(<BackendTestPanel backend="antigravity" />));
+    const select = (await screen.findByLabelText(en.settings.backends.testConnectionModelLabel)) as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe('gemini-4-neon'));
+    expect(screen.queryByRole('option', { name: en.settings.backends.testConnectionModelDefault })).toBeNull();
+    expect(mock.api.testBackendAuth).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: en.settings.backends.testConnectionRun }));
+    await waitFor(() =>
+      expect(mock.api.testBackendAuth).toHaveBeenCalledWith('antigravity', { model: 'gemini-4-neon' }),
+    );
+    expect(await screen.findByText(en.settings.backends.testConnectionAuthOk)).toBeTruthy();
+    expect(screen.getByText(en.settings.backends.testConnectionCatalogOk)).toBeTruthy();
+    expect(screen.getByText(en.settings.backends.testConnectionInferenceOk)).toBeTruthy();
+  });
+
+  it('opens onboarding BackendConnectionDialog for Antigravity with personal automation notice', async () => {
+    render(
+      wrap(
+        <BackendConnectionDialog
+          backend="antigravity"
+          method="oauth"
+          onClose={vi.fn()}
+          onConnected={vi.fn(async () => {})}
+          onWriteState={vi.fn()}
+        />,
+      ),
+    );
+    expect(await screen.findByText(en.onboarding.connection.antigravityDialogIntro)).toBeTruthy();
+    expect(await screen.findByText(en.settings.backends.antigravityPersonalAutomationNotice)).toBeTruthy();
+  });
+});

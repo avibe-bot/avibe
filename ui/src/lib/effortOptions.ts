@@ -44,6 +44,7 @@ export const EFFORT_BY_BACKEND: Record<string, ReasoningEffort[]> = {
   claude: ['low', 'medium', 'high'],
   codex: ['minimal', 'low', 'medium', 'high', 'xhigh'],
   opencode: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  antigravity: ['low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const DEFAULT_EFFORTS: ReasoningEffort[] = ['low', 'medium', 'high'];

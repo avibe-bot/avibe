@@ -73,6 +73,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   const { t } = useTranslation();
   const { showToast } = useToast();
   const supportsDirect = getBackendUiMeta(backend).capabilities.supports_cli;
+  const supportsHub = backend !== 'antigravity';
 
   const [agent, setAgent] = React.useState<AgentSupply | null>(null);
   const [detected, setDetected] = React.useState<MigrationItem[]>([]);
@@ -99,14 +100,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   }, [agentReads, backend]);
 
   const scan = React.useCallback(async () => {
-    if (!supportsDirect) return;
+    if (!supportsDirect || !supportsHub) return;
     try {
       const s = await modelsApi.scanMigration();
       if (aliveRef.current) setDetected(s.items.filter((i) => i.backend === backend));
     } catch {
       /* detect strip is best-effort */
     }
-  }, [backend, supportsDirect]);
+  }, [backend, supportsDirect, supportsHub]);
 
   React.useEffect(() => {
     void load();
@@ -114,7 +115,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
   }, [load, scan]);
 
   const setMode = async (mode: AgentMode, offerMigration = true) => {
-    if (!supportsDirect || !agent || agent.mode === mode || switching) return;
+    if (!supportsDirect || !supportsHub || !agent || agent.mode === mode || switching) return;
     setSwitching(mode);
     try {
       const next = mode === 'hub'
@@ -156,11 +157,11 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
 
   if (!agent) return null;
 
-  const mode = agent.mode;
+  const mode: AgentMode = supportsHub ? agent.mode : 'direct';
   const hubOutcome = connectOutcome(agent, null);
   // The strip advertises an actionable import row. A blocked-only native
   // configuration is still handled by the Direct → Hub migration dialog.
-  const importable = detected.filter((i) => i.proposed_action === 'import');
+  const importable = supportsHub ? detected.filter((i) => i.proposed_action === 'import') : [];
   const detectItem = importable.find((i) => i.kind === 'api_key' || i.kind === 'opencode_provider') ?? importable[0] ?? null;
 
   return (
@@ -174,7 +175,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
           </Badge>
         </div>
 
-        <OptionCard
+        {supportsHub && <OptionCard
           selected={mode === 'hub'}
           disabled={switching !== null}
           onSelect={() => void setMode('hub')}
@@ -216,14 +217,14 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
               </span>
             </div>
           )}
-        </OptionCard>
+        </OptionCard>}
 
         {supportsDirect && <OptionCard
           selected={mode === 'direct'}
-          disabled={switching !== null}
+          disabled={switching !== null || !supportsHub}
           onSelect={() => void setMode('direct')}
           title={<span className="text-[15px] font-semibold text-foreground">{t('settings.models.supplyMode.direct.title')}</span>}
-          description={t('settings.models.supplyMode.direct.description', {
+          description={t(supportsHub ? 'settings.models.supplyMode.direct.description' : 'settings.models.supplyMode.direct.directOnlyDescription', {
             backend: getBackendUiMeta(backend).label,
           }) as string}
         >
@@ -253,7 +254,7 @@ export const BackendSupplyModeCard: React.FC<{ backend: AgentBackend }> = ({ bac
       </CardContent>
 
       {/* Migration is optional: declining it still makes the requested switch. */}
-      {supportsDirect && <MigrationDialog
+      {supportsDirect && supportsHub && <MigrationDialog
         open={migrateOpen !== null}
         eligible={(item) => item.backend === backend}
         onDecline={migrateOpen === 'switch' ? () => void setMode('hub', false) : undefined}

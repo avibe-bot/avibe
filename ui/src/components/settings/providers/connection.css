@@ -93,6 +93,7 @@
 }
 .connection-dialog[data-backend='codex'] { --connection-h: 580px; }
 .connection-dialog[data-backend='opencode'] { --connection-h: 640px; }
+.connection-dialog[data-backend='antigravity'] { --connection-h: 640px; }
 /* Below the floor — the room cannot hold the five rows and one whole control
    between them. There the middle is at or near nothing, and a scroll container
    with no height scrolls nothing, so the fields inside it are not merely small

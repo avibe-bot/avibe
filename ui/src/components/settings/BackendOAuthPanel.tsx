@@ -22,6 +22,15 @@ export type BackendOAuthPanelProps = {
    *  to know which provider's OAuth flow to kick off (each provider has
    *  its own authorize endpoint). Ignored for claude / codex. */
   opencodeProviderId?: string;
+  /** Optional auth mode forwarded to ``startOAuthWeb`` (e.g. Antigravity
+   *  ``oauth-personal`` vs ``oauth-business``). */
+  authMode?: string;
+  /** Optional notice rendered above the sign-in button and authorization link. */
+  notice?: React.ReactNode;
+  /** Optional override for the sign-in button label when not signed in. */
+  startButtonLabel?: string;
+  /** Optional override for the signed-in status banner sentence. */
+  signedInLabel?: string;
   /** When ``true`` the user is already signed in (read from the backend's
    *  ``get*Auth`` endpoint). We still render a "re-authenticate" button so
    *  rotating credentials without dropping to a terminal stays one click. */
@@ -72,6 +81,10 @@ export type BackendOAuthPanelProps = {
 export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   backend,
   opencodeProviderId,
+  authMode,
+  notice,
+  startButtonLabel,
+  signedInLabel,
   signedIn,
   canRemoveAuth,
   title,
@@ -90,7 +103,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
 
   const { state, authorizationCompleted, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
     startFlow, cancelFlow, submitCallback, resetToIdle, isActive, hubOwnedAuth } =
-    useBackendOAuth({ backend, opencodeProviderId, onSuccess, onFailure, onCancel, onActiveChange });
+    useBackendOAuth({ backend, opencodeProviderId, authMode, onSuccess, onFailure, onCancel, onActiveChange });
   const [removing, setRemoving] = useState(false);
   const [removeHubOwnedAuth, setRemoveHubOwnedAuth] = useState(false);
   const removalOwner = useRef({ mounted: true, busy: false });
@@ -167,6 +180,8 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
 
   const showStartButton = state === 'idle' || state === 'success' || state === 'failed' || state === 'cancelled';
   const claudeAwaitingCode = backend === 'claude' && state === 'awaiting_code';
+  const antigravityAwaitingCode =
+    backend === 'antigravity' && state === 'awaiting_code' && (callbackKind === 'code' || callbackKind === 'redirect' || (!callbackKind && Boolean(url) && !deviceCode));
   // OpenCode browser-redirect providers (poe, gitlab, openai-browser)
   // return only ``url`` with no device code — the provider then redirects
   // to ``http://127.0.0.1:<port>/callback?…``. From a remote browser
@@ -179,15 +194,14 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   // user-facing code in the same payload as Codex; reuse the same UI
   // affordance. Browser-redirect flows (gitlab, poe, openai browser)
   // don't surface a code — only the URL.
-  const codexShowDevice = backend === 'codex' && state === 'awaiting_code' && url && deviceCode;
-  const opencodeShowDevice = backend === 'opencode' && state === 'awaiting_code' && url && deviceCode;
-  const showDeviceBlock = codexShowDevice || opencodeShowDevice;
+  const showDeviceBlock = backend !== 'claude' && state === 'awaiting_code' && Boolean(url && deviceCode);
 
   const startLabel = signedIn
     ? t('settings.backends.oauthReauthenticate')
-    : (() => {
+    : startButtonLabel ?? (() => {
         if (backend === 'claude') return t('settings.backends.claudeSignInButton');
         if (backend === 'codex') return t('settings.backends.codexSignInButton');
+        if (backend === 'antigravity') return t('settings.backends.antigravitySignInButton');
         return t('settings.backends.opencodeProviderSignIn');
       })();
   const showRemoveAuth = canRemoveAuth ?? (signedIn || state === 'success');
@@ -203,13 +217,16 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         <p className="text-[12px] leading-relaxed text-muted">{subtitle}</p>
       </div>
 
+      {notice}
+
       {backend !== 'claude' && signedIn && state === 'idle' && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
           <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-mint-ink" />
           <div className="flex flex-col gap-0.5">
             <p className="text-[12px] text-mint-ink">
-              {(() => {
+              {signedInLabel ?? (() => {
                 if (backend === 'codex') return t('settings.backends.codexOauthSignedIn');
+                if (backend === 'antigravity') return t('settings.backends.antigravityOauthSignedIn');
                 return t('settings.backends.opencodeProviderOauthSignedIn');
               })()}
             </p>
@@ -284,6 +301,27 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           />
           <p className="text-[12px] leading-relaxed text-muted">
             {t('settings.backends.claudeCallbackCodeHint')}
+          </p>
+        </div>
+      )}
+
+      {antigravityAwaitingCode && (
+        <div className="flex flex-col gap-2">
+          <Label htmlFor={`oauth-code-${backend}`} className="text-xs font-medium uppercase text-muted">
+            {t('settings.backends.antigravityCallbackCodeLabel')}
+          </Label>
+          <OAuthSubmitRow
+            id={`oauth-code-${backend}`}
+            value={code}
+            onChange={setCode}
+            onSubmit={() => void submitCallback()}
+            submitting={submitting}
+            placeholder={t('settings.backends.antigravityCallbackCodePlaceholder') as string}
+            submitLabel={t('common.submit') as string}
+            submittingLabel={t('common.submitting') as string}
+          />
+          <p className="text-[12px] leading-relaxed text-muted">
+            {t('settings.backends.antigravityCallbackCodeHint')}
           </p>
         </div>
       )}

@@ -23,4 +23,9 @@ export const BACKEND_BRAND_MARKS = {
     fill: "currentColor",
     fillRule: "evenodd",
   },
+  antigravity: {
+    path: "M12 2.75C12.68 2.75 13.28 3.13 13.59 3.74L20.72 18.14C21.29 19.3 20.45 20.65 19.16 20.65H17.32C16.63 20.65 16.01 20.25 15.72 19.62L12 11.4L8.28 19.62C7.99 20.25 7.37 20.65 6.68 20.65H4.84C3.55 20.65 2.71 19.3 3.28 18.14L10.41 3.74C10.72 3.13 11.32 2.75 12 2.75ZM12 16.5A1.9 1.9 0 1 1 12 20.3A1.9 1.9 0 1 1 12 16.5Z",
+    fill: "currentColor",
+    fillRule: "evenodd",
+  },
 } as const;

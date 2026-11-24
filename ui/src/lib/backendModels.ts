@@ -165,7 +165,7 @@ export async function fetchBackendModelLabels(
 ): Promise<Record<string, string>> {
   const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
   if (hub) return hub.modelLabels ?? {};
-  if (backend !== 'claude' && backend !== 'codex') return {};
+  if (backend !== 'claude' && backend !== 'codex' && backend !== 'antigravity') return {};
   return (await nativeBackendModels(api, backend)).modelLabels ?? {};
 }
 
@@ -182,6 +182,15 @@ async function nativeBackendModels(api: ApiContextType, backend: string): Promis
   }
   if (backend === 'codex') {
     const res = await api.codexModels();
+    return {
+      models: res.ok && res.models ? res.models : [],
+      modelLabels: res.model_labels,
+      reasoningOptions: res.reasoning_options,
+      catalogRefreshPending: res.catalog_refresh_pending,
+    };
+  }
+  if (backend === 'antigravity') {
+    const res = await api.antigravityModels();
     return {
       models: res.ok && res.models ? res.models : [],
       modelLabels: res.model_labels,
