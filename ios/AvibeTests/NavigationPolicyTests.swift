@@ -1145,7 +1145,7 @@ final class NavigationPolicyTests: XCTestCase {
             if currentStore != launchStore {
                 let cleanup = NamedDataStoreCleanup()
                 cleanup.identifier = currentStore
-                cleanup.own(appModel)
+                cleanup.own(app: appModel)
                 // Weak: the App holds its current store, so the store can
                 // go only once the App has.
                 addTeardownBlock { @MainActor [weak appModel] in
@@ -2202,7 +2202,7 @@ final class NavigationPolicyTests: XCTestCase {
             )
         )
         storeCleanup.identifier = appModel.websiteDataStore.identifier
-        storeCleanup.own(appModel)
+        storeCleanup.own(app: appModel)
         try await waitUntil {
             (
                 try? appModel.mobileSessionCoordinator.selectInstance(
@@ -2403,7 +2403,7 @@ final class NavigationPolicyTests: XCTestCase {
             )
         )
         storeCleanup.identifier = appModel.websiteDataStore.identifier
-        storeCleanup.own(appModel)
+        storeCleanup.own(app: appModel)
         let hostingController = UIHostingController(
             rootView: RootView().environmentObject(appModel)
         )
@@ -3621,7 +3621,7 @@ final class NavigationPolicyTests: XCTestCase {
         storeCleanups[0].identifier = try XCTUnwrap(
             appModel?.websiteDataStore.identifier
         )
-        storeCleanups[0].own(try XCTUnwrap(appModel))
+        storeCleanups[0].own(app: try XCTUnwrap(appModel))
         try await exerciseRuntimeAccountTransition(
             appModel: try XCTUnwrap(appModel),
             storeCleanups: storeCleanups,
@@ -3768,7 +3768,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         let signedOut = try await appModel.mobileSessionCoordinator.logout()
         storeCleanups[1].identifier = appModel.websiteDataStore.identifier
-        storeCleanups[1].own(appModel)
+        storeCleanups[1].own(app: appModel)
         XCTAssertEqual(signedOut, .signedOut)
         XCTAssertEqual(appModel.route, .onboarding(.account))
         XCTAssertNil(switchedWebView.superview)
@@ -3962,7 +3962,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
         let storeCleanup = NamedDataStoreCleanup()
         storeCleanup.identifier = appModel.websiteDataStore.identifier
-        storeCleanup.own(appModel)
+        storeCleanup.own(app: appModel)
         addTeardownBlock { @MainActor [weak appModel, self] in
             appModel?.showInstancePicker()
             appModel?.mobileSessionCoordinator.deactivateAccountSurface()
@@ -4626,6 +4626,13 @@ private final class NamedDataStoreCleanup {
     /// current store). Weakly.
     func own(_ object: AnyObject) {
         owners.append { [weak object] in object != nil }
+    }
+
+    /// The App and its account store, which holds the App's current
+    /// WebKit store without a page and could outlive the App.
+    func own(app: AppModel) {
+        own(app)
+        own(app.websiteDataStore)
     }
 
     /// `nil` when the store is gone, or when WebKit alone still holds it

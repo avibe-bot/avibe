@@ -69,17 +69,25 @@ enum FixtureStoreRemoval {
         return StillRegistered(identifier: identifier, ownersAlive: alive, error: lastError)
     }
 
-    /// One try for each store WebKit still held at an earlier removal.
+    /// One try for each store WebKit still held at an earlier removal. A
+    /// store still listed with no reason given, or with WebKit's own hold,
+    /// is tried again at the next removal. Any other refusal fails the test
+    /// that is running now, though the store is an earlier test's: the
+    /// message says so.
     static func retryHeldByWebKit() async {
         for (identifier, since) in heldByWebKit {
             let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            let age = Int(Date().timeIntervalSince(since))
             if await !registered().contains(identifier) {
                 heldByWebKit[identifier] = nil
                 print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
-                    + "\(Int(Date().timeIntervalSince(since))) s after its test")
-            } else if !isHeldByWebKitAlone(error) {
+                    + "\(age) s after its test")
+            } else if error != nil, !isHeldByWebKitAlone(error) {
                 heldByWebKit[identifier] = nil
-                XCTFail("Fixture store still registered: \(identifier); error=\(String(describing: error))")
+                XCTFail(
+                    "A fixture store an earlier test left to WebKit \(age) s ago is still registered, "
+                        + "and not for WebKit's own hold: \(identifier); error=\(String(describing: error))"
+                )
             }
         }
     }
