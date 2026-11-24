@@ -29,6 +29,7 @@ export const SkillsPage = lazyPage(() => import('./components/workbench/SkillsPa
 export const HarnessPage = lazyPage(() => import('./components/workbench/HarnessPage').then((m) => m.HarnessPage));
 export const VaultsPage = lazyPage(() => import('./components/workbench/VaultsPage').then((m) => m.VaultsPage));
 export const Wizard = lazyPage(() => import('./components/Wizard').then((m) => m.Wizard));
+export const SetupRemoteAccess = lazyPage(() => import('./components/onboarding/SetupRemoteAccess').then((m) => m.SetupRemoteAccess));
 // The App routes' host: a native App window's body, or the page's own app route.
 export const StandaloneAppRoute = lazyPage(() => import('./components/apps/StandaloneAppRoute').then((m) => m.StandaloneAppRoute));
 
@@ -45,7 +46,8 @@ export const SettingsServicePage = lazyPage(() => settings().then((m) => m.Setti
 export const SettingsPlatformsPage = lazyPage(() => settings().then((m) => m.SettingsPlatformsPage));
 export const ChannelList = lazyPage(() => settings().then((m) => m.ChannelList));
 export const UserList = lazyPage(() => settings().then((m) => m.UserList));
-export const RemoteAccessPage = lazyPage(() => settings().then((m) => m.RemoteAccessPage));
+export const DevicesPage = lazyPage(() => settings().then((m) => m.DevicesPage));
+export const ConnectionPage = lazyPage(() => settings().then((m) => m.ConnectionPage));
 export const SettingsBackendsPage = lazyPage(() => settings().then((m) => m.SettingsBackendsPage));
 export const SettingsOpencodeProviderPage = lazyPage(() => settings().then((m) => m.SettingsOpencodeProviderPage));
 export const SettingsClaudeProviderPage = lazyPage(() => settings().then((m) => m.SettingsClaudeProviderPage));
@@ -65,6 +67,7 @@ const EXACT_PAGES: Record<string, { preload: () => Promise<unknown> }> = {
   '/harness': HarnessPage,
   '/vaults': VaultsPage,
   '/setup': Wizard,
+  '/setup/remote-access': SetupRemoteAccess,
 };
 
 function pageForPath(pathname: string): { preload: () => Promise<unknown> } | null {

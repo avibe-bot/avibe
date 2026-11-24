@@ -3,6 +3,7 @@ use crate::direct::{
     rendezvous::{Reply, Request},
     webview_macos,
     wiring::Material,
+    WindowRegistration,
 };
 use objc2::{rc::Retained, MainThreadMarker};
 use objc2_web_kit::WKWebView;
@@ -34,11 +35,15 @@ pub fn ask(
 
 /// `still` is asked on the main thread, at this work's turn: a route queued
 /// for a session that has ended meanwhile is not installed.
+///
+/// The route carries the window's own credential, that of `registration`,
+/// which no other window presents.
 pub fn install(
     app: &AppHandle,
     window: String,
     host: String,
     material: Material,
+    registration: WindowRegistration,
     still: impl Fn() -> bool + Send + 'static,
 ) {
     let handle = app.clone();
@@ -50,20 +55,14 @@ pub fn install(
             if !still() {
                 return;
             }
-            let _ = webview_macos::install_route(
-                webview,
-                main,
-                &host,
-                material.proxy,
-                &material.username,
-                &material.password,
-            );
+            let (username, password) = registration.native_login();
+            let _ = webview_macos::install_route(webview, main, &host, material.proxy, username, password);
         });
     });
 }
 
 /// Routing here is live: nothing is answered per window.
-pub fn answer(_: &AppHandle, _: String, _: Material, _: impl Fn() -> bool + Send + 'static) {}
+pub fn answer(_: &AppHandle, _: String, _: Material, _: WindowRegistration, _: impl Fn() -> bool + Send + 'static) {}
 
 /// Routing here is live: nothing is kept per window.
 pub fn forget_closed(_: impl Fn(&str) -> bool) {}

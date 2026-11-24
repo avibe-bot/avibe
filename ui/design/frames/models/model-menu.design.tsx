@@ -138,6 +138,24 @@ const change = 'text={t:settings.models.gateway.modelEditor.source.change}';
 /** The reads behind the ID and behind the catalog search are debounced. */
 const customFrame = { width: 1000, height: 900, themes: ['light'] as ('light' | 'dark')[], status: 'shipped' as const, fixtures: { api: customApi }, wait: 900 };
 
+// Changing a saved model's ID, from the model list: what the change carries along is said under
+// the field once the ID differs. One provider lists 「gpt-5.5-turbo」; nobody lists 「gpt-5.5-house」.
+const listedBy = (ids: string[]) => ok({
+  candidates: {
+    builtin: [],
+    providers: [candidate('gpt-5.5-turbo', [supplier(relayGpt, 'gpt-5.5-turbo')])],
+    in_list: ids.map((id) => candidate(id, [supplier(relayGpt, id)])),
+  },
+});
+const renameApi = {
+  ...api,
+  '/api/models/agents/vibey/models/candidates': listedBy(vibeyLong),
+  '/api/models/agents/claude/models/candidates': listedBy(['claude-opus-4-8']),
+  ...Object.fromEntries(['gpt-5.5', 'gpt-5.5-turbo', 'gpt-5.5-house', 'claude-opus-4-8', 'claude-opus-4-8-relay'].map((id) => [lookup(id), ok({ matches: [] })])),
+};
+const editRow = (id: string) => `.model-hub-catalog-row:has-text("${id}") .model-hub-catalog-action >> nth=0`;
+const renameFrame = { width: 1000, height: 900, themes: ['light'] as ('light' | 'dark')[], status: 'shipped' as const, fixtures: { api: renameApi }, wait: 900 };
+
 const designFrames = frames([
   {
     name: 'claude',
@@ -262,6 +280,36 @@ const designFrames = frames([
         onCommit={() => {}}
       />
     ),
+  },
+  {
+    name: 'rename-model',
+    title: '编辑模型 · 改了 ID（Vibey）：写明会带走什么',
+    ...renameFrame,
+    click: [editRow('gpt-5.5'), { fill: idField, text: 'gpt-5.5-turbo' }],
+    render: catalog('vibey'),
+  },
+  {
+    name: 'rename-model-unrouted',
+    title: '编辑模型 · 改了 ID，没有供应商列出新 ID：保存后要单独设置路由',
+    ...renameFrame,
+    click: [editRow('gpt-5.5'), { fill: idField, text: 'gpt-5.5-house' }],
+    render: catalog('vibey'),
+  },
+  {
+    name: 'rename-model-native',
+    title: '编辑模型 · 改了 ID（Claude Code）：正在进行的对话可能中断',
+    ...renameFrame,
+    click: [editRow('claude-opus-4-8'), { fill: idField, text: 'claude-opus-4-8-relay' }],
+    render: catalog('claude'),
+  },
+  {
+    name: 'rename-model-phone',
+    title: '编辑模型 · 改了 ID · 手机',
+    ...renameFrame,
+    width: 390,
+    height: 844,
+    click: [editRow('gpt-5.5'), { fill: idField, text: 'gpt-5.5-house' }],
+    render: catalog('vibey'),
   },
   { name: 'custom-model-exact', title: '添加自定义模型 · 目录里有这个 ID：自动填好，写明参数来自哪里', ...customFrame, render: custom(exactId) },
   { name: 'custom-model-closest', title: '添加自定义模型 · 目录里没有这个 ID：按最接近的模型填，可以更换', ...customFrame, render: custom(variantId) },

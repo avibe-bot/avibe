@@ -8,8 +8,12 @@ import { Wizard } from '../Wizard';
 import { CONTRACT_VERSION, type AgentBackend, type AgentSupply, type NamedAgentSupply, type RuntimeDependency, type Source } from '../settings/models/types';
 import en from '../../i18n/en.json';
 import { selectLanguage } from '../../lib/useLanguageSelection';
+import { devicesApi } from '../devices/api';
+import { readClaimMarker } from '../devices/claimFlow';
+import { SetupRemoteAccess } from './SetupRemoteAccess';
 
-const mock = vi.hoisted(() => ({ presentDesktop: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, apiFetch: vi.fn(), api: {
+const mock = vi.hoisted(() => ({ presentDesktop: vi.fn(), control: vi.fn(), toast: vi.fn(), permission: vi.fn(), manageAccess: true, remote: false, apiFetch: vi.fn(), api: {
+  remoteAccessStatus: vi.fn(),
   saveSettings: vi.fn(), discordAuthTest: vi.fn(), discordGuilds: vi.fn(), slackManifest: vi.fn(), slackAuthTest: vi.fn(), getConfig: vi.fn(), detectCli: vi.fn(), getBackendRuntime: vi.fn(), getBackendConnection: vi.fn(),
   readModelHubAgentCatalogForModelPicker: vi.fn(), listVibeAgents: vi.fn(), getVibeAgent: vi.fn(), updateVibeAgent: vi.fn(), setDefaultVibeAgent: vi.fn(), mutateConfig: vi.fn(),
 },
@@ -27,7 +31,7 @@ vi.mock('../settings/models/modelsApi', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../settings/models/modelsApi')>();
   return { ...actual, modelsApi: { ...actual.modelsApi, ...mock.models } };
 });
-vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ capabilities: { can_manage_agents: true, can_manage_access_members: mock.manageAccess } }) }));
+vi.mock('../../context/InstanceAuthorizationContext', () => ({ useInstanceAuthorization: () => ({ remote: mock.remote, capabilities: { can_manage_agents: true, can_manage_access_members: mock.manageAccess } }) }));
 vi.mock('../../context/StatusContext', () => ({ useStatus: () => ({ control: mock.control }) }));
 vi.mock('../../context/ToastContext', () => ({ useToast: () => ({ showToast: mock.toast }) }));
 vi.mock('../settings/models/useModelHubCapability', () => ({ useModelHubCapability: () => false }));
@@ -141,7 +145,7 @@ function serveBuiltinOnly() {
 }
 let running: boolean;
 beforeEach(() => {
-  vi.resetAllMocks(); running = true; mock.manageAccess = true;
+  vi.resetAllMocks(); running = true; mock.manageAccess = true; mock.remote = false;
   mock.api.saveSettings.mockResolvedValue({ guild_allowlist: [] });
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   Element.prototype.scrollIntoView = vi.fn();
@@ -1189,9 +1193,121 @@ describe('AUTH-SETUP-170 Desktop completion handoff', () => {
     expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
     expect(seeds()).toHaveLength(seedCount);
   });
+  it('offers the Desktop the remote-access step on an unbound computer, in place of setup-complete', async () => {
+    desktop();
+    mock.api.remoteAccessStatus.mockResolvedValue({ ok: true, enabled: false, paired: false, running: false });
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: false, paired: false, running: false } as never);
+    const claim = vi.spyOn(devicesApi, 'startClaim');
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, assign });
+    mock.models.listSources.mockResolvedValue([]);
+    render(<MemoryRouter initialEntries={['/setup']}><I18nextProvider i18n={i18n}><Routes>
+      <Route path="/setup" element={<Wizard />} /><Route path="/setup/remote-access" element={<SetupRemoteAccess />} />
+      <Route path="/" element={<Destination />} /></Routes></I18nextProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.providers.later }));
+    const turnOn = await screen.findByRole('button', { name: en.devices.reach.turnOn });
+    expect(mock.presentDesktop).not.toHaveBeenCalled();
+    fireEvent.click(turnOn);
+    // The shell's claim dialog, not avibe.bot: only the locale goes with it; asked once.
+    expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/claim?locale=en');
+    expect((turnOn as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(turnOn);
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(claim).not.toHaveBeenCalled();
+  });
   it('keeps a remote Runtime completion local to that Runtime', async () => {
     desktop('remote'); fireEvent.click(await setup());
     expect(await screen.findByTestId('destination')).toBeTruthy();
     expect(mock.presentDesktop).not.toHaveBeenCalled();
+  });
+});
+
+// The optional step after Setup: setup is complete before it is offered, it is offered only where
+// turning remote access on can work from here, and neither leaving it nor using it re-enters
+// initialization. The claim itself, on the server side, is AUTH-SETUP-914.
+describe('AUTH-SETUP-916 the optional remote-access step after Setup', () => {
+  function mountJourney() {
+    return render(
+      <MemoryRouter initialEntries={['/setup']}>
+        <I18nextProvider i18n={i18n}>
+          <Routes>
+            <Route path="/setup" element={<Wizard />} />
+            <Route path="/setup/remote-access" element={<SetupRemoteAccess />} />
+            <Route path="/settings/remote-access" element={<div data-testid="devices" />} />
+            <Route path="/" element={<Destination />} />
+          </Routes>
+        </I18nextProvider>
+      </MemoryRouter>,
+    );
+  }
+  /** Finish Setup the short way (no provider yet); what follows it is the same for every way. */
+  async function finishSetup() {
+    mock.models.listSources.mockResolvedValue([]);
+    mountJourney();
+    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    await waitFor(() => expect(primaryAction().textContent).toContain(en.onboarding.providers.actionAdd));
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.providers.later }));
+  }
+  const unbound = { ok: true, enabled: false, paired: false, running: false };
+
+  it('AUTH-SETUP-916 offers remote access only after setup is complete, and skipping lands home without re-entering setup', async () => {
+    mock.api.remoteAccessStatus.mockResolvedValue(unbound);
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(unbound as never);
+    const claim = vi.spyOn(devicesApi, 'startClaim');
+    await finishSetup();
+
+    const turnOn = await screen.findByRole('button', { name: en.devices.reach.turnOn });
+    // Completion was written, once, before the step was shown.
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
+    expect(turnOn).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: en.devices.setup.skip }));
+
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.api.mutateConfig).toHaveBeenCalledTimes(1);
+    expect(claim).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Get started' })).toBeNull();
+  });
+
+  it('AUTH-SETUP-916 turns remote access on with the claim the instance issued, and comes back to Devices', async () => {
+    mock.api.remoteAccessStatus.mockResolvedValue(unbound);
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(unbound as never);
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'pending' });
+    const claim = vi.spyOn(devicesApi, 'startClaim').mockResolvedValue({
+      claimId: 'claim-setup', action: 'https://avibe.bot/api/v1/claims/redirect-entry', method: 'POST',
+      fields: { user_code: 'CODE-FROM-INSTANCE', redirect_state: 'STATE-FROM-INSTANCE' }, referrerPolicy: 'strict-origin',
+    });
+    let sent: Record<string, string> | null = null;
+    vi.spyOn(HTMLFormElement.prototype, 'submit').mockImplementation(function submit(this: HTMLFormElement) {
+      sent = Object.fromEntries(Array.from(this.querySelectorAll('input')).map((input) => [input.name, input.value]));
+    });
+    await finishSetup();
+
+    fireEvent.click(await screen.findByRole('button', { name: en.devices.reach.turnOn }));
+    await waitFor(() => expect(sent).toEqual({ user_code: 'CODE-FROM-INSTANCE', redirect_state: 'STATE-FROM-INSTANCE' }));
+    expect(claim).toHaveBeenCalledExactlyOnceWith('en');
+    expect(readClaimMarker()).toMatchObject({ kind: 'claim', id: 'claim-setup' });
+    // The open request is followed on the Devices page, where the return from avibe.bot lands too.
+    expect(await screen.findByTestId('devices')).toBeTruthy();
+    expect(mock.api.mutateConfig).toHaveBeenCalledTimes(1);
+    window.sessionStorage.clear();
+  });
+
+  it.each([
+    ['a bound instance', { paired: true }, false],
+    ['a remote session', { paired: false }, true],
+  ])('AUTH-SETUP-916 goes straight home on %s', async (_name, status, remote) => {
+    mock.remote = remote;
+    mock.api.remoteAccessStatus.mockResolvedValue({ ok: true, ...status });
+    await finishSetup();
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: en.devices.reach.turnOn })).toBeNull();
+  });
+
+  it('AUTH-SETUP-916 goes straight home when the status cannot be read', async () => {
+    mock.api.remoteAccessStatus.mockRejectedValue(new Error('offline'));
+    await finishSetup();
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
   });
 });

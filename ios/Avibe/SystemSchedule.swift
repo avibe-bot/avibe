@@ -2436,9 +2436,11 @@ final class LiveSystemSchedulePlatform: SystemSchedulePlatforming {
             alarmAuthorization = Self.alarmAuthorization(
                 AlarmManager.shared.authorizationState
             )
-            remindersAvailable = false
-            reminderAuthorization = .unsupported
-            supportedKinds = [.alarm]
+            remindersAvailable = true
+            reminderAuthorization = Self.reminderAuthorization(
+                EKEventStore.authorizationStatus(for: .reminder)
+            )
+            supportedKinds = [.alarm, .reminder]
         } else {
             alarmAvailable = false
             alarmAuthorization = .unsupported
@@ -2537,7 +2539,6 @@ final class LiveSystemSchedulePlatform: SystemSchedulePlatforming {
                 stillCurrent: stillCurrent
             )
         case .reminder:
-            if #available(iOS 26.0, *) { return .failure(.unsupported) }
             return await scheduleReminder(
                 request,
                 systemIdentifier: systemIdentifier,

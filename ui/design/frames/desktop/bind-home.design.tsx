@@ -21,16 +21,10 @@ const EMAIL = 'max@example.test';
 const noop = () => {};
 const macbook: Device = {
   id: 'host', group: 'mine', kind: 'host', name: 'Max 的 MacBook Pro', client: { kind: 'runtime', version: '3.2.8', platform: 'macOS' }, online: {},
-  capabilities: [{ kind: 'computerUse', on: true }, { kind: 'notifications', on: true }], self: true,
+  functions: [{ kind: 'computerUse', status: 'ready' }, { kind: 'notifications', on: true, canChange: true }], self: true,
 };
 
-// Proposed copy for the Desktop's off state and Setup step: one action, no trip to avibe.bot.
-const desktopCopy = {
-  'settings.sections.remoteAccess': { zh: '设备', en: 'Devices' },
-  'devices.reach.firstTime': { zh: '领一个专属域名，手机和其他电脑就能打开这台电脑上的 Avibe。', en: 'Claim your own domain, and your phone and other computers can open the Avibe on this computer.' },
-  'devices.setup.browserHint': { zh: '领一个专属域名，手机和其他电脑就能打开这台电脑上的 Avibe。可以跳过，以后在「设备」里开启。', en: 'Claim your own domain, and your phone and other computers can open the Avibe on this computer. You can skip this and turn it on later in Devices.' },
-};
-const copy = (lang: 'zh' | 'en') => ({ ...copyFor(lang === 'en' ? en : zh), ...desktopCopy });
+const copy = (lang: 'zh' | 'en') => copyFor(lang === 'en' ? en : zh);
 
 const signedOut: DesktopClientState = {
   version: 1, revision: 1, generation: 1,
@@ -49,7 +43,7 @@ const dialog = (step: BindStep) => <BindDialog step={step} account={EMAIL}
   onFactorStep={noop} onPasskey={noop} onRestart={noop} onRecover={noop} onUpdates={noop} onClose={noop} />;
 
 /** The Devices page, remote access off, as the Desktop's Workbench shows it. */
-const devicesOff = () => <DevicesPageView ownerEmail={EMAIL} reach={{ state: 'off', surface: 'browser' }} devices={[macbook]} />;
+const devicesOff = () => <DevicesPageView reach={{ state: 'off', surface: 'desktop' }} devices={[macbook]} />;
 /** The shell's trusted sheet as it can be today: its bundled document brought to the front (the
  *  Workbench hidden behind it, kept as it was), with the dialog. */
 const sheet = (step: BindStep) => () => <div className="flex h-full flex-col bg-background text-foreground">
@@ -66,7 +60,7 @@ const states: State[] = [
   { name: 'devices-off-sheet', title: '按下后（这次能做的）：壳把自己的受信界面换到前面，弹窗在上面；做完回到同一个「设备」页', render: sheet({ kind: 'name', name: 'max', check: 'free' }) },
   { name: 'devices-off-overlay', title: '按下后（理想，要新做窗口叠层，原生审查人不建议这次做）：弹窗直接盖在「设备」页上', route: '/settings/remote-access', render: () => <>{settingsPage('remote-access', devicesOff())()}{dialog({ kind: 'name', name: 'max', check: 'free' })}</> },
   // Setup's optional step.
-  { name: 'setup-step', title: '设置向导 · 可选的一步：开启远程访问，或者跳过', route: '/setup', setup: true, render: () => <SetupRemoteAccessView surface="browser" onTurnOn={noop} onSkip={noop} /> },
+  { name: 'setup-step', title: '设置向导 · 可选的一步：开启远程访问，或者跳过', route: '/setup', setup: true, render: () => <SetupRemoteAccessView surface="desktop" onTurnOn={noop} onSkip={noop} /> },
   { name: 'setup-signed-in-sheet', title: '设置向导 · 已登录：按下后，受信界面里的弹窗直接从起名开始', render: sheet({ kind: 'name', name: 'max', check: 'free' }) },
   { name: 'setup-signed-out-sheet', title: '设置向导 · 未登录（新装）：弹窗第一面是登录（弹窗自己的标题，同样的登录方式，「取消」），登好以后在同一个弹窗里起名', render: sheet({ kind: 'signIn' }), height: 900 },
   // The Account page keeps only the account.

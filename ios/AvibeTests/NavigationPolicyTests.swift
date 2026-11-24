@@ -2929,14 +2929,14 @@ final class NavigationPolicyTests: XCTestCase {
 
         XCTAssertFalse(webView.allowsBackForwardNavigationGestures)
         XCTAssertNotNil(webView.goBack())
-        try await Task.sleep(for: .milliseconds(400))
-        XCTAssertEqual(
-            WebOrigin(
-                url: try XCTUnwrap(webView.url),
-                requiresHTTPS: false
-            ),
-            instanceOrigin
-        )
+        // WebKit reports the back item's URL from `goBack()` until the App's
+        // cancel reaches it, one round trip through the web content process
+        // (a fixed 400 ms was too short on a loaded runner). A back that
+        // committed would keep the authentication page, and this wait would
+        // run out.
+        try await waitUntil("The refused back returned to the instance") {
+            webView.url.flatMap { WebOrigin(url: $0, requiresHTTPS: false) } == instanceOrigin
+        }
         let returnedTitle = try await webView.evaluateJavaScript(
             "document.title"
         ) as? String

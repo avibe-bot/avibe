@@ -325,7 +325,10 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
 async def test_refused_checkpoints_are_silent_and_a_context_that_then_cannot_fit_is_dropped_and_the_turn_answers(
     engine, session, tmp_path
 ):
-    sizes = iter((11_200, 500, 2_000))
+    # Cross the threshold twice while leaving room for each full checkpoint's
+    # framing and the real system prompt; the final read must exceed the hard limit.
+    # The former 11,200-token first read left only 24 tokens of checkpoint headroom.
+    sizes = iter((10_000, 500, 4_000))
 
     async def read(arguments, ctx):
         return ToolResult((text(tokens(next(sizes))),))
@@ -333,7 +336,12 @@ async def test_refused_checkpoints_are_silent_and_a_context_that_then_cannot_fit
     def call(call_id: str) -> list:
         return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
 
-    refused = [Done(dataclasses.replace(assistant("", stop_reason="refusal"), error_message="category: cyber"))]
+    async def refused(request, cancel):
+        # A local admission failure must not shift this positional script's refusal
+        # onto an ordinary conversation request and change the scenario under test.
+        assert is_checkpoint(request)
+        yield Done(dataclasses.replace(assistant("", stop_reason="refusal"), error_message="category: cyber"))
+
     scripts = [[Done(assistant("hi"))], call("r1"), refused, call("r2"), refused, call("r3"), [Done(assistant("done"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("read", execute=read)], language="zh")
     # An earlier Turn gives the checkpoints something to summarize: a cut inside this Turn keeps its input.

@@ -2242,6 +2242,10 @@ fn build_main_child(
     }
     #[cfg(target_os = "macos")]
     {
+        // Another computer's page draws the same drag strip from its own origin.
+        if disposable {
+            macos_title_bar::grant_remote_drag(app, label, destination);
+        }
         macos_new_context::install(&view);
         // A Workbench in a replacement web view opens the Vault sandbox's
         // window as the first one does.

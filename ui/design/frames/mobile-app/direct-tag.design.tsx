@@ -3,7 +3,7 @@
 // naming the App's kind of path (`direct.status()`, `direct` version 3): 「直连」 only for an IPv4 or
 // IPv6 address, 「中继」 through the relay (Product, 2026-11-19: never 「直连」 for a relayed path).
 // Any other way in, a browser, or a path the App does not name, shows nothing: no vendor name and no
-// counts in the header. The details live in Settings · Remote access (settings/remote-access/direct-*).
+// counts in the header. The details live in Settings · Devices · 连接方式 (settings/devices-connection/app*).
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import { Workbench } from '@/components/Workbench';

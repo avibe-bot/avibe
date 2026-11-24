@@ -68,6 +68,7 @@ async function shoot(frame, t) {
   const failure = (reason) => ({ line: { frame: frame.id, theme: t, ms: Date.now() - started, errors: [reason, ...errors] } });
   try {
     await page.setViewportSize({ width: frame.width, height: frame.height });
+    if (frame.browserColorScheme) await page.emulateMedia({ colorScheme: t });
     if (frame.reducedMotion) await page.emulateMedia({ reducedMotion: 'reduce' });
     // A phone drawn edge to edge: the browser reports its insets to `env(safe-area-inset-*)`.
     if (frame.safeArea) {

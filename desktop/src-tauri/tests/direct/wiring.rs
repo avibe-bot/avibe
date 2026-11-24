@@ -39,8 +39,6 @@ fn away(origin: &str, runtime: &str) -> Published {
 fn material(port: u16) -> Material {
     Material {
         proxy: format!("127.0.0.1:{port}").parse().unwrap(),
-        username: "avibe".to_owned(),
-        password: "listener-credential".to_owned(),
     }
 }
 
@@ -946,34 +944,79 @@ fn a_window_does_not_join_a_session_that_is_about_to_end() {
 }
 
 #[test]
-fn a_page_closes_shared_connections_only_from_the_sole_routed_window() {
+fn every_routed_window_of_a_session_is_on_its_route_by_its_own_label() {
     let now = Instant::now();
     let mut wiring = live();
     let session = opened(&mut wiring, ONE, "main-runtime-1", now);
     wiring.app_window_created("show-1", ACCOUNT, ONE, None);
     // Before the first answer no window has the route: none is on it.
     assert_eq!(wiring.routed_by("main-runtime-1"), None);
-    assert!(!wiring.sole(session, "main-runtime-1", |_| true));
 
     wiring.probed(session, true);
+    // The instance view and an app window are each on the session's route:
+    // each is registered with its listener for itself, and neither's page
+    // waits for the other before it hands over.
     assert_eq!(wiring.routed_by("main-runtime-1"), Some(session));
     assert_eq!(wiring.routed_by("show-1"), Some(session));
     assert_eq!(wiring.routed_by("editor-9"), None);
-    // The instance view and an app window share the listener: neither is alone.
-    assert!(!wiring.sole(session, "main-runtime-1", |_| true));
-    assert!(!wiring.sole(session, "show-1", |_| true));
-    // The app window has closed, whether or not the wiring has heard: the view is.
-    assert!(wiring.sole(session, "main-runtime-1", |window| window != "show-1"));
-    // An app window whose instance view is gone is alone too.
-    assert!(wiring.sole(session, "show-1", |window| window == "show-1"));
-    // Never a window without the route, or another session's.
-    assert!(!wiring.sole(session, "editor-9", |_| false));
-    assert!(!wiring.sole(session + 1, "main-runtime-1", |_| false));
+    assert!(wiring.routes(session, "show-1") && !wiring.routes(session + 1, "show-1"));
+    // A window that closed is not routed any more, so its registration goes.
+    wiring.reconcile(Some(&shown(ONE, "main-runtime-1")), |window| window != "show-1", now);
+    assert!(!wiring.routes(session, "show-1"));
+    assert!(wiring.routes(session, "main-runtime-1"));
 
     // The choice of the tunnel ends the session: no window is on a route.
     wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
     assert_eq!(wiring.routed_by("main-runtime-1"), None);
-    assert!(!wiring.sole(session, "main-runtime-1", |_| false));
+}
+
+#[test]
+fn an_app_window_joins_the_published_session_or_else_the_newest_early_one_with_a_window() {
+    let now = Instant::now();
+    let mut choices = Choices::unsaved();
+    choices.remember(ACCOUNT, ONE);
+    let mut wiring = Wiring::new(Routing::Live, false, choices);
+    // An early session whose view was never made, an older one with its
+    // view, and the newest with its view: the newest that has a window.
+    let older = wiring.open(target(ONE), material(4100), None, now);
+    wiring.window_created(older, "main-runtime-1");
+    let newest = wiring.open(target(ONE), material(4200), None, now);
+    wiring.window_created(newest, "main-runtime-2");
+    let unmade = wiring.open(target(ONE), material(4300), None, now);
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(newest));
+    assert_eq!(
+        wiring.app_window_created("show-1", ACCOUNT, ONE, None),
+        [install(newest, "show-1")]
+    );
+    // Its window gone, an early session is nobody's to join.
+    wiring.reconcile(None, |window| window != "main-runtime-2" && window != "show-1", now);
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(older));
+    // Once a view is published, its session is the one, whichever is newer.
+    assert_eq!(wiring.reconcile(Some(&shown(ONE, "main-runtime-1")), |_| true, now), []);
+    assert_eq!(wiring.asks_through(older), Some("main-runtime-1"));
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(older));
+    let later = wiring.open(target(ONE), material(4400), None, now);
+    wiring.window_created(later, "main-runtime-3");
+    assert_eq!(wiring.shared(ACCOUNT, ONE), Some(older));
+    // Never another instance's or account's, and never one with no window.
+    assert_eq!(wiring.shared(ACCOUNT, TWO), None);
+    assert_eq!(wiring.shared("account-2", ONE), None);
+    let _ = unmade;
+}
+
+#[test]
+fn a_choice_is_read_with_its_place_among_the_choices_made() {
+    let mut wiring = live();
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, 0));
+    wiring.choose(ACCOUNT, ONE, Mode::Tunnel);
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, 1));
+    // Any choice moves the order on, so a reading made before it is older
+    // for every page, also one of another instance.
+    wiring.choose(ACCOUNT, TWO, Mode::Tunnel);
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Tunnel, 2));
+    wiring.choose(ACCOUNT, ONE, Mode::Automatic);
+    assert_eq!(wiring.choice(ACCOUNT, ONE), (Mode::Automatic, 3));
+    assert_eq!(wiring.choice(ACCOUNT, TWO), (Mode::Tunnel, 3));
 }
 
 #[test]

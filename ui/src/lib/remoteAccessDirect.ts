@@ -1,63 +1,8 @@
 import type { TFunction } from 'i18next';
 
-import type { RemoteAccessStatus } from '../context/ApiContext';
 import type { TranslationKey } from '../i18n/types';
 import type { LiveStreamVia } from './liveStreamVia';
 import type { NativeDirectConnection, NativeDirectPathKind, NativeDirectPathSnapshot } from './native';
-
-// What Settings · Remote access says about direct, from current facts only: the instance's own
-// state and certificate, and how this page's live stream came in (ui/design:
-// settings/remote-access/direct-*). No drop count and no fallback reason: neither the instance nor
-// the page can know them truthfully today.
-export type DirectLines = {
-  stateKey: TranslationKey;
-  variant: 'success' | 'warning' | 'destructive' | 'secondary';
-  certificateDate: Date | null;
-  pageKey: TranslationKey | null;
-};
-
-/**
- * Null while direct is turned off. `inApp`: in the App (any `direct` version)
- * the page line is not shown. Only the App can tell the relay from a direct
- * address, so 「本页当前连接：直连」 there could name a relayed path; where
- * the App reports its path, the device line says it instead, and the two
- * can never both be shown.
- */
-export function remoteAccessDirectLines(
-  direct: RemoteAccessStatus['direct'],
-  pageVia: LiveStreamVia,
-  now: number,
-  inApp = false,
-): DirectLines | null {
-  if (!direct?.enabled) return null;
-  const stateKey: TranslationKey = direct.state === 'running'
-    ? 'remoteAccess.direct.stateReady'
-    : direct.state === 'waiting-permission'
-      ? direct.reason === 'permission_denied'
-        ? 'remoteAccess.direct.stateDenied'
-        : 'remoteAccess.direct.stateAwaitingPermission'
-      : direct.state === 'waiting-certificate'
-        ? 'remoteAccess.direct.stateAwaitingCertificate'
-        : 'remoteAccess.direct.stateNotRunning';
-  // Only a certificate that is still valid has a date worth showing.
-  const notAfter = direct.certificate_not_after ? new Date(direct.certificate_not_after) : null;
-  const certificateDate = notAfter && notAfter.getTime() > now ? notAfter : null;
-  const pageKey: TranslationKey | null = inApp
-    ? null
-    : pageVia === 'direct'
-      ? 'remoteAccess.direct.pageDirect'
-      : pageVia === 'other'
-        ? 'remoteAccess.direct.pageOther'
-        : null;
-  const variant: DirectLines['variant'] = direct.state === 'running'
-    ? 'success'
-    : direct.state === 'waiting-permission' && direct.reason === 'permission_denied'
-      ? 'destructive'
-      : direct.state === 'waiting-permission' || direct.state === 'waiting-certificate'
-        ? 'warning'
-        : 'secondary';
-  return { stateKey, variant, certificateDate, pageKey };
-}
 
 /** What this device's page is using, in the four agreed names. */
 export type DeviceUsing =
@@ -139,13 +84,19 @@ export function directTagKind(
 }
 
 /**
- * The last new connection's race, for the Settings line: each side's time to
- * be ready in ms, `none` when it was not part of the race, or what became of
- * it. Null when the App recorded none.
+ * The last new connection's race, for the connection details: each side's time
+ * to be ready in ms, `none` when it was not part of the race, or what became
+ * of it. Null when the App recorded none.
  */
 export function lastConnectionLegs(
   snapshot: NativeDirectPathSnapshot | null,
 ): { direct: NativeDirectConnection['direct']; public: NativeDirectConnection['public'] } | null {
   const last = snapshot?.lastConnection;
   return last ? { direct: last.direct, public: last.public } : null;
+}
+
+/** The direct certificate's expiry, while it is still valid: an expired one has no date worth showing. */
+export function directCertificateDate(notAfter: string | null | undefined, now: number): Date | null {
+  const date = notAfter ? new Date(notAfter) : null;
+  return date && Number.isFinite(date.getTime()) && date.getTime() > now ? date : null;
 }

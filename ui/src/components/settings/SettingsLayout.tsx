@@ -8,7 +8,7 @@ import {
   ChevronDown,
   ChevronLeft,
   Cpu,
-  Globe,
+  MonitorSmartphone,
   Hash,
   Keyboard,
   Layers,
@@ -104,7 +104,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
           },
         ],
       },
-      { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: Globe, ownerOnly: true },
+      { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: MonitorSmartphone },
     ],
   },
   {

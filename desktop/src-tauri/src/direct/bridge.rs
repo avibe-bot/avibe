@@ -123,6 +123,8 @@ pub fn handover(result: &HandoverResult) -> Value {
     match result {
         HandoverResult::Done { closed, kept } => json!({ "closed": closed, "kept": kept }),
         HandoverResult::NotUsable => json!({ "closed": 0, "kept": 0, "skipped": "not_usable" }),
+        // The phone App's word. The desktop shell no longer asks in a way
+        // that can be refused like this: each window closes its own.
         HandoverResult::OtherDocuments => json!({ "closed": 0, "kept": 0, "skipped": "other_documents" }),
     }
 }
@@ -196,16 +198,36 @@ fn same(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left.iter().zip(right).fold(0, |differs, (a, b)| differs | (a ^ b)) == 0
 }
 
+/// The choice of path as a page is told it: `direct.preference()`'s answer,
+/// and how many choices this run of the app had made when it was read.
+/// Deliveries come from more than one thread and can reach a page out of
+/// order: the bridge keeps the choice with the highest `order`, so an older
+/// one that arrives late changes nothing.
+#[derive(Clone)]
+pub struct Told {
+    pub preference: Value,
+    pub order: u64,
+}
+
+impl Told {
+    pub fn new(mode: Mode, order: u64) -> Self {
+        Self {
+            preference: preference(mode),
+            order,
+        }
+    }
+}
+
 /// What is delivered to a window's document.
 pub enum Message {
     /// The window's state, on every load and every change.
-    State { status: Value, preference: Value },
+    State { status: Value, choice: Told },
     /// The answer to one request, and the choice of path when it asked
     /// about that.
     Reply {
         id: String,
         result: Value,
-        preference: Option<Value>,
+        choice: Option<Told>,
     },
 }
 
@@ -216,11 +238,15 @@ pub enum Message {
 /// wait for.
 pub fn delivery(origin: &str, message: &Message) -> String {
     let (body, early) = match message {
-        Message::State { status, preference } => (json!({ "status": status, "preference": preference }), true),
-        Message::Reply { id, result, preference } => {
+        Message::State { status, choice } => (
+            json!({ "status": status, "preference": choice.preference, "preferenceOrder": choice.order }),
+            true,
+        ),
+        Message::Reply { id, result, choice } => {
             let mut body = json!({ "reply": { "id": id, "result": result } });
-            if let Some(preference) = preference {
-                body["preference"] = preference.clone();
+            if let Some(choice) = choice {
+                body["preference"] = choice.preference.clone();
+                body["preferenceOrder"] = json!(choice.order);
             }
             (body, false)
         }

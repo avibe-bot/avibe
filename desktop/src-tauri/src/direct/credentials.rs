@@ -12,7 +12,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::watch;
 
-pub struct Credential {
+struct Credential {
     password: String,
     header: String,
 }
@@ -90,23 +90,11 @@ impl Grant {
         tokio::select! { biased; _ = stop.changed() => {}, _ = guarded => {} }
     }
 }
+#[derive(Default)]
 pub(super) struct Windows {
-    legacy: Entry,
     windows: Mutex<HashMap<String, Entry>>,
 }
 impl Windows {
-    pub fn new() -> Option<Self> {
-        Some(Self {
-            legacy: Entry::new()?,
-            windows: Mutex::default(),
-        })
-    }
-    pub fn legacy(&self) -> &Credential {
-        &self.legacy.credential
-    }
-    pub fn legacy_grant(&self) -> Grant {
-        self.legacy.grant()
-    }
     pub fn credential(&self, window: &str) -> Option<WindowRegistration> {
         if window.is_empty() || window.len() > 256 {
             return None;
@@ -144,7 +132,7 @@ impl Windows {
     pub fn authenticate(&self, header: &str) -> Option<Grant> {
         let windows = self.windows.lock().unwrap();
         let mut found = None;
-        for entry in std::iter::once(&self.legacy).chain(windows.values()) {
+        for entry in windows.values() {
             if entry.credential.matches(header) {
                 found = Some(entry);
             }

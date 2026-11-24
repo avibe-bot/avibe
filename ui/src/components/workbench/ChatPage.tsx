@@ -5253,6 +5253,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
         onRetry={() => activity.onRetryGroup(group)}
         showToolCalls={activity.showToolCalls}
         onToggleTools={activity.onToggleTools}
+        onDisableActivity={activity.onDisable}
       />
     ) : null;
   // Runs of Harness input fold into one group (docs/plans/workbench-refinements.md

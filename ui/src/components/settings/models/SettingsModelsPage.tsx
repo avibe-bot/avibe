@@ -1890,7 +1890,7 @@ export const SettingsModelsPage: React.FC = () => {
         // The route dialog handed its model over and comes back once the
         // catalog answers, unless the answer removed the model it was showing.
         if (result?.removed) focusRouteDestination(origin);
-        else setRouteTarget(origin);
+        else setRouteTarget(result?.renamedTo ? { ...origin, modelId: result.renamedTo } : origin);
       }} onSaved={catalogSaved} onObserved={applyAgentEcho} catalogWrite={{ pending: agentWrites.has(menuAgent.backend), track: (work) => agentWriteRegistry.track(menuAgent.backend, work) }} />}
       {addBackend && (
         <AddModelsDialog

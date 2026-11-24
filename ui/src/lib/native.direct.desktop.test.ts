@@ -257,6 +257,26 @@ describe('the desktop direct bridge', () => {
     await expect(bridge.call('direct.preference')).resolves.toEqual({ mode: 'tunnel', reverted: null });
   });
 
+  it('keeps the newest choice of path, whichever delivery arrives first', async () => {
+    await load({ ...state(1, null), preference: { mode: 'automatic', reverted: null }, preferenceOrder: 3 });
+    const bridge = window.avibeNative!;
+    const choice = () => bridge.call('direct.preference');
+
+    // The user chose the tunnel: the answer to that carries the newer order.
+    deliver({ preference: { mode: 'tunnel', reverted: null }, preferenceOrder: 4 });
+    await expect(choice()).resolves.toEqual({ mode: 'tunnel', reverted: null });
+    // A state that was read before the choice arrives after it: its status
+    // is taken, its older choice is not.
+    deliver({ ...state(2, 'relay'), preference: { mode: 'automatic', reverted: null }, preferenceOrder: 3 });
+    await expect(choice()).resolves.toEqual({ mode: 'tunnel', reverted: null });
+    await expect(bridge.call('direct.status')).resolves.toMatchObject({ sequence: 2, path: 'relay' });
+    // The same order again is the same choice; a newer one replaces it.
+    deliver({ preference: { mode: 'tunnel', reverted: null }, preferenceOrder: 4 });
+    deliver({ preference: { mode: 'automatic', reverted: null }, preferenceOrder: 5 });
+    await expect(choice()).resolves.toEqual({ mode: 'automatic', reverted: null });
+    expect(requests).toHaveLength(0);
+  });
+
   it('asks the shell for the choice when none was delivered', async () => {
     await load();
     const asked = window.avibeNative!.call('direct.preference');

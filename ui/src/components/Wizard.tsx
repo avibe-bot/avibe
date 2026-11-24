@@ -1,5 +1,9 @@
 import { hasDesktopClient, isClientProjection, presentDesktopClient } from '../desktop/bridge';
-import { desktopDragRegion } from '../lib/desktopShell';
+import { desktopDragRegion, isDesktopShell } from '../lib/desktopShell';
+import { isNativeShell } from '../lib/native';
+import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
+import { SETUP_REMOTE_ACCESS_PATH } from './devices/paths';
+import { offersRemoteAccessStep } from './onboarding/setupRemoteAccessStep';
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps, type CSSProperties, type ReactElement, type Ref } from 'react';
 import { ArrowLeft, ArrowRight, LoaderCircle, RefreshCw } from 'lucide-react';
@@ -297,6 +301,7 @@ const setupLanguage = (code: string): AppLanguage => {
 
 export function Wizard() {
   const api = useApi(); const { t, i18n } = useTranslation(); const navigate = useNavigate();
+  const { remote, instanceKind } = useInstanceAuthorization();
   const { control } = useStatus();
   const [data, setData] = useState<Record<string, any> | null>(null);
   const [error, setError] = useState<SetupReadFailure | null>(null);
@@ -586,10 +591,28 @@ export function Wizard() {
     // the lease exists to stop the next write, not to take back a finished setup.
     const desktop = window.__AVIBE_DESKTOP_CLIENT_STATE__;
     // Completion is already durable. Cloud/back/skip must never re-enter initialization.
-    navigate('/', { replace: true });
-    if (hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local') {
-      presentDesktopClient('setup-complete');
+    // Where turning remote access on can work from here, Setup offers it once, as its own page;
+    // a status that cannot be read offers nothing.
+    const desktopShell = hasDesktopClient() || isDesktopShell();
+    // The Desktop App on this computer's own instance turns remote access on in its claim dialog,
+    // so Setup offers the step there too (owner, 2026-11-20; ui/design: desktop/bind-home/setup-*).
+    const desktopLocal = hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local';
+    let paired: boolean | null = null;
+    if (!remote && (!desktopShell || desktopLocal) && !isNativeShell()) {
+      try {
+        const status = await api.remoteAccessStatus();
+        paired = typeof status?.paired === 'boolean' ? status.paired : null;
+      } catch {
+        // Setup is over either way; the step is simply not offered.
+      }
     }
+    const offer = offersRemoteAccessStep({
+      remote, desktopShell, desktopClient: desktopLocal, nativeShell: isNativeShell(), paired, organization: instanceKind === 'organization',
+    });
+    navigate(offer ? SETUP_REMOTE_ACCESS_PATH : '/', { replace: true });
+    // Where the step is offered it is the Desktop's end of Setup (its claim dialog signs in);
+    // otherwise the shell's own setup-complete view still offers to start or sign in.
+    if (desktopLocal && !offer) presentDesktopClient('setup-complete');
   };
   /**
    * 「稍后再配」: finish setup with no provider. Someone without a subscription or key

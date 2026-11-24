@@ -248,7 +248,10 @@ impl NativeSink {
     ) -> Box<dyn Fn() -> bool + Send + Sync> {
         let (sink, receipt) = (self.clone(), receipt.clone());
         Box::new(move || {
-            !receipt.retired() && sink.presentation_generation() == presentation_generation && sink.gate().allows()
+            !receipt.retired()
+                && !receipt.superseded()
+                && sink.presentation_generation() == presentation_generation
+                && sink.gate().allows()
         })
     }
 
@@ -268,6 +271,13 @@ impl NativeSink {
 }
 
 impl NotificationSink for NativeSink {
+    fn supports_answer_actions(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        return macos::available();
+        #[cfg(not(target_os = "macos"))]
+        false
+    }
+
     fn registry(&self) -> &Mutex<NotificationRegistry> {
         &self.registry
     }
@@ -302,7 +312,11 @@ impl NotificationSink for NativeSink {
         let sink = self.clone();
         let cleanup = receipt.clone();
         let queued = self.app.run_on_main_thread(move || {
-            if receipt.retired() || sink.presentation_generation() != presentation_generation || !sink.gate().allows() {
+            if receipt.retired()
+                || receipt.superseded()
+                || sink.presentation_generation() != presentation_generation
+                || !sink.gate().allows()
+            {
                 sink.registry
                     .lock()
                     .expect("notification registry lock")

@@ -3,7 +3,8 @@
 // Model Hub keeps its own, larger chunk (SettingsModelsPage).
 export { ChannelList } from '../steps/ChannelList';
 export { UserList } from '../steps/UserList';
-export { RemoteAccessPage } from '../RemoteAccessPage';
+export { DevicesPage } from '../devices/DevicesPage';
+export { ConnectionPage } from '../devices/ConnectionPage';
 export { PermissionsPage } from '../../features/permissions/PermissionsPage';
 export { SettingsLayout } from './SettingsLayout';
 export { SettingsDiagnosticsPage } from './SettingsDiagnosticsPage';
