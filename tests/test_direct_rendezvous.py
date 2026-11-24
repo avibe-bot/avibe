@@ -400,7 +400,8 @@ def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
     assert (grant.subject, grant.until) == ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)
 
 
-def test_listener_faults_log_only_the_three_fields_without_changing_the_offer(instance, caplog):
+@pytest.mark.parametrize("steps", [("bind", "waiting", "ownership", "deadline", "foreign"), ("socket",)])
+def test_listener_faults_log_only_the_three_fields_without_changing_the_offer(instance, caplog, steps):
     config, rv = instance
     rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
     client = _signed_in(config)
@@ -409,7 +410,6 @@ def test_listener_faults_log_only_the_three_fields_without_changing_the_offer(in
     assert baseline["status"] == "ready" and "listener_faults" not in baseline
     assert not any("listener_fault" in line for line in caplog.messages)
     caplog.clear()
-    steps = ("bind", "waiting", "ownership", "deadline", "foreign")
     faults = [{"step": step, "code": i - 2, "background_seconds": i} for i, step in enumerate(steps)]
     response = _post(client, {**_body(), "listener_faults": faults})
     assert response.status_code == 200 and response.get_json() == baseline

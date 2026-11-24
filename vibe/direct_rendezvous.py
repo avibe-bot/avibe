@@ -56,7 +56,7 @@ def log_listener_faults(faults: Any) -> None:
         if (
             not isinstance(fault, dict)
             or fault.keys() != {"step", "code", "background_seconds"}
-            or fault["step"] not in ("bind", "waiting", "ownership", "deadline", "foreign")
+            or fault["step"] not in ("bind", "waiting", "ownership", "deadline", "foreign", "socket")
             or type(fault["code"]) is not int
             or type(fault["background_seconds"]) is not int
             or fault["background_seconds"] < 0
