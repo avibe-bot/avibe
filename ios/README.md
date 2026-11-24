@@ -706,8 +706,8 @@ With a transport:
   leaves it for the public origin by itself; `allowFailover`). Held: a
   routed listener closed for the background or on its return's first
   attempt; in the foreground this is always bounded. Fault: something else
-  may hold the port (it was in use, or answered as a stranger), so WebKit
-  would send the host there. It is not terminal: the attempts go on, and
+  may hold the port (a bind found it in use), so WebKit would send the
+  host there. It is not terminal: the attempts go on, and
   it ends when one serves or finds the port merely closed; it holds in the
   background and across a return too. Nobody waits it out: a caller with
   its own bound (the voice capture's client) refuses on fault, where it
