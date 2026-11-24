@@ -24,6 +24,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable, Mapping
@@ -248,6 +249,224 @@ _SHOW_RUNTIME_MODULE_SCRIPT_RE = re.compile(
     r"<script\b(?=[^>]*\btype\s*=\s*['\"]module['\"])[^>]*>",
     re.IGNORECASE,
 )
+_SHOW_SYSTEM_ENTRY_META = "avibe-show-system-entry"
+_SHOW_SYSTEM_ENTRY_MANIFEST = "__show/manifest.webmanifest"
+_SHOW_SYSTEM_ENTRY_ICON = "__show/icon"
+_SHOW_SYSTEM_ENTRY_SCRIPT = "__show/system-entry.js"
+_SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
+(() => {
+  const meta = document.querySelector('meta[name="avibe-show-system-entry"]');
+  if (!meta) return;
+  let config;
+  try {
+    config = JSON.parse(meta.content || '{}');
+  } catch {
+    return;
+  }
+  const standalone = Boolean(
+    (navigator.standalone === true) ||
+    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
+  );
+  // Safari installs the top-level document, never an embedded Workbench Show.
+  if (window.top !== window.self || standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
+  const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
+  const readPreference = () => {
+    try {
+      return window.localStorage.getItem(storageKey);
+    } catch {
+      return null;
+    }
+  };
+  const savePreference = (value) => {
+    try {
+      window.localStorage.setItem(storageKey, value);
+    } catch {
+      // Private browsing may deny storage; the entry still works for this page load.
+    }
+  };
+  if (readPreference() === 'dismissed') return;
+  const copy = config.copy || {};
+  const root = document.createElement('div');
+  root.setAttribute('data-avibe-show-system-entry', 'true');
+  root.setAttribute('aria-label', copy.title || copy.cta || 'Show Page');
+  const shadow = root.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.textContent = `
+    :host { all: initial; display: block; flex: 0 0 auto; min-width: 0; }
+    .wrap { position: fixed; left: max(12px, env(safe-area-inset-left)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2147483000; max-width: calc(100vw - 24px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
+    .wrap[hidden] { display: none; }
+    .wrap[data-expanded="true"] { position: relative; left: auto; bottom: auto; margin: 12px; padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
+    .button, .copy, .close { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .button { max-width: 100%; padding: 9px 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .button:hover, .copy:hover, .close:hover { background: #f4f7f8; }
+    .panel { box-sizing: border-box; width: min(330px, calc(100vw - 24px)); max-height: min(40vh, 300px); overflow: auto; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
+    .panel[hidden] { display: none; }
+    .panel-head { display: flex; align-items: flex-start; gap: 10px; }
+    .title { min-width: 0; flex: 1; margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .close { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; padding: 0; box-shadow: none; font-size: 18px; line-height: 1; }
+    .collapse { margin-top: 10px; }
+    .body { margin: 0; color: #53616d; font: 400 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .steps { margin: 10px 0 0; padding-left: 20px; color: #17202a; font: 500 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .copy { display: none; margin-top: 10px; padding: 7px 10px; }
+    .copy[data-visible="true"] { display: inline-block; }
+    .status { min-height: 18px; margin: 8px 0 0; color: #187c62; font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    @media (prefers-color-scheme: dark) {
+      .wrap { color: #eef4f6; }
+      .button, .copy, .close, .panel { border-color: rgba(238,244,246,.18); background: rgba(26,34,39,.96); color: #eef4f6; }
+      .button:hover, .copy:hover, .close:hover { background: #313d44; }
+      .body { color: #aebbc1; }
+      .steps { color: #eef4f6; }
+    }
+  `;
+  shadow.append(style);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'wrap';
+  const panel = document.createElement('section');
+  panel.className = 'panel';
+  panel.setAttribute('role', 'dialog');
+  const panelId = 'avibe-show-system-entry-panel';
+  const titleId = 'avibe-show-system-entry-title';
+  panel.id = panelId;
+  panel.setAttribute('aria-labelledby', titleId);
+  const title = document.createElement('h2');
+  title.className = 'title';
+  title.id = titleId;
+  const body = document.createElement('p');
+  body.className = 'body';
+  const steps = document.createElement('ol');
+  steps.className = 'steps';
+  const copyButton = document.createElement('button');
+  copyButton.className = 'copy';
+  copyButton.type = 'button';
+  copyButton.textContent = copy.copyLink || 'Copy link';
+  copyButton.setAttribute('data-visible', 'false');
+  const status = document.createElement('p');
+  status.className = 'status';
+  status.setAttribute('aria-live', 'polite');
+  const panelHead = document.createElement('div');
+  panelHead.className = 'panel-head';
+  const closeButton = document.createElement('button');
+  closeButton.className = 'close';
+  closeButton.type = 'button';
+  closeButton.textContent = '×';
+  closeButton.setAttribute('aria-label', copy.close || 'Close');
+  closeButton.title = copy.close || 'Close';
+  panelHead.append(title, closeButton);
+  const collapseButton = document.createElement('button');
+  collapseButton.className = 'button collapse';
+  collapseButton.type = 'button';
+  collapseButton.textContent = copy.collapse || copy.cta || 'Collapse guidance';
+  collapseButton.setAttribute('aria-label', copy.collapse || 'Collapse guidance');
+  panel.append(panelHead, body, steps, copyButton, status, collapseButton);
+  const button = document.createElement('button');
+  button.className = 'button';
+  button.type = 'button';
+  button.textContent = copy.cta || 'Add to Home Screen or Dock';
+  button.setAttribute('aria-expanded', 'false');
+  button.setAttribute('aria-controls', panelId);
+  wrap.append(panel, button);
+  shadow.append(wrap);
+  document.body.append(root);
+
+  const userAgent = navigator.userAgent || '';
+  const ios = /iP(hone|ad|od)/.test(userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
+    !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
+  const mac = /Macintosh|Mac OS X/.test(userAgent) && !ios;
+  if (ios) {
+    button.textContent = copy.iosCta || copy.cta || 'Add to Home Screen';
+  } else if (mac) {
+    button.textContent = copy.macCta || copy.cta || 'Add to Dock';
+  }
+  if (ios && safari) {
+    title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
+    body.textContent = copy.iosBody || '';
+    steps.hidden = true;
+  } else if (mac && safari) {
+    title.textContent = copy.macTitle || copy.title || 'Add to Dock';
+    body.textContent = copy.macBody || '';
+    steps.hidden = true;
+  } else {
+    title.textContent = copy.title || 'Add this Show Page';
+    body.textContent = copy.otherBody || '';
+    steps.hidden = true;
+    copyButton.setAttribute('data-visible', 'true');
+  }
+
+  const safeArea = document.createElement('div');
+  safeArea.setAttribute('aria-hidden', 'true');
+  safeArea.setAttribute('data-avibe-show-system-entry-spacer', 'true');
+  safeArea.style.cssText = 'width:1px;height:0;pointer-events:none;';
+  document.body.append(safeArea);
+  const updateSafeArea = () => {
+    // Expanded guidance participates in document flow, so it cannot cover the last line.
+    // The collapsed entry and annotation button still need clearance at the page end.
+    safeArea.style.height = panel.hidden && !wrap.hidden ? '80px' : '0px';
+  };
+  const setPanelOpen = (open) => {
+    panel.hidden = !open;
+    button.hidden = open;
+    wrap.setAttribute('data-expanded', String(open));
+    button.setAttribute('aria-expanded', String(open));
+    savePreference(open ? 'expanded' : 'collapsed');
+    window.requestAnimationFrame(updateSafeArea);
+  };
+  setPanelOpen(readPreference() === 'expanded');
+
+  // Annotation owns the page while it is active, including its mobile bottom sheet.
+  // Subscribe to the existing Runtime API; its bootstrap may mount after this script.
+  let unsubscribeAnnotation;
+  const bindAnnotation = () => {
+    const api = window.__AVIBE_SHOW__?.annotation?.api;
+    if (!api || unsubscribeAnnotation) return;
+    const syncAnnotation = (state) => {
+      wrap.hidden = Boolean(state.enabled && state.available);
+      window.requestAnimationFrame(updateSafeArea);
+    };
+    unsubscribeAnnotation = api.subscribe(syncAnnotation);
+    syncAnnotation(api.getState());
+    annotationReady.disconnect();
+  };
+  const annotationReady = new MutationObserver(bindAnnotation);
+  annotationReady.observe(document.body, { childList: true });
+  bindAnnotation();
+  button.addEventListener('click', () => {
+    setPanelOpen(true);
+    window.requestAnimationFrame(() => {
+      root.scrollIntoView({ block: 'end', behavior: 'instant' });
+      collapseButton.focus({ preventScroll: true });
+    });
+  });
+  collapseButton.addEventListener('click', () => {
+    setPanelOpen(false);
+    button.focus({ preventScroll: true });
+  });
+  panel.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      setPanelOpen(false);
+      button.focus({ preventScroll: true });
+    }
+  });
+  closeButton.addEventListener('click', () => {
+    savePreference('dismissed');
+    annotationReady.disconnect();
+    unsubscribeAnnotation?.();
+    safeArea.remove();
+    root.remove();
+  });
+  copyButton.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(window.location.href);
+      status.textContent = copy.copied || 'Link copied';
+    } catch {
+      status.textContent = window.location.href;
+    }
+  });
+})();
+"""
+
 _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _SHOW_PAGE_ASSET_SUFFIXES = frozenset(
     {
@@ -3240,13 +3459,26 @@ def add_api_timing_headers(response: Response) -> Response:
     response.headers["X-Vibe-Request-Ms"] = elapsed_text
     if elapsed_ms >= SLOW_API_REQUEST_MS:
         payload_size = response.headers.get("Content-Length")
+        graph_stages = getattr(g, "graph_stage_seconds", None)
+        # Server-side only: pre-authorization stages reflect work on the
+        # instance's entire graph. Never put them in a member's response.
+        stages_text = "" if graph_stages is None else " stages_ms=" + ",".join(
+            f"{stage}:{graph_stages[stage] * 1000:.1f}"
+            for stage in ("ipc", "queue", "open", "execute", "fetch", "assemble", "acl", "json", "resume",
+                          # Inclusive graph phase times; overlap execute/fetch/assemble above.
+                          "candidates", "lineage", "histories", "edges")
+        )
+        history_spans = getattr(g, "graph_history_spans", None)
+        if history_spans is not None:
+            stages_text += " history_statements=" + json.dumps(history_spans.log_fields(), separators=(",", ":"))
         logger.warning(
-            "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s",
+            "slow api request path=%s method=%s status=%s duration_ms=%.1f size=%s%s",
             request.path,
             request.method,
             response.status_code,
             elapsed_ms,
             payload_size or "unknown",
+            stages_text,
         )
     return response
 
@@ -5611,6 +5843,7 @@ async def model_hub_agent_models_put(backend):
             "baseline",
             "models",
             "expected_suppliers",
+            "renames",
             "force",
             "would_remove_hops",
             "would_interrupt",
@@ -5620,6 +5853,7 @@ async def model_hub_agent_models_put(backend):
             backend,
             payload.get("baseline"),
             payload.get("models"),
+            **({"renames": payload["renames"]} if "renames" in payload else {}),
             expected_suppliers=payload.get("expected_suppliers"),
             force=payload.get("force") is True,
             confirmed_remove_hops=payload.get("would_remove_hops"),
@@ -6298,6 +6532,7 @@ async def agents_graph_get():
 
     live_agents: list = []
     live_unreachable = False
+    started = time.perf_counter()
     try:
         result = await internal_client.list_running_agents()
         live_agents = (result.get("body") or {}).get("agents") or []
@@ -6305,17 +6540,35 @@ async def agents_graph_get():
         # Controller down: fall back to a DB-only graph (history stays visible).
         live_unreachable = True
 
-    payload = await asyncio.to_thread(
-        agent_graph.build_graph,
-        live_agents=live_agents,
-        window=window,
-        project=project,
-        include_ended=include_ended,
-        include_background=include_background,
-        live_unreachable=live_unreachable,
-    )
     context = _request_authorization_context()
-    return jsonify(_authorized_graph_payload(context, payload))
+    submitted = time.perf_counter()
+    stages = {"ipc": submitted - started}
+    history_spans = agent_graph.HistoryStatementSpans()
+
+    def render_graph():
+        entered = time.perf_counter()
+        stages["queue"] = entered - submitted
+        payload = agent_graph.build_graph(
+            live_agents=live_agents, window=window, project=project,
+            include_ended=include_ended, include_background=include_background,
+            live_unreachable=live_unreachable, timings=stages, history_spans=history_spans,
+        )
+        built = time.perf_counter()
+        # Includes Python/ORM overhead, not time blocked opening or reading SQLite.
+        stages["assemble"] = max(0.0, built - entered - stages["open"] - stages["execute"] - stages["fetch"])
+        authorized = _authorized_graph_payload(context, payload)
+        filtered = time.perf_counter()
+        stages["acl"] = filtered - built
+        response = jsonify(authorized)
+        finished = time.perf_counter()
+        stages["json"] = finished - filtered
+        return response, finished
+
+    response, finished = await asyncio.to_thread(render_graph)
+    stages["resume"] = time.perf_counter() - finished
+    g.graph_stage_seconds = stages
+    g.graph_history_spans = history_spans
+    return response
 
 
 @app.route("/api/agents/<name>", methods=["GET"])
@@ -14566,11 +14819,40 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     # starting the microphone.
     "holdActMs",
     "holdStartMs",
+    # When a hold's microphone may start, and how it went: the earliest time in ms after
+    # touch-down, how long the touch took to reach the App, when the input was prepared and
+    # when it was asked to start (ms from the App's handling of the touch), and the session's
+    # category and the engine's set-up durations.
+    "holdT",
+    "holdDlyMs",
+    "holdArmMs",
+    "holdBeginMs",
+    "holdCatMs",
+    "holdPrepMs",
+    # The App's counts of the touches on its surfaces that were not holds, since it was
+    # installed: those that lifted, those that moved away, those it opened the microphone
+    # for, and those it would have with each judged time.
+    "holdTaps",
+    "holdTapsMoved",
+    "holdTapsOpen",
+    "holdTapsW50",
+    "holdTapsW80",
+    "holdTapsW100",
+    "holdTapsW120",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
 _VOICE_CAPTURE_MAX_STALLED_RATES = 4
 _VOICE_CAPTURE_MAX_TRACK_EVENTS = 24
+
+
+def _app_hold_start_ms(audio_asr_config: Any) -> int | None:
+    """``audio_asr.app_hold_start_ms`` as the page may send it to the App: a whole number of ms
+    from 0 to 500, else null (the App's own default)."""
+    value = getattr(audio_asr_config, "app_hold_start_ms", None)
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 500:
+        return value
+    return None
 
 
 def _voice_count(value: Any) -> bool:
@@ -14700,6 +14982,12 @@ def asr_telemetry():
         "audioSession": {"auto", "playback", "transient", "transient-solo", "ambient", "play-and-record"},
         "audioSessionState": _VOICE_AUDIO_SESSION_STATES,
         "audioSessionStateEnd": _VOICE_AUDIO_SESSION_STATES,
+        # In the iOS App, why a hold's press was not followed by the App
+        # (ui/src/lib/nativeVoiceHold.ts, `holdMissReason`).
+        "holdMiss": {
+            "off", "viewport", "unlisted", "closed", "hidden", "covered", "limit",
+            "pending", "refused", "outside", "failed", "gone", "unanswered",
+        },
     }
     outcome = payload.get("outcome")
     if not isinstance(outcome, str) or outcome not in enum_fields["outcome"]:
@@ -14856,6 +15144,13 @@ def asr_status():
                 # there at once (``audio_asr.app_hold_main_at_touch``); false
                 # makes that button open it when the hold is recognised.
                 "app_hold_main_at_touch": getattr(audio_asr_config, "app_hold_main_at_touch", True) is not False,
+                # The earliest a hold's microphone may start in the App, in ms
+                # after touch-down (``audio_asr.app_hold_start_ms``); null: the
+                # App's own default. A value out of 0..500 is said as null.
+                "app_hold_start_ms": _app_hold_start_ms(audio_asr_config),
+                # Whether the App may activate its audio session before the
+                # microphone starts (``audio_asr.app_hold_prepare_at_touch``).
+                "app_hold_prepare_at_touch": getattr(audio_asr_config, "app_hold_prepare_at_touch", True) is not False,
             }
         )
     except Exception:
@@ -15116,6 +15411,15 @@ async def sessions_messages_create(session_id: str):
                     "_web_push_user_key": web_push_user_key,
                 },
                 getattr(g, "authorization_context", None),
+            )
+            from vibe.input_source import resolve_source
+
+            # Overwrite caller-supplied resolved facts, including retries from old clients.
+            message_metadata["terminal_source"] = resolve_source(
+                conn, identity=getattr(g, "remote_session_identity", None),
+                authorization=getattr(g, "authorization_context", None),
+                client_hint=request.headers.get("X-Avibe-Input-Source"),
+                surface_hint=message_metadata.pop("input_surface", None),
             )
             message_metadata.pop(WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA, None)
             if web_push_authorization_context is not None:
@@ -17202,6 +17506,15 @@ def _is_show_page_api_handler_path(asset_path: str) -> bool:
     return relative == "api" or relative.startswith("api/")
 
 
+def _is_show_system_entry_asset(asset_path: str) -> bool:
+    relative = (asset_path or "").strip("/")
+    return relative in {
+        _SHOW_SYSTEM_ENTRY_MANIFEST,
+        _SHOW_SYSTEM_ENTRY_ICON,
+        _SHOW_SYSTEM_ENTRY_SCRIPT,
+    }
+
+
 def _is_show_api_asset(asset_path: str) -> bool:
     relative = (asset_path or "").strip("/")
     if _is_show_page_api_handler_path(asset_path):
@@ -19037,6 +19350,19 @@ async def _show_page_runtime_response(
             include_write_token=external_prefix is None and show_authenticated,
             include_annotation_bootstrap=include_annotation_bootstrap,
         )
+        content = _inject_show_system_entry(
+            content,
+            _show_system_entry_config(
+                title=_show_page_title(session_id, _request_ui_language()),
+                base_path=base_path,
+                icon_url=_show_system_entry_icon_url(
+                    base_path=base_path,
+                    session_id=session_id,
+                ),
+                language=_request_ui_language(),
+            ),
+            base_path=base_path,
+        )
         if external_prefix:
             response_headers["Referrer-Policy"] = "same-origin"
         _mark_show_runtime_document_no_store(response_headers)
@@ -19586,6 +19912,176 @@ def _inject_show_runtime_config(
     return html.encode("utf-8")
 
 
+def _show_page_title(session_id: str, language: str) -> str:
+    from storage.sessions_service import read_session_display_meta
+
+    try:
+        meta = read_session_display_meta([session_id])
+    except Exception:
+        meta = {}
+    title = str((meta.get(session_id) or {}).get("title") or "").strip()
+    return title or t("show.systemEntry.defaultTitle", language)
+
+
+def _show_system_entry_config(
+    *,
+    title: str,
+    base_path: str,
+    icon_url: str,
+    language: str,
+) -> dict[str, Any]:
+    return {
+        "title": title,
+        "basePath": base_path,
+        "iconUrl": icon_url,
+        "copy": {
+            "cta": t("show.systemEntry.cta", language),
+            "iosCta": t("show.systemEntry.iosCta", language),
+            "macCta": t("show.systemEntry.macCta", language),
+            "title": t("show.systemEntry.title", language),
+            "iosTitle": t("show.systemEntry.iosTitle", language),
+            "macTitle": t("show.systemEntry.macTitle", language),
+            "iosBody": t("show.systemEntry.iosBody", language),
+            "macBody": t("show.systemEntry.macBody", language),
+            "otherBody": t("show.systemEntry.otherBody", language),
+            "copyLink": t("show.systemEntry.copyLink", language),
+            "copied": t("show.systemEntry.copied", language),
+            "close": t("show.systemEntry.close", language),
+            "collapse": t("show.systemEntry.collapse", language),
+        },
+    }
+
+
+def _inject_show_system_entry(
+    content: bytes,
+    config: dict[str, Any],
+    *,
+    base_path: str,
+) -> bytes:
+    try:
+        document = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content
+    payload = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
+    escaped_payload = html.escape(payload, quote=True)
+    base = base_path.rstrip("/") + "/"
+    tags = (
+        f'<link rel="manifest" href="{html.escape(base + _SHOW_SYSTEM_ENTRY_MANIFEST, quote=True)}" crossorigin="use-credentials">'
+        f'<link rel="apple-touch-icon" href="{html.escape(str(config["iconUrl"]), quote=True)}">'
+        f'<meta name="apple-mobile-web-app-capable" content="yes">'
+        f'<meta name="mobile-web-app-capable" content="yes">'
+        f'<meta name="apple-mobile-web-app-title" content="{html.escape(str(config["title"]), quote=True)}">'
+        f'<meta name="{_SHOW_SYSTEM_ENTRY_META}" content="{escaped_payload}">'
+        f'<script defer src="{html.escape(base + _SHOW_SYSTEM_ENTRY_SCRIPT, quote=True)}"></script>'
+    )
+    # Locate a real token, not a head-shaped string inside a comment or a
+    # quoted attribute. Keep the prologue/doctype and all authored bytes intact.
+    # Without an explicit head, metadata opens the browser's implicit head.
+    line_starts = [0] + [match.end() for match in re.finditer("\n", document)]
+
+    class InsertionPointFound(Exception):
+        pass
+
+    class HeadInsertionPoint(HTMLParser):
+        def document_offset(self) -> int:
+            line, column = self.getpos()
+            return line_starts[line - 1] + column
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            if tag != "html":
+                position = self.document_offset()
+                if tag == "head":
+                    position += len(self.get_starttag_text())
+                raise InsertionPointFound(position)
+
+        def handle_endtag(self, tag: str) -> None:
+            raise InsertionPointFound(self.document_offset())
+
+        def handle_data(self, data: str) -> None:
+            prefix = "\ufeff" if self.document_offset() == 0 and data.startswith("\ufeff") else ""
+            remaining = data[len(prefix):].lstrip(" \t\r\n\f")
+            if remaining:
+                raise InsertionPointFound(self.document_offset() + len(data) - len(remaining))
+
+        def handle_entityref(self, name: str) -> None:
+            raise InsertionPointFound(self.document_offset())
+
+        handle_charref = handle_entityref
+
+    parser = HeadInsertionPoint(convert_charrefs=False)
+    position = len(document)
+    try:
+        parser.feed(document)
+        parser.close()
+    except InsertionPointFound as found:
+        # Stop at the head boundary; authored scripts/body need no parsing.
+        position = found.args[0]
+    document = f"{document[:position]}{tags}{document[position:]}"
+    return document.encode("utf-8")
+
+
+def _show_system_entry_icon_url(
+    *,
+    base_path: str,
+    session_id: str,
+) -> str:
+    from core.show_pages import show_page_icon_version
+
+    version = show_page_icon_version(session_id)
+    if not version:
+        return "/apple-touch-icon.png"
+    return f"{base_path.rstrip('/')}/{_SHOW_SYSTEM_ENTRY_ICON}?v={quote(version, safe='')}"
+
+
+def _show_system_entry_response(
+    page: ShowPage,
+    asset_path: str,
+    *,
+    base_path: str,
+    language: str,
+):
+    relative = (asset_path or "").strip("/")
+    if relative == _SHOW_SYSTEM_ENTRY_SCRIPT:
+        response = Response(_SHOW_SYSTEM_ENTRY_SCRIPT_BODY, mimetype="text/javascript")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    icon_url = _show_system_entry_icon_url(base_path=base_path, session_id=page.session_id)
+    if relative == _SHOW_SYSTEM_ENTRY_MANIFEST:
+        from core.show_pages import show_page_web_app_manifest
+
+        manifest = show_page_web_app_manifest(
+            title=_show_page_title(page.session_id, language),
+            start_url=base_path,
+            scope=base_path,
+            icon_url=icon_url,
+        )
+        response = Response(
+            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+            mimetype="application/manifest+json",
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Cookie"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+    if relative == _SHOW_SYSTEM_ENTRY_ICON:
+        from core.show_pages import ShowPageError, read_show_page_icon
+
+        try:
+            result = read_show_page_icon(page.session_id, request.args.get("v", ""))
+        except (ShowPageError, OSError, ValueError):
+            result = None
+        if result is None:
+            return _show_page_icon_not_found()
+        data, content_type = result
+        response = Response(data, mimetype=content_type)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Content-Security-Policy"] = "sandbox"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+    return _show_page_file_not_found_response()
+
+
 def _rewrite_show_runtime_url_headers(
     headers: dict[str, str],
     *,
@@ -19764,6 +20260,13 @@ async def serve_private_show_page(session_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
+        if _is_show_system_entry_asset(asset_path):
+            return _show_system_entry_response(
+                page,
+                asset_path,
+                base_path=f"/show/{quote(page.session_id, safe='')}/",
+                language=_request_ui_language(),
+            )
         # A remote viewer is an untrusted viewer even on the private surface: keep
         # its asset reads inside the page workspace so an authored symlink cannot
         # serve out-of-Project disk files across the tunnel.
@@ -20231,6 +20734,7 @@ async def serve_public_show_page(share_id, asset_path):
             return _show_page_not_found_response()
         if page.visibility == "limited":
             request._request.state.public_show_representation_varies_cookie = True
+        system_entry_asset = _is_show_system_entry_asset(asset_path)
         limited_guest = (
             lease is not None
             and lease.page_id == page.session_id
@@ -20254,7 +20758,7 @@ async def serve_public_show_page(share_id, asset_path):
                 representation_candidate
             )
             markdown_requested = markdown_requested and representation_candidate
-        is_spa_navigation = markdown_requested or _is_show_page_spa_route_request(
+        is_spa_navigation = markdown_requested or system_entry_asset or _is_show_page_spa_route_request(
             asset_path,
             request._request,
         )
@@ -20379,6 +20883,14 @@ async def serve_public_show_page(share_id, asset_path):
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
             return _show_page_not_found_response()
+        if system_entry_asset:
+            response = _show_system_entry_response(
+                page,
+                asset_path,
+                base_path=f"/p/{quote(share_id, safe='')}/",
+                language=_request_ui_language(),
+            )
+            return _with_limited_show_policy(response) if limited_guest else response
         if runtime_path_denied:
             if markdown_requested:
                 return _show_page_markdown_error_response("session_unknown", 404)
@@ -20614,7 +21126,7 @@ def _reconcile_remote_access_for_ui_start(config: V2Config | None) -> None:
     try:
         from vibe import remote_access
 
-        result = remote_access.reconcile(config)
+        result = remote_access.restore_connector()
         if isinstance(result, dict) and result.get("ok") is False:
             logger.warning("Remote access reconcile after UI start failed: %s", result.get("error"))
     except Exception:

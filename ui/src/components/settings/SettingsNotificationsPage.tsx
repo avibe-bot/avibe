@@ -8,8 +8,10 @@ import {
   desktopNotificationsActions,
   isDesktopShell,
   listenDesktopNotifications,
+  type DesktopNotificationAuthorization,
   type DesktopNotificationsActions,
 } from '@/lib/desktopShell';
+import { Button } from '@/components/ui/button';
 import { hasNativeCapability } from '@/lib/native';
 import { WebPushControl } from '../workbench/WebPushControl';
 import { LiveActivitySettingRow } from './LiveActivitySettingRow';
@@ -34,6 +36,8 @@ export const SettingsNotificationsPage: React.FC = () => {
   const [desktopEnabled, setDesktopEnabled] = useState<boolean | null>(null);
   const [desktopSaving, setDesktopSaving] = useState(false);
   const [desktopSaveFailed, setDesktopSaveFailed] = useState(false);
+  // What macOS allows, read again whenever the window comes back (from System Settings, say).
+  const [desktopAuthorization, setDesktopAuthorization] = useState<DesktopNotificationAuthorization | null>(null);
 
   useEffect(() => {
     if (!desktop) return;
@@ -61,11 +65,23 @@ export const SettingsNotificationsPage: React.FC = () => {
       setDesktopActions(null);
       setDesktopEnabled(null);
     });
+    const readAuthorization = () => {
+      void candidate.authorization().then(
+        (authorization) => { if (active) setDesktopAuthorization(authorization); },
+        () => { if (active) setDesktopAuthorization(null); },
+      );
+    };
+    readAuthorization();
+    window.addEventListener('focus', readAuthorization);
     return () => {
       active = false;
       stopListening();
+      window.removeEventListener('focus', readAuthorization);
     };
   }, [desktop]);
+  const desktopDenied = desktopAuthorization === 'denied' && desktopActions !== null;
+  // Answering from a notification exists only where the system reports a permission (macOS).
+  const desktopAnswers = desktopAuthorization !== null && desktopAuthorization !== 'unavailable';
 
   const desktopSwitchReady = desktopActions !== null && desktopEnabled !== null;
   const saveDesktopNotifications = async () => {
@@ -147,14 +163,26 @@ export const SettingsNotificationsPage: React.FC = () => {
               control={<WebPushControl />}
             />
           )}
-          {desktop && (
+          {desktop && desktopDenied && (
+            <SettingsRow
+              title={t('settings.notifications.desktopTitle')}
+              tone="warning"
+              description={t('settings.notifications.desktopDenied')}
+              control={(
+                <Button variant="outline" size="sm" onClick={() => void desktopActions?.openSystemSettings().catch(() => {})}>
+                  {t('settings.notifications.openSystemSettings')}
+                </Button>
+              )}
+            />
+          )}
+          {desktop && !desktopDenied && (
             <SettingsRow
               title={t('settings.notifications.desktopTitle')}
               description={
                 desktopSwitchReady && desktopSaveFailed
                   ? t('settings.notifications.desktopSaveFailed')
                   : desktopSwitchReady
-                    ? t('settings.notifications.desktopHint')
+                    ? t(desktopAnswers ? 'settings.notifications.desktopHintAnswers' : 'settings.notifications.desktopHint')
                     : t('settings.notifications.desktopHintMenuBar')
               }
               control={desktopSwitchReady ? (

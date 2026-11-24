@@ -698,7 +698,7 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     steps = workflow["jobs"]["simulator"]["steps"]
     selection_index, selection = next(
         (index, step) for index, step in enumerate(steps)
-        if step.get("name") == "Select the pinned iPhone 17 Pro simulator"
+        if step.get("name") == "Select the pinned iPhone 18 Pro / iOS 27.2 simulator"
     )
     boot = steps[selection_index + 1]
     assert boot["run"] == 'xcrun simctl bootstatus "$SIMULATOR_ID" -b'
@@ -708,14 +708,14 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     subprocess.run(["bash", "-n"], input=shell, text=True, check=True)
     # Execute the actual workflow selector, not a copied implementation.
     selector = shell.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-26-5"
+    pinned = "com.apple.CoreSimulator.SimRuntime.iOS-27-2"
     devices = {
-        "com.apple.CoreSimulator.SimRuntime.iOS-26-4-1": [
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "old"},
+        "com.apple.CoreSimulator.SimRuntime.iOS-27-0": [
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "old"},
         ],
         pinned: [
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "z"},
-            {"name": "iPhone 17 Pro", "isAvailable": True, "udid": "a"},
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "z"},
+            {"name": "iPhone 18 Pro", "isAvailable": True, "udid": "a"},
         ],
     }
     if inventory == "reversed":
@@ -741,7 +741,7 @@ def test_ios_shell_selects_only_the_pinned_simulator(tmp_path: Path, inventory: 
     else:
         assert result.returncode != 0
         assert result.stdout == ""
-        assert f"No available iPhone 17 Pro simulator for {pinned}" in result.stderr
+        assert f"No available iPhone 18 Pro simulator for {pinned}" in result.stderr
 
 
 @pytest.mark.parametrize("pin_state", ["pending", "published"])
@@ -899,8 +899,9 @@ def test_ios_app_builds_carry_their_webcredentials_domains() -> None:
         assert "CODE_SIGN_ENTITLEMENTS = Avibe/Avibe.entitlements;" in block.split("name = ", 1)[0]
 
 
-# The PR browser selection before parallelization: preserve these exact callers,
-# including spec filters, rather than deriving expected coverage from the matrix.
+# The PR browser coverage contract: preserve these exact callers, including spec
+# filters, rather than deriving expected coverage from the matrix. New consumers
+# join this inventory together with their workflow command.
 _BROWSER_COMMANDS = (
     "run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts mobile-otp.spec.ts",
     "run test:home-media",
@@ -909,9 +910,10 @@ _BROWSER_COMMANDS = (
     "run test:chat-selection",
     "run test:badge-triggers",
     "run test:address-retired",
-    "run test:workbench-general-build -- composer-mention-picker.spec.ts",
+    "run test:workbench-general-build -- composer-mention-picker.spec.ts inbox-skeleton-loading.spec.ts",
     "run test:workbench-general -- geometry.spec.ts native-keyboard.spec.ts",
     "run test:safe-browser",
+    "run test:show-system-entry",
     "run test:pet-mini",
     "run test:project-order",
     "run test:inbox-return",

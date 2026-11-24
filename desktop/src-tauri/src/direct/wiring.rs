@@ -88,13 +88,12 @@ pub struct Published {
     pub document: bool,
 }
 
-/// A client's listener, as native routing needs it. Deliberately not `Debug`.
-/// It stays in memory: never in a URL, an argument, storage or a log.
+/// A client's listener, as native routing needs it: where it listens. What a
+/// window presents to it is that window's own registration, which the shell
+/// keeps (`pages.rs`) and this never sees.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Material {
     pub proxy: SocketAddrV4,
-    pub username: String,
-    pub password: String,
 }
 
 /// What the shell does next. Labels only.
@@ -211,6 +210,8 @@ pub struct Wiring {
     proxy_configured: bool,
     system_proxy_rules_out: bool,
     choices: Choices,
+    /// How many choices of path this run of the app has made.
+    chosen: u64,
     sessions: Vec<Session>,
     /// Every open app window of a remote instance, so a session that starts
     /// after a window was opened still finds it.
@@ -226,6 +227,7 @@ impl Wiring {
             proxy_configured,
             system_proxy_rules_out: false,
             choices,
+            chosen: 0,
             sessions: Vec::new(),
             app_windows: Vec::new(),
             next: 0,
@@ -237,11 +239,18 @@ impl Wiring {
         self.choices.mode(account, origin)
     }
 
+    /// The choice, with how many choices had been made when it is read:
+    /// what puts two readings of it in order, whichever is told first.
+    pub fn choice(&self, account: &str, origin: &str) -> (Mode, u64) {
+        (self.mode(account, origin), self.chosen)
+    }
+
     /// Keeps the choice for this account's instance. "Cloudflare tunnel only"
     /// ends its sessions at once; "automatic" starts one at the next
     /// `reconcile` (live routing) or the next window (routing at creation).
     pub fn choose(&mut self, account: &str, origin: &str, mode: Mode) -> Vec<Effect> {
         self.choices.set(account, origin, mode);
+        self.chosen += 1;
         if mode == Mode::Automatic {
             return Vec::new();
         }
@@ -338,16 +347,27 @@ impl Wiring {
     /// was started before its view was created counts from the start: its
     /// view can be on show for a moment before a look has seen it there,
     /// and an app window opened in that moment is routed like any other.
+    ///
+    /// The session whose view is published comes first. Without one, of the
+    /// sessions that were started early it is the newest that still has its
+    /// window: an older one whose view was replaced, or was never made, is
+    /// about to end, and a window that joined it would lose its route.
     pub fn shared(&self, account: &str, origin: &str) -> Option<u64> {
-        self.sessions
+        let of_instance =
+            |session: &&Session| !session.scout && session.target.account == account && session.target.origin == origin;
+        let published = self
+            .sessions
             .iter()
-            .find(|session| {
-                !session.scout
-                    && (session.runtime.is_some() || session.early)
-                    && session.target.account == account
-                    && session.target.origin == origin
-            })
-            .map(|session| session.id)
+            .filter(of_instance)
+            .find(|session| session.runtime.is_some());
+        let early = || {
+            self.sessions
+                .iter()
+                .filter(of_instance)
+                .filter(|session| session.early && !session.windows.is_empty())
+                .max_by_key(|session| session.id)
+        };
+        published.or_else(early).map(|session| session.id)
     }
 
     /// An app window that shows the instance of `account` at `origin` now
@@ -651,20 +671,6 @@ impl Wiring {
             .iter()
             .find(|session| session.routed.iter().any(|label| label == window))
             .map(|session| session.id)
-    }
-
-    /// Whether `window` is the only `open` window that has the session's
-    /// route: its instance view and the app windows opened from it share one
-    /// listener, so what is closed in it for one page is closed for all. A
-    /// window that is only between two documents still counts.
-    pub fn sole(&self, session: u64, window: &str, open: impl Fn(&str) -> bool) -> bool {
-        self.sessions
-            .iter()
-            .find(|candidate| candidate.id == session)
-            .is_some_and(|found| {
-                found.routed.iter().any(|label| label == window)
-                    && found.routed.iter().all(|label| label == window || !open(label))
-            })
     }
 
     /// Whether any session exists, so the shell knows to keep looking for

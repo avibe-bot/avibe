@@ -187,6 +187,17 @@ pub(crate) struct Controller {
 }
 
 impl Controller {
+    #[cfg(all(target_os = "macos", feature = "app-lock-e2e"))]
+    pub(crate) fn e2e_menu() -> Self {
+        let (sender, _) = mpsc::unbounded_channel();
+        Self {
+            sender,
+            view: Arc::new(Mutex::new(MenuView::default())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: AtomicBool::new(false),
+        }
+    }
+
     pub(crate) fn start(app: &AppHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let view = Arc::new(Mutex::new(MenuView::default()));

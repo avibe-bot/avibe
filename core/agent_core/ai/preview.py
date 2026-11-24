@@ -25,6 +25,7 @@ class WirePreview:
 
 async def preview_wire_request(
     request: ModelRequest, *, gateway: bool = False, media_loader: MediaLoader | None = None,
+    session_id: str | None = None,
 ) -> WirePreview | ProviderError:
     """Compile without sending; use HTTPX's JSON encoder, as ``build_request`` does.
 
@@ -51,6 +52,21 @@ async def preview_wire_request(
     if isinstance(prepared, ProviderError):
         return prepared
     wire = builder(request, prepared.messages, gateway=gateway, loaded_images=prepared.loaded_images)
+    if protocol == "anthropic" and session_id:
+        from core.agent_core.ai import message_threads as threads
+
+        # Inspect, never claim, the Session's single-use node. Preview must not disable a live continuation.
+        wire = (
+            await threads.plan_send(
+                wire,
+                request.endpoint,
+                gateway=gateway,
+                session=session_id,
+                parent=threads.parent_entry(session_id, claim=False)[0],
+                repair=bool(prepared.hosted_render_omitted),
+                preview=True,
+            )
+        ).wire
     # AsyncClient.build_request delegates JSON serialization to Request, too.
     # No client construction (or environment/proxy/credential lookup) is needed.
     body = httpx.Request("POST", wire.url, headers=wire.headers, json=wire.body).content

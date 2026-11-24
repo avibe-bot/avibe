@@ -48,6 +48,7 @@ describe('Ask Vibey receiver', () => {
     expect(await settle('c')).toBe('done');
     expect(lines).toEqual(['「乙方应在 15 个工作日内提交报告。」', 'https://example.com/terms', '"The Supplier shall deliver."']);
     expect(openVibey).toHaveBeenCalledTimes(3);
+    expect(target.appendLine).toHaveBeenLastCalledWith('"The Supplier shall deliver."', 'ask_vibey');
     expect(target.addFiles).not.toHaveBeenCalled();
   });
 
@@ -71,6 +72,7 @@ describe('Ask Vibey receiver', () => {
     expect(await settle('f')).toBe('done');
     expect(files).toHaveLength(1);
     const [file] = files[0];
+    expect(target.addFiles).toHaveBeenCalledWith(expect.any(Array), 'ask_vibey');
     expect([file.name, file.type, file.size]).toEqual(['合同.pdf', 'application/pdf', size]);
     expect(new TextDecoder().decode(new Uint8Array(await file.arrayBuffer()))).toBe(contract);
     expect(target.appendLine).not.toHaveBeenCalled();

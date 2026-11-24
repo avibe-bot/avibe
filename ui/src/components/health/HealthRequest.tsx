@@ -17,13 +17,15 @@ type ViewProps = {
   operation?: HealthRequest['operation'];
   metrics?: string[];
   busy?: boolean;
+  busyPhase?: 'pairing' | 'native' | 'unresponsive';
+  retryable?: boolean;
   readOnly?: boolean;
   loadError?: boolean;
   onAuthorize?: () => void;
 };
 
 /** ui/design: health/request-card — the approved card, driven by request metadata only. */
-export function HealthRequestCardView({ state, operation = 'health.connect', metrics = ['steps', 'activity', 'workouts', 'sleep'], busy, readOnly, loadError, onAuthorize }: ViewProps) {
+export function HealthRequestCardView({ state, operation = 'health.connect', metrics = ['steps', 'activity', 'workouts', 'sleep'], busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
   const { t } = useTranslation();
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-xl border border-edge bg-surface px-3.5 py-3 shadow-elevation-0">
@@ -38,9 +40,10 @@ export function HealthRequestCardView({ state, operation = 'health.connect', met
         <span className="text-health-metric font-semibold text-foreground">{metrics.map(metric => t(`health.metric.${metric}`, { defaultValue: metric })).join(t('health.metricSeparator'))}</span>
         <span className="text-xs leading-5 text-muted">{t(state === 'waiting' && operation === 'health.refresh' ? 'health.waitingRefresh' : `health.note.${state}`)}</span>
         {loadError && <span role="status" className="text-xs leading-5 text-muted">{t('health.loadError')}</span>}
+        {busyPhase === 'unresponsive' && <span role="status" className="text-xs leading-5 text-muted">{t('health.reopenApp')}</span>}
       </div>
-      {state === 'authorize' && <Button size="sm" className="shrink-0 max-sm:w-full" disabled={busy || loadError || readOnly} onClick={onAuthorize}>
-        {t(busy ? 'health.opening' : 'health.authorize')}<ArrowRight className="size-3.5" />
+      {(state === 'authorize' || retryable) && <Button size="sm" className="shrink-0 max-sm:w-full" disabled={busy || loadError || readOnly} onClick={onAuthorize}>
+        {t(busy ? (busyPhase === 'pairing' ? 'health.preparing' : 'health.connecting') : retryable ? 'health.retry' : 'health.authorize')}<ArrowRight className="size-3.5" />
       </Button>}
     </div>
   );
@@ -49,11 +52,11 @@ export function HealthRequestCardView({ state, operation = 'health.connect', met
 export function HealthRequestCard({ request, readOnly }: { request: HealthRequest; readOnly?: boolean }) {
   const live = useHealthRequest(request.id, request);
   return <HealthRequestCardView state={live.state ?? 'waiting'} operation={request.operation}
-    readOnly={readOnly || !live.canAuthorize} metrics={live.request?.metrics ?? request.metrics} busy={live.busy} loadError={live.loadError} onAuthorize={readOnly ? undefined : live.authorize} />;
+    readOnly={readOnly || !live.canAuthorize} metrics={live.request?.metrics ?? request.metrics} busy={live.busy} busyPhase={live.busyPhase} retryable={live.retryable} loadError={live.loadError} onAuthorize={readOnly ? undefined : live.authorize} />;
 }
 
 /** ui/design: health/landing — a notification trampoline; no health values or settings. */
-export function HealthLandingView({ state, operation = 'health.connect', busy, readOnly, loadError, onAuthorize }: ViewProps) {
+export function HealthLandingView({ state, operation = 'health.connect', busy, busyPhase, retryable, readOnly, loadError, onAuthorize }: ViewProps) {
   const { t } = useTranslation();
   const connected = state === 'connected' || state === 'succeeded';
   const authorize = state === 'authorize';
@@ -65,8 +68,9 @@ export function HealthLandingView({ state, operation = 'health.connect', busy, r
       <h1 className="mt-5 text-xl font-semibold leading-tight text-foreground">{t(authorize ? 'health.title.connect' : `health.status.${state}`)}</h1>
       <p className="mt-3 text-sm leading-6 text-muted" aria-live="polite">{t(authorize ? 'health.landing.authorize' : state === 'waiting' && operation === 'health.refresh' ? 'health.waitingRefresh' : `health.note.${state}`)}</p>
       {loadError && <p role="status" className="mt-3 text-sm text-muted">{t('health.loadError')}</p>}
+      {busyPhase === 'unresponsive' && <p role="status" className="mt-3 text-sm text-muted">{t('health.reopenApp')}</p>}
       <div className="mt-7 flex w-full flex-col gap-2.5">
-        {authorize && operation === 'health.connect' && <Button variant="brand" size="lg" className="w-full" disabled={busy || loadError || readOnly} onClick={onAuthorize}>{t(busy ? 'health.opening' : 'health.authorize')}</Button>}
+        {(authorize || retryable) && operation === 'health.connect' && <Button variant="brand" size="lg" className="w-full" disabled={busy || loadError || readOnly} onClick={onAuthorize}>{t(busy ? (busyPhase === 'pairing' ? 'health.preparing' : 'health.connecting') : retryable ? 'health.retry' : 'health.authorize')}</Button>}
         <Button asChild variant={authorize ? 'ghost' : 'outline'} size="lg" className="w-full"><Link to="/inbox">{t('health.landing.openConversations')}</Link></Button>
       </div>
       <p className="mt-5 text-xs leading-5 text-muted">{t('health.readOnly')}</p>

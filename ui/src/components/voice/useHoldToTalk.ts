@@ -1,3 +1,4 @@
+import { desktopVoiceLock } from '../../lib/desktopVoiceLock';
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 
 import { apiFetch } from '../../lib/apiFetch';
@@ -14,7 +15,14 @@ import {
   type NativeImpactStyle,
 } from '../../lib/native';
 import { isNativeHoldGone } from '../../lib/nativeVoiceCapture';
-import { holdFollowed, NATIVE_HOLD_GRACE_MS, refreshHoldSurfaces, registerHoldSurface } from '../../lib/nativeVoiceHold';
+import {
+  holdFollowed,
+  holdMissReason,
+  NATIVE_HOLD_GRACE_MS,
+  refreshHoldSurfaces,
+  registerHoldSurface,
+  type HoldMiss,
+} from '../../lib/nativeVoiceHold';
 import { IS_APPLE } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import type { VoiceContextSource } from '../../lib/voiceContext';
@@ -139,6 +147,8 @@ type Press = {
   /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
    *  `holdMs` before the page recognises the hold itself. */
   followed: boolean;
+  /** Why the App did not follow it, or could not record it, for the trace. */
+  miss?: HoldMiss;
   /** The page's own recognition has begun (its timer ran): it runs once. */
   reached: boolean;
   /** The App's take was taken for this press: the page's own recognition stops where it is. */
@@ -310,6 +320,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   const phaseRef = useRef<HoldPhase>('idle');
   const press = useRef<Press | null>(null);
   const take = useRef<Take | null>(null);
+  const retryingKeptTake = useRef(false);
+  const retainedRetryText = useRef<{ take: Take; text: string } | null>(null);
   const clock = useRef<ReturnType<typeof setInterval> | null>(null);
   const armed = useRef(false);
   // Set while this hook releases the pointer itself, so its lostpointercapture is not the system's.
@@ -408,11 +420,33 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // Nothing of the take is kept: its stored copy goes too (a no-op once it was discarded).
     take.current?.dictation.abort();
     take.current = null;
+    retryingKeptTake.current = false;
+    retainedRetryText.current = null;
     releasePointer();
     reset();
     toPhase('idle');
     if (how && mounted.current) setOutcome(how);
   }, [releasePointer, reset, toPhase]);
+
+  useEffect(() => desktopVoiceLock.onInvalidate(() => {
+    // Retrying an already kept take owns no microphone; preserve that take but
+    // invalidate the new attempt's UI/send continuation.
+    if (retryingKeptTake.current) {
+      setFinalizing(false); toPhase('interrupted'); return;
+    }
+    // Already submitted work and explicitly kept interrupted takes are not retracted.
+    if (press.current || phaseRef.current === 'pressing' || phaseRef.current === 'listening'
+      || phaseRef.current === 'recording' || phaseRef.current === 'armed'
+      || (phaseRef.current === 'settling' && finalizingRef.current)) end(null);
+  }), [end, setFinalizing, toPhase]);
+
+  useEffect(() => desktopVoiceLock.onUnlock(() => {
+    const retained = retainedRetryText.current;
+    retainedRetryText.current = null;
+    if (retained && take.current === retained.take && phaseRef.current === 'interrupted') {
+      setText(retained.text); setStash(''); setCanRetry(false);
+    }
+  }), []);
 
   /** The take ended without a send: keep what was heard until the user decides. */
   const interrupt = useCallback((reason: HoldInterruptReason, heard: string) => {
@@ -505,6 +539,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
       pressedAt,
+      // The page's own take of a press the App did not follow, or could not record: why.
+      ...(!adopt && press.current?.miss ? { holdMiss: press.current.miss } : {}),
       // The App records once the microphone is allowed; its first answer is still WebKit's.
       ...(adopt ? { nativeCapture: { adopt } } : granted && hasNativeVoiceCapture() ? { nativeCapture: true } : {}),
       before: '',
@@ -574,6 +610,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       // The App no longer had the take (it waits a second for the page, or the system ended it):
       // while the finger is still down, the page starts the take itself, as it does elsewhere.
       if (adopt && isNativeHoldGone(error) && take.current === current && current.ending === 'none' && mounted.current) {
+        if (press.current) press.current.miss = 'gone';
         take.current = null;
         dictation.abort();
         restartTake.current(true, pressedAt);
@@ -601,6 +638,8 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = press.current;
     if (!current || current.reached) return;
     current.reached = true;
+    // A press the App was following, and whose word did not come by now: the page's own take.
+    if (current.followed && !current.taken && !current.miss) current.miss = 'unanswered';
     cancelAnimationFrame(current.frame);
     if (current.unfollow) {
       // A hold now: the pointer is the element's until the press ends, wherever it goes. If the
@@ -696,6 +735,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const current = press.current;
     if (!current || current.reached) return;
     current.followed = false;
+    current.miss = 'failed';
     clearTimeout(current.timer);
     current.timer = setTimeout(() => void holdReached(), Math.max(0, current.gesture.holdMs - (Date.now() - current.startedAt)));
   }, [holdReached]);
@@ -931,7 +971,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, [systemTook]);
 
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
-    if (press.current) return;
+    if (!desktopVoiceLock.allowed() || press.current) return;
     handled.current = false;
     if (event.button !== 0 || (IS_APPLE && event.ctrlKey)) return;
     // A take still settling or waiting after a cut-off owns the element: its click must not
@@ -975,6 +1015,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     // A finger on a surface the App follows: the App recognises this hold, and its word normally
     // comes before the page's own timer. That timer waits a moment longer for it, then goes on alone.
     const followed = event.pointerType !== 'mouse' && hasNativeVoiceHold() && holdFollowed(surfaceId, event.clientX, event.clientY);
+    // For the trace: why the App did not follow a finger here.
+    const miss = event.pointerType !== 'mouse' && hasNativeVoiceHold() && !followed
+      ? holdMissReason(surfaceId, event.clientX, event.clientY)
+      : undefined;
     const tick = () => {
       const current = press.current;
       if (!current || current.startedAt !== startedAt) return;
@@ -993,6 +1037,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       frame: requestAnimationFrame(tick),
       unfollow,
       followed,
+      ...(miss ? { miss } : {}),
       reached: false,
       taken: false,
       mouse: event.pointerType === 'mouse',
@@ -1027,7 +1072,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
   }, []);
 
   const sendInterrupted = useCallback(() => {
-    if (phaseRef.current !== 'interrupted') return;
+    if (!desktopVoiceLock.allowed() || phaseRef.current !== 'interrupted') return;
     const words = text.trim();
     if (!words) {
       take.current?.dictation.abort();
@@ -1039,18 +1084,28 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
 
   const retry = useCallback(() => {
     const current = take.current;
-    if (phaseRef.current !== 'interrupted' || !current || !current.dictation.canRetry()) return;
+    if (!desktopVoiceLock.allowed() || retryingKeptTake.current || phaseRef.current !== 'interrupted' || !current || !current.dictation.canRetry()) return;
+    const lockToken = desktopVoiceLock.token();
+    retryingKeptTake.current = true;
     current.ending = 'send';
     setFinalizing(true);
     toPhase('settling');
     void current.dictation.retry({ before: '', after: '' }).then(
       (words) => {
         if (take.current !== current) return;
+        retryingKeptTake.current = false;
+        if (!desktopVoiceLock.current(lockToken)) {
+          if (desktopVoiceLock.allowed()) { setText(words); setStash(''); setCanRetry(false); }
+          else retainedRetryText.current = { take: current, text: words };
+          return;
+        }
         if (!words.trim()) end('too-short');
         else void deliver(words.trim());
       },
       (error: unknown) => {
         if (take.current !== current) return;
+        retryingKeptTake.current = false;
+        if (!desktopVoiceLock.current(lockToken)) return;
         if (error instanceof VoiceTranscriptionError && error.code === 'cancelled') return;
         interrupt(failureReason(current, error), text);
       },

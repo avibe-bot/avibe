@@ -694,7 +694,16 @@ Connector state writes are atomic. On startup:
 A connector can exit on its own: after a reboot, when the network is not up yet
 at UI start, cloudflared exits within about a second. `start()` records a
 connector request (`remote-access-connector-requested` in the runtime
-directory) and `stop()` withdraws it before stopping the process. The monitor
+directory) and an explicit `stop()` withdraws it before stopping the process.
+Stopping the service, quitting Desktop, or stopping for a data-preserving
+uninstall does not withdraw it. On first startup after upgrading from a version
+that withdrew requests at service shutdown, Avibe adopts the saved enabled
+setting once, without adding an access-switch event. This can also reopen a
+tunnel stopped explicitly under the old version; the two old states were
+identical. After that, startup restores only a requested connector. An explicit
+Stop before first startup also consumes the upgrade default. The one-time
+marker lives under `state/`; request adoption and withdrawal are serialized
+with connector lifecycle operations. The monitor
 restarts a requested connector that is no longer running:
 
 - only while remote access is enabled with a tunnel token, and never while

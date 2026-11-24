@@ -941,6 +941,8 @@ const NON_KEY_LITERALS = [
   'c1.share_draft',
   'device.describe',
   'direct.handover',
+  'direct.preference',
+  'direct.setPreference',
   'direct.status',
   'direct.transportChanged',
   'haptics.impact',
@@ -993,6 +995,7 @@ const NON_KEY_LITERALS = [
 
   // Storage keys. Namespaced on purpose, which is also why they read like keys.
   'avibe.agents.tab.v1',
+  'avibe.devices.claim',
   'avibe.editor.fontSize.v1',
   'avibe.editor.recents.v1',
   'avibe.pet.activityExpiry.v1',
@@ -1341,8 +1344,8 @@ describe('app i18n key coverage', () => {
     expect(files.some((file) => !file.startsWith(`${MODEL_HUB}${sep}`))).toBe(true);
     // The raw key that opened the lane, on the source remove flow.
     expect(referenced).toContainEqual({ key: 'settings.models.sourceDetail.gone', counted: false, listed: false, demand: 'exact' });
-    // The `<Trans>` prop carrying the Avibe Cloud link.
-    expect(referenced).toContainEqual({ key: 'remoteAccess.flowStep1', counted: false, listed: false, demand: 'exact' });
+    // A `<Trans>` prop: the line under a generated Vault secret.
+    expect(referenced).toContainEqual({ key: 'vaults.generatedBy.line', counted: false, listed: false, demand: 'exact' });
     // Both branches of the permissions dialog title, and the inner branch of its
     // nested conflict ternary.
     expect(referenced).toContainEqual({ key: 'permissions.access.addTitle', counted: false, listed: false, demand: 'exact' });

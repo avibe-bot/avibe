@@ -53,6 +53,28 @@ describe('Model Hub visual token policy', () => {
     expect(declarations('.model-hub-wire--unavailable')['stroke-width']).toBe('var(--model-hub-wire-muted-width)');
   });
 
+  // Owner report 11-23: the last model row sat flush against the footer. The lists scroll
+  // under the footer's rule, so the inset below the last row belongs to the scrolling list,
+  // and every dialog that scrolls a list inside the catalog body carries it.
+  it('keeps the catalog lists\' last row off the footer', () => {
+    const root = postcss.parse(surfaceCss);
+    const declarations = (selector: string) => {
+      const result: Record<string, string> = {};
+      root.walkRules(selector, (rule) => rule.walkDecls((decl) => { result[decl.prop] = decl.value; }));
+      return result;
+    };
+    const body = declarations('.model-hub-catalog-body');
+    expect(body['--model-hub-catalog-body-pad-y']).toBe('16px');
+    expect(body.padding).toBe('var(--model-hub-catalog-body-pad-y) var(--model-hub-catalog-pad-x) 0');
+    expect(declarations('.model-hub-catalog-scroll')['padding-bottom']).toBe('var(--model-hub-catalog-body-pad-y)');
+    for (const file of ['BackendModelCatalogDialog.tsx', 'BackendModelPickerDialog.tsx']) {
+      const source = readFileSync(join(__dirname, file), 'utf8');
+      const scrollers = [...source.matchAll(/className="([^"]*overflow-y-auto[^"]*)"/g)].map((match) => match[1]);
+      expect(scrollers.length, file).toBeGreaterThan(0);
+      for (const classes of scrollers) expect(classes, file).toContain('model-hub-catalog-scroll');
+    }
+  });
+
   it('contains full Default Routing text in stretched columns and growing rows', () => {
     const root = postcss.parse(surfaceCss);
     const declarations = (selector: string) => {

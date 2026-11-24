@@ -1566,4 +1566,15 @@ it('uses the real footer slot without replacing the Apps/Settings tools', async 
   const footer = document.querySelector('[data-sidebar-footer]')!;
   expect(footer.querySelector('[data-settings-toggle]')).toBeTruthy();
   expect(footer.firstElementChild?.className).toContain('h-[39px]');
+  // Only the desktop app's footer draws the line above its bottom row (Max, 2026-11-22).
+  expect(footer.querySelector('[data-sidebar-footer-divider]')).toBeNull();
+});
+
+it('a divided footer draws its line between the tools and the bottom row', () => {
+  render(<AppShellFooter tools={<span>Tools</span>} divided><span>Bottom row</span></AppShellFooter>);
+  const footer = document.querySelector('[data-sidebar-footer]')!;
+  const line = footer.querySelector('[data-sidebar-footer-divider]')!;
+  expect(line.getAttribute('aria-hidden')).toBe('true');
+  expect(line.previousElementSibling).toBe(footer.firstElementChild);
+  expect(line.nextElementSibling?.textContent).toBe('Bottom row');
 });

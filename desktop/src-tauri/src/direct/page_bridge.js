@@ -13,6 +13,9 @@
   // first delivery, so one that loads late does not reconnect for the past.
   let closureBase = null;
   let preference = null;
+  // Deliveries can arrive out of order: the choice with the highest order
+  // is the latest one made, whenever it arrives.
+  let preferenceOrder = -1;
   const handlers = new Map();
   const pending = new Map();
   let asking = false;
@@ -29,7 +32,11 @@
 
   const deliver = (message) => {
     if (!message || typeof message !== 'object') return;
-    if (message.preference && typeof message.preference === 'object') preference = message.preference;
+    const order = typeof message.preferenceOrder === 'number' ? message.preferenceOrder : 0;
+    if (message.preference && typeof message.preference === 'object' && order >= preferenceOrder) {
+      preference = message.preference;
+      preferenceOrder = order;
+    }
     const next = message.status;
     if (next && typeof next === 'object' && (status === null || next.sequence > status.sequence)) {
       if (closureBase === null) closureBase = next.closure;

@@ -45,7 +45,7 @@ struct NativeShellMetadata: Equatable {
         // that the finger lifted. The page names surfaces only from 2 on;
         // the one build that announced 1 (TestFlight 50.1) could give a tap
         // on the composer the hold's cue.
-        "voiceHold": 2,
+        "voiceHold": 3,
     ]
 
     let shellVersion: String

@@ -4,13 +4,14 @@
 // One concept for all three backends. Their runtime adapters still differ —
 // Claude Code reads the Gateway's Anthropic projection, Codex gets a written
 // `model_catalog_json`, OpenCode gets a provider overlay — but those are derived
-// artifacts. The catalog is the state, and this module is the only place that
-// reads it, orders it, or turns a draft into a write.
+// artifacts. The catalog is the state, and this module owns its editing. The
+// shared read-only ID projection lives in backendCatalogIds.
 //
 // It deliberately knows nothing about Sources or Routes. A catalog row names a
 // model the Agent may select; which supplier serves it stays with the Route, and
 // mixing the two here is what the contract's 「no Source id, no upstream model
 // id, no priority, no fallback」 rule exists to prevent.
+import { routeableCatalogModelIds } from './backendCatalogIds';
 import type { ModelsApi } from './modelsApi';
 import type {
   AgentBackend,
@@ -52,13 +53,6 @@ export function listedModelIds(agent: AgentSupply): string[] {
  *  whole compatibility signal: nothing downstream invents rows to stand in for
  *  a payload the server never sent. */
 export const catalogModels = (agent: AgentSupply): BackendModel[] | null => agent.catalog_models ?? null;
-
-export function routeableCatalogModelIds(catalog: readonly BackendModel[]): string[] {
-  const seen = new Set<string>();
-  return catalog
-    .filter((model) => model.routeable && model.id && !seen.has(model.id) && seen.add(model.id))
-    .map((model) => model.id);
-}
 
 /**
  * The model ids an Agent card enumerates, in catalog order.
@@ -375,9 +369,9 @@ export const backendModelId = (id: string): string => id.trim();
 /**
  * The one write that gives a draft row its id.
  *
- * Every id this UI produces lands through here — a models.dev fill, the picker's
- * 「add as a custom model」 seed, the 「use what I typed」 escape, and the row the
- * editor finally commits. One chokepoint rather than a rule each producer
+ * Every id this UI produces lands through here — a catalog model added from the
+ * picker, the picker's 「add as a custom model」 seed, and the row the editor
+ * finally commits. One chokepoint rather than a rule each producer
  * remembers: a producer that skipped the resolver used to be a defect nobody
  * could see until the backend refused the saved id, and the answer to 「which
  * producers apply it?」 has to be 「there is no other way in」, not a list that a
@@ -403,13 +397,12 @@ export const draftWithId = (
 /**
  * A models.dev match, poured into a draft — the id included.
  *
- * Choosing a suggestion is choosing a model, not decorating one: the row it
- * creates is the model that was picked, so it carries that model's own id
- * (`model_id`, the id a backend accepts — not the catalog key `models_dev_id`),
- * resolved through `backendModelId` against the provider that offered it. The
- * user typed a search, and every filled field including the id stays editable
- * afterwards. Keeping what was typed is the 「use what I typed」 escape, which
- * never reaches this function — but reaches the same resolver.
+ * Adding a catalog model from the picker is choosing a model, not decorating
+ * one: the row it creates is the model that was picked, so it carries that
+ * model's own id (`model_id`, the id a backend accepts — not the catalog key
+ * `models_dev_id`), resolved through `backendModelId` against the provider that
+ * offered it. The editor never comes here: there the id is the user's, and the
+ * catalog only describes it (`applyModelsDevParameters`).
  *
  * `origin` is passed in rather than derived because the schema defines it as how
  * the row was FIRST created — an existing row keeps its own answer no matter how
@@ -438,6 +431,41 @@ export const applyModelsDevMatch = (
   match.model_id,
   backend,
 );
+
+/** The registered model a catalog key names: its last path segment. The same
+ *  cut reads a provider-prefixed model ID as the registry would know it. */
+export const modelsDevBaseId = (id: string): string => id.slice(id.lastIndexOf('/') + 1);
+
+/**
+ * A models.dev answer's parameters, poured into a draft that keeps its own ID
+ * and display name.
+ *
+ * This is describing a model, not choosing one: the row stays the model the
+ * user named — a relay's name for it, a variant the catalog files under its
+ * base — and takes what the catalog knows about the model it answers to.
+ *
+ * `origin` is passed in for the reason `applyModelsDevMatch` takes it. `backend`
+ * is passed only for a row being added: the API an OpenCode model is answered
+ * on comes with the description then, and a saved row keeps the one it has.
+ */
+export const applyModelsDevParameters = (
+  draft: BackendModel,
+  match: ModelsDevMatch,
+  origin: BackendModelOrigin,
+  backend: AgentBackend | null,
+): BackendModel => ({
+  ...draft,
+  origin,
+  models_dev_id: match.models_dev_id,
+  context_window: match.context_window,
+  max_output_tokens: match.max_output_tokens,
+  input_modalities: [...match.input_modalities],
+  output_modalities: [...match.output_modalities],
+  supports_tools: match.supports_tools,
+  supports_reasoning: match.supports_reasoning,
+  reasoning_efforts: [...match.reasoning_efforts],
+  ...(backend === 'opencode' ? { native_protocol: match.native_protocol } : {}),
+});
 
 const sameList = (left: readonly unknown[], right: readonly unknown[]): boolean =>
   left.length === right.length && left.every((value, index) => value === right[index]);
@@ -471,8 +499,8 @@ export const MODELS_DEV_FIELDS = [
  * parameters the action names. The provenance goes with the parameters, so the
  * row no longer claims a models.dev source it now owes nothing to.
  *
- * Editing the id never comes here: a catalog model picked as a base is the
- * starting point for a model under another id, and its parameters are kept.
+ * Editing the id never comes here: the parameters on screen stay while the id
+ * changes, and what the new id answers to is only offered.
  */
 export const clearModelsDevParameters = (draft: BackendModel): BackendModel => {
   const blank = blankBackendModel();
@@ -569,6 +597,43 @@ export const applyBackendCatalogIntent = (
     placed.add(model.id);
   }
   return ordered;
+};
+
+/**
+ * Renames still pending in a draft, held against a newer list from the server.
+ *
+ * A rename can be said only while the server still has the old ID and nothing
+ * under the new one. A newer list can end that: another editor took the new ID,
+ * or removed the model. Replaying the draft as it stands would then remove one
+ * model and write over another, with nothing moved. So such a row stops being a
+ * rename here, before the replay:
+ *
+ * - the server has the new ID and not the old one: the row is the server's row
+ *   (this rename, or the same one made elsewhere, is already there);
+ * - otherwise the row goes back to the ID it was saved under, keeping its other
+ *   edits, and whatever the server holds under the new ID is left alone.
+ *
+ * `renames` maps a row's new ID to the ID it was saved under.
+ */
+export const settleBackendCatalogRenames = (
+  current: readonly BackendModel[],
+  draft: readonly BackendModel[],
+  renames: ReadonlyMap<string, string>,
+): { draft: BackendModel[]; renames: ReadonlyMap<string, string> } => {
+  if (renames.size === 0) return { draft: [...draft], renames };
+  const held = new Map(current.map((model) => [model.id, model]));
+  const pending = new Map<string, string>();
+  const settled = draft.map((row) => {
+    const from = renames.get(row.id);
+    if (from === undefined) return row;
+    const taken = held.get(row.id);
+    if (held.has(from) && !taken) {
+      pending.set(row.id, from);
+      return row;
+    }
+    return taken && !held.has(from) ? taken : { ...row, id: from };
+  });
+  return { draft: settled, renames: pending };
 };
 
 /** Whether a catalog the server now holds already carries this intent — the

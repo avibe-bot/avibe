@@ -1948,6 +1948,16 @@ class AudioAsrConfig:
     # (a tap there then opens no microphone). Read and applied as ``app_hold``
     # is; it needs an App that knows the per-surface start (TestFlight 51.1 on).
     app_hold_main_at_touch: bool = True
+    # In the iOS App (TestFlight 52.1 on), the earliest a hold's microphone may
+    # start, in ms after touch-down (0 to 500): a touch that has lifted by then
+    # never opens it. None leaves the App's own default (50 ms). Read and
+    # applied as ``app_hold`` is.
+    app_hold_start_ms: Optional[int] = None
+    # Whether the App may activate its audio session at touch-down, before the
+    # microphone starts. False: nothing is activated before the start (if
+    # activating alone shows the microphone indicator), at the cost of the
+    # activation's time on every hold. Read and applied as ``app_hold`` is.
+    app_hold_prepare_at_touch: bool = True
 
     def __post_init__(self) -> None:
         """Refuse a value that is not the kind this class declares.

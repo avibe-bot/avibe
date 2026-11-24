@@ -14,7 +14,7 @@
 // It writes nothing either. Picks go back into the catalog dialog's draft, so
 // the list still settles through one `PUT .../models` with one baseline.
 import * as React from 'react';
-import { LoaderCircle, Plus, Search } from 'lucide-react';
+import { ChevronRight, LoaderCircle, Plus, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
@@ -42,6 +42,37 @@ type CatalogRead = { query: string; matches: readonly ModelsDevMatch[] };
 
 const NO_SEED: ReadonlySet<string> = new Set();
 const NO_PICKS: ReadonlyMap<string, ChosenCandidate> = new Map();
+/** More provider models than one screen holds open folded, one line per provider. */
+const PROVIDER_FOLD_ABOVE = 12;
+/** One provider's models past this many get a second fold, by how their IDs begin. */
+const SEGMENT_FOLD_ABOVE = 30;
+const SEGMENT_MIN = 3;
+/** How an ID begins, read off its text and nothing else: the path in front of a
+ *  slash, otherwise the word in front of the first hyphen. No vendor is guessed. */
+const leadingSegment = (id: string): string | null => {
+  const slash = id.indexOf('/');
+  if (slash > 0) return id.slice(0, slash + 1);
+  const hyphen = id.indexOf('-');
+  return hyphen > 0 ? id.slice(0, hyphen + 1) : null;
+};
+/** A long provider list by leading segment, in first-seen order; segments too
+ *  small to be worth a fold share one 「other」 at the end. Null when the split
+ *  would not shorten anything. */
+const segmentGroups = (rows: ModelCandidate[]): { key: string; label: string | null; rows: ModelCandidate[] }[] | null => {
+  if (rows.length <= SEGMENT_FOLD_ABOVE) return null;
+  const bySegment = new Map<string, ModelCandidate[]>();
+  for (const candidate of rows) {
+    const segment = leadingSegment(candidate.id) ?? '';
+    bySegment.set(segment, [...(bySegment.get(segment) ?? []), candidate]);
+  }
+  const named = [...bySegment].filter(([segment, members]) => segment !== '' && members.length >= SEGMENT_MIN);
+  if (named.length < 2) return null;
+  const rest = [...bySegment].filter(([segment, members]) => segment === '' || members.length < SEGMENT_MIN).flatMap(([, members]) => members);
+  return [
+    ...named.map(([segment, members]) => ({ key: segment, label: segment, rows: members })),
+    ...(rest.length > 0 ? [{ key: '', label: null, rows: rest }] : []),
+  ];
+};
 
 /**
  * The seed, re-agreed against the read that just arrived.
@@ -114,6 +145,8 @@ export const BackendModelPickerDialog: React.FC<{
   /** What the confirmation will send, held as the agreement itself rather than as
    *  ids beside a projection kept somewhere else. */
   const [chosen, setChosen] = React.useState<ReadonlyMap<string, ChosenCandidate>>(NO_PICKS);
+  /** Providers whose fold the user has set, and to what; the rest keep the default. */
+  const [folds, setFolds] = React.useState<ReadonlyMap<string, boolean>>(new Map());
   const readAttempt = React.useRef(0);
 
   const load = React.useCallback((seed: ReadonlySet<string>) => {
@@ -137,6 +170,7 @@ export const BackendModelPickerDialog: React.FC<{
   React.useEffect(() => {
     if (!open) return;
     setQuery(initialQuery);
+    setFolds(new Map());
     load(seed);
     return () => { readAttempt.current += 1; };
     // Opening with a query is opening a search; a later prop change is not a new one.
@@ -241,7 +275,6 @@ export const BackendModelPickerDialog: React.FC<{
         <span className="model-hub-picker-typed-title">
           {t('settings.models.gateway.picker.customFromQuery', { query: typedId })}
         </span>
-        <span className="model-hub-picker-typed-note">{t('settings.models.gateway.picker.customFromQueryNote')}</span>
       </span>
     </button>
   );
@@ -266,6 +299,121 @@ export const BackendModelPickerDialog: React.FC<{
       </div>
     )
   );
+
+  /**
+   * 「From your providers」, one fold per provider.
+   *
+   * A model several providers list sits under each of them — it is one model,
+   * so ticking it in one place ticks it in all. A long inventory opens folded,
+   * a short one open; a search opens every provider that has a match and drops
+   * the ones that have none, so a fold never hides an answer.
+   */
+  const providerGroups = (label: string, rows: ModelCandidate[]) => {
+    const bySource = new Map<string, { name: string; rows: ModelCandidate[] }>();
+    for (const candidate of rows) {
+      for (const supplier of candidate.suppliers) {
+        const entry = bySource.get(supplier.source_id) ?? { name: supplier.source_name, rows: [] };
+        if (!entry.rows.includes(candidate)) entry.rows.push(candidate);
+        bySource.set(supplier.source_id, entry);
+      }
+    }
+    // One provider needs no heading of its own. Judged on the whole inventory, not
+    // on what a search left of it, so searching never changes how the list is laid out.
+    const providerCount = new Set(groups.providers.flatMap((candidate) => candidate.suppliers.map((supplier) => supplier.source_id))).size;
+    if (providerCount < 2) return group('providers', label, rows);
+    if (rows.length === 0) return null;
+    // A re-ask reopens the picker on picks whose suppliers moved, to be looked at
+    // again: whatever holds one of them starts open, however long the inventory is.
+    const holdsSeed = (members: ModelCandidate[]) => members.some((candidate) => seed.has(candidate.id));
+    // A row no provider is named for has no fold to sit under; it stays in the list, after them.
+    const unnamed = rows.filter((candidate) => candidate.suppliers.length === 0);
+    const openByDefault = groups.providers.length <= PROVIDER_FOLD_ABOVE;
+    return (
+      <div key="providers" role="group" aria-label={label} className="model-hub-picker-group">
+        <div className="model-hub-picker-group-head">
+          <span>{label}</span>
+          <span>{rows.length}</span>
+        </div>
+        {[...bySource].map(([sourceId, entry]) => {
+          const unfolded = filtering || (folds.get(sourceId) ?? (openByDefault || holdsSeed(entry.rows)));
+          const pickedHere = entry.rows.filter((candidate) => chosen.has(candidate.id)).length;
+          return (
+            <div key={sourceId} role="group" aria-label={entry.name} className="model-hub-picker-source">
+              <button
+                type="button"
+                aria-expanded={unfolded}
+                disabled={filtering}
+                className="model-hub-picker-source-head"
+                onClick={() => setFolds((current) => new Map(current).set(sourceId, !unfolded))}
+              >
+                <ChevronRight aria-hidden="true" className={cn(unfolded && 'rotate-90')} />
+                <span className="min-w-0 truncate">{entry.name}</span>
+                <span className="model-hub-picker-source-count">{entry.rows.length}</span>
+                {pickedHere > 0 && (
+                  <span className="model-hub-picker-source-picked">{t('settings.models.gateway.picker.sourcePicked', { count: pickedHere })}</span>
+                )}
+              </button>
+              {unfolded && (() => {
+                const row = (candidate: ModelCandidate) => (
+                  <PickerRow
+                    key={candidate.id}
+                    candidate={candidate}
+                    picked={chosen.has(candidate.id)}
+                    listed={false}
+                    single={choose === 'one'}
+                    grouped
+                    onToggle={() => toggle(candidate)}
+                  />
+                );
+                const segments = segmentGroups(entry.rows);
+                if (!segments) return <div className="model-hub-picker-source-rows">{entry.rows.map(row)}</div>;
+                return (
+                  <div className="model-hub-picker-source-rows">
+                    {segments.map((segment) => {
+                      const foldKey = `${sourceId}\0${segment.key}`;
+                      const shown = filtering || (folds.get(foldKey) ?? holdsSeed(segment.rows));
+                      const picked = segment.rows.filter((candidate) => chosen.has(candidate.id)).length;
+                      return (
+                        <div key={segment.key} role="group" aria-label={segment.label ?? t('settings.models.gateway.picker.segmentOther') as string} className="model-hub-picker-source">
+                          <button
+                            type="button"
+                            aria-expanded={shown}
+                            disabled={filtering}
+                            className="model-hub-picker-segment-head"
+                            onClick={() => setFolds((current) => new Map(current).set(foldKey, !shown))}
+                          >
+                            <ChevronRight aria-hidden="true" className={cn(shown && 'rotate-90')} />
+                            <span className={cn('min-w-0 truncate', segment.label !== null && 'font-mono')}>
+                              {segment.label ?? t('settings.models.gateway.picker.segmentOther')}
+                            </span>
+                            <span className="model-hub-picker-source-count">{segment.rows.length}</span>
+                            {picked > 0 && (
+                              <span className="model-hub-picker-source-picked">{t('settings.models.gateway.picker.sourcePicked', { count: picked })}</span>
+                            )}
+                          </button>
+                          {shown && <div className="model-hub-picker-source-rows">{segment.rows.map(row)}</div>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        })}
+        {unnamed.map((candidate) => (
+          <PickerRow
+            key={candidate.id}
+            candidate={candidate}
+            picked={chosen.has(candidate.id)}
+            listed={false}
+            single={choose === 'one'}
+            onToggle={() => toggle(candidate)}
+          />
+        ))}
+      </div>
+    );
+  };
 
   return (
     <Dialog open={open} onOpenChange={(next) => { if (!next && !busy) onCancel(); }}>
@@ -301,7 +449,7 @@ export const BackendModelPickerDialog: React.FC<{
             />
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+          <div className="model-hub-catalog-scroll flex min-h-0 flex-1 flex-col overflow-y-auto">
             {readState === 'loading' ? (
               <div className="model-hub-picker-empty">
                 <LoaderCircle className="size-5 animate-spin" aria-hidden="true" />
@@ -328,7 +476,7 @@ export const BackendModelPickerDialog: React.FC<{
             ) : (
               <div className="model-hub-picker-list">
                 {group('builtin', t('settings.models.gateway.picker.groupBuiltin', { backend: getBackendUiMeta(backend).label }) as string, shown.builtin)}
-                {group('providers', t('settings.models.gateway.picker.groupProviders') as string, shown.providers)}
+                {providerGroups(t('settings.models.gateway.picker.groupProviders') as string, shown.providers)}
                 {catalogPicks.length > 0 && (
                   <div role="group" aria-label={t('settings.models.gateway.picker.groupCatalog') as string} className="model-hub-picker-group">
                     <div className="model-hub-picker-group-head">
@@ -429,11 +577,13 @@ const PickerRow: React.FC<{
   single?: boolean;
   /** A catalog model no provider lists: the chip says so instead of naming suppliers. */
   unlisted?: boolean;
+  /** Under its provider's own heading: the heading names the supplier, so the row does not. */
+  grouped?: boolean;
   onToggle: () => void;
-}> = ({ candidate, picked, listed, single = false, unlisted = false, onToggle }) => {
+}> = ({ candidate, picked, listed, single = false, unlisted = false, grouped = false, onToggle }) => {
   const { t } = useTranslation();
   const checked = picked || listed;
-  const supplied = candidate.suppliers.length > 0 || unlisted;
+  const supplied = !grouped && (candidate.suppliers.length > 0 || unlisted);
   return (
     <button
       type="button"

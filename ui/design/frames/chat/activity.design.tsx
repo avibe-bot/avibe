@@ -88,6 +88,14 @@ const settledFixture = (extra: { ui?: Record<string, unknown> } = {}) =>
 
 const openChip = 'button[title="{t:chat.agentActivity.expand}"] >> nth=0';
 
+// One finished turn on the phone: its group closed, opened, and opened at 360 px.
+const settledPhone = chatFixtures({
+  session: claude,
+  ui,
+  messages: [ask1, reply1],
+  activity: [activityGroup('grp_done', reply1, doneRows, { duration_ms: 83_000 })],
+});
+
 const designFrames = frames([
   {
     name: 'running',
@@ -179,18 +187,34 @@ const designFrames = frames([
     render: chatPhone,
   },
   {
+    name: 'phone-settled',
+    title: '执行过程 · 已完成的一轮 · 手机',
+    width: 390,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: settledPhone,
+    render: chatPhone,
+  },
+  {
     name: 'phone-settled-expanded',
     title: '执行过程 · 点开已完成的一轮 · 手机',
     width: 390,
     height: 844,
     status: 'shipped',
     route: chatRoute(),
-    fixtures: chatFixtures({
-      session: claude,
-      ui,
-      messages: [ask1, reply1],
-      activity: [activityGroup('grp_done', reply1, doneRows, { duration_ms: 83_000 })],
-    }),
+    fixtures: settledPhone,
+    click: [openChip],
+    render: chatPhone,
+  },
+  {
+    name: 'phone-360-settled-expanded',
+    title: '执行过程 · 点开已完成的一轮 · 手机 360',
+    width: 360,
+    height: 844,
+    status: 'shipped',
+    route: chatRoute(),
+    fixtures: settledPhone,
     click: [openChip],
     render: chatPhone,
   },

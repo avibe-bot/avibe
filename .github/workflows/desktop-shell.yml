@@ -288,3 +288,25 @@ jobs:
           cargo build --locked -p avibe-desktop --example retired_workbench_probe --all-features
           python src-tauri/tests/run_cookie_probe.py target/debug/examples/retired_workbench_probe \
             --timeout 120 --log "$RUNNER_TEMP/retired-workbench-probe.log"
+
+      # A real WebKit window, clicked with AppKit events and read from its own
+      # capture: the empty chat composer below a scrolled conversation must
+      # draw its caret after a click. WebKit can keep the caret's state and not
+      # draw it, which neither the DOM nor Playwright's WebKit shows.
+      - name: Verify the composer draws its caret in a real WebView
+        if: runner.os == 'macOS'
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          cargo build --locked -p avibe-desktop --example composer_caret_probe --all-features
+          (cd ../ui && VIBE_UI_BACKEND=http://127.0.0.1:9 node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5219 --strictPort \
+            > "$RUNNER_TEMP/composer-caret-ui.log" 2>&1 & echo $! > "$RUNNER_TEMP/composer-caret-ui.pid")
+          page='http://127.0.0.1:5219/e2e/voice-shortcut/fixture.html?transcript=long'
+          for _ in $(seq 1 60); do curl -sf "$page" > /dev/null && break; sleep 1; done
+          curl -sf "$page" > /dev/null || { cat "$RUNNER_TEMP/composer-caret-ui.log"; exit 1; }
+          status=0
+          python src-tauri/tests/run_cookie_probe.py target/debug/examples/composer_caret_probe \
+            --timeout 120 --log "$RUNNER_TEMP/composer-caret-probe.log" \
+            --set "AVIBE_CARET_PROBE_URL=$page" || status=$?
+          kill "$(cat "$RUNNER_TEMP/composer-caret-ui.pid")" || true
+          exit "$status"

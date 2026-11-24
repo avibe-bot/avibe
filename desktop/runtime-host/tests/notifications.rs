@@ -5,10 +5,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use avibe_runtime_host::notifications::{
-    run_notifications, EventStream, NotificationFilter, NotificationGate, NotificationIntent, NotificationPreferences,
-    NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot, NotificationTransport,
-    ReconnectBackoff, RunDetail, RunTimestamps, SseDecoder, StreamError, UnreadState, RETAINED_KEYS, RETENTION,
-    UNREAD_REFRESH_INTERVAL,
+    run_notifications, AnswerRequest, EventStream, NotificationFilter, NotificationGate, NotificationIntent,
+    NotificationPreferences, NotificationReceipt, NotificationRegistry, NotificationSink, NotificationSnapshot,
+    NotificationTransport, ReconnectBackoff, RunDetail, RunTimestamps, SessionDetail, SseDecoder, StreamError,
+    UnreadState, RETAINED_KEYS, RETENTION, UNREAD_REFRESH_INTERVAL,
 };
 use serde_json::{json, Value};
 use tokio::time::Instant;
@@ -41,6 +41,8 @@ struct FakeTransport {
     details: Mutex<HashMap<String, RunDetail>>,
     refetched: Mutex<Vec<String>>,
     detail_delay: Duration,
+    sessions: Mutex<HashMap<String, SessionDetail>>,
+    session_delay: Duration,
     unread: Mutex<Option<u64>>,
     unread_by_session: Mutex<Option<HashMap<String, u64>>>,
     unread_delay: Duration,
@@ -52,6 +54,11 @@ struct FakeTransport {
 
 #[async_trait]
 impl NotificationTransport for FakeTransport {
+    async fn session_detail(&self, session_id: &str) -> Option<SessionDetail> {
+        tokio::time::sleep(self.session_delay).await;
+        self.sessions.lock().unwrap().get(session_id).cloned()
+    }
+
     async fn connect(&self) -> Result<Box<dyn EventStream>, StreamError> {
         self.connected_at.lock().unwrap().push(Instant::now());
         self.streams
@@ -100,6 +107,8 @@ impl FakeTransport {
     }
 }
 
+type PendingPost = (Option<String>, u64, Arc<NotificationReceipt>);
+
 struct FakeSink {
     enabled: AtomicBool,
     focused: AtomicBool,
@@ -112,6 +121,11 @@ struct FakeSink {
     receipts: Mutex<NotificationSnapshot>,
     withdrawn: Mutex<Vec<i32>>,
     generation: AtomicU64,
+    answer_actions: AtomicBool,
+    defer_answers: AtomicBool,
+    pending_answers: Mutex<Vec<PendingPost>>,
+    defer_completions: AtomicBool,
+    pending_completions: Mutex<Vec<PendingPost>>,
 }
 
 impl Default for FakeSink {
@@ -128,11 +142,34 @@ impl Default for FakeSink {
             receipts: Mutex::new(Vec::new()),
             withdrawn: Mutex::new(Vec::new()),
             generation: AtomicU64::new(0),
+            answer_actions: AtomicBool::new(true),
+            defer_answers: AtomicBool::new(false),
+            pending_answers: Mutex::new(Vec::new()),
+            defer_completions: AtomicBool::new(false),
+            pending_completions: Mutex::new(Vec::new()),
         }
     }
 }
 
 impl NotificationSink for FakeSink {
+    fn supports_answer_actions(&self) -> bool {
+        self.answer_actions.load(Ordering::SeqCst)
+    }
+
+    fn deliver_answer_request(
+        &self,
+        _request: AnswerRequest,
+        source: Option<String>,
+        generation: u64,
+        receipt: Arc<NotificationReceipt>,
+    ) {
+        if self.defer_answers.load(Ordering::SeqCst) {
+            self.pending_answers.lock().unwrap().push((source, generation, receipt));
+            return;
+        }
+        self.deliver(NotificationIntent::AnswerRequested, source, generation, receipt);
+    }
+
     fn registry(&self) -> &Mutex<NotificationRegistry> {
         &self.registry
     }
@@ -156,7 +193,15 @@ impl NotificationSink for FakeSink {
         generation: u64,
         receipt: Arc<NotificationReceipt>,
     ) {
-        if receipt.retired() || generation != self.presentation_generation() {
+        if intent == NotificationIntent::RunSucceeded && self.defer_completions.load(Ordering::SeqCst) {
+            self.pending_completions
+                .lock()
+                .unwrap()
+                .push((source, generation, receipt));
+            return;
+        }
+        if receipt.retired() || receipt.superseded() || generation != self.presentation_generation() {
+            self.registry.lock().unwrap().forget(receipt.id());
             return;
         }
         receipt.posted();
@@ -182,6 +227,24 @@ impl NotificationSink for FakeSink {
 
     fn desktop_update_requested(&self) {
         self.desktop_update_nudges.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl FakeSink {
+    /// The only replaced boundary: macOS accepting or refusing the request.
+    fn finish_answer(&self, submitted: bool) {
+        let (source, generation, receipt) = self.pending_answers.lock().unwrap().remove(0);
+        if submitted {
+            self.deliver(NotificationIntent::AnswerRequested, source, generation, receipt);
+        } else {
+            self.registry.lock().unwrap().forget(receipt.id());
+        }
+    }
+
+    fn finish_completion(&self) {
+        let (source, generation, receipt) = self.pending_completions.lock().unwrap().remove(0);
+        self.defer_completions.store(false, Ordering::SeqCst);
+        self.deliver(NotificationIntent::RunSucceeded, source, generation, receipt);
     }
 }
 
@@ -228,6 +291,471 @@ async fn settle() {
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
+}
+
+fn question(message_id: &str, session_id: &str, turn_id: &str) -> Vec<u8> {
+    frame(
+        "message.new",
+        json!({
+            "id": message_id, "session_id": session_id, "platform": "avibe",
+            "author": "agent", "type": "result", "text": "Choose the next step",
+            "metadata": { "turn_id": turn_id },
+            "content": { "quick_replies": ["Continue", "Wait"], "quick_reply_revision": "a".repeat(64) },
+        }),
+    )
+}
+
+fn turn_run(run_id: &str, session_id: &str, status: &str) -> Vec<u8> {
+    frame(
+        "runs.updated",
+        json!({
+            "run_id": run_id, "session_id": session_id, "status": status, "run_type": "agent_run",
+            "started_at": "2026-11-23T00:00:00Z", "completed_at": "2026-11-23T00:01:35Z",
+        }),
+    )
+}
+
+fn turn_detail(session_id: &str, turn_id: &str) -> RunDetail {
+    serde_json::from_value(json!({
+        "session_id": session_id, "metadata": { "turn_id": turn_id },
+        "session_is_workbench": true, "notification_category": "bot",
+    }))
+    .unwrap()
+}
+
+fn add_session(transport: &FakeTransport, session_id: &str) {
+    transport.sessions.lock().unwrap().insert(
+        session_id.into(),
+        SessionDetail {
+            session_id: session_id.into(),
+            category: Some("bot".into()),
+            ..SessionDetail::default()
+        },
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_posted_answer_replaces_only_its_turns_success_notification() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    add_session(&transport, "main");
+    transport
+        .details
+        .lock()
+        .unwrap()
+        .insert("brief".into(), turn_detail("main", "morning"));
+    transport.stream(
+        [
+            question("message", "main", "morning"),
+            turn_run("brief", "main", "succeeded"),
+        ],
+        false,
+    );
+    let task = spawn(transport, sink.clone());
+    settle().await;
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::AnswerRequested]);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn interleaved_turns_and_independent_outcomes_keep_their_notifications() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    for session in ["main", "other"] {
+        add_session(&transport, session);
+    }
+    for (run, session, turn) in [
+        ("first", "main", "one"),
+        ("second", "main", "two"),
+        ("unasked", "main", "three"),
+        ("other-session", "other", "one"),
+        ("failed", "main", "one"),
+        ("canceled", "main", "two"),
+    ] {
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert(run.into(), turn_detail(session, turn));
+    }
+    transport.stream(
+        [
+            question("m1", "main", "one"),
+            question("m2", "main", "two"),
+            turn_run("second", "main", "succeeded"),
+            turn_run("other-session", "other", "succeeded"),
+            turn_run("first", "main", "succeeded"),
+            turn_run("unasked", "main", "succeeded"),
+            run("health-check", "scheduled", 1),
+            turn_run("failed", "main", "failed"),
+            turn_run("canceled", "main", "canceled"),
+            approval("vault", "pending"),
+        ],
+        false,
+    );
+    let task = spawn(transport, sink.clone());
+    settle().await;
+    let delivered = sink.delivered.lock().unwrap().clone();
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|&&i| i == NotificationIntent::AnswerRequested)
+            .count(),
+        2
+    );
+    assert_eq!(
+        delivered
+            .iter()
+            .filter(|&&i| i == NotificationIntent::RunSucceeded)
+            .count(),
+        3
+    );
+    for expected in [
+        NotificationIntent::RunFailed,
+        NotificationIntent::RunCanceled,
+        NotificationIntent::ApprovalRequested,
+    ] {
+        assert_eq!(delivered.iter().filter(|&&i| i == expected).count(), 1);
+    }
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn completion_waits_for_os_acceptance_and_a_refusal_preserves_success() {
+    for submitted in [true, false] {
+        let transport = Arc::new(FakeTransport::default());
+        let sink = Arc::new(FakeSink::default());
+        sink.defer_answers.store(true, Ordering::SeqCst);
+        add_session(&transport, "main");
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert("run".into(), turn_detail("main", "turn"));
+        transport.stream(
+            [question("m", "main", "turn"), turn_run("run", "main", "succeeded")],
+            false,
+        );
+        let task = spawn(transport, sink.clone());
+        settle().await;
+        assert_eq!(sink.pending_answers.lock().unwrap().len(), 1);
+        assert!(
+            sink.delivered.lock().unwrap().is_empty(),
+            "a candidate is not a submitted notification"
+        );
+        sink.finish_answer(submitted);
+        settle().await;
+        assert_eq!(
+            *sink.delivered.lock().unwrap(),
+            [if submitted {
+                NotificationIntent::AnswerRequested
+            } else {
+                NotificationIntent::RunSucceeded
+            }]
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn late_native_submission_checks_the_exact_turn_again() {
+    for question_succeeds in [true, false] {
+        let transport = Arc::new(FakeTransport::default());
+        let sink = Arc::new(FakeSink::default());
+        sink.defer_answers.store(true, Ordering::SeqCst);
+        sink.defer_completions.store(true, Ordering::SeqCst);
+        add_session(&transport, "main");
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert("run".into(), turn_detail("main", "turn"));
+        // Reverse event arrival, with ordinary delivery deferred at the native
+        // boundary: the question may have succeeded by the time it can post.
+        transport.paced_stream(
+            [turn_run("run", "main", "succeeded"), question("m", "main", "turn")],
+            false,
+            Duration::from_secs(1),
+        );
+        let task = spawn(transport, sink.clone());
+        settle().await;
+        for _ in 0..2 {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            settle().await;
+        }
+        assert_eq!(sink.pending_completions.lock().unwrap().len(), 1);
+        sink.finish_answer(question_succeeds);
+        sink.finish_completion();
+        assert_eq!(
+            *sink.delivered.lock().unwrap(),
+            [if question_succeeds {
+                NotificationIntent::AnswerRequested
+            } else {
+                NotificationIntent::RunSucceeded
+            }]
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_unknown_os_result_has_a_bounded_wait_and_does_not_delay_failure() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    sink.defer_answers.store(true, Ordering::SeqCst);
+    add_session(&transport, "main");
+    for id in ["success", "failure"] {
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert(id.into(), turn_detail("main", "turn"));
+    }
+    transport.stream(
+        [
+            question("m", "main", "turn"),
+            turn_run("success", "main", "succeeded"),
+            turn_run("failure", "main", "failed"),
+        ],
+        false,
+    );
+    let task = spawn(transport, sink.clone());
+    settle().await;
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::RunFailed]);
+    tokio::time::advance(Duration::from_secs(30)).await;
+    settle().await;
+    assert_eq!(
+        *sink.delivered.lock().unwrap(),
+        [NotificationIntent::RunFailed, NotificationIntent::RunSucceeded]
+    );
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_question_lookup_cannot_be_overtaken_by_the_completion_lookup() {
+    for session_exists in [true, false] {
+        let transport = Arc::new(FakeTransport {
+            session_delay: Duration::from_secs(2),
+            ..FakeTransport::default()
+        });
+        let sink = Arc::new(FakeSink::default());
+        if session_exists {
+            add_session(&transport, "main");
+        }
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert("run".into(), turn_detail("main", "turn"));
+        transport.stream(
+            [question("m", "main", "turn"), turn_run("run", "main", "succeeded")],
+            false,
+        );
+        let task = spawn(transport, sink.clone());
+        settle().await;
+        assert!(sink.delivered.lock().unwrap().is_empty());
+        tokio::time::advance(Duration::from_secs(2)).await;
+        settle().await;
+        assert_eq!(
+            *sink.delivered.lock().unwrap(),
+            [if session_exists {
+                NotificationIntent::AnswerRequested
+            } else {
+                NotificationIntent::RunSucceeded
+            }]
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn waiting_for_an_os_response_does_not_hold_other_sessions_or_preference_refresh() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    sink.defer_answers.store(true, Ordering::SeqCst);
+    add_session(&transport, "main");
+    let mut frames = vec![question("m", "main", "turn")];
+    // More than the HTTP semaphore's 16 slots: pending native callbacks must
+    // not prevent the unrelated completion's detail read.
+    for index in 0..20 {
+        let id = format!("run-{index}");
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert(id.clone(), turn_detail("main", "turn"));
+        frames.push(turn_run(&id, "main", "succeeded"));
+    }
+    frames.push(run("independent", "scheduled", 1));
+    frames.push(frame("notifications.preferences.updated", json!({})));
+    transport.preferences.lock().unwrap().extend([
+        Some(NotificationPreferences::default()),
+        Some(NotificationPreferences {
+            enabled: false,
+            ..NotificationPreferences::default()
+        }),
+    ]);
+    transport.paced_stream(frames, false, Duration::from_millis(1));
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    for _ in 0..23 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+    }
+    assert_eq!(transport.refetched.lock().unwrap().len(), 21);
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::RunSucceeded]);
+    assert_eq!(transport.preference_reads.load(Ordering::SeqCst), 2);
+    sink.finish_answer(false);
+    settle().await;
+    assert_eq!(
+        *sink.delivered.lock().unwrap(),
+        [NotificationIntent::RunSucceeded],
+        "refresh disables the waiting completions"
+    );
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn insufficient_identity_or_action_capability_never_suppresses_success() {
+    for case in [
+        "no-message-turn",
+        "no-run-turn",
+        "blank-message-turn",
+        "non-string-run-turn",
+        "wrong-session",
+        "no-run-session",
+        "no-revision",
+        "no-actions",
+    ] {
+        let transport = Arc::new(FakeTransport::default());
+        let sink = Arc::new(FakeSink::default());
+        add_session(&transport, "main");
+        let mut q = json!({
+            "id": "m", "session_id": "main", "platform": "avibe", "author": "agent", "type": "result",
+            "metadata": { "turn_id": "turn" },
+            "content": { "quick_replies": ["Yes"], "quick_reply_revision": "a".repeat(64) },
+        });
+        let mut detail = turn_detail("main", "turn");
+        match case {
+            "no-message-turn" => q["metadata"] = json!({}),
+            "no-run-turn" => detail.metadata = Some(json!({})),
+            "blank-message-turn" => q["metadata"]["turn_id"] = json!(" "),
+            "non-string-run-turn" => detail.metadata = Some(json!({"turn_id": 123})),
+            "wrong-session" => detail.session_id = Some("other".into()),
+            "no-run-session" => detail.session_id = None,
+            "no-revision" => q["content"]["quick_reply_revision"] = Value::Null,
+            "no-actions" => sink.answer_actions.store(false, Ordering::SeqCst),
+            _ => unreachable!(),
+        }
+        transport.details.lock().unwrap().insert("run".into(), detail);
+        transport.stream([frame("message.new", q), turn_run("run", "main", "succeeded")], false);
+        let task = spawn(transport, sink.clone());
+        settle().await;
+        assert_eq!(
+            *sink.delivered.lock().unwrap(),
+            [NotificationIntent::AnswerRequested, NotificationIntent::RunSucceeded],
+            "{case}"
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_question_filtered_at_receipt_does_not_consume_a_later_completion() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    add_session(&transport, "main");
+    sink.focused.store(true, Ordering::SeqCst);
+    transport
+        .details
+        .lock()
+        .unwrap()
+        .insert("run".into(), turn_detail("main", "turn"));
+    transport.paced_stream(
+        [question("m", "main", "turn"), turn_run("run", "main", "succeeded")],
+        false,
+        Duration::from_secs(1),
+    );
+    let task = spawn(transport, sink.clone());
+    settle().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle().await;
+    sink.focused.store(false, Ordering::SeqCst);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle().await;
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::RunSucceeded]);
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn submission_evidence_survives_read_cleanup_but_not_a_different_presentation() {
+    for new_presentation in [false, true] {
+        let transport = Arc::new(FakeTransport::default());
+        let sink = Arc::new(FakeSink::default());
+        add_session(&transport, "main");
+        transport
+            .details
+            .lock()
+            .unwrap()
+            .insert("run".into(), turn_detail("main", "turn"));
+        transport.paced_stream(
+            [question("m", "main", "turn"), turn_run("run", "main", "succeeded")],
+            false,
+            Duration::from_secs(1),
+        );
+        let task = spawn(transport, sink.clone());
+        settle().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        let posted = sink.receipts.lock().unwrap()[0].clone();
+        sink.registry.lock().unwrap().forget(posted.id());
+        if new_presentation {
+            sink.generation.store(1, Ordering::SeqCst);
+        }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(
+            sink.delivered.lock().unwrap().len(),
+            if new_presentation { 2 } else { 1 }
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_reconnect_retains_evidence_but_a_new_runtime_connection_does_not() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    add_session(&transport, "main");
+    transport
+        .details
+        .lock()
+        .unwrap()
+        .insert("run".into(), turn_detail("main", "turn"));
+    transport.stream([question("m", "main", "turn")], true);
+    transport.stream([turn_run("run", "main", "succeeded")], false);
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+    tokio::time::advance(Duration::from_secs(1)).await;
+    settle().await;
+    assert_eq!(transport.connected_at.lock().unwrap().len(), 2);
+    assert_eq!(*sink.delivered.lock().unwrap(), [NotificationIntent::AnswerRequested]);
+    task.abort();
+    let _ = task.await;
+    let other_runtime = Arc::new(FakeTransport::default());
+    other_runtime
+        .details
+        .lock()
+        .unwrap()
+        .insert("run".into(), turn_detail("main", "turn"));
+    other_runtime.stream([turn_run("run", "main", "succeeded")], false);
+    let other = spawn(other_runtime, sink.clone());
+    settle().await;
+    assert_eq!(
+        *sink.delivered.lock().unwrap(),
+        [NotificationIntent::AnswerRequested, NotificationIntent::RunSucceeded]
+    );
+    other.abort();
 }
 
 #[tokio::test(start_paused = true)]

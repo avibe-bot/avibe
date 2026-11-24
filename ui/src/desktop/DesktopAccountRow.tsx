@@ -31,10 +31,11 @@ export function DesktopAccountRow() {
     state={state}
     onPresent={present}
     // The updater's IPC consumer is mounted only on this computer's own page.
-    localUpdater={remote ? null : <VersionBadge openUpward />}
+    localUpdater={remote ? null : <VersionBadge openUpward size="row" />}
     instanceVersion={committed.kind === 'remote' && <InstanceVersionChip
       name={committed.name}
       appUpdate={state.desktop.update.phase === 'available'}
+      size="row"
       onPresent={() => present('updates')}
     />}
   />;

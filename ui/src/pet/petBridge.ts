@@ -38,6 +38,9 @@ export const PET_BOUND_EVENT = 'avibe:pet-bound';
 export const PET_HOVER_EVENT = 'avibe:pet-hover';
 /** The shell's layout snapshot `{ revision, layout }`: the page draws it. */
 export const PET_LAYOUT_EVENT = 'avibe:pet-layout';
+/** The shell resized the window while hiding it, `{ token, height }`: the page
+ *  answers once it has drawn at that height, and the shell shows it again. */
+export const PET_FRAME_EVENT = 'avibe:pet-frame';
 
 /** A window-local rect that takes the mouse; `hover` marks Vibey's hover zone. */
 export type PetHitRect = { x: number; y: number; width: number; height: number; hover?: boolean };
@@ -243,6 +246,34 @@ export const onPetHover = (handler: (hover: boolean) => void): (() => void) => {
   const listener = (event: Event) => handler((event as CustomEvent<{ hover?: unknown }>).detail?.hover === true);
   window.addEventListener(PET_HOVER_EVENT, listener);
   return () => window.removeEventListener(PET_HOVER_EVENT, listener);
+};
+
+/** Answer each resize once a frame has been drawn at its height: two
+ *  animation frames after the viewport reached it (the first may still paint
+ *  the old size). Returns the unsubscribe function. */
+export const answerPetResizes = (): (() => void) => {
+  let pending: { token: number; height: number } | null = null;
+  const drawn = (token: number) => requestAnimationFrame(() => requestAnimationFrame(() => {
+    void shellInvoke()?.('pet_frame_drawn', { token }).catch(() => undefined);
+  }));
+  const check = () => {
+    if (!pending || Math.abs(window.innerHeight - pending.height) >= 1) return;
+    const { token } = pending;
+    pending = null;
+    drawn(token);
+  };
+  const frame = (event: Event) => {
+    const detail = (event as CustomEvent<{ token?: unknown; height?: unknown }>).detail;
+    if (typeof detail?.token !== 'number' || typeof detail?.height !== 'number') return;
+    pending = { token: detail.token, height: detail.height };
+    check();
+  };
+  window.addEventListener(PET_FRAME_EVENT, frame);
+  window.addEventListener('resize', check);
+  return () => {
+    window.removeEventListener(PET_FRAME_EVENT, frame);
+    window.removeEventListener('resize', check);
+  };
 };
 
 /** Subscribe to shell events; returns the unsubscribe function. */

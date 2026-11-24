@@ -18,6 +18,8 @@ bundled-runtime = []
 # Test-only builds may redirect Computer Use state and assets to a hermetic lane.
 # Release packaging never enables this feature.
 computer-use-test-overrides = []
+# Hermetic App Lock peer used by desktop-client tests; forbidden in release builds.
+app-lock-e2e = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -35,6 +37,7 @@ reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle = { version = "=2.6.1", default-features = false }
 sys-locale.workspace = true
 tar = "0.4"
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "unstable"] }
@@ -89,8 +92,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# Reuse the plugin sender's application-identity setup with the same legacy center.
-notify-rust = "4"
+objc2-local-authentication = { version = "0.3.2", default-features = false, features = ["std", "block2", "LAContext", "LAError", "LABiometryType"] }
 objc2-authentication-services = { version = "0.3.2", default-features = false, features = ["std", "ASFoundation", "ASPublicKeyCredential", "ASAuthorization", "ASAuthorizationController", "ASAuthorizationCredential", "ASAuthorizationProvider", "ASAuthorizationRequest", "ASAuthorizationPublicKeyCredentialAssertion", "ASAuthorizationPublicKeyCredentialAssertionRequest", "ASAuthorizationPublicKeyCredentialConstants", "ASAuthorizationPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialAssertion", "ASAuthorizationPlatformPublicKeyCredentialAssertionRequest", "ASAuthorizationPlatformPublicKeyCredentialDescriptor", "ASAuthorizationPlatformPublicKeyCredentialProvider"] }
 keyring = { version = "3.6", features = ["apple-native"] }
 block2 = "0.6.2"
@@ -99,16 +101,19 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "block2",
   "FoundationErrors",
   "NSAppleEventDescriptor",
+  "NSBundle",
   "NSAppleEventManager",
   "NSArray",
   "NSDate",
   "NSData",
+  "NSAttributedString",
   "NSDictionary",
   "NSSet",
   "NSEnumerator",
   "NSError",
   "NSGeometry",
   "NSNotification",
+  "NSDistributedNotificationCenter", "NSRunLoop", "NSTimer",
   "NSOperation",
   "NSProcessInfo",
   "NSString",
@@ -116,7 +121,6 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
   "NSURLRequest",
   "NSURLResponse",
   "NSUserDefaults",
-  "NSUserNotification",
   "NSValue",
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
@@ -125,6 +129,9 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSApplication",
   "NSBitmapImageRep",
   "NSButton",
+  "NSButtonCell",
+  "NSBezierPath",
+  "NSTrackingArea",
   "NSColor",
   "NSControl",
   "NSFont",
@@ -138,7 +145,17 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSLayoutConstraint",
   "NSSharingService",
   "NSTitlebarAccessoryViewController",
+  "NSToolbar",
   "NSViewController",
+  "NSAlert",
+  "NSAppearance",
+  "NSWorkspace",
+  "NSRunningApplication",
+  "libc",
+  "NSBezierPath",
+  "NSButtonCell",
+  "NSText",
+  "NSCell",
   "NSEvent",
   "NSGraphics",
   "NSPasteboard",
@@ -146,6 +163,11 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
   "NSResponder",
   "NSView",
   "NSWindow",
+  "NSStatusBar",
+  "NSStatusItem",
+  "NSStatusBarButton",
+  "NSMenu",
+  "NSMenuItem",
 ] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "std",
@@ -171,6 +193,25 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
   "WKWebsiteDataStore",
   "WKWindowFeatures",
 ] }
+# The macOS notification center: authorization, posts, withdrawal and responses.
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "block2",
+  "UNNotification",
+  "UNNotificationAction",
+  "UNNotificationCategory",
+  "UNNotificationContent",
+  "UNNotificationRequest",
+  "UNNotificationResponse",
+  "UNNotificationSettings",
+  "UNNotificationTrigger",
+  "UNUserNotificationCenter",
+] }
 # Reads the running app's own signed entitlements for the Vault passkey marker.
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFString"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecTask"] }
+
+[[example]]
+name = "app-lock-peer"
+path = "examples/app-lock-peer.rs"
+required-features = ["app-lock-e2e"]

@@ -1516,7 +1516,15 @@ scenarios:
     layer: scenario
     backend: mobile
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_mobile_health_fake_device_connect_read_and_revoke_closed_loop
-    reason: Real CLI, message mirror, owner CSRF, device HTTP, private storage and revocation run with synthetic data; control-plane and push transports are fixtures.
+    reason: >-
+      Real CLI, message mirror, owner CSRF, device HTTP, private storage and
+      revocation run with synthetic data; control-plane and push transports
+      are fixtures. An abandoned pre-pair attempt leaves the request queued;
+      an explicit retry obtains a fresh code, pairs and completes the same
+      request, and the abandoned code cannot replay after pairing. Native
+      consent dismissal, bounded setup/cleanup, callback ownership and optional
+      empty-step help are owned by HealthSyncTests; page retry and legacy
+      pending-owner recovery by HealthRequest.lifecycle.test.tsx.
   - id: AUTH-SETUP-914
     name: The initiating owner browser completes a personal installation claim without disclosing the pairing key
     status: covered
@@ -1533,4 +1541,23 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_device_account_signout_from_verified_exchange
     reason: Two signed exchanges, real callbacks, local sign-out, pending fence and receipt; fake issuer wire response, not evidence of provider deletion.
+  - id: AUTH-SETUP-916
+    name: Setup offers remote access once, after completion, and neither skipping nor using it re-enters setup
+    status: covered
+    kind: happy_path
+    layer: contract
+    backend: web
+    test:
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-916 offers remote access only after setup is complete, and skipping lands home without re-entering setup
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-916 turns remote access on with the claim the instance issued, and comes back to Devices
+      - ui/src/components/onboarding/WizardCompletion.test.tsx::AUTH-SETUP-916 goes straight home when the status cannot be read
+    reason: >-
+      The continuation is client-only: the Wizard writes completion and confirms
+      it by a fresh read (AUTH-SETUP-161), then routes to the optional step only
+      for a local or admitted-private session on an instance that is not bound.
+      The Vitest cases run the real Wizard into the real step on one router:
+      skipping lands home with the completion written exactly once, and turning
+      it on submits only the form the instance issued and hands the open claim
+      to the Devices page. The claim's server side (owner routes, browser
+      cookie, return gate, redemption) is the closed loop of AUTH-SETUP-914.
 next_priority: []

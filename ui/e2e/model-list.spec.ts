@@ -62,25 +62,14 @@ test.describe('Model list · what a backend can be given', () => {
     const editor = hub.modelEditorDialog;
     await expect(editor).toBeVisible();
 
-    // An id models.dev has never heard of, which is the case the typeahead's
-    // last row exists for. That row is what this asserts, rather than the
-    // matches above it: whether models.dev answers at all is a fact about this
-    // instance's network, not about the product.
+    // An id the model catalog has never heard of. The field is a plain input:
+    // what is typed is the id, whatever the catalog can or cannot say about it,
+    // and whether the catalog answers at all is a fact about this instance's
+    // network, not about the product.
     const typed = `${E2E_SOURCE_PREFIX}model-${Date.now()}`;
     const field = hub.modelIdField;
     await field.fill(typed);
-    const escape = hub.literalIdOption;
-    await expect(escape).toBeVisible();
-    const offered = (await escape.innerText()).trim();
-    await escape.click();
-
-    // What the row offered is what the field now holds, and what it holds is
-    // what was typed. Every backend's id is the query itself — the row is read
-    // for the id rather than assumed to be it, because the offer is what a user
-    // reads before clicking, and an offer that named some other string would be
-    // the surface promising one id and creating another.
     const created = await field.inputValue();
-    expect(offered).toBe(copy('gateway.modelEditor.useAsId', { query: created }));
     expect(created).toBe(typed);
 
     await labelledButton(editor, copy('gateway.modelEditor.add')).click();

@@ -325,7 +325,10 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
 async def test_refused_checkpoints_are_silent_and_a_context_that_then_cannot_fit_is_dropped_and_the_turn_answers(
     engine, session, tmp_path
 ):
-    sizes = iter((11_200, 500, 2_000))
+    # Cross the threshold twice while leaving room for each full checkpoint's
+    # framing and the real system prompt; the final read must exceed the hard limit.
+    # The former 11,200-token first read left only 24 tokens of checkpoint headroom.
+    sizes = iter((10_000, 500, 4_000))
 
     async def read(arguments, ctx):
         return ToolResult((text(tokens(next(sizes))),))
@@ -333,7 +336,12 @@ async def test_refused_checkpoints_are_silent_and_a_context_that_then_cannot_fit
     def call(call_id: str) -> list:
         return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
 
-    refused = [Done(dataclasses.replace(assistant("", stop_reason="refusal"), error_message="category: cyber"))]
+    async def refused(request, cancel):
+        # A local admission failure must not shift this positional script's refusal
+        # onto an ordinary conversation request and change the scenario under test.
+        assert is_checkpoint(request)
+        yield Done(dataclasses.replace(assistant("", stop_reason="refusal"), error_message="category: cyber"))
+
     scripts = [[Done(assistant("hi"))], call("r1"), refused, call("r2"), refused, call("r3"), [Done(assistant("done"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("read", execute=read)], language="zh")
     # An earlier Turn gives the checkpoints something to summarize: a cut inside this Turn keeps its input.
@@ -537,7 +545,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
     from modules.agents.vibey.models import registry_providers
 
     served = json.dumps(
-        {"provider": "upstream", "api": "anthropic", "model": "served-model", "source": "src_upstream01"},
+        {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_threshold01"},
         separators=(",", ":"),
     )
     overflow = json.dumps(
@@ -553,7 +561,8 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
         phase["seen"].append((phase["turn"], kind))
         pending = refusals.get(phase["turn"], [])
         if pending and pending[0] == kind:
-            pending.pop(0)
+            if 'thread' not in body:
+                pending.pop(0)
             return httpx.Response(400, headers={"content-type": "application/json"}, text=overflow)
         answer = CHECKPOINT if kind == "checkpoint" else replies[phase["turn"]]
         return httpx.Response(
@@ -562,6 +571,7 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = "src_threshold01"
         for turn, body in ((1, tokens(11_000)), (2, tokens(12_000)), (3, "and now?")):
             phase["turn"] = turn
             await _turn(harness, body)
@@ -572,7 +582,8 @@ async def test_a_threshold_checkpoint_and_an_overflow_roll_through_the_real_loop
         (1, "conversation"),
         (2, "checkpoint"),
         (2, "conversation"),
-        (3, "conversation"),  # refused as overflow
+        (3, "conversation"),  # speculative full create is also too large
+        (3, "conversation"),  # ordinary replay refused as overflow
         (3, "checkpoint"),  # the normal checkpoint request, refused as overflow
         (3, "checkpoint"),  # the rolling one
         (3, "conversation"),

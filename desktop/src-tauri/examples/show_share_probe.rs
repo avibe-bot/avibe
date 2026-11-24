@@ -45,6 +45,18 @@ mod show_window_title;
 #[path = "../src/macos_show_titlebar.rs"]
 mod macos_show_titlebar;
 
+// This standalone share/rendering probe has no App Lock owner. The dedicated
+// app-lock-e2e peer tests the real command gate with these native controls.
+#[cfg(target_os = "macos")]
+mod app_lock {
+    pub enum EntryKind {
+        Command,
+    }
+    pub fn defer_kind(_: &tauri::AppHandle, _: EntryKind, _: impl FnOnce(&tauri::AppHandle) + Send + 'static) -> bool {
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod probe {
     use std::{
@@ -75,6 +87,7 @@ mod probe {
 <iframe id="show" data-avibe-show-session="ses-probe" src="/show/ses-probe/" style="left:40px;top:60px;width:400px;height:300px"></iframe>
 <iframe id="other" data-avibe-show-session="ses-other" src="/show/ses-other/" style="left:0;top:0;width:1px;height:1px;opacity:0"></iframe>
 <script>
+addEventListener('avibe:show-annotate-open', () => fetch('/report', { method: 'POST', body: '{"case":"annotate-open"}' }));
 addEventListener('avibe:show-share-open', () => fetch('/report', { method: 'POST', body: '{"case":"share-open"}' }));
 document.getElementById('show').addEventListener('load', () => {
   // A same-origin Show script forges a frame that claims to be this Show.
@@ -108,8 +121,11 @@ document.getElementById('show').addEventListener('load', () => {
 
         let mut app = tauri::Builder::default().build(tauri::generate_context!()).unwrap();
         let focus = std::env::var_os("AVIBE_SHOW_SHARE_PROBE_FOCUS").is_some();
-        if !focus {
+        let fullscreen = std::env::var_os("AVIBE_SHOW_CONTROLS_FULLSCREEN").is_some();
+        if !focus && !fullscreen {
             app.set_activation_policy(tauri::ActivationPolicy::Prohibited);
+        } else if fullscreen {
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
         }
         let mut ready_rx = Some(ready_rx);
         app.run(move |app, event| {
@@ -117,30 +133,52 @@ document.getElementById('show').addEventListener('load', () => {
                 api.prevent_exit();
             }
             let tauri::RunEvent::Ready = event else { return };
-            let window = WebviewWindowBuilder::new(
-                app,
-                "probe",
-                WebviewUrl::External(format!("{origin}/workbench").parse().unwrap()),
-            )
-            .inner_size(800.0, 600.0)
-            .position(if focus { 120.0 } else { -4000.0 }, if focus { 120.0 } else { -4000.0 })
-            .visible(true)
-            .focused(false)
-            .incognito(true)
-            .build()
-            .unwrap();
+            let window = WebviewWindowBuilder::new(app, "probe", WebviewUrl::External("about:blank".parse().unwrap()))
+                .inner_size(800.0, 600.0)
+                .position(if focus { 120.0 } else { -4000.0 }, if focus { 120.0 } else { -4000.0 })
+                .visible(true)
+                .focused(false)
+                .incognito(true)
+                .build()
+                .unwrap();
 
             let ready = ready_rx.take().unwrap();
             let origin = origin.clone();
             let handle = app.clone();
             std::thread::spawn(move || {
+                let (action_tx, action_rx) = mpsc::channel();
+                let destination: tauri::Url = format!("{origin}/workbench").parse().unwrap();
+                crate::macos_show_titlebar::install(
+                    &window,
+                    ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
+                    destination.clone(),
+                    move |action| {
+                        let _ = action_tx.send(action);
+                    },
+                );
+                // Match production: install while blank, then navigate after setup.
+                let (initial_url, installed) = on_main(&window, |webview, _, tx| {
+                    let _ = tx.send((
+                        native::document_url(webview),
+                        title_bar::controls(&webview.window().unwrap()),
+                    ));
+                });
+                check(
+                    "controls-installed-before-runtime-navigation",
+                    initial_url.as_deref().is_none_or(|url| url == "about:blank") && installed,
+                    json!({ "url": initial_url, "installed": installed }),
+                );
+                window.navigate(destination).unwrap();
                 assert_eq!(
                     ready.recv_timeout(Duration::from_secs(20)).expect("workbench loaded"),
                     "ready"
                 );
                 std::thread::sleep(Duration::from_millis(500));
                 steps(&window, &origin, focus);
-                title_bar(&window, &ready);
+                title_bar(&window, &ready, action_rx);
+                if fullscreen {
+                    full_screen(&window);
+                }
                 released(&handle, &origin);
                 named(&handle, &origin);
                 println!("{}", json!({ "done": true }));
@@ -329,9 +367,56 @@ document.getElementById('show').addEventListener('load', () => {
     /// click would, and the page hears the open event, but only on the route the
     /// window was opened at (review of 45533723): `pushState` away silences it,
     /// and coming back restores it.
-    fn title_bar(window: &tauri::WebviewWindow, reports: &mpsc::Receiver<String>) {
-        crate::macos_show_titlebar::install(window, "Share".to_owned(), "/workbench".to_owned());
-        std::thread::sleep(Duration::from_millis(300));
+    fn title_bar(
+        window: &tauri::WebviewWindow,
+        reports: &mpsc::Receiver<String>,
+        action_rx: mpsc::Receiver<crate::macos_show_titlebar::Action>,
+    ) {
+        let geometry = on_main(window, |webview, _, tx| {
+            let window = webview.window().expect("window");
+            let _ = tx.send(title_bar::controls(&window));
+        });
+        check(
+            "four-controls-keep-the-approved-order-and-hit-targets",
+            geometry,
+            json!(geometry),
+        );
+        let content = on_main(window, |webview, _, tx| {
+            use objc2_foundation::NSPoint;
+            let window = webview.window().unwrap();
+            let low = webview.convertPoint_toView(NSPoint::new(0.0, 0.0), None).y;
+            let high = webview
+                .convertPoint_toView(NSPoint::new(0.0, webview.bounds().size.height), None)
+                .y;
+            let layout = window.contentLayoutRect();
+            let _ = tx.send((low.max(high), layout.origin.y + layout.size.height));
+        });
+        check(
+            "webview-begins-at-the-native-content-boundary",
+            (content.0 - content.1).abs() < 0.5,
+            json!(content),
+        );
+        for (index, expected) in [
+            (1, crate::macos_show_titlebar::Action::Chat),
+            (3, crate::macos_show_titlebar::Action::Browser),
+        ] {
+            on_main(window, move |webview, _, tx| {
+                let _ = tx.send(title_bar::press_index(&webview.window().unwrap(), index));
+            });
+            check(
+                "native-control-dispatches-its-own-action",
+                action_rx.recv_timeout(Duration::from_secs(2)).ok() == Some(expected),
+                json!(format!("{expected:?}")),
+            );
+        }
+        on_main(window, |webview, _, tx| {
+            let _ = tx.send(title_bar::press_index(&webview.window().unwrap(), 0));
+        });
+        check(
+            "annotation-press-reaches-its-document",
+            reports.recv_timeout(Duration::from_secs(5)).ok().as_deref() == Some("annotate-open"),
+            json!(true),
+        );
         let press = || {
             on_main(window, |webview, _, tx| {
                 let window = webview.window().expect("window");
@@ -377,6 +462,17 @@ document.getElementById('show').addEventListener('load', () => {
             json!(back),
         );
         title(window);
+        if let Some(directory) = std::env::var_os("AVIBE_SHOW_CONTROLS_SHOTS") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            window.set_title("Q4 漏斗看板").unwrap();
+            window.set_size(tauri::LogicalSize::new(1040.0, 720.0)).unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+            on_main(window, move |webview, _, tx| {
+                title_bar::capture(&webview.window().unwrap(), &directory);
+                let _ = tx.send(());
+            });
+        }
     }
 
     /// The drawn title (macOS 26 and later): whole while it fits, cut off
@@ -437,6 +533,33 @@ document.getElementById('show').addEventListener('load', () => {
         );
     }
 
+    /// Opt-in: enters a real full-screen Space and returns to the window.
+    fn full_screen(window: &tauri::WebviewWindow) {
+        window.set_position(tauri::LogicalPosition::new(120.0, 120.0)).unwrap();
+        window.set_focus().unwrap();
+        window.set_fullscreen(true).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        check("show-enters-full-screen", window.is_fullscreen().unwrap(), json!(true));
+        window.set_fullscreen(false).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        let restored = on_main(window, |webview, _, tx| {
+            use objc2_foundation::NSPoint;
+            let window = webview.window().unwrap();
+            let a = webview.convertPoint_toView(NSPoint::new(0.0, 0.0), None).y;
+            let b = webview
+                .convertPoint_toView(NSPoint::new(0.0, webview.bounds().size.height), None)
+                .y;
+            let layout = window.contentLayoutRect();
+            let _ =
+                tx.send(title_bar::controls(&window) && (a.max(b) - layout.origin.y - layout.size.height).abs() < 0.5);
+        });
+        check(
+            "full-screen-exit-restores-controls-and-content-boundary",
+            !window.is_fullscreen().unwrap() && restored,
+            json!(restored),
+        );
+    }
+
     /// What a closed window leaves behind, after `destroy`, as the shell
     /// retires a Show window: whether the window is still referenced, by how
     /// many, and how many of the title-bar views are still alive.
@@ -453,8 +576,19 @@ document.getElementById('show').addEventListener('load', () => {
         .incognito(true)
         .build()
         .unwrap();
+        if !titled {
+            let plain = on_main(&window, |webview, _, tx| {
+                let _ = tx.send(webview.window().unwrap().toolbar().is_none());
+            });
+            check("other-native-windows-do-not-acquire-a-toolbar", plain, json!(plain));
+        }
         if titled {
-            crate::macos_show_titlebar::install(&window, "Share".to_owned(), "/workbench".to_owned());
+            crate::macos_show_titlebar::install(
+                &window,
+                ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
+                format!("{origin}/workbench").parse().unwrap(),
+                |_| {},
+            );
         }
         std::thread::sleep(Duration::from_millis(800));
         let views = on_main(&window, |webview, _, tx| {
@@ -528,7 +662,12 @@ document.getElementById('show').addEventListener('load', () => {
         .incognito(true)
         .build()
         .unwrap();
-        crate::macos_show_titlebar::install(&window, "Share".to_owned(), "/workbench".to_owned());
+        crate::macos_show_titlebar::install(
+            &window,
+            ["Annotate", "Open Chat", "Share", "Open in Browser"].map(str::to_owned),
+            format!("{origin}/workbench").parse().unwrap(),
+            |_| {},
+        );
         // Runs `body` in the page, then reads the window's title and drawn title.
         let titled = |body: &'static str| {
             script(&window, body, vec![]);
@@ -612,12 +751,97 @@ document.getElementById('show').addEventListener('load', () => {
 
         /// Presses the share button, as a click would.
         pub fn press(window: &NSWindow) -> bool {
-            let Some(button) = host(window).and_then(|host| button(&host)) else {
+            press_index(window, 2)
+        }
+
+        pub fn press_index(window: &NSWindow, index: isize) -> bool {
+            let Some(button) = host(window).and_then(|host| {
+                host.subviews()
+                    .iter()
+                    .filter_map(|view| view.downcast::<NSButton>().ok())
+                    .find(|button| button.tag() == index)
+            }) else {
                 return false;
             };
             // SAFETY: A plain button click, on the main thread.
             unsafe { button.performClick(None) };
             true
+        }
+
+        pub fn controls(window: &NSWindow) -> bool {
+            let Some(host) = host(window) else {
+                return false;
+            };
+            let buttons: Vec<_> = host
+                .subviews()
+                .iter()
+                .filter_map(|view| view.downcast::<NSButton>().ok())
+                .collect();
+            let height = window.frame().size.height - window.contentLayoutRect().size.height;
+            let middle = window.frame().size.height - height / 2.0;
+            let centered = |view: &NSView| {
+                let bounds = view.bounds();
+                let point = view.convertPoint_toView(
+                    objc2_foundation::NSPoint::new(bounds.size.width / 2.0, bounds.size.height / 2.0),
+                    None,
+                );
+                (point.y - middle).abs() <= 0.5
+            };
+            window.toolbarStyle() == objc2_app_kit::NSWindowToolbarStyle::UnifiedCompact
+                && window.toolbar().is_some()
+                && window
+                    .standardWindowButton(NSWindowButton::CloseButton)
+                    .is_some_and(|button| centered(&button))
+                && buttons.len() == 4
+                && buttons.iter().enumerate().all(|(index, button)| {
+                    let frame = button.frame();
+                    button.tag() == index as isize
+                        && frame.size.width == 28.0
+                        && frame.size.height == 28.0
+                        && frame.origin.x == 4.0 + index as f64 * 32.0
+                        && centered(button)
+                })
+                && host.frame().size.width == 137.0
+                && host.frame().size.height == height
+        }
+
+        /// Capture this offscreen window's real system title-bar appearance, without pretending a
+        /// per-window appearance override also changes AppKit's separate accessory backdrop.
+        pub fn capture(window: &NSWindow, directory: &std::path::Path) {
+            use objc2::msg_send;
+            use objc2_app_kit::NSBitmapImageFileType;
+            use objc2_foundation::NSDictionary;
+            let bar = bar(window).unwrap();
+            let host = host(window).unwrap();
+            let buttons: Vec<_> = host
+                .subviews()
+                .iter()
+                .filter_map(|view| view.downcast::<NSButton>().ok())
+                .collect();
+            for hover in [false, true] {
+                // SAFETY: Shipping subclass accepts an optional event; only its hover state is changed.
+                unsafe {
+                    let _: () = if hover {
+                        msg_send![&buttons[1], mouseEntered: std::ptr::null::<AnyObject>()]
+                    } else {
+                        msg_send![&buttons[1], mouseExited: std::ptr::null::<AnyObject>()]
+                    };
+                }
+                bar.display();
+                let rect = bar.bounds();
+                let bitmap = bar.bitmapImageRepForCachingDisplayInRect(rect).unwrap();
+                bar.cacheDisplayInRect_toBitmapImageRep(rect, &bitmap);
+                // SAFETY: PNG takes an empty property dictionary.
+                let data = unsafe {
+                    bitmap.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+                }
+                .unwrap();
+                std::fs::write(
+                    directory.join(format!("titlebar-{}.png", if hover { "hover" } else { "idle" })),
+                    data.to_vec(),
+                )
+                .unwrap();
+            }
         }
 
         /// The drawn title's text, whether it shows, how far it reaches, where the

@@ -179,6 +179,86 @@
         }
       }
     },
+    "health.connection_timed_out" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The connection hasn't responded. Reopen Avibe and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接未响应。请重新打开 Avibe 后再试。"
+          }
+        }
+      }
+    },
+    "health.summary" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sync your steps, activity, workouts, and sleep to %@, keeping the last 30 days."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将你的步数、活动、锻炼和睡眠数据同步到 %@，保留最近 30 天。"
+          }
+        }
+      }
+    },
+    "health.access_summary" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All Agents on this instance can read this data. You can disconnect and delete synced Health data at any time."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此实例的所有 Agent 都能读取这些数据。可随时断开连接，删除已同步的健康数据。"
+          }
+        }
+      }
+    },
+    "health.privacy_details" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Privacy and connection details"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "隐私与连接说明"
+          }
+        }
+      }
+    },
+    "health.no_recent_steps" : {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "There are no step records for the last 7 days. To sync steps, check read access in Settings › Privacy & Security › Health › Avibe."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近 7 天没有步数记录。要同步步数，请到『设置 › 隐私与安全性 › 健康 › Avibe』检查读取权限。"
+          }
+        }
+      }
+    },
     "health.ok" : {
       "localizations": {
         "en": {

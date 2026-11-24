@@ -18,7 +18,7 @@ The shell advertises `systemSchedule: 1` and accepts only:
 - `systemSchedule.request` with exactly `requestId`, `operationId`, `kind`, `title`, `fireAt`, `timeZone`, `recurrence`, `instanceId`, `sessionId`, and `expiresAt`. `recurrence` is `null` in this slice.
 - `systemSchedule.cancel` with exactly `requestId`, `operationId`, `kind`, and `purpose`. `purpose` is fixed to the closed value `user`; Runtime does not create compensation attempts and no raw platform API is exposed.
 
-`kind` is `alarm` or `reminder`. The first slice exposes exactly one creation path per OS: iOS 26+ supports fixed-time AlarmKit alarms; iOS 17–25 supports EventKit reminders. The capability response names only the product path supported on that OS and maps framework authorization to `not_determined`, `authorized`, `denied`, `restricted`, or `unsupported`. A reminder created before an OS upgrade can still be cancelled through its retained record, but iOS 26 does not advertise or create new reminders.
+`kind` is `alarm` or `reminder`. iOS 26+ supports both fixed-time AlarmKit alarms and EventKit reminders; iOS 17.4–25 supports EventKit reminders. The capability response reports both kinds on iOS 26+ and maps each framework's independent authorization to `not_determined`, `authorized`, `denied`, `restricted`, or `unsupported`. A denied alarm permission does not block reminders or change the requested kind. Existing items retain their recorded kind and identity through OS upgrades, recovery and cancellation.
 
 A receipt has contract version 1, request/operation/kind identity, `state`, the requested fire instant and time zone, current authorization, an opaque system identifier when one exists, and a stable error object when applicable. Terminal receipt states are:
 
@@ -132,10 +132,10 @@ On explicit logout, completed records for the persisted active owner become perm
 
 ## Platform implementation
 
-- iOS 26+: fixed-date `AlarmManager.schedule`, with product authorization mapping and `AlarmManager.cancel`.
-- iOS 17–25: `requestFullAccessToReminders`, default Reminders calendar, explicit due components/time zone, absolute `EKAlarm`, and exact matching by the deterministic Avibe metadata URL. Lookup returns `exists`, conclusively absent, or unknown; unknown never authorizes duplicate creation or claims successful cancellation.
+- iOS 26+ alarms: fixed-date `AlarmManager.schedule`, with product authorization mapping and `AlarmManager.cancel`.
+- iOS 17.4+ reminders, including iOS 26+: `requestFullAccessToReminders`, default Reminders calendar, explicit due components/time zone, absolute `EKAlarm`, and exact matching by the deterministic Avibe metadata URL. Lookup returns `exists`, conclusively absent, or unknown; unknown never authorizes duplicate creation or claims successful cancellation.
 - App target only: add localized `NSAlarmKitUsageDescription` and `NSRemindersFullAccessUsageDescription`. NotificationService and entitlements remain unchanged.
-- If the pinned Xcode 26.6 archive or Apple signing path requires an AlarmKit capability/profile change, stop and report it; do not change Portal state or signing assets in this branch.
+- If the pinned Xcode 27.2 archive or Apple signing path requires an AlarmKit capability/profile change, stop and report it; do not change Portal state or signing assets in this branch.
 
 ## User confirmation
 
@@ -158,8 +158,8 @@ The user can cancel or create the item. Submission remains visibly in progress w
 4. NativeBridge method allowlist, metadata, exact-origin/main-frame/primary-WebView tests.
 5. AppModel confirmation and generation/account/instance invalidation tests.
 6. Focused XCTest, full owning XCTest, and unsigned simulator/device-architecture builds locally.
-7. Before Internal TestFlight: send main the exact new copy list, phone acceptance route, and Xcode 26.6/profile gate status.
-8. Because the signed TestFlight workflow is master-only, open and fully gate the PR first; after main merges it, dispatch the merge commit to Internal TestFlight and keep real-device behavior as a separate evidence layer.
+7. Before Internal TestFlight: send main the exact new copy list, phone acceptance route, and Xcode 27.2/profile gate status.
+8. Agree the user-visible Native acceptance route with main before opening a PR. The signed TestFlight workflow is master-only; using it as the only physical acceptance route requires Max's explicit approval of a pre-acceptance PR exception. Keep real-device behavior as a separate evidence layer. The coexistence lane does not authorize signing, installation or TestFlight dispatch; see [its acceptance boundary](ios26-schedule-coexistence.md).
 
 ## D2 supported-kind claims
 

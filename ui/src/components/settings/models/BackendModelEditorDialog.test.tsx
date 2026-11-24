@@ -68,7 +68,7 @@ const protocol = () => within(screen.getByRole('radiogroup', { name: 'API' }));
 const protocolAnswer = (): string | null =>
   protocol().getAllByRole('radio').find((radio) => radio.getAttribute('aria-checked') === 'true')?.textContent ?? null;
 
-const modelField = () => screen.getByLabelText('Model') as HTMLInputElement;
+const modelField = () => screen.getByLabelText('Model ID') as HTMLInputElement;
 
 const spy = () => vi.spyOn(modelsApi, 'searchModelsDev');
 let search: ReturnType<typeof spy>;
@@ -87,10 +87,10 @@ afterEach(() => {
 describe('BackendModelEditorDialog', () => {
   it('stays open on a click outside, keeping the model being typed', async () => {
     const { onCancel } = renderEditor();
-    await userEvent.type(screen.getByLabelText('Model'), 'my-finetune');
+    await userEvent.type(screen.getByLabelText('Model ID'), 'my-finetune');
     await pressOutside();
     expect(onCancel).not.toHaveBeenCalled();
-    expect((screen.getByLabelText('Model') as HTMLInputElement).value).toBe('my-finetune');
+    expect((screen.getByLabelText('Model ID') as HTMLInputElement).value).toBe('my-finetune');
   });
 
   it.each(['claude', 'codex', 'opencode'] as const)('does not add Off when saving an existing %s model', async (backend) => {
@@ -131,21 +131,6 @@ describe('BackendModelEditorDialog', () => {
       cleanup();
       await i18n.changeLanguage(previous);
     }
-  });
-
-  it('closes only the suggestion list on the first Escape, and the editor on the next', async () => {
-    const { onCancel } = renderEditor();
-    const user = userEvent.setup();
-    await user.type(modelField(), 'qwen');
-    expect(await screen.findByRole('listbox')).toBeTruthy();
-
-    await user.keyboard('{Escape}');
-    expect(screen.queryByRole('listbox')).toBeNull();
-    expect(onCancel).not.toHaveBeenCalled();
-    expect(modelField().value).toBe('qwen');
-
-    await user.keyboard('{Escape}');
-    expect(onCancel).toHaveBeenCalledTimes(1);
   });
 
   it('closes only the custom effort field on Escape', async () => {
@@ -227,7 +212,7 @@ describe('BackendModelEditorDialog', () => {
     }));
   });
 
-  it('keeps the ID read-only in edit mode and commits the edited row', async () => {
+  it('keeps a saved row under its ID when the ID is left alone, and commits the edited row', async () => {
     const user = userEvent.setup();
     const existing: BackendModel = {
       ...blankBackendModel(),
@@ -241,16 +226,10 @@ describe('BackendModelEditorDialog', () => {
     const { onCommit } = renderEditor({ model: existing, takenIds: new Set([existing.id]) });
 
     expect(screen.getByRole('heading', { name: 'Edit model' })).toBeTruthy();
-    expect(modelField().readOnly).toBe(true);
-    await user.type(modelField(), 'suffix');
-    expect(modelField().value).toBe('anthropic/claude-opus-4');
-    // A saved row's id is not a search: the one metadata source this dialog has
-    // belongs to the field the user can still answer.
-    expect(screen.queryByRole('listbox')).toBeNull();
-    expect(search).not.toHaveBeenCalled();
-    // A saved models.dev row is not a fresh pick: there is no base to name or clear.
-    expect(screen.queryByText(/Parameters from/)).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Clear parameters' })).toBeNull();
+    expect(modelField().readOnly).toBe(false);
+    // Nothing was changed, so nothing is said about changing it.
+    expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+    expect(document.querySelector('.model-hub-model-source-line')?.textContent).toContain('Parameters from claude-opus-4');
 
     // The grouped form is what the field shows, so the grouped form is what it
     // must accept back.
@@ -267,6 +246,136 @@ describe('BackendModelEditorDialog', () => {
     }));
   });
 
+  // ui/design: models/model-menu/rename-model, rename-model-unrouted
+  describe('changing a saved model\'s ID', () => {
+    const saved: BackendModel = { ...blankBackendModel(), id: 'relay-opus', origin: 'provider', context_window: 200000, max_output_tokens: 32000 };
+    const rename = async (user: ReturnType<typeof userEvent.setup>, to: string) => {
+      await user.clear(modelField());
+      if (to) await user.type(modelField(), to);
+    };
+
+    it.each([
+      ['vibey', false],
+      ['claude', true],
+      ['codex', true],
+      ['opencode', true],
+    ] as const)('says what the change carries along on %s, and warns of a running conversation only where one can break', async (backend, warns) => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ backend, model: { ...saved, ...(backend === 'opencode' ? { native_protocol: 'openai_responses' as const } : {}) }, takenIds: new Set([saved.id, 'taken']) });
+
+      await rename(user, 'relay-opus-2');
+      const note = screen.getByText(/Agents and Sessions that use this model switch to the new ID/);
+      expect(note.textContent).toContain('An old ID written in a command or script does not change.');
+      expect(note.textContent?.includes('A conversation in progress may be interrupted.')).toBe(warns);
+      // Every parameter stays; only the ID moves.
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'relay-opus-2', origin: 'provider', context_window: 200000, max_output_tokens: 32000 }));
+    });
+
+    it('refuses an empty ID or one another row holds, and lets the row keep its own', async () => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ model: saved, takenIds: new Set([saved.id, 'taken']) });
+
+      await rename(user, 'taken');
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(screen.getByRole('alert').textContent).toBe('This list already has a model with this ID.');
+      // A refused ID is not a rename to describe.
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      await rename(user, '');
+      expect(screen.getByRole('alert').textContent).toBe('Enter a backend model ID.');
+      expect(onCommit).not.toHaveBeenCalled();
+      // Typed back to what it was: its own ID is not somebody else's.
+      await rename(user, saved.id);
+      expect(screen.queryByRole('alert')).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: saved.id }));
+    });
+
+    it('warns that a row following default routing has no route under an ID no provider lists', async () => {
+      const user = userEvent.setup();
+      const readListedIds = vi.fn().mockResolvedValue(new Set(['listed-by-a-provider']));
+      renderEditor({ model: saved, takenIds: new Set([saved.id]), readListedIds });
+      // Opening the row asks nothing: the question exists only once the ID changes.
+      expect(readListedIds).not.toHaveBeenCalled();
+
+      await rename(user, 'nobody-lists-this');
+      expect(await screen.findByText('No provider lists this ID. After saving, set its route separately.')).toBeTruthy();
+      await rename(user, 'listed-by-a-provider');
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+    });
+
+    it('does not warn about routing for a row that has a route of its own, which moves with it', async () => {
+      const user = userEvent.setup();
+      const readListedIds = vi.fn().mockResolvedValue(new Set<string>());
+      renderEditor({ model: saved, takenIds: new Set([saved.id]), ownRoute: true, readListedIds });
+
+      await rename(user, 'nobody-lists-this');
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+      expect(readListedIds).not.toHaveBeenCalled();
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+    });
+
+    it('takes the row\'s own ID typed back with spaces around it as no change', async () => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ model: saved, takenIds: new Set([saved.id]) });
+
+      await rename(user, `  ${saved.id} `);
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledTimes(1);
+      expect(onCommit.mock.calls[0][0].id).toBe(saved.id);
+    });
+
+    it('refuses an ID that is waiting on a save of the list, and says to save first', async () => {
+      const user = userEvent.setup();
+      const { onCommit } = renderEditor({ model: saved, takenIds: new Set([saved.id]), reservedIds: new Set(['held-until-saved']) });
+
+      await rename(user, 'held-until-saved');
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(screen.getByRole('alert').textContent).toBe('This ID can’t be used yet. Save the model list first, then use it.');
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      expect(onCommit).not.toHaveBeenCalled();
+    });
+
+    it('says nothing of Agents and Sessions for a row the list has not saved yet', async () => {
+      const user = userEvent.setup();
+      const readListedIds = vi.fn().mockResolvedValue(new Set<string>());
+      const { onCommit } = renderEditor({ model: saved, savedId: null, takenIds: new Set([saved.id]), readListedIds });
+
+      await rename(user, 'relay-opus-2');
+      // Nothing uses a row that was never saved, so nothing is carried along or interrupted.
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+      expect(screen.queryByText(/No provider lists this ID/)).toBeNull();
+      expect(readListedIds).not.toHaveBeenCalled();
+      await user.click(screen.getByRole('button', { name: 'Save model' }));
+      expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'relay-opus-2' }));
+    });
+
+    it('keeps saying it for a row already renamed in this draft, until it is back at the ID the server knows', async () => {
+      const user = userEvent.setup();
+      renderEditor({ model: { ...saved, id: 'relay-opus-2' }, savedId: saved.id, takenIds: new Set(['relay-opus-2']) });
+
+      // Opened again before the list was saved: saving still moves the model.
+      expect(screen.getByText(/switch to the new ID/)).toBeTruthy();
+      await rename(user, saved.id);
+      expect(screen.queryByText(/switch to the new ID/)).toBeNull();
+    });
+
+    it('keeps one status region mounted, empty until there is something to say', async () => {
+      const user = userEvent.setup();
+      renderEditor({ model: saved, takenIds: new Set([saved.id]) });
+
+      // Mounted before it speaks: a region that arrives with its text is not announced.
+      const status = screen.getByRole('status');
+      expect(status.textContent).toBe('');
+      expect(status.childNodes.length).toBe(0);
+      await rename(user, 'relay-opus-2');
+      expect(screen.getByRole('status')).toBe(status);
+      expect(status.textContent).toContain('switch to the new ID');
+    });
+  });
+
   it('refuses a token count that is not a whole number', async () => {
     const user = userEvent.setup();
     const { onCommit } = renderEditor();
@@ -277,97 +386,6 @@ describe('BackendModelEditorDialog', () => {
 
     expect(screen.getByLabelText('Context window').getAttribute('aria-invalid')).toBe('true');
     expect(onCommit).not.toHaveBeenCalled();
-  });
-
-  it('fills every field a suggestion knows, the ID included, and leaves each editable', async () => {
-    const user = userEvent.setup();
-    search.mockResolvedValue([match()]);
-    const { onCommit } = renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
-
-    // Choosing a suggestion is choosing a model: the row becomes the model that
-    // was picked, under the id its provider publishes — not the catalog key, and
-    // not the half-typed query that found it.
-    expect(modelField().value).toBe(match().model_id);
-    expect(screen.queryByRole('listbox')).toBeNull();
-    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Claude Sonnet 4.5');
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
-    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('64,000');
-    expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('true');
-    expect(answered('Reasoning')).toBe('Yes');
-
-    // Every filled field stays the user's: what they wanted may be the model
-    // next to the one they found.
-    await user.click(modalities('Input').getByRole('checkbox', { name: 'Image' }));
-    await user.clear(screen.getByLabelText('Maximum output'));
-    await user.type(screen.getByLabelText('Maximum output'), '8000');
-    await user.click(screen.getByRole('checkbox', { name: 'low' }));
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
-      id: match().model_id,
-      models_dev_id: match().models_dev_id,
-      display_name: 'Claude Sonnet 4.5',
-      origin: 'models_dev',
-      input_modalities: ['text'],
-      max_output_tokens: 8000,
-      reasoning_efforts: ['high'],
-    }));
-  });
-
-  it('offers each match once and keeps the keyboard on the same rows as the pointer', async () => {
-    const user = userEvent.setup();
-    search.mockResolvedValue([
-      match(),
-      match({
-        provider_id: 'bedrock',
-        provider_name: 'Amazon Bedrock',
-        model_id: 'anthropic.claude-sonnet-4-5-v1',
-        models_dev_id: 'bedrock/claude-sonnet-4-5',
-        display_name: 'Sonnet 4.5 (Bedrock)',
-        context_window: 180000,
-      }),
-    ]);
-    renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
-    // Every match, plus the escape — one row per answer and one row for the
-    // query itself, so the list can never dead-end.
-    const rows = screen.getAllByRole('option');
-    expect(rows[2].textContent).toContain('Use "sonnet" as the model ID');
-    // Nothing is filled by merely being offered.
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
-
-    // The field keeps the caret and the list keeps the focus ring: the active
-    // row is what Enter takes, whichever way it was reached.
-    await user.keyboard('{ArrowDown}{Enter}');
-
-    expect(modelField().value).toBe('anthropic.claude-sonnet-4-5-v1');
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
-    expect(screen.queryByRole('listbox')).toBeNull();
-  });
-
-  it('takes an OpenCode query as the bare model ID', async () => {
-    const user = userEvent.setup();
-    const { onCommit } = renderEditor({ backend: 'opencode' });
-
-    await user.type(modelField(), 'glm-4.7');
-    await user.click(await screen.findByRole('option', { name: 'Use "glm-4.7" as the model ID' }));
-
-    expect(modelField().value).toBe('glm-4.7');
-    // An id nobody published says nothing about how it is spoken to, and the two
-    // answers are not equally likely: OpenAI Responses is what a self-hosted or
-    // proxied endpoint almost always is.
-    expect(protocolAnswer()).toBe('OpenAI Responses');
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'glm-4.7',
-      origin: 'manual',
-      native_protocol: 'openai_responses',
-    }));
   });
 
   it('asks for the API only where there is a choice, and asks for it last', () => {
@@ -386,30 +404,6 @@ describe('BackendModelEditorDialog', () => {
     // form reads as the model first and the wiring after it.
     const fields = Array.from(document.querySelectorAll('[role="group"],[role="radiogroup"]'));
     expect(fields.at(-1)?.getAttribute('aria-label')).toBe('API');
-  });
-
-  it('takes the API from the model that was picked, and commits the one the user changes it to', async () => {
-    const user = userEvent.setup();
-    search.mockResolvedValue([match({ model_id: 'glm-4.7', display_name: 'GLM 4.7' })]);
-    const { onCommit } = renderEditor({ backend: 'opencode' });
-
-    await user.type(modelField(), 'glm');
-    await user.click(await screen.findByRole('option', { name: /GLM 4\.7/ }));
-
-    // models.dev knows whose model this is, and the vendor family is what the
-    // protocol follows from — so a picked model arrives already answered.
-    expect(protocolAnswer()).toBe('Anthropic Messages');
-
-    // And the answer is still the user's: an endpoint that serves someone else's
-    // model over the other API is exactly the case this field exists for.
-    await user.click(protocol().getByRole('radio', { name: 'OpenAI Responses' }));
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'glm-4.7',
-      origin: 'models_dev',
-      native_protocol: 'openai_responses',
-    }));
   });
 
   it('opens a saved OpenCode row on the API it is stored with', async () => {
@@ -432,51 +426,360 @@ describe('BackendModelEditorDialog', () => {
     }));
   });
 
-  it('takes the query verbatim on a backend whose IDs have no provider segment', async () => {
+  // ── The catalog and the form ───────────────────────────────────────────
+  // ui/design: models/model-menu/custom-model-exact, -closest, -unmatched,
+  // -offer, -change. The ID is the user's. The catalog fills a blank form with
+  // what it knows about the model that ID answers to; once parameters are on
+  // screen it only offers; 「Change」 applies another model's parameters. None of
+  // them touches the ID or the display name.
+  const source = () => within(document.querySelector<HTMLElement>('[data-model-source]')!);
+  const sourceLine = () => document.querySelector<HTMLElement>('.model-hub-model-source-line')!.textContent;
+
+  it('fills a blank form from what the catalog knows about the typed ID, and leaves the ID and the name alone', async () => {
     const user = userEvent.setup();
-    const { onCommit } = renderEditor({ backend: 'claude' });
+    search.mockResolvedValue([match()]);
+    const { onCommit } = renderEditor();
 
-    await user.type(modelField(), 'claude-house-1');
-    await user.click(await screen.findByRole('option', { name: 'Use "claude-house-1" as the model ID' }));
+    await user.type(modelField(), match().model_id);
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
 
-    expect(modelField().value).toBe('claude-house-1');
+    expect(sourceLine()).toContain(`Parameters from ${match().model_id}`);
+    expect(modelField().value).toBe(match().model_id);
+    // The name is the user's to give; the list shows the ID without one.
+    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('64,000');
+    expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('true');
+    expect(answered('Reasoning')).toBe('Yes');
+
+    // Every filled field stays the user's.
+    await user.click(modalities('Input').getByRole('checkbox', { name: 'Image' }));
+    await user.clear(screen.getByLabelText('Maximum output'));
+    await user.type(screen.getByLabelText('Maximum output'), '8000');
+    await user.click(screen.getByRole('checkbox', { name: 'low' }));
     await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'claude-house-1' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: match().model_id,
+      models_dev_id: match().models_dev_id,
+      display_name: null,
+      origin: 'models_dev',
+      input_modalities: ['text'],
+      max_output_tokens: 8000,
+      reasoning_efforts: ['high'],
+    }));
   });
 
-  it('opens on the query the picker carried over', async () => {
+  it('says so when the parameters come from the closest registered model, not the ID itself', async () => {
+    // A provider's name for a variant: the catalog files nothing under it and
+    // answers with its base, under the ID that was asked about.
+    search.mockResolvedValue([match({ match_kind: 'closest', model_id: 'claude-sonnet-4-5-thinking' })]);
+    const { onCommit } = renderEditor({ seedId: 'claude-sonnet-4-5-thinking' });
+
+    await waitFor(() => expect(sourceLine()).toContain('Parameters from the closest match, claude-sonnet-4-5'));
+    expect(modelField().value).toBe('claude-sonnet-4-5-thinking');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'claude-sonnet-4-5-thinking',
+      models_dev_id: 'anthropic/claude-sonnet-4-5',
+      context_window: 200000,
+    }));
+  });
+
+  it('says the catalog has no such model, and offers common limits while the boxes are empty', async () => {
+    const user = userEvent.setup();
+    const { onCommit } = renderEditor({ seedId: 'my-private-model-v2' });
+
+    expect(await source().findByText('The model catalog has no match for this model')).toBeTruthy();
+    const limits = screen.getAllByRole('group', { name: 'Common values' });
+    expect(limits.map((group) => within(group).getAllByRole('button').map((button) => button.textContent)))
+      .toEqual([['128K', '200K', '400K', '1M'], ['8K', '32K', '64K', '128K']]);
+    // Round thousands: 「64K」 must not exceed what a model sold as 64K allows.
+    await user.click(within(limits[1]).getByRole('button', { name: '64K' }));
+    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('64,000');
+    await user.clear(screen.getByLabelText('Maximum output'));
+    await user.click(within(limits[0]).getByRole('button', { name: '200K' }));
+    // A box with a value needs no suggestions.
+    expect(screen.getAllByRole('group', { name: 'Common values' })).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'my-private-model-v2', origin: 'manual', context_window: 200000, max_output_tokens: null }));
+  });
+
+  it('offers, and does not apply, the parameters an edited ID answers to', async () => {
+    const user = userEvent.setup();
+    const opus = match({ model_id: 'claude-opus-4', models_dev_id: 'anthropic/claude-opus-4', display_name: 'Claude Opus 4', context_window: 1000000 });
+    search.mockImplementation(async (query) => (query === 'claude-opus-4' ? [opus] : query === match().model_id ? [match()] : []));
+    const { onCommit } = renderEditor({ seedId: match().model_id });
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
+
+    await user.clear(modelField());
+    await user.type(modelField(), 'claude-opus-4');
+    const offer = await source().findByRole('button', { name: 'Update parameters to claude-opus-4' });
+    // Nothing moved: the numbers on screen may be the user's own by now.
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
+    expect(sourceLine()).toContain(`Parameters from ${match().model_id}`);
+
+    await user.click(offer);
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('1,000,000');
+    expect(source().queryByRole('button', { name: /Update parameters/ })).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'claude-opus-4', models_dev_id: 'anthropic/claude-opus-4', context_window: 1000000 }));
+  });
+
+  it('treats a draft reopened after a refused write as worked on: offered, not refilled', async () => {
+    search.mockResolvedValue([match()]);
+    const written: BackendModel = { ...blankBackendModel(), id: match().model_id, context_window: 32000 };
+    renderEditor({ draftSeed: written });
+
+    expect(await source().findByRole('button', { name: `Update parameters to ${match().model_id}` })).toBeTruthy();
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('32,000');
+  });
+
+  it('offers another provider\'s entry for the same model name, by its whole key', async () => {
+    const user = userEvent.setup();
+    const relay = match({ provider_id: 'relay', provider_name: 'Relay', model_id: `relay/${match().model_id}`, models_dev_id: `relay/${match().model_id}`, context_window: 2000 });
+    search.mockImplementation(async (query) => (query === match().model_id ? [match()] : query === relay.model_id ? [relay] : []));
+    renderEditor({ seedId: match().model_id });
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
+
+    await user.clear(modelField());
+    await user.type(modelField(), relay.model_id);
+    // Same registered name, a different entry with its own limits: still an offer,
+    // and named so it cannot be mistaken for the one already applied.
+    await user.click(await source().findByRole('button', { name: `Update parameters to ${relay.models_dev_id}` }));
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('2,000');
+  });
+
+  it('keeps an API the user chose before the catalog answered', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match({ model_id: 'glm-4.7' })]);
+    renderEditor({ backend: 'opencode' });
+
+    await user.click(protocol().getByRole('radio', { name: 'OpenAI Responses' }));
+    await user.type(modelField(), 'glm-4.7');
+    // Choosing the API is work on the form: the answer is offered, not poured in over it.
+    expect(await source().findByRole('button', { name: 'Update parameters to claude-sonnet-4-5' })).toBeTruthy();
+    expect(protocolAnswer()).toBe('OpenAI Responses');
+  });
+
+  it('does not fill a form somebody has worked on; it offers instead', async () => {
+    const user = userEvent.setup();
+    search.mockImplementation(async (query) => (query === match().model_id ? [match()] : []));
+    renderEditor();
+
+    await user.type(screen.getByLabelText('Context window'), '32000');
+    await user.type(modelField(), match().model_id);
+    expect(await source().findByRole('button', { name: `Update parameters to ${match().model_id}` })).toBeTruthy();
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('32,000');
+  });
+
+  it('applies another model\'s parameters through Change, keeping the ID and the name', async () => {
+    const user = userEvent.setup();
+    const opus = match({ model_id: 'claude-opus-4', models_dev_id: 'anthropic/claude-opus-4', display_name: 'Claude Opus 4', context_window: 1000000 });
+    search.mockImplementation(async (query) => (query === 'opus' ? [opus, match()] : []));
+    const { onCommit } = renderEditor({ seedId: 'house-model' });
+    await source().findByText('The model catalog has no match for this model');
+    await user.type(screen.getByLabelText('Display name'), 'House model');
+
+    await user.click(source().getByRole('button', { name: 'Pick a model to copy parameters from' }));
+    await user.type(screen.getByLabelText('Search the model catalog'), 'opus');
+    await user.click(await source().findByRole('button', { name: /Claude Opus 4/ }));
+
+    // Applied and closed, focus back on the line it belongs to. The user chose
+    // this model; nobody judged it the closest, so the line does not say so.
+    expect(screen.queryByLabelText('Search the model catalog')).toBeNull();
+    expect(sourceLine()).toContain('Parameters from claude-opus-4');
+    expect(sourceLine()).not.toContain('closest');
+    expect(document.activeElement).toBe(source().getByRole('button', { name: 'Change' }));
+    expect(modelField().value).toBe('house-model');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'house-model', display_name: 'House model', models_dev_id: 'anthropic/claude-opus-4', context_window: 1000000,
+    }));
+  });
+
+  it('empties the parameters on request, and stops filling them', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match()]);
+    const { onCommit } = renderEditor({ seedId: match().model_id });
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
+
+    await user.click(source().getByRole('button', { name: 'Change' }));
+    await user.click(screen.getByRole('button', { name: 'Fill in myself' }));
+
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
+    expect(answered('Reasoning')).toBe('No');
+    // The catalog still knows the model; it is offered again, not poured back in.
+    expect(source().getByRole('button', { name: `Update parameters to ${match().model_id}` })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: match().model_id, origin: 'manual', models_dev_id: null, context_window: null }));
+  });
+
+  it('closes only the catalog search on the first Escape, and the editor on the next', async () => {
+    const { onCancel } = renderEditor();
+    const user = userEvent.setup();
+    await user.click(source().getByRole('button', { name: 'Pick a model to copy parameters from' }));
+    await user.type(screen.getByLabelText('Search the model catalog'), 'qwen');
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByLabelText('Search the model catalog')).toBeNull();
+    expect(onCancel).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('takes an OpenCode ID as typed, bare', async () => {
+    const user = userEvent.setup();
+    const { onCommit } = renderEditor({ backend: 'opencode' });
+
+    await user.type(modelField(), 'glm-4.7');
+    // An ID nobody published says nothing about how it is spoken to, and the two
+    // answers are not equally likely: OpenAI Responses is what a self-hosted or
+    // proxied endpoint almost always is.
+    expect(protocolAnswer()).toBe('OpenAI Responses');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'glm-4.7',
+      origin: 'manual',
+      native_protocol: 'openai_responses',
+    }));
+  });
+
+  it('takes the API from the model the ID answers to, and commits the one the user changes it to', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match({ model_id: 'glm-4.7', display_name: 'GLM 4.7' })]);
+    const { onCommit } = renderEditor({ backend: 'opencode' });
+
+    await user.type(modelField(), 'glm-4.7');
+    // The catalog knows whose model this is, and the vendor family is what the
+    // protocol follows from — so a described model arrives already answered.
+    await waitFor(() => expect(protocolAnswer()).toBe('Anthropic Messages'));
+
+    // And the answer is still the user's: an endpoint that serves someone else's
+    // model over the other API is exactly the case this field exists for.
+    await user.click(protocol().getByRole('radio', { name: 'OpenAI Responses' }));
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'glm-4.7',
+      origin: 'models_dev',
+      native_protocol: 'openai_responses',
+    }));
+  });
+
+  it('opens on the ID the picker carried over, and asks about it once', async () => {
     // The user already typed it once, in the picker's own search. Asking again
     // would be the surface forgetting.
-    search.mockResolvedValue([match()]);
+    search.mockResolvedValue([match({ model_id: 'sonnet' })]);
     renderEditor({ seedId: 'sonnet' });
 
     expect(modelField().value).toBe('sonnet');
-    expect(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ })).toBeTruthy();
+    await waitFor(() => expect(sourceLine()).toContain('Parameters from'));
+    expect(search).toHaveBeenCalledTimes(1);
     expect(search).toHaveBeenCalledWith('sonnet', expect.anything());
   });
 
-  it('answers the query the user is on, never the one they left', async () => {
-    // The answer describes the query that asked for it. Landing a late one would
-    // file one model's context window, modalities and efforts under another
-    // model's name.
+  it('answers about the ID the user is on, never the one they left', async () => {
     const user = userEvent.setup();
-    const pending = new Map<string, (matches: ModelsDevMatch[]) => void>();
-    search.mockImplementation((query) => new Promise((resolve) => { pending.set(query, resolve); }));
-    renderEditor();
+    let answerFirst!: (matches: ModelsDevMatch[]) => void;
+    search.mockImplementation((query) => (query === 'old-id'
+      ? new Promise<ModelsDevMatch[]>((resolve) => { answerFirst = resolve; })
+      : Promise.resolve([])));
+    renderEditor({ seedId: 'old-id' });
+    await waitFor(() => expect(search).toHaveBeenCalledWith('old-id', expect.anything()));
 
-    await user.type(modelField(), 'sonnet');
-    await waitFor(() => expect(pending.has('sonnet')).toBe(true));
-    await user.type(modelField(), '-4-5');
-    await waitFor(() => expect(pending.has('sonnet-4-5')).toBe(true));
-
-    await act(async () => { pending.get('sonnet')?.([match()]); });
-    expect(screen.queryByRole('option', { name: /Claude Sonnet 4\.5/ })).toBeNull();
-
-    await act(async () => { pending.get('sonnet-4-5')?.([match({ display_name: 'Sonnet, current' })]); });
-    expect(await screen.findByRole('option', { name: /Sonnet, current/ })).toBeTruthy();
+    await user.clear(modelField());
+    await user.type(modelField(), 'new-id');
+    await source().findByText('The model catalog has no match for this model');
+    // The late answer is about an ID no longer in the box: it fills nothing.
+    await act(async () => { answerFirst([match({ model_id: 'old-id' })]); });
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
+    expect(sourceLine()).not.toContain('Parameters from');
   });
 
-  it('debounces rapid model ID typing into one search request', async () => {
+  it('lets the user add their own model while the catalog is slow or unreachable', async () => {
+    const user = userEvent.setup();
+    search.mockRejectedValue(new ApiCallError('models_dev_unavailable', 'modelHub.errors.models_dev_unavailable'));
+    const { onCommit } = renderEditor();
+
+    await user.type(modelField(), 'house-model');
+    // No answer is no claim: the line neither names a model nor says none exists.
+    expect(sourceLine()).toBe('Pick a model to copy parameters from');
+    // Asked directly, it says why in its own words.
+    await user.click(source().getByRole('button', { name: 'Pick a model to copy parameters from' }));
+    await user.type(screen.getByLabelText('Search the model catalog'), 'house');
+    expect(await source().findByText('The model catalog is unavailable')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({ id: 'house-model', origin: 'manual' }));
+  });
+
+  it('keeps every parameter while the ID is edited, and saves them under the new ID', async () => {
+    const user = userEvent.setup();
+    search.mockImplementation(async (query) => (query === match().model_id ? [match()] : []));
+    const { onCommit } = renderEditor({ seedId: match().model_id });
+    await waitFor(() => expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000'));
+
+    // A relay's name for the same model: the parameters stay under the ID as it
+    // is retyped, and the line goes on naming the model they came from.
+    await user.type(modelField(), '-relay');
+    await waitFor(() => expect(search).toHaveBeenCalledWith(`${match().model_id}-relay`, expect.anything()));
+    expect(sourceLine()).toContain(`Parameters from ${match().model_id}`);
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: `${match().model_id}-relay`,
+      models_dev_id: match().models_dev_id,
+      origin: 'models_dev',
+      context_window: 200000,
+      max_output_tokens: 64000,
+      reasoning_efforts: ['low', 'high'],
+    }));
+  });
+
+  it('carries a capability the catalog does not state through the fill', async () => {
+    const user = userEvent.setup();
+    search.mockResolvedValue([match({ supports_tools: null, supports_reasoning: null, reasoning_efforts: [] })]);
+    const { onCommit } = renderEditor({ seedId: match().model_id });
+    await waitFor(() => expect(sourceLine()).toContain('Parameters from'));
+
+    expect(answered('Tool calling')).toBe('Not set');
+    expect(answered('Reasoning')).toBe('Not set');
+    await user.click(screen.getByRole('button', { name: 'Add model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      supports_tools: null,
+      supports_reasoning: null,
+    }));
+  });
+
+  it('leaves a saved row that has its limits alone, whatever the catalog would say', async () => {
+    const existing: BackendModel = { ...blankBackendModel(), id: 'claude-sonnet-4-5', origin: 'builtin', context_window: 180000, max_output_tokens: 32000 };
+    search.mockResolvedValue([match()]);
+    renderEditor({ model: existing, takenIds: new Set([existing.id]) });
+
+    await waitFor(() => expect(search).toHaveBeenCalled());
+    await act(async () => {});
+    // Opening a row to look at it is not a question about its numbers.
+    expect(sourceLine()).toBe('Pick a model to copy parameters from');
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('180,000');
+  });
+
+  it('offers a saved row what its ID answers to, and changes nothing about how the row was created', async () => {
+    const user = userEvent.setup();
+    // A row added before the catalog could describe it: no parameters, no source.
+    const existing: BackendModel = { ...blankBackendModel(), id: 'claude-sonnet-4-5-thinking', origin: 'provider' };
+    search.mockResolvedValue([match({ match_kind: 'closest', model_id: existing.id })]);
+    const { onCommit } = renderEditor({ model: existing, takenIds: new Set([existing.id]) });
+
+    const offer = await source().findByRole('button', { name: 'Update parameters to claude-sonnet-4-5' });
+    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
+    await user.click(offer);
+    await user.click(screen.getByRole('button', { name: 'Save model' }));
+    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
+      id: existing.id, origin: 'provider', models_dev_id: 'anthropic/claude-sonnet-4-5', context_window: 200000,
+    }));
+  });
+
+  it('debounces rapid model ID typing into one catalog read', async () => {
     vi.useFakeTimers();
     try {
       renderEditor();
@@ -496,164 +799,6 @@ describe('BackendModelEditorDialog', () => {
       vi.runOnlyPendingTimers();
       vi.useRealTimers();
     }
-  });
-
-  it('lets the user name their own model while models.dev is slow', async () => {
-    const user = userEvent.setup();
-    search.mockImplementation(() => new Promise<ModelsDevMatch[]>(() => {}));
-    const { onCommit } = renderEditor();
-
-    await user.type(modelField(), 'private/model');
-    expect(await screen.findByText('Searching models.dev…')).toBeTruthy();
-    // The escape is a row in every open state: a catalog that is slow to answer
-    // is not a reason the user may not name their own model.
-    await user.click(screen.getByRole('option', { name: 'Use "private/model" as the model ID' }));
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'private/model',
-      origin: 'manual',
-      models_dev_id: null,
-    }));
-  });
-
-  it('names an unreachable models.dev in its own words and still offers the query', async () => {
-    const user = userEvent.setup();
-    search
-      .mockRejectedValueOnce(new Error('offline'))
-      .mockRejectedValueOnce(new ApiCallError('upstream_unavailable', 'modelHub.errors.models_dev_unavailable', true));
-    renderEditor();
-
-    await user.type(modelField(), 'private/model');
-    expect(await screen.findByText('models.dev could not be reached')).toBeTruthy();
-    expect(screen.getByRole('option', { name: 'Use "private/model" as the model ID' })).toBeTruthy();
-
-    // The server separates 「the catalog itself is down」 from every other
-    // failure, and its key is never what the user reads.
-    await user.type(modelField(), '-2');
-    expect(await screen.findByText('models.dev unavailable')).toBeTruthy();
-    expect(screen.queryByText('modelHub.errors.models_dev_unavailable')).toBeNull();
-    expect(modelField().value).toBe('private/model-2');
-  });
-
-  it('keeps every parameter a picked model filled while the ID is edited, and saves them under the new ID', async () => {
-    // A catalog model picked as a base is the starting point for a model under
-    // another id — a relay's name for it — so retyping the id keeps the form.
-    const user = userEvent.setup();
-    search.mockResolvedValue([match()]);
-    const { onCommit } = renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
-    // The user's own edit on top of the fill is kept the same way.
-    await user.clear(screen.getByLabelText('Maximum output'));
-    await user.type(screen.getByLabelText('Maximum output'), '8000');
-
-    await user.type(modelField(), '-relay');
-    await user.click(screen.getByLabelText('Display name'));
-
-    expect(modelField().value).toBe('claude-sonnet-4-5-relay');
-    expect((screen.getByLabelText('Display name') as HTMLInputElement).value).toBe('Claude Sonnet 4.5');
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
-    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('8,000');
-    expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('true');
-    expect(answered('Tool calling')).toBe('Yes');
-    expect(answered('Reasoning')).toBe('Yes');
-    expect(screen.getByRole('checkbox', { name: 'high' }).getAttribute('aria-checked')).toBe('true');
-
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith({
-      ...blankBackendModel(),
-      id: 'claude-sonnet-4-5-relay',
-      display_name: 'Claude Sonnet 4.5',
-      origin: 'models_dev',
-      models_dev_id: 'anthropic/claude-sonnet-4-5',
-      context_window: 200000,
-      max_output_tokens: 8000,
-      input_modalities: ['text', 'image'],
-      output_modalities: ['text'],
-      supports_tools: true,
-      supports_reasoning: true,
-      reasoning_efforts: ['low', 'high'],
-    });
-  });
-
-  it('names the model the parameters came from, and clears them on request', async () => {
-    const user = userEvent.setup();
-    search.mockResolvedValue([match()]);
-    const { onCommit, onCancel } = renderEditor();
-
-    // Nothing to name while the form is the user's own.
-    expect(screen.queryByText(/Parameters from/)).toBeNull();
-    await user.type(modelField(), 'sonnet');
-    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
-    expect(screen.getByText('Parameters from Claude Sonnet 4.5')).toBeTruthy();
-
-    await user.type(modelField(), '-relay');
-    expect(screen.getByRole('listbox')).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: 'Clear parameters' }));
-
-    // The button leaves with its line; the caret stays in the id, so the list
-    // it is still showing is the one Escape closes — not the editor.
-    expect(document.activeElement).toBe(modelField());
-    expect(screen.getByRole('listbox')).toBeTruthy();
-    await user.keyboard('{Escape}');
-    expect(screen.queryByRole('listbox')).toBeNull();
-    expect(onCancel).not.toHaveBeenCalled();
-
-    expect(screen.queryByText(/Parameters from/)).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Clear parameters' })).toBeNull();
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('');
-    expect((screen.getByLabelText('Maximum output') as HTMLInputElement).value).toBe('');
-    expect(modalities('Input').getByRole('checkbox', { name: 'Image' }).getAttribute('aria-checked')).toBe('false');
-    expect(answered('Reasoning')).toBe('No');
-
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-    // The blank form under the id and name the user kept; no models.dev
-    // provenance survives the parameters it described.
-    expect(onCommit).toHaveBeenCalledWith({ ...blankBackendModel(), id: 'claude-sonnet-4-5-relay', display_name: 'Claude Sonnet 4.5' });
-  });
-
-  it('offers keeping the parameters first once a model is the base, so Enter keeps them', async () => {
-    const user = userEvent.setup();
-    const opus = match({ model_id: 'claude-opus-4-1', models_dev_id: 'anthropic/claude-opus-4-1', display_name: 'Claude Opus 4.1', context_window: 1000000 });
-    search.mockResolvedValue([match(), opus]);
-    const { onCommit } = renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
-    await user.type(modelField(), '-relay');
-    await waitFor(() => expect(screen.getAllByRole('option')).toHaveLength(3));
-    const rows = screen.getAllByRole('option');
-    expect(rows[0].textContent).toContain('Use "claude-sonnet-4-5-relay", keep current parameters');
-    expect(rows[0].getAttribute('aria-selected')).toBe('true');
-    expect(rows[1].textContent).toContain('Claude Sonnet 4.5');
-
-    // The Enter hint marks the row Enter takes, and follows the highlight.
-    expect(within(rows[0]).getByText('Enter')).toBeTruthy();
-    await user.keyboard('{ArrowDown}');
-    expect(within(screen.getAllByRole('option')[0]).queryByText('Enter')).toBeNull();
-    await user.keyboard('{ArrowUp}{Enter}');
-
-    expect(screen.queryByRole('listbox')).toBeNull();
-    expect(modelField().value).toBe('claude-sonnet-4-5-relay');
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('200,000');
-    expect(screen.getByText('Parameters from Claude Sonnet 4.5')).toBeTruthy();
-
-    // A different catalog row is a deliberate pick: its parameters replace these.
-    await user.type(modelField(), 'x');
-    await user.click(await screen.findByRole('option', { name: /Claude Opus 4\.1/ }));
-    expect(modelField().value).toBe('claude-opus-4-1');
-    expect((screen.getByLabelText('Context window') as HTMLInputElement).value).toBe('1,000,000');
-    expect(screen.getByText('Parameters from Claude Opus 4.1')).toBeTruthy();
-
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'claude-opus-4-1',
-      display_name: 'Claude Opus 4.1',
-      models_dev_id: 'anthropic/claude-opus-4-1',
-      context_window: 1000000,
-    }));
   });
 
   it('keeps hand-typed metadata while the user corrects the ID', async () => {
@@ -676,24 +821,6 @@ describe('BackendModelEditorDialog', () => {
       context_window: 32000,
       input_modalities: ['text', 'image'],
     }));
-  });
-
-  it('closes the suggestion list once the user is working somewhere else', async () => {
-    // It is an overlay over the fields below it, so an open list the user has
-    // left is covering the controls they moved on to.
-    const user = userEvent.setup();
-    search.mockResolvedValue([match()]);
-    renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    expect(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ })).toBeTruthy();
-
-    await user.click(screen.getByLabelText('Display name'));
-
-    expect(screen.queryByRole('listbox')).toBeNull();
-    // The id the user typed is theirs either way: leaving the list is not
-    // abandoning the field.
-    expect(modelField().value).toBe('sonnet');
   });
 
   it('keeps a display name optional, trimmed, and null when the box is empty', async () => {
@@ -805,23 +932,6 @@ describe('BackendModelEditorDialog', () => {
       supports_tools: true,
       supports_reasoning: false,
       reasoning_efforts: ['high'],
-    }));
-  });
-
-  it('carries a capability models.dev does not state through the fill', async () => {
-    const user = userEvent.setup();
-    search.mockResolvedValue([match({ supports_tools: null, supports_reasoning: null, reasoning_efforts: [] })]);
-    const { onCommit } = renderEditor();
-
-    await user.type(modelField(), 'sonnet');
-    await user.click(await screen.findByRole('option', { name: /Claude Sonnet 4\.5/ }));
-
-    expect(answered('Tool calling')).toBe('Not set');
-    expect(answered('Reasoning')).toBe('Not set');
-    await user.click(screen.getByRole('button', { name: 'Add model' }));
-    expect(onCommit).toHaveBeenCalledWith(expect.objectContaining({
-      supports_tools: null,
-      supports_reasoning: null,
     }));
   });
 

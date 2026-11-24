@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-app-lock",
+  "description": "Per-device App Lock preferences, only for the main local Workbench. Unlock is native and has no IPC command.",
+  "platforms": ["macOS"],
+  "local": false,
+  "windows": ["main"],
+  "remote": {"urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]},
+  "permissions": ["allow-app-lock-status", "allow-app-lock-set-policy"]
+}

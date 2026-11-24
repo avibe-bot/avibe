@@ -115,6 +115,12 @@ impl DeepLinks {
         self.pending.is_some()
     }
 
+    /// Supersede navigation without resetting bootstrap failure or a native
+    /// local-return operation that still needs to settle its original ticket.
+    pub fn clear_pending(&mut self) {
+        self.pending = None;
+    }
+
     pub fn receive(&mut self, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
         self.receive_owned(arguments, None);
     }
@@ -329,6 +335,24 @@ impl DeepLinks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superseding_navigation_preserves_failure_and_inflight_return() {
+        let mut links = DeepLinks::default();
+        links.receive_owned(["avibe://session/first"], Some(7));
+        let ticket = links.claim_local_return(1, 7).unwrap();
+        links.clear_pending();
+        assert!(!links.owns_local_return(&ticket));
+        links.receive_owned(["avibe://session/second"], Some(7));
+        assert!(links.claim_local_return(2, 7).is_none());
+        links.finish_local_return(&ticket, Some(8));
+        assert!(links.pending_for_owner(Some(8)));
+        assert!(links.claim_local_return(2, 8).is_some());
+        links.failed = true;
+        links.clear_pending();
+        links.receive(["avibe://session/third"]);
+        assert!(!links.has_pending());
+    }
 
     #[test]
     fn local_return_approval_is_bound_to_exact_delivery_and_ticket() {

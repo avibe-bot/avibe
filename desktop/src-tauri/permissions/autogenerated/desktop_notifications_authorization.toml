@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-notifications-authorization"
+description = "Enables the desktop_notifications_authorization command without any pre-configured scope."
+commands.allow = ["desktop_notifications_authorization"]
+
+[[permission]]
+identifier = "deny-desktop-notifications-authorization"
+description = "Denies the desktop_notifications_authorization command without any pre-configured scope."
+commands.deny = ["desktop_notifications_authorization"]

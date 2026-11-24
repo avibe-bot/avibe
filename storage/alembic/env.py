@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import logging
 from logging.config import fileConfig
 import sqlite3
 
 from alembic import context
 from alembic.script import ScriptDirectory
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, event, pool
+from sqlalchemy.schema import CreateIndex
 
 from storage.compatibility import BRIDGE_REVISION
 from storage.models import metadata
@@ -37,6 +39,13 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
+    # Only migration DDL emits this notice. Keep the revision itself literal
+    # so the additive migration classifier can prove the operation as usual.
+    @event.listens_for(connectable, "before_execute")
+    def log_timeline_index_build(conn, clauseelement, multiparams, params, execution_options):
+        if isinstance(clauseelement, CreateIndex) and clauseelement.element.name == "ix_agent_runs_timeline_times":
+            logging.getLogger("storage.migrations").info("Building SQLite index ix_agent_runs_timeline_times")
 
     with connectable.connect() as connection:
         connection.exec_driver_sql("PRAGMA journal_mode = WAL")

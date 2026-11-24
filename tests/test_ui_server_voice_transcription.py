@@ -51,6 +51,8 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
         "consent": "granted",
         "app_hold": True,
         "app_hold_main_at_touch": True,
+        "app_hold_start_ms": None,
+        "app_hold_prepare_at_touch": True,
     }
 
     config.audio_asr.max_file_bytes = 160_043
@@ -61,6 +63,8 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
         "consent": "granted",
         "app_hold": True,
         "app_hold_main_at_touch": True,
+        "app_hold_start_ms": None,
+        "app_hold_prepare_at_touch": True,
     }
 
     # The off switch for the iOS App's own hold recognition: the next read says so,
@@ -74,6 +78,8 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
         "consent": "granted",
         "app_hold": False,
         "app_hold_main_at_touch": True,
+        "app_hold_start_ms": None,
+        "app_hold_prepare_at_touch": True,
     }
 
     # Where the main Bot's button opens the microphone in the iOS App: the next read
@@ -87,7 +93,21 @@ def test_asr_status_exposes_the_configured_file_limit(monkeypatch):
         "consent": "granted",
         "app_hold": True,
         "app_hold_main_at_touch": False,
+        "app_hold_start_ms": None,
+        "app_hold_prepare_at_touch": True,
     }
+
+    # When a hold's microphone may start in the App, and whether it may prepare before:
+    # said as set, and a time out of 0..500 as null (the App's own default).
+    config.audio_asr.app_hold_main_at_touch = True
+    config.audio_asr.app_hold_start_ms = 80
+    config.audio_asr.app_hold_prepare_at_touch = False
+    body = client.get("/api/asr/status").get_json()
+    assert body["app_hold_start_ms"] == 80
+    assert body["app_hold_prepare_at_touch"] is False
+    for out_of_range in (-1, 501):
+        config.audio_asr.app_hold_start_ms = out_of_range
+        assert client.get("/api/asr/status").get_json()["app_hold_start_ms"] is None
 
 
 def test_asr_transcribe_preserves_compatibility_timeout(monkeypatch):

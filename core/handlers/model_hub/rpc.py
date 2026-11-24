@@ -158,6 +158,7 @@ async def dispatch_model_hub_rpc(
             backend,
             payload.get("baseline"),
             payload.get("models"),
+            **({"renames": payload["renames"]} if "renames" in payload else {}),
             expected_suppliers=payload.get("expected_suppliers"),
             force=payload.get("force") is True,
             confirmed_remove_hops=payload.get("would_remove_hops"),

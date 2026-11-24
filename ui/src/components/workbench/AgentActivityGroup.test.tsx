@@ -160,6 +160,35 @@ describe('ActivityCard display shortcut', () => {
   });
 });
 
+describe('ActivityChip close control', () => {
+  const group = {
+    id: 'completed-turn', anchorMessageId: 'reply', anchorPosition: 'before' as const,
+    open: false, status: 'done' as const, steps: 1, durationMs: 1000, rows: [],
+  };
+
+  it("offers the running card's close control on the opened panel, between the eye pill and the chevron", () => {
+    const onDisableActivity = vi.fn();
+    render(
+      <ActivityChip group={group} expanded loading={false} onToggle={vi.fn()} showToolCalls onToggleTools={vi.fn()} onDisableActivity={onDisableActivity} />,
+    );
+    const tools = screen.getByTitle('chat.agentActivity.hideTools');
+    const close = screen.getByRole('button', { name: 'chat.agentActivity.disable' });
+    expect(tools.nextElementSibling).toBe(close);
+    expect(close.nextElementSibling).toBe(screen.getByRole('button', { name: 'chat.agentActivity.collapse' }));
+    fireEvent.click(close);
+    expect(onDisableActivity).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the closed pill one control, and offers nothing where the switch is not offered', () => {
+    const { rerender } = render(
+      <ActivityChip group={group} expanded={false} loading={false} onToggle={vi.fn()} showToolCalls onToggleTools={vi.fn()} onDisableActivity={vi.fn()} />,
+    );
+    expect(screen.queryByRole('button', { name: 'chat.agentActivity.disable' })).toBeNull();
+    rerender(<ActivityChip group={group} expanded loading={false} onToggle={vi.fn()} showToolCalls onToggleTools={vi.fn()} />);
+    expect(screen.queryByRole('button', { name: 'chat.agentActivity.disable' })).toBeNull();
+  });
+});
+
 describe('ActivityChip completed duration', () => {
   it.each([
     ['collapsed', false],

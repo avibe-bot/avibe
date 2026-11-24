@@ -21,6 +21,26 @@ struct HealthQueryWindow {
     let failures: [[String: Any]]
     var metricStates: [String: String]
 
+    /// Help only: HealthKit deliberately conceals read-grant status. Missing
+    /// days, any query failure, and real samples (including zero) are not proof
+    /// of an empty recent window.
+    var hasCompleteEmptyRecentSteps: Bool {
+        guard failures.isEmpty, ["ok", "empty"].contains(metricStates["steps"] ?? ""),
+              metricStates.values.allSatisfy({ ["ok", "empty"].contains($0) }),
+              let zoneName = items.first(where: { $0["metric"] as? String == "steps" })?["timezone"] as? String,
+              let zone = TimeZone(identifier: zoneName) else { return false }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        guard let recent = try? HealthDayAggregation(days: 7, now: computedAt, calendar: calendar) else { return false }
+        return recent.days.allSatisfy { day in
+            let matches = items.filter { $0["metric"] as? String == "steps" && $0["day"] as? String == day.name }
+            guard matches.count == 1, let item = matches.first else { return false }
+            return item["timezone"] as? String == zoneName
+                && item["availability"] as? String == "empty" && item["value"] is NSNull
+                && item["latest_sample_end_at"] is NSNull
+        }
+    }
+
     func payload(sequence: Int64) -> [String: Any] {
         [
             "device_seq": sequence,

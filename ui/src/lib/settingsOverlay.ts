@@ -53,7 +53,7 @@ export const isSettingsEntryPath = (pathname: string): boolean =>
  * all, and, for a Settings surface opened from there, whether the Settings menu
  * has an app sidebar to sit beside.
  */
-export const isChromelessShellPath = (pathname: string): boolean => pathname === '/setup';
+export const isChromelessShellPath = (pathname: string): boolean => pathname === '/setup' || pathname === '/setup/remote-access';
 
 /**
  * The Settings sections a setup visit opens over the wizard without leaving it:

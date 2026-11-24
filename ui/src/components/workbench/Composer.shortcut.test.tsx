@@ -7,7 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VoiceContextSource } from '../../lib/voiceContext';
-import { closeVoiceConsent, noteVoiceStatus, voiceConsentAsking } from '../../lib/voiceConsent';
+import { answerVoiceConsent, closeVoiceConsent, noteVoiceStatus, voiceConsentAsking } from '../../lib/voiceConsent';
 import { writeVoiceInputSelection } from '../../lib/voiceInput';
 
 type VoiceStopped = (
@@ -773,3 +773,100 @@ describe('Composer voice shortcut', () => {
   });
 });
 
+
+describe('Composer native App Lock cancellation', () => {
+  let revision = 1000;
+  const signal = (locked: boolean) => act(() => {
+    Object.assign(window, { __AVIBE_VOICE_LOCK__: { revision: ++revision, locked } });
+    window.dispatchEvent(new Event('avibe:voice-lock'));
+  });
+  it('keeps a retry result for explicit recovery after unlock without changing the draft', async () => {
+    let resolve!: (response: Response) => void;
+    let retry = false;
+    const previous = apiFetch.getMockImplementation()!;
+    apiFetch.mockImplementation((path, options) => path === '/api/asr/transcribe'
+      ? retry ? new Promise((ok) => { resolve = ok; }) : Promise.resolve(Response.json({ error: 'transcription_empty' }, { status: 422 }))
+      : previous(path, options));
+    voiceMocks.realtimeStart.mockRejectedValue(new Error('use relay'));
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const onSend = vi.fn();
+    try {
+      signal(false); renderComposer('retry-lock-owner', { initialDraft: 'original draft', onSend });
+      const textbox = await screen.findByRole('textbox') as HTMLTextAreaElement;
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await screen.findByRole('button', { name: en.chat.compose.stopRecording });
+      act(() => {
+        voiceMocks.onPcm?.(pcm(0.05, 1_280));
+        voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 3_000, final: true });
+        voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
+      });
+      const button = await screen.findByRole('button', { name: en.chat.compose.voiceRetry });
+      retry = true; fireEvent.click(button); await waitFor(() => expect(resolve).toBeDefined());
+      signal(true);
+      await act(async () => resolve(Response.json({ text: 'recovered once', cleanup: 'success' })));
+      const copy = await screen.findByRole('button', { name: en.chat.compose.voiceCopyTranscript });
+      expect(textbox.value).toBe('original draft'); expect(onSend).not.toHaveBeenCalled();
+      fireEvent.click(copy); expect(writeText).not.toHaveBeenCalled();
+      signal(false); fireEvent.click(copy);
+      await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith('recovered once'));
+      expect(textbox.value).toBe('original draft'); expect(onSend).not.toHaveBeenCalled();
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+  it('does not admit a microphone when consent returns after lock and unlock', async () => {
+    try {
+      signal(false); renderComposer('lock-consent');
+      const textbox = await screen.findByRole('textbox');
+      await act(async () => undefined);
+      act(() => noteVoiceStatus({ consent: null }));
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceConsentAsking()).toBe(true));
+      signal(true); signal(false);
+      await act(async () => { await answerVoiceConsent('granted'); });
+      expect(voiceMocks.getUserMedia).not.toHaveBeenCalled();
+    } finally { closeVoiceConsent(); Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+  it.each(['permission', 'starting', 'listening', 'finishing'] as const)('discards %s without changing the pre-recording draft', async (phase) => {
+    let grant!: (stream: MediaStream) => void;
+    let start!: (active: boolean) => void;
+    let finish!: (result: { text: string; cleanup: string }) => void;
+    const trackStop = vi.fn();
+    const stream = { getTracks: () => [{ stop: trackStop }] } as unknown as MediaStream;
+    voiceMocks.getUserMedia.mockImplementation(() => phase === 'permission' ? new Promise((resolve) => { grant = resolve; }) : Promise.resolve(stream));
+    if (phase === 'starting') voiceMocks.pipelineStart.mockImplementation(() => new Promise((resolve) => { start = resolve; }));
+    voiceMocks.realtimeStart.mockResolvedValue(undefined);
+    voiceMocks.realtimeFinish.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const onSend = vi.fn();
+    try {
+      signal(false);
+      renderComposer('app-lock-' + phase, { initialDraft: 'original draft', onSend });
+      const textbox = await screen.findByRole('textbox');
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalled());
+      if (phase !== 'permission') await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalled());
+      if (phase === 'finishing') {
+        act(() => {
+          voiceMocks.realtimeOptions.at(-1)?.onPreview?.({ text: 'uncommitted preview', stash: '' });
+          voiceMocks.onSegment?.(new Blob(['audio']), { durationMs: 1000, final: true });
+          voiceMocks.onStopped?.('finish', { pendingSegmentCount: 1 });
+        });
+        await waitFor(() => expect(voiceMocks.realtimeFinish).toHaveBeenCalled());
+      }
+      signal(true);
+      const count = voiceMocks.getUserMedia.mock.calls.length;
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      signal(false);
+      await act(async () => {
+        grant?.(stream); start?.(true); finish?.({ text: 'stale transcript', cleanup: 'success' });
+      });
+      await waitFor(() => expect(trackStop).toHaveBeenCalled());
+      expect((textbox as HTMLTextAreaElement).value).toBe('original draft');
+      expect(onSend).not.toHaveBeenCalled();
+      expect(voiceMocks.getUserMedia).toHaveBeenCalledTimes(count);
+      voiceMocks.getUserMedia.mockResolvedValue(stream); voiceMocks.pipelineStart.mockResolvedValue(true);
+      fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
+      await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalledTimes(count + 1));
+      signal(true);
+    } finally { Reflect.deleteProperty(window, '__AVIBE_VOICE_LOCK__'); }
+  });
+});

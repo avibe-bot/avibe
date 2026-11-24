@@ -16,7 +16,9 @@ describe('isOwnerOnlyPath', () => {
     const ownerOnly = [
       '/settings/service',
       '/settings/platforms/slack',
-      '/settings/remote-access',
+      '/settings/remote-access/connection',
+      '/settings/remote-access/connection/address',
+      '/settings/remote-access/activity',
       '/settings/backends/claude',
       '/settings/models',
       '/settings/dependencies',
@@ -28,6 +30,8 @@ describe('isOwnerOnlyPath', () => {
   it('keeps personal preferences, replies, and access readable', () => {
     expect(isOwnerOnlyPath('/settings/replies')).toBe(false);
     expect(isOwnerOnlyPath('/settings/access')).toBe(false);
+    // 「设备」 is every signed-in person's page: a member sees their own devices there.
+    expect(isOwnerOnlyPath('/settings/remote-access')).toBe(false);
   });
 
   it('keeps retired owner routes gated before their redirect runs', () => {
