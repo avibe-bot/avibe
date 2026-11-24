@@ -7,6 +7,7 @@ import {
   getActiveVaultSandboxClient, getVaultSandboxClient, openVaultAuthorizationWindow,
   resetVaultSandboxClient, verifyVaultSandboxIntegrity,
 } from './vaultSandboxClient';
+import { getVaultSandboxAppearance, setVaultSandboxAppearance } from './vaultSandboxAppearance';
 import {
   VAULT_SANDBOX_EXPECTED_BUILD_HASH, VAULT_SANDBOX_IFRAME_RESOURCE_PATH, VAULT_SANDBOX_IFRAME_URL, VAULT_SANDBOX_MANIFEST_PATH,
   VAULT_SANDBOX_ORIGIN, VAULT_SANDBOX_PINNED_MANIFEST, VAULT_SANDBOX_VERSION,
@@ -175,6 +176,26 @@ describe('fail-closed local release authority', () => {
     expect(iframe.src).toBe(VAULT_SANDBOX_IFRAME_URL);
     expect(getActiveVaultSandboxClient()).toBe(client);
     expect(post.mock.calls[0][0]).toMatchObject({ op: 'handshake', payload: { expectedBuildHash: build.buildHash } });
+  });
+
+  it('forwards appearance updates to the active client via the lightweight appearance store', async () => {
+    const previous = getVaultSandboxAppearance();
+    try {
+      const { promise, post } = await creation();
+      await promise;
+      post.mockClear();
+      const next = {
+        locale: previous.locale === 'en' ? 'zh' : 'en',
+        theme: previous.theme === 'dark' ? 'light' : 'dark',
+      } as const;
+      setVaultSandboxAppearance(next);
+      expect(post).toHaveBeenCalledWith(
+        expect.objectContaining({ op: 'set-appearance', payload: next }),
+        VAULT_SANDBOX_ORIGIN,
+      );
+    } finally {
+      setVaultSandboxAppearance(previous);
+    }
   });
 
   it.each([
