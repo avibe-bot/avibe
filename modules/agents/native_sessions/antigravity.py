@@ -10,7 +10,11 @@ from datetime import datetime
 from typing import Any, TypeVar
 
 from modules.agents.acp import ACP_AUTH_REQUIRED, AcpClient, AcpRpcError, AcpTransportError
-from modules.agents.antigravity.agent import build_antigravity_command, build_antigravity_env
+from modules.agents.antigravity.agent import (
+    _authenticate_session_client,
+    build_antigravity_command,
+    build_antigravity_env,
+)
 
 from .base import (
     NativeSessionProvider,
@@ -89,15 +93,20 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
             return self._config
         return _load_persisted_antigravity_config()
 
-    def _build_launch(self, working_path: str) -> tuple[tuple[str, ...], dict[str, str]]:
-        config = self._effective_config()
+    def _build_launch(
+        self,
+        working_path: str,
+        *,
+        config: Any = None,
+    ) -> tuple[tuple[str, ...], dict[str, str]]:
+        effective_config = config if config is not None else self._effective_config()
         cli_path = (
             self._cli_path
-            or getattr(config, "cli_path", None)
-            or getattr(config, "binary", None)
+            or getattr(effective_config, "cli_path", None)
+            or getattr(effective_config, "binary", None)
             or "agy"
         )
-        extra_args = self._extra_args or tuple(getattr(config, "extra_args", None) or ())
+        extra_args = self._extra_args or tuple(getattr(effective_config, "extra_args", None) or ())
         # Passive session listing MUST NOT pass --dangerously-skip-permissions.
         command = build_antigravity_command(
             str(cli_path).strip() or "agy",
@@ -105,14 +114,15 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
             extra_args=extra_args,
         )
         env = build_antigravity_env(
-            config,
+            effective_config,
             cli_path=command[0],
             working_dir=working_path or None,
         )
         return command, env
 
     async def _list_raw_sessions(self, working_path: str) -> list[dict[str, Any]]:
-        command, env = self._build_launch(working_path)
+        config = await asyncio.to_thread(self._effective_config)
+        command, env = await asyncio.to_thread(self._build_launch, working_path, config=config)
         client = AcpClient(
             command,
             cwd=working_path or None,
@@ -123,6 +133,7 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
         try:
             await client.start()
             await client.initialize(client_info=_CLIENT_INFO, client_capabilities={})
+            await _authenticate_session_client(client, getattr(config, "auth_mode", None))
             if not client.supports_list:
                 return []
 

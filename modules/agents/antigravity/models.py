@@ -107,6 +107,12 @@ def _normalize_config_options(raw: Any) -> tuple[dict[str, Any], ...]:
     return tuple(dict(item) for item in raw if isinstance(item, Mapping))
 
 
+def _option_current_value(option: Mapping[str, Any]) -> str | None:
+    if "currentValue" in option:
+        return _clean_optional(option.get("currentValue"))
+    return _clean_optional(option.get("current_value"))
+
+
 async def apply_model_and_effort(
     client: AcpClient,
     session_id: str,
@@ -151,7 +157,7 @@ async def apply_model_and_effort(
         )
 
     model_option_id = str(model_option["id"])
-    server_model = _clean_optional(model_option.get("currentValue"))
+    server_model = _option_current_value(model_option)
     model_needs_apply = current_model != selected_model or server_model != selected_model
 
     if model_needs_apply:
@@ -165,6 +171,18 @@ async def apply_model_and_effort(
         updated = _normalize_config_options(resp.get("configOptions"))
         if updated:
             options = updated
+            returned_model_opt = _find_config_option(
+                updated,
+                categories=("model",),
+                ids=(model_option_id, "model"),
+            )
+            if returned_model_opt is not None:
+                confirmed_model = _option_current_value(returned_model_opt)
+                if confirmed_model is not None and confirmed_model != selected_model:
+                    raise AntigravityModelSelectionError(
+                        f"Antigravity applied model {confirmed_model!r} instead of requested {selected_model!r}.",
+                        reason="model_mismatch",
+                    )
 
     if selected_effort is not None:
         effort_option = _find_config_option(
@@ -187,7 +205,7 @@ async def apply_model_and_effort(
             )
 
         effort_option_id = str(effort_option["id"])
-        server_effort = _clean_optional(effort_option.get("currentValue"))
+        server_effort = _option_current_value(effort_option)
         # Re-apply effort whenever model changed or effort differs from server/tracked state.
         if model_needs_apply or current_effort != selected_effort or server_effort != selected_effort:
             try:
@@ -201,6 +219,19 @@ async def apply_model_and_effort(
             updated = _normalize_config_options(resp.get("configOptions"))
             if updated:
                 options = updated
+                returned_effort_opt = _find_config_option(
+                    updated,
+                    categories=("thought_level",),
+                    ids=(effort_option_id, "thought_level", "reasoning_effort"),
+                )
+                if returned_effort_opt is not None:
+                    confirmed_effort = _option_current_value(returned_effort_opt)
+                    if confirmed_effort is not None and confirmed_effort != selected_effort:
+                        raise AntigravityModelSelectionError(
+                            f"Antigravity applied reasoning effort {confirmed_effort!r} instead of requested "
+                            f"{selected_effort!r} for model {selected_model!r}.",
+                            reason="effort_mismatch",
+                        )
 
     return AppliedModelConfig(
         model=selected_model,

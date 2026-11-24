@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
+import shlex
 import shutil
+import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from config import paths
+from core.agent_tool_policy import ALWAYS_SESSION_ONLY_TOOL_NAMES, check_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,9 @@ MAX_RULE_TOTAL_TOKENS = 20_000
 MAX_RULE_TOTAL_BYTES = MAX_RULE_TOTAL_TOKENS * 4
 
 _RULE_FILENAME = "AGENTS.md"
+_HOOKS_DIRNAME = ".agents"
+_HOOKS_CONFIG_FILENAME = "hooks.json"
+_HOOKS_SCRIPT_FILENAME = "avibe_tool_policy_hook.py"
 _TRUNCATION_MARKER = "\n\n[Avibe rules truncated to stay within Antigravity's 20,000-token rule budget.]\n"
 
 
@@ -104,16 +112,84 @@ def split_rule_content(
     return tuple(chunks)
 
 
-def _atomic_write_text(target: Path, text: str) -> None:
+def _atomic_write_text(target: Path, text: str, *, mode: int | None = None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".agents-md-", suffix=".tmp", dir=str(target.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+        if mode is not None:
+            os.chmod(tmp_name, mode)
         os.replace(tmp_name, target)
     except BaseException:
         Path(tmp_name).unlink(missing_ok=True)
         raise
+
+
+def _quote_executable(executable: str) -> str:
+    if os.name == "nt":
+        return subprocess.list2cmdline([executable])
+    return shlex.quote(executable)
+
+
+def _build_tool_policy_hook_files() -> tuple[str, str]:
+    """Render Antigravity ``.agents/hooks.json`` and standalone PreToolUse guard script."""
+    denied_reasons = {
+        name: check_tool_call(name, {}).reason
+        for name in ALWAYS_SESSION_ONLY_TOOL_NAMES
+    }
+    matcher = "|".join(ALWAYS_SESSION_ONLY_TOOL_NAMES)
+    hooks_config = {
+        "avibe-tool-policy": {
+            "PreToolUse": [
+                {
+                    "matcher": matcher,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{_quote_executable(sys.executable)} ./{_HOOKS_SCRIPT_FILENAME}",
+                            "timeout": 10,
+                        }
+                    ],
+                }
+            ]
+        }
+    }
+    hooks_json = json.dumps(hooks_config, indent=2) + "\n"
+    hook_script = (
+        f"#!{sys.executable}\n"
+        '"""Avibe PreToolUse hook enforcing core/agent_tool_policy.py."""\n\n'
+        "import json\n"
+        "import sys\n\n"
+        f"DENIED_REASONS = {json.dumps(denied_reasons, indent=2, sort_keys=True)}\n\n"
+        "def main() -> int:\n"
+        "    raw = sys.stdin.read().strip()\n"
+        "    payload = json.loads(raw) if raw else {}\n"
+        "    if not isinstance(payload, dict):\n"
+        "        payload = {}\n"
+        '    tool_call = payload.get("toolCall") or payload.get("tool_call") or {}\n'
+        "    if not isinstance(tool_call, dict):\n"
+        "        tool_call = {}\n"
+        '    tool_name = str(tool_call.get("name") or payload.get("tool_name") or "").strip()\n'
+        "    reason = DENIED_REASONS.get(tool_name)\n"
+        "    if reason:\n"
+        '        sys.stdout.write(json.dumps({"decision": "deny", "reason": reason}) + "\\n")\n'
+        "    else:\n"
+        '        sys.stdout.write(json.dumps({"decision": "allow"}) + "\\n")\n'
+        "    return 0\n\n"
+        'if __name__ == "__main__":\n'
+        "    raise SystemExit(main())\n"
+    )
+    return hooks_json, hook_script
+
+
+def _file_matches(path: Path, expected: str) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        return path.read_text(encoding="utf-8") == expected
+    except OSError:
+        return False
 
 
 def render_session_rules(
@@ -124,31 +200,38 @@ def render_session_rules(
     max_file_bytes: int = MAX_RULE_FILE_BYTES,
     max_total_bytes: int = MAX_RULE_TOTAL_BYTES,
 ) -> RenderedRules:
-    """Render Avibe system instructions into per-session ``AGENTS.md`` directories.
+    """Render Avibe system instructions and PreToolUse policy hooks into per-session directories.
 
     Each returned directory contains one ``AGENTS.md`` file of at most
-    ``max_file_bytes`` UTF-8 bytes so Antigravity loads all parts via
-    ``additionalDirectories`` without touching user project or global rules.
-    Disk writes are skipped completely when the on-disk files already match.
+    ``max_file_bytes`` UTF-8 bytes, and the primary directory also contains
+    ``.agents/hooks.json`` plus its self-contained PreToolUse guard script so
+    Antigravity enforces Avibe's Harness tool policy independently of
+    ``--dangerously-skip-permissions`` without touching user project or global
+    rules. Disk writes are skipped completely when the on-disk files already
+    match.
     """
     chunks = split_rule_content(
         content,
         max_file_bytes=max_file_bytes,
         max_total_bytes=max_total_bytes,
     )
+    if not chunks:
+        chunks = ("",)
+
+    hooks_json, hook_script = _build_tool_policy_hook_files()
+
     digest_hash = hashlib.sha256()
     for chunk in chunks:
         digest_hash.update(chunk.encode("utf-8"))
         digest_hash.update(b"\x00")
+    digest_hash.update(hooks_json.encode("utf-8"))
+    digest_hash.update(b"\x00")
+    digest_hash.update(hook_script.encode("utf-8"))
     digest = digest_hash.hexdigest()
 
     root = (base_dir if base_dir is not None else paths.get_state_dir() / "antigravity-rules") / _session_dir_slug(
         runtime_key
     )
-    if not chunks:
-        if root.exists():
-            shutil.rmtree(root, ignore_errors=True)
-        return RenderedRules(directories=(), digest=digest, written=False)
 
     expected_dirs: list[Path] = []
     expected_part_names: set[str] = set()
@@ -157,6 +240,10 @@ def render_session_rules(
         expected_part_names.add(part_name)
         expected_dirs.append(root / part_name)
 
+    hooks_dir = expected_dirs[0] / _HOOKS_DIRNAME
+    hooks_config_path = hooks_dir / _HOOKS_CONFIG_FILENAME
+    hooks_script_path = hooks_dir / _HOOKS_SCRIPT_FILENAME
+
     needs_write = False
     if not root.is_dir():
         needs_write = True
@@ -164,17 +251,11 @@ def render_session_rules(
         existing_entries = {entry.name for entry in root.iterdir()}
         if existing_entries != expected_part_names:
             needs_write = True
+        elif not _file_matches(hooks_config_path, hooks_json) or not _file_matches(hooks_script_path, hook_script):
+            needs_write = True
         else:
             for part_dir, chunk in zip(expected_dirs, chunks, strict=True):
-                rule_file = part_dir / _RULE_FILENAME
-                if not rule_file.is_file():
-                    needs_write = True
-                    break
-                try:
-                    if rule_file.read_text(encoding="utf-8") != chunk:
-                        needs_write = True
-                        break
-                except OSError:
+                if not _file_matches(part_dir / _RULE_FILENAME, chunk):
                     needs_write = True
                     break
 
@@ -194,8 +275,10 @@ def render_session_rules(
                 entry.unlink(missing_ok=True)
 
     for part_dir, chunk in zip(expected_dirs, chunks, strict=True):
-        rule_file = part_dir / _RULE_FILENAME
-        _atomic_write_text(rule_file, chunk)
+        _atomic_write_text(part_dir / _RULE_FILENAME, chunk)
+
+    _atomic_write_text(hooks_config_path, hooks_json)
+    _atomic_write_text(hooks_script_path, hook_script, mode=0o755)
 
     return RenderedRules(
         directories=tuple(str(d) for d in expected_dirs),

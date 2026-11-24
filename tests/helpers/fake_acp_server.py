@@ -78,12 +78,16 @@ DEFAULT_CONFIG_OPTIONS: list[dict[str, Any]] = [
 
 DEFAULT_MODES: list[str] = ["code", "plan"]
 DEFAULT_MODELS: list[str] = ["model-alpha", "model-beta"]
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2dIAAAAASUVORK5CYII="
+)
 
 
 def fake_acp_server_command(
     *,
     state_file: Path | None = None,
     config: Mapping[str, Any] | None = None,
+    require_auth_method: str | None = None,
 ) -> list[str]:
     """Build an argv list that spawns this scripted ACP server over stdio."""
     cmd = [sys.executable, "-u", str(FAKE_ACP_SERVER_PATH)]
@@ -91,6 +95,8 @@ def fake_acp_server_command(
         cmd.extend(["--state-file", str(state_file)])
     if config is not None:
         cmd.extend(["--config-json", json.dumps(dict(config), separators=(",", ":"))])
+    if require_auth_method is not None:
+        cmd.extend(["--require-auth-method", require_auth_method])
     return cmd
 
 
@@ -111,15 +117,54 @@ def _prompt_text(prompt_blocks: Any) -> str:
 class FakeAcpServer:
     """Async JSON-RPC 2.0 ACP server speaking NDJSON over stdin/stdout."""
 
-    def __init__(self, *, state_file: Path | None, config: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        *,
+        state_file: Path | None,
+        config: dict[str, Any],
+        require_auth_method: str | None = None,
+    ) -> None:
         self._state_file = state_file
         self._config = config
         self._agent_info = _deep_copy_json(config.get("agentInfo", DEFAULT_AGENT_INFO))
         self._agent_capabilities = _deep_copy_json(
             config.get("agentCapabilities", DEFAULT_AGENT_CAPABILITIES)
         )
-        self._auth_methods = _deep_copy_json(config.get("authMethods", DEFAULT_AUTH_METHODS))
-        self._require_auth = bool(config.get("requireAuth", False))
+        raw_required_method = (
+            require_auth_method
+            if require_auth_method is not None
+            else config.get("requireAuthMethod")
+        )
+        self._require_auth_method = (
+            str(raw_required_method).strip()
+            if isinstance(raw_required_method, str) and raw_required_method.strip()
+            else None
+        )
+        if "authMethods" in config:
+            self._auth_methods = _deep_copy_json(config["authMethods"])
+        elif self._require_auth_method is not None:
+            self._auth_methods = [
+                {
+                    "id": self._require_auth_method,
+                    "name": self._require_auth_method,
+                    "description": f"Authenticate with {self._require_auth_method}",
+                }
+            ]
+        else:
+            self._auth_methods = _deep_copy_json(DEFAULT_AUTH_METHODS)
+        if self._require_auth_method is not None and not any(
+            isinstance(m, dict) and m.get("id") == self._require_auth_method
+            for m in self._auth_methods
+        ):
+            self._auth_methods.append(
+                {
+                    "id": self._require_auth_method,
+                    "name": self._require_auth_method,
+                    "description": f"Authenticate with {self._require_auth_method}",
+                }
+            )
+        self._require_auth = bool(config.get("requireAuth", False)) or self._require_auth_method is not None
+        self._method_authenticated = self._require_auth_method is None
         self._page_size = config.get("listPageSize")
         self._server_req_id = 0
         self._pending_server_requests: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
@@ -170,6 +215,14 @@ class FakeAcpServer:
         return await fut
 
     def _require_authenticated(self, req_id: int | str) -> bool:
+        if self._require_auth_method is not None and not self._method_authenticated:
+            self._send_error(
+                req_id,
+                -32000,
+                "Authentication required",
+                {"authMethods": self._auth_methods},
+            )
+            return False
         if self._state.get("authenticated", True):
             return True
         self._send_error(
@@ -251,6 +304,15 @@ class FakeAcpServer:
             if method_id not in valid_ids:
                 self._send_error(req_id, -32602, f"Unknown auth method: {method_id}")
                 return
+            if self._require_auth_method is not None and method_id != self._require_auth_method:
+                self._send_error(
+                    req_id,
+                    -32000,
+                    f"Authentication required via {self._require_auth_method}",
+                    {"authMethods": self._auth_methods},
+                )
+                return
+            self._method_authenticated = True
             self._state["authenticated"] = True
             self._save_state()
             self._send_result(req_id, {})
@@ -261,6 +323,7 @@ class FakeAcpServer:
             if not isinstance(auth_caps, dict) or "logout" not in auth_caps:
                 self._send_error(req_id, -32601, "Method not found: logout")
                 return
+            self._method_authenticated = False
             self._state["authenticated"] = False
             self._save_state()
             self._send_result(req_id, {})
@@ -632,6 +695,59 @@ class FakeAcpServer:
                 self._send_result(req_id, {"stopReason": "end_turn"})
                 return
 
+            if text.startswith("stop_reason:"):
+                reason = text.split(":", 1)[1]
+                self._send_update(
+                    session_id,
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": f"partial:{reason}"},
+                    },
+                )
+                self._send_result(req_id, {"stopReason": reason})
+                return
+
+            if text == "stop_reason_missing":
+                self._send_update(
+                    session_id,
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "partial:missing"},
+                    },
+                )
+                self._send_result(req_id, {})
+                return
+
+            if text == "emit_image_only":
+                self._send_update(
+                    session_id,
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {
+                            "type": "image",
+                            "data": _TINY_PNG_B64,
+                            "mimeType": "image/png",
+                        },
+                    },
+                )
+                self._send_result(req_id, {"stopReason": "end_turn"})
+                return
+
+            if text == "emit_image_uri":
+                self._send_update(
+                    session_id,
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {
+                            "type": "image",
+                            "uri": "https://example.test/chart.png",
+                            "mimeType": "image/png",
+                        },
+                    },
+                )
+                self._send_result(req_id, {"stopReason": "end_turn"})
+                return
+
             if text == "recall":
                 prior = [turn["prompt"] for turn in session["history"]]
                 reply = (
@@ -669,9 +785,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Scripted stdio fake ACP server")
     parser.add_argument("--state-file", type=Path, default=None)
     parser.add_argument("--config-json", type=str, default="{}")
+    parser.add_argument("--require-auth-method", type=str, default=None)
     args = parser.parse_args()
     config = json.loads(args.config_json)
-    server = FakeAcpServer(state_file=args.state_file, config=config)
+    server = FakeAcpServer(
+        state_file=args.state_file,
+        config=config,
+        require_auth_method=args.require_auth_method,
+    )
     asyncio.run(server.run())
 
 
