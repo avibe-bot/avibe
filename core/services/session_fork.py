@@ -67,6 +67,8 @@ _FORK_ANCHOR_TYPES = tuple(
 
 SESSION_AGENT_UNAVAILABLE_CODE = "session_agent_unavailable"
 SESSION_AGENT_UNAVAILABLE_I18N_KEY = "error.sessionFork.agentUnavailable"
+FORK_HANDOFF_MODE_NATIVE = "native"
+FORK_HANDOFF_MODE_SUMMARY = "summary_handoff"
 
 
 class SessionForkError(ValueError):
@@ -387,6 +389,7 @@ def reserve_forked_session(
             metadata.pop("fork_opencode_boundary_from_active_run", None)
             # A source that is itself a fork carries its own point; the child's is resolved below.
             metadata.pop("fork_source_context_seq", None)
+            metadata.pop("fork_handoff_mode", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -775,6 +778,96 @@ def fork_anchor_is_terminal_agent_output(fork: dict[str, Any] | None) -> bool:
     """Whether the reservation anchor already points at a completed agent row."""
 
     return fork_source_state(fork).anchor_is_terminal_agent_output
+
+
+def build_fork_summary_handoff_text(
+    pending_fork: Mapping[str, Any],
+    *,
+    backend: str,
+    db_path: Optional[Path] = None,
+    budget: Optional[int] = None,
+) -> str:
+    """Build a bounded summary handoff when native session fork is unavailable."""
+
+    from core.session_handoff import (
+        HANDOFF_BUDGET_CHARS,
+        build_fork_summary_handoff,
+        render_fork_summary_handoff,
+    )
+
+    source_session_id = str(pending_fork.get("source_session_id") or "").strip()
+    effective_budget = HANDOFF_BUDGET_CHARS if budget is None else budget
+    path = db_path or paths.get_sqlite_state_path()
+    if source_session_id and path.is_file():
+        from storage.db import create_sqlite_engine
+
+        engine = create_sqlite_engine(path, read_only=True)
+        try:
+            with engine.connect() as conn:
+                return build_fork_summary_handoff(
+                    conn,
+                    source_session_id,
+                    backend=backend,
+                    budget=effective_budget,
+                )
+        finally:
+            engine.dispose()
+
+    return render_fork_summary_handoff(
+        source_session_id,
+        backend=backend,
+        messages=(),
+        has_older=False,
+        budget=effective_budget,
+    )
+
+
+def record_fork_handoff_mode(
+    session_id: str,
+    *,
+    mode: str,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Persist how a forked session was materialized (``native`` or ``summary_handoff``)."""
+
+    cleaned_id = _clean_optional(session_id)
+    cleaned_mode = _clean_optional(mode)
+    if not cleaned_id or not cleaned_mode:
+        return False
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return False
+
+    from sqlalchemy import select, update
+
+    from storage.agent_session_rows import reserve_write_lock
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            metadata = _load_metadata(row["metadata_json"])
+            if metadata.get("fork_handoff_mode") == cleaned_mode:
+                return True
+            metadata["fork_handoff_mode"] = cleaned_mode
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == cleaned_id)
+                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
+            )
+            return True
+    finally:
+        engine.dispose()
 
 
 def _load_metadata(value: Any) -> dict[str, Any]:

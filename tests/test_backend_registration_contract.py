@@ -42,7 +42,6 @@ PYTHON_DECLARATIONS = {
     ("core/agent_auth_service.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Login-output noise tokens, not a backend selector."),
     ("core/backend_restart.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Vendor-to-native-custody mapping."),
     ("core/handlers/command_handlers.py", "Dict", NATIVE): (1, "native", "Native resume command aliases."),
-    ("core/handlers/message_handler.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Native subagent names and prompt injection."),
     ("core/handlers/settings_handler.py", "Dict", AGENTS): (1, "agent", "IM route menu loaders: where each backend's agents, models and efforts come from; the routing form itself is backend-neutral."),
     ("core/handlers/model_hub/migration.py", "Dict", frozenset({"claude", "codex"})): (2, "native_subset", "Vendor credential and native environment maps."),
     ("core/handlers/model_hub/migration.py", "Dict", NATIVE): (1, "native", "Native migration vendor descriptors."),

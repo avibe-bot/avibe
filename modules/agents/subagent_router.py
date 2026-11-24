@@ -181,6 +181,58 @@ def load_codex_subagent(
     return list_codex_subagents(search_root, project_root).get(normalized)
 
 
+def list_antigravity_subagents(
+    search_root: Optional[Path] = None,
+    project_root: Optional[Path] = None,
+) -> Dict[str, SubagentDefinition]:
+    """List all available Antigravity native agents.
+
+    Searches global ``~/.gemini/config/agents/*.md`` first, then project
+    ``<workspace>/.agents/agents/*.md`` (project definitions override global).
+    """
+    definitions: Dict[str, SubagentDefinition] = {}
+
+    root = search_root or (Path.home() / ".gemini" / "config")
+    global_agents_dir = root / "agents"
+    if global_agents_dir.exists() and global_agents_dir.is_dir():
+        for agent_file in sorted(global_agents_dir.glob("*.md")):
+            definition = _parse_antigravity_agent_definition(agent_file, source="global")
+            if not definition:
+                continue
+            key = normalize_subagent_name(definition.name)
+            if key:
+                definitions[key] = definition
+
+    if project_root:
+        project_agents_dir = project_root / ".agents" / "agents"
+        if project_agents_dir.exists() and project_agents_dir.is_dir():
+            for agent_file in sorted(project_agents_dir.glob("*.md")):
+                definition = _parse_antigravity_agent_definition(agent_file, source="project")
+                if not definition:
+                    continue
+                key = normalize_subagent_name(definition.name)
+                if key:
+                    definitions[key] = definition
+
+    return definitions
+
+
+def load_antigravity_subagent(
+    name: str,
+    search_root: Optional[Path] = None,
+    project_root: Optional[Path] = None,
+) -> Optional[SubagentDefinition]:
+    """Load a specific Antigravity native agent by name.
+
+    Project agents in ``<workspace>/.agents/agents/`` take precedence over
+    global agents in ``~/.gemini/config/agents/``.
+    """
+    normalized = normalize_subagent_name(name)
+    if not normalized:
+        return None
+    return list_antigravity_subagents(search_root, project_root).get(normalized)
+
+
 def _find_claude_agent_dirs(root: Path) -> Iterable[Path]:
     agent_dirs = []
     if (root / "agents").exists():
@@ -201,7 +253,7 @@ def _find_claude_agent_dirs(root: Path) -> Iterable[Path]:
     return unique
 
 
-def _parse_claude_agent_definition(path: Path) -> Optional[SubagentDefinition]:
+def _parse_markdown_frontmatter(path: Path) -> Optional[tuple[dict, str]]:
     try:
         text = path.read_text(encoding="utf-8")
     except Exception as e:
@@ -215,26 +267,69 @@ def _parse_claude_agent_definition(path: Path) -> Optional[SubagentDefinition]:
     if len(parts) < 3:
         return None
 
-    header = parts[1]
     try:
-        data = _yaml_safe_load(header)
+        data = _yaml_safe_load(parts[1])
     except Exception as e:
         logger.debug("Failed to parse YAML header in subagent definition %s: %s", path, e)
         return None
 
-    name = data.get("name")
-    if not isinstance(name, str) or not name.strip():
+    return data, parts[2]
+
+
+def _clean_optional_str(value: object) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _parse_claude_agent_definition(path: Path) -> Optional[SubagentDefinition]:
+    parsed = _parse_markdown_frontmatter(path)
+    if parsed is None:
+        return None
+    data, _body = parsed
+
+    name = _clean_optional_str(data.get("name"))
+    if not name:
         return None
 
-    model = data.get("model")
-    if not isinstance(model, str) or not model.strip():
-        model = None
+    model = _clean_optional_str(data.get("model"))
+    reasoning_effort = _clean_optional_str(
+        data.get("reasoning_effort") or data.get("reasoningEffort")
+    )
 
-    reasoning_effort = data.get("reasoning_effort") or data.get("reasoningEffort")
-    if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
-        reasoning_effort = None
+    return SubagentDefinition(name=name, model=model, reasoning_effort=reasoning_effort, path=path)
 
-    return SubagentDefinition(name=name.strip(), model=model, reasoning_effort=reasoning_effort, path=path)
+
+def _parse_antigravity_agent_definition(path: Path, source: str) -> Optional[SubagentDefinition]:
+    parsed = _parse_markdown_frontmatter(path)
+    if parsed is None:
+        return None
+    data, body = parsed
+
+    name = _clean_optional_str(data.get("name"))
+    if not name:
+        return None
+
+    description = _clean_optional_str(data.get("description"))
+    developer_instructions = _clean_optional_str(body)
+    model = _clean_optional_str(data.get("model"))
+    reasoning_effort = _clean_optional_str(
+        data.get("thought_level")
+        or data.get("thoughtLevel")
+        or data.get("reasoning_effort")
+        or data.get("reasoningEffort")
+    )
+
+    return SubagentDefinition(
+        name=name,
+        description=description,
+        developer_instructions=developer_instructions,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        path=path,
+        source=source,
+    )
 
 
 def _parse_codex_agent_definition(path: Path, source: str) -> Optional[SubagentDefinition]:

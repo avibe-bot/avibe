@@ -178,6 +178,78 @@ def render_backend_handoff(
     )
 
 
+def build_fork_summary_handoff(
+    conn: Connection,
+    source_session_id: str,
+    *,
+    backend: str,
+    budget: int = HANDOFF_BUDGET_CHARS,
+) -> str:
+    """Render a bounded summary handoff for a forked session without native fork."""
+
+    from storage.messages_service import list_session_messages
+
+    page = list_session_messages(
+        conn,
+        session_id=source_session_id,
+        types=tuple(_TRANSCRIPT_LABELS),
+        tail=True,
+        limit=_TRANSCRIPT_FETCH_LIMIT,
+    )
+    return render_fork_summary_handoff(
+        source_session_id,
+        backend=backend,
+        messages=page.get("messages") or [],
+        has_older=bool(page.get("next_before_id")),
+        budget=budget,
+    )
+
+
+def render_fork_summary_handoff(
+    source_session_id: str,
+    *,
+    backend: str,
+    messages: Sequence[Mapping[str, Any]],
+    has_older: bool,
+    budget: int = HANDOFF_BUDGET_CHARS,
+) -> str:
+    """Render a bounded summary handoff clearly labeled as a summary, not full native history."""
+
+    backend_label = display_name_for_backend(backend) if backend else "this"
+    source_ref = source_session_id or "unknown"
+    head = [
+        "[Avibe handoff]",
+        (
+            f"This session is a bounded summary handoff forked from Avibe session `{source_ref}` "
+            f"on the {backend_label} backend. Native session fork is unavailable on this backend, "
+            "so this carries a bounded summary of recent messages rather than full native history."
+        ),
+        (
+            "Continue the work from the summary below. Earlier turns, tool calls, and their outputs "
+            "are not included; read files or query the source transcript when you need them."
+        ),
+    ]
+    query = _history_query(source_session_id) if source_session_id else None
+    tail = ["[End of Avibe handoff]"]
+    if query:
+        tail.insert(0, f"The full source conversation is in Avibe's transcript. For example:\n{query}")
+
+    heading_omitted = "Recent conversation, oldest first (earlier messages omitted):"
+    remaining = budget - _size(head) - _size(tail)
+    transcript = _transcript_lines(messages, max(0, remaining - len(heading_omitted) - 2))
+    if transcript:
+        omitted = has_older or len(transcript) < len(messages)
+        transcript_block = [
+            heading_omitted if omitted else "Recent conversation, oldest first:",
+            *transcript,
+        ]
+    else:
+        transcript_block = []
+    return "\n\n".join(
+        "\n".join(block) for block in (head, transcript_block, tail) if block
+    )
+
+
 def _history_query(session_id: str) -> str | None:
     if _PLAIN_ID.fullmatch(session_id) is None:
         return None
