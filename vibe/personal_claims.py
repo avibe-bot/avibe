@@ -5,17 +5,19 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import hmac
 import json
+import re
 import secrets
 import socket
 import threading
 import time
+from uuid import UUID
 
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import config_file_lock
 from storage.lock import MigrationFileLock, MigrationLockTimeout
 from vibe import desktop_local_instance as local, pairing_replay, remote_access
-from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending, Ticket, local_origin, return_proof, text
+from vibe.personal_claim_client import ClaimError, ClaimsClient, Grant, Pending, Ticket, _instant, local_origin, return_proof, text
 
 
 @dataclass(frozen=True)
@@ -53,13 +55,12 @@ def _recover_before_start(on_bound):
     """Return the *exact* still-prepared record an explicit new claim may supersede."""
     with config_file_lock():
         pending = local._pending()
-        if not pending:
-            if pairing_replay.orphaned_delivery():
-                raise ClaimError('pairing_needs_reconciliation')
-            return None
-        phase = pending["phase"]
-        if phase not in ('redeemed', 'applied') and pairing_replay.accept_conflict(pending):
+        d = pairing_replay.decision(pending)
+        if d.kind == 'check':
             raise ClaimError('pairing_needs_reconciliation')
+        if not pending:
+            return None
+        phase = pending['phase']
         if phase == "revoked":
             cloud = local._config().remote_access.vibe_cloud
             if any((cloud.instance_id, cloud.instance_secret, cloud.tunnel_token, cloud.client_id, cloud.session_secret)):
@@ -105,33 +106,40 @@ def _marker():
     return paths.get_state_dir() / "personal-claim-outcome.json"
 
 
-def _outcome(*, sealed_claim_id=None):
-    """Missing is clean; unreadable acceptance evidence never authorizes a send."""
+def _read_marker():
+    """Keep a recognizable outstanding claim even when other fields are damaged."""
+    saved = None
     try:
-        saved = json.loads(_marker().read_text(encoding="utf-8"))
-        # Even when the rest is damaged, a readable foreign acceptance ID is
-        # evidence. Local archiving may not erase it in favor of another claim.
-        if sealed_claim_id is not None and isinstance(saved, dict) and saved.get('claim_id') not in (None, sealed_claim_id):
-            raise ClaimError('pairing_needs_reconciliation')
+        saved = json.loads(_marker().read_text(encoding='utf-8'))
         if not isinstance(saved, dict) or set(saved) - {'bound', 'claim_id', 'expires_at'}:
             raise ValueError
-        if ('claim_id' in saved) != ('expires_at' in saved) or any(
-            not isinstance(saved[k], str) or not saved[k] for k in ('claim_id', 'expires_at') if k in saved
-        ):
-            raise ValueError
+        if 'claim_id' in saved or 'expires_at' in saved:
+            if str(UUID(saved['claim_id'])) != saved['claim_id']:
+                raise ValueError
+            _instant(saved['expires_at'])  # Validate the writer's grammar, not its age.
         if 'bound' in saved:
             bound = saved['bound']
-            if not isinstance(bound, dict) or not all(isinstance(bound.get(k), str) and bound[k] for k in ('claim_id', 'generation')):
+            if (set(bound) != {'claim_id', 'generation'} or str(UUID(bound['claim_id'])) != bound['claim_id']
+                    or not re.fullmatch('[0-9a-f]{64}', bound['generation'])):
                 raise ValueError
-        return saved
+        return saved, None
     except FileNotFoundError:
-        return {}
-    except (ValueError, RecursionError):
-        if sealed_claim_id is not None:
-            return {}
-        raise ClaimError('pairing_needs_reconciliation') from None
+        return {}, None
     except OSError:
-        raise ClaimError("local_claim_unavailable") from None
+        return {}, 'local_claim_unavailable'
+    except (KeyError, AttributeError, TypeError, ValueError, RecursionError, ClaimError):
+        return saved if isinstance(saved, dict) else {}, 'pairing_needs_reconciliation'
+
+
+def _outcome(*, sealed_claim_id=None):
+    saved, error = _read_marker()
+    if sealed_claim_id is not None and saved.get('claim_id') not in (None, sealed_claim_id):
+        raise ClaimError('pairing_needs_reconciliation')
+    if error:
+        if sealed_claim_id is not None and error == 'pairing_needs_reconciliation':
+            return {}
+        raise ClaimError(error)
+    return saved
 
 
 def _record_attempt(ticket):
@@ -321,9 +329,9 @@ class _Flow:
                                     continue
                                 self._check_time()
                                 source.validate()
-                                if pairing_replay.replacement_blocked(
+                                if not pairing_replay.decision(
                                     local._pending(), active_claim_id=ticket.id if self.accepting else None,
-                                ):
+                                ).replaceable:
                                     self._cleanup_client = None  # Quarantine forbids even a cleanup POST.
                                     raise ClaimError('pairing_needs_reconciliation')
                                 if not self.accepting:

@@ -5936,36 +5936,16 @@ def pending_pairing_status(config: V2Config | None) -> dict[str, Any] | None:
     record, error = _read_pending_pairing_record()
     if error:
         return {"phase": "invalid", "can_resume": False}
+    from vibe import pairing_replay
+    d = pairing_replay.decision(record, config=config)
     if record is None:
-        from vibe import pairing_replay
-        if pairing_replay.orphaned_delivery():
-            return {'phase': 'unknown', 'can_resume': False, 'replay_state': 'needs_reconciliation'}
-        return None
-    phase = record["phase"]
-    can_resume = phase == "retirement_pending"
-    replay = {}
-    if phase == "prepared" and record.get("redeem_request"):
-        from vibe import desktop_local_instance as local, pairing_replay
-        try:
-            can_resume = pairing_replay.eligible(record, config)
-        except local.LocalInstanceError:
-            can_resume = False
-        replay = pairing_replay.projection(record, can_resume)
-        can_resume = replay['replay_state'] in {'scheduled', 'manual'}
-    if config is not None and phase in {"redeemed", "applied"}:
-        current_identity = _pairing_identity_from_cloud(config.remote_access.vibe_cloud)
-        current_fingerprint = _pairing_identity_fingerprint(current_identity)
-        can_resume = current_fingerprint == record["target_fingerprint"] or (
-            phase == "redeemed" and current_fingerprint == record["source_fingerprint"]
-        )
-    if can_resume and phase in {'redeemed', 'applied', 'retirement_pending'}:
-        replay['replay_state'] = 'local_archive'
+        return None if d.kind == 'fresh' else {'phase': 'unknown', 'can_resume': False, **d.projection}
     return {
-        "phase": phase,
-        "can_resume": can_resume,
+        "phase": record['phase'],
+        "can_resume": d.can_resume,
         "operation_owner": ("desktop_app" if record.get("desktop_enrollment") else
                             "personal_claim" if record.get("personal_claim") else "cli"),
-        **replay,
+        **d.projection,
     }
 
 
@@ -6217,9 +6197,7 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
     # Fail before endpoint resolution or local preparation. This advisory read
     # never grants permission: the selected operation rechecks under its lock.
     initial, initial_error = _read_pending_pairing_record()
-    if not initial_error and pairing_replay.accept_conflict(initial, sealed_archive=bool(
-        initial and initial['phase'] in ('redeemed', 'applied')
-    )):
+    if desktop_enrollment is None and pairing_key and not initial_error and pairing_replay.decision(initial).kind == 'check':
         return pairing_replay.reconciliation_required()
     if desktop_enrollment is not None:
         try:
@@ -6232,9 +6210,7 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
         # The existing recovery owner can resume a Desktop redemption after a
         # process restart, without requiring the UI to retain its pairing key.
         record, error = _read_pending_pairing_record()
-        if not error and record is None and pairing_replay.orphaned_delivery():
-            return pairing_replay.reconciliation_required()
-        if not error and record and record['phase'] not in ('redeemed', 'applied') and pairing_replay.accept_conflict(record):
+        if not error and not record and pairing_replay.decision(None).kind == 'check':
             return pairing_replay.reconciliation_required()
         if not error and record and record.get("redeem_request") and record["phase"] == "prepared":
             try:
@@ -6289,14 +6265,16 @@ def _pair(pairing_key, backend_url, device_name, *, desktop_enrollment=None, man
             pending, error = _read_pending_pairing_record()
             if error:
                 return pairing_replay.reconciliation_required()
+            d = pairing_replay.decision(pending, config=current_config)
+            if d.kind == 'check':
+                return pairing_replay.reconciliation_required()
             if pending is not None and _same_pairing_request(pending, backend.base_url, pairing_key):
-                if pending.get('redeem_request') and pending['phase'] == 'prepared':
-                    if hold := pairing_replay.duplicate_hold(pending):
-                        return hold
+                if d.kind in ('wait', 'terminal') and pending.get('redeem_request'):
+                    return pairing_replay.refusal(d)
                 duplicate_operation_id = str(pending["operation_id"])
-            elif pending and pending['phase'] in {'redeemed', 'applied'}:
+            elif d.kind == 'archive':
                 return {'ok': False, 'error': 'pairing_local_archive_required', 'replay_state': 'local_archive'}
-            elif pairing_replay.replacement_blocked(pending) or (pending and pending.get('desktop_enrollment')):
+            elif not d.replaceable or (pending and pending.get('desktop_enrollment')):
                 return pairing_replay.reconciliation_required()
             elif pending and pending.get('personal_claim'):
                 # A pasted key cannot take ownership of a personal claim's saved
@@ -6363,7 +6341,7 @@ def _pair_personal_claim(*, key, backend_url, device, revision, installation, su
         if pending and (pending["phase"] != "prepared" or pending.get("desktop_enrollment")):
             return {"ok": False, "error": "local_instance_conflict"}
         from vibe import pairing_replay
-        if pairing_replay.replacement_blocked(pending, active_claim_id=claim_id):
+        if not pairing_replay.decision(pending, config=config, active_claim_id=claim_id).replaceable:
             return pairing_replay.reconciliation_required()
         claim = _with_redeem_request(_new_pairing_claim(config, backend_url, device), backend_url, device, key)
         claim["personal_claim"] = {"claim_id": claim_id, "installation_id": installation, "account_id": subject,
@@ -6393,12 +6371,16 @@ def _pair_desktop(
         assert claim is not None
         if claim["phase"] == "prepared":
             from vibe import pairing_replay
-            if pairing_replay.accept_conflict(claim):
-                return pairing_replay.reconciliation_required()
+            d = pairing_replay.decision(claim, config=config)
+            if (claim.get('redeem_request') and pairing_key and not _same_pairing_request(claim, backend.base_url, pairing_key)
+                    and d.error != 'pairing_key_expired'):
+                raise desktop_local_instance.LocalInstanceError('local_instance_conflict')
+            if d.kind in ('check', 'unavailable'):
+                return pairing_replay.refusal(d)
             if config.remote_access.vibe_cloud.instance_id:
                 raise desktop_local_instance.LocalInstanceError("local_binding_changed")
             replace_expired_grant = (
-                claim.get("desktop_failure") == "pairing_key_expired"
+                d.error == "pairing_key_expired"
                 and pairing_key
                 and not _same_pairing_request(claim, backend.base_url, pairing_key)
             )
@@ -6583,8 +6565,13 @@ def _persist_pairing_impl(
             return {"ok": False, "error": "missing_pairing_key"}
 
         from vibe import pairing_replay
-        if pairing_replay.accept_conflict(record, sealed_archive=record['phase'] in ('redeemed', 'applied')):
-            return pairing_replay.reconciliation_required()
+        if result is None:
+            d = pairing_replay.decision(record)
+            if d.kind in ('check', 'unavailable'):
+                return pairing_replay.refusal(d)
+            if d.error in ('local_binding_changed', 'pairing_superseded_after_redeem', 'pairing_reconciliation_failed'):
+                return {'ok': False, 'error': d.error, 'pairing': {'ok': False, 'recoverable': False}}
+
         enrollment = record.get("personal_claim") or record.get("desktop_enrollment")
         if enrollment:
             from vibe import desktop_local_instance
@@ -6616,8 +6603,10 @@ def _persist_pairing_impl(
                     "detail": f"current pairing identity unavailable: {exc}",
                     "pairing": {"ok": False, "recoverable": False},
                 }
-            current_identity = _pairing_identity_from_cloud(current_config.remote_access.vibe_cloud)
-            if _pairing_identity_fingerprint(current_identity) != record["source_fingerprint"]:
+            publication = pairing_replay.decision(record, config=current_config, live_receipt=True)
+            if publication.kind == 'check':
+                return pairing_replay.reconciliation_required()
+            if publication.kind != 'publish':
                 return {
                     "ok": False,
                     "error": "pairing_superseded_after_redeem",

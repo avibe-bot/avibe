@@ -172,7 +172,7 @@ def prepare(account_id: Any, expected_binding_revision: Any) -> dict[str, Any]:
                 raise LocalInstanceError("local_instance_conflict")
         else:
             from vibe import pairing_replay
-            if pairing_replay.orphaned_delivery():
+            if pairing_replay.decision(None, config=config).kind != 'fresh':
                 raise LocalInstanceError('pairing_needs_reconciliation')
             if installation_id is None:
                 installation_id = ensure_installation_id()

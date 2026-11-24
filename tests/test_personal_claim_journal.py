@@ -24,7 +24,7 @@ def test_expired_unconsumed_grant_retires_only_its_claim_attempt(claim_peer, mon
         assert (outcome['state'], outcome['code']) == ('error', 'fresh_claim_required')
     assert remote_access._read_pending_pairing_record() == (None, None)
     assert 'claim_id' not in claims._outcome()
-    assert not pairing_replay.orphaned_delivery()
+    assert pairing_replay.decision(None).kind == 'fresh'
     assert _claim()['state'] == 'bound'
 
 
@@ -76,7 +76,7 @@ def test_explicit_key_leaves_settled_personal_request_with_its_owner(claim_peer,
         assert [path.read_bytes() for path in evidence] == before
         assert len(sends) == 1 and claim_peer.decisions == decisions
     assert claims.recover_pairing(claim_peer.id)['state'] == 'bound'
-    assert claim_peer.decisions == decisions and not pairing_replay.orphaned_delivery()
+    assert claim_peer.decisions == decisions and pairing_replay.decision(None).kind == 'fresh'
 
 
 @pytest.mark.parametrize('superseded', [False, True])
@@ -336,7 +336,8 @@ def test_pairing_cannot_publish_a_target_different_from_the_approved_claim(claim
     assert not V2Config.load().remote_access.vibe_cloud.instance_id
 
 
-@pytest.mark.parametrize("damage", ["{not json", "[]", '{"bound": 5}', b"\xff\xfe"])
+@pytest.mark.parametrize("damage", ["{not json", "[]", '{"bound": 5}', b"\xff\xfe",
+                                    '{"bound":{"claim_id":"12345678-1234-4234-a234-123456789abc","generation":"abc123"}}'])
 def test_damaged_attempt_blocks_new_claim_but_not_matching_sealed_archive(claim_peer, monkeypatch, damage):
     """This file may be the sole acceptance evidence: only a sealed local receipt can repair it."""
     import json
@@ -356,7 +357,26 @@ def test_damaged_attempt_blocks_new_claim_but_not_matching_sealed_archive(claim_
     ident = claim_peer.id
     assert remote_access._read_pending_pairing_record()[0]["phase"] == "redeemed"
     damage_marker()
+    view = remote_access.pending_pairing_status(V2Config.load())
+    assert (view['can_resume'], view['replay_state']) == (True, 'local_archive')
     assert claims.recover_pairing(ident)["state"] == "bound"
     assert remote_access._read_pending_pairing_record() == (None, None)
     assert json.loads(marker.read_text())["bound"]["claim_id"] == ident
     assert claims.RedirectClaims().state(ident) == {"state": "bound"}
+
+
+def test_foreign_acceptance_blocks_sealed_archive_in_status_and_action(claim_peer, monkeypatch):
+    import json
+    from uuid import uuid4
+    from tests.test_pairing_recovery import _fail_config_publication_once
+
+    _fail_config_publication_once(monkeypatch)
+    assert _claim()['code'] == 'pairing_recovery_required'
+    assert remote_access._read_pending_pairing_record()[0]['phase'] == 'redeemed'
+    marker = claims._marker()
+    marker.write_text(json.dumps({**claims._outcome(), 'claim_id': str(uuid4())}))
+    before = (marker.read_bytes(), remote_access._pending_pairing_path().read_bytes(), list(claim_peer.calls))
+    view = remote_access.pending_pairing_status(V2Config.load())
+    assert (view['can_resume'], view['replay_state']) == (False, 'needs_reconciliation')
+    assert remote_access.pair('', '')['error'] == 'pairing_needs_reconciliation'
+    assert (marker.read_bytes(), remote_access._pending_pairing_path().read_bytes(), claim_peer.calls) == before

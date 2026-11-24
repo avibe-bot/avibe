@@ -5,7 +5,6 @@ and a selected crash/write boundary. Real journal/sidecar/marker files, config
 and locks survive each step. An absorbing successor with identical disk bytes,
 clock and peer ledgers is explored once per remaining depth, not 8**4 times.
 """
-from collections import Counter
 import json
 import subprocess
 import sys
@@ -15,7 +14,7 @@ import pytest
 from config.v2_config import V2Config
 from tests.test_desktop_local_instance import desktop_host as desktop_host
 from tests.test_pairing_recovery import pairing_host as pairing_host, _response
-from tests.test_pairing_replay import Wire, _HTTP
+from tests.test_pairing_replay import Wire, _HTTP, setup_replay as setup_replay
 from tests.test_personal_claims import claim_peer as claim_peer
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import desktop_local_instance as local, pairing_replay as replay, personal_claims as claims, remote_access as ra, ui_server
@@ -29,52 +28,92 @@ def claim():
     return claims.run_link(expected_subject='owner-id', show_link=lambda _: None)
 
 
+class GrantPeer:
+    """Two boundaries: raw arrivals vs. idempotent transitions on fixture grants."""
+
+    def __init__(self):
+        self.accepts, self.posts = [], []
+        self.issued, self.consumed = {}, {}
+        self.ready = set()
+
+    def issue(self, claim_id, offered_key):
+        # A repeated accept serves the already issued authorization.
+        return self.issued.setdefault(claim_id, offered_key)
+
+    def redeem(self, raw):
+        self.posts.append(raw)  # first operation on every redeem, including malformed requests
+        key = json.loads(raw)['pairing_key']
+        if key not in self.issued.values():
+            return 403, b'{}'
+        if key in self.consumed:
+            return (200, self.consumed[key][1]) if self.consumed[key][0] == raw else (409, b'{}')
+        if key in self.ready:
+            receipt = json.dumps(_response()).encode()
+            self.consumed[key] = (raw, receipt)
+            return 200, receipt
+        return None
+
+    def snapshot(self):
+        return (tuple(self.accepts), tuple(self.posts), dict(self.issued), dict(self.consumed))
+
+
+def assert_quiet(before, after):
+    assert after == before, 'unexpected fixture transport arrival or grant transition'
+
+
+def test_outside_oracle_observes_a_rejected_delivery():
+    peer = GrantPeer()
+    baseline = peer.snapshot()
+    body = b'{"pairing_key":"unissued-fixture"}'
+    assert peer.redeem(body)[0] == 403 and not peer.consumed
+    with pytest.raises(AssertionError, match='unexpected fixture transport'):
+        assert_quiet(baseline, peer.snapshot())
+
+
+@pytest.mark.parametrize('damage', [False, True])
+def test_guarded_desktop_delivery_uses_real_prepare_and_evidence(setup_replay, damage, monkeypatch):
+    wire, clock, payload, post = setup_replay  # real prepare route, same installation and operation
+    arrived = []
+    request = wire.request
+    def observe(method, path, *, body, headers):
+        arrived.append(body)
+        return request(method, path, body=body, headers=headers)
+    monkeypatch.setattr(wire, 'request', observe)
+    wire.status, wire.advice, wire.body = 429, '90', b'{}'
+    assert post(payload).get_json()['replay_state'] == 'scheduled'
+    if damage:
+        claims._marker().write_text('{"bound":{"claim_id":"12345678-1234-4234-a234-123456789abc","generation":"bad"}}')
+    clock[0] += 100  # past the floor, within the original budget in both histories
+    result = post(payload).get_json()
+    if damage:
+        assert result['error'] == 'pairing_needs_reconciliation' and len(arrived) == 1
+    else:
+        assert result['replay_state'] == 'scheduled' and len(arrived) == 2 and arrived[0] == arrived[1]
+
+
 @pytest.mark.parametrize('cut', ['issued_before_handoff', 'unsettled', 'received_not_archived', 'damaged_marker', 'retryable'])
 def test_bounded_restart_sequences(cut, desktop_host, claim_peer, monkeypatch):
     clock = [replay._now()]
     monkeypatch.setattr(replay, '_now', lambda: clock[0])
     wire = Wire()
-    issued, consumed = Counter(), Counter()
-    reservations = []
-    persist = replay._save
-    def reserve_or_settle(new):
-        if new.get('mode') == 'unsettled' and new.get('attempts', 0) == 1 + len([
-            key for key in reservations if key == new['key']
-        ]):
-            # Independent pre-send oracle: a reservation cannot manufacture its
-            # own permission. Read the PREVIOUS disk evidence before publishing.
-            journal, error = ra._read_pending_pairing_record()
-            assert not error and replay._request_key(journal) == new['key']
-            assert claims._outcome()['claim_id'] == journal['personal_claim']['claim_id']
-            if new['key'] in reservations:
-                prior = replay._saved()
-                assert prior['key'] == new['key'] and prior['mode'] in ('scheduled', 'manual_retryable')
-                assert clock[0] >= prior['not_before']
-            else:
-                assert journal.get('replay_budget_claimed') is False
-            reservations.append(new['key'])
-        persist(new)
-    monkeypatch.setattr(replay, '_save', reserve_or_settle)
+    peer = GrantPeer()
+    arrivals = []
     peer_request = claim_peer.request
     def accept(method, path, body, headers):
+        arrivals.append((method, path, body))  # first operation, even for malformed input
+        payload = json.loads(body)
+        if 'accepted_subject' in payload:
+            peer.accepts.append(payload['claim_id'])
         peer_request(method, path, body, headers)
-        if 'accepted_subject' in json.loads(body):
-            issued[claim_peer.key] += 1
-            assert issued[claim_peer.key] == 1
+        if 'accepted_subject' in payload and claim_peer.result[1].get('status') == 'redeemed':
+            claim_peer.result[1]['pairing']['pairing_key'] = peer.issue(payload['claim_id'], claim_peer.key)
     monkeypatch.setattr(claim_peer, 'request', accept)
     request = wire.request
     def post(method, path, *, body, headers):
-        assert replay._saved()['mode'] == 'unsettled'  # durable reservation before dispatch
-        assert len(reservations) == len(wire.sent) + 1
-        record, error = ra._read_pending_pairing_record()
-        payload = json.loads(body)
-        assert not error and record['redeem_request'] == payload
-        assert claims._outcome()['claim_id'] == record['personal_claim']['claim_id']
-        assert issued[payload['pairing_key']] == 1
+        answer = peer.redeem(body)
+        if answer:
+            wire.status, wire.body = answer
         request(method, path, body=body, headers=headers)
-        if wire.status == 200:
-            consumed[payload['pairing_key']] += 1
-            assert consumed[payload['pairing_key']] == 1
     monkeypatch.setattr(wire, 'request', post)
     monkeypatch.setattr(ra, '_json_request', _HTTP)
     monkeypatch.setattr(ra, '_validated_backend_connections', lambda *_: [wire])
@@ -102,39 +141,38 @@ def test_bounded_restart_sequences(cut, desktop_host, claim_peer, monkeypatch):
             if claim_peer.id != a and json.loads(wire.sent[-1][1])['pairing_key'] == 'fixture-B':
                 if cut == 'unsettled':
                     raise PowerLoss()
-                if cut == 'received_not_archived':
-                    wire.body = json.dumps(_response()).encode()
-                else:
+                if cut != 'received_not_archived':
                     wire.status, wire.advice, wire.body = 429, '90', b'{}'
             return response()
         m.setattr(wire, 'getresponse', respond)
         if cut == 'received_not_archived':
-            # Count consumption in the peer when the POST arrives, not when
-            # the local journal is or is not successfully written.
-            def choose_status(method, path, *, body, headers):
-                wire.status = 200 if json.loads(body)['pairing_key'] == 'fixture-B' else 422
-                post(method, path, body=body, headers=headers)
-            m.setattr(wire, 'request', choose_status)
+            peer.ready.add('fixture-B')
         if cut in ('issued_before_handoff', 'unsettled'):
             with pytest.raises(PowerLoss):
                 claim()
         else:
             assert claim()['state'] == 'error'
     b = claim_peer.id
-    assert a != b and issued == {'fixture-A': 1, 'fixture-B': 1}
+    assert a != b and peer.issued == {a: 'fixture-A', b: 'fixture-B'} and peer.accepts == [a, b]
     assert wire.sent[:2] == [first_request, first_request]
     if cut == 'damaged_marker':
-        claims._marker().write_bytes(b'{')
+        saved = claims._outcome()
+        saved['expires_at'] = 'not a timestamp'
+        claims._marker().write_text(json.dumps(saved))
+    elif cut == 'retryable':
+        saved = claims._outcome()
+        saved['expires_at'] = '2001-01-01T00:00:00+00:00'  # valid historical date, same grant
+        claims._marker().write_text(json.dumps(saved))
     paths = (ra._pending_pairing_path(), replay._path(), claims._marker(), local._identity_path())
     def evidence():
         return (tuple(p.read_bytes() if p.exists() else None for p in paths),
                 ra._pairing_identity_from_cloud(V2Config.load().remote_access.vibe_cloud),
-                list(wire.sent), list(claim_peer.calls), dict(issued), dict(consumed))
+                list(wire.sent), tuple(arrivals), peer.snapshot())
     rec, _ = ra._read_pending_pairing_record()
     assert rec['personal_claim']['claim_id'] == (a if cut == 'issued_before_handoff' else b)
-    assert (claims._marker().read_bytes() == b'{') if cut == 'damaged_marker' else (claims._outcome()['claim_id'] == b)
+    assert json.loads(claims._marker().read_bytes())['claim_id'] == b
     if cut == 'received_not_archived':
-        assert replay._saved()['mode'] == 'received_not_archived' and consumed == {'fixture-B': 1}
+        assert replay._saved()['mode'] == 'received_not_archived' and set(peer.consumed) == {'fixture-B'}
     elif cut == 'unsettled':
         assert replay._saved()['mode'] == 'unsettled'
 
@@ -199,18 +237,20 @@ replay.tick()
         previous = clock[0]
         for entry in 'ABCDEFGH':
             for ident in (a, b):
-                clock[0] = previous + (1 if cut == 'retryable' else 901)
+                clock[0] = previous + (1 if cut == 'retryable' else 100)
                 monkeypatch.setattr(claims, 'redirect_claims', claims.RedirectClaims())
                 step(entry, ident)
+                assert_quiet(baseline[-1], peer.snapshot())
                 assert evidence() == baseline, (cut, remaining, entry, ident)
                 visit(remaining - 1)
         clock[0] = previous
     visit(4)
     assert len(explored) == 4
     if cut == 'retryable':
-        clock[0] += 90
-        wire.status, wire.body = 200, json.dumps(_response()).encode()
+        clock[0] += 100
+        peer.ready.add('fixture-B')
         replay.tick()
         assert wire.sent[-2] == wire.sent[-1] and len(wire.sent) == len(baseline[2]) + 1
-        assert consumed == {'fixture-B': 1} and issued == {'fixture-A': 1, 'fixture-B': 1}
+        assert set(peer.consumed) == {'fixture-B'} and peer.accepts == [a, b]
+        assert peer.posts[-1] == peer.posts[-2] and peer.issued == {a: 'fixture-A', b: 'fixture-B'}
         assert claims.recover_pairing(b)['state'] == 'bound'
