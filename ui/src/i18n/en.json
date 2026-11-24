@@ -3357,7 +3357,7 @@
   "accessBlocked": {
     "title": "This address can't open Avibe",
     "body": "Avibe is running, but it does not open at this address.",
-    "hint": "Sign in at avibe.bot and open it from your list, or open it on the computer that runs Avibe.",
+    "hint": "Open it on the computer that runs Avibe. If this Avibe is bound to an account, you can also sign in at avibe.bot and open it from your list.",
     "code": "Reason: {{code}}",
     "retry": "Retry"
   },
@@ -3443,7 +3443,7 @@
     "project_agent_conflict": "The project's Agent changed elsewhere. Reloading it — apply your change again.",
     "project_order_conflict": "Project order changed elsewhere. The list has been refreshed; move the project again.",
     "invalid_project_order": "Project order could not be saved. Refresh the list and try again.",
-    "remote_access_host_mismatch": "This address can't open Avibe. Sign in at avibe.bot and open it from your list, or open it on the computer that runs Avibe.",
+    "remote_access_host_mismatch": "This address can't open Avibe. Open it on the computer that runs Avibe; if this Avibe is bound to an account, you can also sign in at avibe.bot and open it from your list.",
     "remote_access_config_unavailable": "Avibe couldn't read its configuration. Check that the service is healthy and try again.",
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
     "remote_access_session_secret_missing": "Remote access is misconfigured (missing session secret). Re-pair this device to restore access.",

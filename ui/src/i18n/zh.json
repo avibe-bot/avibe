@@ -3357,7 +3357,7 @@
   "accessBlocked": {
     "title": "这个地址打不开 Avibe",
     "body": "Avibe 在运行，但不在这个地址打开。",
-    "hint": "在 avibe.bot 登录后，从你的列表里打开它；也可以在运行 Avibe 的那台电脑上直接打开。",
+    "hint": "到运行 Avibe 的那台电脑上打开它。这个 Avibe 绑定了账号的话，也可以在 avibe.bot 登录后从你的列表里打开。",
     "code": "原因：{{code}}",
     "retry": "重试"
   },
@@ -3443,7 +3443,7 @@
     "project_agent_conflict": "该项目的 Agent 已在别处变更，正在重新加载，请再次修改。",
     "project_order_conflict": "项目顺序已在别处变更，列表已刷新，请重新拖动。",
     "invalid_project_order": "无法保存项目顺序，请刷新列表后重试。",
-    "remote_access_host_mismatch": "这个地址打不开 Avibe。在 avibe.bot 登录后从你的列表里打开它，或者在运行 Avibe 的那台电脑上直接打开。",
+    "remote_access_host_mismatch": "这个地址打不开 Avibe。到运行 Avibe 的那台电脑上打开它；这个 Avibe 绑定了账号的话，也可以在 avibe.bot 登录后从你的列表里打开。",
     "remote_access_config_unavailable": "Avibe 无法读取配置。请确认服务运行正常后重试。",
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
     "remote_access_session_secret_missing": "远程访问配置有误（缺少会话密钥）。请重新配对此设备以恢复访问。",
