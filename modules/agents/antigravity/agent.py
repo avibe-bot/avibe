@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -106,6 +108,84 @@ _LIVE_CONFIG_FIELDS = frozenset({"idle_timeout_seconds", "auto_update"})
 _API_KEY_AUTH_MODES = frozenset({"api_key", "gemini-api-key"})
 _AGENT_PLATFORM_AUTH_MODES = frozenset({"agent_platform", "agent-platform", "adc"})
 _OAUTH_AUTH_MODES = frozenset({"oauth", "oauth-personal", "oauth-business"})
+_IMAGE_MIME_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+}
+
+
+async def _authenticate_session_client(client: AcpClient, auth_mode: str | None) -> None:
+    """Run ACP ``authenticate`` for API-key / Agent Platform modes right after ``initialize``."""
+    mode = str(auth_mode or "").strip().lower()
+    if mode in _API_KEY_AUTH_MODES:
+        method_id = "gemini-api-key"
+    elif mode in _AGENT_PLATFORM_AUTH_MODES:
+        method_id = "agent-platform"
+    else:
+        return
+    advertised = {
+        str(method.get("id") or "").strip()
+        for method in client.auth_methods
+        if isinstance(method, Mapping)
+    }
+    if advertised and method_id not in advertised:
+        return
+    await client.authenticate(method_id)
+
+
+def _image_extension(raw: bytes, mime_type: str) -> str:
+    if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if raw.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return ".webp"
+    if raw.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    normalized_mime = mime_type.split(";", 1)[0].strip().lower()
+    return _IMAGE_MIME_EXTENSIONS.get(normalized_mime, ".png")
+
+
+def _write_reply_image_bytes(runtime_key: str, encoded_data: str, mime_type: str) -> Path | None:
+    payload = encoded_data.strip()
+    if payload.startswith("data:") and "," in payload:
+        header, payload = payload.split(",", 1)
+        if not mime_type and ";" in header:
+            mime_type = header[5:].split(";", 1)[0].strip().lower()
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        logger.warning("Ignoring invalid base64 image in Antigravity agent_message_chunk")
+        return None
+    if not raw:
+        return None
+
+    ext = _image_extension(raw, mime_type)
+    slug = hashlib.sha256(runtime_key.encode("utf-8")).hexdigest()[:24]
+    target_dir = paths.get_attachments_dir() / "antigravity" / slug
+    destination = target_dir / f"image-{hashlib.sha256(raw).hexdigest()[:24]}{ext}"
+    if destination.is_file():
+        return destination.resolve()
+
+    temp_path: Path | None = None
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, temp_name = tempfile.mkstemp(prefix=".image-", suffix=".tmp", dir=str(target_dir))
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(raw)
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, destination)
+    except OSError as exc:
+        logger.warning("Failed to persist Antigravity reply image: %s", exc)
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        return None
+    return destination.resolve()
 
 
 class AntigravityResumeUnavailableError(RuntimeError):
@@ -454,7 +534,8 @@ class AntigravityAgent(BaseAgent):
             request.working_path,
             project_base=skills_project_base,
         )
-        launch_env = build_antigravity_env(
+        launch_env = await asyncio.to_thread(
+            build_antigravity_env,
             self.antigravity_config,
             cli_path=cli_path,
             working_dir=request.working_path,
@@ -561,6 +642,10 @@ class AntigravityAgent(BaseAgent):
             try:
                 await client.start()
                 await client.initialize(client_info=_CLIENT_INFO, client_capabilities={})
+                await _authenticate_session_client(
+                    client,
+                    _config_str(self.antigravity_config, "auth_mode"),
+                )
                 add_dirs = list(spec.rules_dirs) if (spec.rules_dirs and client.supports_additional_directories) else None
 
                 use_backend_anchor = self._uses_namespaced_backend_session(
@@ -682,7 +767,8 @@ class AntigravityAgent(BaseAgent):
             return {"outcome": {"outcome": "cancelled"}}
 
         tool_call = params.get("toolCall")
-        denied_by_policy = False
+        tool_name = ""
+        tool_input: dict[str, Any] | None = None
         if isinstance(tool_call, Mapping):
             tool_name = str(
                 tool_call.get("name")
@@ -692,10 +778,11 @@ class AntigravityAgent(BaseAgent):
             ).strip()
             raw_input = tool_call.get("rawInput")
             tool_input = dict(raw_input) if isinstance(raw_input, Mapping) else None
-            if tool_name and check_tool_call(tool_name, tool_input).denied:
-                denied_by_policy = True
 
-        if not denied_by_policy:
+        identifiable = bool(tool_name) and tool_name.casefold() != "unknown"
+        allowed = identifiable and check_tool_call(tool_name, tool_input).allowed
+
+        if allowed:
             for option in options:
                 if not isinstance(option, Mapping):
                     continue
@@ -794,7 +881,36 @@ class AntigravityAgent(BaseAgent):
         if isinstance(update, AcpMessageChunkUpdate):
             if update.text:
                 turn.reply_chunks.append(update.text)
+                return
+            if update.content.get("type") == "image":
+                image_markdown = await self._materialize_reply_image(turn, update.content)
+                if image_markdown:
+                    if turn.reply_chunks and not turn.reply_chunks[-1].endswith("\n"):
+                        turn.reply_chunks.append("\n\n")
+                    turn.reply_chunks.append(image_markdown)
             return
+
+    async def _materialize_reply_image(
+        self,
+        turn: _ActiveTurn,
+        content: Mapping[str, Any],
+    ) -> str | None:
+        raw_data = content.get("data")
+        if isinstance(raw_data, str) and raw_data.strip():
+            mime_type = str(content.get("mimeType") or content.get("mime_type") or "").strip().lower()
+            path = await asyncio.to_thread(_write_reply_image_bytes, turn.runtime_key, raw_data, mime_type)
+            if path is not None:
+                return f"![image]({path.as_uri()})"
+            return None
+
+        raw_uri = content.get("uri")
+        if isinstance(raw_uri, str) and raw_uri.strip():
+            uri = raw_uri.strip()
+            if uri.startswith(("file://", "http://", "https://")):
+                return f"![image]({uri})"
+            if os.path.isabs(uri):
+                return f"![image]({Path(uri).resolve().as_uri()})"
+        return None
 
     def _build_prompt_blocks_sync(
         self,
@@ -840,23 +956,35 @@ class AntigravityAgent(BaseAgent):
         blocks.extend(image_blocks)
         return blocks
 
+    def _language(self) -> str:
+        return str(getattr(self.config, "language", "en") or "en")
+
     @staticmethod
-    def _classify_failure(error: Exception) -> tuple[str, str, str | None]:
+    def _classify_failure(error: Exception, *, language: str = "en") -> tuple[str, str, str | None]:
         if isinstance(error, AcpRpcError) and error.code == ACP_AUTH_REQUIRED:
             diagnostic = f"Antigravity authentication required (ACP {error.code}): {error.message}"
-            return diagnostic, f"❌ {diagnostic}", "auth_required"
+            display = i18n_t(
+                "error.antigravityAuthRequired",
+                language,
+                code=error.code,
+                detail=error.message,
+            )
+            return diagnostic, f"❌ {display}", "auth_required"
         if isinstance(error, FileNotFoundError) or (
             isinstance(error, AcpTransportError) and isinstance(error.__cause__, FileNotFoundError)
         ):
             diagnostic = f"Antigravity CLI not found: {error}"
-            return diagnostic, f"❌ {diagnostic}", "cli_not_found"
+            display = i18n_t("error.antigravityCliNotFound", language, detail=str(error))
+            return diagnostic, f"❌ {display}", "cli_not_found"
         if isinstance(error, OSError) or (
             isinstance(error, AcpTransportError) and isinstance(error.__cause__, OSError)
         ):
             diagnostic = f"Antigravity CLI failed to launch: {error}"
-            return diagnostic, f"❌ {diagnostic}", "launch_failed"
+            display = i18n_t("error.antigravityLaunchFailed", language, detail=str(error))
+            return diagnostic, f"❌ {display}", "launch_failed"
         diagnostic = str(error)
-        return diagnostic, f"❌ Antigravity error: {diagnostic}", None
+        display = i18n_t("error.antigravityError", language, detail=diagnostic)
+        return diagnostic, f"❌ {display}", None
 
     def _schedule_live_title_backfill(self, session: _RuntimeSession, title: str) -> None:
         if not session.agent_session_id or not session.native_session_id:
@@ -962,6 +1090,71 @@ class AntigravityAgent(BaseAgent):
         if session.native_session_id and not session.reported_title:
             self._maybe_backfill_session_title(turn.request, session.native_session_id)
 
+    async def _settle_turn_incomplete(
+        self,
+        session: _RuntimeSession,
+        turn: _ActiveTurn,
+        *,
+        stop_reason: str,
+    ) -> None:
+        del session
+        if turn.settled:
+            return
+        turn.settled = True
+
+        language = self._language()
+        if stop_reason in ("max_tokens", "max_turn_requests"):
+            subtype = "error_max_turns"
+            failure_reason = f"Antigravity turn stopped incomplete ({stop_reason})."
+            localized_reason = i18n_t("error.antigravityTurnIncomplete", language, reason=stop_reason)
+        elif stop_reason == "refusal":
+            subtype = "error_during_execution"
+            failure_reason = "Antigravity refused to complete the turn (refusal)."
+            localized_reason = i18n_t("error.antigravityTurnRefused", language)
+        elif stop_reason:
+            subtype = "error_during_execution"
+            failure_reason = f"Antigravity turn ended with unexpected stopReason: {stop_reason}."
+            localized_reason = i18n_t("error.antigravityTurnUnexpectedStop", language, reason=stop_reason)
+        else:
+            subtype = "error_during_execution"
+            failure_reason = "Antigravity turn ended without a stopReason."
+            localized_reason = i18n_t("error.antigravityTurnMissingStopReason", language)
+
+        partial_text = "".join(turn.reply_chunks).strip()
+        note = f"⚠️ {localized_reason}"
+        body = f"{partial_text}\n\n{note}" if partial_text else note
+
+        result_footer: str | None = None
+        if getattr(self.config, "show_duration", True):
+            duration_ms = self._calculate_duration_ms(turn.started_at)
+            token_field = ""
+            get_token_field = getattr(self.controller, "session_token_field", None)
+            if callable(get_token_field):
+                try:
+                    token_field = get_token_field(turn.request.context) or ""
+                except Exception:
+                    token_field = ""
+            if duration_ms > 0 or token_field:
+                result_footer = self._get_formatter(turn.request.context).format_result_footer(
+                    subtype,
+                    duration_ms,
+                    token_field=token_field,
+                )
+
+        await emit_output(
+            self.controller,
+            turn.request.context,
+            TurnEnd(
+                outcome=TurnOutcome.FAILED,
+                text=body,
+                parse_mode="markdown",
+                footer=result_footer,
+                terminal_error=failure_reason,
+                output=terminal_output_for(turn.request),
+            ),
+        )
+        await self._remove_ack_reaction(turn.request)
+
     async def _settle_turn_failure(
         self,
         session: _RuntimeSession | None,
@@ -973,7 +1166,7 @@ class AntigravityAgent(BaseAgent):
             if turn.settled:
                 return
             turn.settled = True
-        diagnostic, display_text, _ = self._classify_failure(error)
+        diagnostic, display_text, _ = self._classify_failure(error, language=self._language())
         if session is not None and not session.client.is_alive:
             session.exit_failure = (diagnostic, display_text)
             await self._close_session(session, intentional=False, retire_activation=True)
@@ -989,7 +1182,7 @@ class AntigravityAgent(BaseAgent):
         await self._remove_ack_reaction(request)
 
     async def _refuse_disabled_turn(self, request: AgentRequest) -> None:
-        language = str(getattr(self.config, "language", "en") or "en")
+        language = self._language()
         await emit_backend_failure(
             self.controller,
             request.context,
@@ -1105,11 +1298,14 @@ class AntigravityAgent(BaseAgent):
 
         try:
             response = await prompt_task
-            stop_reason = str(response.get("stopReason") or "end_turn")
+            raw_stop_reason = response.get("stopReason")
+            stop_reason = raw_stop_reason.strip() if isinstance(raw_stop_reason, str) else ""
             if turn.cancelled or stop_reason == "cancelled":
                 await self._settle_turn_stopped(turn)
-            else:
+            elif stop_reason == "end_turn":
                 await self._settle_turn_done(session, turn)
+            else:
+                await self._settle_turn_incomplete(session, turn, stop_reason=stop_reason)
         except asyncio.CancelledError:
             if turn.cancelled:
                 await self._settle_turn_stopped(turn)
