@@ -125,6 +125,12 @@ enum WebKitReadiness {
     /// A picker route is also the App's bootstrap error fallback. Require
     /// the account and instance snapshot before exercising a signed-in flow.
     /// This observes one bootstrap; it never retries or extends its deadlines.
+    ///
+    /// When the bootstrap settled on another state, the error carries what
+    /// it left (`FixtureReadinessError.bootstrap`). A caller may build its
+    /// App once more for exactly one such state, a bootstrap that stalled
+    /// after its web content launch (`FixtureBootstrap.stalledAfterWebContentLaunch`),
+    /// and for no other: `DirectPathAppTests.makeApp` does.
     @MainActor
     static func waitForSignedInFixture(
         _ app: AppModel,
@@ -156,6 +162,7 @@ enum WebKitReadiness {
             }
             try await Task.sleep(for: .milliseconds(50))
         }
+        let settled = started.duration(to: clock.now)
         let evidence = fixtureEvidence(
             app, stage: "bootstrap settled", started: started, requests: requests
         )
@@ -166,8 +173,14 @@ enum WebKitReadiness {
         else {
             throw thrown(
                 "The signed-in fixture settled on another state",
-                FixtureReadinessError(description:
-                    "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+                FixtureReadinessError(
+                    description:
+                        "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())",
+                    bootstrap: FixtureBootstrap(
+                        elapsed: settled,
+                        signedIn: app.mobileSessionCoordinator.currentAccount != nil,
+                        served: requests.served
+                    )
                 )
             )
         }
@@ -191,21 +204,39 @@ enum WebKitReadiness {
 /// Only fixture metadata, never request bodies, headers, query strings or
 /// provider error text (the password test deliberately puts secrets in those).
 final class FixtureRequestLog: @unchecked Sendable {
+    /// One request the fixture answered: when, from the log's start, and
+    /// with what.
+    struct Entry: Equatable, CustomStringConvertible {
+        let at: Duration
+        let method: String
+        let path: String
+        let status: Int
+
+        var description: String {
+            "\(at) \(method) \(path) -> \(status)"
+        }
+    }
+
     private let lock = NSLock()
     private let started = ContinuousClock.now
-    private var entries: [String] = []
+    private var entries: [Entry] = []
 
     var count: Int { lock.withLock { entries.count } }
 
+    /// Every request answered so far, in order.
+    var served: [Entry] { lock.withLock { entries } }
+
     func record(_ request: LocalHTTPRequest, status: Int) {
         lock.withLock {
-            entries.append("\(started.duration(to: .now)) \(request.method) \(request.path) -> \(status)")
+            entries.append(
+                Entry(at: started.duration(to: .now), method: request.method, path: request.path, status: status)
+            )
         }
     }
 
     func summary(since index: Int = 0) -> String {
         lock.withLock {
-            "requests=[" + entries.dropFirst(index).joined(separator: "; ") + "]"
+            "requests=[" + entries.dropFirst(index).map(\.description).joined(separator: "; ") + "]"
         }
     }
 
@@ -238,6 +269,60 @@ func recordThrown(
 
 struct FixtureReadinessError: Error, CustomStringConvertible {
     let description: String
+    /// What the bootstrap left, when it settled on another state than the
+    /// signed-in one.
+    var bootstrap: FixtureBootstrap? = nil
+}
+
+/// A fixture App's bootstrap that settled without the signed-in state, as
+/// far as the one rebuild rule needs it.
+struct FixtureBootstrap: Equatable {
+    /// How long the App took to settle, from when the wait for it began.
+    let elapsed: Duration
+    /// The App has an account.
+    let signedIn: Bool
+    /// What the fixture's control plane answered, in order.
+    let served: [FixtureRequestLog.Entry]
+
+    /// Whether this is the one stall a caller may rebuild its App for, once.
+    ///
+    /// Seen on the CI simulator (runs 45318053323 and 45005744290): the
+    /// account transport's web content process took 35 to 37 s to launch
+    /// and then never finished its first document. The fixture answered
+    /// that document's request, `GET /api/config/auth`, the moment the
+    /// process came up; nothing followed; and the App gave up at its own
+    /// readiness deadline, signed out. Why such a process stays silent is
+    /// not known. A longer wait does not help: it had been silent for more
+    /// than 80 s. A new App makes a new WebView; that this is enough has
+    /// not been seen yet, and the rebuild's two printed lines are how it
+    /// will be.
+    ///
+    /// Exactly that, and nothing near it:
+    /// - the App is signed out;
+    /// - it settled at its readiness deadline (`readiness`, to within a
+    ///   second: the wait begins a moment after the App does), not sooner.
+    ///   An App that settled sooner was told something;
+    /// - `/api/config/auth` was answered with `200`;
+    /// - the session was never asked for. A session request that was
+    ///   answered, refused or failed is the bootstrap's own result.
+    func stalledAfterWebContentLaunch(readiness: Duration) -> Bool {
+        !signedIn
+            && elapsed + .seconds(1) >= readiness
+            && served.contains { $0.method == "GET" && $0.path == Self.documentPath && $0.status == 200 }
+            && !served.contains { $0.path == Self.sessionPath }
+    }
+
+    /// The stall in one line, for the log: when the document's request was
+    /// answered (the launch), what was served, and what never was.
+    func stallEvidence(readiness: Duration) -> String {
+        let launched = served.first { $0.path == Self.documentPath }.map { "\($0.at)" } ?? "never"
+        let answered = served.map { "\($0.method) \($0.path) -> \($0.status)" }.joined(separator: "; ")
+        return "launch=\(launched), settled=\(elapsed), readiness=\(readiness), "
+            + "served=[\(answered)], missing=[GET \(Self.sessionPath)], account=nil"
+    }
+
+    static let documentPath = "/api/config/auth"
+    static let sessionPath = "/api/mobile/session"
 }
 
 enum WebKitReadinessError: Error {
