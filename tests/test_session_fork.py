@@ -2493,3 +2493,98 @@ def test_forking_an_inherited_null_session_keeps_its_explicit_pins(
     assert "reasoning_effort" in marked, (
         f"supplying model dropped the untouched reasoning_effort pin too (marker={sorted(marked)})"
     )
+
+
+def test_fork_summary_handoff_is_bounded_to_reserved_source_message_id(tmp_path: Path) -> None:
+    """Fork summary handoffs stop at the reserved source_message_id and exclude post-fork turns."""
+    from core.services.session_fork import build_fork_summary_handoff_text
+
+    db_path = tmp_path / "state.db"
+    source_id = _seed_source_session(db_path, tmp_path, backend="antigravity")
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = conn.execute(
+                select(agent_sessions.c.scope_id).where(agent_sessions.c.id == source_id)
+            ).scalar_one()
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                source="user",
+                text="pre-fork user question alpha",
+            )
+            anchor_msg = messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                source="agent",
+                text="pre-fork assistant answer beta",
+            )
+
+        forked = reserve_forked_session(source_session_id=source_id, db_path=db_path)
+        assert forked.fork.source_message_id == anchor_msg["id"]
+
+        # Append post-fork turns to the source session AFTER fork reservation, including
+        # large content that would displace pre-fork history if unbounded.
+        with engine.begin() as conn:
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                source="user",
+                text="post-fork user leakage gamma " + ("X" * 1200),
+            )
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                source="agent",
+                text="post-fork assistant leakage delta " + ("Y" * 1200),
+            )
+            child_metadata = json.loads(
+                conn.execute(
+                    select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == forked.session_id)
+                ).scalar_one()
+                or "{}"
+            )
+    finally:
+        engine.dispose()
+
+    pending_fork = fork_metadata_from_session_metadata(child_metadata)
+    assert pending_fork is not None
+    assert pending_fork["source_message_id"] == anchor_msg["id"]
+
+    # Tight budget proves post-fork messages neither leak in nor displace pre-fork turns.
+    summary = build_fork_summary_handoff_text(
+        pending_fork,
+        backend="antigravity",
+        db_path=db_path,
+        budget=1200,
+    )
+    assert "pre-fork user question alpha" in summary
+    assert "pre-fork assistant answer beta" in summary
+    assert "post-fork user leakage gamma" not in summary
+    assert "post-fork assistant leakage delta" not in summary
+
+    # Unknown anchor fails closed instead of leaking the latest source transcript.
+    missing_anchor_summary = build_fork_summary_handoff_text(
+        {**pending_fork, "source_message_id": "msg_nonexistent_anchor"},
+        backend="antigravity",
+        db_path=db_path,
+    )
+    assert "pre-fork user question alpha" not in missing_anchor_summary
+    assert "post-fork user leakage gamma" not in missing_anchor_summary

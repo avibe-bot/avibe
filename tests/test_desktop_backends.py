@@ -1188,3 +1188,48 @@ def test_removal_that_cannot_delete_every_file_fails(monkeypatch, capsys, tmp_pa
 
     assert result == (2, {"failed": "backend_removal_failed"})
     assert (stuck / "r1").is_dir()
+
+
+def test_resolve_cli_path_maps_default_cli_agy_to_published_desktop_antigravity(monkeypatch, tmp_path):
+    """Default selector 'agy' resolves to the published desktop Antigravity installation."""
+    from vibe.cli_paths import desktop_backend_for_cli, resolve_cli_path
+
+    env = _desktop_env(tmp_path)
+    root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+    binary_name = "agy.exe" if os.name == "nt" else "agy"
+    published = root / "antigravity" / "releases" / "r1" / "bin" / binary_name
+    _write_native(published)
+    descriptor = {
+        "schema_version": desktop_backends.CURRENT_DESCRIPTOR_SCHEMA_VERSION,
+        "backend": "antigravity",
+        "package": desktop_backends.BACKEND_SPECS["antigravity"].package,
+        "version": "1.2.3",
+        "executable": published.relative_to(root).as_posix(),
+    }
+    (root / "antigravity" / "current.json").write_text(json.dumps(descriptor), encoding="utf-8")
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    monkeypatch.setenv("AVIBE_DESKTOP_RUNTIME_ROOT", env["AVIBE_DESKTOP_RUNTIME_ROOT"])
+    monkeypatch.setenv("AVIBE_DESKTOP_BACKENDS_ROOT", env["AVIBE_DESKTOP_BACKENDS_ROOT"])
+    monkeypatch.setenv("PATH", str(empty_bin))
+    monkeypatch.setattr(
+        "vibe.cli_paths._candidate_cli_paths",
+        lambda binary, **_kwargs: [Path(binary)] if Path(binary).is_absolute() else [],
+    )
+
+    assert desktop_backend_for_cli("agy") == "antigravity"
+    assert desktop_backend_for_cli("agy.exe") == "antigravity"
+    assert desktop_backend_for_cli("antigravity") == "antigravity"
+
+    expected = str(published.resolve(strict=True))
+    assert resolve_cli_path("agy", include_npm_global=False) == expected
+    assert resolve_cli_path("antigravity", include_npm_global=False) == expected
+    assert resolve_cli_path("agy", include_npm_global=False, include_desktop=False) is None
+
+    # A stale desktop release path ending in agy stays within the published desktop backend
+    # instead of falling back to an unrelated external PATH binary.
+    external = empty_bin / binary_name
+    _write_native(external)
+    stale_desktop_path = root / "antigravity" / "releases" / "stale" / "bin" / binary_name
+    assert resolve_cli_path(str(stale_desktop_path), include_npm_global=False) == expected

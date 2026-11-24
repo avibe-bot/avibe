@@ -12,7 +12,19 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
+from core.process_isolation import (
+    KILL_SIGNAL,
+    PROCESS_IDENTITY_ENV,
+    PersistedProcessIdentity,
+    capture_spawned_process_identity,
+    fingerprint_process_marker,
+    isolated_subprocess_kwargs,
+    new_process_identity_marker,
+    process_identity_subprocess_env,
+    reap_marked_processes,
+    reap_orphaned_process_tree,
+    signal_process_tree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +65,23 @@ def _capability_enabled(value: Any) -> bool:
     return isinstance(value, Mapping)
 
 
+def _reap_process_tree(
+    identity: PersistedProcessIdentity | None,
+    fingerprint: str | None,
+    terminate_timeout: float,
+) -> None:
+    """Reap any surviving descendants in the ACP process tree after the leader exits."""
+    if identity is not None:
+        reap_orphaned_process_tree(logger, "ACP server", expected_identity=identity)
+    if fingerprint is not None:
+        reap_marked_processes(
+            logger,
+            "ACP server",
+            worker_fingerprint=fingerprint,
+            terminate_timeout=terminate_timeout,
+        )
+
+
 class AcpClient:
     """Async NDJSON JSON-RPC 2.0 client over a single stdio ACP subprocess.
 
@@ -76,6 +105,8 @@ class AcpClient:
         self._request_timeout = request_timeout
 
         self._process: Process | None = None
+        self._process_identity: PersistedProcessIdentity | None = None
+        self._process_fingerprint: str | None = None
         self._request_id = 0
         # Maps JSON-RPC request id -> Future resolving to (result, rpc_error, notify_barrier)
         self._pending: dict[int | str, asyncio.Future[tuple[dict[str, Any], AcpRpcError | None, int]]] = {}
@@ -129,27 +160,38 @@ class AcpClient:
         self._agent_info = {}
         self._auth_methods = ()
 
+        self._process_identity = None
+        self._process_fingerprint = None
+
+        marker = new_process_identity_marker()
+        env = dict(self._env) if self._env is not None else process_identity_subprocess_env(marker)
+        env[PROCESS_IDENTITY_ENV] = marker
+
         subprocess_kwargs: dict[str, Any] = {
             "stdin": asyncio.subprocess.PIPE,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
             "limit": STREAM_BUFFER_LIMIT,
+            "env": env,
             **isolated_subprocess_kwargs(),
         }
         if self._cwd is not None:
             subprocess_kwargs["cwd"] = self._cwd
-        if self._env is not None:
-            subprocess_kwargs["env"] = self._env
 
+        self._process_fingerprint = fingerprint_process_marker(marker)
         spawn = asyncio.create_task(asyncio.create_subprocess_exec(*self._command, **subprocess_kwargs))
         try:
             self._process = await asyncio.shield(spawn)
         except asyncio.CancelledError:
             self._process = await spawn
+            self._process_identity = capture_spawned_process_identity(self._process.pid, marker)
             await self.close()
             raise
         except OSError as exc:
+            self._process_fingerprint = None
             raise AcpTransportError(f"Failed to launch ACP server {self._command[0]!r}: {exc}") from exc
+
+        self._process_identity = capture_spawned_process_identity(self._process.pid, marker)
 
         self._reader_task = asyncio.create_task(self._reader_loop())
         self._stderr_task = asyncio.create_task(self._stderr_reader())
@@ -174,6 +216,13 @@ class AcpClient:
                     logger.warning("ACP server did not exit after SIGTERM; sending KILL")
                     signal_process_tree(proc, KILL_SIGNAL, logger, "ACP server")
                     await proc.wait()
+
+        identity = self._process_identity
+        fingerprint = self._process_fingerprint
+        self._process_identity = None
+        self._process_fingerprint = None
+        if identity is not None or fingerprint is not None:
+            await asyncio.to_thread(_reap_process_tree, identity, fingerprint, terminate_timeout)
 
         tasks: list[asyncio.Task[None]] = []
         for task in (self._reader_task, self._stderr_task, self._notify_task, *self._server_request_tasks):

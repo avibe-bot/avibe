@@ -786,6 +786,7 @@ def build_fork_summary_handoff_text(
     backend: str,
     db_path: Optional[Path] = None,
     budget: Optional[int] = None,
+    source_message_id: Optional[str] = None,
 ) -> str:
     """Build a bounded summary handoff when native session fork is unavailable."""
 
@@ -795,7 +796,14 @@ def build_fork_summary_handoff_text(
         render_fork_summary_handoff,
     )
 
-    source_session_id = str(pending_fork.get("source_session_id") or "").strip()
+    source_session_id = str(
+        pending_fork.get("source_session_id") or pending_fork.get("fork_source_session_id") or ""
+    ).strip()
+    effective_source_message_id = (
+        _clean_optional(source_message_id)
+        or _clean_optional(pending_fork.get("source_message_id"))
+        or _clean_optional(pending_fork.get("fork_source_message_id"))
+    )
     effective_budget = HANDOFF_BUDGET_CHARS if budget is None else budget
     path = db_path or paths.get_sqlite_state_path()
     if source_session_id and path.is_file():
@@ -808,6 +816,7 @@ def build_fork_summary_handoff_text(
                     conn,
                     source_session_id,
                     backend=backend,
+                    source_message_id=effective_source_message_id,
                     budget=effective_budget,
                 )
         finally:

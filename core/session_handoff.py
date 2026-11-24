@@ -15,10 +15,12 @@ it again from what is true then.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Connection
 
 from modules.agents.catalog import display_name_for_backend
@@ -178,16 +180,93 @@ def render_backend_handoff(
     )
 
 
+def _row_message_text(row: Mapping[str, Any]) -> str:
+    text = row.get("content_text")
+    if text:
+        return str(text)
+    try:
+        content = json.loads(row.get("content_json") or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if isinstance(content, dict):
+        return str(content.get("text") or "")
+    return ""
+
+
 def build_fork_summary_handoff(
     conn: Connection,
     source_session_id: str,
     *,
     backend: str,
+    source_message_id: str | None = None,
     budget: int = HANDOFF_BUDGET_CHARS,
 ) -> str:
     """Render a bounded summary handoff for a forked session without native fork."""
 
-    from storage.messages_service import list_session_messages
+    from storage.messages_service import list_session_messages, transcript_order_value
+    from storage.models import messages as messages_table
+
+    anchor_id = str(source_message_id or "").strip() or None
+    if anchor_id is not None:
+        order_value = transcript_order_value()
+        anchor_order_at = conn.execute(
+            select(order_value)
+            .where(
+                messages_table.c.session_id == source_session_id,
+                messages_table.c.id == anchor_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if anchor_order_at is None:
+            return render_fork_summary_handoff(
+                source_session_id,
+                backend=backend,
+                messages=(),
+                has_older=False,
+                budget=budget,
+            )
+        rows = (
+            conn.execute(
+                select(
+                    messages_table.c.id,
+                    messages_table.c.type,
+                    messages_table.c.content_text,
+                    messages_table.c.content_json,
+                    messages_table.c.created_at,
+                )
+                .where(
+                    messages_table.c.session_id == source_session_id,
+                    messages_table.c.type.in_(tuple(_TRANSCRIPT_LABELS)),
+                    or_(
+                        order_value < anchor_order_at,
+                        and_(order_value == anchor_order_at, messages_table.c.id <= anchor_id),
+                    ),
+                )
+                .order_by(order_value.desc(), messages_table.c.id.desc())
+                .limit(_TRANSCRIPT_FETCH_LIMIT + 1)
+            )
+            .mappings()
+            .all()
+        )
+        has_older = len(rows) > _TRANSCRIPT_FETCH_LIMIT
+        bounded = list(rows[:_TRANSCRIPT_FETCH_LIMIT])
+        bounded.reverse()
+        bounded_messages = [
+            {
+                "id": row["id"],
+                "type": row["type"],
+                "created_at": row["created_at"],
+                "text": _row_message_text(row),
+            }
+            for row in bounded
+        ]
+        return render_fork_summary_handoff(
+            source_session_id,
+            backend=backend,
+            messages=bounded_messages,
+            has_older=has_older,
+            budget=budget,
+        )
 
     page = list_session_messages(
         conn,
