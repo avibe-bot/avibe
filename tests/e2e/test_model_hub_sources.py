@@ -545,12 +545,19 @@ def listing_upstream():
         yield upstream
 
 
+@pytest.fixture
+def b8_app(model_hub_app_factory):
+    with model_hub_app_factory(extra_env={"B8_TRACE_SITES": "1"}) as app:
+        yield app
+
+
 def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     mock_llm_upstream: MockLLMUpstream,
     listing_upstream: MockLLMUpstream,
-    model_hub_app,
+    b8_app,
 ) -> None:
     """B8: refresh force is body-only in the current HTTP contract."""
+    model_hub_app = b8_app
 
     # Open decision B6 has no D-1..D-4 identifier in plan section 5:
     # normalize destructive force transport or retain the current split.
@@ -599,6 +606,9 @@ def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
         },
     )
     body = body_force.json()
+    if body_force.status != 200:
+        sites = model_hub_app.avibe_home / 'b8-sites.txt'
+        print('B8 controller call sites:', sites.read_text() if sites.exists() else 'unavailable')
     assert body_force.status == 200, body
     assert body["removed_hops"] == refusal["would_remove_hops"]
     assert all(hop["source_id"] != listing_source["id"] for hop in body["removed_hops"])

@@ -34,5 +34,34 @@ def _scope_native_inventory_to_harness() -> None:
     scoped.cache_clear = process_iter.cache_clear
     psutil.process_iter = scoped
 
-
 _scope_native_inventory_to_harness()
+
+
+# Temporary CI-only location probe. No exception text, locals, source lines,
+# request data or absolute paths are collected. Only B8 opts in.
+if os.environ.get("B8_TRACE_SITES") == "1" and hasattr(sys, "monitoring"):
+    from pathlib import Path
+
+    _paths = ("core/handlers/model_hub/service.py", "vibe/model_hub_runtime/adapter.py",
+              "vibe/model_hub_runtime/supervisor.py", "vibe/model_hub_runtime/client.py",
+              "vibe/model_hub_runtime/state.py", "vibe/model_hub_runtime/config.py")
+    _seen = set()
+
+    def _record_site(code, offset, exc):
+        if isinstance(exc, (StopIteration, StopAsyncIteration, GeneratorExit)):
+            return
+        path = next((p for p in _paths if code.co_filename.endswith('/' + p)), None)
+        if path is None or len(_seen) >= 256:
+            return
+        line = next((n for start, end, n in code.co_lines() if start <= offset < end), None)
+        if line is None or (path, line) in _seen:
+            return
+        _seen.add((path, line))
+        with (Path(os.environ['AVIBE_HOME']) / 'b8-sites.txt').open('a') as report:
+            print(f'{path}:{line}', file=report)
+
+    _mon = sys.monitoring
+    _mon.use_tool_id(3, 'b8-ci-location-only')
+    for _event in (_mon.events.RAISE, _mon.events.PY_UNWIND):
+        _mon.register_callback(3, _event, _record_site)
+    _mon.set_events(3, _mon.events.RAISE | _mon.events.PY_UNWIND)
