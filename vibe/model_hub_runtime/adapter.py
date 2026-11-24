@@ -10,6 +10,7 @@ import random
 import re
 import secrets
 import threading
+import time
 import urllib.parse
 import uuid
 from dataclasses import dataclass, field, replace
@@ -62,6 +63,7 @@ from core.handlers.model_hub.quota import (
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.os_errors import local_os_errno
 from vibe.model_hub_runtime import card_use
+from vibe.model_hub_runtime.controls import EngineJobs, auto_update_enabled, project
 from vibe.model_hub_runtime.admission import EngineAdmission, engine_operation
 from vibe.model_hub_runtime.client import (
     _OFFICIAL_BASE_URLS,
@@ -1678,9 +1680,10 @@ class CLIProxyEngineAdapter:
         self.supervisor = supervisor or get_engine_supervisor()
         self.state_store = state_store or self.supervisor.state_store
         self.lifecycle = getattr(self.supervisor, "lifecycle", None)
-        # PR4 can supply the policy through this shared internal provider; no
-        # new persisted switch or UI/CLI policy surface belongs to this change.
-        self._routine_adoption = routine_adoption or (lambda: True)
+        self._routine_adoption = routine_adoption or auto_update_enabled
+        self._engine_job: dict | None = None
+        self._request_lock = asyncio.Lock()
+        self._engine_jobs = EngineJobs(self.lifecycle.manager.runtime_dir) if self.lifecycle is not None else None
         self._engine_admission = EngineAdmission()
         self._lifecycle_recovery_lock = asyncio.Lock()
         self._engine_update_lock = asyncio.Lock()
@@ -1788,38 +1791,80 @@ class CLIProxyEngineAdapter:
 
     async def engine_status(self) -> dict[str, Any]:
         if self.lifecycle is None:
-            return {"state": "opted_out", "reason": "manifest_override"}
-        status = await run_owned_in_thread(self.lifecycle.status)
-        status["operation_id"] = self._engine_operation_id
-        return status
+            status = {"state": "opted_out", "reason": "manifest_override"}
+            return {**status, **project(status, default=None, automatic=await asyncio.to_thread(self._routine_adoption),
+                    participation="opted_out", live=True)}
+
+        def snapshot():
+            raw = self.lifecycle.status()
+            participation = self.lifecycle.channel.opt_out_reason()
+            if participation == "manifest_override":
+                participation = "opted_out"
+            return {**raw, **project(raw, default=self.lifecycle.channel.bundled_release_tag(),
+                    automatic=self._routine_adoption(), participation=participation, live=True,
+                    operation=self._engine_job)}
+
+        return await run_owned_in_thread(snapshot)
+
+    async def engine_job(self, operation_id: str) -> dict:
+        if self._engine_job is not None and self._engine_job.get("status") == "running" and (
+            self._engine_operation_task is None or self._engine_operation_task.done()
+        ):
+            # Shutdown/terminal receipt failure: never advertise an orphan as running.
+            self._engine_job = None
+        if self._engine_job and self._engine_job["operation_id"] == operation_id:
+            return dict(self._engine_job)
+        if self.lifecycle is None:
+            from core.handlers.model_hub import ModelHubError
+            raise ModelHubError("job_not_found", status=404)
+        return await asyncio.to_thread(self._engine_jobs.get, operation_id)
 
     async def request_engine_operation(self, *, update: bool = False) -> dict[str, Any]:
+        from core.handlers.model_hub import ModelHubError
+
         if self.lifecycle is None:
-            return await self.engine_status()
-        if self._engine_operation_task is None or self._engine_operation_task.done():
-            self._engine_operation_id = uuid.uuid4().hex
+            raise ModelHubError("manifest_override", status=409, data={"update_state": "opted_out"})
+        async with self._request_lock:
+            if self._engine_operation_task and not self._engine_operation_task.done():
+                if update and self._engine_job["kind"] == "check":
+                    raise ModelHubError("operation_busy", status=409, data={"operation_id": self._engine_operation_id})
+                return dict(self._engine_job)
+            jobs = self._engine_jobs
+            operation_id = "engine-" + uuid.uuid4().hex
+            job = jobs.started(operation_id, update)
+            await run_owned_in_thread(jobs.store, job)
+            self._engine_operation_id, self._engine_job = operation_id, job
+            self._engine_operation_task = asyncio.create_task(self._perform_engine_operation(jobs, job, update))
+            return dict(job)
 
-            async def operation():
-                try:
-                    await self.recover_lifecycle()
-                    if update:
-                        await self._reconcile_engine(explicit=True)
-                    else:
-                        async with self._engine_update_lock:
-                            decision = await run_owned_in_thread(self.lifecycle.check)
-                        if self.lifecycle.withdrawn_current:
-                            await self._reconcile_engine(explicit=False, decision=decision)
-                except Exception as exc:
-                    logger.exception("Model Hub engine operation failed")
-                    # An operation failure is not proof that execution failed:
-                    # preserve a healthy rollback and its truthful last result.
-                    self.lifecycle._status["operation_error"] = type(exc).__name__
-                    if not self.lifecycle.recovered or not self.lifecycle._ready:
-                        self.lifecycle._status["state"] = "blocked"
-                    await run_owned_in_thread(self.lifecycle.publish_status)
-
-            self._engine_operation_task = asyncio.create_task(operation(), name="model-hub-engine-operation")
-        return await self.engine_status()
+    async def _perform_engine_operation(self, jobs: EngineJobs, job: dict, update: bool) -> None:
+        failed = False
+        try:
+            await self.recover_lifecycle()
+            if update:
+                await self._reconcile_engine(explicit=True)
+            else:
+                async with self._engine_update_lock:
+                    await run_owned_in_thread(self.lifecycle.check)
+                if self.lifecycle.withdrawn_current:
+                    await self._reconcile_engine(explicit=False, withdrawal_only=True)
+        except Exception:
+            failed = True
+            logger.exception("Model Hub engine operation failed")
+            if not self.lifecycle.recovered or not self.lifecycle._ready:
+                self.lifecycle._status["state"] = "blocked"
+            elif self.lifecycle._status.get("state") != "rolled_back":
+                self.lifecycle._status.update(state="failed", reason="engine_operation_failed")
+            await run_owned_in_thread(self.lifecycle.publish_status)
+        # Don't let the job's own running overlay obscure its terminal outcome.
+        job = {**job, "status": "succeeded"}
+        raw = await run_owned_in_thread(self.lifecycle.status)
+        terminal = project(raw, default=None, automatic=False, participation=None, live=True)
+        failed |= terminal["update_state"] in {"unavailable", "rejected", "blocked", "rolled_back", "failed"}
+        job.update(ok=not failed, status="failed" if failed else "succeeded", finished_at=time.time(),
+                   update_state=terminal["update_state"], update_reason=terminal["update_reason"])
+        self._engine_job = job
+        await run_owned_in_thread(jobs.store, job)
 
     async def _drain_engine(self, *, withdrawal: bool = False) -> bool:
         # Recovery/routine callers cannot downgrade an existing recall gate or
@@ -1908,7 +1953,7 @@ class CLIProxyEngineAdapter:
             changed = await self._select_staged(generation)
         return EngineEnsureResult(status=await self.status(), changed=changed)
 
-    async def _reconcile_engine(self, *, explicit: bool, decision=None) -> None:
+    async def _reconcile_engine(self, *, explicit: bool, decision=None, withdrawal_only: bool = False) -> None:
         from core.model_hub_engine_channel import ResolutionAction
 
         async with self._engine_update_lock:
@@ -1917,10 +1962,12 @@ class CLIProxyEngineAdapter:
             # stop, or fallback action; the committed generation is the
             # snapshot that makes the decision current.
             decision = await run_owned_in_thread(
-                self.lifecycle.check, retry=explicit, allow_adoption=explicit or self._routine_adoption(),
+                self.lifecycle.check, retry=explicit, allow_adoption=explicit or await asyncio.to_thread(self._routine_adoption),
             )
             self._gate_known_withdrawal()
             withdrawn = decision.action in {ResolutionAction.WITHDRAW, ResolutionAction.BLOCKED}
+            if withdrawal_only and not withdrawn:
+                return  # a metadata-only check must not adopt if its earlier recall is already settled
             if withdrawn:
                 self._engine_admission.close("engine_withdrawn")
                 if self._withdrawal_deadline is None:

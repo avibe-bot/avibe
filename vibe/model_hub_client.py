@@ -76,6 +76,29 @@ def _rpc_sync(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
     return _decode(response)
 
 
+def engine_control_sync(action: str, *, operation_id: str | None = None) -> dict:
+    """Local controller only, never direct install or restart on IPC failure."""
+    if action not in {"status", "check", "update", "job"}:
+        raise ValueError("Unknown engine operation")
+    # The new verb cannot accidentally run a legacy controller's update before
+    # we discover it lacks durable job polling. Keep its old verbs intact.
+    if action in {"check", "update"}:
+        operation, payload = "engine_control", {"action": action}
+    else:
+        operation, payload = "engine_" + action, {"operation_id": operation_id} if action == "job" else {}
+    try:
+        result = _rpc_sync(operation, payload)
+    except ModelHubError as exc:
+        if exc.status == 404 and exc.code != "job_not_found":
+            raise ModelHubError("incompatible_controller", status=503) from exc
+        raise
+    if not isinstance(result, dict) or (action == "status" and "update_state" not in result) or (
+        action in {"check", "update"} and not result.get("job_id")
+    ):
+        raise ModelHubError("incompatible_controller", status=503)
+    return result
+
+
 async def _rpc(operation: str, payload: Optional[dict[str, Any]] = None) -> Any:
     return await _post(_MODEL_HUB_RPC_PATH, {"operation": operation, "payload": payload or {}})
 
