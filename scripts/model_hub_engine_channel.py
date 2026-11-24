@@ -933,6 +933,7 @@ def publish(
     fetch_public: Callable[[], bytes | None] = fetch_public_index,
     sleep: Callable[[float], None] = time.sleep,
     public_wait_seconds: float = 300.0,
+    guard: Callable[[bytes | None], None] | None = None,
 ) -> ChannelPayload:
     """Put ``envelope`` in the bucket and prove clients receive exactly it.
 
@@ -949,6 +950,8 @@ def publish(
 
     successor = authenticate(envelope, roots=roots, verifier=verifier)
     stored = bucket.read()
+    if guard is not None:
+        guard(stored[0] if stored else None)
     if stored is None or stored[0] != envelope:
         if stored is not None:
             try:
