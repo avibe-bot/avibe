@@ -47,7 +47,11 @@ import { recordVaultPasskeyOutcome, vaultPasskeyHandoff } from './vaultBrowserHa
 import i18next from 'i18next';
 
 import { openLinkInNewContext } from './pwaNavigation';
-import { getVaultSandboxAppearance, type VaultSandboxAppearance } from './vaultSandboxAppearance';
+import {
+  getVaultSandboxAppearance,
+  subscribeVaultSandboxAppearance,
+  type VaultSandboxAppearance,
+} from './vaultSandboxAppearance';
 import { getVaultSandboxPolicy, refreshVaultSandboxPolicy, type VaultSessionPolicy } from './vaultSandboxPolicy';
 import { buildVaultConfirmSurface, type VaultConfirmSurface } from './vaultConfirmSurface';
 import {
@@ -221,6 +225,11 @@ type ReservedWindow = VaultAuthorizationWindow & {
 const authorizationWindows = new Map<string, ReservedWindow>();
 let singleton: Promise<VaultSandboxClient> | null = null;
 let activeClient: VaultSandboxClient | null = null;
+// Keep the live sandbox iframe in sync with theme/locale changes without making
+// VaultSandboxAppearanceBridge pull this module into the first-screen bundle.
+subscribeVaultSandboxAppearance((appearance) => {
+  activeClient?.setAppearance(appearance);
+});
 // Bumped on every reset. A create() that started before a reset checks this after its handshake:
 // if it advanced, the client handshook under the pre-reset (stale) policy and is discarded instead
 // of being adopted, so a reset takes effect even for an in-flight client creation.
