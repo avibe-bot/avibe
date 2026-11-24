@@ -538,8 +538,16 @@ def test_b8_delete_force_is_query_only_in_the_current_http_contract(
     assert query_force.status == 200, query_force.json()
 
 
+@pytest.fixture
+def listing_upstream():
+    # B8 needs one catalog to keep listing the model after the other empties.
+    with MockLLMUpstream() as upstream:
+        yield upstream
+
+
 def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     mock_llm_upstream: MockLLMUpstream,
+    listing_upstream: MockLLMUpstream,
     model_hub_app,
 ) -> None:
     """B8: refresh force is body-only in the current HTTP contract."""
@@ -549,9 +557,10 @@ def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     # An API-key hop needs no inventory membership (#1897), so an emptied
     # listing strands nothing on its own. Refresh drops a hop where another
     # Source still lists the model and automatic matching narrows to it (#1934).
+    _configure_protocol(listing_upstream, "anthropic", models=[{"id": MENU_MODEL}])
     _configure_protocol(mock_llm_upstream, "anthropic", models=[{"id": MENU_MODEL}])
-    _create_source(
-        model_hub_app, mock_llm_upstream, nonce="scn_b800000000000001",
+    listing_source, _ = _create_source(
+        model_hub_app, listing_upstream, nonce="scn_b800000000000001",
         vendor="anthropic", display_name="Listing E2E source",
     )
     source, _ = _create_source(
@@ -592,6 +601,7 @@ def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     body = body_force.json()
     assert body_force.status == 200, body
     assert body["removed_hops"] == refusal["would_remove_hops"]
+    assert all(hop["source_id"] != listing_source["id"] for hop in body["removed_hops"])
     assert body["interrupted"] == refusal["would_interrupt"]
 
 
