@@ -63,7 +63,9 @@ from core.services.session_fork import (
     FORK_HANDOFF_MODE_NATIVE,
     FORK_HANDOFF_MODE_SUMMARY,
     build_fork_summary_handoff_text,
+    clear_pending_fork_handoff,
     pending_native_fork,
+    pending_summary_fork_handoff_for_session,
     record_fork_handoff_mode,
 )
 from core.system_prompt_injection import (
@@ -188,6 +190,19 @@ def _config_cli_path(config: Any) -> str:
     return text or "agy"
 
 
+def _is_explicit_cli_path(value: str) -> bool:
+    return bool(value) and (
+        value.startswith("~")
+        or os.path.isabs(value)
+        or os.sep in value
+        or (os.altsep is not None and os.altsep in value)
+    )
+
+
+def _normalize_explicit_cli_path(value: str) -> str:
+    return str(Path(os.path.expanduser(value)).absolute())
+
+
 def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
     """Resolve an Antigravity CLI selector without invoking ``npm``.
 
@@ -195,8 +210,11 @@ def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
     bare selectors and stale desktop paths resolve to the published private
     desktop install (or user-installed ``agy`` outside the GUI PATH). Outside
     desktop runtimes, bare selectors (no path separator) are still resolved via
-    ``resolve_cli_path(..., include_npm_global=False)`` while explicit missing
-    paths stay untouched to preserve ``cli_not_found`` reporting.
+    ``resolve_cli_path(..., include_npm_global=False)``. Explicit paths (tilde,
+    absolute, or containing a path separator) are normalized to expanded
+    absolute paths so subprocess execution never passes raw ``~`` or
+    cwd-dependent relative paths (while preserving ``cli_not_found`` reporting
+    for missing explicit paths).
     """
     selected = str(raw_cli_path).strip() if raw_cli_path is not None else ""
     selected = selected or "agy"
@@ -205,12 +223,16 @@ def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
     from vibe.upgrade import is_desktop_managed_runtime
 
     if is_desktop_managed_runtime():
-        return runtime_agent_cli_path(selected, "agy", resolve_agent_paths=True)
-    expanded = Path(os.path.expanduser(selected))
-    has_path_separator = os.sep in selected or (os.altsep is not None and os.altsep in selected)
-    if not expanded.is_absolute() and not has_path_separator:
-        return resolve_cli_path(selected, include_npm_global=False) or selected
-    return selected
+        resolved = runtime_agent_cli_path(selected, "agy", resolve_agent_paths=True)
+        if _is_explicit_cli_path(resolved):
+            return _normalize_explicit_cli_path(resolved)
+        return resolved
+    if not _is_explicit_cli_path(selected):
+        resolved = resolve_cli_path(selected, include_npm_global=False) or selected
+        if _is_explicit_cli_path(resolved):
+            return _normalize_explicit_cli_path(resolved)
+        return resolved
+    return _normalize_explicit_cli_path(selected)
 
 
 def _config_extra_args(config: Any) -> tuple[str, ...]:
@@ -347,6 +369,7 @@ class _ActiveTurn:
     tool_calls: dict[str, dict[str, Any]] = field(default_factory=dict)
     cancelled: bool = False
     settled: bool = False
+    prompt_accepted: bool = False
     prompt_task: asyncio.Task[dict[str, Any]] | None = None
 
 
@@ -752,7 +775,28 @@ class AntigravityAgent(BaseAgent):
                     record_fork_handoff_mode,
                     session.agent_session_id,
                     mode=fork_handoff_mode,
+                    pending=(
+                        bool(session.pending_fork_handoff)
+                        if fork_handoff_mode == FORK_HANDOFF_MODE_SUMMARY
+                        else False
+                    ),
                 )
+            elif (
+                stored_native_id
+                and not use_backend_anchor
+                and session.agent_session_id
+                and not (request.input_metadata is not None and request.input_metadata.handoff)
+            ):
+                pending_summary_fork = await asyncio.to_thread(
+                    pending_summary_fork_handoff_for_session,
+                    session.agent_session_id,
+                )
+                if pending_summary_fork is not None:
+                    session.pending_fork_handoff = await asyncio.to_thread(
+                        build_fork_summary_handoff_text,
+                        pending_summary_fork,
+                        backend=self.name,
+                    )
             return session
 
     async def _handle_server_request(
@@ -847,6 +891,7 @@ class AntigravityAgent(BaseAgent):
         if turn is None or turn.settled or turn.cancelled:
             return
 
+        turn.prompt_accepted = True
         session.last_activity = time.monotonic()
 
         if isinstance(update, AcpUsageUpdate):
@@ -1266,13 +1311,15 @@ class AntigravityAgent(BaseAgent):
             return
 
         input_metadata = request.input_metadata
+        delivering_fork_handoff = False
         if session.pending_fork_handoff:
             handoff_text = session.pending_fork_handoff
-            session.pending_fork_handoff = None
             if input_metadata is None:
                 input_metadata = AgentInputMetadata(handoff=handoff_text)
+                delivering_fork_handoff = True
             elif not input_metadata.handoff:
                 input_metadata = replace(input_metadata, handoff=handoff_text)
+                delivering_fork_handoff = True
 
         prompt_blocks = await asyncio.to_thread(
             self._build_prompt_blocks_sync,
@@ -1301,6 +1348,17 @@ class AntigravityAgent(BaseAgent):
 
             accept_catalog(self.controller, request.context, skill_catalog, backend=self.name)
 
+        fork_handoff_cleared = False
+
+        async def _mark_fork_handoff_delivered() -> None:
+            nonlocal fork_handoff_cleared
+            if not delivering_fork_handoff or fork_handoff_cleared:
+                return
+            fork_handoff_cleared = True
+            session.pending_fork_handoff = None
+            if session.agent_session_id:
+                await asyncio.to_thread(clear_pending_fork_handoff, session.agent_session_id)
+
         prompt_task = asyncio.create_task(
             session.client.session_prompt(session.native_session_id, prompt_blocks, timeout=None)
         )
@@ -1308,6 +1366,8 @@ class AntigravityAgent(BaseAgent):
 
         try:
             response = await prompt_task
+            turn.prompt_accepted = True
+            await _mark_fork_handoff_delivered()
             raw_stop_reason = response.get("stopReason")
             stop_reason = raw_stop_reason.strip() if isinstance(raw_stop_reason, str) else ""
             if turn.cancelled or stop_reason == "cancelled":
@@ -1318,12 +1378,20 @@ class AntigravityAgent(BaseAgent):
                 await self._settle_turn_incomplete(session, turn, stop_reason=stop_reason)
         except asyncio.CancelledError:
             if turn.cancelled:
+                if turn.prompt_accepted:
+                    await _mark_fork_handoff_delivered()
                 await self._settle_turn_stopped(turn)
             elif session.intentional_teardown:
+                if turn.prompt_accepted:
+                    await _mark_fork_handoff_delivered()
                 await self._settle_turn_teardown(turn)
             else:
+                if turn.prompt_accepted:
+                    session.pending_fork_handoff = None
                 raise
         except (AcpTransportError, AcpRpcError) as exc:
+            if turn.prompt_accepted:
+                await _mark_fork_handoff_delivered()
             if turn.cancelled:
                 await self._settle_turn_stopped(turn)
             elif session.intentional_teardown:
@@ -1331,6 +1399,8 @@ class AntigravityAgent(BaseAgent):
             else:
                 await self._settle_turn_failure(session, turn, request, exc)
         except Exception as exc:
+            if turn.prompt_accepted:
+                await _mark_fork_handoff_delivered()
             await self._settle_turn_failure(session, turn, request, exc)
         finally:
             if session.active_turn is turn:

@@ -390,6 +390,7 @@ def reserve_forked_session(
             # A source that is itself a fork carries its own point; the child's is resolved below.
             metadata.pop("fork_source_context_seq", None)
             metadata.pop("fork_handoff_mode", None)
+            metadata.pop("fork_handoff_pending", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -835,6 +836,7 @@ def record_fork_handoff_mode(
     session_id: str,
     *,
     mode: str,
+    pending: bool | None = None,
     db_path: Optional[Path] = None,
 ) -> bool:
     """Persist how a forked session was materialized (``native`` or ``summary_handoff``)."""
@@ -849,6 +851,7 @@ def record_fork_handoff_mode(
         return False
 
     from sqlalchemy import select, update
+    from sqlalchemy.exc import OperationalError
 
     from storage.agent_session_rows import reserve_write_lock
     from storage.db import create_sqlite_engine
@@ -866,15 +869,127 @@ def record_fork_handoff_mode(
             if row is None:
                 return False
             metadata = _load_metadata(row["metadata_json"])
-            if metadata.get("fork_handoff_mode") == cleaned_mode:
+            changed = False
+            if metadata.get("fork_handoff_mode") != cleaned_mode:
+                metadata["fork_handoff_mode"] = cleaned_mode
+                changed = True
+            if pending is True:
+                if metadata.get("fork_handoff_pending") is not True:
+                    metadata["fork_handoff_pending"] = True
+                    changed = True
+            elif pending is False:
+                if "fork_handoff_pending" in metadata:
+                    metadata.pop("fork_handoff_pending", None)
+                    changed = True
+            if not changed:
                 return True
-            metadata["fork_handoff_mode"] = cleaned_mode
             conn.execute(
                 update(agent_sessions)
                 .where(agent_sessions.c.id == cleaned_id)
                 .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
             )
             return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    finally:
+        engine.dispose()
+
+
+def clear_pending_fork_handoff(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Clear the pending summary-fork handoff flag once the first prompt is accepted."""
+
+    cleaned_id = _clean_optional(session_id)
+    if not cleaned_id:
+        return False
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return False
+
+    from sqlalchemy import select, update
+    from sqlalchemy.exc import OperationalError
+
+    from storage.agent_session_rows import reserve_write_lock
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            metadata = _load_metadata(row["metadata_json"])
+            if "fork_handoff_pending" not in metadata:
+                return False
+            metadata.pop("fork_handoff_pending", None)
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == cleaned_id)
+                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
+            )
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    finally:
+        engine.dispose()
+
+
+def pending_summary_fork_handoff_for_session(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> dict[str, Any] | None:
+    """Return fork metadata if the session still owes its first summary-fork handoff."""
+
+    cleaned_id = _clean_optional(session_id)
+    if not cleaned_id:
+        return None
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return None
+
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path, read_only=True)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return None
+            metadata = _load_metadata(row["metadata_json"])
+            if (
+                metadata.get("fork_handoff_mode") != FORK_HANDOFF_MODE_SUMMARY
+                or not bool(metadata.get("fork_handoff_pending"))
+            ):
+                return None
+            return fork_metadata_from_session_metadata(metadata)
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
     finally:
         engine.dispose()
 

@@ -194,9 +194,9 @@ def _make_request(
 @pytest.fixture(autouse=True)
 def _hermetic_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     fake_home = tmp_path / "home"
-    fake_home.mkdir()
+    fake_home.mkdir(exist_ok=True)
     avibe_home = tmp_path / "avibe-home"
-    avibe_home.mkdir()
+    avibe_home.mkdir(exist_ok=True)
     monkeypatch.setenv("HOME", str(fake_home))
     monkeypatch.setenv("AVIBE_HOME", str(avibe_home))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
@@ -962,3 +962,301 @@ async def test_antigravity_harness_acp_ignores_shadowing_tests_package(tmp_path:
     async with AcpClient([str(shim), "acp", "--disable-telemetry"], cwd=str(tmp_path), env=env) as client:
         await client.initialize(client_info={"name": "test", "version": "1.0"})
         assert client.agent_info["name"] == "fake-acp-server"
+
+
+# ---------------------------------------------------------------------------
+# 10. Explicit tilde & relative CLI paths normalized before subprocess launch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("desktop_runtime", [False, True])
+async def test_resolve_antigravity_cli_path_normalizes_explicit_paths_and_launches_from_other_cwd(
+    tmp_path: Path,
+    _hermetic_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    desktop_runtime: bool,
+) -> None:
+    from modules.agents.antigravity.agent import resolve_antigravity_cli_path
+
+    service_dir = tmp_path / "service-cwd"
+    service_dir.mkdir()
+    workspace_dir = tmp_path / "other-workspace"
+    workspace_dir.mkdir()
+    empty_path_dir = tmp_path / "empty-path"
+    empty_path_dir.mkdir()
+
+    monkeypatch.chdir(service_dir)
+    monkeypatch.setenv("PATH", str(empty_path_dir))
+    if desktop_runtime:
+        monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    else:
+        monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+
+    # Create real executable shims at ~/.local/bin/agy and ./bin/agy.
+    home_bin = _hermetic_home / ".local" / "bin"
+    home_bin.mkdir(parents=True)
+    tilde_shim = _create_fake_agy_shim(
+        home_bin,
+        state_file=tmp_path / f"tilde-state-{desktop_runtime}.json",
+        name="agy",
+    )
+
+    rel_bin = service_dir / "bin"
+    rel_bin.mkdir(parents=True)
+    rel_shim = _create_fake_agy_shim(
+        rel_bin,
+        state_file=tmp_path / f"rel-state-{desktop_runtime}.json",
+        name="agy",
+    )
+
+    # Existing explicit paths resolve to expanded absolute paths.
+    assert resolve_antigravity_cli_path("~/.local/bin/agy") == str(tilde_shim.absolute())
+    assert resolve_antigravity_cli_path("./bin/agy") == str(rel_shim.absolute())
+
+    # Missing explicit paths are ALSO normalized (no raw '~' or cwd-relative path leaked).
+    assert resolve_antigravity_cli_path("~/.local/bin/missing-agy") == str(
+        (_hermetic_home / ".local" / "bin" / "missing-agy").absolute()
+    )
+    assert resolve_antigravity_cli_path("./bin/missing-agy") == str(
+        (service_dir / "bin" / "missing-agy").absolute()
+    )
+
+    # Bare selector missing from PATH stays bare (not turned into <cwd>/missing-bare-agy).
+    assert resolve_antigravity_cli_path("missing-bare-agy") == "missing-bare-agy"
+
+    # End-to-end launch from a DIFFERENT working_dir succeeds for both tilde & relative selectors.
+    for selector, session_tag in (("~/.local/bin/agy", "tilde"), ("./bin/agy", "rel")):
+        cfg = _antigravity_config(selector)
+        ctrl = _DummyController(_app_config(cfg))
+        agent = AntigravityAgent(ctrl, cfg, rules_base_dir=tmp_path / f"rules-{session_tag}-{desktop_runtime}")
+        try:
+            await agent.handle_message(
+                _make_request(
+                    message="stream_all",
+                    workdir=workspace_dir,
+                    base_session_id=f"explicit_{session_tag}_{desktop_runtime}",
+                )
+            )
+            results = [e for e in ctrl.emitted if e[0] == "result"]
+            assert len(results) == 1
+            assert results[0][1] == "Updated hello.py."
+            assert not results[0][2].get("is_error")
+        finally:
+            await agent.shutdown_runtime()
+
+
+# ---------------------------------------------------------------------------
+# 11. Summary-fallback fork handoff persists across failed turn & eviction
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_summary_fork_handoff_survives_failed_turn_and_eviction_until_accepted(
+    tmp_path: Path,
+) -> None:
+    from sqlalchemy import select
+
+    from config import paths
+    from core.services.session_fork import (
+        FORK_HANDOFF_MODE_SUMMARY,
+        pending_summary_fork_handoff_for_session,
+        reserve_forked_session,
+    )
+    from core.vibe_agents import VibeAgentStore
+    from storage import messages_service
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, scope_settings
+    from storage.sessions_service import SQLiteSessionsService
+    from storage.settings_service import upsert_scope
+    from tests.helpers.antigravity_harness import (
+        make_acp_capabilities,
+        make_agent_harness,
+        make_request,
+    )
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    ensure_sqlite_state(primary_platform="avibe")
+    db_path = paths.get_sqlite_state_path()
+    SQLiteSessionsService(db_path).close()
+    store = VibeAgentStore(db_path)
+    try:
+        agy_worker = store.create(name="agy-fork-worker", backend="antigravity", model="model-alpha")
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_agy_fork_retry",
+                now="2026-11-24T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(workdir),
+                    agent_name="agy-fork-worker",
+                    agent_backend="antigravity",
+                    agent_variant="antigravity",
+                    model="model-alpha",
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-11-24T00:00:00Z",
+                    updated_at="2026-11-24T00:00:00Z",
+                )
+            )
+            source_session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor=None,
+                agent_backend="antigravity",
+                agent_variant="antigravity",
+                agent_id=agy_worker.id,
+                agent_name="agy-fork-worker",
+                model="model-alpha",
+                workdir=str(workdir),
+                native_session_id="sess-source-native",
+                title="Source Antigravity Session",
+            )
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_session_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="CRITICAL-SOURCE-CONTEXT-MARKER: keep this context across fork retry",
+            )
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_session_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="Acknowledged CRITICAL-SOURCE-CONTEXT-MARKER.",
+            )
+    finally:
+        engine.dispose()
+
+    fork_result = reserve_forked_session(source_session_id=source_session_id, db_path=db_path)
+
+    def _read_child_row() -> tuple[str, dict[str, Any]]:
+        eng = create_sqlite_engine(db_path)
+        try:
+            with eng.connect() as conn:
+                row = conn.execute(
+                    select(agent_sessions).where(agent_sessions.c.id == fork_result.session_id)
+                ).mappings().one()
+                return str(row["native_session_id"] or ""), json.loads(row["metadata_json"] or "{}")
+        finally:
+            eng.dispose()
+
+    async with make_agent_harness(
+        tmp_path,
+        workdir=workdir,
+        record_rpc=True,
+        server_config={"agentCapabilities": make_acp_capabilities(fork=False, logout=False)},
+        name="fork-retry",
+    ) as h:
+        # Turn 1: fails model validation AFTER session/new bound the native session ID.
+        turn1_target = {
+            "id": fork_result.session_id,
+            "agent_backend": "antigravity",
+            "native_session_id": "",
+            "native_session_fork": fork_result.fork.to_metadata(),
+        }
+        await h.agent.handle_message(
+            make_request(
+                message="turn 1 invalid model",
+                workdir=workdir,
+                base_session_id=fork_result.session_id,
+                platform="avibe",
+                model="nonexistent-model",
+                platform_specific={"agent_session_target": turn1_target},
+            )
+        )
+
+        # Turn 1 failed before session/prompt, persisted native ID and durable pending flag.
+        assert h.rpcs("session/prompt") == []
+        assert len(h.rpcs("session/new")) == 1
+        persisted_native_id = h.controller.sessions._by_id[fork_result.session_id]["native_session_id"]
+        assert persisted_native_id
+        _, meta_after_turn1 = _read_child_row()
+        assert meta_after_turn1.get("fork_handoff_mode") == FORK_HANDOFF_MODE_SUMMARY
+        assert meta_after_turn1.get("fork_handoff_pending") is True
+        assert pending_summary_fork_handoff_for_session(fork_result.session_id, db_path=db_path) is not None
+
+        # Simulate idle eviction / process restart before Turn 2.
+        await h.agent.end_session(fork_result.session_id)
+        assert h.agent._sessions == {}
+
+        # Turn 2: valid model against the persisted native session ID resumes & delivers handoff.
+        h.controller.emitted.clear()
+        turn2_target = {
+            "id": fork_result.session_id,
+            "agent_backend": "antigravity",
+            "native_session_id": persisted_native_id,
+        }
+        await h.agent.handle_message(
+            make_request(
+                message="turn 2 valid retry",
+                workdir=workdir,
+                base_session_id=fork_result.session_id,
+                platform="avibe",
+                model="model-alpha",
+                platform_specific={"agent_session_target": turn2_target},
+            )
+        )
+
+        resume_rpcs = h.rpcs("session/resume")
+        assert len(resume_rpcs) == 1
+        assert resume_rpcs[0]["params"]["sessionId"] == persisted_native_id
+        prompt_rpcs = h.rpcs("session/prompt")
+        assert len(prompt_rpcs) == 1
+        turn2_prompt = prompt_rpcs[0]["params"]["prompt"][0]["text"]
+        assert "[Avibe handoff]" in turn2_prompt
+        assert "CRITICAL-SOURCE-CONTEXT-MARKER" in turn2_prompt
+        assert "turn 2 valid retry" in turn2_prompt
+        turn2_results = h.controller.events("result")
+        assert len(turn2_results) == 1
+        assert not turn2_results[0][2].get("is_error")
+
+        # Durable pending flag is cleared in SQLite after Turn 2's prompt succeeds.
+        _, meta_after_turn2 = _read_child_row()
+        assert meta_after_turn2.get("fork_handoff_mode") == FORK_HANDOFF_MODE_SUMMARY
+        assert "fork_handoff_pending" not in meta_after_turn2
+        assert pending_summary_fork_handoff_for_session(fork_result.session_id, db_path=db_path) is None
+
+        # Evict/restart AGAIN and run Turn 3: must resume without re-injecting handoff.
+        await h.agent.end_session(fork_result.session_id)
+        assert h.agent._sessions == {}
+        h.controller.emitted.clear()
+        await h.agent.handle_message(
+            make_request(
+                message="turn 3 after restart",
+                workdir=workdir,
+                base_session_id=fork_result.session_id,
+                platform="avibe",
+                model="model-alpha",
+                platform_specific={"agent_session_target": turn2_target},
+            )
+        )
+
+        assert len(h.rpcs("session/resume")) == 2
+        prompt_rpcs = h.rpcs("session/prompt")
+        assert len(prompt_rpcs) == 2
+        turn3_prompt = prompt_rpcs[1]["params"]["prompt"][0]["text"]
+        assert "[Avibe handoff]" not in turn3_prompt
+        assert "turn 3 after restart" in turn3_prompt
