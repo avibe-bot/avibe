@@ -369,12 +369,14 @@ async def test_pre_tool_use_hook_enforces_policy_and_unattributable_permission_r
     for blocked in ALWAYS_SESSION_ONLY_TOOL_NAMES:
         assert blocked in pre_entries[0]["matcher"].split("|")
 
-    # Execute the exact configured PreToolUse command in hooks.json's directory.
+    # Execute the exact configured PreToolUse command from the user's workspace CWD
+    # (proves hooks.json emits an absolute script path and does not rely on .agents/ CWD).
+    assert str(hook_script_path.resolve()) in hook_command
     for blocked_tool in ("schedule", "invoke_subagent", "define_subagent", "Workflow"):
         proc = subprocess.run(
             hook_command,
             shell=True,
-            cwd=str(hooks_json_path.parent),
+            cwd=str(workspace),
             input=json.dumps({"hookEventName": "PreToolUse", "toolCall": {"id": "t1", "name": blocked_tool, "args": {}}}),
             text=True,
             capture_output=True,
@@ -388,13 +390,25 @@ async def test_pre_tool_use_hook_enforces_policy_and_unattributable_permission_r
         proc = subprocess.run(
             hook_command,
             shell=True,
-            cwd=str(hooks_json_path.parent),
+            cwd=str(workspace),
             input=json.dumps({"hookEventName": "PreToolUse", "toolCall": {"id": "t2", "name": sync_tool, "args": {}}}),
             text=True,
             capture_output=True,
             check=True,
         )
         assert json.loads(proc.stdout) == {"decision": "allow"}
+
+    # Malformed stdin never exits non-zero in a fail-closed hook runner.
+    malformed_proc = subprocess.run(
+        hook_command,
+        shell=True,
+        cwd=str(workspace),
+        input="{not-valid-json",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert json.loads(malformed_proc.stdout) == {"decision": "allow"}
 
     # Identical re-render skips disk writes (preserves hook mtimes) and never touches user dirs.
     hooks_mtime = hooks_json_path.stat().st_mtime_ns

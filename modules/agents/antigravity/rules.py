@@ -132,13 +132,14 @@ def _quote_executable(executable: str) -> str:
     return shlex.quote(executable)
 
 
-def _build_tool_policy_hook_files() -> tuple[str, str]:
+def _build_tool_policy_hook_files(hooks_script_path: Path) -> tuple[str, str]:
     """Render Antigravity ``.agents/hooks.json`` and standalone PreToolUse guard script."""
     denied_reasons = {
         name: check_tool_call(name, {}).reason
         for name in ALWAYS_SESSION_ONLY_TOOL_NAMES
     }
     matcher = "|".join(ALWAYS_SESSION_ONLY_TOOL_NAMES)
+    command = f"{_quote_executable(sys.executable)} {_quote_executable(str(hooks_script_path.resolve()))}"
     hooks_config = {
         "avibe-tool-policy": {
             "PreToolUse": [
@@ -147,7 +148,7 @@ def _build_tool_policy_hook_files() -> tuple[str, str]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{_quote_executable(sys.executable)} ./{_HOOKS_SCRIPT_FILENAME}",
+                            "command": command,
                             "timeout": 10,
                         }
                     ],
@@ -164,7 +165,10 @@ def _build_tool_policy_hook_files() -> tuple[str, str]:
         f"DENIED_REASONS = {json.dumps(denied_reasons, indent=2, sort_keys=True)}\n\n"
         "def main() -> int:\n"
         "    raw = sys.stdin.read().strip()\n"
-        "    payload = json.loads(raw) if raw else {}\n"
+        "    try:\n"
+        "        payload = json.loads(raw) if raw else {}\n"
+        "    except ValueError:\n"
+        "        payload = {}\n"
         "    if not isinstance(payload, dict):\n"
         "        payload = {}\n"
         '    tool_call = payload.get("toolCall") or payload.get("tool_call") or {}\n'
@@ -218,17 +222,6 @@ def render_session_rules(
     if not chunks:
         chunks = ("",)
 
-    hooks_json, hook_script = _build_tool_policy_hook_files()
-
-    digest_hash = hashlib.sha256()
-    for chunk in chunks:
-        digest_hash.update(chunk.encode("utf-8"))
-        digest_hash.update(b"\x00")
-    digest_hash.update(hooks_json.encode("utf-8"))
-    digest_hash.update(b"\x00")
-    digest_hash.update(hook_script.encode("utf-8"))
-    digest = digest_hash.hexdigest()
-
     root = (base_dir if base_dir is not None else paths.get_state_dir() / "antigravity-rules") / _session_dir_slug(
         runtime_key
     )
@@ -243,6 +236,16 @@ def render_session_rules(
     hooks_dir = expected_dirs[0] / _HOOKS_DIRNAME
     hooks_config_path = hooks_dir / _HOOKS_CONFIG_FILENAME
     hooks_script_path = hooks_dir / _HOOKS_SCRIPT_FILENAME
+    hooks_json, hook_script = _build_tool_policy_hook_files(hooks_script_path)
+
+    digest_hash = hashlib.sha256()
+    for chunk in chunks:
+        digest_hash.update(chunk.encode("utf-8"))
+        digest_hash.update(b"\x00")
+    digest_hash.update(hooks_json.encode("utf-8"))
+    digest_hash.update(b"\x00")
+    digest_hash.update(hook_script.encode("utf-8"))
+    digest = digest_hash.hexdigest()
 
     needs_write = False
     if not root.is_dir():
