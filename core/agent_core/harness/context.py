@@ -507,6 +507,7 @@ def _valid_usage(message: Optional[Message]) -> bool:
         and message.stop_reason not in {"error", "aborted"}
         # A provider-executed call can bill more than one pass over the same context.
         and message.hosted_summary is None
+        and not message.hosted_call_unretained
         and message.usage is not None
         and usage_total(message.usage) > 0
     )

@@ -529,13 +529,14 @@ class AnthropicAdapter(ProviderAdapter):
                             continue
                         if kind == "server_tool_use":
                             hosted_call = block.get("name") in hosted and isinstance(block.get("id"), str) and block["id"]
-                            if hosted_call and assembler.source_id is not None:
+                            source_id = assembler.observe_hosted_call()
+                            if hosted_call and source_id is not None:
                                 # The call keeps its place in the stream; its input streams in and its result follows.
                                 assembler.set_block_kind(index, "hosted_use")
                                 uses[index] = dict(block)
                                 assembler.hosted_block(
                                     ("hosted", block.get("id")),
-                                    anthropic_hosted_block(block, None, source_id=assembler.source_id),
+                                    anthropic_hosted_block(block, None, source_id=source_id),
                                 )
                             continue
                         if kind == "web_search_tool_result":

@@ -879,6 +879,8 @@ class AssistantMessage:
     hosted_render_omitted: tuple[str, ...] = field(default=(), compare=False, repr=False)
     #: Store-owned identity, stable across reload and shared fork ancestry; never serialized as canonical content.
     transcript_row_id: Optional[str] = field(default=None, compare=False, repr=False)
+    #: C-9 row metadata: the provider executed a tool whose opaque block could not be retained for replay.
+    hosted_call_unretained: bool = field(default=False, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         _require_blocks(self.content, (TextBlock, ThinkingBlock, ToolCallBlock, HostedToolBlock), "assistant message")
