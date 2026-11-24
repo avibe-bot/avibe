@@ -13,6 +13,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 from modules.agents import acp
@@ -58,6 +59,51 @@ def normalize_antigravity_auth_mode(config: Any | None = None, auth_mode: str | 
     raw = (auth_mode or getattr(config, "auth_mode", None) or "oauth-personal").strip().lower()
     mode = _ANTIGRAVITY_AUTH_MODE_ALIASES.get(raw, raw)
     return mode if mode in ANTIGRAVITY_AUTH_MODES else "oauth-personal"
+
+
+def _is_explicit_cli_path(value: str) -> bool:
+    return bool(value) and (
+        value.startswith("~")
+        or os.path.isabs(value)
+        or os.sep in value
+        or (os.altsep is not None and os.altsep in value)
+    )
+
+
+def _normalize_explicit_cli_path(value: str) -> str:
+    return str(Path(os.path.expanduser(value)).absolute())
+
+
+def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
+    """Resolve an Antigravity CLI selector without invoking ``npm``.
+
+    On desktop-managed runtimes, delegates to ``runtime_agent_cli_path`` so
+    bare selectors and stale desktop paths resolve to the published private
+    desktop install (or user-installed ``agy`` outside the GUI PATH). Outside
+    desktop runtimes, bare selectors (no path separator) are still resolved via
+    ``resolve_cli_path(..., include_npm_global=False)``. Explicit paths (tilde,
+    absolute, or containing a path separator) are normalized to expanded
+    absolute paths so subprocess execution never passes raw ``~`` or
+    cwd-dependent relative paths (while preserving ``cli_not_found`` reporting
+    for missing explicit paths).
+    """
+    selected = str(raw_cli_path).strip() if raw_cli_path is not None else ""
+    selected = selected or "agy"
+    from config.v2_compat import runtime_agent_cli_path
+    from vibe.cli_paths import resolve_cli_path
+    from vibe.upgrade import is_desktop_managed_runtime
+
+    if is_desktop_managed_runtime():
+        resolved = runtime_agent_cli_path(selected, "agy", resolve_agent_paths=True)
+        if _is_explicit_cli_path(resolved):
+            return _normalize_explicit_cli_path(resolved)
+        return resolved
+    if not _is_explicit_cli_path(selected):
+        resolved = resolve_cli_path(selected, include_npm_global=False) or selected
+        if _is_explicit_cli_path(resolved):
+            return _normalize_explicit_cli_path(resolved)
+        return resolved
+    return _normalize_explicit_cli_path(selected)
 
 
 def antigravity_acp_command(binary: str, *, login: bool = False) -> list[str]:
@@ -237,8 +283,9 @@ async def probe_antigravity_passive_status(
     if missing == "adc_missing":
         return _passive_status(error="adc_missing", adc_command=ANTIGRAVITY_ADC_LOGIN_COMMAND)
 
-    cmd = antigravity_acp_command(binary, login=False)
     try:
+        resolved_binary = await asyncio.to_thread(resolve_antigravity_cli_path, binary)
+        cmd = antigravity_acp_command(resolved_binary, login=False)
         async with acp.AcpClient(cmd, env=env, request_timeout=timeout) as client:
             await client.initialize(client_info=_ACP_CLIENT_INFO)
             meta = {
@@ -283,13 +330,24 @@ async def logout_antigravity_via_acp(
     timeout: float = 20.0,
 ) -> tuple[bool, str | None]:
     """Sign out Antigravity via ACP ``logout`` when advertised (no permission bypass)."""
-    env = build_antigravity_auth_env(config, base_env=base_env)
+    env = build_antigravity_auth_env(config, base_env=base_env, auth_mode="oauth-personal")
     try:
-        async with acp.AcpClient(antigravity_acp_command(binary, login=False), env=env, request_timeout=timeout) as client:
+        resolved_binary = await asyncio.to_thread(resolve_antigravity_cli_path, binary)
+        cmd = antigravity_acp_command(resolved_binary, login=False)
+        async with acp.AcpClient(cmd, env=env, request_timeout=timeout) as client:
             await client.initialize(client_info=_ACP_CLIENT_INFO)
             if client.supports_logout:
                 await client.logout()
-            return True, None
+                return True, None
+            if not client.supports_list:
+                return False, "logout_unsupported"
+            try:
+                await client.session_list()
+            except acp.AcpRpcError as err:
+                if err.code == acp.ACP_AUTH_REQUIRED or classify_antigravity_auth_error(err.message):
+                    return True, None
+                return False, "logout_unsupported"
+            return False, "logout_unsupported"
     except acp.AcpRpcError as err:
         return (True, None) if err.code == acp.ACP_AUTH_REQUIRED else (False, str(err)[:400])
     except (acp.AcpTransportError, FileNotFoundError, OSError, asyncio.TimeoutError) as err:
@@ -379,7 +437,8 @@ async def run_antigravity_connection_probe(
 
     async def _execute() -> dict[str, Any]:
         session_id: str | None = None
-        cmd = antigravity_acp_command(binary, login=False)
+        resolved_binary = await asyncio.to_thread(resolve_antigravity_cli_path, binary)
+        cmd = antigravity_acp_command(resolved_binary, login=False)
         async with acp.AcpClient(cmd, cwd=cwd, env=env, request_timeout=timeout) as client:
             client.on_notification(_on_notification)
             await client.initialize(client_info=_ACP_CLIENT_INFO)
