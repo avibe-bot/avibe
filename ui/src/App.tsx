@@ -23,7 +23,8 @@ import {
   PermissionsPage,
   preloadInitialRoute,
   ProjectsPage,
-  RemoteAccessPage,
+  ConnectionPage,
+  DevicesPage,
   SettingsBackendPage,
   SettingsBackendsPage,
   SettingsClaudeProviderPage,
@@ -44,6 +45,7 @@ import {
   SkillsPage,
   UserList,
   VaultsPage,
+  SetupRemoteAccess,
   Wizard,
   StandaloneAppRoute,
 } from './routePages';
@@ -859,7 +861,11 @@ const settingsRoute = () => (
     <Route path="platforms" element={<SettingsPlatformsPage />} />
     <Route path="platforms/groups" element={<ChannelList isPage />} />
     <Route path="platforms/users" element={<UserList />} />
-    <Route path="remote-access" element={<RemoteAccessPage />} />
+    {/* 「设备」 keeps the old path: the claim's return and saved links point here. */}
+    <Route path="remote-access" element={<DevicesPage />} />
+    <Route path="remote-access/activity" element={<DevicesPage />} />
+    <Route path="remote-access/connection" element={<ConnectionPage />} />
+    <Route path="remote-access/connection/address" element={<ConnectionPage />} />
     <Route path="backends" element={<SettingsBackendsPage />} />
     <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
     <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
@@ -896,6 +902,7 @@ const WorkbenchRouteSurface = () => {
     fallbackElement={<Navigate to="/" replace />}
   >
     <Route path="/setup" element={<Wizard />} />
+    <Route path="/setup/remote-access" element={<SetupRemoteAccess />} />
 
     {/* Workbench mode — `/` is the canvas root, the five capability
         entries (Inbox + Agents/Skills/Harness/Vaults) live alongside it. */}

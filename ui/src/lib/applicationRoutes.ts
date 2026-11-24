@@ -7,6 +7,7 @@ import { AGENT_BACKENDS } from './agentBackends';
 export const APPLICATION_ROUTE_PATHS = [
   '/',
   '/setup',
+  '/setup/remote-access',
   '/inbox',
   '/search',
   '/agents',
@@ -61,6 +62,9 @@ export const APPLICATION_ROUTE_PATHS = [
   '/settings/platforms/groups',
   '/settings/platforms/users',
   '/settings/remote-access',
+  '/settings/remote-access/activity',
+  '/settings/remote-access/connection',
+  '/settings/remote-access/connection/address',
   '/settings/backends',
   ...AGENT_BACKENDS.map((backend) => backend.settingsRoute),
   '/settings/models',

@@ -1267,13 +1267,6 @@ export type ApiContextType = {
     pid?: number | null;
   }) => Promise<{ ok: boolean; unreachable?: boolean; error?: string; action?: string }>;
   remoteAccessStatus: () => Promise<RemoteAccessStatus>;
-  pairVibeCloudRemoteAccess: (payload: { backend_url: string; pairing_key: string; device_name?: string }) => Promise<any>;
-  startRemoteAccess: () => Promise<RemoteAccessStatus>;
-  stopRemoteAccess: () => Promise<RemoteAccessStatus>;
-  optimizeRemoteAccessRoute: () => Promise<RemoteAccessStatus>;
-  getRemoteAccessNetworkInterfaces: () => Promise<{ ok: boolean; interfaces: TunnelNetworkInterface[] }>;
-  saveRemoteAccessSettings: (settings: RemoteAccessSettings) => Promise<RemoteAccessStatus>;
-  diagnoseRemoteAccess: () => Promise<TunnelConnectivityDiagnostics>;
   getAuthSession: () => Promise<SessionInfo>;
   signOut: () => Promise<{ ok: boolean }>;
 };
@@ -5423,13 +5416,6 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return res.json().catch(() => ({ ok: res.ok }));
     },
     remoteAccessStatus: () => getJson('/api/remote-access/status'),
-    pairVibeCloudRemoteAccess: (payload) => postJson('/api/remote-access/vibe-cloud/pair', payload),
-    startRemoteAccess: () => postJson('/api/remote-access/start', {}),
-    stopRemoteAccess: () => postJson('/api/remote-access/stop', {}),
-    optimizeRemoteAccessRoute: () => postJson('/api/remote-access/optimize-route', {}, { handleError: false }),
-    getRemoteAccessNetworkInterfaces: () => getJson('/api/remote-access/network-interfaces'),
-    saveRemoteAccessSettings: (settings) => postJson('/api/remote-access/settings', settings),
-    diagnoseRemoteAccess: () => postJson('/api/remote-access/diagnostics', {}),
     getAuthSession: () => readAuthSession(),
     signOut: async () => {
       // Before the request, so a failed logout leaves nothing of this reader on

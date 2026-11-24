@@ -34,11 +34,6 @@
     "src/components/InstallHint.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
-    "src/components/RemoteAccess.tsx": {
-      "avibe/localized-user-text": 6,
-      "react-hooks/purity": 1,
-      "react-hooks/set-state-in-effect": 2
-    },
     "src/components/ShowPagesPage.tsx": {
       "avibe/localized-user-text": 3
     },
@@ -525,7 +520,7 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/context/ApiContext.tsx": {
-      "@typescript-eslint/no-explicit-any": 48,
+      "@typescript-eslint/no-explicit-any": 47,
       "react-refresh/only-export-components": 1
     },
     "src/context/StatusContext.ts": {
