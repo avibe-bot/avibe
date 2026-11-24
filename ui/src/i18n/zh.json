@@ -1023,6 +1023,31 @@
       "backendsTitle": "Agent 后端",
       "backendsDetail": "Claude · OpenCode · Codex —— 在 Backends 标签页管理。",
       "manageBackends": "前往 Backends",
+      "engineUpdates": {
+        "current": "已是最新 · {{time}}检查",
+        "notChecked": "还没有检查过更新",
+        "checking": "正在检查更新…",
+        "available": "可以更新到 v{{version}}",
+        "updating": "正在更新…",
+        "updatingTo": "正在更新到 v{{version}}…",
+        "waitingForIdle": "模型网关正在工作，空闲后会自动更新",
+        "waitingForIdleTo": "模型网关正在工作，空闲后会自动更新到 v{{version}}",
+        "waitingForIdleManual": "模型网关正在工作，这次没有更新，等它空闲后再试",
+        "undone": "上次更新没有成功，已换回 v{{version}}，模型网关照常可用",
+        "unfinished": "上次更新没有完成，仍在使用 v{{version}}，模型网关照常可用",
+        "replaced": "之前的版本已被撤回，已换成 v{{version}}，模型网关照常可用",
+        "needsAvibe": "新版引擎需要 Avibe {{version}} 或更高版本，请先更新 Avibe",
+        "cannotCheck": "暂时无法检查更新，当前版本不受影响",
+        "withdrawing": "这个版本已被撤回，正在换成安全的版本，模型网关稍后恢复",
+        "stopped": "模型网关已停止：这个引擎版本已被撤回，替换的版本可用后会自动恢复。",
+        "cannotStart": "模型网关已停止：引擎无法启动。请到「诊断与日志」查看原因。",
+        "autoUpdate": "自动更新",
+        "checkingButton": "检查中…",
+        "updatingButton": "更新中…",
+        "updated": "模型网关引擎已更新。",
+        "updateUnfinished": "更新没有完成，当前版本不受影响。",
+        "settingFailed": "设置没有更改成功，请重试。"
+      },
       "items": {
         "askill": {
           "label": "askill",
@@ -1033,8 +1058,10 @@
           "detail": "Vault 托管核心 —— 本地 Vault 操作的必需依赖。"
         },
         "model-hub-engine": {
-          "label": "模型网关引擎（CPA）",
-          "detail": "模型网关使用的固定版本 CLIProxyAPI 运行时。"
+          "label": "模型网关引擎",
+          "detail": "在本机运行模型网关的引擎。",
+          "attribution": "基于开源项目 <project>CLIProxyAPI</project>（CPA）构建。",
+          "attributionLabel": "关于这个引擎"
         },
         "show-runtime": {
           "label": "Show Page 运行时",

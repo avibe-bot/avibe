@@ -19,6 +19,8 @@ interface InfoHintProps {
   hover?: boolean;
   /** Width of the revealed panel. Defaults to the 16rem hint width. */
   contentClassName?: string;
+  /** Space kept between the panel and the screen's edge, for a panel wide enough to reach it on a phone. */
+  collisionPadding?: number;
 }
 
 // A small "ⓘ" affordance that reveals a hint on click / tap — uniform across
@@ -45,6 +47,7 @@ export const InfoHint: React.FC<InfoHintProps> = ({
   trigger,
   hover = false,
   contentClassName,
+  collisionPadding,
 }) => {
   const [open, setOpen] = React.useState(false);
   // Hover-close is deferred so the pointer can travel from the trigger into the
@@ -117,6 +120,7 @@ export const InfoHint: React.FC<InfoHintProps> = ({
       <PopoverContent
         align={align}
         sideOffset={6}
+        collisionPadding={collisionPadding}
         // Don't steal focus from the trigger on hover-open, so tabbing isn't trapped.
         onOpenAutoFocus={(event) => event.preventDefault()}
         onCloseAutoFocus={(event) => {

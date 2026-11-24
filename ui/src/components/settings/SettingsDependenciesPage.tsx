@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { useTranslation } from 'react-i18next';
+import { Trans, useTranslation } from 'react-i18next';
 import {
   ArrowUpRight,
   AlertTriangle,
@@ -20,6 +20,9 @@ import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Badge } from '../ui/badge';
+import { InfoHint } from '../ui/info-hint';
+import { EngineUpdateStrip } from './EngineUpdateStrip';
+import { engineBuildVersion, engineUpdateIsWorking, engineUpdateView } from './engineUpdateView';
 import { SettingsPageShell } from './SettingsPageShell';
 import { SettingsResourceRow } from './SettingsPrimitives';
 import { useApi } from '@/context/ApiContext';
@@ -30,8 +33,6 @@ import {
   dependencyHasInstallAction,
   dependencyNeedsStartupRepair,
   dependencyNeedsUpgrade,
-  engineBuildVersion,
-  engineUpdatesApply,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
@@ -43,6 +44,11 @@ import { AvaultAuthorizationNotice } from '../ui/avault-authorization-notice';
 // runtime and CPA auto-install during `vibe runtime prepare`; this page surfaces
 // their status and offers manual re-check / install / repair. Backend CLIs are
 // managed on the Backends tab — linked, not duplicated.
+// The Model Hub engine also updates by itself between Avibe releases: its row
+// carries one strip for that (ui/design: settings/engine-updates/*).
+
+/** The open-source project the Model Hub engine is built on, named beside the row's title. */
+const ENGINE_UPSTREAM_URL = 'https://github.com/router-for-me/CLIProxyAPI';
 
 type DepMeta = { icon: LucideIcon; tileCls: string; iconCls: string };
 
@@ -55,19 +61,30 @@ const DEP_META: Record<string, DepMeta> = {
   node: { icon: Hexagon, tileCls: 'bg-violet-soft', iconCls: 'text-violet-ink' },
 };
 
-type SettingsDependenciesPageProps = {
-  /** The Model Hub engine row's update strip (ui/design: settings/engine-updates/*). */
-  engineUpdates?: React.ComponentType<{ dep: DependencyItem }>;
-};
-
-export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> = ({ engineUpdates: EngineUpdates }) => {
+export const SettingsDependenciesPage: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
 
   const { checks, refresh: refreshDependencies, checking, loginSessionState } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
+  // The engine check or update this page started; its last update's failure, which a fresh read
+  // cannot tell from a failed check; and the switch's change on its way.
+  const [engineWorking, setEngineWorking] = useState<'check' | 'update' | null>(null);
+  const [engineUpdateFailed, setEngineUpdateFailed] = useState(false);
+  const [engineSettingBusy, setEngineSettingBusy] = useState(false);
   useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
+
+  // Work the engine's owner started by itself (a routine update, a withdrawal) is read again until
+  // it settles, so the row does not sit on "Updating…" until the page is reopened.
+  const engineCheck = checks['model-hub-engine'];
+  const engineSettling = engineWorking === null && !engineCheck.checking && engineCheck.error === null
+    && engineCheck.data !== null && engineUpdateIsWorking(engineCheck.data);
+  useEffect(() => {
+    if (!engineSettling) return undefined;
+    const timer = window.setTimeout(() => void refreshDependencies('model-hub-engine'), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [engineSettling, engineCheck.data, refreshDependencies]);
   // A closed backend reason/message is often a snake_case token rather than human copy. Localize any
   // token-shaped string through the shared errors namespace so the user never
   // sees a raw identifier; fall back to a human message or the generic failure.
@@ -104,6 +121,42 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
     }
   };
 
+  const runEngine = async (kind: 'check' | 'update') => {
+    if (busy !== null || engineWorking !== null) return;
+    setEngineWorking(kind);
+    setEngineUpdateFailed(false);
+    try {
+      const receipt = await api.runEngineOperation(kind);
+      if (kind === 'update' && receipt.update_state === 'applied') {
+        showToast(t('settings.dependencies.engineUpdates.updated'), 'success');
+      } else if (receipt.job_id === undefined) {
+        // Refused before any work began: the row may not change, so say it here.
+        showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.updateUnfinished'), 'error');
+      }
+      // Every other outcome (waiting for idle, undone, nothing newer) is the row's own sentence.
+      setEngineUpdateFailed(kind === 'update' && receipt.update_state === 'failed');
+    } catch {
+      showToast(kind === 'check' ? t('settings.dependencies.engineUpdates.cannotCheck') : t('settings.dependencies.engineUpdates.updateUnfinished'), 'error');
+    } finally {
+      await refreshDependencies('model-hub-engine');
+      setEngineWorking(null);
+    }
+  };
+
+  const setEngineAutoUpdate = async (enabled: boolean) => {
+    if (engineSettingBusy) return;
+    setEngineSettingBusy(true);
+    try {
+      const result = await api.setEngineAutoUpdate(enabled);
+      if (!result?.ok) showToast(t('settings.dependencies.engineUpdates.settingFailed'), 'error');
+    } catch {
+      showToast(t('settings.dependencies.engineUpdates.settingFailed'), 'error');
+    } finally {
+      await refreshDependencies('model-hub-engine');
+      setEngineSettingBusy(false);
+    }
+  };
+
   const statusText = (d: DependencyItem) => {
     if (checks[d.id]?.reconciling && dependencyIsStartupRepairing(d, checks[d.id].reconcilingDependencies)) return t('settings.dependencies.installing');
         // Closed non-installed failure states render distinctly, ahead
@@ -119,7 +172,7 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
     }
     const word = d.kind === 'node' ? t('settings.dependencies.statusDetected') : t('settings.dependencies.statusReady');
     // The engine's channel builds differ by build revision, so its row names the running build.
-    const version = (EngineUpdates && engineUpdatesApply(d) && engineBuildVersion(d.active_release)) || d.version;
+    const version = (engineUpdateView(d) && engineBuildVersion(d.active_release)) || d.version;
     return version ? `${word} · v${String(version).replace(/^v/i, '')}` : word;
   };
 
@@ -195,6 +248,24 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
                 aria-label={t('settings.dependencies.checking')}
               />
             ) : null;
+            // Attribution, so it shows in every build and every state of the row.
+            const attribution = id === 'model-hub-engine' ? (
+              <InfoHint
+                hover
+                align="center"
+                collisionPadding={16}
+                label={t('settings.dependencies.items.model-hub-engine.attributionLabel')}
+                contentClassName="w-auto max-w-[calc(100vw-2rem)]"
+                content={
+                  <Trans
+                    i18nKey="settings.dependencies.items.model-hub-engine.attribution"
+                    components={{
+                      project: <a href={ENGINE_UPSTREAM_URL} target="_blank" rel="noreferrer" className="font-medium text-foreground underline underline-offset-2" />,
+                    }}
+                  />
+                }
+              />
+            ) : null;
             if (!d) {
               return (
                 <SettingsResourceRow
@@ -203,6 +274,7 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
                   tileClassName={meta.tileCls}
                   iconClassName={meta.iconCls}
                   title={t(`settings.dependencies.items.${id}.label`, { defaultValue: `settings.dependencies.items.${id}.label` })}
+                  badges={attribution}
                   detail={t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
                   actions={
                     <>
@@ -221,14 +293,26 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
             const startupRepairPending = Boolean(check.reconciling) && dependencyNeedsStartupRepair(d);
             const showAction = dependencyHasInstallAction(d);
             const repairBlockedBySidecar = false;
-            const dependencyOperationBusy = busy !== null || check.checking || check.error !== null;
+            const dependencyOperationBusy = busy !== null || check.checking || check.error !== null
+              || (id === 'model-hub-engine' && engineWorking !== null);
             const notice = null;
             const persistedFailure = d.status === 'error' && d.reason
               ? localizedReason(d.reason, t('settings.dependencies.installFailed'))
               : null;
-            const engineUpdates = EngineUpdates && engineUpdatesApply(d) ? EngineUpdates : null;
+            const engineView = engineUpdateView(d, { working: engineWorking, updateFailed: engineUpdateFailed });
             // A stopped engine (`blocked`) reads as an error with nothing to repair: the strip says why.
-            const engineStopped = Boolean(engineUpdates) && d.update_state === 'blocked';
+            const engineStopped = engineView !== null && d.update_state === 'blocked';
+            const engineStrip = engineView && (
+              <EngineUpdateStrip
+                dep={d}
+                view={engineView}
+                disabled={busy !== null || engineWorking !== null || check.checking}
+                autoUpdateBusy={engineSettingBusy}
+                onCheck={() => void runEngine('check')}
+                onUpdate={() => void runEngine('update')}
+                onAutoUpdateChange={(enabled) => void setEngineAutoUpdate(enabled)}
+              />
+            );
             return (
               <SettingsResourceRow
                 key={id}
@@ -237,16 +321,19 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
                 iconClassName={meta.iconCls}
                 title={t(`settings.dependencies.items.${id}.label`, { defaultValue: `settings.dependencies.items.${id}.label` })}
                 badges={
-                  d.required && (
-                    <Badge variant="secondary" className="font-mono uppercase tracking-[0.08em]">
-                      {t('settings.dependencies.required')}
-                    </Badge>
-                  )
+                  <>
+                    {attribution}
+                    {d.required && (
+                      <Badge variant="secondary" className="font-mono uppercase tracking-[0.08em]">
+                        {t('settings.dependencies.required')}
+                      </Badge>
+                    )}
+                  </>
                 }
                 detail={
                   <>
                     {t(`settings.dependencies.items.${id}.detail`, { defaultValue: `settings.dependencies.items.${id}.detail` })}
-                    {d.id === 'model-hub-engine' && d.latest_version && !engineUpdates && (
+                    {d.id === 'model-hub-engine' && d.latest_version && !engineView && (
                       <span className="mt-1 block font-mono text-[11px]">
                         {t('settings.dependencies.targetVersion', {
                           version: String(d.latest_version).replace(/^v/i, ''),
@@ -292,10 +379,8 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
                     {notice}
                     {persistedFailure && <div role="alert" className="mt-1 text-destructive-ink">{persistedFailure}</div>}
                   </div>
-                ) : engineUpdates && engineStopped ? (
-                  <div className="border-t border-destructive/30 pt-4">
-                    {React.createElement(engineUpdates, { dep: d })}
-                  </div>
+                ) : engineStopped ? (
+                  <div className="border-t border-destructive/30 pt-4">{engineStrip}</div>
                 ) : persistedFailure ? (
                   <div
                     role="alert"
@@ -307,10 +392,8 @@ export const SettingsDependenciesPage: React.FC<SettingsDependenciesPageProps> =
                   <div className="border-t border-border pt-3">
                     <AvaultAuthorizationNotice forceVisible />
                   </div>
-                ) : engineUpdates && d.status === 'ready' ? (
-                  <div className="border-t border-border pt-4">
-                    {React.createElement(engineUpdates, { dep: d })}
-                  </div>
+                ) : engineStrip && d.status === 'ready' ? (
+                  <div className="border-t border-border pt-4">{engineStrip}</div>
                 ) : undefined}
               />
             );

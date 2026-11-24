@@ -1,16 +1,16 @@
 // Settings · Dependencies · the Model Hub engine's own updates (docs/plans/model-hub-engine-channel.md,
 // section 5). The engine's row keeps its line and gains one strip: one sentence, the automatic-update
 // switch, one button. Each frame is the shipped page with the engine's row in one state, as
-// `GET /api/dependencies` reports it; the strip is `kit/engine-updates` until it ships.
+// `GET /api/dependencies` reports it. The fold from the twenty reported states to these sentences is
+// `engineUpdateView` (src/components/settings/engineUpdateView.ts).
 import type { DependencyItem } from '@/context/ApiContext';
 import { SettingsDependenciesPage } from '@/components/settings/SettingsDependenciesPage';
 
 import { frames, type FrameSpec } from '../../frame';
-import { EngineUpdateStrip } from '../../kit/engine-updates';
 import { DESIGN_NOW } from '../../shell/clock';
 import { settingsFixtures, settingsPage } from './fixtures';
 
-const page = settingsPage('dependencies', <SettingsDependenciesPage engineUpdates={EngineUpdateStrip} />);
+const page = settingsPage('dependencies', <SettingsDependenciesPage />);
 const route = '/settings/dependencies';
 const ago = (minutes: number) => new Date(DESIGN_NOW - minutes * 60_000).toISOString();
 
@@ -54,23 +54,16 @@ const deps = (engine: Partial<DependencyItem>) => [
   dep('tmux', '3.5a', { required: false }),
 ];
 
-// "Pinned" stops being true once the engine updates by itself, and the line named the upstream project;
-// the title carried its internal initials. Both read the same in every build.
-const copy = {
-  'settings.dependencies.items.model-hub-engine.label': { zh: '模型网关引擎', en: 'Model Hub engine' },
-  'settings.dependencies.items.model-hub-engine.detail': {
-    zh: '在本机运行模型网关的引擎。',
-    en: 'The local engine that runs Model Hub.',
-  },
-};
-
-const state = (name: string, title: string, engine: Partial<DependencyItem>): FrameSpec[] => {
-  const fixtures = settingsFixtures({ '/api/dependencies': { ok: true, deps: deps(engine) } }, { copy });
+const state = (name: string, title: string, engine: Partial<DependencyItem>, extra: Partial<FrameSpec> = {}): FrameSpec[] => {
+  const fixtures = settingsFixtures({ '/api/dependencies': { ok: true, deps: deps(engine) } });
   return [
-    { name, title: `设置 · 依赖 · 引擎更新 · ${title}`, width: 1440, height: 960, status: 'proposed', route, fixtures, render: page },
-    { name: `${name}-phone`, title: `设置 · 依赖 · 引擎更新 · ${title} · 手机`, width: 390, height: 1400, status: 'proposed', route, fixtures, render: page },
+    { name, title: `设置 · 依赖 · 引擎更新 · ${title}`, width: 1440, height: 960, status: 'shipped', route, fixtures, render: page, ...extra },
+    { name: `${name}-phone`, title: `设置 · 依赖 · 引擎更新 · ${title} · 手机`, width: 390, height: 1400, status: 'shipped', route, fixtures, render: page, ...extra },
   ];
 };
+
+// The row's title carries an info mark that names the open-source project the engine is built on.
+const attributionOpen = ['role=button[name="{t:settings.dependencies.items.model-hub-engine.attributionLabel}"]'];
 
 const designFrames = frames([
   ...state('up-to-date', '已是最新', {}),
@@ -91,7 +84,9 @@ const designFrames = frames([
     status: 'error', action_class: 'operator_only', reason: 'model_hub_engine_install_inspection_failed',
     active_release: null, update_state: 'blocked', update_reason: 'engine_withdrawn', last_checked_at: ago(1),
   }),
-  // This build ships no channel: the row is the one shipped today, with nothing added but the new name and line.
+  // Attribution shows in every build and state: here on the usual row, and below on a build with no channel.
+  ...state('attribution', '标题旁的来源说明（点开）', {}, { click: attributionOpen }),
+  // This build ships no channel: the row is the one shipped before, with nothing added but the new name and line.
   ...state('channel-off', '本版本未启用更新通道（与今天相同）', {
     active_release: null, default_release: 'model-hub-engine-v8.0.63-1', update_state: 'uncommissioned', update_reason: 'uncommissioned', last_checked_at: null,
   }),

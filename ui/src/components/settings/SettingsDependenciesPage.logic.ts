@@ -59,20 +59,3 @@ export const dependenciesNeedAutomaticRefresh = (
   return Boolean(result.reconciling) ||
     (allowInitialRetry && result.deps.some((dependency) => dependencyIsStartupRepairing(dependency, activeIds)));
 };
-
-/**
- * Whether the Model Hub engine's own update channel applies to this row. A build that ships no
- * channel root (`uncommissioned`), a manifest override (`opted_out`) and an older runtime that
- * reports no state keep the row as it was.
- */
-export const engineUpdatesApply = (
-  dependency: Pick<DependencyItem, 'id' | 'update_state'>,
-): boolean =>
-  dependency.id === 'model-hub-engine'
-  && dependency.update_state !== undefined
-  && dependency.update_state !== 'uncommissioned'
-  && dependency.update_state !== 'opted_out';
-
-/** A build tag as the row shows it: `model-hub-engine-v8.0.63-2` reads `8.0.63-2`. */
-export const engineBuildVersion = (release: string | null | undefined): string | null =>
-  release ? release.replace(/^model-hub-engine-/, '').replace(/^v/i, '') : null;

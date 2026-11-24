@@ -1023,6 +1023,31 @@
       "backendsTitle": "Agent backends",
       "backendsDetail": "Claude · OpenCode · Codex — managed in the Backends tab.",
       "manageBackends": "Manage in Backends",
+      "engineUpdates": {
+        "current": "Up to date · checked {{time}}",
+        "notChecked": "Not checked for updates yet",
+        "checking": "Checking for updates…",
+        "available": "v{{version}} is available",
+        "updating": "Updating…",
+        "updatingTo": "Updating to v{{version}}…",
+        "waitingForIdle": "Model Hub is busy. The update installs by itself once it is idle.",
+        "waitingForIdleTo": "Model Hub is busy. v{{version}} installs by itself once it is idle.",
+        "waitingForIdleManual": "Model Hub is busy, so it wasn't updated. Try again once it is idle.",
+        "undone": "The last update didn't work, so v{{version}} was put back. Model Hub works as before.",
+        "unfinished": "The last update didn't finish. Still on v{{version}}; Model Hub works as before.",
+        "replaced": "The earlier version was withdrawn; v{{version}} replaced it. Model Hub works as before.",
+        "needsAvibe": "A newer engine needs Avibe {{version}} or later. Update Avibe first.",
+        "cannotCheck": "Can't check for updates right now. The current version keeps working.",
+        "withdrawing": "This version was withdrawn. Switching to a safe one; Model Hub is back shortly.",
+        "stopped": "Model Hub is stopped: the engine was withdrawn. It restarts once its replacement can run here.",
+        "cannotStart": "Model Hub is stopped: the engine can't start. See Diagnostics & Logs for the cause.",
+        "autoUpdate": "Auto-update",
+        "checkingButton": "Checking…",
+        "updatingButton": "Updating…",
+        "updated": "Model Hub engine updated.",
+        "updateUnfinished": "The update didn't finish. The current version keeps working.",
+        "settingFailed": "Couldn't change the setting. Try again."
+      },
       "items": {
         "askill": {
           "label": "askill",
@@ -1033,8 +1058,10 @@
           "detail": "Vault custody core — required for local Vault operations."
         },
         "model-hub-engine": {
-          "label": "Model Hub engine (CPA)",
-          "detail": "Pinned CLIProxyAPI runtime used by Model Hub."
+          "label": "Model Hub engine",
+          "detail": "The local engine that runs Model Hub.",
+          "attribution": "Built on the open-source project <project>CLIProxyAPI</project> (CPA).",
+          "attributionLabel": "About this engine"
         },
         "show-runtime": {
           "label": "Show Page runtime",

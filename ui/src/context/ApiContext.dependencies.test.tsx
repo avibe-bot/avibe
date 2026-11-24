@@ -71,3 +71,78 @@ describe('dependency inspection transport', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('Model Hub engine update operations', () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  const paths = () => apiFetch.mock.calls.map(([path, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${path}`);
+
+  it('starts a check with an empty body and polls its receipt until it settles', async () => {
+    vi.useFakeTimers();
+    const answers = [
+      json({ ok: true, job_id: 'engine-1', operation_id: 'engine-1', kind: 'check', status: 'running', update_state: 'checking' }, 202),
+      json({ ok: true, job_id: 'engine-1', kind: 'check', status: 'running', update_state: 'checking' }),
+      json({ ok: true, job_id: 'engine-1', kind: 'check', status: 'succeeded', update_state: 'available' }),
+    ];
+    apiFetch.mockImplementation(async () => answers.shift());
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    const outcome = result.current.runEngineOperation('check');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await outcome).toMatchObject({ ok: true, status: 'succeeded', update_state: 'available' });
+    expect(paths()).toEqual([
+      'POST /api/dependencies/model-hub-engine/check',
+      'GET /api/dependencies/model-hub-engine/install/engine-1',
+      'GET /api/dependencies/model-hub-engine/install/engine-1',
+    ]);
+    expect(apiFetch.mock.calls[0][1].body).toBe('{}');
+  });
+
+  it('returns a refusal as a result, not a thrown error or a finished operation', async () => {
+    apiFetch.mockImplementation(async () => json({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' }, 503));
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    expect(await result.current.runEngineOperation('update')).toEqual({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' });
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits out a running check and then asks for the update once more', async () => {
+    vi.useFakeTimers();
+    const answers = [
+      json({ ok: false, error: 'operation_busy', operation_id: 'engine-check' }, 409),
+      json({ ok: true, job_id: 'engine-check', kind: 'check', status: 'succeeded', update_state: 'available' }),
+      json({ ok: true, job_id: 'engine-update', kind: 'update', status: 'running', update_state: 'updating' }, 202),
+      json({ ok: true, job_id: 'engine-update', kind: 'update', status: 'succeeded', update_state: 'applied' }),
+    ];
+    apiFetch.mockImplementation(async () => answers.shift());
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    const outcome = result.current.runEngineOperation('update');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await outcome).toMatchObject({ job_id: 'engine-update', status: 'succeeded', update_state: 'applied' });
+    expect(paths()).toEqual([
+      'POST /api/dependencies/model-hub-engine/update',
+      'GET /api/dependencies/model-hub-engine/install/engine-check',
+      'POST /api/dependencies/model-hub-engine/update',
+      'GET /api/dependencies/model-hub-engine/install/engine-update',
+    ]);
+  });
+
+  it('stops polling a receipt the owner no longer has', async () => {
+    vi.useFakeTimers();
+    const answers = [
+      json({ ok: true, job_id: 'engine-9', kind: 'update', status: 'running' }, 202),
+      json({ ok: false, error: 'job_not_found' }, 404),
+    ];
+    apiFetch.mockImplementation(async () => answers.shift());
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    const outcome = result.current.runEngineOperation('update');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await outcome).toMatchObject({ ok: false, status: 'failed', error: 'job_not_found' });
+    expect(apiFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('sends the automatic-update switch as one boolean', async () => {
+    apiFetch.mockImplementation(async () => json({ ok: true, auto_update: false }));
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    expect(await result.current.setEngineAutoUpdate(false)).toEqual({ ok: true, auto_update: false });
+    expect(apiFetch.mock.calls[0][0]).toBe('/api/dependencies/model-hub-engine/auto-update');
+    expect(apiFetch.mock.calls[0][1].body).toBe('{"enabled":false}');
+  });
+});
