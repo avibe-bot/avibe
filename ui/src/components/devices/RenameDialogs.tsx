@@ -129,7 +129,8 @@ function CleanupDialog({ title, oldHost, retired, kept, onClose }: {
   title: string; oldHost: string; retired: RetiredName | null; kept?: boolean; onClose?: () => void;
 }) {
   const { t, i18n } = useTranslation();
-  // The name just given up is kept for this account, until the day the instance reports.
+  // Just renamed, the dialog says first that the old name is kept for this account, until the day
+  // the instance reports (or without a day where it reports none); the clean-up comes after.
   const keptText = retired?.releaseAt
     ? t('devices.rename.keptUntil', { host: oldHost, date: longDay(retired.releaseAt, i18n.language) })
     : t('devices.rename.keptPlain');
@@ -138,9 +139,9 @@ function CleanupDialog({ title, oldHost, retired, kept, onClose }: {
       <DialogContent className="max-w-lg content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
         <DialogHeader>
           <DialogTitle className="text-balance">{title}</DialogTitle>
+          {kept && <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={keptText} /></p>}
           <DialogDescription><KeptTail text={t('devices.rename.cleaning')} /></DialogDescription>
         </DialogHeader>
-        {kept && <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={keptText} /></p>}
         {retired
           ? <DeviceChecklist devices={retired.devices} host={oldHost} after />
           : <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.rename.listUnread')} /></p>}
