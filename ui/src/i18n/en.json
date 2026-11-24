@@ -8407,7 +8407,7 @@
         "title": "Path speed",
         "run": "Measure",
         "running": "Measuring…",
-        "lead": "From this device, sends 5 small requests over the path in use and over the Cloudflare tunnel and compares the round trips, not counting connection setup.",
+        "lead": "From this device, sends 5 small requests over the current path and over the Cloudflare tunnel and compares round trips (connection setup not counted).",
         "value": "median {{median}} · worst {{max}}",
         "partial": "{{value}} ({{ok}} of {{samples}} completed)",
         "failed": "Did not complete: failed",
