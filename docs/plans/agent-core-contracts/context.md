@@ -809,9 +809,26 @@ of each section and how, and gives the Mission a way out (§10); and the request
 (`{mind_sizes}`). Stored minds are not rewritten. A list without boxes takes them at its next checkpoint: in replays
 of such a mind, a model told only the rule folded the finished entries at once, which reads as live entries gone and
 cost the repair, so the request tells a mind with unboxed entries to box each and keep them that once
-(`MIND_UNBOXED`). The request grew by 214 tokens, and by about 75 to 115 more with a previous mind's sizes; the
+(`MIND_UNBOXED`). The request grew by 234 tokens, and by about 75 to 115 more with a previous mind's sizes; the
 framing is unchanged, and nothing an ordinary Turn sends changes: the request is read only in a checkpoint turn, and
-a stored checkpoint's `summary` is fixed when it is written (§7). The request:
+a stored checkpoint's `summary` is fixed when it is written (§7).
+
+Before it merged, the chained replay of `checkpoint-v5.1`'s evaluation was run again on both versions: the five GPT
+Sessions, 49 points, three runs each through the shipped loop, the probe after every point, two blind judges. That
+evaluation's Gold had been deleted with its working files and was rebuilt from the raw record, so these figures
+compare the two versions and do not continue the earlier series. Retention of the live mission after the eighth
+checkpoint was 100% on both versions for one judge and 98.8% against 96.4% for the other (one of 14 points lower, 13
+equal; 97.6% against 96.4% in the probe answer), and no judge found a live mission lost at any point. After the eighth
+checkpoint Goals took 436 tokens instead of 1,290, and finished items 199 instead of 720: 44 in folded lines, the rest
+in entries marked at that checkpoint. Four of 147 minds were shown cut before, none after. In single-checkpoint
+replays of 30 stored minds that had been shown cut, 11 were cut again under `checkpoint-v5.1` and 8 under
+`checkpoint-v5.2`, three of those only by entries just marked, so 5 lost live text against 11; no turn lost a live
+Mission entry or needed the Mission repair. Two things were worse. Recall of the user's constraints in the stored
+memory fell for both judges (97.7% to 96.5%, 93.9% to 89.0%; in the probe answer unchanged for one, 81.7% to 79.3%
+for the other), a few specifics of constraints tied to one item. And one judge counted more attributions to the user
+that the record does not support (75 to 95 over three runs; the other 32 to 29), typically a status justified as the
+user's choice; a first wording had raised them further, and the request now says to write a status as what happened
+and to credit the user only where they decided it. The request:
 
 ```text
 <context-checkpoint-request>
