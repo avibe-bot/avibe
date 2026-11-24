@@ -1,5 +1,5 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { Check, CodeXml, ListChecks, ScanEye, Split, type LucideIcon } from 'lucide-react';
+import { Check, CodeXml, ListChecks, ScanEye, Sparkles, Split, type LucideIcon } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 import { BackendIcon } from '../visual';
@@ -37,6 +37,7 @@ const STORY: Partial<Record<string, { icon: LucideIcon; work: StoryWork }>> = {
   claude: { icon: CodeXml, work: 'code' },
   codex: { icon: ScanEye, work: 'review' },
   opencode: { icon: ListChecks, work: 'tests' },
+  antigravity: { icon: Sparkles, work: 'code' },
 };
 function Bar({ width, tone, revealed }: { width: number; tone?: string; revealed?: boolean }) {
   const reveal = revealed === undefined ? ''
@@ -77,7 +78,7 @@ const CODE_BARS: [number, number][] = [[24.3, 30.4], [18.1, 43.3], [29.2, 23], [
 const REVIEW_DIFF: Partial<Record<number, 'removed' | 'added'>> = { 1: 'removed', 2: 'added', 3: 'added' };
 const TEST_BARS = [73.2, 61.6, 82.3, 54.5];
 /** One task line per assistant the coordinator hands a part to, in `ASSISTANT_ORDER`. */
-const HANDOFF_BARS = [68.4, 52.7, 76.1];
+const HANDOFF_BARS = [68.4, 52.7, 76.1, 61.5];
 
 function CodeRows({ written, diff }: { written: number; diff?: typeof REVIEW_DIFF }) {
   return (
@@ -106,9 +107,9 @@ function Skeleton({ work, active, done, written }: { work: StoryWork; active: bo
     return (
       <div className="onboarding-skeleton onboarding-skeleton-handoffs">
         {ASSISTANT_ORDER.map((backend, index) => (
-          <div key={backend} className={`onboarding-handoff-row onboarding-write-line ${written > index * 2 ? 'onboarding-write-visible' : ''}`}>
+          <div key={backend} className={`onboarding-handoff-row onboarding-write-line ${written > Math.floor((index * WORK_LINES) / ASSISTANT_ORDER.length) ? 'onboarding-write-visible' : ''}`}>
             <span className="onboarding-handoff-mark"><BackendIcon backend={backend} size={14} variant="brand" aria-hidden="true" /></span>
-            <Bar width={HANDOFF_BARS[index]} />
+            <Bar width={HANDOFF_BARS[index % HANDOFF_BARS.length]} />
           </div>
         ))}
       </div>

@@ -39,15 +39,16 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
   const { showToast } = useToast();
   const [testing, setTesting] = useState(false);
   const [lastResult, setLastResult] = useState<BackendAuthTestResult | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('');
+  const [catalog, setCatalog] = useState<{ backend: Backend; models: string[] }>({ backend, models: [] });
+  const [selection, setSelection] = useState<{ backend: Backend; model: string }>({ backend, model: '' });
+  const models = catalog.backend === backend ? catalog.models : [];
+  const selectedModel = selection.backend === backend ? selection.model : '';
 
   // Load the available models catalog once on mount so the dropdown can
   // pre-populate. Antigravity requires an explicit Avibe-selected model;
   // Claude/Codex can fall back to "default-only" when empty.
   useEffect(() => {
     let cancelled = false;
-    setSelectedModel('');
     const loader =
       backend === 'claude'
         ? api.claudeModels()
@@ -59,14 +60,18 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
         if (cancelled) return;
         if (data?.ok && Array.isArray(data.models)) {
           const valid = data.models.filter((m): m is string => typeof m === 'string' && m.length > 0);
-          setModels(valid);
-          if (backend === 'antigravity' && valid.length > 0) {
-            setSelectedModel(valid[0]);
-          }
+          setCatalog({ backend, models: valid });
+          setSelection({ backend, model: backend === 'antigravity' && valid.length > 0 ? valid[0] : '' });
+        } else {
+          setCatalog({ backend, models: [] });
+          setSelection({ backend, model: '' });
         }
       })
       .catch(() => {
         /* swallow — dropdown stays empty; default-model path still works */
+        if (cancelled) return;
+        setCatalog({ backend, models: [] });
+        setSelection({ backend, model: '' });
       });
     return () => {
       cancelled = true;
@@ -166,7 +171,7 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
               want this to bypass a reasoning-heavy config default. */}
           <Select
             value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
+            onChange={(e) => setSelection({ backend, model: e.target.value })}
             disabled={testing}
             wrapperClassName="w-auto"
             className="font-mono text-[11px]"

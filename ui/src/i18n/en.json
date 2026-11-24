@@ -1103,6 +1103,7 @@
       "antigravityBaseUrlPlaceholder": "https://generativelanguage.googleapis.com",
       "antigravityBaseUrlHint": "Leave empty to use Google's default Gemini Developer API endpoint (GOOGLE_GEMINI_BASE_URL).",
       "antigravityApiKeyRemove": "Remove key",
+      "antigravityApiKeyMasked": "••••••••",
       "antigravityGcpProjectLabel": "Google Cloud project (GOOGLE_CLOUD_PROJECT)",
       "antigravityGcpProjectPlaceholder": "my-gcp-project",
       "antigravityGcpProjectHint": "Project ID configured for Gemini Enterprise Agent Platform.",

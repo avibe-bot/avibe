@@ -1103,6 +1103,7 @@
       "antigravityBaseUrlPlaceholder": "https://generativelanguage.googleapis.com",
       "antigravityBaseUrlHint": "留空则使用 Google 默认的 Gemini Developer API 地址（GOOGLE_GEMINI_BASE_URL）。",
       "antigravityApiKeyRemove": "移除 Key",
+      "antigravityApiKeyMasked": "••••••••",
       "antigravityGcpProjectLabel": "Google Cloud 项目（GOOGLE_CLOUD_PROJECT）",
       "antigravityGcpProjectPlaceholder": "my-gcp-project",
       "antigravityGcpProjectHint": "用于 Gemini Enterprise Agent Platform 的项目 ID。",

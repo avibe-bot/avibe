@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { AlertTriangle, CheckCircle2, ExternalLink, Eye, EyeOff, Info, KeyRound, LoaderCircle, Pencil, Terminal } from 'lucide-react';
 import { useApi, type AntigravityAuthMode, type AntigravityAuthState, type OAuthWebMutationResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import { getBackendUiMeta } from '@/lib/agentBackends';
 import { errorMessage } from '@/lib/errorMessage';
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/ui/copy-button';
@@ -19,7 +20,6 @@ type DialogInitialMethod = 'oauth' | 'api_key';
 type OAuthMethod = 'oauth-personal' | 'oauth-business';
 type Editable = 'method' | 'api_key' | 'base_url' | 'gcp_project' | 'gcp_location';
 
-const DEFAULT_ADC_COMMAND = 'gcloud auth application-default login';
 const ANTIGRAVITY_MODES: readonly AntigravityAuthMode[] = ['oauth-personal', 'oauth-business', 'gemini-api-key', 'agent-platform'];
 
 const METHOD_META = {
@@ -92,7 +92,10 @@ export function AntigravityConnectionForm({
   const touched = useRef(new Set<Editable>());
   const lifetime = useRef({ mounted: true, busy: false });
   const callbacks = useRef({ onConnected, onWriteState });
-  callbacks.current = { onConnected, onWriteState };
+
+  useEffect(() => {
+    callbacks.current = { onConnected, onWriteState };
+  }, [onConnected, onWriteState]);
 
   useEffect(() => {
     const owner = lifetime.current;
@@ -102,59 +105,59 @@ export function AntigravityConnectionForm({
 
   const invalidateObservation = () => { observation.current += 1; };
 
-  const observe = useCallback(async ({ receiptError = '' }: { receiptError?: string } = {}) => {
+  const observe = useCallback(({ receiptError = '' }: { receiptError?: string } = {}) => {
     const token = ++observation.current;
     const current = () => lifetime.current.mounted && token === observation.current;
-    setStatus((s) => ({ ...s, connected: false, savedDisabled: false, error: receiptError }));
 
-    const [application, authResult] = await Promise.allSettled([
+    return Promise.allSettled([
       api.getBackendConnection('antigravity'),
       api.getAntigravityAuth(),
-    ]);
-    if (!current()) return false;
+    ]).then(([application, authResult]) => {
+      if (!current()) return false;
 
-    const messages = receiptError ? [receiptError] : [];
-    const connection = application.status === 'fulfilled' ? application.value : null;
-    if (!(connection?.ok && ['applied', 'stopped'].includes(connection.application))) {
-      messages.push(
-        application.status === 'rejected'
-          ? errorMessage(application.reason) || t('onboarding.connection.readFailed')
-          : connection?.message || t('onboarding.connection.applyPending'),
-      );
-    }
-
-    let hasAuth = false;
-    let nextAuthReadable = false;
-    if (authResult.status === 'rejected') {
-      messages.push(errorMessage(authResult.reason) || t('onboarding.connection.readFailed'));
-    } else if (!authResult.value.ok) {
-      messages.push(authResult.value.message || t('onboarding.connection.readFailed'));
-    } else {
-      const fresh = authResult.value;
-      setAuth(fresh);
-      nextAuthReadable = true;
-      setFields((prev) => ({
-        base_url: touched.current.has('base_url') ? prev.base_url : fresh.base_url || '',
-        gcp_project: touched.current.has('gcp_project') ? prev.gcp_project : fresh.gcp_project || '',
-        gcp_location: touched.current.has('gcp_location') ? prev.gcp_location : fresh.gcp_location || '',
-      }));
-      if (!compact && !touched.current.has('method') && isAntigravityAuthMode(fresh.auth_mode)) {
-        setMethod(fresh.auth_mode);
+      const messages = receiptError ? [receiptError] : [];
+      const connection = application.status === 'fulfilled' ? application.value : null;
+      if (!(connection?.ok && ['applied', 'stopped'].includes(connection.application))) {
+        messages.push(
+          application.status === 'rejected'
+            ? errorMessage(application.reason) || t('onboarding.connection.readFailed')
+            : connection?.message || t('onboarding.connection.applyPending'),
+        );
       }
-      hasAuth = Boolean(fresh.authenticated || fresh.credentials_present);
-    }
 
-    const confirmed = messages.length === 0;
-    setStatus((s) => ({
-      ...s,
-      loading: false,
-      authReadable: nextAuthReadable,
-      error: [...new Set(messages)].join(' '),
-      applyPending: !confirmed,
-      connected: confirmed && hasAuth && Boolean(connection?.ready),
-      savedDisabled: confirmed && hasAuth && connection?.enabled === false,
-    }));
-    return confirmed;
+      let hasAuth = false;
+      let nextAuthReadable = false;
+      if (authResult.status === 'rejected') {
+        messages.push(errorMessage(authResult.reason) || t('onboarding.connection.readFailed'));
+      } else if (!authResult.value.ok) {
+        messages.push(authResult.value.message || t('onboarding.connection.readFailed'));
+      } else {
+        const fresh = authResult.value;
+        setAuth(fresh);
+        nextAuthReadable = true;
+        setFields((prev) => ({
+          base_url: touched.current.has('base_url') ? prev.base_url : fresh.base_url || '',
+          gcp_project: touched.current.has('gcp_project') ? prev.gcp_project : fresh.gcp_project || '',
+          gcp_location: touched.current.has('gcp_location') ? prev.gcp_location : fresh.gcp_location || '',
+        }));
+        if (!compact && !touched.current.has('method') && isAntigravityAuthMode(fresh.auth_mode)) {
+          setMethod(fresh.auth_mode);
+        }
+        hasAuth = Boolean(fresh.authenticated || fresh.credentials_present);
+      }
+
+      const confirmed = messages.length === 0;
+      setStatus((s) => ({
+        ...s,
+        loading: false,
+        authReadable: nextAuthReadable,
+        error: [...new Set(messages)].join(' '),
+        applyPending: !confirmed,
+        connected: confirmed && hasAuth && Boolean(connection?.ready),
+        savedDisabled: confirmed && hasAuth && connection?.enabled === false,
+      }));
+      return confirmed;
+    });
   }, [api, compact, t]);
 
   useEffect(() => {
@@ -163,14 +166,19 @@ export function AntigravityConnectionForm({
     return () => { observation.current += 1; };
   }, [connectionRevision, observe]);
 
+  const refreshObservation = (options: { receiptError?: string } = {}) => {
+    setStatus((s) => ({ ...s, connected: false, savedDisabled: false, error: options.receiptError ?? '' }));
+    return observe(options);
+  };
+
   const confirmOAuth = async (applicationError = '') => {
-    const confirmed = await observe({ receiptError: applicationError });
+    const confirmed = await refreshObservation({ receiptError: applicationError });
     if (!confirmed) throw new Error(t('onboarding.connection.applyPending'));
     touched.current.delete('method');
     await callbacks.current.onConnected?.();
   };
 
-  const observeOAuthFailure = async (receiptError: string) => { await observe({ receiptError }); };
+  const observeOAuthFailure = async (receiptError: string) => { await refreshObservation({ receiptError }); };
   const changeOAuthActive = (value: boolean) => { if (value) invalidateObservation(); setActive(value); };
 
   const oauthAuthMode: OAuthMethod = method === 'oauth-business' ? 'oauth-business' : 'oauth-personal';
@@ -184,7 +192,7 @@ export function AntigravityConnectionForm({
     onPendingChange: onWriteState,
   });
 
-  const removed = (result: OAuthWebMutationResult) => observe({
+  const removed = (result: OAuthWebMutationResult) => refreshObservation({
     receiptError: !result.ok
       ? result.error || result.detail || t('onboarding.connection.saveFailed')
       : result.restart?.ok === false
@@ -266,7 +274,7 @@ export function AntigravityConnectionForm({
     setStatus((s) => ({ ...s, error: '', connected: false }));
   };
 
-  const setField = (key: 'base_url' | 'gcp_project' | 'gcp_location') => (value: string) => {
+  const updateField = (key: 'base_url' | 'gcp_project' | 'gcp_location', value: string) => {
     touched.current.add(key);
     setFields((prev) => ({ ...prev, [key]: value }));
   };
@@ -277,8 +285,8 @@ export function AntigravityConnectionForm({
   const needsCode = oauth.state === 'awaiting_code' && (
     oauth.callbackKind === 'code' || oauth.callbackKind === 'redirect' || (!oauth.callbackKind && Boolean(oauth.url) && !oauth.deviceCode)
   );
-  const adcCommand = auth?.adc_command?.trim() || DEFAULT_ADC_COMMAND;
-  const enterpriseTerminalCommand = oauth.terminalCommand?.trim() || 'agy';
+  const adcCommand = auth?.adc_command?.trim() || '';
+  const enterpriseTerminalCommand = oauth.terminalCommand?.trim() || getBackendUiMeta('antigravity').defaultCli || '';
   const waitingKey = oauth.state === 'starting'
     ? 'settings.backends.oauthStarting'
     : oauth.state === 'verifying'
@@ -331,7 +339,7 @@ export function AntigravityConnectionForm({
           <>
             {compact && <p className="connection-intro">{t(METHOD_META[method].intro)}</p>}
             {status.applyPending && (
-              <div><Button variant="secondary" disabled={busy} onClick={() => void observe()}>{t('onboarding.connection.refresh')}</Button></div>
+              <div><Button variant="secondary" disabled={busy} onClick={() => void refreshObservation()}>{t('onboarding.connection.refresh')}</Button></div>
             )}
             {status.connected && (
               <p className="connection-confirmed" role="status"><CheckCircle2 size={16} />{t('onboarding.connection.connected')}</p>
@@ -345,7 +353,7 @@ export function AntigravityConnectionForm({
             {status.error && (
               <div role="alert" className="connection-error">
                 {status.error}
-                {!auth && <Button variant="secondary" onClick={() => void observe()}>{t('common.retry')}</Button>}
+                {!auth && <Button variant="secondary" onClick={() => void refreshObservation()}>{t('common.retry')}</Button>}
               </div>
             )}
 
@@ -410,7 +418,7 @@ export function AntigravityConnectionForm({
                   {hasKey && !editingKey ? (
                     <div className="connection-secret">
                       <KeyRound size={15} />
-                      <code>{auth?.api_key_masked || '••••••••'}</code>
+                      <code>{auth?.api_key_masked || t('settings.backends.antigravityApiKeyMasked')}</code>
                       <Button variant="ghost" size="xs" disabled={busy} onClick={() => { setEditingKey(true); setApiKey(''); touched.current.add('api_key'); }}>
                         <Pencil size={14} />{t('settings.backends.replaceApiKey')}
                       </Button>
@@ -444,7 +452,7 @@ export function AntigravityConnectionForm({
 
                 <ConnectionTextField
                   id="antigravity-connection-url" type="url" label={t('settings.backends.antigravityBaseUrlLabel')}
-                  value={fields.base_url} onChange={setField('base_url')} disabled={busy}
+                  value={fields.base_url} onChange={(value) => updateField('base_url', value)} disabled={busy}
                   placeholder={t('settings.backends.antigravityBaseUrlPlaceholder')}
                   hint={t('settings.backends.antigravityBaseUrlHint')}
                   error={!urlValid ? t('onboarding.connection.invalidUrl') : undefined}
@@ -456,13 +464,13 @@ export function AntigravityConnectionForm({
               <>
                 <ConnectionTextField
                   id="antigravity-gcp-project" label={t('settings.backends.antigravityGcpProjectLabel')}
-                  value={fields.gcp_project} onChange={setField('gcp_project')} disabled={busy} spellCheck={false}
+                  value={fields.gcp_project} onChange={(value) => updateField('gcp_project', value)} disabled={busy} spellCheck={false}
                   placeholder={t('settings.backends.antigravityGcpProjectPlaceholder')}
                   hint={t('settings.backends.antigravityGcpProjectHint')}
                 />
                 <ConnectionTextField
                   id="antigravity-gcp-location" label={t('settings.backends.antigravityGcpLocationLabel')}
-                  value={fields.gcp_location} onChange={setField('gcp_location')} disabled={busy} spellCheck={false}
+                  value={fields.gcp_location} onChange={(value) => updateField('gcp_location', value)} disabled={busy} spellCheck={false}
                   placeholder={t('settings.backends.antigravityGcpLocationPlaceholder')}
                   hint={t('settings.backends.antigravityGcpLocationHint')}
                 />
@@ -472,11 +480,15 @@ export function AntigravityConnectionForm({
                     {auth?.adc_present ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
                     <span>{t(auth?.adc_present ? 'settings.backends.antigravityAdcPresent' : 'settings.backends.antigravityAdcMissing')}</span>
                   </div>
-                  <p className="text-[12px] leading-relaxed text-muted">{t('settings.backends.antigravityAdcCommandHint')}</p>
-                  <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">
-                    <code className="overflow-x-auto font-mono text-[12px] text-foreground">{adcCommand}</code>
-                    <CopyButton value={adcCommand} />
-                  </div>
+                  {adcCommand && (
+                    <>
+                      <p className="text-[12px] leading-relaxed text-muted">{t('settings.backends.antigravityAdcCommandHint')}</p>
+                      <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">
+                        <code className="overflow-x-auto font-mono text-[12px] text-foreground">{adcCommand}</code>
+                        <CopyButton value={adcCommand} />
+                      </div>
+                    </>
+                  )}
                 </div>
               </>
             )}
