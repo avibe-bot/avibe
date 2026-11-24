@@ -405,3 +405,25 @@ def test_other_account_refusal_reaches_the_starter_only_and_keeps_the_installati
 
     state_dir = paths.get_state_dir()
     assert not [p for p in state_dir.rglob("*") if p.is_file() and b"b@example.test" in p.read_bytes()]
+
+
+def test_cancel_at_avibe_bot_returns_an_ordinary_claim_as_cancelled(claim_peer, owner_browser):
+    origin, environ = owner_browser
+    client, stranger = ui_server.app.test_client(), ui_server.app.test_client()
+    body = _start(client, origin, environ).get_json()
+    url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
+
+    def back(c, u):
+        return c.get(u, base_url=origin, environ_base=environ)
+
+    _assert_bad_return(back(stranger, url + "&outcome=declined"))  # another browser cannot cancel it
+    _assert_bad_return(back(client, url + "&outcome=accepted"))
+    calls = len(claim_peer.calls)
+    assert back(client, url + "&outcome=declined").headers["Location"] == "/settings/remote-access"
+    flow = claims.redirect_claims._get(body["claim_id"])
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view["state"] == "declined", timeout=5)
+    view = client.get("/api/remote-access/claims/" + body["claim_id"], base_url=origin, environ_base=environ).get_json()
+    assert (view["state"], view["code"]) == ("declined", "declined")
+    assert len(claim_peer.calls) == calls  # declined there already: no decline, no accept
+    _assert_bad_return(back(client, url))
