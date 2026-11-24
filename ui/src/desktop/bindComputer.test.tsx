@@ -364,6 +364,25 @@ it('a published sign-in that still owes a second factor asks for it, with the sa
     .toEqual({ type: 'submit_factor_code', receipt: 'r', submission: 's', method: 'totp', code: '654321' }));
 });
 
+it('a recovery code native cannot take is marked wrong in place: nothing sent, the claim stays', async () => {
+  const page = mount({ ...proofAnswers, review_after_proof: refuse('authentication_required') });
+  await verify();
+  await broadcast({ ...signedIn, revision: signedIn.revision + 3,
+    account: { ...signedIn.account, status: 'second_factor_required', gate: 'challenge', methods: ['totp'] } });
+  fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.useRecovery }, { timeout: 5000 }));
+  // Several saved codes pasted at once: over native's 32 UTF-16 units.
+  fireEvent.change(await screen.findByLabelText(en.mobileApp.twoFactor.recoveryLabel), { target: { value: 'abcde-12345 fghij-67890 klmno-13579' } });
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
+  await screen.findByText(en.mobileApp.twoFactor.recoveryInvalid);
+  expect(page.types()).not.toContain('submit_factor_code');
+  expect(page.types()).not.toContain('cancel');
+  // Still the same claim: a code native takes goes out with its submission.
+  fireEvent.change(screen.getByLabelText(en.mobileApp.twoFactor.recoveryLabel), { target: { value: 'abcde-12345' } });
+  fireEvent.click(screen.getByRole('button', { name: en.mobileApp.twoFactor.verify }));
+  await waitFor(() => expect(page.actions.find((each) => each.type === 'submit_factor_code'))
+    .toEqual({ type: 'submit_factor_code', receipt: 'r', submission: 's', method: 'recovery', code: 'abcde-12345' }));
+});
+
 it.each(['a', 'ab--cd', `${'a'.repeat(47)}`, '-ab', 'ab-'])('keeps %s in the field and never checks it', async (typed) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
