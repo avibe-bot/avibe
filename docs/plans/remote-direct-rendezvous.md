@@ -23,6 +23,7 @@ Content-Type: application/json
 - `client_endpoint_id` is the App's own iroh endpoint ID (its Ed25519 public key in iroh's canonical lowercase hex). The App generates a fresh endpoint key per launch and sends only the ID.
 - The caller must hold a current remote session for this instance. Any instance role may ask (Viewer and above): the direct path is transport, not a permission.
 - It is a `POST` because it records the client's admission (section 4), so the usual Origin and CSRF checks apply.
+- An optional `listener_faults` array reports up to five client listener faults. Each entry has exactly `step` (`bind`, `waiting`, `ownership`, `deadline`, `foreign`, or `socket` for a listening socket that failed while serving), `code` (a signed 32-bit integer error code), and `background_seconds` (an integer from 0 through 2147483647). The shared request decoder applies the same body limits as before; a body it rejects never reaches this handler. After decoding, the instance ignores the entire field if any entry is malformed or the array exceeds five entries. Otherwise it logs one INFO line per entry with only those fields. These diagnostics do not affect the answer or admission and are not retained in rendezvous state.
 
 | Condition | Answer |
 | --- | --- |

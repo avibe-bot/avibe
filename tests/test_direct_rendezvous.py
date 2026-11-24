@@ -400,6 +400,45 @@ def test_signed_in_viewer_gets_the_endpoint_and_is_admitted(instance):
     assert (grant.subject, grant.until) == ("sub-viewer", NOW + RENDEZVOUS_TTL_SECONDS)
 
 
+@pytest.mark.parametrize("steps", [("bind", "waiting", "ownership", "deadline", "foreign"), ("socket",)])
+def test_listener_faults_log_only_the_three_fields_without_changing_the_offer(instance, caplog, steps):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready" and "listener_faults" not in baseline
+    assert not any("listener_fault" in line for line in caplog.messages)
+    caplog.clear()
+    faults = [{"step": step, "code": i - 2, "background_seconds": i} for i, step in enumerate(steps)]
+    response = _post(client, {**_body(), "listener_faults": faults})
+    assert response.status_code == 200 and response.get_json() == baseline
+    assert [(r.levelname, r.getMessage()) for r in caplog.records if r.name == "vibe.direct_rendezvous"] == [
+        ("INFO", f"direct rendezvous listener_fault step={step} code={i - 2} background_seconds={i}")
+        for i, step in enumerate(steps)
+    ]
+
+
+def test_invalid_listener_fault_batches_are_ignored_in_full(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    assert baseline["status"] == "ready"
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    good = {"step": "bind", "code": -1, "background_seconds": 0}
+    for faults in (None, [], good, [good] * 6, [good, None], [good, {"step": "bind"}],
+                   [good, {**good, "extra": "private"}], [good, {**good, "step": "unknown"}],
+                   [good, {**good, "step": []}], [good, {**good, "code": False}],
+                   [good, {**good, "code": 1.5}], [good, {**good, "background_seconds": True}],
+                   [good, {**good, "code": -(2**31) - 1}], [good, {**good, "code": 2**31}],
+                   [good, {**good, "background_seconds": 2**31}],
+                   [good, {**good, "background_seconds": "1"}], [good, {**good, "background_seconds": -1}]):
+        response = _post(client, {**_body(), "listener_faults": faults})
+        assert response.status_code == 200 and response.get_json() == baseline
+    assert not any("listener_fault" in line for line in caplog.messages)
+
+
 def test_before_a_transport_exists_the_answer_is_unavailable(instance):
     config, _rendezvous = instance
 
