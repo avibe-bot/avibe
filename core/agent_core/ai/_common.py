@@ -234,6 +234,7 @@ class StreamAssembler:
         self._hosted_inputs: dict[Hashable, io.StringIO] = {}
         self._hosted_counts: dict[str, int] = {}
         self._hosted_cited: tuple[HostedSource, ...] = ()
+        self._observed_hosted_call = False
         self._hosted_cost: HostedCost | None = None
         #: Whether the response was paused and continues (``pause``).
         self._continuing = False
@@ -428,6 +429,11 @@ class StreamAssembler:
 
     def text_citations(self) -> tuple[Citation, ...]:
         return tuple(item for index in sorted(self._citations) for item in self._citations[index])
+
+    def observe_hosted_call(self) -> str | None:
+        """Record execution even if its Source is unknown and the opaque call cannot be kept."""
+        self._observed_hosted_call = True
+        return self.source_id
 
     def hosted_block(self, key: Hashable, block: HostedToolBlock) -> None:
         """Place a hosted call in stream order at its slot ``key``, or replace the call already there: a result
@@ -1168,6 +1174,8 @@ class StreamAssembler:
         ))
 
     def _rendered_response(self, message: AssistantMessage) -> AssistantMessage:
+        if message.hosted_summary is None and (self._observed_hosted_call or any(self._hosted_counts.values())):
+            message = replace(message, hosted_call_unretained=True)
         if not self.hosted_render_omitted:
             return message
         return replace(

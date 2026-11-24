@@ -417,7 +417,9 @@ class SQLiteTranscriptStore:
         if not isinstance(message, AssistantMessage):
             raise TypeError("append_response takes an AssistantMessage")
         row_metadata = dict(metadata or {})
-        stored_message = _with_render_metadata(message, row_metadata)
+        if message.hosted_call_unretained:
+            row_metadata["hosted_call_unretained"] = True
+        stored_message = _with_response_metadata(message, row_metadata)
         response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(stored_message)}
         if request is not None:
             response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
@@ -1139,9 +1141,11 @@ def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> li
     return sorted(entries, key=lambda row: row.context_seq)
 
 
-def _with_render_metadata(message: AssistantMessage, metadata: Mapping[str, Any]) -> AssistantMessage:
-    """Optional renderer facts never make an otherwise valid historical row unreadable."""
+def _with_response_metadata(message: AssistantMessage, metadata: Mapping[str, Any]) -> AssistantMessage:
+    """Optional response facts never make an otherwise valid historical row unreadable."""
     changes: dict[str, Any] = {}
+    if metadata.get("hosted_call_unretained") is True:
+        changes["hosted_call_unretained"] = True
     for key in ("hosted_render_epoch", "hosted_render_rule"):
         value = metadata.get(key)
         if type(value) is int:
@@ -1168,7 +1172,7 @@ def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
             metadata = _json_object(row.get("metadata_json"), row_id)
         except TranscriptError:
             metadata = {}
-        message = replace(_with_render_metadata(message, metadata), transcript_row_id=row_id)
+        message = replace(_with_response_metadata(message, metadata), transcript_row_id=row_id)
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
     )
