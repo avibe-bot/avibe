@@ -459,7 +459,9 @@ final class HealthSyncTests: XCTestCase {
         let previous = scene.windows.first { $0.isKeyWindow }
         for (name, style) in [("light", UIUserInterfaceStyle.light), ("dark", .dark)] {
             for timeout in [true, false] {
-                let fixture = try coordinatorFixture(connectionTimeout: .seconds(1))
+                // Only the timeout arm needs its deadline to expire; the other
+                // must connect, sheet dismissal included, whatever the load.
+                let fixture = try coordinatorFixture(connectionTimeout: timeout ? .seconds(1) : .seconds(90))
                 fixture.reader.holdAuthorization = timeout
                 fixture.uploader.autoAcknowledge = true
                 var calendar = Calendar(identifier: .gregorian)
@@ -604,7 +606,12 @@ final class HealthSyncTests: XCTestCase {
 
     @MainActor
     func testLatePairResponseCannotCommitOrClearAReplacementConnection() async throws {
-        let fixture = try coordinatorFixture(connectionTimeout: .milliseconds(120))
+        // One coordinator runs both connections, and its setup deadline is
+        // fixed when it is made: the first must expire it (its pair is held),
+        // the second must finish within it (consent, authorization, pair and
+        // commit, on the real clock). So the deadline is one the second cannot
+        // miss for reasons of load, and the first waits it out.
+        let fixture = try coordinatorFixture(connectionTimeout: .seconds(3))
         fixture.client.holdPair = true
         let first = fixture.connect()
         try await eventually { fixture.coordinator.consent != nil }
