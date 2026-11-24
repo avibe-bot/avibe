@@ -13,9 +13,16 @@ from modules.agents.base import AgentRequest
 class AntigravityModelSelectionError(RuntimeError):
     """Raised when Avibe's selected model or reasoning effort cannot be applied."""
 
-    def __init__(self, message: str, *, reason: str = "model_selection_failed") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "model_selection_failed",
+        config_options: tuple[dict[str, Any], ...] | None = None,
+    ) -> None:
         super().__init__(message)
         self.reason = reason
+        self.config_options = config_options
 
 
 @dataclass(frozen=True)
@@ -162,6 +169,32 @@ def extract_initial_default_effort(
     return init_model, init_effort
 
 
+def has_model_config_option(config_options: Sequence[Mapping[str, Any]]) -> bool:
+    """Return True when ``config_options`` advertises a selectable ``model`` option."""
+    model_option = _find_config_option(config_options, categories=("model",), ids=("model",))
+    return model_option is not None and isinstance(model_option.get("id"), str)
+
+
+def _with_option_current_value(
+    options: tuple[dict[str, Any], ...],
+    *,
+    categories: tuple[str, ...],
+    ids: tuple[str, ...],
+    value: str,
+) -> tuple[dict[str, Any], ...]:
+    target = _find_config_option(options, categories=categories, ids=ids)
+    if target is None:
+        return options
+    updated_items: list[dict[str, Any]] = []
+    for item in options:
+        copied = dict(item)
+        if item is target:
+            key = "current_value" if ("current_value" in copied and "currentValue" not in copied) else "currentValue"
+            copied[key] = value
+        updated_items.append(copied)
+    return tuple(updated_items)
+
+
 async def _set_model_option(
     client: AcpClient,
     session_id: str,
@@ -178,7 +211,15 @@ async def _set_model_option(
         ) from exc
     updated = _normalize_config_options(resp.get("configOptions"))
     if not updated:
-        return options, False
+        return (
+            _with_option_current_value(
+                options,
+                categories=("model",),
+                ids=(model_option_id, "model"),
+                value=selected_model,
+            ),
+            False,
+        )
     returned_model_opt = _find_config_option(
         updated,
         categories=("model",),
@@ -190,6 +231,7 @@ async def _set_model_option(
             raise AntigravityModelSelectionError(
                 f"Antigravity applied model {confirmed_model!r} instead of requested {selected_model!r}.",
                 reason="model_mismatch",
+                config_options=updated,
             )
     return updated, True
 
@@ -201,6 +243,8 @@ async def _set_effort_option(
     target_effort: str,
     selected_model: str,
     options: tuple[dict[str, Any], ...],
+    *,
+    fallback_config_options: tuple[dict[str, Any], ...] | None = None,
 ) -> tuple[dict[str, Any], ...]:
     try:
         resp = await client.session_set_config_option(session_id, effort_option_id, target_effort)
@@ -209,10 +253,16 @@ async def _set_effort_option(
             f"Antigravity rejected reasoning effort {target_effort!r} for model {selected_model!r}: "
             f"{exc.message}",
             reason="effort_rejected",
+            config_options=fallback_config_options,
         ) from exc
     updated = _normalize_config_options(resp.get("configOptions"))
     if not updated:
-        return options
+        return _with_option_current_value(
+            options,
+            categories=_EFFORT_CATEGORIES,
+            ids=(effort_option_id, *_EFFORT_IDS),
+            value=target_effort,
+        )
     returned_effort_opt = _find_config_option(
         updated,
         categories=_EFFORT_CATEGORIES,
@@ -225,6 +275,7 @@ async def _set_effort_option(
                 f"Antigravity applied reasoning effort {confirmed_effort!r} instead of requested "
                 f"{target_effort!r} for model {selected_model!r}.",
                 reason="effort_mismatch",
+                config_options=updated,
             )
     return updated
 
@@ -239,6 +290,7 @@ async def apply_model_and_effort(
     current_model: str | None = None,
     current_effort: str | None = None,
     default_effort: str | None = None,
+    force_reapply: bool = False,
 ) -> AppliedModelConfig:
     """Explicitly apply Avibe's model, then dependent ``thought_level``, via ACP.
 
@@ -280,7 +332,7 @@ async def apply_model_and_effort(
 
     model_option_id = str(model_option["id"])
     server_model = _option_current_value(model_option)
-    model_needs_apply = prior_model != selected_model or server_model != selected_model
+    model_needs_apply = force_reapply or prior_model != selected_model or server_model != selected_model
     model_options_refreshed = False
 
     if model_needs_apply:
@@ -291,6 +343,8 @@ async def apply_model_and_effort(
             selected_model,
             options,
         )
+
+    latest_options = options if model_options_refreshed else None
 
     effort_option = _find_config_option(
         options,
@@ -319,12 +373,14 @@ async def apply_model_and_effort(
                 f"Antigravity model {selected_model!r} does not advertise a 'thought_level' config option "
                 f"for requested effort {selected_effort!r}.",
                 reason="effort_option_unavailable",
+                config_options=latest_options,
             )
         if allowed_efforts and selected_effort not in allowed_efforts:
             raise AntigravityModelSelectionError(
                 f"Reasoning effort {selected_effort!r} is not supported for Antigravity model {selected_model!r} "
                 f"(available: {', '.join(sorted(allowed_efforts))}).",
                 reason="effort_unsupported",
+                config_options=latest_options,
             )
 
         effort_option_id = str(effort_option["id"])
@@ -338,30 +394,37 @@ async def apply_model_and_effort(
                 selected_effort,
                 selected_model,
                 options,
+                fallback_config_options=latest_options,
             )
-    elif prior_effort is not None and effort_option is not None and isinstance(effort_option.get("id"), str):
+    elif effort_option is not None and isinstance(effort_option.get("id"), str):
         effort_option_id = str(effort_option["id"])
         server_effort = _option_current_value(effort_option)
         reset_target = baseline_effort
-        if reset_target is not None:
-            if server_effort != reset_target:
-                options = await _set_effort_option(
-                    client,
-                    session_id,
-                    effort_option_id,
-                    reset_target,
-                    selected_model,
-                    options,
-                )
-        else:
+        if reset_target is not None and (
+            server_effort != reset_target
+            or (force_reapply and not model_options_refreshed)
+        ):
+            options = await _set_effort_option(
+                client,
+                session_id,
+                effort_option_id,
+                reset_target,
+                selected_model,
+                options,
+                fallback_config_options=latest_options,
+            )
+        elif prior_effort is not None and reset_target is None:
             if not model_needs_apply:
-                options, _ = await _set_model_option(
+                options, refreshed = await _set_model_option(
                     client,
                     session_id,
                     model_option_id,
                     selected_model,
                     options,
                 )
+                if refreshed:
+                    model_options_refreshed = True
+                    latest_options = options
                 effort_option = _find_config_option(
                     options,
                     categories=_EFFORT_CATEGORIES,
@@ -382,12 +445,14 @@ async def apply_model_and_effort(
                             refreshed_default,
                             selected_model,
                             options,
+                            fallback_config_options=latest_options,
                         )
                 elif server_effort == prior_effort and bool(allowed_efforts - {prior_effort}):
                     raise AntigravityModelSelectionError(
                         f"Antigravity kept reasoning effort {server_effort!r} for model {selected_model!r} "
                         "after clearing the override and advertised no default value to restore.",
                         reason="effort_reset_unavailable",
+                        config_options=latest_options,
                     )
                 else:
                     baseline_effort = _valid_option_value(server_effort, allowed_efforts)

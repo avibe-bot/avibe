@@ -1922,3 +1922,182 @@ async def test_antigravity_title_backfill_and_native_discovery_do_not_block_even
         engine.dispose()
     assert row is not None
     assert row["title"] == "Offloaded Antigravity Title"
+
+
+# ---------------------------------------------------------------------------
+# 16. Partial model/effort selection failure invalidates cached session state
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("return_empty_config_options", [False, True])
+async def test_partial_selection_failure_without_notification_reapplies_model_and_effort(
+    tmp_path: Path,
+    return_empty_config_options: bool,
+) -> None:
+    from tests.helpers.antigravity_harness import make_agent_harness, make_request
+
+    async with make_agent_harness(
+        tmp_path,
+        name=f"partial-sel-empty-{return_empty_config_options}",
+    ) as h:
+        peer_state = {"model": "model-alpha", "thought_level": "medium"}
+        set_calls: list[tuple[str, Any]] = []
+        prompt_states: list[tuple[str, str]] = []
+        mismatch_next_effort = False
+
+        def _peer_options() -> list[dict[str, Any]]:
+            effort_choices = (
+                [{"value": "low"}, {"value": "medium"}]
+                if peer_state["model"] == "model-beta"
+                else [{"value": "low"}, {"value": "medium"}, {"value": "high"}]
+            )
+            return [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "currentValue": peer_state["model"],
+                    "options": [{"value": "model-alpha"}, {"value": "model-beta"}],
+                },
+                {
+                    "id": "thought_level",
+                    "category": "thought_level",
+                    "currentValue": peer_state["thought_level"],
+                    "options": effort_choices,
+                },
+            ]
+
+        orig_get_or_create = h.agent._get_or_create_session
+        wrapped_ids: set[int] = set()
+
+        async def _wrapped_get_or_create(*args: Any, **kwargs: Any) -> Any:
+            sess = await orig_get_or_create(*args, **kwargs)
+            if id(sess) not in wrapped_ids:
+                wrapped_ids.add(id(sess))
+
+                async def _peer_set_opt(session_id: str, config_id: str, value: Any) -> dict[str, Any]:
+                    nonlocal mismatch_next_effort
+                    del session_id
+                    set_calls.append((config_id, value))
+                    if config_id == "model":
+                        peer_state["model"] = str(value)
+                    elif config_id == "thought_level":
+                        if mismatch_next_effort:
+                            mismatch_next_effort = False
+                            peer_state["thought_level"] = "low"
+                            return {"configOptions": _peer_options()}
+                        peer_state["thought_level"] = str(value)
+                    # Intentionally emit NO session/update config_option_update notification.
+                    if return_empty_config_options:
+                        return {}
+                    return {"configOptions": _peer_options()}
+
+                async def _peer_prompt(*_p_args: Any, **_p_kwargs: Any) -> dict[str, Any]:
+                    prompt_states.append((peer_state["model"], peer_state["thought_level"]))
+                    return {"stopReason": "end_turn"}
+
+                sess.client.session_set_config_option = _peer_set_opt  # type: ignore[method-assign]
+                sess.client.session_prompt = _peer_prompt  # type: ignore[method-assign]
+            return sess
+
+        h.agent._get_or_create_session = _wrapped_get_or_create  # type: ignore[method-assign]
+
+        # 16a/16b. Exact Codex repro: alpha -> beta + unsupported effort (no notification) -> retry alpha.
+        req1 = make_request(message="t1", workdir=h.workdir, model="model-alpha", effort=None)
+        await h.agent.handle_message(req1)
+        assert prompt_states[-1] == ("model-alpha", "medium")
+        session = h.agent._sessions[req1.composite_session_id]
+        assert session.current_model == "model-alpha"
+
+        h.controller.emitted.clear()
+        set_calls.clear()
+        prompts_before = len(prompt_states)
+        await h.agent.handle_message(
+            make_request(message="t2", workdir=h.workdir, model="model-beta", effort="ultra-invalid")
+        )
+        assert set_calls == [("model", "model-beta")]
+        assert peer_state["model"] == "model-beta"
+        assert len(prompt_states) == prompts_before
+        assert h.controller.events("result")[0][2].get("is_error") is True
+        assert session.current_model is None
+        assert session.selection_dirty is True
+        if not return_empty_config_options:
+            assert next(o for o in session.config_options if o["id"] == "model")["currentValue"] == "model-beta"
+
+        h.controller.emitted.clear()
+        set_calls.clear()
+        await h.agent.handle_message(
+            make_request(message="t3", workdir=h.workdir, model="model-alpha", effort=None)
+        )
+        assert ("model", "model-alpha") in set_calls
+        assert prompt_states[-1] == ("model-alpha", "medium")
+        assert session.current_model == "model-alpha"
+        assert session.selection_dirty is False
+        assert not h.controller.events("result")[0][2].get("is_error")
+
+        # 16c. alpha+high -> beta+unsupported_effort -> alpha+None must reapply alpha AND restore medium.
+        await h.agent.handle_message(
+            make_request(message="t4", workdir=h.workdir, model="model-alpha", effort="high")
+        )
+        assert prompt_states[-1] == ("model-alpha", "high")
+        assert session.current_effort == "high"
+        assert session.default_efforts.get("model-alpha") == "medium"
+
+        h.controller.emitted.clear()
+        set_calls.clear()
+        prompts_before = len(prompt_states)
+        unsupported_beta_effort = "ultra-invalid" if return_empty_config_options else "high"
+        await h.agent.handle_message(
+            make_request(message="t5", workdir=h.workdir, model="model-beta", effort=unsupported_beta_effort)
+        )
+        assert set_calls == [("model", "model-beta")]
+        assert peer_state == {"model": "model-beta", "thought_level": "high"}
+        assert len(prompt_states) == prompts_before
+        assert h.controller.events("result")[0][2].get("is_error") is True
+        assert session.current_model is None
+        assert session.current_effort == "high"
+
+        h.controller.emitted.clear()
+        set_calls.clear()
+        await h.agent.handle_message(
+            make_request(message="t6", workdir=h.workdir, model="model-alpha", effort=None)
+        )
+        assert set_calls == [("model", "model-alpha"), ("thought_level", "medium")]
+        assert prompt_states[-1] == ("model-alpha", "medium")
+        assert session.current_model == "model-alpha"
+        assert session.current_effort is None
+        assert session.selection_dirty is False
+
+        # Staying on alpha+None after recovery sends zero redundant config RPCs.
+        set_calls.clear()
+        await h.agent.handle_message(
+            make_request(message="t7", workdir=h.workdir, model="model-alpha", effort=None)
+        )
+        assert set_calls == []
+        assert prompt_states[-1] == ("model-alpha", "medium")
+
+        # 16d. effort_mismatch mutation: alpha+None (medium) -> alpha+high applies "low" -> alpha+None restores "medium".
+        mismatch_next_effort = True
+        h.controller.emitted.clear()
+        set_calls.clear()
+        prompts_before = len(prompt_states)
+        await h.agent.handle_message(
+            make_request(message="t8", workdir=h.workdir, model="model-alpha", effort="high")
+        )
+        assert set_calls == [("thought_level", "high")]
+        assert peer_state == {"model": "model-alpha", "thought_level": "low"}
+        assert len(prompt_states) == prompts_before
+        assert h.controller.events("result")[0][2].get("is_error") is True
+        assert session.current_model is None
+        assert session.selection_dirty is True
+
+        h.controller.emitted.clear()
+        set_calls.clear()
+        await h.agent.handle_message(
+            make_request(message="t9", workdir=h.workdir, model="model-alpha", effort=None)
+        )
+        assert set_calls == [("model", "model-alpha"), ("thought_level", "medium")]
+        assert prompt_states[-1] == ("model-alpha", "medium")
+        assert session.current_model == "model-alpha"
+        assert session.current_effort is None
+        assert session.selection_dirty is False
