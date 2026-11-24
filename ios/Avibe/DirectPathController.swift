@@ -445,9 +445,6 @@ final class DirectPathController {
     private let timing: DirectPathTiming
     private let notificationCenter: NotificationCenter
     private let onStatusChanged: () -> Void
-    /// No longer called: no failure of the listener is terminal. Kept until
-    /// the App side stops passing it.
-    private let onFault: () -> Void
     /// Called when a load gate or `listenerRecovery` may have changed: the
     /// listener was closed for the background, a return was settled, an
     /// attempt to bind the listener's port again failed, or one succeeded.
@@ -590,7 +587,6 @@ final class DirectPathController {
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
         onStatusChanged: @escaping () -> Void,
-        onFault: @escaping () -> Void = {},
         onAvailabilityChanged: @escaping () -> Void = {}
     ) {
         self.websiteDataStore = websiteDataStore
@@ -603,7 +599,6 @@ final class DirectPathController {
         // The App can be launched into the background.
         self.isInBackground = UIApplication.shared.applicationState == .background
         self.onStatusChanged = onStatusChanged
-        self.onFault = onFault
         self.onAvailabilityChanged = onAvailabilityChanged
 
         websiteDataStore.onWillRotate = { [weak self] in
@@ -2274,42 +2269,6 @@ final class DirectPathController {
 /// name that listener.
 private final class DirectListenerBox: @unchecked Sendable {
     weak var listener: DirectConnectListener?
-}
-
-/// Remembered, until the next launch, that the listener faulted, while a
-/// listener's failure was terminal. Nothing in this file writes it any
-/// more; kept until the App side stops using it.
-protocol DirectFaultMarkerStoring: AnyObject {
-    /// Records the fault.
-    func mark()
-    /// Whether a fault was recorded, clearing it. Any stored value counts,
-    /// including one this version cannot read.
-    func take() -> Bool
-}
-
-/// The marker as one key in the App's preferences. It holds a version
-/// number and nothing else.
-final class UserDefaultsDirectFaultMarker: DirectFaultMarkerStoring {
-    static let key = "avibe.direct.listenerFault"
-    static let version = 1
-
-    private let defaults: UserDefaults
-
-    init(defaults: UserDefaults) {
-        self.defaults = defaults
-    }
-
-    func mark() {
-        defaults.set(Self.version, forKey: Self.key)
-    }
-
-    func take() -> Bool {
-        guard defaults.object(forKey: Self.key) != nil else {
-            return false
-        }
-        defaults.removeObject(forKey: Self.key)
-        return true
-    }
 }
 
 /// The generation of a bind made inside a deadline, read after it.
