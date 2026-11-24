@@ -87,6 +87,7 @@ from modules.agents.antigravity.auth import (  # noqa: E402
     extract_antigravity_oauth_url as extract_antigravity_oauth_url,
     logout_antigravity_via_acp as logout_antigravity_via_acp,
     probe_antigravity_passive_status as probe_antigravity_passive_status,
+    resolve_antigravity_cli_path as resolve_antigravity_cli_path,
     run_antigravity_connection_probe as run_antigravity_connection_probe,
 )
 
@@ -807,6 +808,8 @@ class AgentAuthService:
                 )
         default_cli = default_cli_for_backend(backend) or backend
         cli_path = getattr(backend_cfg, "cli_path", None) or getattr(backend_cfg, "binary", None)
+        if backend == "antigravity":
+            return resolve_antigravity_cli_path(cli_path or default_cli)
         if runtime_projected:
             return cli_path or default_cli
         from config.v2_compat import runtime_agent_cli_path
@@ -1732,8 +1735,9 @@ class AgentAuthService:
         requested_mode = (flow.auth_method or "").strip()
         if requested_mode not in ANTIGRAVITY_OAUTH_METHODS or configured_mode != requested_mode:
             return False
+        binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
         probe = await probe_antigravity_passive_status(
-            self._get_cli_binary("antigravity"),
+            binary,
             config=cfg,
             auth_mode=requested_mode,
         )
@@ -1747,7 +1751,8 @@ class AgentAuthService:
     ) -> tuple[asyncio.subprocess.Process, int | None]:
         """Launch ``agy acp --login --disable-telemetry`` in a PTY (never with permission bypass)."""
         env = build_antigravity_auth_env(self._resolve_backend_config("antigravity"), auth_mode=auth_method)
-        cmd = antigravity_acp_command(self._get_cli_binary("antigravity"), login=True)
+        binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
+        cmd = antigravity_acp_command(binary, login=True)
         restore = on_irreversible_start() if on_irreversible_start is not None else None
         master_fd: int | None = None
         slave_fd: int | None = None
@@ -2385,7 +2390,7 @@ class AgentAuthService:
             return (verify_opencode_auth_list_output(text, flow.provider), text)
 
         if backend == "antigravity":
-            binary = self._get_cli_binary("antigravity")
+            binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
             cfg = self._resolve_backend_config("antigravity")
             probe = await probe_antigravity_passive_status(
                 binary,
@@ -3237,7 +3242,11 @@ class AgentAuthService:
         if backend not in {"claude", "codex", "antigravity"}:
             return {"ok": False, "error": "unsupported_backend"}
 
-        binary = self._get_cli_binary(backend)
+        binary = (
+            await _native_auth_thread(self._get_cli_binary, backend)
+            if backend == "antigravity"
+            else self._get_cli_binary(backend)
+        )
         settings_cleanup_error: str | None = None
         if backend == "codex":
             logout_ok, logout_error = await self._run_utility_command(binary, "logout")
@@ -3373,7 +3382,11 @@ class AgentAuthService:
         from core.vibe_agents import recommended_agent_model
 
         model = require_agent_model(model or recommended_agent_model(backend), backend)
-        binary = self._get_cli_binary(backend)
+        binary = (
+            await _native_auth_thread(self._get_cli_binary, backend)
+            if backend == "antigravity"
+            else self._get_cli_binary(backend)
+        )
         probe_cwd = self._resolve_backend_probe_cwd(
             backend,
             prepare=backend != "codex",

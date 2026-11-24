@@ -14245,11 +14245,11 @@ async def get_antigravity_auth_async() -> dict:
     never triggers inference, and never logs or exposes existing session
     listings. Plaintext API keys never leave the server.
     """
-    from config.v2_compat import runtime_agent_cli_path
     from core.agent_auth_service import (
         ANTIGRAVITY_AUTH_MODES,
         detect_antigravity_adc,
         probe_antigravity_passive_status,
+        resolve_antigravity_cli_path,
     )
 
     try:
@@ -14270,8 +14270,8 @@ async def get_antigravity_auth_async() -> dict:
     adc = await asyncio.to_thread(detect_antigravity_adc)
     cli_health = await detect_cli_async(configured_cli or default_cli, "antigravity")
     if cli_health["status"] == "ok":
-        binary = cli_health["path"] or runtime_agent_cli_path(
-            configured_cli or default_cli, default_cli, resolve_agent_paths=True
+        binary = cli_health["path"] or await asyncio.to_thread(
+            resolve_antigravity_cli_path, configured_cli or default_cli
         )
         probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
     else:

@@ -86,7 +86,10 @@ from modules.agents.acp import (
     AcpUsageUpdate,
     parse_session_update,
 )
-from modules.agents.antigravity.auth import authenticate_antigravity_client
+from modules.agents.antigravity.auth import (
+    authenticate_antigravity_client,
+    resolve_antigravity_cli_path as resolve_antigravity_cli_path,
+)
 from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
@@ -189,51 +192,6 @@ def _config_cli_path(config: Any) -> str:
     cli_path = getattr(config, "cli_path", None) or getattr(config, "binary", None) or "agy"
     text = str(cli_path).strip()
     return text or "agy"
-
-
-def _is_explicit_cli_path(value: str) -> bool:
-    return bool(value) and (
-        value.startswith("~")
-        or os.path.isabs(value)
-        or os.sep in value
-        or (os.altsep is not None and os.altsep in value)
-    )
-
-
-def _normalize_explicit_cli_path(value: str) -> str:
-    return str(Path(os.path.expanduser(value)).absolute())
-
-
-def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
-    """Resolve an Antigravity CLI selector without invoking ``npm``.
-
-    On desktop-managed runtimes, delegates to ``runtime_agent_cli_path`` so
-    bare selectors and stale desktop paths resolve to the published private
-    desktop install (or user-installed ``agy`` outside the GUI PATH). Outside
-    desktop runtimes, bare selectors (no path separator) are still resolved via
-    ``resolve_cli_path(..., include_npm_global=False)``. Explicit paths (tilde,
-    absolute, or containing a path separator) are normalized to expanded
-    absolute paths so subprocess execution never passes raw ``~`` or
-    cwd-dependent relative paths (while preserving ``cli_not_found`` reporting
-    for missing explicit paths).
-    """
-    selected = str(raw_cli_path).strip() if raw_cli_path is not None else ""
-    selected = selected or "agy"
-    from config.v2_compat import runtime_agent_cli_path
-    from vibe.cli_paths import resolve_cli_path
-    from vibe.upgrade import is_desktop_managed_runtime
-
-    if is_desktop_managed_runtime():
-        resolved = runtime_agent_cli_path(selected, "agy", resolve_agent_paths=True)
-        if _is_explicit_cli_path(resolved):
-            return _normalize_explicit_cli_path(resolved)
-        return resolved
-    if not _is_explicit_cli_path(selected):
-        resolved = resolve_cli_path(selected, include_npm_global=False) or selected
-        if _is_explicit_cli_path(resolved):
-            return _normalize_explicit_cli_path(resolved)
-        return resolved
-    return _normalize_explicit_cli_path(selected)
 
 
 def _config_extra_args(config: Any) -> tuple[str, ...]:

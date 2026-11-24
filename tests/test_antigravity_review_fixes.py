@@ -925,11 +925,14 @@ async def test_desktop_runtime_resolves_bare_agy_before_command_and_env(
     assert spec.command[0] == str(private_shim)
     assert launch_env["AVIBE_DESKTOP_TEST_MARKER"] == "derived-from-resolved-path"
 
-    # Auth service defaults to catalog CLI ("agy"), never backend id ("antigravity").
+    # Auth service defaults to catalog CLI ("agy"), never backend id ("antigravity"),
+    # and resolves through resolve_antigravity_cli_path for both V2 and AppCompat shapes.
     auth_svc = auth_mod.AgentAuthService.__new__(auth_mod.AgentAuthService)
     auth_svc.controller = SimpleNamespace(config=SimpleNamespace(agents=SimpleNamespace(antigravity=SimpleNamespace(cli_path=None))))
     assert auth_svc._get_cli_binary("antigravity") == str(private_shim)
     auth_svc.controller = SimpleNamespace(config=SimpleNamespace(antigravity=SimpleNamespace(binary="")))
+    assert auth_svc._get_cli_binary("antigravity") == str(private_shim)
+    monkeypatch.setattr("vibe.cli_paths.resolve_cli_path", lambda *_a, **_kw: None)
     assert auth_svc._get_cli_binary("antigravity") == "agy"
 
 
@@ -1524,3 +1527,259 @@ async def test_apply_model_and_effort_clear_override_unit_contracts() -> None:
     assert switched.model == "model-beta"
     assert switched.effort is None
     assert switched.default_effort == "medium"
+
+
+# ---------------------------------------------------------------------------
+# 13. Auth & probe paths expand tilde cli_path on non-desktop runtimes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("controller_shape", ["v2", "compat"])
+async def test_antigravity_auth_service_expands_tilde_cli_path_non_desktop(
+    tmp_path: Path,
+    _hermetic_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controller_shape: str,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from config.v2_compat import to_app_config
+    from config.v2_config import V2Config
+    from core.agent_auth_service import (
+        AgentAuthService,
+        probe_antigravity_passive_status,
+    )
+    from tests.helpers.antigravity_harness import create_fake_agy_shim, read_jsonl
+    from vibe import api
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    empty_path_dir = tmp_path / "empty-path"
+    empty_path_dir.mkdir()
+
+    monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
+    monkeypatch.setenv("PATH", str(empty_path_dir))
+    for var in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GEMINI_API_KEY",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    home_bin = _hermetic_home / ".local" / "bin"
+    home_bin.mkdir(parents=True)
+    state_file = tmp_path / f"tilde-auth-state-{controller_shape}.json"
+    launch_log = tmp_path / f"tilde-auth-launches-{controller_shape}.jsonl"
+    rpc_log = tmp_path / f"tilde-auth-rpc-{controller_shape}.jsonl"
+    config_file = tmp_path / f"tilde-auth-cfg-{controller_shape}.json"
+    state_file.write_text(
+        json.dumps({"authenticated": False, "next_session_num": 1, "sessions": {}}),
+        encoding="utf-8",
+    )
+    config_file.write_text(json.dumps({"expected_code": "tilde-code-42"}), encoding="utf-8")
+
+    tilde_shim = create_fake_agy_shim(
+        home_bin,
+        state_file=state_file,
+        launch_log=launch_log,
+        rpc_log=rpc_log,
+        config_file=config_file,
+        auth_mode=True,
+        name="agy",
+    )
+
+    v2 = V2Config.default()
+    v2.runtime.default_cwd = str(workdir)
+    v2.agents.antigravity.enabled = True
+    v2.agents.antigravity.cli_path = "~/.local/bin/agy"
+    v2.agents.antigravity.auth_mode = "oauth-personal"
+    v2.save()
+
+    controller_config = (
+        V2Config.load()
+        if controller_shape == "v2"
+        else to_app_config(V2Config.load(), resolve_agent_paths=False)
+    )
+    controller = SimpleNamespace(
+        config=controller_config,
+        agent_service=None,
+        session_handler=None,
+        im_client=None,
+        emit_agent_message=AsyncMock(),
+    )
+    service = AgentAuthService(controller)
+    service._post_web_success_hook = lambda _backend: None
+
+    # Both V2Config and AppCompatConfig shapes resolve ~/.local/bin/agy to an absolute path.
+    assert service._get_cli_binary("antigravity") == str(tilde_shim.absolute())
+
+    # 1. OAuth start + paste code + post-login verification succeed without FileNotFoundError.
+    flow = await service.start_web_setup("antigravity", force_reset=True, auth_method="oauth-personal")
+    for _ in range(80):
+        status = service.get_web_flow_status(flow.flow_id)
+        if status["state"] == "awaiting_code" and status["url"]:
+            break
+        await asyncio.sleep(0.05)
+    else:
+        pytest.fail(f"Antigravity tilde flow did not reach awaiting_code: {service.get_web_flow_status(flow.flow_id)}")
+
+    assert await service.submit_web_code(flow.flow_id, "tilde-code-42") == {"ok": True}
+    for _ in range(100):
+        status = service.get_web_flow_status(flow.flow_id)
+        if status["state"] in {"success", "failed"}:
+            break
+        await asyncio.sleep(0.05)
+    assert status["state"] == "success", status
+
+    # 2. Direct passive probe with raw tilde selector expands and succeeds.
+    passive = await probe_antigravity_passive_status("~/.local/bin/agy", config=v2.agents.antigravity)
+    assert (passive["ok"], passive["authenticated"]) == (True, True)
+
+    # 3. API passive status fallback when detect_cli_async returns empty path also expands tilde.
+    monkeypatch.setattr(
+        api,
+        "detect_cli_async",
+        AsyncMock(return_value={"found": True, "path": "", "status": "ok", "version": "1.5.16"}),
+    )
+    api_auth = await api.get_antigravity_auth_async()
+    assert (api_auth["ok"], api_auth["authenticated"]) == (True, True)
+
+    # 4. Connection test succeeds end-to-end with tilde cli_path.
+    conn = await service.test_web_auth("antigravity", model="gemini-4-neon")
+    assert (conn["ok"], conn["authenticated"], conn["catalog_available"], conn["inference_verified"]) == (
+        True,
+        True,
+        True,
+        True,
+    )
+
+    # 5. Logout succeeds end-to-end with tilde cli_path and actually signs out.
+    rpc_log.unlink(missing_ok=True)
+    assert await service.remove_web_auth("antigravity") == {"ok": True}
+    assert "logout" in [entry["method"] for entry in read_jsonl(rpc_log) if "method" in entry]
+    after_logout = await probe_antigravity_passive_status("~/.local/bin/agy", config=v2.agents.antigravity)
+    assert (after_logout["ok"], after_logout["authenticated"]) == (True, False)
+
+
+# ---------------------------------------------------------------------------
+# 14. Unsupported ACP logout reports partial sign-out when native creds stay active
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_antigravity_logout_without_logout_capability_distinguishes_active_vs_unauthenticated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from config.v2_config import V2Config
+    from core.agent_auth_service import AgentAuthService, logout_antigravity_via_acp
+    from tests.helpers.antigravity_harness import FakeAgyAuthFixture, make_acp_capabilities
+
+    for var in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "GEMINI_API_KEY",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    fixture = FakeAgyAuthFixture(tmp_path)
+    fixture.set_config(
+        {
+            "expected_api_key": "AIza-fixture-key-9999",
+            "acp_config": {"agentCapabilities": make_acp_capabilities(logout=False)},
+        }
+    )
+
+    def _make_service() -> AgentAuthService:
+        controller = SimpleNamespace(
+            config=V2Config.load(),
+            agent_service=None,
+            session_handler=None,
+            im_client=None,
+            emit_agent_message=AsyncMock(),
+        )
+        svc = AgentAuthService(controller)
+        svc._post_web_success_hook = lambda _backend: None
+        return svc
+
+    # 14a. Authenticated native CLI without logout capability -> logout_unsupported & partial=True.
+    v2 = V2Config.default()
+    v2.agents.antigravity.enabled = True
+    v2.agents.antigravity.cli_path = str(fixture.binary)
+    v2.agents.antigravity.auth_mode = "gemini-api-key"
+    v2.agents.antigravity.api_key = "AIza-fixture-key-9999"
+    v2.agents.antigravity.base_url = "https://relay.example.test/gemini"
+    v2.agents.antigravity.gcp_project = "proj-1"
+    v2.agents.antigravity.gcp_location = "us-central1"
+    v2.save()
+
+    fixture.set_state(authenticated=True)
+    fixture.clear_logs()
+    ok, err = await logout_antigravity_via_acp(str(fixture.binary), config=v2.agents.antigravity)
+    assert (ok, err) == (False, "logout_unsupported")
+    assert fixture.rpc_methods() == ["initialize", "session/list"]
+    inv_env = fixture.invocations()[-1]["env"]
+    assert "GEMINI_API_KEY" not in inv_env
+    assert "GOOGLE_GEMINI_BASE_URL" not in inv_env
+
+    fixture.clear_logs()
+    service = _make_service()
+    partial_result = await service.remove_web_auth("antigravity")
+    assert partial_result == {
+        "ok": True,
+        "partial": True,
+        "warning": "logout_failed",
+        "detail": "logout_unsupported",
+    }
+    cleared = V2Config.load().agents.antigravity
+    assert (
+        cleared.auth_mode,
+        cleared.api_key,
+        cleared.base_url,
+        cleared.gcp_project,
+        cleared.gcp_location,
+    ) == ("oauth-personal", None, None, None, None)
+
+    # 14b. Unauthenticated native CLI (e.g. API-key-only or already signed out) -> clean idempotent ok.
+    v2_api = V2Config.load()
+    v2_api.agents.antigravity.auth_mode = "gemini-api-key"
+    v2_api.agents.antigravity.api_key = "AIza-fixture-key-9999"
+    v2_api.agents.antigravity.base_url = "https://relay.example.test/gemini"
+    v2_api.save()
+
+    fixture.set_state(authenticated=False)
+    fixture.clear_logs()
+    assert await logout_antigravity_via_acp(str(fixture.binary), config=v2_api.agents.antigravity) == (True, None)
+    assert fixture.rpc_methods() == ["initialize", "session/list"]
+
+    service = _make_service()
+    assert await service.remove_web_auth("antigravity") == {"ok": True}
+    reloaded = V2Config.load().agents.antigravity
+    assert (reloaded.auth_mode, reloaded.api_key, reloaded.base_url) == ("oauth-personal", None, None)
+    # Repeated sign-out stays cleanly idempotent.
+    assert await service.remove_web_auth("antigravity") == {"ok": True}
+
+    # 14c. Server advertising neither logout nor list cannot confirm credentials are gone.
+    fixture.set_config(
+        {
+            "acp_config": {
+                "agentCapabilities": {
+                    "loadSession": True,
+                    "sessionCapabilities": {},
+                }
+            }
+        }
+    )
+    fixture.clear_logs()
+    assert await logout_antigravity_via_acp(str(fixture.binary), config=V2Config.load().agents.antigravity) == (
+        False,
+        "logout_unsupported",
+    )
+    assert fixture.rpc_methods() == ["initialize"]
