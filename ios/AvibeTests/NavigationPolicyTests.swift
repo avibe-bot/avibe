@@ -2305,13 +2305,26 @@ final class NavigationPolicyTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
 
+        addTeardownBlock { @MainActor [self] in
+            server.requests.attach(to: self, name: "cold launch bootstrap requests")
+        }
+
         let appModel = makeTestAppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: baseURL
             )
         )
-        await fulfillment(of: [sessionHeaders.expectation], timeout: 15)
+        // The App's first session request, as long as the App itself
+        // allows one account operation (its account page's readiness and
+        // the request), not less: a loaded CI runner took 15.7 s here
+        // (rc18's backstop, run 45360245740), and a shorter wait fails a
+        // bootstrap the App would have finished. The request log, attached
+        // at teardown, names the step of one that really stalls.
+        await fulfillment(
+            of: [sessionHeaders.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
 
         NotificationCenter.default.post(
             name: .avibePushNotificationTapped,
