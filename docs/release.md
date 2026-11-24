@@ -470,6 +470,30 @@ A change counts as published only after the bucket returns the exact envelope
 and the public URL serves those same bytes. The object is cached for 60
 seconds, so the workflow waits for the public URL instead of purging it.
 
+### Hosted-signer proposal (not commissioned)
+
+The hosted workflow is disabled by default. Its proposed ledger is the complete,
+protected first-parent history of `master`, not a host directory. Before the root
+can land, the owner must verify required PR review, no force pushes/deletions or
+bypass on master, and distinct named-reviewer environments limited to the master
+branch. The signer environment has only a dedicated channel signing credential;
+the writer has only its separate index credential. The owner explicitly enables
+the hosted path only after the public root and protections are reviewed.
+
+Each allocation PR adds the exact payload as
+`patches/model-hub-engine-channel-ledger/<16-digit-sequence>.payload.json`, starting
+at 1. No extra fields or newline: use the bytes returned by `plan_payload`. Existing
+records must never be edited, renamed or removed. After verifying the rehearsal,
+the approved signer independently compares the allocation with the requested change,
+signs only matching bytes and verifies the signature against the public root.
+Before any index upload, a **separate reviewed receipt PR** adds the exact signed
+envelope under the same sequence with suffix `.envelope.json`. `resume` is the only
+writer dispatch: it reads this receipt, never an artifact or a signing key, verifies
+its binding and conditionally uploads it. A failed upload can only retry those bytes.
+An unexpected published index, incomplete history or uncertain ledger is a stop.
+The former host-ledger design below is historical, **not** a way to commission this
+hosted draft. No root, allocation or receipt is supplied by the proposal.
+
 ### Commissioning (owner-held, not done)
 
 Commissioning does not turn `untrusted_rehearsal` into an authority. It remains

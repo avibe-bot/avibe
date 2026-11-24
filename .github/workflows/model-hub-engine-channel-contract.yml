@@ -17,6 +17,9 @@ on:
       - "core/model_hub_engine_channel.py"
       - "core/model_hub_engine_manifest.py"
       - "scripts/ci_avault_verifier.py"
+      - "scripts/model_hub_engine_hosted.py"
+      - "tests/test_model_hub_engine_hosted.py"
+      - ".github/workflows/model-hub-engine-channel.yml"
       - "scripts/release_asset_download.py"
       - "tests/engine_channel_support.py"
       - "tests/fixtures/avault/**"
@@ -31,6 +34,9 @@ on:
       - "core/model_hub_engine_channel.py"
       - "core/model_hub_engine_manifest.py"
       - "scripts/ci_avault_verifier.py"
+      - "scripts/model_hub_engine_hosted.py"
+      - "tests/test_model_hub_engine_hosted.py"
+      - ".github/workflows/model-hub-engine-channel.yml"
       - "scripts/release_asset_download.py"
       - "tests/engine_channel_support.py"
       - "tests/fixtures/avault/**"
@@ -95,6 +101,24 @@ jobs:
         run: |
           python -m pytest tests/test_model_hub_engine_channel_avault.py tests/test_model_hub_engine_channel.py \
             -p no:cacheprovider -q -ra
+
+      - name: Rehearse a disposable hosted channel key and immutable receipt (no secrets or upload)
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-15'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS/$RUNNER_ARCH" in
+            Linux/X64) target=linux-x64; digest=3c17361f74cdcbcc18f223636c3ba5e49129cbaeddd4b4e75526442469390390 ;;
+            macOS/ARM64) target=macos-arm64; digest=22860f6bdb4bf076f7a28fbf54f383603243edb895b1062a4f45a4c97f067302 ;;
+            *) exit 1 ;;
+          esac
+          dir="$(mktemp -d)"; trap 'rm -rf "$dir"' EXIT
+          curl -fsSL "https://github.com/avibe-bot/avault/releases/download/v0.1.11/avault-0.1.11-$target.tar.gz" -o "$dir/generator.tgz"
+          printf '%s  %s\n' "$digest" "$dir/generator.tgz" | shasum -a 256 -c -
+          tar -xzf "$dir/generator.tgz" -C "$dir"
+          export AVIBE_TEST_HOSTED_KEYGEN="$(find "$dir" -type f -name avault)"
+          test -x "$AVIBE_TEST_HOSTED_KEYGEN"
+          python -m pytest tests/test_model_hub_engine_hosted.py -q
 
   smoke-harness:
     name: smoke-harness (${{ matrix.platform }})

@@ -1,49 +1,13 @@
 name: Publish Model Hub engine channel
 
-# The only writer of https://dl.avibe.bot/index/model-hub-engine.json, the
-# signed index of engine releases installed Avibe may adopt (docs/release.md,
-# docs/plans/model-hub-engine-channel.md). One run makes one change: publish a
-# owner-approved engine release, promote it, withdraw a release, or publish again
-# the index the signer last allocated. Only a promotion or a withdrawal
-# allocates a new index. An index does not expire, so nothing here renews one
-# and nothing runs on a schedule: the signer host only has to be up for a run
-# that was approved, and its ledger has to outlast every run.
-#
-# NOT COMMISSIONED. Avibe ships no channel key, so `authorize` stops every run
-# in its first step. The signer's ledger, the two environments and the signer
-# runner group do not exist. Commissioning is a separate, owner-held step;
-# nothing here performs or replaces it.
-#
-# Desired state lives in a ledger on the signer host, never in the published
-# object, the bucket or a workflow artifact. The ledger is created once, by
-# hand, during commissioning; this workflow has no operation that creates,
-# resets or restores it.
-#
-# Authority is split so that no job holds two:
-#   authorize  no secret, GitHub-hosted. Proves this is the reviewed workflow
-#              on the default branch and that both environments require review.
-#   prepare   no secret. Re-reads the untrusted rehearsal run from GitHub and checks
-#              that the release is published and mirrored byte for byte.
-#   release    the repository token only. Publishes the trusted-checked assets as an
-#              immutable release. It never rebuilds them.
-#   sign       the signing key, inside avault on the signer host, and the
-#              ledger. No bucket credential. Runs this checkout's scripts only.
-#   publish    the bucket credential. No key. Replaces the object only if it is
-#              still the one it read, then reads it back.
-#
-# A job that names a GitHub Environment nobody configured runs unprotected, so
-# each privileged job reads the protection from the API and requires this
-# run's approval before its first privileged step. That is not an execution
-# boundary for the signer host: a self-hosted runner serves whatever its
-# runner group admits. `sign` therefore names the runner group, and that group
-# must admit only this workflow at refs/heads/master. Whether the organization
-# can enforce that is unverified and is a commissioning gate.
-
+# Disabled until reviewed public-root commissioning and explicit owner enablement.
+# Signing and writing are separate dispatches: a merged append-only receipt PR
+# must contain the exact signed envelope before any upload is possible.
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: "release: publish trusted-checked assets. promote | revoke: change the index. resume: publish the last allocated index again."
+        description: "release: publish trusted-checked assets. promote | revoke: change the index. resume: upload the committed signed receipt (only writer)."
         required: true
         type: choice
         options: [release, promote, revoke, resume]
@@ -70,6 +34,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  HOSTED_COMMISSIONED: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED }}
   OPERATION: ${{ inputs.operation }}
   ASSET_RELEASE_TAG: ${{ inputs.asset_release_tag }}
 
@@ -96,6 +61,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          test "$HOSTED_COMMISSIONED" = true
           for environment in model-hub-engine-channel-signer model-hub-engine-channel-writer; do
             python3 scripts/model_hub_engine_channel.py authorize \
               --environment "$environment" --operation "$OPERATION"
@@ -278,126 +244,107 @@ jobs:
             --output-dir "$RUNNER_TEMP/published"
 
   sign:
-    name: sign
     needs: [authorize, prepare]
     if: >-
-      always() && inputs.operation != 'release' && needs.authorize.result == 'success' &&
-      (needs.prepare.result == 'success' ||
-      (inputs.operation != 'promote' && needs.prepare.result == 'skipped'))
-    # The runner group, not only a label: the group's policy decides which
-    # workflows may run on the signer host.
-    runs-on:
-      group: model-hub-engine-channel-signer
-      labels: [self-hosted, model-hub-engine-channel-signer]
+      always() && needs.authorize.result == 'success' &&
+      ((inputs.operation == 'promote' && needs.prepare.result == 'success') ||
+      (inputs.operation == 'revoke' && needs.prepare.result == 'skipped'))
+    runs-on: ubuntu-latest
     environment: model-hub-engine-channel-signer
     timeout-minutes: 15
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ad0a1b7d3ca12be7f946efe61586c4b89c022d6b
+          path: tools
           persist-credentials: false
-
-      # Before anything reads the ledger or the signing store: this run, on
-      # this ref, was approved for this environment by a required reviewer.
-      - name: Require this run's approval before touching the ledger or the signing store
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: ledger
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: |
+            vibe/model_hub_runtime/engine_channel_roots.json
+          sparse-checkout-cone-mode: false
+      - name: Require current run approval from the exact protected environment
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/model_hub_engine_channel.py authorize \
-            --environment model-hub-engine-channel-signer --operation "$OPERATION" --require-approval
-
-      # The payload is allocated here, from this host's ledger and this
-      # checkout's reviewed candidate record. It is committed to the ledger
-      # before avault is asked to sign, and the envelope is committed before it
-      # leaves this job. No other job's output is signed.
-      - name: Allocate the next index in the ledger and sign it inside avault
-        shell: bash
+          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --data ledger \
+            --authorize-only --avault /usr/bin/true --output /dev/null
+      - name: Fetch digest-pinned avault using reviewed tooling
+        run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/avault-path"
+      - name: Sign the exact PR allocation (candidate tree is data only)
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HOSTED_SIGNING_BUNDLE: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE }}
+          REHEARSAL_BASELINES: ${{ needs.prepare.outputs.baselines }}
           ROLLBACK_TO: ${{ inputs.rollback_to }}
           REASON: ${{ inputs.reason }}
-          REHEARSAL_BASELINES: ${{ needs.prepare.outputs.baselines }}
-          SIGNER_LEDGER: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_LEDGER }}
-          SIGNER_AVAULT: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_AVAULT }}
-          SIGNER_KEY_NAME: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_KEY_NAME }}
-          SIGNER_KEY_ENVELOPE: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_KEY_ENVELOPE }}
         run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/signed"
-          args=(
-            --operation "$OPERATION"
-            --ledger "$SIGNER_LEDGER"
-            --avault "$SIGNER_AVAULT"
-            --key-name "$SIGNER_KEY_NAME"
-            --key-envelope "$SIGNER_KEY_ENVELOPE"
-            --output "$RUNNER_TEMP/signed/model-hub-engine.json"
-          )
-          case "$OPERATION" in
-            promote)
-              args+=(
-                --tag "$ASSET_RELEASE_TAG"
-                --candidate-dir "patches/model-hub-engine-candidates/$ASSET_RELEASE_TAG"
-                --rehearsal-baselines "$REHEARSAL_BASELINES"
-              ) ;;
-            revoke)
-              args+=(--tag "$ASSET_RELEASE_TAG" --rollback-to "$ROLLBACK_TO" --reason "$REASON") ;;
-          esac
-          python3 scripts/model_hub_engine_channel.py sign "${args[@]}"
-
-      - name: Hand the signed index to the writer
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --data ledger \
+            --avault "$(cat "$RUNNER_TEMP/avault-path")" --output "$RUNNER_TEMP/model-hub-engine.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: model-hub-engine-channel-signed
-          path: ${{ runner.temp }}/signed/model-hub-engine.json
+          name: signed-envelope-for-receipt-pr
+          path: ${{ runner.temp }}/model-hub-engine.json
           if-no-files-found: error
           retention-days: 1
 
   publish:
-    name: publish
-    needs: [authorize, sign]
-    if: always() && needs.authorize.result == 'success' && needs.sign.result == 'success'
+    needs: [authorize]
+    if: inputs.operation == 'resume'
     runs-on: ubuntu-latest
     environment: model-hub-engine-channel-writer
     timeout-minutes: 20
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ad0a1b7d3ca12be7f946efe61586c4b89c022d6b
+          path: tools
           persist-credentials: false
-
-      - name: Require this run's approval before the index is replaced
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: ledger
+          fetch-depth: 0
+          persist-credentials: false
+          sparse-checkout: |
+            vibe/model_hub_runtime/engine_channel_roots.json
+          sparse-checkout-cone-mode: false
+      - name: Require current run approval from the exact protected environment
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          python3 scripts/model_hub_engine_channel.py authorize \
-            --environment model-hub-engine-channel-writer --operation "$OPERATION" --require-approval
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
-        with:
-          name: model-hub-engine-channel-signed
-          path: ${{ runner.temp }}/signed
-
-      # The channel's own bucket credential, named apart from the release
-      # mirror's so an unconfigured environment cannot fall back to it. If this
-      # step fails after the signer allocated, run `resume`: it publishes the
-      # same envelope again and writes nothing the bucket already holds.
-      - name: Replace the index conditionally and read it back
-        shell: bash
+          python3 -I tools/scripts/model_hub_engine_hosted.py "$OPERATION" --data ledger \
+            --authorize-only --avault /usr/bin/true --output /dev/null
+      - name: Fetch digest-pinned avault using reviewed tooling
+        run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/avault-path"
+      - name: Select the verified, committed envelope; never sign on retry
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 -I tools/scripts/model_hub_engine_hosted.py resume --data ledger \
+            --avault "$(cat "$RUNNER_TEMP/avault-path")" --output "$RUNNER_TEMP/model-hub-engine.json"
+          git -C ledger show "$GITHUB_SHA:vibe/model_hub_runtime/engine_channel_roots.json" > tools/vibe/model_hub_runtime/engine_channel_roots.json
+      - name: Conditional replacement and public read-back
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_ACCOUNT_ID }}
           AWS_DEFAULT_REGION: auto
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-          R2_ACCOUNT_ID: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_R2_ACCOUNT_ID }}
         run: |
-          set -euo pipefail
-          avault="$(python3 scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault")"
-          python3 scripts/model_hub_engine_channel.py publish \
-            --envelope "$RUNNER_TEMP/signed/model-hub-engine.json" \
-            --avault "$avault" \
-            --bucket avibe \
-            --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          python3 -I tools/scripts/model_hub_engine_channel.py publish \
+            --envelope "$RUNNER_TEMP/model-hub-engine.json" --avault "$(cat "$RUNNER_TEMP/avault-path")" \
+            --bucket avibe --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"

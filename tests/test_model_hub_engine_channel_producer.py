@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import subprocess
 import threading
@@ -1309,10 +1310,10 @@ def test_every_privileged_job_follows_authorization_and_proves_approval_before_i
         assert "needs.authorize.result == 'success'" in job["if"] or "always()" not in job["if"]
         runs = [step.get("run", "") for step in job["steps"]]
         first_run = next(index for index, run in enumerate(runs) if run)
-        assert (
-            f'authorize \\\n  --environment {environment} --operation "$OPERATION" --require-approval'
-            in runs[first_run]
-        )
+        if name == "release":
+            assert f"--environment {environment}" in runs[first_run] and "--require-approval" in runs[first_run]
+        else:
+            assert "--authorize-only" in runs[first_run] and "tools/scripts/model_hub_engine_hosted.py" in runs[first_run]
         # Nothing but the checkout precedes the approval check.
         assert all(str(step.get("uses", "")).startswith("actions/checkout@") for step in job["steps"][:first_run])
 
@@ -1324,26 +1325,19 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     def mentions(job: str, needle: str) -> bool:
         return needle in json.dumps(jobs[job])
 
-    # Scheduled onto the signer's runner group, whose policy decides which workflows it admits.
-    assert jobs["sign"]["runs-on"] == {
-        "group": "model-hub-engine-channel-signer",
-        "labels": ["self-hosted", "model-hub-engine-channel-signer"],
-    }
-    assert not mentions("sign", "secrets.") and not mentions("sign", "AWS_")
-    assert mentions("sign", "MODEL_HUB_ENGINE_CHANNEL_LEDGER") and mentions("sign", "--ledger")
+    assert jobs["sign"]["runs-on"] == "ubuntu-latest"
+    assert mentions("sign", "secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE") and not mentions("sign", "AWS_")
     for name in ("authorize", "prepare", "release", "publish"):
-        assert not mentions(name, "LEDGER") and not mentions(name, "KEY_ENVELOPE")
-        assert not mentions(name, "model_hub_engine_channel.py sign") and jobs[name]["runs-on"] == "ubuntu-latest"
-    # The channel's bucket credential is not the release mirror's.
+        assert not mentions(name, "HOSTED_SIGNING_BUNDLE")
     assert "secrets.R2_" not in text and text.count("secrets.MODEL_HUB_ENGINE_CHANNEL_R2_") == 3
-    # The signer runs this checkout's scripts only: no downloaded assets or receipt, no installs.
-    sign_text = json.dumps(jobs["sign"])
-    for forbidden in ("candidate-assets", "receipt", "pip install", "gh run download", "download-artifact",
-                      "contents\": \"write"):
-        assert forbidden not in sign_text
+    assert jobs["publish"]["if"] == "inputs.operation == 'resume'" and "sign" not in jobs["publish"]["needs"]
+    for name in ("sign", "publish"):
+        tools, data, *_ = jobs[name]["steps"]
+        assert re.fullmatch("[a-f0-9]{40}", tools["with"]["ref"]) and tools["with"]["path"] == "tools"
+        assert data["with"]["path"] == "ledger" and data["with"]["fetch-depth"] == 0
+        assert not mentions(name, "download-artifact") and not mentions(name, "python3 ledger/")
     assert all(job.get("permissions", {}).get("contents") != "write" for name, job in jobs.items() if name != "release")
-    assert jobs["prepare"]["outputs"] == {"baselines": "${{ steps.context.outputs.baselines }}"}
-    assert mentions("sign", "needs.prepare.outputs.baselines") and mentions("sign", "--rehearsal-baselines")
+    assert mentions("sign", "needs.prepare.outputs.baselines")
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:
