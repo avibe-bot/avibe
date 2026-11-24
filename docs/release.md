@@ -486,11 +486,20 @@ at 1. No extra fields or newline: use the bytes returned by `plan_payload`. Exis
 records must never be edited, renamed or removed. After verifying the rehearsal,
 the approved signer independently compares the allocation with the requested change,
 signs only matching bytes and verifies the signature against the public root.
-Before any index upload, a **separate reviewed receipt PR** adds the exact signed
-envelope under the same sequence with suffix `.envelope.json`. `resume` is the only
-writer dispatch: it reads this receipt, never an artifact or a signing key, verifies
-its binding and conditionally uploads it. A failed upload can only retry those bytes.
-An unexpected published index, incomplete history or uncertain ledger is a stop.
+One lead dispatch of `promote` or `revoke` makes both protected environments
+pending after trusted preparation. In **Review deployments**, the owner selects
+both and approves once. The GitHub UI ceremony must be verified at commissioning;
+hermetic CI cannot attest to a live environment approval. The writer has no signer
+dependency in its job graph: it waits at most five minutes for the immutable
+signed artifact, verifies its repository, workflow, run, first attempt, SHA,
+sequence, allocation digest, archive digest, signature and exact payload, then
+uses conditional replacement and proves public read-back. No receipt PR or second
+routine dispatch. All recovery requires a **new dispatch and fresh approvals**:
+`resume` names the original run ID at the same SHA to reuse its artifact. If lost
+or expired, repeat the same promotion/withdrawal; the pinned signer deterministically
+signs only those exact allocated bytes. Actions reruns are refused because the
+approval history is per run, not per attempt. An unexpected public/stored index,
+incomplete history or uncertain ledger is a stop.
 The former host-ledger design below is historical, **not** a way to commission this
 hosted draft. No root, allocation or receipt is supplied by the proposal.
 

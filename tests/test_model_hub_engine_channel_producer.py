@@ -1279,10 +1279,10 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
     inputs = workflow[True]["workflow_dispatch"]["inputs"]
 
     assert inputs["operation"]["options"] == list(producer.OPERATION_POLICY)
-    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rollback_to", "reason"}
+    assert set(inputs) == {"operation", "asset_release_tag", "rehearsal_run_id", "rollback_to", "reason", "source_run_id"}
     # Creating a ledger is owner commissioning, run by hand; no step of this workflow reaches it.
     scripts = "\n".join(step.get("run", "") for job in workflow["jobs"].values() for step in job["steps"])
-    for forbidden in ("initialize", "--first-sequence", "first_publication", "recover"):
+    for forbidden in ("initialize-ledger", "--first-sequence", "first_publication", "restore-ledger"):
         assert forbidden not in scripts and forbidden not in json.dumps(inputs)
     # Workflow artifacts carry an envelope between jobs for one day; none is an archive to continue from.
     retained = [
@@ -1330,7 +1330,8 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     for name in ("authorize", "prepare", "release", "publish"):
         assert not mentions(name, "HOSTED_SIGNING_BUNDLE")
     assert "secrets.R2_" not in text and text.count("secrets.MODEL_HUB_ENGINE_CHANNEL_R2_") == 3
-    assert jobs["publish"]["if"] == "inputs.operation == 'resume'" and "sign" not in jobs["publish"]["needs"]
+    assert jobs["publish"]["if"] == jobs["sign"]["if"]
+    assert jobs["publish"]["needs"] == jobs["sign"]["needs"] == ["authorize", "prepare"]
     for name in ("sign", "publish"):
         tools, data, *_ = jobs[name]["steps"]
         assert re.fullmatch("[a-f0-9]{40}", tools["with"]["ref"]) and tools["with"]["path"] == "tools"

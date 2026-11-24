@@ -1,7 +1,10 @@
 """A signed channel may only spend a sequence on the exact immutable PR allocation."""
 from __future__ import annotations
 
+import hashlib
+import io
 import json
+import zipfile
 import os
 import subprocess
 from datetime import datetime, timezone
@@ -42,7 +45,7 @@ def api_at(sha):
     return get
 
 
-@pytest.mark.parametrize("failure", ["rewritten", "deleted", "wrong_change", "not_pr", "stale_run", "resume_before_receipt", "unrecorded_published", "sequence_gap"])
+@pytest.mark.parametrize("failure", ["rewritten", "deleted", "wrong_change", "not_pr", "stale_run", "unrecorded_published", "sequence_gap"])
 def test_refuses_before_any_signature(tmp_path, failure):
     repo, sha, path, change, raw = fixture(tmp_path)
     operation, published = "promote", None
@@ -54,8 +57,6 @@ def test_refuses_before_any_signature(tmp_path, failure):
         sha = commit(repo)
     elif failure == "wrong_change":
         change = hosted.producer.Promote(manifest_bytes(), "3.2.8")
-    elif failure == "resume_before_receipt":
-        operation = "resume"
     elif failure == "unrecorded_published":
         published = b"not the predecessor"
     elif failure == "sequence_gap":
@@ -64,7 +65,7 @@ def test_refuses_before_any_signature(tmp_path, failure):
     api = api_at("0" * 40 if failure == "stale_run" else sha)
     if failure == "not_pr":
         api = lambda p: [] if p.endswith("pulls") else {"object": {"sha": sha}}  # noqa: E731
-    with pytest.raises(hosted.Error):
+    with pytest.raises((hosted.Error, hosted.channel.ChannelError)):
         hosted.validate(repo, sha, operation=operation, roots=hosted.channel.TrustRoots(),
                         verifier=None, published=published, api=api, change=change)
 
@@ -84,16 +85,60 @@ def test_isolated_owner_keygen_through_signed_pr_receipt_and_identical_resume(tm
     roots = hosted.channel.parse_trust_roots(json.dumps(roots_doc).encode())
     verifier = hosted.producer.avault_verifier(str(signer))
     assert hosted.validate(repo, sha, operation="promote", roots=roots, verifier=verifier, published=None,
-                           api=api_at(sha), change=change) == raw
+                           api=api_at(sha), change=change) == (raw, None)
     secret = json.loads(credential.read_bytes())
     home = tmp_path / "only-on-test-runner"
     home.mkdir(mode=0o700)
     hosted.avault_run(signer, ["key", "import"], home, data=json.dumps(secret["import"]).encode())
     envelope = hosted.producer.sign_payload(raw, key_id="fixture", key_name=hosted.KEY_NAME, key_envelope=secret["envelope"],
         roots=roots, verifier=verifier, sign=lambda request: json.loads(hosted.avault_run(signer, ["sign"], home, data=request))["signature"])
-    payload_path.with_name("0000000000000001.envelope.json").write_bytes(envelope)
-    sha = commit(repo)
+    # Artifact loss cannot spend the same sequence on different bytes. Re-sign
+    # in a separate process, not by caching/reusing the previous signature.
+    again = hosted.producer.sign_payload(raw, key_id="fixture", key_name=hosted.KEY_NAME, key_envelope=secret["envelope"],
+        roots=roots, verifier=verifier, sign=lambda request: json.loads(hosted.avault_run(signer, ["sign"], home, data=request))["signature"])
+    assert again == envelope
     for published in (None, envelope):
-        assert hosted.validate(repo, sha, operation="resume", roots=roots, verifier=verifier, published=published, api=api_at(sha)) == envelope
-        with pytest.raises(hosted.Error, match="resume"):
-            hosted.validate(repo, sha, operation="promote", roots=roots, verifier=verifier, published=published, api=api_at(sha), change=change)
+        assert hosted.validate(repo, sha, operation="resume", roots=roots, verifier=verifier, published=published, api=api_at(sha)) == (raw, None)
+    # Tampering after signing is never authenticated as the original bytes.
+    with pytest.raises(hosted.channel.ChannelError):
+        hosted.channel.authenticate(envelope.replace(b'"fixture"', b'"wrong"'), roots=roots, verifier=verifier)
+
+
+@pytest.mark.parametrize("bad", ["run", "sha", "attempt", "event", "repo", "expired", "ambiguous", "digest", "missing", "ok"])
+def test_artifact_wait_is_bounded_and_requires_exact_origin(bad):
+    from scripts import model_hub_engine_artifact as artifacts
+
+    sha, run = "f" * 40, "123"
+    name = artifacts.artifact_name(run, sha, 1, b"public fixture")
+    source = {"run_attempt": 2 if bad == "attempt" else 1, "head_sha": sha, "head_branch": "master", "id": 123,
+              "event": "pull_request" if bad == "event" else "workflow_dispatch", "path": hosted.producer.WORKFLOW_PATH,
+              "repository": {"full_name": hosted.producer.REPOSITORY, "id": 100}}
+    row = {"name": name, "id": 42, "expired": bad == "expired", "digest": "" if bad == "digest" else "sha256:" + sha + "0" * 24,
+           "workflow_run": {"head_sha": "a" * 40 if bad == "sha" else sha, "id": 1 if bad == "run" else 123,
+                            "repository_id": 5 if bad == "repo" else 100}, "size_in_bytes": 10}
+    def api(path):
+        if "/artifacts?" not in path:
+            return source
+        return {"total_count": 2 if bad == "ambiguous" else 1, "artifacts": [] if bad == "missing" else [row]}
+    if bad == "ok":
+        assert artifacts.wait_for_artifact(api, run, sha, name, timeout=0) == (42, row["digest"])
+    else:
+        with pytest.raises(hosted.Error):
+            artifacts.wait_for_artifact(api, run, sha, name, timeout=0)
+
+
+def test_artifact_hash_is_checked_before_using_its_single_file():
+    from scripts import model_hub_engine_artifact as artifacts
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("model-hub-engine.json", b"public envelope fixture")
+    raw = buf.getvalue()
+    assert artifacts.unpack(raw, "sha256:" + hashlib.sha256(raw).hexdigest()) == b"public envelope fixture"
+    with pytest.raises(hosted.Error, match="digest"):
+        artifacts.unpack(raw, "sha256:" + "0" * 64)
+
+
+def test_a_rerun_cannot_reuse_approvals_from_the_first_attempt():
+    with pytest.raises(hosted.Error, match="fresh run"):
+        hosted.check_fresh_approvals(None, "123", "2")
