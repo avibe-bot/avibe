@@ -692,6 +692,25 @@ To try again:
 avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。再试一次：vibe remote rebind
 ```
 
+**G8b** · Product: first two lines decided November 24; the way out is G2's, lead November 24 · `other_account`, with `confirming_account_email` from avibe.bot (the account that approved the link, never the owner). Without a valid address, G8 instead. No reset is offered: it is an ordinary refusal. How a person gets here: the computer's settings lost their binding (restored from a backup, or reinstalled with the data folder kept) while it still belongs to another account's Avibe, and the link is approved signed in as a different account.
+
+```
+The Avibe this computer used is not under {email}. Sign in to avibe.bot with the
+account that owns it.
+Use the browser on this computer, or from another computer through SSH port
+forwarding:
+    ssh -L {port}:127.0.0.1:{port} <user>@<this-server>
+then open http://127.0.0.1:{port} there, go to Devices and turn on remote
+access.
+```
+
+中文说明：
+
+```
+这台电脑用过的那个 Avibe 不在 {email} 名下。请用拥有它的账号登录 avibe.bot。
+请使用这台电脑上的浏览器，或者从另一台电脑做 SSH 端口转发：ssh -L {port}:127.0.0.1:{port} <用户>@<这台服务器>，然后在那台电脑上打开 http://127.0.0.1:{port}，进入「设备」页开启远程访问。
+```
+
 **G9** · `local_binding_changed`
 
 ```
