@@ -2064,7 +2064,7 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(settled, .held)
         XCTAssertTrue(slept.isEmpty)
 
-        // The fault is terminal: not waited for.
+        // A fault is not waited for here: the take is kept and sent again by itself.
         settled = await Client.settledGate(gate: { .fault }, isActive: { true }, sleep: sleep, now: { clock })
         XCTAssertEqual(settled, .fault)
         XCTAssertTrue(slept.isEmpty)

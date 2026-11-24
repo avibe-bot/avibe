@@ -112,8 +112,10 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         case forbidden
         /// Anything else the instance answered.
         case server(Int, String?)
-        /// The App's local listener for this instance failed
-        /// (`DirectLoadGate.fault`): nothing is loaded against it.
+        /// The App's local listener for this instance cannot serve now
+        /// (`DirectLoadGate.fault`: another process holds its port; it
+        /// recovers by itself): nothing is loaded against it, and the take
+        /// is kept and sent again by itself.
         case directFault
         /// The client was closed before this request was made (its take is
         /// over): provably nothing was sent.

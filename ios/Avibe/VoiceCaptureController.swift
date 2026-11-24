@@ -436,13 +436,9 @@ final class VoiceCaptureController {
         let reason: VoiceCaptureAttributes.Reason
         let needsApp: Bool
         /// The instance could not be reached (or answered with an error):
-        /// not a no. The take is kept on the phone for Retry, which asks
-        /// again before anything is sent.
+        /// not a no. The take is kept on the phone and sent again by itself,
+        /// which asks again before anything is sent.
         var transient = false
-        /// Unreachable until Avibe is opened again (the App's local
-        /// listener failed for this process): sending again by itself
-        /// cannot help.
-        var untilReopened = false
     }
 
     /// The App's state at the press that is starting, for the message.
@@ -1215,8 +1211,10 @@ final class VoiceCaptureController {
             case .consentRequired: return Refusal(reason: .consent, needsApp: true)
             case .olderAvibe: return Refusal(reason: .updateAvibe, needsApp: false)
             case .unavailable: return Refusal(reason: .voiceUnavailable, needsApp: false)
+            // The App's local listener cannot serve now (another process holds
+            // its port): it recovers by itself, and the take is sent then.
             case .directFault:
-                return Refusal(reason: .offline, needsApp: false, transient: true, untilReopened: true)
+                return Refusal(reason: .offline, needsApp: false, transient: true)
             default: return Refusal(reason: .offline, needsApp: false, transient: true)
             }
         } catch {
@@ -1273,7 +1271,7 @@ final class VoiceCaptureController {
         }
         if let refusal = answer {
             // Unreachable is not a no: the take stays on the phone.
-            if refusal.transient { return .kept(.offline, automatic: !refusal.untilReopened) }
+            if refusal.transient { return .kept(.offline, automatic: true) }
             // Neither is an expired session: the take waits for the App to
             // be signed in again.
             if refusal.reason == .signIn { return .needsApp(.signIn) }
@@ -1347,8 +1345,9 @@ final class VoiceCaptureController {
             // A "no" given since: stop, send nothing, keep nothing.
             case .consentRequired: return .needsApp(.consent)
             case .signIn: return .needsApp(.signIn)
+            // The listener recovers by itself: sent again then.
             case .directFault:
-                return .kept(.offline, automatic: false)
+                return .kept(.offline, automatic: true)
             default:
                 let reason: VoiceCaptureAttributes.Reason =
                     take.text == nil && failure != .offline ? .transcriptionFailed : .offline
