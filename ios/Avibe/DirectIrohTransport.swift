@@ -1496,7 +1496,13 @@ final class DirectRendezvousWebViewSource {
         appModel?.directRendezvousWebView(for: selection)
     }
 
-    /// The transport's `fetchRendezvous`.
+    /// Which of the listener's failures an answered request has carried.
+    private var faultReport = DirectListenerFaultReport()
+
+    /// The transport's `fetchRendezvous`. Each request also reports the
+    /// failures of the App's own listener that no answered request has
+    /// carried yet, so that the instance's log has them without anyone
+    /// asking. A request that fails reports them again with the next.
     var fetch: DirectIrohRendezvousFetch {
         { [weak self] selection, clientEndpointID in
             guard
@@ -1505,11 +1511,17 @@ final class DirectRendezvousWebViewSource {
             else {
                 throw DirectRendezvousFetchError.pageNotReady
             }
-            return try await DirectRendezvousFetcher.fetch(
+            let faults = self?.faultReport.pending(
+                from: self?.appModel?.directListenerFailures ?? []
+            ) ?? []
+            let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,
-                clientEndpointID: clientEndpointID
+                clientEndpointID: clientEndpointID,
+                listenerFaults: faults
             )
+            self?.faultReport.answered(faults)
+            return answer
         }
     }
 }

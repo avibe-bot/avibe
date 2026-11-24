@@ -44,6 +44,9 @@ struct DirectPathStatus: Equatable, Sendable {
     /// For diagnosis: the last few times committed direct relays were closed
     /// because their path was lost, oldest first.
     var losses: [DirectLossRecord] = []
+    /// For diagnosis, for a host that has a route: the last few times the
+    /// App's own listener could not be bound or checked, oldest first.
+    var listenerFaults: [DirectListenerFailure] = []
 
     static let initial = DirectPathStatus(preferred: .tunnel, sequence: 0, closure: 0)
 
@@ -95,6 +98,9 @@ struct DirectPathStatus: Equatable, Sendable {
         }
         if !losses.isEmpty {
             object["losses"] = losses.map(\.jsonObject)
+        }
+        if !listenerFaults.isEmpty {
+            object["listener_faults"] = listenerFaults.map(\.jsonObject)
         }
         return object
     }
@@ -268,21 +274,27 @@ struct DirectPathTiming: Sendable {
     let rebindSeconds: TimeInterval
     /// The foreground watchdog: how long, in one stay in the foreground,
     /// the listener may be neither serving nor failed (binding, checking,
-    /// closing, closed and about to be bound again) before that is the
-    /// listener fault. One fixed bound for the whole stay, whatever
+    /// closing, closed and about to be bound again) before that is a
+    /// failure of the listener. One fixed bound for the whole stay, whatever
     /// attempts happen inside it. Longer than a first bind or a re-bind
     /// with its check is allowed to take, so it only ends what those bounds
     /// did not. A conservative proposal for the internal trial.
     let foregroundSeconds: TimeInterval
+    /// How long after a failed attempt the listener's port is bound and
+    /// checked again, attempt by attempt; the last one repeats for as long
+    /// as the App stays in the foreground.
+    let retrySeconds: [TimeInterval]
 
     init(
         listenerWaitSeconds: TimeInterval,
         rebindSeconds: TimeInterval,
-        foregroundSeconds: TimeInterval = 5
+        foregroundSeconds: TimeInterval = 5,
+        retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5]
     ) {
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
         self.foregroundSeconds = foregroundSeconds
+        self.retrySeconds = retrySeconds
     }
 
     static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
@@ -315,6 +327,27 @@ struct DirectListenerFailure: Equatable, Sendable {
     /// before it.
     let backgroundSeconds: Int?
     let at: ContinuousClock.Instant
+
+    /// Something else may hold the port (`DirectListenerFailureCause`).
+    var portMayBeForeign: Bool {
+        DirectListenerFailureCause(step, code: code).portMayBeForeign
+    }
+
+    /// The most seconds away that are reported; longer reads as this.
+    static let maxBackgroundSeconds = Int(Int32.max)
+
+    /// For `direct.status()` and the rendezvous request: the step and the
+    /// numbers, nothing else.
+    var jsonObject: [String: Any] {
+        var object: [String: Any] = ["step": step.rawValue]
+        if let code {
+            object["code"] = Int(code)
+        }
+        if let backgroundSeconds {
+            object["background_seconds"] = min(max(backgroundSeconds, 0), Self.maxBackgroundSeconds)
+        }
+        return object
+    }
 }
 
 /// A listener that a route points at is not serving, in the foreground, and
@@ -342,15 +375,18 @@ enum DirectListenerState: Equatable, Sendable {
     /// Closed on background (B2); the same port is re-bound on return.
     case closedForBackground
     case rebinding
-    /// Terminal for this process: a bind, its ownership check, or the
-    /// listening socket failed, before or after a route. Direct is never
-    /// authorized again, no route is written, no listener is made again,
-    /// and the next launch uses no listener at all. A host that has a route
-    /// still points at a port the App may not hold, and nothing in the
-    /// process can make WebKit leave it (docs/plans/remote-direct-ios.md
-    /// section 9): its runtime asks the user to reopen the App. A host
-    /// without a route keeps WebKit's normal path and is not interrupted.
-    case faulted
+    /// A bind, its ownership check, or the listening socket failed, and a
+    /// route points at the listener: direct is not authorized and no route
+    /// is written until the same port is bound and checked again, which is
+    /// tried for as long as the App is in the foreground
+    /// (docs/plans/remote-direct-ios.md section 9). A host that has a route
+    /// still points at that port, and nothing in the process can make
+    /// WebKit leave it: while the port is closed WebKit fails over to its
+    /// normal path; while something else may hold it, the host's loads are
+    /// held. A host without a route keeps WebKit's normal path and is not
+    /// interrupted. (A listener no route points at is not kept when it
+    /// fails: it is stopped, and the next open makes another.)
+    case failed
 }
 
 /// Whether the shell may create or reload a runtime's WebView now. Derived,
@@ -358,14 +394,18 @@ enum DirectListenerState: Equatable, Sendable {
 /// lifecycle; nothing keeps a copy.
 enum DirectLoadGate: Equatable, Sendable {
     /// The host has no route on the current store (WebKit's normal path),
-    /// or its route points at a listener that serves.
+    /// or its route points at a listener that serves, or at one whose port
+    /// is closed after a failed attempt: WebKit then fails over to its
+    /// normal path by itself, and the port is bound again underneath.
     case open
-    /// The host has a route and the listener is closed for the background
-    /// or being bound again: nothing is created or reloaded against that
-    /// port until the return settles.
+    /// The host has a route, and the listener is closed for the background
+    /// or being bound again on a return whose first attempt has not ended;
+    /// or something else may hold its port. Nothing is created or reloaded
+    /// against that port until the return settles, or the port is this
+    /// App's again.
     case held
-    /// The host has a route and the listener failed: only the reopen
-    /// message is shown.
+    /// No longer returned: no failure of the listener is terminal. Kept
+    /// until the App side stops reading it.
     case fault
 }
 
@@ -398,10 +438,12 @@ final class DirectPathController {
     private let timing: DirectPathTiming
     private let notificationCenter: NotificationCenter
     private let onStatusChanged: () -> Void
-    /// Called once, when the listener fault is entered.
+    /// No longer called: no failure of the listener is terminal. Kept until
+    /// the App side stops passing it.
     private let onFault: () -> Void
-    /// Called when a load gate may have changed without a fault: the
-    /// listener was closed for the background, or a return was settled.
+    /// Called when a load gate or `listenerRecovery` may have changed: the
+    /// listener was closed for the background, a return was settled, an
+    /// attempt to bind the listener's port again failed, or one succeeded.
     private let onAvailabilityChanged: () -> Void
     private var lifecycleObservers: [NSObjectProtocol] = []
 
@@ -414,18 +456,31 @@ final class DirectPathController {
     /// bookkeeping of that task; whether the listener admits or publishes
     /// is decided by its lifecycle alone.
     private var rebinds = DirectRebindAttempts()
-    /// Where the delivery of the listener fault stands. The fault itself is
-    /// the lifecycle's `failed` phase, which fences everything at once; this
-    /// only makes its one delivery (the marker, the reopen message) happen
-    /// once. It is `delivered` only after `onFault` has returned, so an
-    /// observation of the failure before that still delivers.
-    private enum FaultDelivery {
-        case none
-        case delivering
-        case delivered
+    /// The bind generation of the last failure this controller has heard
+    /// of. A failure is the lifecycle's `failed` phase, which fences
+    /// everything at once, where it is decided; this makes what follows
+    /// from it here (its record, the next attempt) happen once.
+    private var heardFailure: Int?
+    /// This stay's recovery, while a listener a route points at does not
+    /// serve in the foreground (`listenerRecovery`).
+    private struct Recovery {
+        let since: ContinuousClock.Instant
+        var lastFailure: DirectListenerFailure?
     }
 
-    private var faultDelivery = FaultDelivery.none
+    private var recovery: Recovery?
+    /// The last few failures of the listener in this process, oldest first.
+    /// Numbers only; for `direct.status()` and the rendezvous request.
+    private(set) var listenerFailures: [DirectListenerFailure] = []
+    static let listenerFailureLimit = 5
+    /// How many attempts this stay's recovery has scheduled, and the one
+    /// wake-up for the next.
+    private var retriesScheduled = 0
+    private var retryWake: Task<Void, Never>?
+    /// When the App last left the foreground, and how long it had been away
+    /// when it came back to this stay.
+    private var leftForegroundAt: ContinuousClock.Instant?
+    private var awaySeconds: Int?
     /// The one wake-up scheduled for the foreground watchdog, and the
     /// episode it is for.
     private var watchdog: (episode: UUID, wake: Task<Void, Never>)?
@@ -433,8 +488,6 @@ final class DirectPathController {
     /// The listener, as the controller sees it: derived from the listener's
     /// lifecycle, the one authority (`DirectListenerLifecycle`).
     var listenerState: DirectListenerState {
-        // A failed listener is kept, so its phase says so for as long as the
-        // process lives.
         guard let listener else {
             return .none
         }
@@ -448,7 +501,8 @@ final class DirectPathController {
         case .serving:
             return .ready
         case .failed:
-            return .faulted
+            // Failed, and an attempt already on its way to bind again.
+            return rebinds.inFlight ? .rebinding : .failed
         case .stopped:
             return .none
         }
@@ -491,7 +545,8 @@ final class DirectPathController {
     private var sequence = 0
     private var closures: [String: Int] = [:]
     /// Hosts whose relays the background closed: published on the return,
-    /// once the listener is ready again (or its recovery has failed).
+    /// once the listener is ready again (or the return's first attempt has
+    /// failed).
     private var pendingClosureHosts: Set<String> = []
     /// Status answers held while the App returns from the background.
     private struct HeldReply {
@@ -603,7 +658,12 @@ final class DirectPathController {
             selected: preferred == .direct && selected ? selectedPath : nil,
             counts: counts,
             races: selected ? races : [],
-            losses: selected ? losses : []
+            losses: selected ? losses : [],
+            // The listener is the App's one, not a host's: its failures are
+            // told to any host that has a route to it.
+            listenerFaults: routeOwner.routes(origin.host, store: websiteDataStore.identifier)
+                ? listenerFailures
+                : []
         )
     }
 
@@ -661,7 +721,9 @@ final class DirectPathController {
 
     /// Answers `direct.status()` for `origin`. While the App returns from the
     /// background the answer is held until the listener is ready again and
-    /// the pending closure is published, or until a failed recovery is.
+    /// the pending closure is published, or until the return's first
+    /// attempt has failed: from then on the answer is the public path, at
+    /// once, while the port is bound again underneath.
     func status(
         for origin: WebOrigin,
         reply: @escaping @MainActor (DirectPathStatus?) -> Void
@@ -677,7 +739,7 @@ final class DirectPathController {
                 )
             )
         } else {
-            reply(answer(for: origin))
+            reply(currentStatus(for: origin))
         }
     }
 
@@ -689,22 +751,6 @@ final class DirectPathController {
         for entry in held {
             entry.reply(nil)
         }
-    }
-
-    /// No status once the fault covers `origin`'s host: a page behind it is
-    /// never told anything that reads as ready.
-    private func answer(for origin: WebOrigin) -> DirectPathStatus? {
-        if isFaulted, routeOwner.routes(origin.host, store: websiteDataStore.identifier) {
-            return nil
-        }
-        return currentStatus(for: origin)
-    }
-
-    /// The listener fault is terminal for this process. Read from the
-    /// lifecycle, so status answers and events are fenced from the moment
-    /// the failure is recorded, before its delivery reaches this actor.
-    var isFaulted: Bool {
-        listenerState == .faulted
     }
 
     // MARK: Runtime and account
@@ -737,10 +783,7 @@ final class DirectPathController {
         for runtime: MobileRuntimeContext,
         stillWanted: () -> Bool
     ) async {
-        guard
-            let authority = DirectAuthority(instanceURL: runtime.instance.url),
-            listenerState != .faulted
-        else {
+        guard let authority = DirectAuthority(instanceURL: runtime.instance.url) else {
             return
         }
         let store = websiteDataStore.identifier
@@ -797,22 +840,22 @@ final class DirectPathController {
         }
     }
 
-    /// Delivers the listener fault if the lifecycle has recorded a failure
-    /// that has not been delivered yet (the watchdog's deadline passed, or
-    /// a failure's own callback is still on its way). For callers that are
-    /// about to act on the gate or the status outside a view update; the
-    /// gate and the status themselves never wait for it.
+    /// Takes in a failure the lifecycle has recorded and this controller
+    /// has not heard of yet (the watchdog's deadline passed, or a failure's
+    /// own callback is still on its way): its record, and the next attempt.
+    /// For callers that are about to act on the gate or the status outside a
+    /// view update; the gate and the status themselves never wait for it.
     func settleRecordedFault() {
         if let listener {
-            deliverFault(of: listener, "a recorded failure was observed")
+            hearFailure(of: listener, "a recorded failure was observed")
         }
     }
 
     /// Whether the shell may create or reload `runtime`'s WebView now.
     /// Synchronous, and read from the route table and the lifecycle each
     /// time, with no side effect: a failure the lifecycle has recorded,
-    /// including the watchdog's deadline passing, closes the gate before
-    /// its delivery reaches this actor.
+    /// including the watchdog's deadline passing, is in the gate before
+    /// this controller has heard of it.
     func loadGate(for runtime: MobileRuntimeContext) -> DirectLoadGate {
         loadGate(forInstanceURL: runtime.instance.url)
     }
@@ -825,23 +868,38 @@ final class DirectPathController {
     func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
         guard
             let authority = DirectAuthority(instanceURL: url),
-            routeOwner.routes(authority.host, store: websiteDataStore.identifier)
+            routeOwner.routes(authority.host, store: websiteDataStore.identifier),
+            let listener
         else {
+            // No route; or a route and no listener, which is not reachable
+            // (a listener a route was published to is never stopped or
+            // replaced) and would leave the port closed: WebKit's own path.
             return .open
         }
-        switch listenerState {
-        case .ready:
+        switch listener.lifecycle.phase {
+        case .serving, .stopped:
             return .open
-        case .binding, .rebinding, .closedForBackground:
-            return .held
-        case .faulted:
-            return .fault
-        case .none:
-            // Not reachable: a listener a route was published to is never
-            // stopped or replaced. Shown as the fault rather than held, so
-            // nothing could wait on it for ever.
-            return .fault
+        case .failed where !rebinds.inFlight:
+            // Between attempts. Read from the lifecycle, so a failure this
+            // controller has not heard of yet already decides the gate.
+            return gate(after: listener.lifecycle.failure?.cause)
+        case .idle, .binding, .verifying, .closing, .closed, .failed:
+            // An attempt is under way, or the listener is closed for the
+            // background. Held on a return whose first attempt has not
+            // ended; after a failed attempt in this stay, as that failure
+            // says.
+            guard let last = recovery?.lastFailure else {
+                return .held
+            }
+            return gate(after: DirectListenerFailureCause(last.step, code: last.code))
         }
+    }
+
+    /// The gate of a routed host after a failed attempt. A port that is
+    /// closed or refusing is left by WebKit's own failover, so loads go on;
+    /// a port something else may hold is not, so they are held.
+    private func gate(after cause: DirectListenerFailureCause?) -> DirectLoadGate {
+        cause?.portMayBeForeign == true ? .held : .open
     }
 
     /// A runtime opened, after its route was prepared.
@@ -1347,12 +1405,8 @@ final class DirectPathController {
         notify()
     }
 
-    /// Sends the state to the runtime's documents; never once faulted, so a
-    /// covered page is asked to start nothing.
+    /// Sends the state to the runtime's documents.
     private func notify() {
-        guard !isFaulted else {
-            return
-        }
         onStatusChanged()
     }
 
@@ -1380,7 +1434,10 @@ final class DirectPathController {
         switch listenerState {
         case .ready:
             return true
-        case .faulted, .closedForBackground:
+        case .failed, .closedForBackground:
+            // Failed and between attempts, or closed for the background: a
+            // host opened now loads without a route, like one whose
+            // listener was not ready in time.
             return false
         case .none:
             // No bind in the background: a listening socket does not survive
@@ -1431,20 +1488,21 @@ final class DirectPathController {
         let rebindSeconds = timing.rebindSeconds
         let task = Task { [weak self] () -> Bool in
             guard let binding = try? await listener.bind(port: nil) else {
-                // The bind failed, and its lifecycle already says so: the
-                // fault. (A bind that only ended because the listener was
-                // stopped is no longer this controller's listener.)
+                // The bind failed, and its lifecycle already says so. No
+                // route points at this listener, so it is not kept. (A bind
+                // that only ended because the listener was stopped is no
+                // longer this controller's listener.)
                 await MainActor.run {
                     guard let self, self.listener === listener else {
                         return
                     }
-                    if !self.deliverFault(of: listener, "the first bind failed") {
+                    if !self.hearFailure(of: listener, "the first bind failed") {
                         self.retireAndStop()
                     }
                 }
                 return false
             }
-            let owned = await DirectConnectListener.ownershipCheck(
+            let ownership = await DirectConnectListener.ownershipCheck(
                 port: binding.port,
                 nonce: listener.ownershipNonce,
                 within: rebindSeconds
@@ -1454,11 +1512,11 @@ final class DirectPathController {
                     return false
                 }
                 // Confirmed only if this bind is still verifying: a failure
-                // recorded first wins. Not owned, or failed meanwhile: the
-                // fault.
-                guard owned, listener.lifecycle.confirm(binding.generation) else {
-                    listener.lifecycle.reject(binding.generation)
-                    if !self.deliverFault(of: listener, "the first bind was not confirmed") {
+                // recorded first wins. Not owned, or failed meanwhile: this
+                // listener is not kept either.
+                guard ownership == .owned, listener.lifecycle.confirm(binding.generation) else {
+                    listener.lifecycle.reject(binding.generation, Self.cause(of: ownership))
+                    if !self.hearFailure(of: listener, "the first bind was not confirmed") {
                         self.retireAndStop()
                     }
                     return false
@@ -1480,7 +1538,7 @@ final class DirectPathController {
                 }
                 self.listenerStart = nil
                 // A first bind that did not end serving leaves no listener
-                // that could be used: failed (the fault), or retired.
+                // that could be used: it was retired when it failed.
                 if !ready, self.listener === listener, self.listenerState == .none {
                     self.retireAndStop()
                 }
@@ -1503,106 +1561,275 @@ final class DirectPathController {
     /// Takes the listener out of service now, if it may be: no route
     /// preparation or plan sees it ready from here on. Returns it for its
     /// socket to be stopped. One decision under the listener's own lock
-    /// (`retire`): a failure recorded first wins, and then the listener is
-    /// kept and the fault delivered; a listener a route was ever published
-    /// to is never stopped or replaced, because the route cannot be taken
-    /// back and only that listener, on that port, can serve it.
+    /// (`retire`), whether or not it had failed: a listener a route was
+    /// ever published to is never stopped or replaced, because the route
+    /// cannot be taken back and only that listener, on that port, can serve
+    /// it.
     private func retireListener() -> DirectConnectListener? {
         guard let listener else {
             return nil
         }
+        // A failure recorded before the retirement and not heard yet is on
+        // record all the same; nothing else follows from it, because
+        // nothing points at this listener.
+        let unheard = listener.lifecycle.failure.flatMap { failure in
+            heardFailure == failure.generation ? nil : failure.cause
+        }
         switch listener.lifecycle.retire() {
         case .retired:
+            if let unheard {
+                recordFailure(unheard, "a listener no route points at had failed")
+            }
             disarmWatchdog()
+            endRecovery()
             self.listener = nil
             listenerPort = nil
             listenerGeneration = nil
             listenerStart = nil
+            heardFailure = nil
             rebinds.abandon()
             completionAwaitingCloses = nil
             return listener
-        case .failed:
-            enterFault("the listener failed before it could be retired")
-            return nil
         case .published:
             return nil
         }
     }
 
+    // MARK: Failure and recovery
+
     /// Non-`nil` while a listener that a route points at is not serving, in
-    /// the foreground. Every change of it is announced through
+    /// the foreground: from the return to the foreground, or from the
+    /// failure if it failed while the App was in front, until it serves
+    /// again. It includes an ordinary return's one attempt, during which
+    /// `lastFailure` is `nil`. Every change of it is announced through
     /// `onAvailabilityChanged`.
-    ///
-    /// The contract for the listener's recovery
-    /// (docs/plans/remote-direct-ios.md section 9). Until the recovery
-    /// itself lands, a listener that fails is the listener fault, as before,
-    /// and this is always `nil`.
     var listenerRecovery: DirectListenerRecovery? {
-        nil
+        guard
+            let listener,
+            let recovery,
+            !isInBackground,
+            listener.lifecycle.isPublished
+        else {
+            return nil
+        }
+        if case .serving = listener.lifecycle.phase {
+            return nil
+        }
+        // A failure the lifecycle recorded and this controller has not
+        // heard of yet is not in `lastFailure`; the gate already has it.
+        return DirectListenerRecovery(
+            since: recovery.since,
+            lastFailure: recovery.lastFailure,
+            portMayBeForeign: recovery.lastFailure?.portMayBeForeign ?? false
+        )
     }
 
     /// Starts an attempt to bind and check the listener's port now, unless
     /// one is running: what 「重试」 asks for. Nothing in the background, or
-    /// when nothing is recovering; so nothing at all until the recovery
-    /// itself lands.
-    func retryListenerNow() {}
+    /// when nothing is recovering. The attempts the recovery makes by
+    /// itself go on as before.
+    func retryListenerNow() {
+        settleRecordedFault()
+        startAttemptIfFailed()
+    }
 
     /// The listening socket of `failed` failed, as its lifecycle recorded
     /// where Network reported it.
     func listenerDidFail(_ failed: DirectConnectListener) {
-        deliverFault(of: failed, "the listening socket failed")
+        hearFailure(of: failed, "the listening socket failed")
     }
 
-    /// Delivers the fault if `listener` is this controller's and its
-    /// lifecycle has recorded a failure. The controller never decides a
-    /// failure itself: a stale generation, a deliberate close, or a stop
-    /// records none, and then this does nothing and returns `false`.
+    /// What an ownership check that did not find this listener says about
+    /// the port.
+    private nonisolated static func cause(
+        of ownership: DirectConnectListener.Ownership
+    ) -> DirectListenerFailureCause {
+        switch ownership {
+        case .foreign:
+            return DirectListenerFailureCause(.foreign)
+        case .unanswered, .owned:
+            return DirectListenerFailureCause(.ownership)
+        }
+    }
+
+    /// Whether `listener` is this controller's and its lifecycle is in a
+    /// failure; and, the first time for each failure, what follows from it
+    /// here (`listenerFailed`). The controller never decides a failure
+    /// itself: a stale generation, a deliberate close, or a stop records
+    /// none, and then this does nothing and returns `false`.
     @discardableResult
-    private func deliverFault(of listener: DirectConnectListener, _ reason: String) -> Bool {
-        guard listener === self.listener, case .failed = listener.lifecycle.phase else {
+    private func hearFailure(of listener: DirectConnectListener, _ reason: String) -> Bool {
+        guard listener === self.listener, let failure = listener.lifecycle.failure else {
             return false
         }
-        enterFault(reason)
+        if heardFailure != failure.generation {
+            heardFailure = failure.generation
+            listenerFailed(failure.cause, reason)
+        }
         return true
     }
 
-    /// The one exit for every listener failure, entered once, in the
-    /// foreground or the background. The lifecycle's `failed` phase has
+    /// The one exit for every listener failure, entered once for each, in
+    /// the foreground or the background. The lifecycle's `failed` phase has
     /// already ended every admission, plan, grant, and publication, and
-    /// revoked what was not granted; this delivers the rest. No listener is
-    /// made again in this process, no new connection is authorized for
-    /// direct, no route is written, held status answers are settled without
-    /// a status for a routed host, and no event follows. Granted relays are
-    /// left as the close-and-keep table has them: the fault closes none of
-    /// them, and it is not a closure. The listener is kept, never stopped:
-    /// it holds those relays.
-    private func enterFault(_ reason: String) {
-        guard faultDelivery == .none else {
+    /// revoked what was not granted; this does the rest. Granted relays are
+    /// left as the close-and-keep table has them: a failure closes none of
+    /// them, and it is not a closure.
+    ///
+    /// A listener no route points at is stopped: there is nothing for it to
+    /// serve, and the next open makes another. One a route points at is
+    /// kept, never stopped (it holds those relays, and only it, on its
+    /// port, can serve that route): its socket is closed, so that WebKit
+    /// fails over from the port, and the port is bound and checked again,
+    /// attempt after attempt, for as long as the App is in the foreground.
+    private func listenerFailed(_ cause: DirectListenerFailureCause, _ reason: String) {
+        let failure = recordFailure(cause, reason)
+        disarmWatchdog()
+        if completionAwaitingCloses != nil {
+            // An attempt that had found the listener and waited only for
+            // closes is settled by this failure.
+            completionAwaitingCloses = nil
+            rebinds.abandon()
+        }
+        guard let listener else {
             return
         }
-        faultDelivery = .delivering
-        Self.logger.error("Direct path: listener fault: \(reason, privacy: .public)")
-        disarmWatchdog()
-        // Whatever return was under way is settled by this.
-        rebinds.abandon()
-        completionAwaitingCloses = nil
-        if let listener {
-            // The socket goes, and the revoked work with it.
+        guard listener.lifecycle.isPublished else {
+            // Retired with its failure: nothing points at it.
+            retireAndStop()
+            if isResuming, !isInBackground {
+                finishResume()
+            }
+            return
+        }
+        if !rebinds.inFlight {
+            // The socket goes, and the revoked work with it. An attempt
+            // under way closes it itself, before it binds.
             Task {
                 await listener.closeListeningSocket()
             }
         }
         // The selection stays: deselecting would have the transport close
-        // its streams, and the fault closes no relay.
+        // its streams, and a failure closes no relay.
         advanceGeneration()
-        preferred = .tunnel
-        // The marker and the reopen message. Delivered only once this has
-        // returned.
-        onFault()
-        faultDelivery = .delivered
-        if isResuming, !isInBackground {
-            finishResume()
+        updatePreference()
+        guard !isInBackground else {
+            // Nothing is bound in the background: the return binds again.
+            return
         }
+        if recovery == nil {
+            recovery = Recovery(since: failure.at, lastFailure: failure)
+        } else {
+            recovery?.lastFailure = failure
+        }
+        scheduleRetryIfFailed()
+        if isResuming {
+            // The return's first attempt has ended: its held answers are
+            // given now, as the public path, and the gate is as this
+            // failure says.
+            finishResume()
+        } else {
+            onAvailabilityChanged()
+        }
+    }
+
+    /// Puts a failure on record and in the log: the step, the number, and
+    /// how long the App had been away. The record keeps what differs: an
+    /// attempt that fails as the one before it did, in the same stay, adds
+    /// nothing to it.
+    @discardableResult
+    private func recordFailure(
+        _ cause: DirectListenerFailureCause,
+        _ reason: String
+    ) -> DirectListenerFailure {
+        let failure = DirectListenerFailure(
+            step: cause.step,
+            code: cause.code,
+            backgroundSeconds: awaySeconds,
+            at: ContinuousClock.now
+        )
+        if let last = listenerFailures.last,
+           last.step == failure.step,
+           last.code == failure.code,
+           last.backgroundSeconds == failure.backgroundSeconds
+        {
+            // Already there.
+        } else {
+            listenerFailures.append(failure)
+            if listenerFailures.count > Self.listenerFailureLimit {
+                listenerFailures.removeFirst(listenerFailures.count - Self.listenerFailureLimit)
+            }
+        }
+        let step = cause.step.rawValue
+        let code = cause.code.map(String.init) ?? "none"
+        Self.logger.error(
+            "Direct path: listener failure: \(reason, privacy: .public); step \(step, privacy: .public), code \(code, privacy: .public)"
+        )
+        return failure
+    }
+
+    /// The recovery is over: the listener serves, was retired, or the App
+    /// left the foreground.
+    private func endRecovery() {
+        recovery = nil
+        retriesScheduled = 0
+        retryWake?.cancel()
+        retryWake = nil
+    }
+
+    /// Schedules the next attempt, if the listener is failed in the
+    /// foreground, a route points at it, and neither an attempt nor a
+    /// wake-up for one is under way.
+    private func scheduleRetryIfFailed() {
+        guard
+            retryWake == nil,
+            !rebinds.inFlight,
+            !isInBackground,
+            let listener,
+            listener.lifecycle.isPublished,
+            case .failed = listener.lifecycle.phase
+        else {
+            return
+        }
+        let delays = timing.retrySeconds
+        let delay = delays.isEmpty ? 5 : delays[min(retriesScheduled, delays.count - 1)]
+        retriesScheduled += 1
+        // On the continuous clock, which keeps counting while the device
+        // sleeps.
+        retryWake = Task { @MainActor [weak self, weak listener] in
+            do {
+                try await Task.sleep(for: .seconds(delay), clock: .continuous)
+            } catch {
+                return
+            }
+            self?.retryDidWake(listener)
+        }
+    }
+
+    private func retryDidWake(_ woken: DirectConnectListener?) {
+        retryWake = nil
+        guard let listener, woken === listener else {
+            return
+        }
+        startAttemptIfFailed()
+    }
+
+    /// Binds and checks the port again now, if the listener is failed in
+    /// the foreground, a route points at it, and no attempt is running.
+    private func startAttemptIfFailed() {
+        guard
+            !rebinds.inFlight,
+            !isInBackground,
+            let listener,
+            let listenerPort,
+            listener.lifecycle.isPublished,
+            case .failed = listener.lifecycle.phase
+        else {
+            return
+        }
+        retryWake?.cancel()
+        retryWake = nil
+        startRebind(listener, port: listenerPort)
     }
 
     // MARK: The foreground watchdog
@@ -1666,7 +1893,7 @@ final class DirectPathController {
             return
         }
         watchdog = nil
-        if deliverFault(of: listener, "the listener did not serve in the foreground in time") {
+        if hearFailure(of: listener, "the listener did not serve in the foreground in time") {
             return
         }
         if let running = listener.lifecycle.currentEpisode, running.id == episode {
@@ -1681,9 +1908,12 @@ final class DirectPathController {
             return
         }
         isInBackground = true
-        // Nothing is watched while the App is away. An episode already
-        // overdue fails the listener here, before the close below; the
-        // background itself is never a failure.
+        leftForegroundAt = ContinuousClock.now
+        // Nothing is bound or watched while the App is away: this stay's
+        // recovery ends here, and the return begins its own. An episode
+        // already overdue fails the listener here, before the close below;
+        // the background itself is never a failure.
+        endRecovery()
         listener?.lifecycle.endEpisode()
         disarmWatchdog()
         settleRecordedFault()
@@ -1695,11 +1925,12 @@ final class DirectPathController {
         advanceGeneration()
         // Out of service now, before any close runs, and on purpose: what a
         // bind under way reports after this is not a failure. A serving
-        // listener is closed here. A return's re-bind still running is
-        // closed by its own completion, which parks it or, if its bind had
-        // already failed, delivers that. A first bind still under way has no
-        // route pointing at it: its listener is retired, and a later open in
-        // the foreground makes a new one.
+        // listener is closed here. An attempt still running is closed by
+        // its own completion, which parks it or, if its bind had already
+        // failed, records that. A failed listener's socket is closed
+        // already; the return binds its port again. A first bind still
+        // under way has no route pointing at it: its listener is retired,
+        // and a later open in the foreground makes a new one.
         if let listener {
             if rebinds.inFlight {
                 listener.lifecycle.beginClose()
@@ -1735,26 +1966,50 @@ final class DirectPathController {
             return
         }
         isInBackground = false
+        if let leftForegroundAt {
+            awaySeconds = Int(leftForegroundAt.duration(to: ContinuousClock.now).components.seconds)
+        }
         // A new stay in the foreground: a new episode, with its own
         // deadline, for a listener that does not serve yet.
         armWatchdog()
         if rebinds.inFlight {
-            // A return before the previous return's re-bind finished: that
-            // re-bind settles this resume too. Held answers stay held and
-            // pending closures stay pending until the listener is ready.
+            // A return before the previous return's attempt finished: that
+            // attempt settles this resume too. Held answers stay held and
+            // pending closures stay pending until the listener is ready, or
+            // the attempt has failed.
             isResuming = true
+            beginRecovery()
+            onAvailabilityChanged()
             return
         }
+        // Closed for the background, or failed before it: either way the
+        // return binds the same port again, and this stay's first attempt
+        // is held like any return's.
         guard
             let listener,
             let listenerPort,
             listenerState == .closedForBackground
+                || (listenerState == .failed && listener.lifecycle.isPublished)
         else {
             finishResume()
             return
         }
         isResuming = true
+        beginRecovery()
         startRebind(listener, port: listenerPort)
+        if recovery != nil {
+            onAvailabilityChanged()
+        }
+    }
+
+    /// This stay's recovery begins with the return, if a route points at
+    /// the listener: `listenerRecovery` says so until the listener serves.
+    private func beginRecovery() {
+        endRecovery()
+        guard let listener, listener.lifecycle.isPublished else {
+            return
+        }
+        recovery = Recovery(since: ContinuousClock.now, lastFailure: nil)
     }
 
     /// Binds `port` again, checks it, and settles the return.
@@ -1770,21 +2025,29 @@ final class DirectPathController {
         // the deadline ends the ownership check.
         let bound = DirectBindingBox()
         Task { [weak self] in
-            let ready: Bool
+            // How the attempt ended: `nil` when the listener on the port
+            // answered as this one.
+            let failure: DirectListenerFailureCause?
             do {
-                ready = try await directDeadline(rebindSeconds) {
-                    // The background's close may not have run yet.
+                failure = try await directDeadline(rebindSeconds) {
+                    // The background's close, or the close after a failure,
+                    // may not have run yet.
                     await listener.closeListeningSocket()
                     let binding = try await listener.bind(port: listenerPort)
                     bound.set(binding.generation)
-                    return await DirectConnectListener.ownershipCheck(
+                    let ownership = await DirectConnectListener.ownershipCheck(
                         port: binding.port,
                         nonce: nonce,
                         within: rebindSeconds
                     )
+                    return ownership == .owned ? nil : Self.cause(of: ownership)
                 }
+            } catch DirectConnectError.timedOut {
+                failure = DirectListenerFailureCause(.deadline)
             } catch {
-                ready = false
+                // The bind threw. Its lifecycle recorded why, where Network
+                // said so; this is only for a bind that left no record.
+                failure = DirectListenerFailureCause(.bind, error)
             }
             let generation = bound.value
             await MainActor.run {
@@ -1794,7 +2057,7 @@ final class DirectPathController {
                         listener: listener,
                         port: listenerPort,
                         generation: generation,
-                        ready: ready
+                        failure: failure
                     )
                 )
             }
@@ -1806,19 +2069,21 @@ final class DirectPathController {
         let listener = completion.listener
         let listenerPort = completion.port
         let generation = completion.generation
-        let ready = completion.ready
-        // Only the current attempt settles anything. A stale one (settled by
-        // a failure, or replaced by a newer attempt) changes no state here;
-        // the socket it bound, if any, is the listener's, which the newer
-        // attempt closes before binding, and its generation can no longer
-        // be confirmed or rejected.
+        let ready = completion.failure == nil
+        // Only the current attempt settles anything. A stale one (replaced
+        // by a newer attempt, or its listener retired) changes no state
+        // here; the socket it bound, if any, is the listener's, which the
+        // newer attempt closes before binding, and its generation can no
+        // longer be confirmed or rejected.
         guard self.listener === listener, rebinds.current == attempt else {
             return
         }
-        // A bind that already failed (its lifecycle recorded it) is the
-        // fault, in the foreground or the background: failure wins over
-        // parking, and over waiting for closes.
-        if deliverFault(of: listener, "the port could not be re-bound and checked") {
+        // A bind that already failed (its lifecycle recorded it) is a
+        // failed attempt, in the foreground or the background: failure wins
+        // over parking, and over waiting for closes. The attempt is over
+        // before the failure is heard, so the next one can be scheduled.
+        if listener.lifecycle.failure != nil {
+            attemptFailed(attempt, of: listener)
             return
         }
         // Success waits until every relay close decided so far has been
@@ -1848,6 +2113,7 @@ final class DirectPathController {
         if ready, let generation, listener.lifecycle.confirm(generation) {
             listenerGeneration = generation
             disarmWatchdog()
+            endRecovery()
             finishResume()
             return
         }
@@ -1864,10 +2130,11 @@ final class DirectPathController {
         // Not owned, or out of time. This attempt was the only owner of the
         // current bind, whether or not that bind ever returned a generation
         // to it: whatever the bind had reached, it fails here, under the
-        // lifecycle's lock. Nothing is left binding or verifying with no
-        // attempt behind it.
-        listener.lifecycle.failUnconfirmed()
-        if deliverFault(of: listener, "the port could not be re-bound and checked") {
+        // lifecycle's lock, for what the attempt found. Nothing is left
+        // binding or verifying with no attempt behind it.
+        listener.lifecycle.failUnconfirmed(completion.failure ?? DirectListenerFailureCause(.ownership))
+        if hearFailure(of: listener, "the port could not be re-bound and checked") {
+            scheduleRetryIfFailed()
             return
         }
         switch listener.lifecycle.phase {
@@ -1876,9 +2143,21 @@ final class DirectPathController {
             startRebind(listener, port: listenerPort)
         default:
             // Serving (nothing to do but settle) or stopped (no listener).
-            // Neither is held: the gate is open, or shows the fault.
+            // Neither is held.
             finishResume()
         }
+    }
+
+    /// The current attempt ended with the listener failed: the attempt is
+    /// over, the failure is heard if it was not, and the next attempt is
+    /// scheduled.
+    private func attemptFailed(_ attempt: Int, of listener: DirectConnectListener) {
+        guard rebinds.end(attempt) else {
+            return
+        }
+        completionAwaitingCloses = nil
+        hearFailure(of: listener, "the port could not be re-bound and checked")
+        scheduleRetryIfFailed()
     }
 
     /// Publishes the closures the background caused, answers the held
@@ -1903,7 +2182,7 @@ final class DirectPathController {
                 entry.reply(nil)
                 continue
             }
-            entry.reply(answer(for: entry.origin))
+            entry.reply(currentStatus(for: entry.origin))
         }
         select()
         updatePreference()
@@ -1918,9 +2197,9 @@ private final class DirectListenerBox: @unchecked Sendable {
     weak var listener: DirectConnectListener?
 }
 
-/// Remembers, until the next launch, that the listener faulted
-/// (docs/plans/remote-direct-ios.md section 9). Only touched when a direct
-/// transport is registered.
+/// Remembered, until the next launch, that the listener faulted, while a
+/// listener's failure was terminal. Nothing in this file writes it any
+/// more; kept until the App side stops using it.
 protocol DirectFaultMarkerStoring: AnyObject {
     /// Records the fault.
     func mark()
@@ -1974,7 +2253,9 @@ struct DirectRebindCompletion: Sendable {
     let listener: DirectConnectListener
     let port: UInt16
     let generation: Int?
-    let ready: Bool
+    /// Why the attempt did not find this listener on the port; `nil` when
+    /// it did.
+    let failure: DirectListenerFailureCause?
 }
 
 /// The controller's own bookkeeping of a return's re-bind attempts: which

@@ -1232,7 +1232,7 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertTrue(owned)
+        XCTAssertEqual(owned, .owned)
 
         let extra = LoopbackClient(port: fixture.port)
         try? await extra.send(canonicalHead)
@@ -1259,7 +1259,7 @@ final class DirectConnectListenerTests: XCTestCase {
             within: 3
         )
 
-        XCTAssertTrue(owned)
+        XCTAssertEqual(owned, .owned)
         let rest = try await slow.receiveUntilClosed()
         XCTAssertEqual(rest, Data())
         client.close()
@@ -1423,43 +1423,122 @@ final class DirectConnectListenerTests: XCTestCase {
     }
 
     /// Every failure of the current bind (a bind failure, a rejected
-    /// ownership check, a socket failure) is the same terminal state,
-    /// before a route or after one, and nothing leaves it.
-    func testEveryFailureIsTheOneTerminalStateBeforeOrAfterARoute() {
+    /// ownership check, a socket failure) is the same state, before a route
+    /// or after one, with its cause. While failed, nothing is confirmed,
+    /// admitted, published, granted, or closed; the next bind leaves it.
+    func testEveryFailureIsTheSameStateWithItsCauseAndTheNextBindLeavesIt() {
         for published in [false, true] {
             let bindFails = makeLifecycle(in: published ? "rebinding" : "binding", published: published)
             let g = published ? 2 : 1
-            XCTAssertTrue(bindFails.bindFailed(g))
+            let inUse = DirectListenerFailureCause(.bind, code: EADDRINUSE)
+            XCTAssertTrue(bindFails.bindFailed(g, inUse))
             XCTAssertEqual(bindFails.phase, .failed(generation: g))
+            XCTAssertEqual(bindFails.failure?.generation, g)
+            XCTAssertEqual(bindFails.failure?.cause, inUse)
 
             let rejected = makeLifecycle(in: published ? "rebinding" : "binding", published: published)
             XCTAssertTrue(rejected.ready(g))
-            XCTAssertTrue(rejected.reject(g))
+            XCTAssertTrue(rejected.reject(g, DirectListenerFailureCause(.foreign)))
             XCTAssertEqual(rejected.phase, .failed(generation: g))
+            XCTAssertEqual(rejected.failure?.cause, DirectListenerFailureCause(.foreign))
 
             let failsServing = makeLifecycle(in: "serving", published: published)
-            XCTAssertTrue(failsServing.socketFailed(1))
+            let aborted = DirectListenerFailureCause(.socket, code: ECONNABORTED)
+            XCTAssertTrue(failsServing.socketFailed(1, aborted))
             XCTAssertEqual(failsServing.phase, .failed(generation: 1))
+            XCTAssertEqual(failsServing.failure?.cause, aborted)
 
-            // Terminal: no bind, no confirmation, no admission, no
-            // publication, no grant, no close, and a stop leaves it failed.
             for failed in [bindFails, rejected, failsServing] {
+                guard case .failed(let at) = failed.phase else {
+                    XCTFail("Not failed: \(failed.phase)")
+                    continue
+                }
                 let id = UUID()
-                XCTAssertNil(failed.beginBind())
-                XCTAssertFalse(failed.ready(g))
-                XCTAssertFalse(failed.confirm(g))
-                XCTAssertEqual(failed.admit(g, relay: id), .refused)
-                XCTAssertFalse(failed.publish(g) { true })
+                XCTAssertFalse(failed.ready(at))
+                XCTAssertFalse(failed.confirm(at))
+                XCTAssertEqual(failed.admit(at, relay: id), .refused)
+                XCTAssertFalse(failed.publish(at) { true })
                 XCTAssertFalse(failed.grant(id, host: "instance.example", backend: .direct, generation: 0, claim: DirectRelayClaim()))
                 XCTAssertFalse(failed.beginClose())
                 failed.closeCompleted()
-                failed.stop()
-                if case .failed = failed.phase {
-                } else {
-                    XCTFail("A failed listener left the failed phase: \(failed.phase)")
-                }
+                XCTAssertEqual(failed.phase, .failed(generation: at))
+                XCTAssertEqual(failed.isPublished, published)
+
+                // The next bind of the same port leaves it, as a re-bind,
+                // and serves once confirmed: the failure is then gone.
+                let next = failed.beginBind()
+                XCTAssertEqual(next, at + 1)
+                XCTAssertEqual(failed.phase, .binding(generation: at + 1, rebind: true))
+                XCTAssertNil(failed.failure)
+                XCTAssertTrue(failed.ready(at + 1))
+                // The failed bind's own socket reports late: stale.
+                XCTAssertFalse(failed.socketFailed(at, aborted))
+                XCTAssertFalse(failed.reject(at, inUse))
+                XCTAssertTrue(failed.confirm(at + 1))
+                XCTAssertEqual(failed.phase, .serving(generation: at + 1))
+                XCTAssertNil(failed.failure)
+                XCTAssertEqual(failed.isPublished, published)
+                XCTAssertEqual(failed.admit(at + 1, relay: id), .relay)
             }
         }
+    }
+
+    /// A bind that fails again keeps failing as its own generation, with
+    /// its own cause: each failed attempt is one failure, named by the bind
+    /// that failed.
+    func testEachFailedAttemptIsItsOwnFailure() {
+        let lifecycle = makeLifecycle(in: "closed", published: true)
+        var seen: [Int] = []
+        for (step, code) in [
+            (DirectListenerFailure.Step.bind, EADDRINUSE),
+            (.waiting, ENETDOWN),
+            (.bind, EADDRINUSE),
+        ] {
+            guard let g = lifecycle.beginBind() else {
+                return XCTFail("A failed listener could not bind again: \(lifecycle.phase)")
+            }
+            let cause = DirectListenerFailureCause(step, code: code)
+            XCTAssertTrue(lifecycle.bindFailed(g, cause))
+            XCTAssertEqual(lifecycle.failure?.generation, g)
+            XCTAssertEqual(lifecycle.failure?.cause, cause)
+            seen.append(g)
+        }
+        XCTAssertEqual(seen, [2, 3, 4])
+        // The first cause recorded for one failure is the one it keeps.
+        XCTAssertFalse(lifecycle.failUnconfirmed(DirectListenerFailureCause(.deadline)))
+        XCTAssertEqual(lifecycle.failure?.cause, DirectListenerFailureCause(.bind, code: EADDRINUSE))
+        // A stop ends it, failed or not.
+        lifecycle.stop()
+        XCTAssertEqual(lifecycle.phase, .stopped)
+        XCTAssertNil(lifecycle.failure)
+        XCTAssertNil(lifecycle.beginBind())
+    }
+
+    /// What a cause says about the port: only a bind that found it in use,
+    /// or something that accepted there and was not this listener, may be
+    /// someone else's. A closed or refusing port is not.
+    func testOnlyAPortInUseOrAForeignAnswerMayBeSomeoneElses() {
+        XCTAssertTrue(DirectListenerFailureCause(.bind, code: EADDRINUSE).portMayBeForeign)
+        XCTAssertTrue(DirectListenerFailureCause(.waiting, code: EADDRINUSE).portMayBeForeign)
+        XCTAssertTrue(DirectListenerFailureCause(.foreign).portMayBeForeign)
+        for cause in [
+            DirectListenerFailureCause(.bind),
+            DirectListenerFailureCause(.bind, code: EACCES),
+            DirectListenerFailureCause(.waiting, code: ENETDOWN),
+            DirectListenerFailureCause(.ownership),
+            DirectListenerFailureCause(.deadline),
+            DirectListenerFailureCause(.socket, code: ECONNABORTED),
+            // In use is a bind's answer; a serving socket that fails with
+            // that number had the port.
+            DirectListenerFailureCause(.socket, code: EADDRINUSE),
+        ] {
+            XCTAssertFalse(cause.portMayBeForeign, "\(cause)")
+        }
+        // The number is Network's or POSIX's own; any other error has none.
+        XCTAssertEqual(DirectListenerFailureCause(.bind, NWError.posix(.EADDRINUSE)).code, EADDRINUSE)
+        XCTAssertEqual(DirectListenerFailureCause(.waiting, NWError.posix(.ENETDOWN)).code, ENETDOWN)
+        XCTAssertEqual(DirectListenerFailureCause(.bind, POSIXError(.EACCES)).code, EACCES)
+        XCTAssertNil(DirectListenerFailureCause(.bind, CancellationError()).code)
     }
 
     /// The transitions that must not happen: confirm after a failure, a
@@ -1542,10 +1621,10 @@ final class DirectConnectListenerTests: XCTestCase {
 
     // MARK: Retirement and an unconfirmed bind
 
-    /// Retirement is one decision against a failure, in both orders: a
-    /// failure recorded first wins and stays; a retirement that comes first
-    /// stops the listener, and nothing reported afterwards is a failure. A
-    /// listener a route was published to is never retired.
+    /// Retirement is one decision, whether or not the listener had failed:
+    /// a listener no route was published to stops, and nothing reported
+    /// afterwards is a failure. A listener a route was published to is
+    /// never retired, failed or not.
     func testRetirementAndAFailureAreDecidedOnceInEitherOrder() {
         for phase in ["binding", "verifying", "serving"] {
             let failureFirst = makeLifecycle(in: phase)
@@ -1555,8 +1634,11 @@ final class DirectConnectListenerTests: XCTestCase {
             default:
                 XCTAssertTrue(failureFirst.socketFailed(1), phase)
             }
-            XCTAssertEqual(failureFirst.retire(), .failed, phase)
             XCTAssertEqual(failureFirst.phase, .failed(generation: 1), phase)
+            XCTAssertEqual(failureFirst.retire(), .retired, phase)
+            XCTAssertEqual(failureFirst.phase, .stopped, phase)
+            XCTAssertNil(failureFirst.failure, phase)
+            XCTAssertNil(failureFirst.beginBind(), phase)
 
             let retirementFirst = makeLifecycle(in: phase)
             XCTAssertEqual(retirementFirst.retire(), .retired, phase)
@@ -1567,7 +1649,7 @@ final class DirectConnectListenerTests: XCTestCase {
             XCTAssertFalse(retirementFirst.failUnconfirmed(), phase)
             XCTAssertEqual(retirementFirst.phase, .stopped, phase)
         }
-        for phase in ["serving", "closing", "closed", "rebinding"] {
+        for phase in ["serving", "closing", "closed", "rebinding", "failed"] {
             let published = makeLifecycle(in: phase, published: true)
             let before = published.phase
             XCTAssertEqual(published.retire(), .published, phase)
@@ -1722,8 +1804,9 @@ final class DirectConnectListenerTests: XCTestCase {
 
     /// One deadline for a stay in the foreground. While it is ahead, the
     /// listener is left alone; once it has come, the listener has failed
-    /// for whoever asks next, whatever it was doing short of serving. A
-    /// listener that serves, has failed, or is stopped has no episode.
+    /// for whoever asks next, whatever it was doing short of serving, and
+    /// the next bind starts outside it. A listener that serves, has failed,
+    /// or is stopped has no episode.
     func testTheForegroundEpisodeFailsTheListenerOnceItsDeadlineHasComeAndNotBefore() {
         for phase in ["idle", "binding", "verifying", "closing", "closed", "rebinding"] {
             let ahead = makeLifecycle(in: phase)
@@ -1740,16 +1823,36 @@ final class DirectConnectListenerTests: XCTestCase {
                 XCTFail("\(phase) once the deadline has come: \(come.phase)")
             }
             XCTAssertNil(come.currentEpisode, phase)
-            // Terminal: no bind, no admission, no publication.
-            XCTAssertNil(come.beginBind(), phase)
+            // A failure like any other, for the deadline: no admission and
+            // no publication, until the next bind serves.
+            XCTAssertEqual(come.failure?.cause, DirectListenerFailureCause(.deadline), phase)
             XCTAssertEqual(come.admit(1, relay: UUID()), .refused, phase)
             XCTAssertFalse(come.publish(1) { true }, phase)
+            // The next bind is not under the deadline that has come: the
+            // episode ended with the failure.
+            let next = come.beginBind()
+            XCTAssertNotNil(next, phase)
+            XCTAssertNil(come.currentEpisode, phase)
+            if let next {
+                XCTAssertTrue(come.ready(next), phase)
+                XCTAssertTrue(come.confirm(next), phase)
+            }
         }
         for phase in ["serving", "failed", "stopped"] {
             let lifecycle = makeLifecycle(in: phase)
             let before = lifecycle.phase
             XCTAssertNil(lifecycle.beginEpisode(deadline: reached), phase)
             XCTAssertEqual(lifecycle.phase, before, phase)
+        }
+
+        // A bind that finds the deadline come does not start: the listener
+        // fails for the deadline there, and the bind after it starts.
+        for phase in ["idle", "closed"] {
+            let late = makeLifecycle(in: phase, published: phase == "closed")
+            XCTAssertNotNil(late.beginEpisode(deadline: reached), phase)
+            XCTAssertNil(late.beginBind(), phase)
+            XCTAssertEqual(late.failure?.cause, DirectListenerFailureCause(.deadline), phase)
+            XCTAssertNotNil(late.beginBind(), phase)
         }
     }
 
@@ -2386,24 +2489,111 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertTrue(owned)
+        XCTAssertEqual(owned, .owned)
         let otherNonce = await DirectConnectListener.ownershipCheck(
             port: fixture.port.rawValue,
             nonce: "another-nonce",
             within: 1
         )
-        XCTAssertFalse(otherNonce)
+        // Something accepted and gave another answer: not this listener,
+        // and possibly someone else.
+        XCTAssertEqual(otherNonce, .foreign)
 
-        // A socket that accepts and never answers is not this listener.
+        // A socket that accepts and never answers is not this listener
+        // either, and WebKit would not fail over from it.
         let control = try ControlListener(family: AF_INET, address: "127.0.0.1")
-        defer { control.close() }
         let silent = await DirectConnectListener.ownershipCheck(
             port: control.socket.port,
             nonce: nonce,
             within: 0.5
         )
-        XCTAssertFalse(silent)
+        XCTAssertEqual(silent, .foreign)
+
+        // A port nobody listens on: closed or refusing, which WebKit leaves
+        // by itself.
+        let freed = control.socket.port
+        control.close()
+        let nobody = await DirectConnectListener.ownershipCheck(
+            port: freed,
+            nonce: nonce,
+            within: 0.5
+        )
+        XCTAssertEqual(nobody, .unanswered)
         XCTAssertEqual(fixture.plans.planCount, 0)
+    }
+
+    /// What the recovery does after a failure, with the real socket: the
+    /// serving socket fails, nothing is admitted, and the same port is
+    /// closed, bound, checked, and confirmed again, by the same listener.
+    func testAListenerWhoseSocketFailedServesItsPortAgainAfterTheNextBind() async throws {
+        let failures = Recorder<Int>()
+        let fixture = try await makeListener(onListenerFailure: { failures.record(1) })
+        let lifecycle = await fixture.listener.lifecycle
+        let nonce = await fixture.listener.ownershipNonce
+        guard case .serving(let g) = lifecycle.phase else {
+            return XCTFail("Not serving: \(lifecycle.phase)")
+        }
+
+        // As Network's own failure handler does: recorded first, then told.
+        XCTAssertTrue(lifecycle.socketFailed(g, DirectListenerFailureCause(.socket, code: ECONNABORTED)))
+        await fixture.listener.socketDidFail()
+        XCTAssertEqual(failures.values.count, 1)
+        XCTAssertEqual(lifecycle.failure?.cause, DirectListenerFailureCause(.socket, code: ECONNABORTED))
+        let refused = LoopbackClient(port: fixture.port)
+        try? await refused.send(canonicalHead)
+        let nothing = try await refused.receiveUntilClosed()
+        XCTAssertEqual(nothing, Data())
+        XCTAssertEqual(fixture.plans.planCount, 0)
+
+        // One attempt: close, bind the same port, check, confirm.
+        await fixture.listener.closeListeningSocket()
+        XCTAssertEqual(lifecycle.phase, .failed(generation: g), "A close does not hide a failure.")
+        let binding = try await fixture.listener.bind(port: fixture.port.rawValue)
+        XCTAssertEqual(binding.port, fixture.port.rawValue)
+        XCTAssertEqual(lifecycle.phase, .verifying(generation: binding.generation, rebind: true))
+        let owned = await DirectConnectListener.ownershipCheck(
+            port: binding.port,
+            nonce: nonce,
+            within: 10
+        )
+        XCTAssertEqual(owned, .owned)
+        XCTAssertTrue(lifecycle.confirm(binding.generation))
+        XCTAssertNil(lifecycle.failure)
+
+        let client = LoopbackClient(port: fixture.port)
+        _ = try await establish(client, fixture)
+        client.close()
+        XCTAssertEqual(failures.values.count, 1)
+    }
+
+    /// A bind of a port someone else holds fails as in use, with Network's
+    /// own number, and the same bind succeeds once the port is free.
+    func testABindOfAPortInUseFailsAsInUseAndSucceedsOnceThePortIsFree() async throws {
+        let fixture = try await makeListener()
+        let lifecycle = await fixture.listener.lifecycle
+        await fixture.listener.closeListeningSocket()
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: fixture.port.rawValue,
+            reuseAddress: true
+        )
+
+        do {
+            _ = try await fixture.listener.bind(port: fixture.port.rawValue)
+            XCTFail("The bind of a port in use returned.")
+        } catch {}
+        let cause = try XCTUnwrap(lifecycle.failure?.cause)
+        XCTAssertEqual(cause.code, EADDRINUSE)
+        XCTAssertTrue(cause.portMayBeForeign)
+
+        squatter.close()
+        // The attempt after it, as the controller makes it.
+        await fixture.listener.closeListeningSocket()
+        let binding = try await fixture.listener.bind(port: fixture.port.rawValue)
+        XCTAssertEqual(binding.port, fixture.port.rawValue)
+        XCTAssertTrue(lifecycle.confirm(binding.generation))
+        XCTAssertNil(lifecycle.failure)
     }
 
     func testClosingTheListeningSocketKeepsCommittedRelays() async throws {
@@ -2448,7 +2638,7 @@ final class DirectConnectListenerTests: XCTestCase {
             nonce: nonce,
             within: 10
         )
-        XCTAssertTrue(owned)
+        XCTAssertEqual(owned, .owned)
         let lifecycle = await fixture.listener.lifecycle
         XCTAssertTrue(lifecycle.confirm(binding.generation))
         let client = LoopbackClient(port: fixture.port)
@@ -2484,7 +2674,7 @@ final class DirectConnectListenerTests: XCTestCase {
                 nonce: nonce,
                 within: 10
             )
-            XCTAssertTrue(owned)
+            XCTAssertEqual(owned, .owned)
             outcome = "bound again"
         } catch {
             outcome = "refused: \(error)"
@@ -2688,7 +2878,8 @@ final class DirectConnectListenerTests: XCTestCase {
         limits: DirectConnectLimits = .patient,
         allowedHosts: Set<String>? = nil,
         direct: StandInStreamSource.Mode = .open,
-        publicOrigin: StandInStreamSource.Mode = .open
+        publicOrigin: StandInStreamSource.Mode = .open,
+        onListenerFailure: @escaping @Sendable () -> Void = {}
     ) async throws -> Fixture {
         let directStreams = StandInStreamSource(mode: direct)
         let publicStreams = StandInStreamSource(mode: publicOrigin)
@@ -2698,7 +2889,7 @@ final class DirectConnectListenerTests: XCTestCase {
             planner: { authority in
                 plans.plan(for: authority)
             },
-            onListenerFailure: {}
+            onListenerFailure: onListenerFailure
         )
         for allowed in allowedHosts ?? [host] {
             await listener.allowHost(allowed)
@@ -3758,5 +3949,27 @@ final class ManualReceives: @unchecked Sendable {
     func complete(with data: Data?, isComplete: Bool = false, error: Error? = nil) {
         let completion = lock.withLock { completions.removeFirst() }
         completion(data, isComplete, error)
+    }
+}
+
+/// The failures of a test that is not about their cause.
+extension DirectListenerLifecycle {
+    @discardableResult
+    func bindFailed(_ g: Int) -> Bool {
+        bindFailed(g, DirectListenerFailureCause(.bind))
+    }
+
+    @discardableResult
+    func reject(_ g: Int) -> Bool {
+        reject(g, DirectListenerFailureCause(.ownership))
+    }
+
+    func socketFailed(_ g: Int) -> Bool {
+        socketFailed(g, DirectListenerFailureCause(.socket))
+    }
+
+    @discardableResult
+    func failUnconfirmed() -> Bool {
+        failUnconfirmed(DirectListenerFailureCause(.deadline))
     }
 }
