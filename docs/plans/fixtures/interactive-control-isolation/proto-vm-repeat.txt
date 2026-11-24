@@ -1,0 +1,8 @@
+{"attempts": 80, "body_bytes": 2536901, "checksums": "8f2a437e0eb3400520896cb5c3f7d877e4cf54d98cbe1e72c8e846178a618331", "control_rtt_ms": {"max": 17.6, "p50": 0.1, "p99": 12.1}, "control_samples": 2308, "controller_peak_rss_native_units": 30080, "elapsed_s": 28.32, "heartbeat_gap_ms": {"max": 51.6, "p50": 11.7, "p99": 22.7}, "mode": "paced", "platform": "linux", "python": "3.12.3", "requests": 2560, "sessions": 32}
+low 0
+high 0
+max 0
+oom 0
+oom_kill 0
+oom_group_kill 0
+800407552

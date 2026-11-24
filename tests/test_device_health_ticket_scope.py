@@ -25,13 +25,12 @@ def legacy(config):
     return store, mid, viewer, token
 
 
-def test_native_bearer_to_browser_self_report(install, monkeypatch):
-    from config.v2_config import V2Config
+def test_native_bearer_to_browser_self_report(install):
     from storage.models import remote_device_sessions as sessions
     from vibe import remote_access
 
     install.remote_access.vibe_cloud.instance_secret = "fixture-secret"
-    monkeypatch.setattr(V2Config, "load", classmethod(lambda cls, *a, **kw: install))
+    install.save()
     store = MobileStore()
     _, payload = code_for(store, None)
     cookie, viewer, _ = phone(install, "reporter")

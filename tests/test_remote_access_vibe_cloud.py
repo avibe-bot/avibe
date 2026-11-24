@@ -925,7 +925,7 @@ def test_sign_out_that_cannot_be_recorded_reports_failure_and_clears_the_cookie(
     from storage import remote_access_authorization_service
 
     config = _config()
-    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    config.save()
     cookie = _session_cookie(config)
 
     def storage_unavailable(*_args, **_kwargs):
@@ -2250,10 +2250,9 @@ def test_session_names_the_principal_this_browser_writes_chat_rows_as(
     tmp_path,
 ) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _config()
-    config.remote_access.vibe_cloud.instance_kind = "organization"
-    config.ui.setup_host = "192.168.2.3"
-    config.save()
+    unbound = V2Config.default()
+    unbound.ui.setup_host = "192.168.2.3"
+    unbound.save()
 
     loopback = ui_server.app.test_client().get("/api/session", base_url="http://localhost")
     assert loopback.get_json()["author_id"] == "local"
@@ -2268,6 +2267,10 @@ def test_session_names_the_principal_this_browser_writes_chat_rows_as(
     assert lan.get_json()["remote"] is False
     assert lan.get_json()["author_id"] is None
 
+    config = _config()
+    config.remote_access.vibe_cloud.instance_kind = "organization"
+    config.ui.setup_host = unbound.ui.setup_host
+    config.save()
     remote = ui_server.app.test_client()
     remote.set_cookie(
         remote_access.SESSION_COOKIE_NAME,

@@ -130,6 +130,17 @@ def get_state_dir() -> Path:
     return get_vibe_remote_dir() / "state"
 
 
+def get_remote_binding_reset_path() -> Path:
+    """The record a reset of the account binding leaves from its start until it has finished.
+
+    Shared by its writer (the reset) and by every reader that closes
+    network-position trust while it exists (``vibe/network_position.py``): the
+    two must name the same file, so both take the path from here.
+    """
+
+    return get_state_dir() / "remote-binding-reset.json"
+
+
 def get_model_request_artifacts_dir() -> Path:
     """Where Vibey keeps the exact bytes of model requests that did not succeed (``request_artifacts``)."""
 

@@ -107,11 +107,6 @@ const LibraryAppBody = lazy(() => import('./apps/LibraryApp').then((m) => ({ def
 const ShowPageRoute = lazy(() =>
   import('./components/apps/ShowPageRoute').then((m) => ({ default: m.ShowPageRoute })),
 );
-// The one screen a browser sees after it bound this computer from a private-network address
-// (ui/design: settings/devices/moved*). Rare, so it stays out of the main entry.
-const OpenNewAddress = lazy(() =>
-  import('./components/devices/OpenNewAddress').then((m) => ({ default: m.OpenNewAddress })),
-);
 // Settings → Models (Model Hub, L4). Lazy so its code + framer-motion Reorder
 // stay out of the main entry. The backend capability gate below must accept the
 // route before React renders this lazy component and requests its chunk.
@@ -122,8 +117,6 @@ import { ModelHubCapabilityGate } from './components/settings/models/ModelHubCap
 import { MODEL_HUB_SETTINGS_PATH } from './components/settings/models/modelHubRoutes';
 import { settingsOverlayOriginFromState, SETUP_VISIT_SETTINGS_PATHS } from './lib/settingsOverlay';
 import { isSetupComplete } from './lib/setupState';
-import { copyTextToClipboard } from './lib/utils';
-import { readClaimMarker } from './components/devices/claimFlow';
 import { isNativeShell, onNativePushOpened } from './lib/native';
 import { isIosDevice, isStandalonePwa } from './lib/platform';
 import { bootSessionGeneration, forgetBootSession, readBootSession, recordBootSession } from './lib/bootSession';
@@ -143,6 +136,7 @@ import { isNativeAppWindow } from './lib/desktopShell';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './components/ui/card';
 import { Button } from './components/ui/button';
+import { AccessBlocked } from './components/AccessBlocked';
 import { legacySettingsRedirectTarget, LEGACY_SETTINGS_REDIRECTS } from './lib/settingsRoutes';
 import { installNavigationMotion } from './lib/navigationMotion';
 import { VoiceInputFallbackNotice } from './components/voice/VoiceInputFallbackNotice';
@@ -238,45 +232,6 @@ const accessBlockedCode = (error: unknown): string | null => {
         if (error.status === 401 || error.status === 403) return error.code ?? 'forbidden';
     }
     return null;
-};
-
-// Shown when the server is up but refuses to open the control panel at this
-// entry point. Tells the user which URL to use instead of stranding them in
-// the setup wizard.
-const AccessBlocked = ({ code }: { code: string | null }) => {
-    const { t } = useTranslation();
-    // This browser turned remote access on from a private-network address a moment ago: binding
-    // succeeded, and that is why this address stopped opening Avibe. Say so, with the way on. The
-    // claim is recognised by what this tab kept from the local API, never by the address bar.
-    const moved = code === 'remote_access_host_mismatch' ? readClaimMarker() : null;
-    if (moved) {
-        return (
-            <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
-                <div className="w-full max-w-md">
-                    <Suspense fallback={null}>
-                        <OpenNewAddress host={moved.host} onCopy={(url) => { void copyTextToClipboard(url); }} />
-                    </Suspense>
-                </div>
-            </main>
-        );
-    }
-    return (
-        <main className="min-h-screen flex items-center justify-center bg-bg text-text p-4">
-            <Card className="max-w-md w-full">
-                <CardHeader>
-                    <CardTitle>{t('accessBlocked.title')}</CardTitle>
-                    <CardDescription>{t('accessBlocked.body')}</CardDescription>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                    <p className="text-sm text-muted">{t('accessBlocked.hint')}</p>
-                    {code ? (
-                        <p className="text-xs text-muted font-mono">{t('accessBlocked.codeLabel')}: {code}</p>
-                    ) : null}
-                    <Button onClick={() => window.location.reload()}>{t('accessBlocked.retry')}</Button>
-                </CardContent>
-            </Card>
-        </main>
-    );
 };
 
 type GuardStatus =

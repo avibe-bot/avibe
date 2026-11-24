@@ -1148,11 +1148,16 @@ def _validate_remote_access_network_change(
         )
 
 
+class NetworkSettingsForbidden(PermissionError):
+    """A settings patch tried to change a protected network field."""
+
+
 def save_config(
     payload: dict,
     *,
     validate_remote_access_network: bool = True,
     generic_remote_access: bool = False,
+    direct_origin_writer: bool = False,
     user_context: Any = None,
 ) -> V2Config:
     """Save general settings while discarding removed optional-feature sections."""
@@ -1190,6 +1195,15 @@ def save_config(
         str(key) in ("platforms.enabled", "platforms.primary") for key in raw_list_ops
     )
 
+    remote_fields = payload.get('remote_access')
+    pairing_fields = remote_fields.get('vibe_cloud') if isinstance(remote_fields, dict) else None
+    if isinstance(pairing_fields, dict) and pairing_fields.keys() & {'backend_url', 'instance_id', 'instance_secret', 'session_secret'}:
+        # A pairing publication needs the push table, including a first pair
+        # performed by a standalone CLI before service startup. Migration takes
+        # place outside the config lock; inside it only reserve the SQLite writer.
+        from storage.importer import ensure_sqlite_state
+
+        ensure_sqlite_state()
     pairing_revocation_operation_id: str | None = None
     # Serialize the WHOLE read-merge-write cycle across processes
     # (#1458 stage ③): the base load, merge, validation, and write all
@@ -1238,6 +1252,18 @@ def save_config(
         merged_payload = _merge_legacy_discord_guild_scope_fields(merged_payload, payload, base_config)
         sanitized_payload, guild_scope_update = _extract_settings_scopes_from_config_payload(merged_payload)
         config = V2Config.from_payload(sanitized_payload)
+        if generic_remote_access:
+            from config.v2_config import UiConfig
+
+            # Compare the merged result, not the keys the client happened to send.
+            # The file lock above covers both this decision and the eventual write.
+            original = base_config.ui if base_config is not None else UiConfig()
+            if config.ui.trusted_public_origins != original.trusted_public_origins and not (
+                direct_origin_writer and context.is_instance_owner
+            ):
+                raise NetworkSettingsForbidden("proxy_origin_change_requires_direct_owner")
+            if (config.ui.setup_host, config.ui.setup_port) != (original.setup_host, original.setup_port) and not context.is_instance_owner:
+                raise NetworkSettingsForbidden("listener_change_requires_owner")
         # This settings writer does not change relay consent. Ordinary host file
         # and shell access can still modify local config, including via Web Terminal.
         # Compare against the locked base, not a prior read or the request's role.
@@ -1316,7 +1342,10 @@ def save_config(
                 existing_update = _discord_guild_scope_from_config(base_config)
                 if existing_update is not None:
                     _save_discord_guild_scope_update(*existing_update, store=store, user_context=context)
-        config.save()
+        from storage.web_push_cutover import publishing
+
+        with publishing(base_config, config):
+            config.save()
         if not remote_access.complete_pairing_revocation(pairing_revocation_operation_id):
             logger.error(
                 "Pairing revocation committed but its pending record could not be retired; "
@@ -9717,15 +9746,15 @@ def _run_install_command(
 _ASKILL_INSTALL_LOCK = threading.Lock()
 # The managed askill release. Avibe installs it and upgrades an older askill to
 # it; only an explicit repair replaces a newer one.
-ASKILL_VERSION = "0.1.15"
+ASKILL_VERSION = "0.1.17"
 # (sha256, size) of each ASKILL_VERSION binary by askill's platform name, from
 # the release's GitHub asset digests.
 _ASKILL_BINARIES = {
-    "darwin-arm64": ("09d333828577bca89c4c842f3a30fb5459f22a78a59db8287512b3653762acb1", 63759842),
-    "darwin-x64": ("0f81766bcaf18c05148c403ebe561a3b7f2c0699cadca86fc498b5f812fc97a9", 69484624),
-    "linux-arm64": ("e06830ba2170f70e8dc9c5efbe83568f615735c75cca8f6961e45f2fbaf2bc91", 93956240),
-    "linux-x64": ("a5ac72faafc0f3f14c36a34c1a2e2beff777a483ad6ce71ee945297f0fa0aa24", 94894208),
-    "win32-x64": ("00e1bd471f531bded8504f1c6d79edf900ff9cee7e313bf6528be927e508dfe1", 98781696),
+    "darwin-arm64": ("a51371a711f5c6e1449a29532c8869df2ca600111fcf14bb3f6a9b2d275399f6", 89473794),
+    "darwin-x64": ("1a101e0dbb539ddbfd88f5584e1a2a01d550e09f4f076accc833fd5d1c260b4b", 98562352),
+    "linux-arm64": ("8c340cda2135d8827066ffa4f192776127d5dd8c1d48f4e47933f8f0ae27de26", 109562872),
+    "linux-x64": ("5257e7cb627b4af465e64a12b6ea38839dc1164942ad48e7ef38540f1c11b464", 109521072),
+    "win32-x64": ("8f3befa8911ffe1358c9f576d7024dbb705eef79e1da71705df762dde7ea82fc", 115681792),
 }
 _AVAULT_INSTALL_LOCK = threading.Lock()
 _AVAULT_AGENT_MANAGER_LOCK = threading.Lock()

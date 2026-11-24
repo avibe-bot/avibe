@@ -57,6 +57,13 @@ logger = logging.getLogger(__name__)
 STALL_SECONDS = 2.0
 POLL_SECONDS = 1.0
 GC_SLOW_SECONDS = 0.2
+# A heavily used controller tracked 0.9-1.05 M objects within five minutes of start,
+# and the count did not trend up over two hours. Until the freeze, every full
+# collection rescans them: minutes 10-120 after each restart held 212-321 collections
+# over 200 ms (76-195 s of pauses). Counts are not identity: which objects a ten-minute
+# freeze retains (recovery still running, later first-use imports left unfrozen) is
+# an unmeasured trade-off, bounded by the same unfreeze rollback.
+WARM_FREEZE_AFTER_SECONDS = 600
 _MAX_GC_REPORTS = 64
 _MAX_OWN_CODES = 200_000
 # Written only at Vibey stream boundaries on the controller loop; sampled without a lock by GC.
@@ -119,8 +126,8 @@ class EventLoopWatchdog:
     def arm_warm_freeze(self) -> str:
         """Arm the one-shot freeze of the warmed heap; idempotent, never resets the warm-up.
 
-        It fires at the first natural full collection after two hours of uptime,
-        whatever is running or streaming then: on the owner's machine moments with no
+        It fires at the first natural full collection after WARM_FREEZE_AFTER_SECONDS
+        of uptime, whatever is running or streaming then: on the owner's machine moments with no
         open model stream were 2 in 1,827 slow collections, so any such condition is
         no condition. Cost: objects frozen then are never collected by the cycle
         collector until unfreeze or restart. Reference counting still frees an
@@ -133,7 +140,7 @@ class EventLoopWatchdog:
         """
         with self._freeze_lock:
             if self._freeze_state == "off" and can_freeze():
-                self._freeze_since = max(self._watchdog_birth + 7200, self._monotonic())
+                self._freeze_since = max(self._watchdog_birth + WARM_FREEZE_AFTER_SECONDS, self._monotonic())
                 self._freeze_state = "armed"
             return self._freeze_state
 

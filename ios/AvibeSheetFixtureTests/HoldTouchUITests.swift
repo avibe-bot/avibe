@@ -149,6 +149,10 @@ final class HoldTouchUITests: XCTestCase {
         requireFollowedWithNoCue("A tap")
         // Focused, the input is no hold surface, as a composer with its keyboard up.
         XCTAssertTrue(waitFor("surfaces=plain"), facts())
+        // Counted as the tap it was, though the page took the surface back before the App
+        // learnt of the lift: the counts Product's table is made of.
+        XCTAssertTrue(kept().contains("hold taps "), "The tap was not counted as a tap; \(facts())")
+        XCTAssertFalse(kept().contains("end=withdrawn"), "The tap was kept as withdrawn; \(facts())")
     }
 
     func testTheButtonBesideTheInputTakesShortAndLongPresses() {
@@ -368,9 +372,9 @@ final class HoldTouchUITests: XCTestCase {
 
     /// The App followed the touch, and it was no hold: no cue was given (nothing recognised
     /// by the App, no word of a hold to the page). How the press ended is the App's to say:
-    /// counted as a tap or a move; `withdrawn`, when the page took the surface back first (a
-    /// tap focuses the input, which is then no hold surface); or, on a simulator with no
-    /// microphone, the failed start.
+    /// counted as a tap or a move (a tap that focuses the input is counted as a tap though the
+    /// page took the surface back first); `withdrawn`, when the page took it back under a finger
+    /// still down; or, on a simulator with no microphone, the failed start.
     private func requireFollowedWithNoCue(
         _ what: String, file: StaticString = #filePath, line: UInt = #line
     ) {

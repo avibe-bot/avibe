@@ -203,6 +203,9 @@ final class NativeHoldCapture {
     struct TouchState {
         var liftedAt: TimeInterval?
         var point: CGPoint?
+        /// The touch is gone: it has lifted, but when is not known
+        /// (`liftedAt` is then the time of asking).
+        var gone = false
     }
 
     /// A press the App itself follows, from its touch-down until its take
@@ -636,7 +639,20 @@ final class NativeHoldCapture {
         // longer one: it is not followed any more.
         if let hold, !hold.recognised,
            !(hold.webView === webView && surfaces.contains { $0.id == hold.surface && $0.rect.contains(hold.origin) }) {
-            cancelHold(hold, why: "withdrawn")
+            // Most often the tap that focuses the composer: the page took the
+            // press for itself, so the App was not told of the lift, and the
+            // focused composer left the list before the App learnt of it.
+            // Asked, the touch says whether it lifted: then it was a tap, and
+            // is counted as one by its own length. A touch already gone has
+            // lifted at a time not known; counted by the time of this word
+            // it would read longer than it was and skew the counts, so it
+            // stays a `withdrawn` line.
+            if let state = hold.touch?(), !state.gone, let lifted = state.liftedAt {
+                if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                cancelHold(hold, why: "tap")
+            } else {
+                cancelHold(hold, why: "withdrawn")
+            }
         }
         return true
     }
@@ -1873,7 +1889,7 @@ final class NativeHoldTouchObserver: UIGestureRecognizer, UIGestureRecognizerDel
     /// while the finger is down), and where it is. A touch that is gone has
     /// lifted.
     private static func state(of touch: UITouch?, in webView: WKWebView?) -> NativeHoldCapture.TouchState {
-        guard let touch else { return .init(liftedAt: ProcessInfo.processInfo.systemUptime, point: nil) }
+        guard let touch else { return .init(liftedAt: ProcessInfo.processInfo.systemUptime, point: nil, gone: true) }
         let lifted = touch.phase == .ended || touch.phase == .cancelled
         return .init(liftedAt: lifted ? touch.timestamp : nil, point: webView.map { touch.location(in: $0) })
     }

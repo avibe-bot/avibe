@@ -856,6 +856,7 @@ export type ApiContextType = {
     deviceId?: string,
     previousEndpoints?: string[],
     backgroundRotation?: boolean,
+    intent?: WebPushSubscribeIntent,
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string, deviceId?: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
@@ -2782,8 +2783,22 @@ export type WebPushStatus = {
   subscription_count: number;
   current_subscription_enabled?: boolean;
   current_subscription_repairable?: boolean;
+  /**
+   * Binding this Avibe to an account stopped this subscription, and the page is open on the
+   * computer that runs it: it may be taken back with `binding_repair`. Not enabled, and not a
+   * choice of "off".
+   */
+  current_subscription_binding_retired?: boolean;
   normal_delivery?: WebPushNormalDelivery;
 };
+
+/**
+ * Why a subscription is posted, when it is more than keeping an existing one in step.
+ * `explicit_enable`: the person pressed the switch just now. `binding_repair`: the page, open in
+ * the foreground on the computer that runs Avibe, takes back the subscription binding stopped;
+ * never together with a background rotation. Neither on a retry whose origin is not known.
+ */
+export type WebPushSubscribeIntent = 'explicit_enable' | 'binding_repair';
 
 export type WebPushStatusPayload = {
   endpoint?: string;
@@ -4426,13 +4441,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
-    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation) =>
+    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation, intent) =>
       postJson('/api/web-push/subscriptions', {
         subscription,
         device_label: deviceLabel,
         device_id: deviceId,
         previous_endpoints: previousEndpoints,
         background_rotation: backgroundRotation,
+        ...(intent === 'explicit_enable' ? { explicit_enable: true } : {}),
+        ...(intent === 'binding_repair' ? { binding_repair: true } : {}),
       }),
     unsubscribeWebPush: (endpoint, deviceId) =>
       deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),
