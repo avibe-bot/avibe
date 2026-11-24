@@ -333,7 +333,8 @@ applies them:
 - **One repair.** A final response the validator rejects gets exactly one corrective follow-up in the same side turn
   (C-10 §7 step 4): the user message in §11 naming every problem found, joined by "; " (no block, a block that is not
   closed, tags that do not form exactly one block, an empty block, a checkpoint under the floor; a mind that lost its
-  structure or is past a section's limit; a memo changed beyond its checkboxes or past its budget). Its request takes
+  structure or a live Mission entry, or is past a section's limit; a memo changed beyond its checkboxes or past its
+  budget). Its request takes
   the turn's pipeline, budget, policy, and admission like every other request of the turn, and its final response is
   validated again, now only for its block: a second reply without a valid block fails the turn, and files still
   rejected take their fallbacks (§10). Nothing else of the files ever fails the turn.
@@ -411,6 +412,18 @@ is written, so projection stays a pure function of the rows:
   of a small route's `T` (175% of it on 8,000 tokens), so a checkpoint there could leave no less than it found. A
   mind kept whole on a larger route is shown cut to the smaller route's limits, with its read-only copy, a drop's as
   well; the request states the route's limits.
+
+  In Goals, every entry under `## Mission` and `## Workstreams` starts with a box: `- [ ]` while it is live (in
+  progress, waiting, or owed), `- [x]` once it is finished (done, withdrawn by the user, or replaced). A live entry is
+  never deleted or merged. One that finishes has its box checked where it stands and stays for that checkpoint; the
+  entries a mind already kept as `- [x]` are history, and the next checkpoint folds them into one short line under
+  their heading (`- [x] Earlier: ...`), whose oldest names drop off as it grows. So what is finished costs one line or
+  nothing, every live entry stays whole, and what was folded is still in the earlier record and in each checkpoint's
+  own row. The box is the only status the harness reads (§10): an entry without one counts as live, and a Mission
+  written as a paragraph, or as lines without bullets, lists no entry. Minds stored under `checkpoint-v5` and
+  `checkpoint-v5.1` have no boxes, and none is rewritten: each is its next checkpoint's `mind.md` as it is, the
+  request asks for a box on every entry that has none (§11), and an entry boxed as finished then may be folded at the
+  checkpoint after.
 
   The template has, under each heading that holds text, a placeholder line of its own, `(none yet: <the heading's
   name>)` (`(none yet: for whom and why)` ... `(none yet: lessons)`): each is unique, so the first consolidation's
@@ -622,17 +635,38 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   checkpoint spend is at most 2 attempts per Turn. Nothing of it is shown to the user.
 - **The mind and the memo hold, whatever the model wrote.** The turn's files are checked when it gives a final reply
   (§6). One repair names every problem; after it, a file still rejected takes its fallback and never fails the turn.
-  Every check compares with what the harness wrote; nothing parses the model's free text:
+  Every check compares with what the harness wrote, or reads a box; nothing parses the model's free text:
 
   | What the file shows | After the one repair |
   | --- | --- |
-  | `mind.md` lost its structure: a heading line of the template missing, repeated, or out of order; fewer Mission entries (top-level bullets or numbered items) than the mind it started from; not a readable file | the latest checkpoint's mind is kept as it was |
-  | a mind section past its limit (§7) | the whole mind is kept in the row, and `summary` shows each such section cut to its limit: every heading line, the head of what is under each heading while the section has room, and once, ending the section, `[This section continues; the whole of it is in <path>.]`. When the heading lines and that one line already take the limit (a small route's, §7), they are all the section shows. The path is a read-only copy of the whole mind (`checkpoint_dir`, named by the SHA-256 of its text, published whole before the row commits: a private temporary file, synced, then renamed onto the name, so a failed write leaves nothing there); without `checkpoint_dir` the line is `[This section is cut short here.]`. The next checkpoint request gives the whole mind (§11) |
+  | `mind.md` lost its structure: a heading line of the template missing, repeated, or out of order; a live Mission entry gone (below); not a readable file | the latest checkpoint's mind is kept as it was |
+  | a mind section past its limit (§7) | the whole mind is kept in the row, and `summary` shows each such section cut to its limit: every heading line; in Goals, finished entries (`- [x]`, each with the indented lines under it and the blank lines between them) left out from the top, under Mission and then Workstreams, only until the section with that line under it is within its limit; then the head of what is under each heading while the section has room; and once, ending the section, `[Part of this section is left out: finished entries first, then its end. The whole of it is in <path>.]`. When the heading lines and that one line already take the limit (a small route's, §7), they are all the section shows. The path is a read-only copy of the whole mind (`checkpoint_dir`, named by the SHA-256 of its text, published whole before the row commits: a private temporary file, synced, then renamed onto the name, so a failed write leaves nothing there); without `checkpoint_dir` the line is `[Part of this section is left out: finished entries first, then its end.]`. The next checkpoint request gives the whole mind (§11) |
   | the mind past twice its limits' sum (12,000 tokens; scaled below a 192,000-token route, §7), however its sections stand: piled up, not condensed | the latest checkpoint's mind is kept as it was |
   | the template untouched | no mind is kept (no repair is asked) |
   | `memo.md` changed beyond its checkboxes: a line not one of the two the harness wrote for its candidate, a line added or missing, or not a readable file | every candidate is kept: more of the user's words, never fewer |
   | `memo.md` as the harness wrote it, in a turn whose tool budget closed on a call (its room or rounds ran out, §6): it may never have had room to check it | every candidate is kept |
   | the checked messages past the memo's budget (3,000 tokens; scaled below a 192,000-token route, §7) | every checked message is kept, the longest cut to one common share, water-filling, each marked as cut. The entries' own lines count: when every message at a floor share of 10 tokens (about a preview) would still not fit, the first message and the newest that fit are kept, and the others stay in the earlier record under their `#<seq>` |
+
+  **A live Mission entry stays.** The Mission's entries are its top-level bullets and numbered items; one whose box
+  is checked (`- [x]`) is finished, any other is live. A mind is accepted when
+  `live(new) + finished_since(new) >= live(started from)`, where `finished_since` counts the finished entries whose
+  line is not a finished entry of the mind the turn started from. So a live entry stays, in whatever words, or is
+  finished where it stands, and only an entry a mind already kept as finished may be folded or dropped: one finished
+  and folded away in the same turn reads as a live entry gone. The repair says how many live entries there were and
+  are, and asks for each unfinished one back, whole, and for each finished one to be marked where it stands. The rule
+  is a count, like the one before it: it cannot see a live entry deleted in the turn that adds another, or that
+  rewrites a finished line. Before `checkpoint-v5.2` the Mission's entries could never become fewer, so finished ones
+  could not be folded and only piled up (§11).
+
+  The repair names each section past its limit with its size, its limit, how much to take out, and its own way to condense
+  (`CONDENSE_ADVICE`): overlapping agreements merged; the Goals entries that already were finished when the turn began
+  folded or dropped (with the tokens they take); overturned decisions folded into the ones that replaced them;
+  recurring lessons merged into principles. Entries the turn itself marked as finished have to stay this once, so a
+  Goals section that is within its limit without them asks no repair: what the checkpoint shows leaves them out (the
+  table), and the next request says how much of Goals they take (§11). An entry is one the turn marked unless the mind
+  it started from held it as finished under the same heading, with the same lines or else the same first line. The
+  waiver does not hold for a mind past twice its limits' sum: that mind is not kept (the table), so the repair names
+  Goals while the turn can still condense.
 
   A failure of the host's part after the model answered (state, lookup, skills, the mind's copy) is a failed
   checkpoint, counted (invariant 4).
@@ -693,12 +727,18 @@ every-exit audit: `test_loop.py`) that fails when its order or owner is broken.
 UX is silent: compaction is invisible, the user never needs to think about it, and the raw messages stay in
 history. The only user-visible text is the stop message after (d) (§9).
 
-## 11. Checkpoint request (prompt `checkpoint-v5.1`)
+## 11. Checkpoint request (prompt `checkpoint-v5.2`)
 
 The request, verbatim (`harness/context.py` `CHECKPOINT_REQUEST`, then `CHECKPOINT_REQUEST_END`), with its fields filled
 by `checkpoint_request`: `{scratch}` is the absolute path of the Session's scratch directory (`SCRATCH_UNAVAILABLE` without one); `{mind_file}` says what `mind.md` holds (`MIND_FILE_PREVIOUS`, or at a first v5 checkpoint
 `MIND_FILE_FIRST`, which gives the template in place); `{limit_1}` to `{limit_4}` are the mind's section limits
-and `{memo_budget}` the memo's (§7); `{memo_file}` says what `memo.md` holds: `MEMO_FILE_LISTED`, with `{memo_list}` a
+and `{memo_budget}` the memo's (§7); `{mind_sizes}` is empty at a first v5 checkpoint and for a mind that lost its
+structure, else what the previous mind's sections hold now, as their limits count them, which of them are past their
+limit on this route, and how much of Goals is finished entries (`MIND_SIZES`: " They hold now: Where I stand about
+1,233 (over its limit by about 233), Goals about 1,921 (575 of them finished entries), Key decisions about 1,445, Lessons about
+1,440. A section over its limit has to come back under it, not counting Goals entries you mark this time, and one near
+its limit has to shrink by as much as you add to it."), then, for a mind whose Mission or Workstreams hold entries without a box, how many and that each gets its box
+and stays this time (`MIND_UNBOXED`); `{memo_file}` says what `memo.md` holds: `MEMO_FILE_LISTED`, with `{memo_list}` a
 blank line, `Current memo.md:`, and its lines; or, when there is no candidate (§7), `MEMO_FILE_EMPTY` ("empty, and it
 stays empty: no message the user typed is a memo candidate this time, so there is nothing to check. Do not edit it;
 revise only mind.md."), with `{memo_list}` empty: the request never shows text the file does not hold. A placeholder
@@ -745,7 +785,31 @@ does not support fell by 22% and 43% (every new run below every old one), recall
 mission retention after the eighth checkpoint held at 98–99%; intent depth was slightly lower in all four judge
 cells, not significantly. The request grew by 127 tokens and the framing by 9; the summaries did not grow. A variant
 that added "why the user wants this goes as deep as the record supports" widened the mission into work the user had
-not asked for and lowered mission, cursor, and intent-depth scores, so it was not adopted. The request:
+not asked for and lowered mission, cursor, and intent-depth scores, so it was not adopted.
+
+`checkpoint-v5.2` (owner decision 2026-11-25) keeps every limit and uses the same room better: "the limits stay; do
+the utmost within limited room before letting it rot". Under `checkpoint-v5.1` a Mission entry could never leave (its
+status was marked in words, and the validator rejected fewer entries than before), and "fold each finished workstream
+into one line" let that one line grow without end, so finished business only accumulated. Of the 1,675 minds stored on
+the owner's machine by then (377 Sessions), 659 listed the Mission as entries and 1,016 held it as a paragraph or as
+plain lines, which the count never read and which piled up dated "(done)" lines the same way (one grew from 56 to
+1,209 tokens). The longest list held 36 entries, 34 of them finished; in a Bot's mind at its thirteenth checkpoint,
+every section stood at about 96% of its limit and a third of Goals was finished business, one "done and closed" line
+of 32 items among it. When Goals passed its limit the cut kept the head, the oldest and mostly finished entries, and
+left out the newest. Of 1,964 checkpoint turns, 453 (23%) took the repair because a section was past its limit, a
+request over the whole context each time, and 141 minds were shown cut after it: the request stated the limits, but
+a model cannot count what its sections hold.
+
+`checkpoint-v5.2` gives Goals' entries a box, the one status the harness reads (§7): a live entry stays whole, a
+finished one is marked where it stands and may be folded into one short line from the next checkpoint on (§10); a
+section past its limit is shown with its finished entries left out first (§10); the repair says how much to take out
+of each section and how, and gives the Mission a way out (§10); and the request says what each section holds now
+(`{mind_sizes}`). Stored minds are not rewritten. A list without boxes takes them at its next checkpoint: in replays
+of such a mind, a model told only the rule folded the finished entries at once, which reads as live entries gone and
+cost the repair, so the request tells a mind with unboxed entries to box each and keep them that once
+(`MIND_UNBOXED`). The request grew by 214 tokens, and by about 75 to 115 more with a previous mind's sizes; the
+framing is unchanged, and nothing an ordinary Turn sends changes: the request is read only in a checkpoint turn, and
+a stored checkpoint's `summary` is fixed when it is written (§7). The request:
 
 ```text
 <context-checkpoint-request>
@@ -762,7 +826,7 @@ Your scratch directory is {scratch}. It holds two files, and you already have bo
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:
 - Where I stand: does my understanding of whom I do this for and why, of what I own, and of how the user and I work together still hold? Can I point to where the user said or accepted each agreement? One I cannot is my own view, and it belongs in Lessons.
-- Goals: has the end result the user wants changed? Where does each workstream stand, and what comes next in it?
+- Goals: has the end result the user wants changed? Which goals and workstreams finished? Where does each live one stand, and what comes next in it?
 - Key decisions: what was newly decided, and was any earlier decision overturned?
 - Lessons: what proved to work or not to work? Has anything recurred that can be distilled into a principle?
 Do the looking back in your thinking, or as text outside the <checkpoint> block; text outside the block does not enter the context.
@@ -770,9 +834,9 @@ Do the looking back in your thinking, or as text outside the <checkpoint> block;
 2. Revise your mind (mind.md)
 - Change only what the looking back found changed; leave everything else, its wording included, as it is. Put all the changes in one edit call. At your first consolidation, replace each section's placeholder line, such as "(none yet: mission)", with its content; a section with nothing yet keeps its placeholder.
 - Make small changes for small shifts. If your understanding at some layer has changed at its root (for example, you realize the user really wants something other than what you thought), rewrite that section, and write one sentence outside the block: I used to think ..., now I think ..., because ....
-- Memory keeps condensing: fold each finished workstream into one line; merge recurring concrete lessons into a more general principle; fold overturned decisions into the decision that replaced them; let go of details you no longer need. The original conversation stays stored, so a detail you let go can be looked up again.
-- Never delete an entry under Mission: when it is done, withdrawn by the user, or replaced, mark its status on the entry itself. The mission changes only when the user explicitly changes it.
-- Keep every heading line exactly as it is. Each section's length limit: Where I stand {limit_1:,}, Goals {limit_2:,}, Key decisions {limit_3:,}, Lessons {limit_4:,} tokens.
+- Memory keeps condensing: merge recurring concrete lessons into a more general principle; fold overturned decisions into the decision that replaced them; let go of details you no longer need. The original conversation stays stored, so a detail you let go can be looked up again.
+- In Goals, every entry under Mission and Workstreams starts with a box: "- [ ]" while it is live (in progress, waiting, or owed), "- [x]" once it is finished (done, withdrawn by the user, or replaced). Never delete or merge a live entry. An entry leaves in two steps. First it is marked: give a box to each entry that has none, and check "- [x]" on each one that has finished; an entry you mark in this consolidation stays where it stands, whole, even when Goals is over its limit (what the next context shows of an over-limit section leaves finished entries out first). Then, at a later consolidation, it is folded: the entries that already show "- [x]" in the mind.md you were given are history; merge them into one short line under their heading, for example "- [x] Earlier: the importer shipped; the audit was withdrawn; the first migration plan was replaced", and let the oldest drop off that line as it grows. The mission changes only when the user explicitly changes it.
+- Keep every heading line exactly as it is. Each section's length limit: Where I stand {limit_1:,}, Goals {limit_2:,}, Key decisions {limit_3:,}, Lessons {limit_4:,} tokens.{mind_sizes}
 
 3. Check the memo (memo.md)
 The memo carries the user's own words, verbatim, into the next context. Each line of the list is one message the user typed: [x] is one carried from last time, [ ] is a new one that has just left the context.
@@ -795,9 +859,9 @@ What I am responsible for seeing through, and where that ends.
 What the user and I have actually agreed, written as principles: how they want me to report and work, when to ask, what I may decide on my own, and the scope of what they authorized, including proposals of mine they accepted. Only what the user said or accepted belongs here; it holds until they change it. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
-In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.
+In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower. Where it holds several goals, one boxed entry for each.
 ## Workstreams
-Each workstream that serves the mission: its status (in progress, waiting, or done) and when it is done; where it has a queue, the queue and its cursor (how far it got, what is next).
+One boxed entry for each workstream that serves the mission: its status (in progress, waiting, or done) and when it is done; where it has a queue, the queue and its cursor (how far it got, what is next).
 # 3. Key decisions
 decision: reason (and which workstream it belongs to).
 # 4. Lessons

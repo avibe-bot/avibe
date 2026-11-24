@@ -553,7 +553,7 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
     # a truncation note would tell the model to read again, and another call fails the turn.
     long = AssistantMessage(
-        (ThinkingBlock(tokens(5_600)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+        (ThinkingBlock(tokens(5_400)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
     )
     model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
     tool = sized_reader(6_000, 6_000, 6_000, 1_900)
@@ -2082,7 +2082,7 @@ async def test_a_checkpoint_consolidates_into_a_mind_it_edits_a_memo_it_checks_a
     assert (payload["mind"], payload["mind_truncated"]) == (FIRST_MIND, False)
     assert payload["memo"] == [{"seq": 1, "text": "typed input", "truncated": False}]
     assert payload["checkpoint"] == CHECKPOINT_BODY
-    assert payload["summarizer"]["prompt_version"] == "checkpoint-v5.1" and payload["summarizer"]["rounds"] == 1
+    assert payload["summarizer"]["prompt_version"] == "checkpoint-v5.2" and payload["summarizer"]["rounds"] == 1
     summary = payload["summary"]
     assert summary.startswith(f"<context-checkpoint>\n{CHECKPOINT_FRAMING}\n\n{FIRST_MIND}\n\n{MEMO_HEADING}\n- (#1) typed input\n\n{CHECKPOINT_BODY}\n")
     (audit,) = [audit for _, _, audit in store.audits]
@@ -2169,6 +2169,59 @@ async def test_a_mind_stored_before_the_placeholders_is_filled_by_placeholder_ed
     assert row.payload["mind"] == FIRST_MIND.replace(MIND_PLACEHOLDERS["## Workstreams"], "- the parser fix: in progress")
 
 
+async def test_a_list_mission_a_released_version_stored_takes_boxes_folds_later_and_keeps_every_live_entry(tmp_path):
+    # A Session whose last checkpoint stored a Mission as checkpoint-v5.1 wrote it: a list, its status in words, no
+    # boxes. Nothing rewrites the stored mind; its next checkpoints run under the new rule (sections 7 and 10).
+    store = InMemoryTranscriptStore()
+    context = _v5(tmp_path, Host())
+    await run(make_agent(Model(history()), store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context))
+    done, live = "- ship the importer: done, shipped in 2.4\n- port the reports: withdrawn", "- audit the billing export: waiting on finance"
+    legacy = MIND_TEMPLATE.replace(MIND_PLACEHOLDERS["## Mission"], f"{done}\n{live}")
+    view = context_view(await store.load("session"))
+    stored = compaction_payload(
+        view, len(view.units) - 1, mode="normal", reason="threshold", checkpoint=CHECKPOINT_BODY, state=(),
+        earlier_record=None, tokens_before=1, threshold=2, window=32_000, summarizer=None, usage=None, mind=legacy,
+    )
+    await store.append_payloads("session", [("compaction", stored)])
+    mind_md = tmp_path / "scratch" / MIND_FILE
+    reply = [Done(assistant(CHECKPOINT))]
+
+    async def checkpoint(index: int, *script):
+        model = Model([[Done(assistant("after"))]], script)
+        agent = make_agent(model, store=store, tools=[reader(tokens(3_000))], selection=ROOMY, context=context)
+        await run(agent, tokens(29_000), row=f"cross{index}")
+        return model, [row for row in await store.load("session") if row.kind == "compaction"][-1].payload["mind"]
+
+    # Folding the finished entry at once: no mind ever kept it as finished, so it reads as a live entry gone. The one
+    # repair says so, and the turn then marks it where it stands instead.
+    checked = done.replace("- ", "- [x] ")
+    marked = legacy.replace(done, checked).replace(live, live.replace("- ", "- [ ] "))
+    model, mind = await checkpoint(
+        0,
+        _batch(_edit("a", mind_md, (f"{done}\n{live}", live.replace("- ", "- [ ] ")))),
+        reply,
+        _batch(_edit("b", mind_md, (live.replace("- ", "- [ ] "), marked.split("## Mission\n")[1].split("\n## ")[0]))),
+        reply,
+    )
+    assert f"{MIND_CURRENT}\n{legacy}\n" in _request(model)  # the stored mind, as it was
+    repair = model.checkpoint_requests[2].messages[-1].content[0].text
+    assert 'its Mission started with 3 live entries and now has 1, with 0 more newly marked "- [x]"' in repair
+    assert mind == marked
+    # The next checkpoint started from a mind that kept them as finished: it may fold the two into one line, with
+    # no repair.
+    folded = marked.replace(checked, "- [x] Earlier: the importer shipped; the report port withdrawn")
+    model, mind = await checkpoint(
+        1, _batch(_edit("c", mind_md, (checked, "- [x] Earlier: the importer shipped; the report port withdrawn"))), reply
+    )
+    assert mind == folded and len(model.checkpoint_requests) == 2
+    assert "Goals about" in _request(model) and "of them finished entries" in _request(model)
+    # A live entry dropped, and still gone after the repair: the previous mind stays as it was.
+    model, mind = await checkpoint(
+        2, _batch(_edit("d", mind_md, (f"\n{live.replace('- ', '- [ ] ')}", ""))), reply, reply
+    )
+    assert mind == folded and len(model.checkpoint_requests) == 3
+
+
 async def test_a_later_checkpoint_starts_from_the_mind_and_memo_it_left_and_needs_one_request_when_nothing_changed(
     tmp_path,
 ):
@@ -2245,6 +2298,22 @@ async def test_a_mind_piled_past_twice_its_budget_is_not_kept(tmp_path):
     _, (_, second), _ = await _consolidate(tmp_path, [_fill_mind(tmp_path), piled])
     assert (second.payload["mind"], second.payload["mind_truncated"]) == (FIRST_MIND, False)
     assert not (tmp_path / "checkpoints").exists()
+
+
+async def test_a_mind_piled_past_its_budget_by_an_entry_it_just_finished_still_gets_its_repair(tmp_path):
+    # Goals past its limit only by an entry the turn marked as finished asks no repair (section 10), but not when the
+    # whole mind is past twice its budget: that mind is not kept, so the turn has to hear of it while it can condense.
+    scratch = tmp_path / "scratch"
+    finished = "- [x] fix the parser without changing its API\n  " + "n" * 8_000  # ~2,000 tokens, past ROOMY's 1,998
+    piled = [
+        _batch(_edit("m", scratch / MIND_FILE, (MISSION, finished))),
+        [Done(assistant(CHECKPOINT))],
+        [Done(assistant(CHECKPOINT))],
+    ]
+    models, (_, second), _ = await _consolidate(tmp_path, [_fill_mind(tmp_path), piled])
+    assert len(models[1].checkpoint_requests) == 3
+    assert "mind.md is over its length limits: Goals is about" in models[1].checkpoint_requests[-1].messages[-1].content[0].text
+    assert second.payload["mind"] == FIRST_MIND
 
 
 async def test_a_memo_changed_beyond_its_checkboxes_keeps_every_candidate(tmp_path):
