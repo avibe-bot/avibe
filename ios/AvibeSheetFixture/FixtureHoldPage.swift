@@ -123,7 +123,6 @@ final class FixtureHoldViewController: UIViewController {
       <p id="s-press">press=none</p>
       <p id="s-drag">drag=none</p>
       <p id="s-tap">tap=none</p>
-      <p id="s-ends">ends=none</p>
       <div id="row">
         <textarea id="input" class="holdable" aria-label="Message"></textarea>
         <button id="send" type="button">Send</button>
@@ -132,6 +131,8 @@ final class FixtureHoldViewController: UIViewController {
       <button id="blur" type="button">Hide keyboard</button>
       <div id="plain">Plain surface</div>
       <div id="control">Control box</div>
+      <!-- Below every control, so adding it moved nothing a test taps. -->
+      <p id="s-ends">ends=none</p>
       <div id="filler"></div>
       <div id="sheet"><div id="sheet-body"><button id="close-sheet" type="button">Close sheet</button><p>Sheet content</p></div></div>
     <script>
