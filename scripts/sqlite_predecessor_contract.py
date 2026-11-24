@@ -313,9 +313,14 @@ def _is_avibe_release(tag: str) -> bool:
 
 def previous_release(repo: str, *, release_tag: str | None = None) -> dict:
     pages = json.loads(_run("gh", "api", f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp"))
+    return select_previous_release((item for page in pages for item in page), release_tag=release_tag)
+
+
+def select_previous_release(items, *, release_tag: str | None = None) -> dict:
+    """One publication baseline for RC range gates and the predecessor reader."""
     # The repository also publishes managed-runtime assets (model-hub-engine-v*,
     # git-runtime-v*); they carry no Avibe wheel and are never a predecessor.
-    releases = [item for page in pages for item in page if not item["draft"] and item.get("published_at")
+    releases = [item for item in items if not item["draft"] and item.get("published_at")
                 and _is_avibe_release(item["tag_name"])]
     # A rerun of an already-published target still compares with its immediate
     # predecessor, not with itself or a release published after that target.

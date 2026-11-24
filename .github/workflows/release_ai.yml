@@ -11,6 +11,10 @@ on:
         description: "Tag to release (e.g., v1.0.0, v1.0.1rc1, or gh-v1.0.1rc1)"
         required: true
         type: string
+      rc_runner_exception:
+        description: "Single unassigned job | reason and quoted Product go for this RC. Release lead only."
+        type: string
+        required: false
       model:
         description: "OpenAI model (default: gpt-5.6-sol)"
         required: false
@@ -52,10 +56,12 @@ jobs:
           # dispatch/tag input through the API and never trusts a workflow
           # context SHA as the release source.
           ref: ${{ github.ref }}
+          fetch-depth: 0
       - name: Require the full master backstop, or an RC's green pull request
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
+          RC_RUNNER_EXCEPTION: ${{ inputs.rc_runner_exception }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate
 
@@ -709,6 +715,18 @@ jobs:
             printf "\n\nFull Changelog: %s\n" "$COMPARE_URL" >> release.md
           fi
 
+      - name: Record the approved runner exception in the RC notes
+        if: inputs.rc_runner_exception != ''
+        env:
+          RC_RUNNER_EXCEPTION: ${{ inputs.rc_runner_exception }}
+        run: |
+          python - <<'PY'
+          import html, os
+          with open('release.md', 'a') as notes:
+              print('\nRunner exception (release lead, quoted Product approval): <code>' +
+                    html.escape(os.environ['RC_RUNNER_EXCEPTION']) + '</code>', file=notes)
+          PY
+
       - name: Preserve silent-update marker (tag annotation or existing release body)
         shell: bash
         env:
@@ -883,6 +901,7 @@ jobs:
             --notes-file release.md
       - name: Dispatch desktop Stage 2
         env:
+          RC_RUNNER_EXCEPTION: ${{ inputs.rc_runner_exception }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
           SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
@@ -893,6 +912,6 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --ref master \
             -f tag="$RELEASE_TAG" \
-            -f source_sha="$SOURCE_SHA"; then
+            -f source_sha="$SOURCE_SHA" -f rc_runner_exception="$RC_RUNNER_EXCEPTION"; then
             echo "::warning::Could not dispatch desktop Stage 2; rerun desktop-release.yml for $RELEASE_TAG." >&2
           fi

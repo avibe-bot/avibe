@@ -34,16 +34,21 @@ This is the gate for a stable `v*` tag in Stage 1, `Publish to PyPI` and
 Stage 2, and for every tag that is not a canonical `gh-vX.Y.ZrcN`. `Publish to
 PyPI` applies it to any tag it is given.
 
-### GitHub-only RC tags: the merged pull request
+### GitHub-only RC tags: the merged pull request and protected native evidence
 
-A `gh-vX.Y.ZrcN` tag does not wait for the full backstop. Stage 1 and Stage 2
+A `gh-vX.Y.ZrcN` tag does not wait for every unrelated job in the full backstop. Stage 1 and Stage 2
 require instead that:
 
 1. the tag's SHA is on `master` and is the merge commit of a pull request
    merged into `master`; and
 2. on that pull request's head, every check `master`'s ruleset requires
    concluded `success` or `skipped`. Where a check ran more than once on the
-   head, its newest run counts, as it did for the merge.
+   head, its newest run counts, as it did for the merge; and
+3. the protected jobs selected by `scripts/ci_protected_rc.py` passed on the **exact merge SHA** in the master lint workflow. The range starts at the previous **published Avibe product release**, not the closest tag; an unpublished RC, a draft, or a runtime release is not the baseline. Renames and commits later reverted still count. Unknown build inputs expand the required evidence rather than removing it.
+
+Before pushing an RC tag, run `scripts/ci_release_backstop.py --repository OWNER/REPO --source-sha SHA --candidate-rc-tag TAG` from a checkout with complete master history. Both release stages repeat this proof from the resolved tag. A missing, skipped, cancelled, red or pending protected job is not a pass.
+
+**Runner exception:** only the release lead, with the product lead's explicit approval for this RC, may supply `rc_runner_exception` on the manual release workflow: `exact job name | reason and quoted approval`. For pre-tag verification supply the same value as `RC_RUNNER_EXCEPTION`. The gate accepts only one cancelled protected job with no runner and no steps; the direct parent's same job must be green and the change must be outside that job's inputs. The workflow records the reason in its inputs and release notes, and passes it to Stage 2. This is not an override for a failed test or a stable release.
 
 The gate fails closed. It refuses an RC whose SHA resolves to no such pull
 request, such as a direct push or a commit that is not the merge commit; one
@@ -54,7 +59,7 @@ tag/source binding, the predecessor contract, immutability, signing,
 notarization and the mirror apply as before.
 
 The full backstop still runs on `master`, and a red one still gets its
-fix-forward owner. For an RC the gate only reports the state at the RC's SHA:
+fix-forward owner. Once the protected evidence has passed, the overall full backstop is reported separately:
 `success`, `pending`, `failed`, or `missing` when no full pass finished there
 because it was coalesced away, cancelled or never started. A `failed` state is
 a warning on the release run, not a refusal.

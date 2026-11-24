@@ -4,7 +4,8 @@
 Every tag needs a successful full master lint backstop at that SHA. With
 ``--rc-pull-request-gate``, a ``gh-vX.Y.ZrcN`` tag instead needs its SHA to be
 the merge commit of a pull request merged into master whose head passed every
-check master's ruleset requires; the full backstop is then only reported.
+check master's ruleset requires, plus exact-SHA native evidence for protected
+changes since the last published product release. Other backstop jobs are reported.
 """
 
 from __future__ import annotations
@@ -19,7 +20,15 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
+import subprocess
+from pathlib import Path
 from typing import Any, Callable
+
+if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from scripts import ci_protected_rc as protected
+from scripts.sqlite_predecessor_contract import select_previous_release
 
 API_ROOT = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
 WORKFLOW = "lint.yml"
@@ -50,7 +59,7 @@ class PullRequestProof:
     source_sha: str
     pull_number: int
     head_sha: str
-    # Reported, never required: "success", "pending", "failed", "missing" or "unknown".
+    # Overall backstop state; required named jobs are verified before returning.
     backstop: str
     backstop_run_id: int | None = None
     full_backstop: BackstopProof | None = None
@@ -343,13 +352,73 @@ def _require_green_checks(api: GitHubApi, *, pull_number: int, head_sha: str, me
         )
 
 
-def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
-    """Prove an RC's source is a master merge commit whose PR head passed the required checks."""
+def _checked_range(api: GitHubApi, tag: str, source_sha: str) -> set[str]:
+    try:
+        baseline = select_previous_release(_paged(api, "releases", query={}), release_tag=tag)
+        base = resolve_tag_sha(api, baseline["tag_name"])
+        return protected.required_jobs(protected.touched(base, source_sha))
+    except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
+        raise ReleaseBackstopError("Cannot prove complete range from the previous published product release") from exc
 
-    source_sha = resolve_tag_sha(api, tag)
+
+def _named_jobs(api: GitHubApi, sha: str) -> dict[str, dict[str, Any]]:
+    # Never combine a red current run with successful jobs from a superseded one.
+    runs = _candidate_runs(api, sha)
+    if not runs:
+        raise ReleaseBackstopError(f"Missing protected native evidence for exact SHA {sha}")
+    run = max(runs, key=lambda r: r['id'])
+    jobs: dict[str, dict[str, Any]] = {}
+    for job in _jobs(api, run['id']):
+        name = job.get('name')
+        if not isinstance(name, str) or name in jobs:
+            raise ReleaseBackstopError("Ambiguous master job evidence")
+        jobs[name] = job
+    return jobs
+
+
+def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str) -> None:
+    wanted = _checked_range(api, tag, sha)
+    if not wanted and not waiver:
+        return
+    jobs = _named_jobs(api, sha)
+    def passed(job: dict[str, Any]) -> bool:
+        return job.get('status') == 'completed' and job.get('conclusion') == 'success'
+    missing = sorted(n for n in wanted if not passed(jobs.get(n, {})))
+    if not waiver:
+        if missing:
+            raise ReleaseBackstopError('Missing or non-green protected job(s): ' + ', '.join(missing))
+        return
+    # The release lead records Product's explicit approval. It is an operational
+    # rule, not a distinct GitHub identity; the mechanical conditions still apply.
+    name, sep, reason = waiver.partition(' | ')
+    if not sep or not reason.strip() or len(waiver) > 500 or any(not ch.isprintable() for ch in waiver):
+        raise ReleaseBackstopError('Expected one job | reason and quoted approval on one line')
+    if missing != [name]:
+        raise ReleaseBackstopError('Exception must name exactly the one non-green protected job')
+    job = jobs.get(name, {})
+    if (job.get('status') != 'completed' or job.get('conclusion') != 'cancelled' or
+            job.get('runner_id') != 0 or job.get('runner_name') != '' or job.get('steps') != []):
+        raise ReleaseBackstopError('Exception requires a cancelled job with no runner and no steps')
+    commit = api.get(f'commits/{sha}')
+    parents = commit.get('parents') if isinstance(commit, dict) else None
+    if not isinstance(parents, list) or len(parents) != 1 or not isinstance(parents[0], dict):
+        raise ReleaseBackstopError('Exception requires one exact parent')
+    parent = _sha(parents[0].get('sha'), context='RC parent')
+    try:
+        affected = protected.required_jobs(protected.touched(parent, sha))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise ReleaseBackstopError('Cannot prove parent inputs unchanged') from exc
+    if name in affected or not passed(_named_jobs(api, parent).get(name, {})):
+        raise ReleaseBackstopError('Parent job must pass and candidate changes must not reach its inputs')
+
+
+def prove_rc_pull_request(api: GitHubApi, *, tag: str, candidate: str | None = None, waiver: str = '') -> PullRequestProof:
+    """Use the same proof before tag creation and at both publication stages."""
+    source_sha = _sha(candidate, context='RC candidate') if candidate else resolve_tag_sha(api, tag)
     _require_on_master(api, source_sha)
     pull_number, head_sha, merged_at = _merged_pull(api, source_sha)
     _require_green_checks(api, pull_number=pull_number, head_sha=head_sha, merged_at=merged_at)
+    _verify_protected(api, tag, source_sha, waiver)
     try:
         full_backstop, backstop, run_id = _backstop(api, source_sha)
     except ReleaseBackstopError:
@@ -365,10 +434,12 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
 
 
 def prove_release(
-    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False
+    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, waiver: str = ''
 ) -> BackstopProof | PullRequestProof:
     if rc_pull_request_gate and RC_TAG_RE.fullmatch(tag):
-        return prove_rc_pull_request(api, tag=tag)
+        return prove_rc_pull_request(api, tag=tag, waiver=waiver)
+    if waiver:
+        raise ReleaseBackstopError('Runner exception is only valid for a GitHub-only RC')
     return prove_backstop(api, tag=tag)
 
 
@@ -378,6 +449,7 @@ def _parser() -> argparse.ArgumentParser:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--tag", help="Resolve an existing release tag before checking its source")
     source.add_argument("--source-sha", help="Check the source commit before creating a tag")
+    parser.add_argument('--candidate-rc-tag', help='Before pushing a canonical RC tag, verify its --source-sha')
     parser.add_argument("--token", default=os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", ""))
     parser.add_argument(
         "--rc-pull-request-gate",
@@ -391,10 +463,17 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         api = GitHubApi(args.repository, args.token)
-        if args.source_sha is not None:
+        waiver = os.environ.get('RC_RUNNER_EXCEPTION', '')
+        if args.candidate_rc_tag:
+            if not args.source_sha or not RC_TAG_RE.fullmatch(args.candidate_rc_tag):
+                raise ReleaseBackstopError('Pre-tag RC proof requires --source-sha and a canonical candidate RC tag')
+            proof = prove_rc_pull_request(api, tag=args.candidate_rc_tag, candidate=args.source_sha, waiver=waiver)
+        elif args.source_sha is not None:
+            if waiver:
+                raise ReleaseBackstopError('No exception for a full backstop')
             proof = prove_backstop_sha(api, source_sha=args.source_sha)
         else:
-            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate)
+            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate, waiver=waiver)
     except ReleaseBackstopError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
@@ -407,11 +486,11 @@ def main(argv: list[str] | None = None) -> int:
             f"#{proof.pull_number} passed every required check on its head {proof.head_sha}."
         )
         run = f" (run {proof.backstop_run_id})" if proof.backstop_run_id else ""
-        print(f"Full master backstop at {proof.source_sha}: {proof.backstop}{run}. It does not gate an RC.")
+        print(f"Protected RC evidence verified. Overall master backstop at {proof.source_sha}: {proof.backstop}{run}.")
         if proof.backstop == "failed":
             print(
                 f"::warning::The full master backstop failed at RC source {proof.source_sha}{run}. "
-                "The RC is not blocked; report it as docs/release.md describes."
+                "Required protected evidence has been verified; report the remaining failure as documented."
             )
     # The RC path already inspected the backstop for reporting. Reuse only that
     # existing successful proof; pending/missing/red RCs incur no new discovery

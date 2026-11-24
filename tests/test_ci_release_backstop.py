@@ -47,6 +47,8 @@ class FakeApi:
 
     def get(self, path: str, *, query: dict[str, str | int] | None = None) -> Any:
         self.calls.append((path, query))
+        if path == "releases":
+            return [{"tag_name": "v3.0.1", "draft": False, "published_at": BEFORE_MERGE}]
         if path.startswith("git/ref/tags/"):
             return {"object": {"type": "tag", "sha": "b" * 40}}
         if path == f"git/tags/{'b' * 40}":
