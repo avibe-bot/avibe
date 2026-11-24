@@ -3842,7 +3842,9 @@ final class DirectPathAppTests: XCTestCase {
     /// after its web content process ended) pass the same gate where they
     /// are made. Held: nothing is loaded, and one pending load is kept
     /// however often it is asked for; it is made once when the gate opens.
-    /// The fault, or the controller's invalidation, drops it.
+    /// The fault (something else may hold the listener's port) keeps it the
+    /// same way, for as long as that lasts: the fault ends by itself, and
+    /// the page must load then. The controller's invalidation drops it.
     @MainActor
     func testAnAutomaticLoadThatMeetsAHeldGateIsMadeOnceWhenTheGateOpens() async throws {
         let server = try LocalHTTPServer { _ in
@@ -3917,24 +3919,44 @@ final class DirectPathAppTests: XCTestCase {
         controller.webViewWebContentProcessDidTerminate(primary)
         try await eventually { starts == 3 }
 
-        // The fault drops a held load for good.
+        // The fault keeps a held load, and loads nothing while it lasts,
+        // however often it is asked. It is made once when the gate opens.
         gate = .held
         controller.webViewWebContentProcessDidTerminate(primary)
+        XCTAssertTrue(controller.isHoldingAutomaticLoad)
         gate = .fault
         controller.directAvailabilityDidChange()
-        gate = .open
         controller.directAvailabilityDidChange()
         try await settle()
         XCTAssertEqual(starts, 3)
+        XCTAssertTrue(controller.isHoldingAutomaticLoad)
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await eventually { starts == 4 }
+        XCTAssertFalse(controller.isHoldingAutomaticLoad)
+        controller.directAvailabilityDidChange()
+        try await settle()
+        XCTAssertEqual(starts, 4)
 
-        // So does the controller's invalidation.
+        // A process that ends under the fault itself is held as well.
+        gate = .fault
+        controller.webViewWebContentProcessDidTerminate(primary)
+        try await settle()
+        XCTAssertEqual(starts, 4)
+        XCTAssertTrue(controller.isHoldingAutomaticLoad)
+        gate = .open
+        controller.directAvailabilityDidChange()
+        try await eventually { starts == 5 }
+
+        // The controller's invalidation drops a held load for good.
         gate = .held
         controller.webViewWebContentProcessDidTerminate(primary)
         _ = controller.invalidateForAccountTransition()
         gate = .open
         controller.directAvailabilityDidChange()
         try await settle()
-        XCTAssertEqual(starts, 3)
+        XCTAssertEqual(starts, 5)
+        XCTAssertFalse(controller.isHoldingAutomaticLoad)
     }
 
     /// The App allowed the open, and the App went to the background before
