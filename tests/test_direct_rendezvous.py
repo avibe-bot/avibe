@@ -431,6 +431,8 @@ def test_invalid_listener_fault_batches_are_ignored_in_full(instance, caplog):
                    [good, {**good, "extra": "private"}], [good, {**good, "step": "unknown"}],
                    [good, {**good, "step": []}], [good, {**good, "code": False}],
                    [good, {**good, "code": 1.5}], [good, {**good, "background_seconds": True}],
+                   [good, {**good, "code": -(2**31) - 1}], [good, {**good, "code": 2**31}],
+                   [good, {**good, "background_seconds": 2**31}],
                    [good, {**good, "background_seconds": "1"}], [good, {**good, "background_seconds": -1}]):
         response = _post(client, {**_body(), "listener_faults": faults})
         assert response.status_code == 200 and response.get_json() == baseline
