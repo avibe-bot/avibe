@@ -753,8 +753,11 @@ With a transport:
   - **An open under way** has its own line, rows and failure screen; a
     held open waits in its slot and goes on when the gate opens. Their
     Retry is offered under the fault gate too: nothing is reloaded against
-    a port someone else may hold, but the tap binds the port again, and
-    the reload can be made once it is the App's.
+    a port someone else may hold, but the tap binds the port again and the
+    request is kept for that open (`heldRuntimeRetry`, one slot), with the
+    line; it is made by itself as soon as the gate opens, so the user taps
+    once. A newer open, another runtime, or a selection that ended drops
+    it.
   - **The one cause an attempt cannot cure** is a port someone else holds.
     The App keeps trying and shows the message with Retry; it is cured
     when the other holder lets go. The App does not move to another WebKit

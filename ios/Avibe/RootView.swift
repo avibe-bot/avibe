@@ -552,6 +552,15 @@ private struct BrowserScreen: View {
                             .accessibilityIdentifier("listener-recovery-progress")
                     }
 
+                    if appModel.holdsRetry(forAttempt: attemptID) {
+                        // Retry was pressed while something else may hold
+                        // the listener's port: it is made by itself once
+                        // the port is the App's. The line says it is
+                        // under way.
+                        RuntimeProgressLine(label: Text("runtime.loading"))
+                            .accessibilityIdentifier("held-retry-progress")
+                    }
+
                     if recovery == .unreachable {
                         if appModel.runtimeHoldsItsAutomaticLoad {
                             // Nothing of the page is left to keep: the

@@ -368,6 +368,20 @@ final class AppModel: ObservableObject {
     private var listenerRecoverySince: ContinuousClock.Instant?
     private var listenerRecoveryTimer: (any RuntimeOpenTimer)?
     private var listenerRetryAfter: ContinuousClock.Instant?
+    /// A Retry of an open pressed while something else may hold the
+    /// listener's port: nothing could be reloaded then, so the request is
+    /// kept for that open and made once the gate opens, with no second
+    /// tap. One slot; it belongs to the attempt it was pressed for.
+    enum HeldRuntimeRetry: Equatable {
+        /// The failure screen's Retry (`retryRuntimeOpen`).
+        case open
+        /// The row over a cached page whose instance could not be reached.
+        case cachedPage
+        /// The row over a cached page whose instance is listed offline.
+        case offlineCachedPage
+    }
+
+    @Published private(set) var heldRuntimeRetry: (kind: HeldRuntimeRetry, attemptID: Int)?
     /// A runtime whose open is held because its host has a route and the
     /// listener does not serve yet. One slot, not a queue: a newer open, a
     /// stop, or a sign-out clears it, and it is settled only for the
@@ -2000,9 +2014,12 @@ final class AppModel: ObservableObject {
             attempt.id == attemptID,
             attempt.phase == .failed,
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
-            authorizeReload(of: attempt.runtime)
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
         else {
+            return false
+        }
+        guard authorizeReload(of: attempt.runtime) else {
+            holdRetryWhilePortMayBeForeign(.open, of: attempt)
             return false
         }
         return openRuntime(attempt.runtime)
@@ -2048,9 +2065,12 @@ final class AppModel: ObservableObject {
             let attempt = runtimeOpenAttempt,
             attempt.phase == .cachedUnreachable,
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
-            authorizeReload(of: attempt.runtime)
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
         else {
+            return false
+        }
+        guard authorizeReload(of: attempt.runtime) else {
+            holdRetryWhilePortMayBeForeign(.cachedPage, of: attempt)
             return false
         }
         runtimeLoadsLiveOnce = attempt.runtime
@@ -2066,10 +2086,15 @@ final class AppModel: ObservableObject {
             let attempt = runtimeOpenAttempt,
             attempt.phase == .cachedOffline,
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
-            authorizeReload(of: attempt.runtime),
-            openRuntime(attempt.runtime)
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
         else {
+            return false
+        }
+        guard authorizeReload(of: attempt.runtime) else {
+            holdRetryWhilePortMayBeForeign(.offlineCachedPage, of: attempt)
+            return false
+        }
+        guard openRuntime(attempt.runtime) else {
             return false
         }
         let runtime = attempt.runtime
@@ -2854,6 +2879,61 @@ final class AppModel: ObservableObject {
             }
         }
         runtimeController?.directAvailabilityDidChange()
+        makeHeldRuntimeRetryIfTheGateOpened()
+    }
+
+    /// Keeps a Retry that could not reload because something else may hold
+    /// the listener's port. Any other refusal (a return's first attempt,
+    /// where Retry is not offered) keeps nothing.
+    private func holdRetryWhilePortMayBeForeign(
+        _ kind: HeldRuntimeRetry,
+        of attempt: RuntimeOpenAttempt
+    ) {
+        guard directLoadGate(for: attempt.runtime) == .fault else {
+            return
+        }
+        heldRuntimeRetry = (kind, attempt.id)
+    }
+
+    /// Makes the kept Retry once its runtime's gate is open, for the open
+    /// it was pressed for and no other: a newer open, another runtime on
+    /// screen, or a selection that ended drops it. While the gate is not
+    /// open (the port still someone else's, the background, a return's
+    /// first attempt) it stays kept.
+    private func makeHeldRuntimeRetryIfTheGateOpened() {
+        guard let held = heldRuntimeRetry else {
+            return
+        }
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.id == held.attemptID,
+            runtimeIdentity == held.attemptID,
+            route.runtime == attempt.runtime,
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
+        else {
+            heldRuntimeRetry = nil
+            return
+        }
+        guard directLoadGate(for: attempt.runtime) == .open else {
+            return
+        }
+        // Cleared first: the retry asks the gate itself, and decides alone.
+        heldRuntimeRetry = nil
+        switch held.kind {
+        case .open:
+            _ = retryRuntimeOpen(attemptID: held.attemptID)
+        case .cachedPage:
+            retryRuntimeCachedPage()
+        case .offlineCachedPage:
+            retryOfflineCachedPage()
+        }
+    }
+
+    /// Whether a Retry pressed for this open is kept until the listener's
+    /// port is the App's again: the line shows meanwhile.
+    func holdsRetry(forAttempt attemptID: Int) -> Bool {
+        heldRuntimeRetry?.attemptID == attemptID
+            && runtimeOpenAttempt?.id == attemptID
     }
 
     /// Whether the shell may create or reload `runtime`'s WebView now
@@ -2915,8 +2995,9 @@ final class AppModel: ObservableObject {
     /// The Retry tap itself: decides again, now, whether the reload may be
     /// made, and hears a failure already recorded first. While something
     /// else may hold the listener's port nothing is reloaded, but the tap
-    /// is not wasted: the port is bound again now, as the recovery's own
-    /// Retry does, and the reload can be made once it is the App's.
+    /// is not lost: the port is bound again now, as the recovery's own
+    /// Retry does, and the caller keeps the request, which is made as soon
+    /// as the port is the App's (`makeHeldRuntimeRetryIfTheGateOpened`).
     func authorizeReload(of runtime: MobileRuntimeContext) -> Bool {
         directPathController?.settleRecordedFault()
         if directLoadGate(for: runtime) == .fault {

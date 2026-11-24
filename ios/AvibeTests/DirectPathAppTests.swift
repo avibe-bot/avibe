@@ -250,6 +250,125 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    /// The failure screen's Retry, pressed while something else holds the
+    /// listener's port: nothing may be reloaded against that port, so the
+    /// request is kept for that open, and made by itself as soon as the
+    /// port is the App's again. The user taps once.
+    @MainActor
+    func testARetryPressedWhileThePortIsSomeoneElsesIsMadeByItselfWhenThePortIsFree() async throws {
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(directTransport: transport) {
+            listening = try listeningSockets()
+        }
+        let runtime = try await select("instance-1", in: app)
+        let port = try directListenerPort(of: app, since: listening)
+        let failedID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        // The open ended on its failure screen.
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: failedID,
+            runtime: runtime
+        )
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        var squatterIsOpen = true
+        defer {
+            if squatterIsOpen {
+                squatter.close()
+            }
+        }
+        enterForeground()
+        try await eventually { app.directLoadGate(for: runtime) == .fault }
+        XCTAssertTrue(app.offersRetry(for: runtime))
+        XCTAssertFalse(app.holdsRetry(forAttempt: failedID))
+
+        // The one tap: nothing is reloaded against the port, and the
+        // request is kept for this open.
+        XCTAssertFalse(app.retryRuntimeOpen(attemptID: failedID))
+        XCTAssertTrue(app.holdsRetry(forAttempt: failedID))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, failedID)
+        XCTAssertEqual(app.runtimeOpenAttempt?.phase, .failed)
+        XCTAssertEqual(app.route, .browser(runtime))
+        // Still kept while the port is someone else's, attempt after attempt.
+        try await Task.sleep(for: .milliseconds(900))
+        XCTAssertEqual(app.directLoadGate(for: runtime), .fault)
+        XCTAssertTrue(app.holdsRetry(forAttempt: failedID))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, failedID)
+
+        // The port is free: the runtime opens again, with no second tap.
+        squatter.close()
+        squatterIsOpen = false
+        try await eventually(timeout: .seconds(20)) {
+            guard let attempt = app.runtimeOpenAttempt else {
+                return false
+            }
+            return attempt.id != failedID && attempt.phase != .failed
+        }
+        XCTAssertFalse(app.holdsRetry(forAttempt: failedID))
+        XCTAssertNil(app.heldRuntimeRetry)
+        let reopened = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(app.directLoadGate(for: reopened), .open)
+        XCTAssertGreaterThan(app.runtimeIdentity, failedID)
+    }
+
+    /// A kept Retry belongs to the open it was pressed for: another
+    /// instance opened meanwhile drops it, and nothing reopens the first
+    /// when the port is free.
+    @MainActor
+    func testAKeptRetryIsDroppedWhenAnotherInstanceIsOpened() async throws {
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(directTransport: transport) {
+            listening = try listeningSockets()
+        }
+        let runtime = try await select("instance-1", in: app)
+        let port = try directListenerPort(of: app, since: listening)
+        let failedID = try XCTUnwrap(app.runtimeOpenAttempt?.id)
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .failed, destination: .instance),
+            attemptID: failedID,
+            runtime: runtime
+        )
+        enterBackground()
+        try await eventually { await !LoopbackClient.canConnect(to: port) }
+        let squatter = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        var squatterIsOpen = true
+        defer {
+            if squatterIsOpen {
+                squatter.close()
+            }
+        }
+        enterForeground()
+        try await eventually { app.directLoadGate(for: runtime) == .fault }
+        XCTAssertFalse(app.retryRuntimeOpen(attemptID: failedID))
+        XCTAssertTrue(app.holdsRetry(forAttempt: failedID))
+
+        // The user goes to another instance instead.
+        let other = try await select("instance-2", in: app)
+        XCTAssertFalse(app.holdsRetry(forAttempt: failedID))
+
+        squatter.close()
+        squatterIsOpen = false
+        try await eventually(timeout: .seconds(20)) { app.directLoadGate(for: runtime) == .open }
+        try await settle()
+        XCTAssertNil(app.heldRuntimeRetry)
+        XCTAssertEqual(app.route, .browser(other))
+    }
+
     /// The recovery covers only a runtime whose host is routed to the
     /// listener. Another instance, opened while the listener could not
     /// serve, is on WebKit's own path: not covered, its open not failed.
