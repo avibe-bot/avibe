@@ -106,7 +106,7 @@ def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
     model_hub_app,
     protocol: str,
 ) -> None:
-    """B1: Auto never proves a key; the declared interface's key-gated listing does (#1920, #1936)."""
+    """B1: only a credential-gated listing can turn ambiguous relay shapes into proof."""
 
     _configure_protocol(mock_llm_upstream, protocol)
     _require_key(mock_llm_upstream, SYNTHETIC_API_KEY)
@@ -122,9 +122,21 @@ def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
     body = response.json()
     assert response.status == 200, body
     assert body["contract_version"] == CONTRACT_VERSION
-    # A model-free probe's schema error shows a shape, never the key, and Auto
-    # never asks a listing, which names no protocol.
-    assert body["observation"] == {
+    # The fixture rejects every mismatched path in its configured dialect.
+    # With Chat-compatible shape evidence and a gated catalog of generic model
+    # names, a multi-format relay resolves to Chat. Responses-only evidence in
+    # this fixture does not establish an interface on Auto.
+    auto_proven = protocol in {"anthropic", "openai_chat"}
+    assert body["observation"] == ({
+        "contract_version": CONTRACT_VERSION,
+        "outcome": "observed",
+        "reachable": True,
+        "authenticated": "authenticated",
+        "protocol": "openai_chat",
+        "discovery": "succeeded",
+        "models": ["mock-model"],
+        "model_metadata": [{"id": "mock-model", "supported_parameters": None}],
+    } if auto_proven else {
         "contract_version": CONTRACT_VERSION,
         "outcome": "adapter_error",
         "reachable": True,
@@ -133,8 +145,9 @@ def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
         "discovery": "not_attempted",
         "models": [],
         "model_metadata": [],
-    }
-    assert "/v1/models" not in [item["path"] for item in mock_llm_upstream.requests()]
+    })
+    auto_paths = [item["path"] for item in mock_llm_upstream.requests()]
+    assert ("/v1/models" in auto_paths) == auto_proven
 
     mock_llm_upstream.reset_requests()
     response = model_hub_app.client.post(
@@ -344,8 +357,9 @@ def test_b6_replace_key_rolls_back_then_rename_and_retarget_commit(
         {"key": "sk-model-hub-e2e-rejected"},
     )
     failed_body = failed.json()
-    assert failed.status == 502, failed_body
+    assert failed.status == 422, failed_body
     assert failed_body["error"] == "discovery_failed"
+    assert failed_body["detail"] == "modelHub.errors.authentication_failed"
     after_failure = model_hub_app.client.get(
         "/api/models/sources"
     ).json()["sources"][0]
