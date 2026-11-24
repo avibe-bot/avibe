@@ -1569,7 +1569,10 @@ def _add_hosted_call(
     """
 
     tool = responses_hosted_tool(item)
-    if tool is None or tool not in hosted or assembler.source_id is None:
+    if tool is None:
+        return
+    source_id = assembler.observe_hosted_call()
+    if tool not in hosted or source_id is None:
         return
     current = assembler.hosted_block_at(output_index)
     if backfill and current is not None and current.record.status != "pending":
@@ -1577,7 +1580,7 @@ def _add_hosted_call(
     assembler.hosted_block(
         output_index,
         responses_hosted_block(
-            item, source_id=assembler.source_id, call_id=f"hosted_{output_index}", finished=finished
+            item, source_id=source_id, call_id=f"hosted_{output_index}", finished=finished
         ),
     )
 

@@ -12,6 +12,208 @@ def _claim(subject="owner-id"):
     return claims.run_link(expected_subject=subject, show_link=lambda _: None)
 
 
+@pytest.mark.parametrize('bad_receipt', [{}, {'binding_disposition': 'new'}, {'binding_disposition': True}])
+def test_constrained_pair_replays_same_request_until_receipt_matches(pairing_host, monkeypatch, bad_receipt):
+    from uuid import uuid4
+    from vibe import desktop_local_instance as local
+
+    assert remote_access.pair('key_A', 'https://backend.test')['ok']
+    cfg = V2Config.load()
+    installation = local.ensure_installation_id()
+    key = 'vrp2_' + 'A' * 43
+    claim_id = str(uuid4())
+    requests = []
+
+    def redeem(_url, payload, **_kw):
+        requests.append(dict(payload))
+        receipt = bad_receipt if len(requests) == 1 else {'binding_disposition': 'existing'}
+        return {**_response('inst_B'), **receipt}
+
+    monkeypatch.setattr(remote_access, '_json_request', redeem)
+    assert not remote_access.pair(key, 'https://backend.test')['ok']
+    assert not requests
+    result = remote_access.pair_personal_claim(
+        key=key, backend_url='https://backend.test', device='fixture',
+        revision=local.claim_revision(cfg, installation, None), installation=installation,
+        subject='owner-id', claim_id=claim_id, instance_id='inst_B', hostname='fixture.avibe.bot',
+        binding_disposition='existing',
+    )
+    assert result['error'] == 'pairing_redeem_indeterminate'
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    journal, error = remote_access._read_pending_pairing_record()
+    assert not error and journal['phase'] == 'prepared'
+    assert journal['personal_claim']['binding_disposition'] == 'existing'
+    if bad_receipt:
+        recovered = remote_access._retry_installation_pairing(journal)
+        assert recovered['ok'] and recovered['binding_disposition'] == 'existing'
+    else:
+        # A new UI process starts with only this journal. Its first tick must not
+        # interpret the now invalid source credential as a detector observation.
+        workers, probes = [], []
+
+        class Worker:
+            def __init__(self, *, target, **_):
+                self.target = target
+
+            def start(self):
+                workers.append(self.target)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(remote_access, '_AUTHORIZATION_REVISION_POLL_STARTED', False)
+            patch.setattr(remote_access.threading, 'Thread', Worker)
+            remote_access.start_authorization_revision_polling()
+        assert len(workers) == 1
+
+        class EndTick(Exception):
+            pass
+
+        def stop_tick(delay):
+            assert delay > 0
+            raise EndTick
+
+        monkeypatch.setattr(remote_access.time, 'sleep', stop_tick)
+        monkeypatch.setattr(remote_access, 'sync_authorization_revision_once', lambda **kw: probes.append(kw['monitor']))
+        with pytest.raises(EndTick):
+            workers[0]()
+        assert probes == [None]  # refresh the live binding, but no rejection evidence
+    assert requests[0] == requests[1] and requests[0]['redeem_request_id']
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_B'
+    assert 'bound' not in claims._outcome()
+    assert claims._outcome(constrained=True)['bound']['binding_disposition'] == 'existing'
+    assert claims.RebindClaims().state(claim_id) == {'state': 'bound', 'binding_disposition': 'existing'}
+    with pytest.raises(claims.ClaimError, match='claim_unavailable'):
+        claims.RedirectClaims().state(claim_id)
+    assert remote_access._read_pending_pairing_record() == (None, None)
+
+
+@pytest.mark.parametrize('kind', ['existing', 'new'])
+def test_desktop_disposition_checks_target_but_never_selects_rebind_journal(claim_peer, monkeypatch, kind):
+    from tests.test_personal_claims import _desktop_claim
+
+    peer = claim_peer
+    peer.start_fields['ordinary_decision_readback'] = True
+    request = peer.request
+
+    def issue(*args):
+        request(*args)
+        if peer.result[1].get('status') == 'redeemed':
+            peer.result[1]['binding_disposition'] = kind
+
+    monkeypatch.setattr(peer, 'request', issue)
+    sealed = []
+
+    def redeem(*args, **kwargs):
+        journal, error = remote_access._read_pending_pairing_record()
+        assert not error and journal['phase'] == 'prepared'
+        sealed.append(journal['personal_claim'])
+        return _response()  # Ordinary pairing has no disposition at all.
+
+    monkeypatch.setattr(remote_access, '_json_request', redeem)
+
+    def review(ticket):
+        assert ticket['ordinary_decision_readback'] is True
+        flow.arm(claim_id=ticket['claim_id'], kind=kind, hostname=peer.hostname,
+                 existing_instance_id='inst_A' if kind == 'existing' else None)
+
+    flow = _desktop_claim(signed_in_subject=peer.account['subject'], publish_ticket=review)
+    assert flow.run()['state'] == 'bound'
+    assert sum(payload.get('read_decision') is True for _, payload in peer.calls) == 1
+    assert len(sealed) == 1 and 'binding_disposition' not in sealed[0]
+    assert set(claims._outcome()['bound']) == {'claim_id', 'generation'}
+    assert not claims._marker(True).exists()
+
+
+@pytest.mark.parametrize('kind,old_marker,resume', [
+    ('existing', False, False), ('new', False, False), ('existing', True, False), ('new', True, False),
+    ('existing', True, True), ('new', True, True),
+])
+def test_web_rebind_notifies_service_for_its_own_publication(claim_peer, monkeypatch, kind, old_marker, resume):
+    from tests.test_pairing_recovery import _fail_config_publication_once
+    from tests.test_personal_claims import callback_proof
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe import ui_server
+
+    if old_marker:
+        assert _claim()['state'] == 'bound'  # Real prior ordinary generation.
+    else:
+        assert remote_access.pair('key_A', 'https://avibe.bot')['ok']
+    ordinary = claims._outcome()
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.enabled = False
+    cfg.save()
+    peer = claim_peer
+    target = 'inst_A' if kind == 'existing' else 'inst_B'
+    peer.code, peer.key = 'RB2-ABCD234567', 'vrp2_' + 'A' * 43
+    peer.start_fields.update(predecessor_constrained=True, ordinary_decision_readback=True)
+    request = peer.request
+
+    def issue(*args):
+        request(*args)
+        if peer.result[1].get('status') == 'redeemed':
+            peer.result[1]['binding_disposition'] = kind
+            peer.result[1]['instance']['id'] = target
+
+    sends, activations = [], []
+
+    def redeem(_url, payload, **kw):
+        sends.append(payload['redeem_request_id'])
+        return {**_response(target), 'instance_secret': 'fixture-rotated', 'binding_disposition': kind}
+
+    def activate(*, binding_changed=False):
+        cloud = V2Config.load().remote_access.vibe_cloud
+        activations.append((binding_changed, cloud.instance_id, cloud.enabled))
+        return True
+
+    monkeypatch.setattr(claims, 'rebind_claims', claims.RebindClaims())
+    monkeypatch.setattr(peer, 'request', issue)
+    monkeypatch.setattr(remote_access, '_json_request', redeem)
+    monkeypatch.setattr(ui_server, '_ensure_remote_access_monitoring', activate)
+    browser = ui_server.app.test_client()
+    headers = csrf_headers(browser)
+    started = browser.post('/api/remote-access/rebind/claims', headers=headers, json={})
+    assert started.status_code == 201
+    body = started.get_json()
+    flow = claims.rebind_claims._get(body['claim_id'])
+    assert not flow.ticket.ordinary_decision_readback  # Extra ordinary ack on an RB2 ticket is inert.
+    if resume:
+        _fail_config_publication_once(monkeypatch)
+    callback = '/remote/claim/callback?claim_id=' + body['claim_id'] + '&state=' + callback_proof(body)
+    assert browser.get(callback + '&callback_token=' + 'A' * 43, base_url='http://localhost').headers['Location'] == '/settings/remote-access'
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] in ('bound', 'error'), timeout=5)
+    if resume:
+        assert flow.view['code'] == 'pairing_recovery_required' and not activations
+        assert remote_access._read_pending_pairing_record()[0]['phase'] == 'redeemed'
+        done = browser.post('/api/remote-access/vibe-cloud/pair', headers=headers, json={})
+        assert done.status_code == 200 and done.get_json()['binding_disposition'] == kind
+    else:
+        assert flow.view['state'] == 'bound'
+    assert len(sends) == 1 and activations == [(True, target, False)]
+    assert claims._outcome() == ordinary and claims._outcome(True)['bound']['binding_disposition'] == kind
+    assert V2Config.load().remote_access.vibe_cloud.instance_secret == 'fixture-rotated'
+
+
+def test_refused_rebind_retry_cannot_begin_legacy_desktop_dispatch(pairing_host, monkeypatch):
+    from tests.test_binding_recovery import _attempt
+    from vibe import desktop_local_instance as local
+
+    assert remote_access.pair('key_A', 'https://backend.test')['ok']
+    requests = []
+
+    def refused(_url, payload, **kw):
+        requests.append(payload['redeem_request_id'])
+        raise remote_access.BackendRequestError(409, {'error': 'registration_indeterminate'})
+
+    monkeypatch.setattr(remote_access, '_json_request', refused)
+    monkeypatch.setattr(remote_access.desktop_redeem_evidence, 'begin', lambda *_: pytest.fail('legacy dispatch'))
+    assert _attempt(V2Config.load(), local.ensure_installation_id())['error'] == 'issuer_replay_refused'
+    pending, error = remote_access._read_pending_pairing_record()
+    assert not error and remote_access._issuer_replay_refused(pending)
+    assert remote_access._retry_installation_pairing(pending)['error'] == 'issuer_replay_refused'
+    assert requests == [pending['redeem_request']['redeem_request_id']]
+    assert remote_access._read_pending_pairing_record() == (pending, None)
+
+
 def test_off_binding_is_not_repaired_or_replaced(claim_peer):
     assert _claim()["state"] == "bound"
     cfg = V2Config.load()
@@ -26,6 +228,8 @@ def test_off_binding_is_not_repaired_or_replaced(claim_peer):
 def test_legacy_prepared_survives_refusal_then_can_be_superseded_by_matching_accept(claim_peer):
     record = remote_access._new_pairing_claim(V2Config.load(), "https://avibe.bot", "original", pairing_key="fixture-old")
     remote_access._write_pending_pairing_record(record)
+    assert remote_access._drive_pending_pairing() == (True, 60)
+    assert not claim_peer.calls
     assert _claim("different")["state"] == "declined"
     assert remote_access._read_pending_pairing_record() == (record, None)
     assert _claim()["state"] == "bound"
@@ -86,7 +290,7 @@ def test_changed_source_only_supersedes_on_owner_accept(claim_peer, monkeypatch)
     assert len(claim_peer.challenges) == 3
 
 
-@pytest.mark.parametrize("via", ["legacy", "fresh_start", "explicit_recovery"])
+@pytest.mark.parametrize("via", ["legacy", "fresh_start", "explicit_recovery", "startup"])
 def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, monkeypatch, service_adoptions, via):
     from tests.test_pairing_recovery import _fail_config_publication_once
     from tests.test_personal_claims import _start
@@ -103,6 +307,9 @@ def test_durable_status_after_other_caller_finishes_sealed_journal(claim_peer, m
     elif via == "fresh_start":
         assert _start(client).get_json()["code"] == "already_bound"
         assert service_adoptions == ["inst_A"]
+    elif via == "startup":
+        monkeypatch.setattr(remote_access, '_json_request', lambda *a, **kw: pytest.fail('sealed response was already redeemed'))
+        assert remote_access._drive_pending_pairing() == (True, 1)
     else:
         assert claims.recover_pairing(ident)["state"] == "bound"
     assert len(claim_peer.challenges) == 1 and client.get(route).get_json() == {"state": "bound"}

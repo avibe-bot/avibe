@@ -19,6 +19,8 @@ _REQUEST = {"request_fingerprint", "redeem_request"}
 _WIRE = {"pairing_key", "redeem_request_id", "device_name", "local_version", "origin_service"}
 _OBSERVED = {"desktop_reply", "desktop_dispatch", "desktop_failure"}
 _SEALED = {"pairing", "target_identity", "target_fingerprint", "redeemed_at"}
+# Publication bookkeeping the current writer seals with the receipt (#4133).
+_PUBLICATION = {"source_was_bound", "connection_file"}
 
 
 def _unique(pairs):
@@ -114,9 +116,11 @@ def classify(pending, config, installation, *, recent):
     same_source = record["source_fingerprint"] == fingerprint
     phase = record["phase"]
     if phase in ("redeemed", "applied"):
-        allowed = _BASE | _REQUEST | _OBSERVED | _SEALED | ({"applied_at"} if phase == "applied" else set())
+        allowed = _BASE | _REQUEST | _OBSERVED | _SEALED | _PUBLICATION | ({"applied_at"} if phase == "applied" else set())
         saved = record["pairing"]
         if (record.keys() - allowed or not _known_request(record) or not _timestamp(record.get("redeemed_at"))
+                or type(record.get("source_was_bound", False)) is not bool
+                or not isinstance(record.get("connection_file"), (str, type(None)))
                 or phase == "applied" and not _timestamp(record.get("applied_at"))
                 or set(saved) - {*pairing._PAIRING_REQUIRED_FIELDS, *pairing._PAIRING_SEAL_EXTRA_FIELDS, "session_secret"}
                 or saved["session_secret"] != record["session_secret"] or saved["backend_url"] != record["backend_url"]

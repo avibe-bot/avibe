@@ -377,14 +377,13 @@ class _GoogleStream:
     def _server_part(self, part: Mapping[str, Any]) -> None:
         """A Google Search Gemini ran inside the response: one hosted call, its two parts kept verbatim (§4)."""
 
-        source_id = self.assembler.source_id
         call = part.get("toolCall")
         response = part.get("toolResponse")
         item = call if isinstance(call, Mapping) else response
-        if (
-            "web_search" not in self.hosted or source_id is None or not isinstance(item, Mapping)
-            or item.get("toolType") != GOOGLE_SEARCH_TOOL_TYPE
-        ):
+        if not isinstance(item, Mapping) or item.get("toolType") != GOOGLE_SEARCH_TOOL_TYPE:
+            return
+        source_id = self.assembler.observe_hosted_call()
+        if "web_search" not in self.hosted or source_id is None:
             return
         self._end_block()
         if isinstance(call, Mapping):

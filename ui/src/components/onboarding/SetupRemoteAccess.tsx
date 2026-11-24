@@ -26,7 +26,9 @@ export function SetupRemoteAccess() {
   const onEnd = useCallback((end: ClaimEnd) => {
     // Bound (here, or already): the Devices page shows it and offers the phone.
     if (end.state === 'bound' || end.code === 'already_bound') navigate(DEVICES_PATH, { replace: true });
-    else setProblem(claimProblem(end.code === 'no_answer' ? undefined : end.code, { claimId: end.claimId, seconds: end.seconds }));
+    else setProblem(claimProblem(end.code === 'no_answer' ? undefined : end.code, {
+        claimId: end.claimId, seconds: end.seconds, confirmingEmail: end.claim?.confirmingEmail,
+      }));
   }, [navigate]);
   const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd });
 

@@ -1145,6 +1145,7 @@ final class NavigationPolicyTests: XCTestCase {
             if currentStore != launchStore {
                 let cleanup = NamedDataStoreCleanup()
                 cleanup.identifier = currentStore
+                cleanup.own(app: appModel)
                 // Weak: the App holds its current store, so the store can
                 // go only once the App has.
                 addTeardownBlock { @MainActor [weak appModel] in
@@ -2201,6 +2202,7 @@ final class NavigationPolicyTests: XCTestCase {
             )
         )
         storeCleanup.identifier = appModel.websiteDataStore.identifier
+        storeCleanup.own(app: appModel)
         try await waitUntil {
             (
                 try? appModel.mobileSessionCoordinator.selectInstance(
@@ -2303,13 +2305,26 @@ final class NavigationPolicyTests: XCTestCase {
             defaults.removePersistentDomain(forName: suiteName)
         }
 
+        addTeardownBlock { @MainActor [self] in
+            server.requests.attach(to: self, name: "cold launch bootstrap requests")
+        }
+
         let appModel = makeTestAppModel(
             defaults: defaults,
             controlPlane: MobileControlPlaneConfiguration(
                 testBaseURL: baseURL
             )
         )
-        await fulfillment(of: [sessionHeaders.expectation], timeout: 15)
+        // The App's first session request, as long as the App itself
+        // allows one account operation (its account page's readiness and
+        // the request), not less: a loaded CI runner took 15.7 s here
+        // (rc18's backstop, run 45360245740), and a shorter wait fails a
+        // bootstrap the App would have finished. The request log, attached
+        // at teardown, names the step of one that really stalls.
+        await fulfillment(
+            of: [sessionHeaders.expectation],
+            timeout: WebKitReadiness.standardTransportOperationSeconds
+        )
 
         NotificationCenter.default.post(
             name: .avibePushNotificationTapped,
@@ -2388,6 +2403,7 @@ final class NavigationPolicyTests: XCTestCase {
             )
         )
         storeCleanup.identifier = appModel.websiteDataStore.identifier
+        storeCleanup.own(app: appModel)
         let hostingController = UIHostingController(
             rootView: RootView().environmentObject(appModel)
         )
@@ -3162,6 +3178,12 @@ final class NavigationPolicyTests: XCTestCase {
             storeCleanups: storeCleanups,
             requests: server.requests
         )
+        // Nothing of ours holds the launch store or the one sign-out
+        // rotated to: the App was released, and no page uses either. That
+        // WebKit itself may still hold one for a while is no failure of the
+        // App, which never needs a store removed at once (its sweep keeps a
+        // store listed until WebKit drops it), so such a store is left to
+        // later removals (`FixtureStoreRemoval`).
         for storeCleanup in storeCleanups {
             let removalError = await storeCleanup.remove()
             XCTAssertNil(removalError)
@@ -3599,6 +3621,7 @@ final class NavigationPolicyTests: XCTestCase {
         storeCleanups[0].identifier = try XCTUnwrap(
             appModel?.websiteDataStore.identifier
         )
+        storeCleanups[0].own(app: try XCTUnwrap(appModel))
         try await exerciseRuntimeAccountTransition(
             appModel: try XCTUnwrap(appModel),
             storeCleanups: storeCleanups,
@@ -3745,6 +3768,7 @@ final class NavigationPolicyTests: XCTestCase {
 
         let signedOut = try await appModel.mobileSessionCoordinator.logout()
         storeCleanups[1].identifier = appModel.websiteDataStore.identifier
+        storeCleanups[1].own(app: appModel)
         XCTAssertEqual(signedOut, .signedOut)
         XCTAssertEqual(appModel.route, .onboarding(.account))
         XCTAssertNil(switchedWebView.superview)
@@ -3938,6 +3962,7 @@ final class NavigationPolicyTests: XCTestCase {
         )
         let storeCleanup = NamedDataStoreCleanup()
         storeCleanup.identifier = appModel.websiteDataStore.identifier
+        storeCleanup.own(app: appModel)
         addTeardownBlock { @MainActor [weak appModel, self] in
             appModel?.showInstancePicker()
             appModel?.mobileSessionCoordinator.deactivateAccountSurface()
@@ -4590,37 +4615,41 @@ private final class HeldSessionReads: @unchecked Sendable {
     let release = DispatchSemaphore(value: 0)
 }
 
+/// One named store a test made, and what of the test holds it
+/// (`FixtureStoreRemoval`).
 @MainActor
 private final class NamedDataStoreCleanup {
     var identifier: UUID?
+    private var owners: [@MainActor () -> Bool] = []
 
+    /// `object` holds the store while it is alive (an App holds its
+    /// current store). Weakly.
+    func own(_ object: AnyObject) {
+        owners.append { [weak object] in object != nil }
+    }
+
+    /// The App and its account store, which holds the App's current
+    /// WebKit store without a page and could outlive the App.
+    func own(app: AppModel) {
+        own(app)
+        own(app.websiteDataStore)
+    }
+
+    /// `nil` when the store is gone, or when WebKit alone still holds it
+    /// with nothing of the test alive (it is then left to later removals).
     func remove() async -> Error? {
         guard let identifier else {
             return nil
         }
-        var lastError: Error?
-        for attempt in 0..<50 {
-            lastError = await AccountWebsiteDataStoreOperations.live
-                .removeIdentifier(identifier)
-            let registered = await withCheckedContinuation { continuation in
-                WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                    continuation.resume(returning: Set($0))
-                }
-            }
-            if !registered.contains(identifier) {
-                self.identifier = nil
-                return nil
-            }
-            if attempt < 49 {
-                try? await Task.sleep(for: .milliseconds(100))
-            }
+        let owners = owners
+        let failure = await FixtureStoreRemoval.remove(identifier) {
+            owners.contains { $0() }
         }
-        return lastError ?? NamedDataStoreCleanupError.stillRegistered(identifier)
+        if failure == nil {
+            self.identifier = nil
+        }
+        return failure
     }
-}
-
-private enum NamedDataStoreCleanupError: Error {
-    case stillRegistered(UUID)
 }
 
 private final class NavigationResponseProbe: NSObject, WKNavigationDelegate {

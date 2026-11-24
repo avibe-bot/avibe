@@ -57,3 +57,9 @@ vibe remote start                 # bring tunnel back up
 ```
 
 Treat the pairing key, tunnel token, instance secret, and session secret as opaque. Never echo them in chat replies.
+
+### Binding a computer again
+
+When `vibe remote status` prints a `Binding:` line (or `binding_state` in `--json`), or `vibe remote start` says avibe.bot is refusing this computer's binding, the binding needs the user at that computer. You cannot do it for them: `vibe remote rebind` asks its questions at a terminal and refuses an Agent, a Task, a script or a pipe.
+
+Tell the user to run `vibe remote rebind` by hand in a terminal on that computer (an SSH session works), and that it explains both ways before it changes anything: binding the same Avibe again in a browser at the computer's own address, or binding it as a new computer. Do not edit `remote_access` config or files under `state/` to work around a refused binding, and do not pair over it with a key.

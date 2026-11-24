@@ -1103,6 +1103,34 @@ def queue_outage(rig, clock):
         clock.sleep(15)
 
 
+def test_repaired_binding_can_recover_retained_pin_without_prior_journal(rig, monkeypatch, connector_clock, pin_fleet):
+    import ipaddress
+    import time
+    from tests.test_pairing_recovery import _response
+
+    rig.cfg.remote_access.vibe_cloud.edge_ip_version = '4'
+    rig.cfg.save()
+    cs.journal.path.write_text('{')
+    with monkeypatch.context() as pairing:
+        pairing.setattr(ra, 'time', time)
+        pairing.setattr(ra, '_resolve_pairing_backend_addresses', lambda *_: (ipaddress.ip_address('93.184.216.34'),))
+        pairing.setattr(ra, '_json_request', lambda *_a, **_kw: _response('new-instance'))
+        pairing.setattr(ra, '_continue_requested_after_pairing', lambda *_: None)
+        pairing.setattr(ra, '_stop_direct_lifecycle_before_pairing_discard', lambda *_: None)
+        pairing.setattr(ra, 'status', lambda *_: {'ok': True})
+        assert ra.pair('fixture', 'https://backend.test')['ok']
+    rig.cfg = V2Config.load()
+    assert rig.cfg.remote_access.vibe_cloud.instance_id == 'new-instance'
+    assert cs.value(rig.cfg, 'ipFamily') == '4' and not cs.journal.path.exists()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', 'http2')
+    queue_outage(rig, connector_clock)
+    assert cs.journal.load(rig.cfg)['pinAttempt']['pins'] == {'ipFamily': '4'}
+    pin_fleet.sample = lambda record, elapsed: int(record['ipFamily'] == 'auto' and elapsed >= 8.030)
+    cr._consume_pin_attempt()
+    assert cs.value(V2Config.load(), 'ipFamily') == 'auto'
+    assert cs.journal.inspect(rig.cfg)['returnedToAutomatic']['changes']
+
+
 def test_surviving_connection_does_not_prove_new_connections_work(rig, monkeypatch, connector_clock, pin_fleet):
     monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', 'http2')
     queue_outage(rig, connector_clock)

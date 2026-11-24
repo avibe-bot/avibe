@@ -1026,6 +1026,29 @@
       "backendsTitle": "Agent 后端",
       "backendsDetail": "Claude · OpenCode · Codex —— 在 Backends 标签页管理。",
       "manageBackends": "前往 Backends",
+      "engineUpdates": {
+        "current": "已是最新 · {{time}}检查",
+        "recovering": "正在读取引擎状态…",
+        "available": "可以更新到 v{{version}}",
+        "updating": "正在更新…",
+        "updatingTo": "正在更新到 v{{version}}…",
+        "waitingForIdle": "模型网关正在工作，空闲后会自动再试",
+        "waitingForIdleManual": "模型网关正在工作，这次没有更新，等它空闲后再试",
+        "undone": "上次更新没有成功，已换回之前的版本，模型网关照常可用",
+        "unfinished": "上次更新没有完成，模型网关仍然可用",
+        "attemptUnfinished": "上次尝试没有完成，模型网关仍然可用",
+        "replaced": "之前的版本已被撤回，已换成安全的版本，模型网关照常可用",
+        "needsAvibe": "新版引擎需要 Avibe {{version}} 或更高版本，请先更新 Avibe",
+        "cannotCheck": "暂时无法检查更新，当前版本不受影响",
+        "withdrawing": "这个版本已被撤回，正在换成安全的版本，模型网关稍后恢复",
+        "stopped": "模型网关已停止：这个引擎版本已被撤回，替换的版本可用后会自动恢复。",
+        "cannotStart": "模型网关已停止：引擎无法启动。请到「诊断与日志」查看原因。",
+        "autoUpdate": "自动更新",
+        "checkingButton": "检查中…",
+        "updatingButton": "更新中…",
+        "cannotUpdate": "现在无法更新，当前版本不受影响。",
+        "settingFailed": "设置没有更改成功，请重试。"
+      },
       "items": {
         "askill": {
           "label": "askill",
@@ -1036,8 +1059,10 @@
           "detail": "Vault 托管核心 —— 本地 Vault 操作的必需依赖。"
         },
         "model-hub-engine": {
-          "label": "模型网关引擎（CPA）",
-          "detail": "模型网关使用的固定版本 CLIProxyAPI 运行时。"
+          "label": "模型网关引擎",
+          "detail": "在本机运行模型网关的引擎。",
+          "attribution": "基于开源项目 <project>CLIProxyAPI</project>（CPA）构建。",
+          "attributionLabel": "关于这个引擎"
         },
         "show-runtime": {
           "label": "Show Page 运行时",
@@ -3357,7 +3382,7 @@
   "accessBlocked": {
     "title": "这个地址打不开 Avibe",
     "body": "Avibe 在运行，但不在这个地址打开。",
-    "hint": "在 avibe.bot 登录后，从你的列表里打开它；也可以在运行 Avibe 的那台电脑上直接打开。",
+    "hint": "到运行 Avibe 的那台电脑上打开它。这个 Avibe 绑定了账号的话，也可以在 avibe.bot 登录后从你的列表里打开。",
     "code": "原因：{{code}}",
     "retry": "重试"
   },
@@ -3443,7 +3468,7 @@
     "project_agent_conflict": "该项目的 Agent 已在别处变更，正在重新加载，请再次修改。",
     "project_order_conflict": "项目顺序已在别处变更，列表已刷新，请重新拖动。",
     "invalid_project_order": "无法保存项目顺序，请刷新列表后重试。",
-    "remote_access_host_mismatch": "这个地址打不开 Avibe。在 avibe.bot 登录后从你的列表里打开它，或者在运行 Avibe 的那台电脑上直接打开。",
+    "remote_access_host_mismatch": "这个地址打不开 Avibe。到运行 Avibe 的那台电脑上打开它；这个 Avibe 绑定了账号的话，也可以在 avibe.bot 登录后从你的列表里打开。",
     "remote_access_config_unavailable": "Avibe 无法读取配置。请确认服务运行正常后重试。",
     "remote_access_public_url_invalid": "远程访问配置有误（公网地址无效）。请重新配对此设备或修正远程访问设置。",
     "remote_access_session_secret_missing": "远程访问配置有误（缺少会话密钥）。请重新配对此设备以恢复访问。",
@@ -7999,6 +8024,7 @@
         "freshClaim": "你确认之后，avibe.bot 的回复没有送到，而且无法重新获取。这台电脑没有绑定。请再开启并确认一次。",
         "nameTaken": "绑定完成之前，这个域名被别人占用了。什么都没有绑定。请再开启一次并换一个名字。",
         "unexplained": "avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。",
+        "otherAccount": "这台电脑原来的 Avibe 不在 {{email}} 这个账号下。请用拥有它的账号登录 avibe.bot，再试一次。",
         "loopbackRequired": "avibe.bot 拒绝了：这台电脑以前绑定过，这样的电脑要在它本机地址上的浏览器里绑定。什么都没有绑定。",
         "activeElsewhere": "avibe.bot 拒绝了：那个 Avibe 正在另一台电脑上运行，它在最近 15 分钟内还活跃。什么都没有绑定。想让它改到这台电脑上：在那台电脑上退出 Avibe，等 15 分钟后再试。那台电脑已经不在你手里的话：在 avibe.bot 上删除那个 Avibe 再重新绑定；它的访问名单会丢失，名字会为你的账号保留 30 天。",
         "bindingChanged": "这台电脑的绑定刚刚变了，这里没有再做任何事。",
@@ -8391,7 +8417,20 @@
       "gone": "这台设备已经不在列表里了。",
       "lost": "没有收到结果，不确定有没有完成。下面是重新读取到的状态。",
       "offFromAfar": "没有收到回答，这正是关闭成功时的样子：远程访问一关，这台设备就收不到回答了。要再用，回到运行 Avibe 的电脑上重新开启。",
-      "closedFromAfar": "远程访问已关闭。这台设备现在连不上这个 Avibe 了；要再用，回到运行 Avibe 的电脑上重新开启。"
+      "closedFromAfar": "远程访问已关闭。这台设备现在连不上这个 Avibe 了；要再用，回到运行 Avibe 的电脑上重新开启。",
+      "restrictedFromAfar": "已经改了。这台设备打不开这个 Avibe 了，要到那台电脑上才能再改回来。"
+    },
+    "networkOpen": {
+      "body": "同一网络上的设备现在不用登录就能打开这个 Avibe。开启远程访问后，它们要先登录。",
+      "action": "只允许这台电脑",
+      "confirmTitle": "只允许这台电脑？",
+      "confirmBody": "改了之后，这台设备也打不开了，要到那台电脑上才能再改回来。",
+      "closedBody": "只有这台电脑能打开这个 Avibe。"
+    },
+    "proxyAccess": {
+      "body": "经 {{hosts}} 打开的浏览器不用登录，就是这个 Avibe 的所有者；它们不在这张名单里，也不能在这里退出。",
+      "range": "受信任的代理写的是一段地址，这段地址里的每一台机器都能这样进来。",
+      "where": "这是这台电脑的反向代理声明，在它的配置和启动环境里改。"
     },
     "outsideChange": {
       "title": "这个 Avibe 的地址在别处被改了",
@@ -8420,7 +8459,7 @@
       "currentDomain": "现在的域名",
       "oldName": "原来的名字",
       "confirmTitle": "重新绑定远程访问？",
-      "confirmBody": "这台电脑会重新向 avibe.bot 登记，用你接下来在 avibe.bot 登录的账号。完成后，旧的设备密钥作废，所有远程设备都会退出、要重新登录；这台电脑上的页面不受影响。地址通常不变；如果变了，完成后这里会显示新地址，旧名字可以在「更改域名」里拿回。",
+      "confirmBody": "这台电脑会重新向 avibe.bot 登记，用你接下来在 avibe.bot 登录的账号。完成后，旧的设备密钥作废；这台电脑上的页面不受影响。重新绑定后，已登录的设备会自动重新连上。地址通常不变；如果变了，完成后这里会显示新地址，旧名字可以在「更改域名」里拿回。",
       "copiedData": "如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。",
       "asNew": {
         "whose": "这台电脑绑定的 Avibe 属于另一个账号（{{hint}}）。",
@@ -8451,9 +8490,9 @@
       },
       "toDevices": "去开启远程访问",
       "boundTitle": "已重新绑定",
-      "boundExisting": "已重新绑定。所有远程设备都要重新登录。",
+      "boundExisting": "已重新绑定。已登录的设备会自动重新连上。",
       "boundNew": "已绑定为一个新的 Avibe：{{host}}。所有远程设备都要用新地址重新登录。",
-      "boundPlain": "已绑定。所有远程设备都要重新登录。",
+      "boundPlain": "已绑定。",
       "inBrowser": "重新绑定会在这台电脑的浏览器里继续。",
       "openInBrowser": "在浏览器里打开",
       "invalidReturn": "没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。",

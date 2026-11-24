@@ -22,10 +22,50 @@ def _cutoff_key(binding, subject):
     return "cutoff:" + hashlib.sha256(json.dumps([binding, subject]).encode()).hexdigest()
 
 
+def binding_retired(conn, binding):
+    return bool(binding and conn.scalar(select(state_meta.c.key).where(
+        state_meta.c.key == 'remote_access.retired_registry.v1:' + binding)))
+
+
+def retire_binding(binding, *, now):
+    """Before config publication: freeze the old registry and stop its remote deliveries.
+
+    No account sign-out and no Health unpair. Snapshot unattributed remote endpoints
+    in this same write transaction, while the new binding cannot yet register.
+    A replay after publication must never select endpoints a second time.
+    """
+    from storage.models import device_session_extensions as ext, web_push_subscriptions as push
+    from storage.models import live_activity_trackings as tracks
+    from storage import web_push_service
+
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        if binding_retired(conn, binding):
+            return
+        conn.execute(insert(state_meta).values(key='remote_access.retired_registry.v1:' + binding,
+                                               value_json='true', updated_at=str(now)))
+        web_push_service.record_binding_retirement(conn, binding, now)
+        # A rotated phone token may revive a token_gone row, but never across
+        # retirement, even if the phone enrolls the same endpoint again.
+        revivable = (tracks.c.status == 'stopped') & (tracks.c.stop_reason == 'token_gone')
+        conn.execute(tracks.update().where(tracks.c.owner_user_key.like('remote:%'),
+                                           (tracks.c.status == 'tracking') | revivable)
+                     .values(status='stopped', stop_reason='registration_unavailable', confirmed_at=now,
+                             pending_state=None, updated_at=now))
+        old_sids = select(sessions.c.session_id).where(sessions.c.binding == binding)
+        for endpoint, user_key in conn.execute(select(push.c.endpoint, push.c.user_key).where(
+                push.c.user_key.like('remote:%'))).all():
+            web_push_service.disable_subscription(conn, endpoint=endpoint, user_key=user_key)
+        conn.execute(links.delete().where(links.c.binding == binding))
+        conn.execute(account_refs.delete().where(account_refs.c.cookie_binding == binding))
+        conn.execute(ext.delete().where(ext.c.session_id.in_(old_sids)))
+        conn.execute(sessions.delete().where(sessions.c.binding == binding))
+
+
 def fenced(conn, binding, subject, sid, signed_in, now):
     # Registered sessions at the cutoff have individual tombstones. A fresh
     # login after commit is allowed even in the very same wall-clock second.
-    return (
+    return binding_retired(conn, binding) or (
         conn.execute(
             select(deadlines.c.key)
             .where(
@@ -121,6 +161,8 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
                 return
     with engine.begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
+        if binding_retired(conn, binding):
+            raise PermissionError('session_revoked')
         if not fresh and (
             conn.execute(
                 select(state_meta.c.key).where(state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + sid)

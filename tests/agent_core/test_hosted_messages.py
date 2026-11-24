@@ -412,6 +412,7 @@ def test_a_native_unknown_hosted_block_loads_as_portable_text(
         assert loaded.hosted_summary.cost is None
     else:
         assert loaded.hosted_summary is None
+        assert loaded.hosted_call_unretained  # Its usage is still not a single-context measurement.
     portable = message_to_dict(loaded)
     assert portable["content"][1:] == stored["content"][1:]
     assert isinstance(loaded.content[0], TextBlock)
