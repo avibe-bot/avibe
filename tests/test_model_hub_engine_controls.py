@@ -110,6 +110,49 @@ async def test_pollable_check_never_adopts_or_claims_active_and_update_intent_is
     assert after["last_result"] == "applied"
 
 
+@pytest.mark.parametrize(("cached", "expected_live"), [
+    ("deferred", "deferred"), ("rolling_back", "rolling_back"), ("rolled_back", "rolled_back"),
+    ("withdrawing", "withdrawing"), ("activating", "updating"), ("blocked", "blocked"),
+])
+def test_only_live_observations_can_report_current_engine_activity(tmp_path, cached, expected_live):
+    from vibe.model_hub_runtime.controls import project
+    from vibe.model_hub_runtime.journal import write_document
+    from vibe.model_hub_runtime.lifecycle import EngineLifecycleView
+
+    observed = {"state": cached, "reason": "engine_withdrawn", "available": "new-tag",
+                "last_checked_at": "yesterday", "last_result": "rolled_back"}
+    options = dict(default="bundled", automatic=True, participation=None)
+    live = project(observed, live=True, **options)
+    assert live["active_release"] is None and live["update_state"] == expected_live
+    write_document(tmp_path / "lifecycle-status.json", {**observed, "running": {"asset_release_tag": "old-tag"},
+                                                       "journal_block_reason": "stale observation"})
+    snapshot = EngineLifecycleView.read(tmp_path)
+    for policy in (None, "opted_out", "uncommissioned"):
+        offline = project(snapshot, live=False, **{**options, "participation": policy})
+        assert offline["update_state"] == offline["update_reason"] == (policy or "waiting_for_controller")
+        assert offline["active_release"] is offline["available_release"] is offline["operation_id"] is None
+        assert offline["last_checked_at"] == "yesterday" and offline["last_result"] == "rolled_back"
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_offline_projection_preserves_journal_block_and_history(tmp_path, unreadable):
+    from vibe.model_hub_runtime.controls import project
+    from vibe.model_hub_runtime.journal import write_document
+    from vibe.model_hub_runtime.lifecycle import EngineJournal, EngineLifecycleView
+
+    journal = EngineJournal(tmp_path)
+    if unreadable:
+        journal.path.write_bytes(b"{")
+        reason = "engine_journal_unreadable"
+    else:
+        reason = "engine_withdrawn"
+        journal.save({**journal.empty(), "blocked": reason})
+    write_document(tmp_path / "lifecycle-status.json", {"state": "activating", "last_result": "applied"})
+    result = project(EngineLifecycleView.read(tmp_path), default=None, automatic=True, participation=None, live=False)
+    assert (result["update_state"], result["update_reason"], result["last_result"]) == ("blocked", reason, "applied")
+    assert result["active_release"] is result["available_release"] is None
+
+
 def test_interrupted_receipt_is_failed_not_replayed(tmp_path):
     jobs = EngineJobs(tmp_path)
     jobs.store(jobs.started("engine-lost", True))

@@ -191,23 +191,26 @@ class EngineLifecycleView:
     @staticmethod
     def read(runtime_dir: Path) -> dict[str, Any]:
         try:
+            status = read_document(runtime_dir / "lifecycle-status.json") or {}
+        except JournalError:
+            status = {}
+        try:
             value = EngineJournal(runtime_dir).load()
-            try:
-                status = read_document(runtime_dir / "lifecycle-status.json") or {}
-            except JournalError:
-                status = {}
-            return {
-                **status, "committed": value["active"] if value else None,
-                "previous": value["previous"] if value else None,
-                "staged": value["staged"] if value else [],
-                "pending": value["pending"] if value else None,
-                "quarantine": value["quarantine"] if value else {},
-                "running_last_observed": status.get("running"), "running": None,
-                "state": "blocked" if value and value["blocked"] else status.get("state", "waiting_for_controller"),
-                "reason": value["blocked"] if value and value["blocked"] else status.get("reason"),
-            }
+            blocked = value["blocked"] if value else None
         except JournalError as exc:
-            return {"state": "blocked", "reason": str(exc), "committed": None, "running": None}
+            value, blocked = None, str(exc)
+        return {
+            "committed": value["active"] if value else None,
+            "previous": value["previous"] if value else None,
+            "staged": value["staged"] if value else [],
+            "pending": value["pending"] if value else None,
+            "quarantine": value["quarantine"] if value else {},
+            "running_last_observed": status.get("running"), "running": None,
+            "last_checked_at": status.get("last_checked_at"), "last_result": status.get("last_result"),
+            "journal_block_reason": blocked,
+            "state": "blocked" if blocked else "waiting_for_controller",
+            "reason": blocked or "waiting_for_controller",
+        }
 
 
 class EngineLifecycle:

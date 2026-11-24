@@ -42,7 +42,13 @@ def project(status: dict, *, default: str | None, automatic: bool, participation
     channel = status.get("channel") or {}
     active = (status.get("running") or {}).get("asset_release_tag") if live else None
     available = status.get("available")
-    if state in {"blocked", "rolling_back", "rolled_back", "deferred"}:
+    if not live:
+        # Only a fresh journal read or local policy can override waiting. A
+        # controller being reachable is independent of whether it runs an engine.
+        blocked = status.get("journal_block_reason")
+        state = "blocked" if blocked else participation or "waiting_for_controller"
+        reason = blocked or state
+    elif state in {"blocked", "rolling_back", "rolled_back", "deferred"}:
         pass
     elif state == "withdrawing":
         reason = "engine_withdrawn"
@@ -50,8 +56,6 @@ def project(status: dict, *, default: str | None, automatic: bool, participation
         state = "updating"
     elif participation:
         state, reason = participation, participation
-    elif not live:
-        state, reason = "waiting_for_controller", "waiting_for_controller"
     elif operation and operation["status"] == "running" and state not in {"applied", "withdrawing"}:
         state = "updating" if operation["kind"] == "update" else "checking"
     elif state == "applied":
@@ -69,7 +73,7 @@ def project(status: dict, *, default: str | None, automatic: bool, participation
         "min_avibe_version": status.get("min_avibe_version") if available or state == "requires_avibe_update" else None,
         "auto_update": automatic, "update_state": state, "update_reason": reason,
         "last_checked_at": status.get("last_checked_at"), "last_result": status.get("last_result"),
-        "operation_id": operation["operation_id"] if operation else None,
+        "operation_id": operation["operation_id"] if live and operation else None,
     }
 
 
