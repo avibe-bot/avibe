@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import signal
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
+import psutil
 import pytest
 
 from modules.agents.acp import (
@@ -417,6 +422,86 @@ async def test_lifecycle_guards(tmp_path: Path) -> None:
     await sleeper.close(graceful_timeout=0.05, terminate_timeout=2.0)
     assert sleeper.is_alive is False
     assert sleeper.exit_code is not None and sleeper.exit_code != 0
+
+
+def _pid_running(pid: int) -> bool:
+    try:
+        proc = psutil.Process(pid)
+        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+@pytest.mark.parametrize("leader_mode", ["eof_exit_zero", "crash_before_close"])
+async def test_close_reaps_surviving_tool_children_after_leader_exits(
+    tmp_path: Path,
+    leader_mode: str,
+) -> None:
+    """close() reaps surviving stdio-redirected tool children even after the leader exits cleanly or crashes."""
+    pids_file = tmp_path / f"child-pids-{leader_mode}.json"
+    if leader_mode == "eof_exit_zero":
+        tail = "sys.stdin.read()\nsys.exit(0)\n"
+    else:
+        tail = "sys.exit(2)\n"
+
+    leader_script = (
+        "import json, os, subprocess, sys\n"
+        "pids_path = sys.argv[1]\n"
+        "child_code = 'import time; time.sleep(60)'\n"
+        "in_group = subprocess.Popen(\n"
+        "    [sys.executable, '-c', child_code, pids_path],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+        ")\n"
+        "detached = subprocess.Popen(\n"
+        "    [sys.executable, '-c', child_code, pids_path],\n"
+        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
+        "    start_new_session=(os.name != 'nt'),\n"
+        ")\n"
+        "tmp_path = pids_path + '.tmp'\n"
+        "with open(tmp_path, 'w', encoding='utf-8') as f:\n"
+        "    json.dump([os.getpid(), in_group.pid, detached.pid], f)\n"
+        "os.replace(tmp_path, pids_path)\n"
+        + tail
+    )
+
+    child_pids: list[int] = []
+    client = AcpClient([sys.executable, "-c", leader_script, str(pids_file)], cwd=tmp_path)
+    try:
+        await client.start()
+        deadline = time.monotonic() + 10.0
+        while not pids_file.exists():
+            assert time.monotonic() < deadline, "leader did not spawn tool children"
+            await asyncio.sleep(0.05)
+
+        leader_pid, in_group_pid, detached_pid = json.loads(pids_file.read_text(encoding="utf-8"))
+        child_pids = [in_group_pid, detached_pid]
+        assert _pid_running(in_group_pid)
+        assert _pid_running(detached_pid)
+
+        if leader_mode == "crash_before_close":
+            # Wait for leader to crash and be reaped before close() is called.
+            crash_deadline = time.monotonic() + 5.0
+            while client.exit_code is None and time.monotonic() < crash_deadline:
+                await asyncio.sleep(0.05)
+            assert client.exit_code == 2
+            assert _pid_running(in_group_pid)
+            assert _pid_running(detached_pid)
+
+        await client.close(graceful_timeout=5.0, terminate_timeout=2.0)
+
+        expected_rc = 0 if leader_mode == "eof_exit_zero" else 2
+        assert client.exit_code == expected_rc
+        assert not _pid_running(leader_pid)
+        assert not _pid_running(in_group_pid)
+        assert not _pid_running(detached_pid)
+    finally:
+        await client.close(graceful_timeout=1.0, terminate_timeout=1.0)
+        for pid in child_pids:
+            if _pid_running(pid):
+                try:
+                    os.kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+                except OSError:
+                    pass
 
 
 def test_parse_session_update_validation_and_diff_blocks() -> None:
