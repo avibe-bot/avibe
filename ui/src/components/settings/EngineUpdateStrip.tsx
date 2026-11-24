@@ -22,6 +22,7 @@ type Tone = 'quiet' | 'plain' | 'stopped';
 const SENTENCE: Record<EngineUpdateSentence, { icon: ComponentType<{ className?: string }>; iconClassName: string; tone: Tone; alert?: boolean }> = {
   current: { icon: Check, iconClassName: 'text-mint-ink', tone: 'quiet' },
   notChecked: { icon: Info, iconClassName: 'text-muted', tone: 'quiet' },
+  recovering: { icon: RefreshCw, iconClassName: 'text-muted', tone: 'quiet' },
   checking: { icon: RefreshCw, iconClassName: 'text-muted', tone: 'quiet' },
   // Good news, not a warning (as the update panel has it): orange is for what went wrong.
   available: { icon: ArrowUpCircle, iconClassName: 'text-cyan-ink', tone: 'plain' },
@@ -52,6 +53,8 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
       return t('settings.dependencies.engineUpdates.current', { time: formatRelativeTime(dep.last_checked_at, t) });
     case 'notChecked':
       return t('update.status.notChecked');
+    case 'recovering':
+      return t('settings.dependencies.engineUpdates.recovering');
     case 'checking':
       return t('update.status.checking');
     case 'available':
@@ -61,10 +64,11 @@ function useSentence(dep: DependencyItem, sentence: EngineUpdateSentence): strin
         ? t('settings.dependencies.engineUpdates.updatingTo', { version: next })
         : t('settings.dependencies.engineUpdates.updating');
     case 'waitingForIdle':
-      // With the switch off nothing retries by itself, so the sentence does not promise it.
-      if (dep.auto_update === false) return t('settings.dependencies.engineUpdates.waitingForIdleManual');
-      return next
-        ? t('settings.dependencies.engineUpdates.waitingForIdleTo', { version: next })
+      // With the switch off nothing retries by itself, so the sentence does not promise it. With it
+      // on, the owner checks and tries again: which build that installs is decided then, so the
+      // sentence names none.
+      return dep.auto_update === false
+        ? t('settings.dependencies.engineUpdates.waitingForIdleManual')
         : t('settings.dependencies.engineUpdates.waitingForIdle');
     // What happened last is history and names no build; the badge above says what runs now.
     case 'undone':

@@ -7,7 +7,7 @@ import type { DependencyItem } from '@/context/ApiContext';
 
 /** What the strip says. Several backend states share one sentence. */
 export type EngineUpdateSentence =
-  | 'current' | 'notChecked' | 'checking' | 'available' | 'updating' | 'waitingForIdle'
+  | 'current' | 'notChecked' | 'recovering' | 'checking' | 'available' | 'updating' | 'waitingForIdle'
   | 'undone' | 'unfinished' | 'attemptUnfinished' | 'replaced' | 'needsAvibe' | 'cannotCheck'
   | 'withdrawing' | 'stopped' | 'cannotStart';
 
@@ -97,9 +97,10 @@ export function engineUpdateView(dep: DependencyItem, context: EngineUpdateConte
   };
   switch (dep.update_state) {
     case 'recovering':
-      // No check has run since the owner started, and none is running: recovery waits for Model Hub
-      // to be idle and can take long. A check asks for recovery first, so the button stays usable.
-      return { sentence: 'notChecked', button: CHECK };
+      // The owner is reading its state back after a start. No check is running, and an earlier one
+      // may well be on record, so the row claims neither. Recovery waits for Model Hub to be idle
+      // and can take long; a check asks for it first, so the button stays usable.
+      return { sentence: 'recovering', button: CHECK };
     case 'checking':
       return { sentence: 'checking', button: { ...CHECK, busy: true } };
     case 'updating':

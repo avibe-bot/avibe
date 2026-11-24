@@ -31,7 +31,7 @@ describe('engineUpdateView', () => {
   it('folds every reported state into one sentence and one button', () => {
     const states: Record<EngineUpdateState, string | null> = {
       idle: 'current / check',
-      recovering: 'notChecked / check',
+      recovering: 'recovering / check',
       checking: 'checking / check busy',
       up_to_date: 'current / check',
       available: 'available / update (update)',

@@ -156,6 +156,9 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
     engineRow = engine({ update_state: 'deferred', update_reason: 'waiting_for_idle', available_release: NEXT });
     finish({ ok: true, job_id: 'engine-3', kind: 'update', status: 'succeeded', update_state: 'deferred', update_reason: 'waiting_for_idle', outcome: 'settled' });
     await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('waitingForIdle'));
+    // Which build a later try installs is decided then: the sentence names none.
+    expect(strip()!.textContent).toContain(`${KEY}.waitingForIdle`);
+    expect(strip()!.textContent).not.toContain('8.0.70-1');
     // Nothing failed, so the button is still Update and nothing is toasted.
     expect(stripButton('update.action.update')).toBeTruthy();
     expect(showToast).not.toHaveBeenCalled();
@@ -219,7 +222,8 @@ describe('SettingsDependenciesPage · Model Hub engine updates', () => {
   it('keeps Check usable while the engine owner recovers after a start', async () => {
     engineRow = engine({ update_state: 'recovering', update_reason: 'engine_journal_unavailable', active_release: null });
     await renderPage();
-    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('notChecked'));
+    // An earlier check may be on record, and none is running: the row claims neither.
+    await waitFor(() => expect(strip()?.dataset.engineUpdates).toBe('recovering'));
     expect((stripButton('update.action.check') as HTMLButtonElement).disabled).toBe(false);
   });
 
