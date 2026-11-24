@@ -16461,12 +16461,17 @@ def _print_pairing_replay_state(result: dict, *, first_send: bool) -> bool:
     if error_code == "pairing_needs_reconciliation" or state in {"needs_reconciliation", "terminated"}:
         _print_pairing_needs_check()
         return True
-    if (error_code in {"pairing_local_busy", "pairing_local_archive_required", "pairing_redeem_pending",
-                       "pairing_retry_wait"} or state in {"scheduled", "local_archive"}):
+    if error_code in {"pairing_redeem_pending", "pairing_retry_wait"} or state == "scheduled":
+        # Avibe sends it again by itself and this command sent nothing: no command to run.
+        _err(PAIRING_FINISHING[0])
+        return True
+    if error_code == "pairing_local_archive_required" or state == "local_archive":
+        # The receipt is saved; running the command again finishes it on this computer.
         for line in PAIRING_FINISHING:
             _err(line)
         return True
-    if state == "manual":
+    if error_code == "pairing_local_busy" or state == "manual":
+        # pairing_local_busy: another step on this computer kept this one from being taken.
         for line in PAIRING_TRY_AGAIN:
             _err(line)
         return True

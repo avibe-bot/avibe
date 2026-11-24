@@ -20,6 +20,8 @@ from vibe.support_contact import SUPPORT_EMAIL
 NEEDS_CHECK = ("This binding can't be confirmed, and this computer won't retry it. "
                f"Email {SUPPORT_EMAIL}; until then, don't delete Avibe's files.\n")
 FINISHING = "Finishing the binding.\nTo continue, run: vibe remote pair\n"
+# Avibe sends it again by itself and the command sent nothing, so no command is named.
+FINISHING_BY_ITSELF = "Finishing the binding.\n"
 TRY_AGAIN = "That did not go through. Try again.\nTo try again, run: vibe remote pair\n"
 # Never offered where the result is not this computer's own first send of a key typed now.
 KEY_OFFERS = ("get a new", "enter it here", "new_pairing_key", "fresh", "substitute", "vibe remote pair")
@@ -71,7 +73,7 @@ def test_scheduled_retry_is_left_to_the_service(setup_replay, capsys, no_prompt)
     assert view()["replay_state"] == "scheduled"
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys) == FINISHING
+    assert lines(capsys) == FINISHING_BY_ITSELF
     assert len(wire.sent) == 1
 
 
@@ -124,7 +126,7 @@ def test_cloud_pending_is_a_floor(setup_replay, capsys, no_prompt):
     clock[0] += 3
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys) == FINISHING
+    assert lines(capsys) == FINISHING_BY_ITSELF
     assert len(wire.sent) == 1
 
 
@@ -135,7 +137,7 @@ def test_rate_limit_with_retries_left_is_the_scheduled_text(setup_replay, capsys
     clock[0] += 60
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys) == FINISHING
+    assert lines(capsys) == FINISHING_BY_ITSELF
     assert len(wire.sent) == 1
 
 
@@ -146,7 +148,7 @@ def test_rate_limit_after_the_window_names_the_wait(setup_replay, capsys, no_pro
     clock[0] = replay._state(ra._read_pending_pairing_record()[0])["deadline"] + 1
     capsys.readouterr()
     assert run_pair() == 1
-    assert lines(capsys) == FINISHING
+    assert lines(capsys) == FINISHING_BY_ITSELF
     assert len(wire.sent) == 1
 
 
@@ -257,7 +259,7 @@ def test_local_busy_is_not_pending_and_queues_nothing(setup_replay, monkeypatch,
         capsys.readouterr()
         for entered_key in (None, "another-key"):
             assert run_pair(entered_key) == 1
-            assert lines(capsys) == FINISHING
+            assert lines(capsys) == TRY_AGAIN
         assert ra._pending_pairing_path().read_bytes() == before
     finally:
         release.set()
