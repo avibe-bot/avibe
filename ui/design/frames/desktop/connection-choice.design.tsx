@@ -30,8 +30,10 @@ const fixtures = (lang: Lang) => workbenchFixtures({}, { copy: copyFor(lang === 
 
 type Options = { lang?: Lang; direct?: boolean; status?: FrameSpec['status'] };
 
+// The English menu is as wide as its last line, the note under 「在此设备退出」: the frame is
+// wider there, so the submenu beside it is in the picture.
 const menu = (name: string, title: string, system: 'macos' | 'windows', choice: ConnectionChoice | null, { lang = 'zh', direct = true, status = 'approved' }: Options = {}): FrameSpec => ({
-  name, title, width: 900, height: 560, status, route: '/', fixtures: fixtures(lang),
+  name, title, width: lang === 'en' ? 1100 : 900, height: 560, status, route: '/', fixtures: fixtures(lang),
   render: () => <ConnectionChoiceMenu choice={choice} system={system} direct={direct} />,
 });
 
