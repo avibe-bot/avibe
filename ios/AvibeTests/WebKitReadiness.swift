@@ -130,13 +130,17 @@ enum WebKitReadiness {
     /// it left (`FixtureReadinessError.bootstrap`). A caller may build its
     /// App once more for exactly one such state, a bootstrap that stalled
     /// after its web content launch (`FixtureBootstrap.stalledAfterWebContentLaunch`),
-    /// and for no other: `DirectPathAppTests.makeApp` does.
+    /// and for no other: `DirectPathAppTests.makeApp` does. `requestsSince`
+    /// is the log's count when this App was made, for a log that an earlier
+    /// App wrote to: what the bootstrap left is then this App's requests
+    /// only.
     @MainActor
     static func waitForSignedInFixture(
         _ app: AppModel,
         accountID: String,
         instanceIDs: Set<String>,
         requests: FixtureRequestLog,
+        requestsSince: Int = 0,
         budget: Duration = standardTransportOperation,
         recordsFailure: Bool = true,
         file: StaticString = #filePath,
@@ -149,6 +153,7 @@ enum WebKitReadiness {
         }
         let clock = ContinuousClock()
         let started = clock.now
+        let began = requests.elapsed
         let deadline = started.advanced(by: budget)
         while case .loading = app.route {
             guard clock.now < deadline else {
@@ -179,7 +184,8 @@ enum WebKitReadiness {
                     bootstrap: FixtureBootstrap(
                         elapsed: settled,
                         signedIn: app.mobileSessionCoordinator.currentAccount != nil,
-                        served: requests.served
+                        began: began,
+                        served: requests.served(since: requestsSince)
                     )
                 )
             )
@@ -223,8 +229,16 @@ final class FixtureRequestLog: @unchecked Sendable {
 
     var count: Int { lock.withLock { entries.count } }
 
-    /// Every request answered so far, in order.
-    var served: [Entry] { lock.withLock { entries } }
+    /// The log's own time now: what an entry recorded now would have as
+    /// its `at`.
+    var elapsed: Duration { started.duration(to: .now) }
+
+    /// The requests answered so far, in order, from the `index`-th on: an
+    /// App made when the log's `count` was `index` has these and no
+    /// earlier App's.
+    func served(since index: Int = 0) -> [Entry] {
+        lock.withLock { Array(entries.dropFirst(index)) }
+    }
 
     func record(_ request: LocalHTTPRequest, status: Int) {
         lock.withLock {
@@ -281,7 +295,11 @@ struct FixtureBootstrap: Equatable {
     let elapsed: Duration
     /// The App has an account.
     let signedIn: Bool
-    /// What the fixture's control plane answered, in order.
+    /// The request log's time when the wait began, which `elapsed` counts
+    /// from; the entries' times are the log's.
+    let began: Duration
+    /// What the fixture's control plane answered this App, in order: not
+    /// what it answered an App made before it on the same log.
     let served: [FixtureRequestLog.Entry]
 
     /// Whether this is the one stall a caller may rebuild its App for, once.
@@ -313,9 +331,10 @@ struct FixtureBootstrap: Equatable {
     }
 
     /// The stall in one line, for the log: when the document's request was
-    /// answered (the launch), what was served, and what never was.
+    /// answered (the launch, counted like `settled` from when the wait
+    /// began), what was served, and what never was.
     func stallEvidence(readiness: Duration) -> String {
-        let launched = served.first { $0.path == Self.documentPath }.map { "\($0.at)" } ?? "never"
+        let launched = served.first { $0.path == Self.documentPath }.map { "\($0.at - began)" } ?? "never"
         let answered = served.map { "\($0.method) \($0.path) -> \($0.status)" }.joined(separator: "; ")
         return "launch=\(launched), settled=\(elapsed), readiness=\(readiness), "
             + "served=[\(answered)], missing=[GET \(Self.sessionPath)], account=nil"

@@ -7647,12 +7647,13 @@ final class DirectPathAppTests: XCTestCase {
         if launchesWithInstanceOneSelected || reusingDefaults != nil {
             return app
         }
-        func signedIn(_ app: AppModel, recordsFailure: Bool) async throws {
+        func signedIn(_ app: AppModel, since: Int = 0, recordsFailure: Bool) async throws {
             try await WebKitReadiness.waitForSignedInFixture(
                 app,
                 accountID: "account-1",
                 instanceIDs: ["instance-1", "instance-2"],
                 requests: server.requests,
+                requestsSince: since,
                 budget: WebKitReadiness.launchedTransportOperation,
                 recordsFailure: recordsFailure
             )
@@ -7686,10 +7687,13 @@ final class DirectPathAppTests: XCTestCase {
             app.showInstancePicker()
             app.mobileSessionCoordinator.deactivateAccountSurface()
         }
+        // The log already has the stalled App's requests: the new App is
+        // judged, and its line written, by its own, those from here on.
+        let before = server.requests.count
         let rebuilt = makeModel()
         adopt(rebuilt)
         do {
-            try await signedIn(rebuilt, recordsFailure: true)
+            try await signedIn(rebuilt, since: before, recordsFailure: true)
         } catch let error as FixtureReadinessError
             where error.bootstrap?.stalledAfterWebContentLaunch(readiness: readiness) == true
         {

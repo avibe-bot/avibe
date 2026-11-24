@@ -20,9 +20,12 @@ final class WebKitReadinessTests: XCTestCase {
     private func bootstrap(
         elapsed: Double,
         signedIn: Bool = false,
+        began: Double = 0,
         served: [FixtureRequestLog.Entry]
     ) -> FixtureBootstrap {
-        FixtureBootstrap(elapsed: .seconds(elapsed), signedIn: signedIn, served: served)
+        FixtureBootstrap(
+            elapsed: .seconds(elapsed), signedIn: signedIn, began: .seconds(began), served: served
+        )
     }
 
     func testTheTwoRecordedStallsAreTheStall() {
@@ -116,6 +119,67 @@ final class WebKitReadinessTests: XCTestCase {
             "launch=35.5 seconds, settled=120.5 seconds, readiness=120.0 seconds, "
                 + "served=[GET /api/config/auth -> 200], missing=[GET /api/mobile/session], account=nil"
         )
+        // An App whose wait began later on the same log: its launch is
+        // counted from then, as `settled` is, not from the log's start.
+        let later = bootstrap(
+            elapsed: 120.5,
+            began: 121,
+            served: [entry(158.5, "GET", "/api/config/auth", 200)]
+        )
+        XCTAssertEqual(
+            later.stallEvidence(readiness: readiness),
+            "launch=37.5 seconds, settled=120.5 seconds, readiness=120.0 seconds, "
+                + "served=[GET /api/config/auth -> 200], missing=[GET /api/mobile/session], account=nil"
+        )
+    }
+
+    func testAnAppMadeLaterOnTheSameLogIsJudgedByItsOwnRequests() {
+        func request(_ path: String) -> LocalHTTPRequest {
+            LocalHTTPRequest(method: "GET", path: path, queryItems: [], headers: [:], body: Data())
+        }
+        let log = FixtureRequestLog()
+        // The first App stalled: its document was answered, nothing else.
+        log.record(request("/api/config/auth"), status: 200)
+        XCTAssertTrue(
+            FixtureBootstrap(elapsed: .seconds(120.1), signedIn: false, began: .zero, served: log.served())
+                .stalledAfterWebContentLaunch(readiness: readiness)
+        )
+
+        // A second App is made here. Its web content never comes up, so it
+        // is served nothing: another failure, and not the stall, though the
+        // whole log still looks like one.
+        let made = log.count
+        XCTAssertEqual(log.served(since: made), [])
+        XCTAssertFalse(
+            FixtureBootstrap(
+                elapsed: .seconds(120.1), signedIn: false, began: log.elapsed, served: log.served(since: made)
+            ).stalledAfterWebContentLaunch(readiness: readiness)
+        )
+        XCTAssertTrue(
+            FixtureBootstrap(elapsed: .seconds(120.1), signedIn: false, began: .zero, served: log.served())
+                .stalledAfterWebContentLaunch(readiness: readiness)
+        )
+
+        // Its own document answered and nothing after: the stall, again,
+        // and by its own request alone.
+        log.record(request("/api/config/auth"), status: 200)
+        XCTAssertEqual(log.served(since: made).count, 1)
+        XCTAssertTrue(
+            FixtureBootstrap(
+                elapsed: .seconds(120.1), signedIn: false, began: .zero, served: log.served(since: made)
+            ).stalledAfterWebContentLaunch(readiness: readiness)
+        )
+
+        // Its own session request: its own result, whatever the first App
+        // was served.
+        log.record(request("/api/mobile/session"), status: 503)
+        XCTAssertFalse(
+            FixtureBootstrap(
+                elapsed: .seconds(120.1), signedIn: false, began: .zero, served: log.served(since: made)
+            ).stalledAfterWebContentLaunch(readiness: readiness)
+        )
+        // Past the end is nothing, not a trap.
+        XCTAssertEqual(log.served(since: 99), [])
     }
 
     func testTheRequestLogKeepsItsSummaryAndGivesWhatItServed() {
@@ -129,9 +193,10 @@ final class WebKitReadinessTests: XCTestCase {
             status: 503
         )
         XCTAssertEqual(log.count, 2)
-        XCTAssertEqual(log.served.map(\.method), ["GET", "GET"])
-        XCTAssertEqual(log.served.map(\.path), ["/api/config/auth", "/api/mobile/session"])
-        XCTAssertEqual(log.served.map(\.status), [200, 503])
+        XCTAssertEqual(log.served().map(\.method), ["GET", "GET"])
+        XCTAssertEqual(log.served().map(\.path), ["/api/config/auth", "/api/mobile/session"])
+        XCTAssertEqual(log.served().map(\.status), [200, 503])
+        XCTAssertEqual(log.served(since: 1).map(\.path), ["/api/mobile/session"])
         // The line the fixtures print and other tests read is unchanged:
         // `<when> <method> <path> -> <status>`, joined by "; ".
         let summary = log.summary()
