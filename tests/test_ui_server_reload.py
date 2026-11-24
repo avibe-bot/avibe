@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 # These tests monkeypatch ``threading.Thread`` before building their first test
 # client. The app loads Starlette's client lazily, and its request portal comes
 # from ``anyio.from_thread``, which binds ``threading.Thread`` at import; load it
@@ -91,7 +93,8 @@ def test_ui_reload_overrides_bind_host_when_tunnel_enabled(monkeypatch):
     assert call["config"].remote_access.vibe_cloud.enabled is True
 
 
-def test_ui_reload_rejects_non_string_host(monkeypatch):
+@pytest.mark.parametrize('invalid', [123, 'printer..example', '-printer', 'x' * 64, '[localhost]', '127.0.0.1:5123'])
+def test_ui_reload_rejects_invalid_host(monkeypatch, invalid):
     monkeypatch.setattr(
         "core.services.settings.load_config",
         lambda *a, **k: _config_with_tunnel(enabled=True),
@@ -101,7 +104,7 @@ def test_ui_reload_rejects_non_string_host(monkeypatch):
     client = app.test_client()
     response = client.post(
         "/api/ui/reload",
-        json={"host": 123, "port": 5123},
+        json={"host": invalid, "port": 5123},
         headers=csrf_headers(client, "http://127.0.0.1:5123"),
         base_url="http://127.0.0.1:5123",
     )
@@ -140,7 +143,8 @@ def test_ui_reload_uses_requested_host_when_tunnel_disabled(monkeypatch):
     assert captured["enabled"] is False
 
 
-def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypatch):
+@pytest.mark.parametrize('host', ['127.0.0.1', 'printer.example.test', 'desk-01', 'printer.local.'])
+def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypatch, host):
     captured: dict = {}
     monkeypatch.setattr(
         "core.services.settings.load_config",
@@ -171,12 +175,16 @@ def test_ui_reload_routes_replacement_output_through_runtime_log_sinks(monkeypat
     client = app.test_client()
     response = client.post(
         "/api/ui/reload",
-        json={"host": "127.0.0.1", "port": 5123},
+        json={"host": host, "port": 5123},
         headers=csrf_headers(client, "http://127.0.0.1:5123"),
         base_url="http://127.0.0.1:5123",
     )
 
     assert response.status_code == 200
+    argv = captured['spawn'][0]
+    assert argv[1] == '-c' and argv[3:] == [host, '5123']
+    assert host not in argv[2] and '5123' not in argv[2]
+    assert runtime._is_ui_server_argv(argv)
     assert captured["spawn"][1] == runtime.paths.get_runtime_ui_pid_path()
     assert captured["spawn"][2:4] == ("ui_stdout.log", "ui_stderr.log")
     assert captured["status"][-1] == 222

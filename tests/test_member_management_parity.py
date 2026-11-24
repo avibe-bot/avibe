@@ -93,6 +93,9 @@ def management_http(tmp_path, monkeypatch):
 # This inventory describes retained effects independently of the policy rules.
 # A newly registered Owner-only management route must be consciously classified.
 _RETAINED_OWNER_ROUTES = {
+    ("POST", "/api/dependencies/model-hub-engine/check"),
+    ("POST", "/api/dependencies/model-hub-engine/update"),
+    ("POST", "/api/dependencies/model-hub-engine/auto-update"),
     # MCP Hub management runs arbitrary local commands: Owner-only (plan §7).
     ("POST", "/api/mcp"),
     ("POST", "/api/mcp/discover"),
@@ -109,7 +112,15 @@ _RETAINED_OWNER_ROUTES = {
     ("PUT", "/api/permissions/resources/{resource_kind}/{resource_id}/access"),
     ("GET", "/api/agent-onboarding"),
     ("POST", "/api/agent-onboarding"),
+    # An unbound setup Owner may restrict which devices can open this host.
+    ("POST", "/api/devices/host/network-access"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("GET", "/api/remote-access/rebind"),
+    ("POST", "/api/remote-access/rebind/claims"),
+    ("GET", "/api/remote-access/rebind/claims/{claim_id}"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/cancel"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
@@ -201,7 +212,14 @@ def test_complete_registered_api_management_inventory():
     # + 8 device function, activity and Health ticket methods.
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
-    assert len(endpoints) == 374
+    # + 6 constrained local rebind/reset methods (Owner and local operator).
+    # + 1 host network restriction (Owner, separately limited to unbound installations).
+    # Three independent engine channel controls are owner-only, including metadata refresh.
+    assert len(endpoints) == 384
+    for action in ("check", "update", "auto-update"):
+        path = f"/api/dependencies/model-hub-engine/{action}"
+        assert ("POST", path) in endpoints
+        assert http_authorization_policy("POST", path).minimum_role == "owner"
     for method, path in (
         ("GET", "/api/web-push/live-activities/turn"),
         ("GET", "/api/web-push/live-activities/{activity_id}"),
@@ -495,6 +513,71 @@ def test_manager_saves_config_credentials_and_reads_masked_result(management_htt
     switches = response.get_json()["remote_access"]["vibe_cloud"]
     assert ("direct" in switches) is (role == "owner")
     assert ("public_relay_trial" in switches) is (role == "owner")
+
+
+@pytest.mark.parametrize(('role', 'patch', 'error'), [
+    ('owner', {'trusted_public_origins': ['https://workbench.example.test']}, 'proxy_origin_change_requires_direct_owner'),
+    ('member', {'setup_port': 16318}, 'listener_change_requires_owner'),
+    ('member', {'setup_host': 'localhost'}, 'listener_change_requires_owner'),
+])
+def test_network_authority_change_rejected_without_writing(management_http, role, patch, error):
+    request = management_http(role)
+    before = paths.get_config_path().read_bytes()
+    refused = request('POST', '/api/config', payload={'language': 'zh', 'ui': patch})
+    assert refused.status_code == 403 and refused.get_json()['error'] == error
+    assert paths.get_config_path().read_bytes() == before
+
+
+@pytest.mark.parametrize(('host', 'port', 'listeners', 'allowed'), [
+    ('127.0.0.1', 15131, [('127.0.0.1', 15131)], True),
+    ('127.0.0.1', 15132, [('127.0.0.1', 15131)], False),
+    ('127.0.0.2', 15131, [('127.0.0.1', 15131)], False),
+    ('127.0.0.1', 15131, [('127.0.0.1', 15132)], False),
+    ('127.0.0.1', 15131, [('0.0.0.0', 15131)], False),
+    ('127.0.0.1', 15131, [], False),
+])
+def test_member_reload_preserves_the_verified_live_endpoint(management_http, monkeypatch, host, port, listeners, allowed):
+    from types import SimpleNamespace
+    from tests.test_host_network_access import Acceptor
+    from tests.test_ui_server_reload import _ImmediateThread
+    from vibe import runtime
+
+    request = management_http('member')
+    config = V2Config.load()
+    config.ui.setup_host, config.ui.setup_port = '127.0.0.1', 15131
+    config.save()
+    server = SimpleNamespace(started=True, should_exit=False, servers=[Acceptor(h, p) for h, p in listeners])
+    calls = []
+    monkeypatch.setattr(ui_server, '_server', server)
+    monkeypatch.setattr(runtime, 'read_status', lambda: {})
+    monkeypatch.setattr(runtime, 'write_status', lambda *_: None)
+    monkeypatch.setattr(runtime, 'spawn_background', lambda argv, *_: calls.append(argv) or 123)
+    # Replace only this module's launcher; TestClient needs its real portal threads.
+    monkeypatch.setattr(ui_server, 'threading', SimpleNamespace(Thread=_ImmediateThread))
+    response = request('POST', '/api/ui/reload', payload={'host': host, 'port': port})
+    if allowed:
+        assert response.status_code == 200 and [argv[3:] for argv in calls] == [['127.0.0.1', '15131']]
+    else:
+        assert response.status_code == 403 and response.get_json()['error'] == 'listener_change_requires_owner'
+        assert calls == [] and not server.should_exit
+
+
+def test_network_authority_unchanged_round_trip_and_direct_owner_edit(management_http):
+    local = ui_server.app.test_client()
+    origins = ['https://workbench.example.test']
+    direct = local.post('/api/config', json={'ui': {'trusted_public_origins': origins}},
+                        headers=csrf_headers(local, 'http://127.0.0.1'))
+    assert direct.status_code == 200 and V2Config.load().ui.trusted_public_origins == origins
+    ui = V2Config.load().ui
+    echoed = management_http('member')('POST', '/api/config', payload={
+        'ui': {'trusted_public_origins': origins, 'setup_port': ui.setup_port, 'setup_host': ui.setup_host},
+        'runtime': {'log_level': 'DEBUG'},
+    })
+    assert echoed.status_code == 200 and V2Config.load().runtime.log_level == 'DEBUG'
+    remote = management_http('owner')
+    assert remote('POST', '/api/config', payload={'ui': {'setup_port': ui.setup_port + 1}}).status_code == 200
+    assert remote('POST', '/api/config', payload={'ui': {'trusted_public_origins': []}}).status_code == 403
+    assert V2Config.load().ui.trusted_public_origins == origins
 
 
 @pytest.mark.parametrize(

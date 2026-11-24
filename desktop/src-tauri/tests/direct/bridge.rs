@@ -14,6 +14,7 @@ fn client(preferred: PreferredPath, closure: u64) -> PathStatus {
         // The client's own order of events is not the page's.
         sequence: 1,
         closure,
+        strict_failures: 0,
     }
 }
 

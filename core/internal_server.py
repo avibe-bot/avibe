@@ -1899,7 +1899,7 @@ def create_app(
         operation = body.get("operation") if isinstance(body, dict) else None
         payload = body.get("payload") if isinstance(body, dict) else None
         dependency_operation = operation in {
-            "runtime_ensure_dependency", "engine_status", "engine_check", "engine_update",
+            "runtime_ensure_dependency", "engine_status", "engine_check", "engine_update", "engine_job", "engine_control",
         }
         if not is_model_hub_enabled() and not dependency_operation:
             return JSONResponse(
@@ -1913,8 +1913,16 @@ def create_app(
         if service is None and (not dependency_operation or adapter is None):
             return JSONResponse(status_code=503, content={"ok": False, "error": "engine_down"})
         try:
-            if service is not None:
+            if operation == "engine_control":
+                action = payload.get("action")
+                if action not in ("check", "update"):
+                    raise ModelHubError("invalid_request", status=400)
+                owner = service.adapter if service is not None else adapter
+                result = await owner.request_engine_operation(update=action == "update")
+            elif service is not None:
                 result = await dispatch_model_hub_rpc(service, operation, payload)
+            elif operation == "engine_job":
+                result = await adapter.engine_job(payload.get("operation_id"))
             elif operation == "engine_status":
                 result = await adapter.engine_status()
             elif operation in {"engine_check", "engine_update"}:
@@ -2171,7 +2179,7 @@ async def serve(
             # Freeze the warmed controller heap once, by default. Armed only once this
             # listener is published, so the unfreeze command is reachable for as long
             # as the freeze can last. Stream count does not gate the natural full
-            # collection that triggers the freeze after two hours of uptime.
+            # collection that triggers the freeze after ten minutes of uptime.
             if watchdog is not None:
                 watchdog.arm_warm_freeze()
             await server.serve(sockets=[bound.listener])

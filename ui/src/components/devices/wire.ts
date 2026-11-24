@@ -7,7 +7,7 @@ import type { RemoteAccessSettings, RemoteAccessStatus } from '@/context/ApiCont
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '@/lib/tunnelQuality';
 import type {
   AccountResult, AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
-  DirectState, HealthData, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
+  DirectState, HealthData, ProxyAccess, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
   SignedOutDevice, SwitchSetting, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
 } from './types';
 
@@ -85,6 +85,9 @@ export function deviceFromWire(raw: unknown, listed?: Device['group']): Device |
     account: text(record(row.account).email),
     person: group === 'others' ? text(record(row.account).email) : undefined,
     pushOnly: row.push_only === true || undefined,
+    // The instance's own answer, on the host row only, and only an exact `true` or `false`: null
+    // (not known, or not Avibe's to close) and a missing field both leave the row silent.
+    networkOpen: id === 'host' && kind.kind === 'host' && typeof row.network_open === 'boolean' ? row.network_open : undefined,
   };
 }
 
@@ -114,11 +117,21 @@ export function signedOutFromWire(raw: unknown): SignedOutDevice | null {
   };
 }
 
+/** The declared-proxy fact as the instance computed it. Nothing is inferred: without at least one
+ *  origin and a scope this page knows, it says nothing. */
+function proxyAccessFromWire(raw: unknown): ProxyAccess | undefined {
+  const fact = record(raw);
+  const origins = list(fact.origins).filter((each): each is string => typeof each === 'string' && each.length > 0);
+  if (origins.length === 0 || (fact.peer_scope !== 'single_address' && fact.peer_scope !== 'range')) return undefined;
+  return { origins, peerScope: fact.peer_scope };
+}
+
 export type DevicesSnapshot = {
   devices: Device[];
   unlinkedHealth: UnlinkedHealth[];
   signedOut: SignedOutDevice[];
   bulk: 'other_sessions' | 'all_remote' | null;
+  proxyAccess?: ProxyAccess;
 };
 
 export function devicesFromWire(raw: unknown): DevicesSnapshot {
@@ -135,6 +148,7 @@ export function devicesFromWire(raw: unknown): DevicesSnapshot {
     }),
     signedOut: list(body.recent_sign_outs).map(signedOutFromWire).filter((each): each is SignedOutDevice => each !== null),
     bulk: body.bulk_action === 'other_sessions' || body.bulk_action === 'all_remote' ? body.bulk_action : null,
+    proxyAccess: proxyAccessFromWire(body.unauthenticated_proxy_access),
   };
 }
 
@@ -223,7 +237,23 @@ const CLAIM_CODES = new Set([
 ]);
 
 /** A claim's local outcome name (never the hosted user code) as what the page says. */
-export function claimProblem(code: string | undefined, extra: { claimId?: string; seconds?: number } = {}): ClaimProblem {
+// The confirming account's address as the instance checked it: printable, no spaces, quotes or
+// angle brackets, one `@` and a dotted domain. Anything else is the unexplained refusal.
+const CONFIRMING_EMAIL = /^[^\s@<>"]{1,64}@[^\s@<>"]+\.[^\s@<>".]+$/;
+// Control, zero-width, direction and other invisible format characters (Unicode Cc and Cf).
+const unprintable = (value: string) => [...value].some((c) => /\p{Cc}|\p{Cf}/u.test(c));
+const confirmingEmail = (value: string | undefined) =>
+  value && value.length <= 254 && CONFIRMING_EMAIL.test(value) && !unprintable(value)
+    && !value.split('@')[1].includes('..') ? value : undefined;
+
+export function claimProblem(
+  code: string | undefined,
+  extra: { claimId?: string; seconds?: number; confirmingEmail?: string } = {},
+): ClaimProblem {
+  if (code === 'other_account') {
+    const email = confirmingEmail(extra.confirmingEmail);
+    return email ? { code, email } : { code: 'binding_unavailable' };
+  }
   if (code === 'claim_in_progress') return { code, claimId: extra.claimId };
   if (code === 'rate_limited') return { code, seconds: extra.seconds };
   if (code === 'control_plane_unreachable') return { code: 'unreachable' };

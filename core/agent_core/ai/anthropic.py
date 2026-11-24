@@ -527,6 +527,10 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             continue
+                        # Either half is execution evidence. A result can arrive in a later HTTP response
+                        # without a new server_tool_use block, a search counter, or a replayable Source.
+                        if kind == "server_tool_use" or kind.endswith("_tool_result"):
+                            assembler.observe_hosted_call()
                         if kind == "server_tool_use":
                             hosted_call = block.get("name") in hosted and isinstance(block.get("id"), str) and block["id"]
                             if hosted_call and assembler.source_id is not None:
@@ -1000,6 +1004,7 @@ class AnthropicAdapter(ProviderAdapter):
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
                     bound_pin_handback=speculative,
                     on_send=record_send if attempt else None,
+                    on_http_error=(lambda status, body: threads.record_http_error(attempt.record, status, body, hub=self._gateway)) if attempt else None,
                     refused=_rejects_ttl if prefix_ttl is not None and not speculative else None,
                 )
                 rejected = continued = paused = message_started = message_stopped = False
@@ -1122,6 +1127,7 @@ class AnthropicAdapter(ProviderAdapter):
                                         u.cache_read_tokens,
                                         next_trial,
                                         threads.terminal_mark(wire.body),
+                                        attempt.pinned_drop_block,
                                     ),
                                 )
                         else:

@@ -35,6 +35,7 @@ from core.handlers.model_hub.adapter import (
     UpstreamRejection,
     sanitize_response_correlation_ids,
 )
+from core.anthropic_thread_errors import thread_error_fields
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
 from core.handlers.model_hub.events import bounded_diagnostic_detail
@@ -2232,6 +2233,7 @@ def _reduce_protocol_observation(
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             upstream_detail=upstream_detail,
+            thread_error_fields=tuple(thread_error_fields(http_status, observation.error_payload or b"").items()) if source.protocol == "anthropic" and not stream_started else (),
             rejection=_upstream_rejection(
                 http_status,
                 stream_started,
@@ -2346,6 +2348,7 @@ def _outcome(
     response_correlation_ids: tuple[tuple[str, str], ...] = (),
     upstream_detail: str | None = None,
     os_errno: int | None = None,
+    thread_error_fields: tuple[tuple[str, str], ...] = (),
     rejection: UpstreamRejection | None = None,
     hosted_tools: frozenset[str] = frozenset(),
     served_tier: ServedTier | None = None,
@@ -2365,6 +2368,7 @@ def _outcome(
         response_correlation_ids=response_correlation_ids,
         upstream_detail=upstream_detail,
         os_errno=os_errno,
+        thread_error_fields=thread_error_fields,
         rejection=rejection,
         hosted_tools=hosted_tools,
         served_tier=served_tier,

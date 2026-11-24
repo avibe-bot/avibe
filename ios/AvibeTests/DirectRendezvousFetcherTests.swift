@@ -28,7 +28,23 @@ final class DirectRendezvousFetcherTests: XCTestCase {
         )
         XCTAssertEqual(
             String(decoding: request.body, as: UTF8.self),
-            DirectRendezvous.requestBody(clientEndpointID: client)
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [])
+        )
+
+        // The listener's failures go with the request, as the body says.
+        let faults = [
+            DirectListenerFailure(step: .bind, code: EADDRINUSE, backgroundSeconds: 90, at: .now),
+        ]
+        _ = try await fetch(in: webView, origin: instance.origin, listenerFaults: faults).get()
+        let reporting = try XCTUnwrap(instance.rendezvousRequests.last)
+        XCTAssertEqual(
+            String(decoding: reporting.body, as: UTF8.self),
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: faults)
+        )
+        XCTAssertTrue(
+            String(decoding: reporting.body, as: UTF8.self).hasSuffix(
+                ",\"listener_faults\":[{\"step\":\"bind\",\"code\":48,\"background_seconds\":90}]}"
+            )
         )
 
         // A missing or revoked session is the instance's answer to give.
@@ -251,6 +267,7 @@ final class DirectRendezvousFetcherTests: XCTestCase {
     private func fetch(
         in webView: WKWebView,
         origin: WebOrigin,
+        listenerFaults: [DirectListenerFailure] = [],
         deadlineMilliseconds: Int = DirectRendezvousFetcher.defaultDeadlineMilliseconds
     ) async -> Result<Data, Error> {
         let client = client
@@ -261,6 +278,7 @@ final class DirectRendezvousFetcherTests: XCTestCase {
                         in: webView,
                         origin: origin,
                         clientEndpointID: client,
+                        listenerFaults: listenerFaults,
                         deadlineMilliseconds: deadlineMilliseconds
                     )
                 }

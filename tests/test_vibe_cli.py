@@ -5016,7 +5016,7 @@ def test_cmd_remote_setup_shows_existing_pairing_without_prompt(monkeypatch, cap
     output = capsys.readouterr().out
     assert "Remote access is already configured." in output
     assert "https://alex.avibe.bot" in output
-    assert "vibe remote pair" in output
+    assert "vibe remote rebind" in output and "vibe remote pair" not in output
 
 
 def test_cmd_remote_pair_maps_invalid_key_to_user_action(monkeypatch, capsys):
@@ -5303,7 +5303,8 @@ def test_start_ui_replaces_stale_live_pid_when_health_check_fails(tmp_path, monk
     monkeypatch.setattr(runtime, "wait_for_ui_server", lambda host, port: True)
 
     def fake_spawn(args, pid_path, stdout_name, stderr_name, env=None):
-        assert args[-1] == "from vibe.ui_server import run_ui_server; run_ui_server('127.0.0.1', 5123)"
+        assert args[3:] == ['127.0.0.1', '5123'] and runtime._is_ui_server_argv(args)
+        assert '127.0.0.1' not in args[2]
         pid_path.write_text("67890", encoding="utf-8")
         return 67890
 

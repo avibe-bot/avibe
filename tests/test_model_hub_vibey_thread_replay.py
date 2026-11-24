@@ -21,6 +21,62 @@ from tests.test_model_hub_vibey_consumer import _vibey_service
 
 
 @pytest.mark.asyncio
+async def test_pinned_thread_rejection_keeps_provider_code_through_real_hub(tmp_path):
+    import json
+    from core.agent_core.ai.message_threads import record_http_error
+    from core.handlers.model_hub.stream_wire import ProtocolObservation
+    from vibe.model_hub_runtime.client import _reduce_protocol_observation
+
+    primary = _source("src_primary01", "Claude", vendor="anthropic", protocol="anthropic", model_id="claude-test")
+    envelope = {
+        "error": {
+            "type": "invalid_request_error",
+            "message": "private fixture",
+            "details": {"error_code": "thread_fingerprint_mismatch"},
+        }
+    }
+    from types import SimpleNamespace
+
+    outcome = _reduce_protocol_observation(
+        ProtocolObservation(
+            outcome="failed_terminal", error_payload=json.dumps(envelope).encode(), error_envelope_paths=(("error",),)
+        ),
+        source=SimpleNamespace(source_id=primary.id, protocol="anthropic"),
+        model_id="claude-test",
+        http_status=400,
+        stream_started=False,
+    )
+    svc = _vibey_service(tmp_path, [primary], handles=[InvokeHandle(outcome)])
+    gateway = ModelHubTurnGateway(svc)
+    router = ModelHubRuntimeRouter(service=svc, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:thread", turn_id="turn-rejection")
+        body = {
+            "model": hop["runtime_model"],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 8,
+            "thread": {"type": "continue", "previous_message_id": "msg_fixture"},
+        }
+        headers = {
+            "x-api-key": hop["token"],
+            **hop["request_headers"],
+            "x-avibe-pin-source": primary.id,
+            "anthropic-beta": "message-threads-2026-08-12",
+            "x-avibe-thread-declarations": "[]",
+        }
+        async with (
+            aiohttp.ClientSession() as client,
+            client.post(hop["base_url"] + "/messages", json=body, headers=headers) as response,
+        ):
+            assert response.status == 400
+            receipt = {}
+            record_http_error(receipt, response.status, await response.text(), hub=True)
+        assert receipt == {"error_type": "invalid_request_error", "error_code": "thread_fingerprint_mismatch"}
+    finally:
+        await gateway.close()
+
+
+@pytest.mark.asyncio
 async def test_pinned_thread_failure_does_not_cool_the_replay_source(tmp_path):
     primary = _source("src_primary01", "Claude", vendor="anthropic", protocol="anthropic", model_id="claude-test")
     svc = _vibey_service(

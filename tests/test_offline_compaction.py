@@ -448,7 +448,9 @@ ui_server.threading.Thread = ImmediateThread
 """
     source += (
         "runtime.start_ui('127.0.0.1', 5123, wait_for_ready=False)\n"
-        if entry == "start" else "ui_server.ui_reload()\n"
+        # The route hands the reload to a worker thread; this is that worker,
+        # asked by the Owner (who alone may change where the server listens).
+        if entry == "start" else "ui_server._dispatch_ui_reload(True, None, ())\n"
     )
     with runtime.offline_maintenance():
         child = children(source)

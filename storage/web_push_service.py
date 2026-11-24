@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
@@ -24,6 +24,8 @@ def _new_id() -> str:
     return "wps_" + secrets.token_urlsafe(16)
 
 
+# A disabled anonymous grant, never an account or an active install-local grant.
+RETIRED_LOCAL = 'retired:setup-network'
 _LAST_BADGE_STATE_PREFIX = "web_push.last_successful_badge."
 
 
@@ -189,6 +191,10 @@ def upsert_subscription(
     stmt = stmt.on_conflict_do_update(
         index_elements=[web_push_subscriptions.c.endpoint],
         set_={
+            # Foreground proof is a NEW grant even at the same endpoint. A sender
+            # holding a pre-binding subscription must not inherit that proof.
+            'id': case((web_push_subscriptions.c.user_key == RETIRED_LOCAL, stmt.excluded.id),
+                       else_=web_push_subscriptions.c.id),
             "user_key": user_key,
             "p256dh": p256dh,
             "auth": auth,
@@ -237,8 +243,8 @@ def upsert_background_rotated_subscription(
     if previous is None:
         return None
 
-    current = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
-    if current is not None and not current["enabled"] and not current.get("provider_invalidated_at"):
+    current = get_by_endpoint(conn, endpoint=endpoint)
+    if current is not None and (current['user_key'] != user_key or (not current['enabled'] and not current.get('provider_invalidated_at'))):
         return None
     return upsert_subscription(
         conn,
@@ -290,7 +296,7 @@ def attach_device_to_enabled_subscription(
     existing = get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
     if existing is None:
         if (
-            get_by_endpoint(conn, endpoint=endpoint, user_key=user_key) is None
+            get_by_endpoint(conn, endpoint=endpoint) is None
             and recoverable_previous is not None
         ):
             return upsert_subscription(
@@ -336,17 +342,85 @@ def attach_device_to_enabled_subscription(
     return get_enabled_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
 
 
+def belongs_to_signed_account(conn: Connection, payload: dict) -> bool:
+    endpoint, _, _ = validate_subscription_payload(payload)
+    row = get_by_endpoint(conn, endpoint=endpoint)
+    return row is not None and row["user_key"].startswith("remote:")
+
+
+def is_binding_retired(conn: Connection, endpoint: str) -> bool:
+    return get_by_endpoint(conn, endpoint=endpoint, user_key=RETIRED_LOCAL) is not None
+
+
+def resume_retired_host_subscription(
+    conn: Connection,
+    *,
+    payload: dict,
+    device_id: str | None,
+    device_label: str | None,
+    user_agent: str | None,
+    previous_endpoints: list[str] | None = None,
+) -> dict | None:
+    """Only called for a trusted foreground host while holding the SQLite writer.
+
+    Recover an existing grant, never one that was explicitly turned off.
+    A rotated endpoint can name its predecessor only if the new endpoint is
+    unused. Never transfer a signed subject's, or another device's, row.
+    """
+    endpoint, p256dh, auth = validate_subscription_payload(payload)
+    current = get_by_endpoint(conn, endpoint=endpoint)
+    if current is not None:
+        if current["user_key"] != RETIRED_LOCAL or current["p256dh"] != p256dh or current["auth"] != auth:
+            return None
+        candidates = [current]
+    else:
+        prior = _normalize_previous_endpoints(previous_endpoints, endpoint)
+        if not prior:
+            return None
+        candidates = (
+            conn.execute(
+                select(web_push_subscriptions).where(
+                    web_push_subscriptions.c.user_key == RETIRED_LOCAL,
+                    web_push_subscriptions.c.endpoint.in_(prior),
+                )
+            )
+            .mappings()
+            .all()
+        )
+    match = next((row for row in candidates if current is not None or row["device_id"] in (None, device_id)), None)
+    if match is None:
+        return None
+    device_id = device_id or match["device_id"]
+    if match["endpoint"] != endpoint:
+        # Old native registrations can lack a browser device ID. Keep the two
+        # ends of this rotation associated so a concurrent opt-out naming only
+        # the old endpoint also disables the new one, whichever writer won.
+        device_id = device_id or match["id"]
+        conn.execute(
+            web_push_subscriptions.update()
+            .where(web_push_subscriptions.c.id == match["id"])
+            .values(device_id=device_id)
+        )
+        disable_subscription(conn, endpoint=match["endpoint"], user_key="local")
+    return upsert_subscription(
+        conn, user_key="local", payload=payload, device_id=device_id, device_label=device_label, user_agent=user_agent
+    )
+
+
 def disable_subscription(conn: Connection, *, endpoint: str, user_key: str | None = None) -> bool:
     endpoint = endpoint.strip() if isinstance(endpoint, str) else ""
     if not endpoint:
         return False
     now = _utc_now_iso()
     stmt = web_push_subscriptions.update().where(web_push_subscriptions.c.endpoint == endpoint)
-    if user_key is not None:
+    if user_key == "local":
+        stmt = stmt.where(web_push_subscriptions.c.user_key.in_((user_key, RETIRED_LOCAL))).values(user_key="local")
+    elif user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
-    result = conn.execute(
-        stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=now)
-    )
+    else:
+        owner = web_push_subscriptions.c.user_key
+        stmt = stmt.values(user_key=case((owner == RETIRED_LOCAL, "local"), else_=owner))
+    result = conn.execute(stmt.values(enabled=0, last_failure_at=None, provider_invalidated_at=None, updated_at=now))
     if result.rowcount:
         _clear_last_successful_badges(conn, [endpoint])
     return bool(result.rowcount)
@@ -367,19 +441,20 @@ def disable_device_subscription(
         return False
     device_ids = {device_id} if device_id else set()
     if endpoint:
-        endpoint_row = get_by_endpoint(conn, endpoint=endpoint, user_key=user_key)
-        if endpoint_row and endpoint_row.get("device_id"):
+        endpoint_row = get_by_endpoint(conn, endpoint=endpoint)
+        allowed = (user_key, RETIRED_LOCAL) if user_key == "local" else (user_key,)
+        if endpoint_row and endpoint_row["user_key"] in allowed and endpoint_row.get("device_id"):
             # A previous endpoint keeps the rotation's device identity even if
             # another tab submitted a different ID during logout.
             device_ids.add(endpoint_row["device_id"])
-    stmt = (
-        web_push_subscriptions.update()
-        .where(web_push_subscriptions.c.user_key == user_key)
-    )
+    stmt = web_push_subscriptions.update()
+    if user_key == "local":
+        stmt = stmt.where(web_push_subscriptions.c.user_key.in_((user_key, RETIRED_LOCAL))).values(user_key="local")
+    else:
+        stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     if endpoint and device_ids:
         stmt = stmt.where(
-            (web_push_subscriptions.c.endpoint == endpoint)
-            | (web_push_subscriptions.c.device_id.in_(device_ids))
+            (web_push_subscriptions.c.endpoint == endpoint) | (web_push_subscriptions.c.device_id.in_(device_ids))
         )
     elif endpoint:
         stmt = stmt.where(web_push_subscriptions.c.endpoint == endpoint)
@@ -406,9 +481,33 @@ def count_enabled(conn: Connection, *, user_key: str | None = None) -> int:
     return int(conn.execute(stmt).scalar_one())
 
 
+_DELIVERY_GENERATION = 'remote_access.push_delivery_generation.v1'
+
+
+def record_binding_retirement(conn, binding, now):
+    stmt = sqlite_insert(state_meta).values(key=_DELIVERY_GENERATION, value_json=json.dumps(binding), updated_at=str(now))
+    conn.execute(stmt.on_conflict_do_update(index_elements=['key'], set_={'value_json': stmt.excluded.value_json,
+                                                                          'updated_at': stmt.excluded.updated_at}))
+
+
+def _delivery_generation():
+    return func.coalesce(select(state_meta.c.value_json).where(state_meta.c.key == _DELIVERY_GENERATION).scalar_subquery(), '')
+
+
+def _delivery_rows():
+    # One snapshot for the endpoint and the retirement preceding its selection.
+    return select(web_push_subscriptions, _delivery_generation().label('_delivery_generation'))
+
+
+def _same_delivery_generation(subscription):
+    if subscription and str(subscription.get('user_key', '')).startswith('remote:'):
+        return _delivery_generation() == subscription.get('_delivery_generation')
+    return True
+
+
 def list_enabled(conn: Connection, *, user_key: str | None = None) -> list[dict[str, Any]]:
     from storage.device_functions import delivery_allowed
-    stmt = select(web_push_subscriptions).where(web_push_subscriptions.c.enabled == 1, delivery_allowed())
+    stmt = _delivery_rows().where(web_push_subscriptions.c.enabled == 1, delivery_allowed())
     if user_key is not None:
         stmt = stmt.where(web_push_subscriptions.c.user_key == user_key)
     rows = conn.execute(stmt).mappings().all()
@@ -458,7 +557,7 @@ def get_enabled_by_endpoint(
 
 def get_deliverable_by_endpoint(conn: Connection, *, endpoint: str, user_key: str):
     from storage.device_functions import delivery_allowed
-    row = conn.execute(select(web_push_subscriptions).where(web_push_subscriptions.c.endpoint==endpoint,
+    row = conn.execute(_delivery_rows().where(web_push_subscriptions.c.endpoint==endpoint,
         web_push_subscriptions.c.user_key==user_key, web_push_subscriptions.c.enabled==1, delivery_allowed())).mappings().first()
     return _row_to_dict(row) if row else None
 
@@ -468,10 +567,11 @@ def mark_send_success(
     *,
     endpoint: str,
     badge_count: int | None = None,
+    subscription: dict | None = None,
 ) -> None:
     now = _utc_now_iso()
     result = conn.execute(
-        web_push_subscriptions.update()
+        web_push_subscriptions.update().where(_same_delivery_generation(subscription))
         .where(web_push_subscriptions.c.endpoint == endpoint)
         .where(web_push_subscriptions.c.enabled == 1)
         .values(last_success_at=now, last_failure_at=None, provider_invalidated_at=None, failure_count=0, updated_at=now)
@@ -487,7 +587,7 @@ def mark_send_success(
         )
 
 
-def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False) -> None:
+def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False, subscription: dict | None = None) -> None:
     now = _utc_now_iso()
     values = {
         "last_failure_at": now,
@@ -498,7 +598,7 @@ def mark_send_failure(conn: Connection, *, endpoint: str, disable: bool = False)
         values["enabled"] = 0
         values["provider_invalidated_at"] = now
     result = conn.execute(
-        web_push_subscriptions.update()
+        web_push_subscriptions.update().where(_same_delivery_generation(subscription))
         .where(web_push_subscriptions.c.endpoint == endpoint)
         .where(web_push_subscriptions.c.enabled == 1)
         .values(**values)

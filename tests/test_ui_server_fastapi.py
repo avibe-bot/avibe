@@ -443,7 +443,7 @@ def test_websocket_echo_is_disabled_by_default(monkeypatch):
     monkeypatch.delenv("VIBE_UI_ENABLE_WS_ECHO", raising=False)
 
     with pytest.raises(WebSocketDisconnect) as exc:
-        with app.test_client().websocket_connect("/ws/echo"):
+        with app.test_client().websocket_connect("ws://127.0.0.1/ws/echo", headers={TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}):
             pass
 
     assert exc.value.code == 1008
@@ -452,7 +452,7 @@ def test_websocket_echo_is_disabled_by_default(monkeypatch):
 def test_websocket_echo_smoke_when_enabled(monkeypatch):
     monkeypatch.setenv("VIBE_UI_ENABLE_WS_ECHO", "1")
 
-    with app.test_client().websocket_connect("/ws/echo") as websocket:
+    with app.test_client().websocket_connect("ws://127.0.0.1/ws/echo", headers={TEST_REMOTE_ADDR_HEADER: "127.0.0.1"}) as websocket:
         websocket.send_text("hello")
 
         assert websocket.receive_text() == "echo: hello"
@@ -3841,9 +3841,16 @@ def test_wechat_qr_poll_blocks_restart_when_credential_persist_fails(monkeypatch
     assert bound_users == []
 
 
+def _unbound_push_install():
+    from config.v2_config import V2Config
+
+    V2Config.default().save()
+    ensure_sqlite_state()
+
+
 def test_web_push_subscription_routes_roundtrip(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -3897,7 +3904,7 @@ def test_web_push_disable_retires_a_racing_rotation_for_same_device(monkeypatch,
     from storage.db import create_sqlite_engine
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
     client = app.test_client()
     headers = csrf_headers(client)
     old = {
@@ -3950,7 +3957,7 @@ def test_web_push_status_sync_disables_previous_endpoint_for_same_device(monkeyp
     from storage.db import create_sqlite_engine
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -4008,7 +4015,7 @@ def test_web_push_status_sync_disables_client_known_previous_endpoint(monkeypatc
     from storage.db import create_sqlite_engine
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -4075,7 +4082,7 @@ def test_web_push_status_sync_does_not_reenable_disabled_endpoint(
     from storage.models import web_push_subscriptions
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -4127,7 +4134,7 @@ def test_web_push_background_rotation_preserves_logout_opt_out(monkeypatch, tmp_
     from storage.db import create_sqlite_engine
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -4211,7 +4218,7 @@ def test_web_push_unsubscribe_is_scoped_to_current_user(monkeypatch, tmp_path):
 
 def test_web_push_test_route_sends_to_enabled_subscriptions(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     sends = []
     monkeypatch.setattr(
@@ -4277,7 +4284,7 @@ def test_web_push_test_route_recomputes_badge_inside_owner_lock(
     from storage.db import create_sqlite_engine
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
     endpoint = f"https://avibe.bot/api/push/apns/{'E' * 43}"
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -4415,7 +4422,7 @@ def test_web_push_status_reads_cross_process_delivery_dispositions(monkeypatch, 
 
 def test_web_push_test_route_targets_current_endpoint_only(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    ensure_sqlite_state()
+    _unbound_push_install()
 
     sends = []
     monkeypatch.setattr(

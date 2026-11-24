@@ -25,9 +25,9 @@ OTHER_CODES = ["invalid_oauth_state", "oauth_exchange_failed", "remote_pairing_m
 
 
 @pytest.fixture
-def install(monkeypatch):
+def install():
     config = _config()
-    monkeypatch.setattr(ui_server, "_load_remote_access_config", lambda: config)
+    config.save()
     return config
 
 

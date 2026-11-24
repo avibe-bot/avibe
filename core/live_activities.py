@@ -79,6 +79,10 @@ class LiveActivityService:
 
     def _handle(self, operation, owner, activity_id, payload, pending, authorization):
         with self.engine.begin() as conn:
+            if operation == 'put':
+                # Rotation may revive a token_gone row. Read its eligibility in
+                # the same writer transaction as the update, serial with retirement.
+                conn.exec_driver_sql('BEGIN IMMEDIATE')
             result = store.handle(conn, operation, owner, activity_id, payload, int(self.clock()), pending)
             if operation == "put" and result["body"].get("activity"):
                 store.update(conn, activity_id, authorization_json=json.dumps(authorization))
@@ -168,9 +172,10 @@ class LiveActivityService:
                 return None
             # Keep the queued phase (including an end) while the phone is paused.
             # Only missing enrollment ends tracking; a pause reserves no relay timestamp.
-            if web_push_service.get_deliverable_by_endpoint(
+            subscription = web_push_service.get_deliverable_by_endpoint(
                 conn, endpoint=subscription["endpoint"], user_key=row["owner_user_key"]
-            ) is None:
+            )
+            if subscription is None:
                 return None
             terminal = queued["ended_at"] is not None
             stamp = max(now, row["last_timestamp"] + 1)
@@ -195,7 +200,22 @@ class LiveActivityService:
             store.update(conn, activity_id, last_timestamp=stamp, updated_at=now)
             return body, subscription
 
+    @staticmethod
+    def _current_send(conn, activity_id, body):
+        # The controller lock does not cover UI/CLI retirement. Take the DB
+        # writer lock only after relay IO, through the result commit.
+        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        row = store.get(conn, activity_id)
+        if (row and row['status'] == 'tracking' and row['last_timestamp'] == body['timestamp']
+                and row['activity_token'] == body['activity_token']):
+            return row
+        return None
+
     def _deliver(self, activity_id, subscription, body):
+        from storage.web_push_cutover import may_dispatch
+
+        if not may_dispatch(self.engine, subscription):
+            return
         now = int(self.clock())
         try:
             self.sender(subscription=subscription, body=body)
@@ -203,6 +223,9 @@ class LiveActivityService:
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
             with self.engine.begin() as conn:
+                row = self._current_send(conn, activity_id, body)
+                if row is None:
+                    return
                 if status == 410:
                     try:
                         result = response.json()
@@ -213,7 +236,6 @@ class LiveActivityService:
                 elif status == 502 or (status is not None and 400 <= status < 500 and status != 429):
                     store.stop(conn, activity_id, "relay_rejected", now)
                 else:
-                    row = store.get(conn, activity_id)
                     count = min(4, row["retry_count"] + 1)
                     # Unknown server/protocol failures retain the latest state too, but
                     # only the contracted transient errors get the three rapid retries.
@@ -224,6 +246,8 @@ class LiveActivityService:
             logger.warning("Live Activity delivery failed status=%s", status)
             return
         with self.engine.begin() as conn:
+            if self._current_send(conn, activity_id, body) is None:
+                return
             store.update(
                 conn,
                 activity_id,

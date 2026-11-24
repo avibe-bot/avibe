@@ -229,6 +229,7 @@ def main():
         sqlite_started_at = time.monotonic()
         try:
             report = prepare_sqlite_state(config)
+            # The controller never attests proxy policy from its own launch environment.
         except Exception as exc:
             _record_database_disk_full(exc, logger)
             raise

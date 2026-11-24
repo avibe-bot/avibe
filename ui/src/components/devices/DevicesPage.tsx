@@ -112,7 +112,7 @@ export function DevicesPage() {
   const [add, setAdd] = useState<AddKind | undefined>();
   const [busy, setBusy] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar' | undefined>();
+  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar' | 'restrictedFromAfar' | undefined>();
   // The callback's own refusal arrives as one allowlisted word in the address, read once here.
   const [returned] = useState(() => returnRefusal(location.search));
   // A bind-again started from the connection page comes back here (the claim's return is one
@@ -128,6 +128,8 @@ export function DevicesPage() {
   /** A turn-off from this remote device is waiting for its answer: a read that fails meanwhile is
    *  the tunnel going, not a state that cannot be read, and is not said as such. */
   const closingFromAfar = useRef(false);
+  /** 「只允许这台电脑」 pressed from another device is waiting for its answer: the same holds. */
+  const restrictingFromAfar = useRef(false);
 
   const go = useCallback((to: string, replace = false) => navigate(to, { state: location.state, replace }), [location.state, navigate]);
 
@@ -153,7 +155,7 @@ export function DevicesPage() {
         // Read again through a tunnel that was supposed to be gone: it was not turned off after
         // all. What is known is only that the answer was lost.
         if (remote.value.running) setProblem((current) => (current === 'offFromAfar' || current === 'closedFromAfar' ? 'lost' : current));
-      } else if (!closingFromAfar.current) {
+      } else if (!closingFromAfar.current && !restrictingFromAfar.current) {
         setStatusRead('unknown');
       }
     }
@@ -182,7 +184,9 @@ export function DevicesPage() {
       if (end.state === 'bound') setStartedAt(Date.now());
       setClaimIssue(undefined);
     } else {
-      setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, { claimId: end.claimId, seconds: end.seconds }));
+      setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, {
+        claimId: end.claimId, seconds: end.seconds, confirmingEmail: end.claim?.confirmingEmail,
+      }));
     }
     void load();
   }, [load]);
@@ -371,6 +375,39 @@ export function DevicesPage() {
     await load();
   }, [failed, load, remote]);
 
+  // 「只允许这台电脑」: one request, with no address in it, then the row is read again here. It ends
+  // no sign-in and stops no notification; it only closes opening Avibe from the network.
+  const restrictToThisComputer = useCallback(async (fromAfar: boolean) => {
+    if (!fromAfar) return act(async () => { await api.restrictToThisComputer(); });
+    // From another device this is the last thing it can do here: once the change is in force
+    // nothing is answered to it any more. The answer says whether it was made; reading again
+    // says whether this device was shut out.
+    setBusy(true);
+    setProblem(undefined);
+    restrictingFromAfar.current = true;
+    let outcome: 'done' | 'refused' | 'none' = 'none';
+    let refusal: unknown;
+    try {
+      await api.restrictToThisComputer();
+      outcome = 'done';
+    } catch (error) {
+      if (!(error instanceof LostAnswer)) {
+        outcome = 'refused';
+        refusal = error;
+      }
+    }
+    const read = await load();
+    restrictingFromAfar.current = false;
+    if (!alive.current) return undefined;
+    setBusy(false);
+    setConfirm(undefined);
+    if (outcome === 'refused') failed(refusal);
+    else if (outcome === 'none') failed(new LostAnswer());
+    // Answered, and this device can no longer read anything: that is the change in force.
+    else if (!read.readable) setProblem('restrictedFromAfar');
+    return undefined;
+  }, [act, failed, load]);
+
   const signOut = useCallback((device: Device) => act(async () => {
     const answer = await api.signOut(device.id);
     // Only its own panel is closed: another device opened meanwhile stays open.
@@ -386,6 +423,7 @@ export function DevicesPage() {
 
   const confirmed = () => {
     if (confirm === 'turn-off') return void switchRemoteAccess(false);
+    if (confirm === 'this-computer-only') return void restrictToThisComputer(true);
     if (confirm === 'remove' && opened) return void signOut(opened);
     if (confirm === 'health-off' && opened) {
       return void act(async () => { await api.revokeHealth(opened.id); });
@@ -451,6 +489,7 @@ export function DevicesPage() {
       signedOut={snapshot.signedOut}
       signOutNotice={notice}
       unrecognizedChange={unrecognizedChange}
+      proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}
       problem={problem}
       detail={detail}
@@ -474,6 +513,11 @@ export function DevicesPage() {
       onOpenAddress={() => { if (host) openLinkInNewContext(instanceUrl(host), 'noopener,noreferrer'); }}
       onOpenConnection={() => go(CONNECTION_PATH)}
       onOpenRebind={() => go(`${CONNECTION_PATH}${CONNECTION_REBIND_HASH}`)}
+      onThisComputerOnly={() => {
+        // On the computer itself nothing is lost by it; from another device, that device is shut out.
+        if (devices.find((each) => each.kind === 'host')?.self) void restrictToThisComputer(false);
+        else setConfirm('this-computer-only');
+      }}
       onOpenDevice={(id) => setDetail(id)}
       onCloseDevice={() => setDetail(undefined)}
       onFunctionChange={changeFunction}

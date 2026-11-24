@@ -77,6 +77,13 @@ final class ContinuousRuntimeOpenTiming: RuntimeOpenTiming {
     }
 }
 
+/// What an earlier version stored, in the App's preferences, to run the
+/// launch after a listener fault without a listener. Nothing reads it any
+/// more; a launch with a direct transport removes it.
+enum RetiredListenerFaultNote {
+    static let key = "avibe.direct.listenerFault"
+}
+
 enum RuntimeNavigationStage: Equatable {
     case started
     case committed
@@ -295,9 +302,10 @@ final class AppModel: ObservableObject {
         // follow the system until it does.
         didSet { runtimePageColorScheme = nil }
     }
-    /// The direct listener faulted in this process. One-way: only a new
-    /// launch clears it.
-    @Published private(set) var directListenerFault = false
+    /// The direct listener's recovery in this stay in the foreground
+    /// (`DirectPathController.listenerRecovery`) has run past
+    /// `listenerRecoveryPatience` without the listener serving again.
+    @Published private(set) var listenerRecoveryIsOverdue = false
     /// The one Native-owned opening attempt. It outlives `didFinish` as
     /// `documentLoaded` so callbacks keep their generation fence, but its
     /// automatic budget ends there because legacy pages have no ready signal.
@@ -351,7 +359,29 @@ final class AppModel: ObservableObject {
     /// path controller: no `direct` capability, no listener, no route write,
     /// no event, and runtimes open exactly as they did before.
     private let directTransport: DirectTransporting?
-    private let directFaultMarker: DirectFaultMarkerStoring
+    /// How long a recovery of the listener goes on silently, with the thin
+    /// line, before the message with Retry.
+    private let listenerRecoveryPatience: Duration
+    /// The recovery the patience is counted for (its `since`), the timer for
+    /// its end, and the failed attempt a Retry was pressed after: the
+    /// message comes back as soon as the attempt it started has failed too.
+    private var listenerRecoverySince: ContinuousClock.Instant?
+    private var listenerRecoveryTimer: (any RuntimeOpenTimer)?
+    private var listenerRetryAfter: ContinuousClock.Instant?
+    /// A Retry of an open pressed while something else may hold the
+    /// listener's port: nothing could be reloaded then, so the request is
+    /// kept for that open and made once the gate opens, with no second
+    /// tap. One slot; it belongs to the attempt it was pressed for.
+    enum HeldRuntimeRetry: Equatable {
+        /// The failure screen's Retry (`retryRuntimeOpen`).
+        case open
+        /// The row over a cached page whose instance could not be reached.
+        case cachedPage
+        /// The row over a cached page whose instance is listed offline.
+        case offlineCachedPage
+    }
+
+    @Published private(set) var heldRuntimeRetry: (kind: HeldRuntimeRetry, attemptID: Int)?
     /// A runtime whose open is held because its host has a route and the
     /// listener does not serve yet. One slot, not a queue: a newer open, a
     /// stop, or a sign-out clears it, and it is settled only for the
@@ -366,14 +396,6 @@ final class AppModel: ObservableObject {
     /// in flight (it holds the account meanwhile).
     private var sessionRenewal: Task<Void, Never>?
     private var sessionRenewalIsReading = false
-    /// The identity of a runtime opened while the listener fault covered
-    /// it: it shows only the reopen message, and no WebView is made for it.
-    /// (A runtime the fault reaches later keeps its WebView under the
-    /// message; the same gate value cannot tell the two apart.)
-    private var directFaultOnlyIdentity: Int?
-    /// A call of the fault marker's `mark()` has returned in this process.
-    /// That is all it says: not that the marker is on disk.
-    private var directFaultIsMarked = false
     let healthSync: HealthSyncCoordinator?
 
     private let pushKeychain: PushKeychainStoring
@@ -571,9 +593,6 @@ final class AppModel: ObservableObject {
                 onStatusChanged: { [weak self] in
                     self?.deliverDirectStatus()
                 },
-                onFault: { [weak self] in
-                    self?.directListenerDidFault()
-                },
                 onAvailabilityChanged: { [weak self] in
                     self?.directAvailabilityDidChange()
                 }
@@ -597,6 +616,11 @@ final class AppModel: ObservableObject {
             }
             controller.status(for: origin, reply: reply)
         }
+    }
+
+    /// The listener's last few failures, for the rendezvous request.
+    var directListenerFailures: [DirectListenerFailure] {
+        directPathController?.listenerFailures ?? []
     }
 
     /// Answers `direct.handover` for the runtime's WebViews; `nil` without a
@@ -645,7 +669,7 @@ final class AppModel: ObservableObject {
         controlPlane: MobileControlPlaneConfiguration =
             MobileControlPlaneConfiguration(),
         directTransport: DirectTransporting? = nil,
-        directFaultMarker: DirectFaultMarkerStoring? = nil,
+        listenerRecoveryPatience: Duration = .seconds(10),
         pushKeychain: PushKeychainStoring = PushKeychainStore(),
         pushGenerationStore: PushGenerationStoring =
             SharedPushGenerationStore(),
@@ -672,18 +696,13 @@ final class AppModel: ObservableObject {
         self.healthSync = healthSync
         self.healthCredentials = healthCredentials
         self.controlPlane = controlPlane
-        let directFaultMarker = directFaultMarker
-            ?? UserDefaultsDirectFaultMarker(defaults: defaults)
-        self.directFaultMarker = directFaultMarker
-        // A launch after a listener fault uses no listener at all, decided
-        // here, before any route or first load: the user was asked to
-        // reopen the App, and this launch must work. It clears the marker,
-        // so the launch after it uses the transport again. Without a
-        // transport the marker is never read.
-        if directTransport != nil, directFaultMarker.take() {
-            self.directTransport = nil
-        } else {
-            self.directTransport = directTransport
+        self.directTransport = directTransport
+        self.listenerRecoveryPatience = listenerRecoveryPatience
+        // No failure of the listener ends direct for a launch any more, so
+        // no launch runs without it: an earlier version's note of a fault
+        // is removed unread. Without a transport nothing of it is touched.
+        if directTransport != nil {
+            defaults.removeObject(forKey: RetiredListenerFaultNote.key)
         }
         self.pushKeychain = pushKeychain
         self.pushGenerationStore = pushGenerationStore
@@ -1995,9 +2014,16 @@ final class AppModel: ObservableObject {
             attempt.id == attemptID,
             attempt.phase == .failed,
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
-            authorizeReload(of: attempt.runtime)
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
         else {
+            return false
+        }
+        // This press replaces a request kept from an earlier one, before
+        // anything is asked: hearing a recorded failure can announce a gate
+        // change in this same turn, which must not make the kept one too.
+        heldRuntimeRetry = nil
+        guard authorizeReload(of: attempt.runtime) else {
+            holdRetryWhilePortMayBeForeign(.open, of: attempt)
             return false
         }
         return openRuntime(attempt.runtime)
@@ -2043,9 +2069,16 @@ final class AppModel: ObservableObject {
             let attempt = runtimeOpenAttempt,
             attempt.phase == .cachedUnreachable,
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
-            authorizeReload(of: attempt.runtime)
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
         else {
+            return false
+        }
+        // This press replaces a request kept from an earlier one, before
+        // anything is asked: hearing a recorded failure can announce a gate
+        // change in this same turn, which must not make the kept one too.
+        heldRuntimeRetry = nil
+        guard authorizeReload(of: attempt.runtime) else {
+            holdRetryWhilePortMayBeForeign(.cachedPage, of: attempt)
             return false
         }
         runtimeLoadsLiveOnce = attempt.runtime
@@ -2061,10 +2094,19 @@ final class AppModel: ObservableObject {
             let attempt = runtimeOpenAttempt,
             attempt.phase == .cachedOffline,
             route.runtime == attempt.runtime,
-            sessionCoordinator.isSelectedRuntime(attempt.runtime),
-            authorizeReload(of: attempt.runtime),
-            openRuntime(attempt.runtime)
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
         else {
+            return false
+        }
+        // This press replaces a request kept from an earlier one, before
+        // anything is asked: hearing a recorded failure can announce a gate
+        // change in this same turn, which must not make the kept one too.
+        heldRuntimeRetry = nil
+        guard authorizeReload(of: attempt.runtime) else {
+            holdRetryWhilePortMayBeForeign(.offlineCachedPage, of: attempt)
+            return false
+        }
+        guard openRuntime(attempt.runtime) else {
             return false
         }
         let runtime = attempt.runtime
@@ -2460,8 +2502,10 @@ final class AppModel: ObservableObject {
     /// nor over a cached page shown uncovered (it stays, with its banner).
     private func revertTunnelOnlyIfUnreachable(attemptID: Int) -> Bool {
         guard
-            directPathController != nil,
-            !directListenerFault,
+            let directPathController,
+            // While the listener is being bound again, the path says
+            // nothing yet about this device's choice.
+            directPathController.listenerRecovery == nil,
             runtimeIdentity == attemptID,
             let attempt = runtimeOpenAttempt,
             attempt.id == attemptID,
@@ -2784,7 +2828,8 @@ final class AppModel: ObservableObject {
     /// from the load gate. Open: the browser. Held (the host has a route
     /// and the listener is closed or being bound again): the loading route
     /// stays and the open waits in its slot for the return to settle.
-    /// Fault: the reopen message alone.
+    /// Fault (something else may hold the listener's port): it waits in the
+    /// same slot, until an attempt has made the port the App's again.
     private func settleOpen(of runtime: MobileRuntimeContext, identity: Int) {
         guard let directPathController else {
             return
@@ -2795,8 +2840,8 @@ final class AppModel: ObservableObject {
             confirmSessionThenOpen()
             return
         }
-        // About to act on the gate: a failure already recorded is delivered
-        // first, so the marker never lags behind what is shown.
+        // About to act on the gate: a failure already recorded is heard
+        // first.
         directPathController.settleRecordedFault()
         switch directPathController.loadGate(for: runtime) {
         case .open:
@@ -2807,29 +2852,22 @@ final class AppModel: ObservableObject {
             if allowsDirect(runtime) {
                 directPathController.runtimeDidOpen(runtime)
             }
-        case .held:
+        case .held, .fault:
+            // No WebView is made against a port the App does not hold. The
+            // open's own line, long-wait row and budget apply meanwhile.
             deferredOpen = (runtime, identity)
-        case .fault:
-            // The fault is already terminal for this process. There will be
-            // no new listener callback to end an attempt started after it,
-            // so retire the automatic budget at the gate decision itself.
-            finishRuntimeOpenAutomaticBudget(
-                phase: .failed,
-                attemptID: identity
-            )
-            deferredOpen = nil
-            directFaultOnlyIdentity = identity
-            route = .browser(runtime)
         }
     }
 
-    /// A load gate may have changed: the listener was closed for the
-    /// background, a return was settled, or the fault was entered. Nothing
-    /// is replayed from an earlier decision: the root reads the gate again,
-    /// a held open is decided again for its own identity, and the live
+    /// A load gate or the listener's recovery may have changed: the
+    /// listener was closed for the background, a return was settled, or an
+    /// attempt to bind its port again failed or succeeded. Nothing is
+    /// replayed from an earlier decision: the root reads the gate again, a
+    /// held open is decided again for its own identity, and the live
     /// runtime's WebView is told, for an automatic load it is holding.
     private func directAvailabilityDidChange() {
         objectWillChange.send()
+        updateListenerRecovery()
         if let deferred = deferredOpen {
             if runtimeIdentity != deferred.identity
                 || runtimeOpenAttempt?.id != deferred.identity
@@ -2853,6 +2891,61 @@ final class AppModel: ObservableObject {
             }
         }
         runtimeController?.directAvailabilityDidChange()
+        makeHeldRuntimeRetryIfTheGateOpened()
+    }
+
+    /// Keeps a Retry that could not reload because something else may hold
+    /// the listener's port. Any other refusal (a return's first attempt,
+    /// where Retry is not offered) keeps nothing.
+    private func holdRetryWhilePortMayBeForeign(
+        _ kind: HeldRuntimeRetry,
+        of attempt: RuntimeOpenAttempt
+    ) {
+        guard directLoadGate(for: attempt.runtime) == .fault else {
+            return
+        }
+        heldRuntimeRetry = (kind, attempt.id)
+    }
+
+    /// Makes the kept Retry once its runtime's gate is open, for the open
+    /// it was pressed for and no other: a newer open, another runtime on
+    /// screen, or a selection that ended drops it. While the gate is not
+    /// open (the port still someone else's, the background, a return's
+    /// first attempt) it stays kept.
+    private func makeHeldRuntimeRetryIfTheGateOpened() {
+        guard let held = heldRuntimeRetry else {
+            return
+        }
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.id == held.attemptID,
+            runtimeIdentity == held.attemptID,
+            route.runtime == attempt.runtime,
+            sessionCoordinator.isSelectedRuntime(attempt.runtime)
+        else {
+            heldRuntimeRetry = nil
+            return
+        }
+        guard directLoadGate(for: attempt.runtime) == .open else {
+            return
+        }
+        // Cleared first: the retry asks the gate itself, and decides alone.
+        heldRuntimeRetry = nil
+        switch held.kind {
+        case .open:
+            _ = retryRuntimeOpen(attemptID: held.attemptID)
+        case .cachedPage:
+            retryRuntimeCachedPage()
+        case .offlineCachedPage:
+            retryOfflineCachedPage()
+        }
+    }
+
+    /// Whether a Retry pressed for this open is kept until the listener's
+    /// port is the App's again: the line shows meanwhile.
+    func holdsRetry(forAttempt attemptID: Int) -> Bool {
+        heldRuntimeRetry?.attemptID == attemptID
+            && runtimeOpenAttempt?.id == attemptID
     }
 
     /// Whether the shell may create or reload `runtime`'s WebView now
@@ -2903,61 +2996,164 @@ final class AppModel: ObservableObject {
     /// Whether the shell's own reload of `runtime` (Retry) may be offered
     /// now. Synchronous and without side effects, for the view: only when
     /// the host is on WebKit's normal path or its route points at a serving
-    /// listener. Never while the listener is closed or being bound again,
-    /// and never under the fault. Always `true` without a transport.
+    /// listener, or at one whose port is closed (WebKit then leaves it by
+    /// itself). Never while the listener is closed for the background or
+    /// on its return's first attempt (held), nor while something else may
+    /// hold its port (fault). Always `true` without a transport.
     func mayReload(_ runtime: MobileRuntimeContext) -> Bool {
         directLoadGate(for: runtime) == .open
     }
 
     /// The Retry tap itself: decides again, now, whether the reload may be
-    /// made, and delivers a failure already recorded first.
+    /// made, and hears a failure already recorded first. While something
+    /// else may hold the listener's port nothing is reloaded, but the tap
+    /// is not lost: the port is bound again now, as the recovery's own
+    /// Retry does, and the caller keeps the request, which is made as soon
+    /// as the port is the App's (`makeHeldRuntimeRetryIfTheGateOpened`).
     func authorizeReload(of runtime: MobileRuntimeContext) -> Bool {
         directPathController?.settleRecordedFault()
+        if directLoadGate(for: runtime) == .fault {
+            directPathController?.retryListenerNow()
+        }
         return mayReload(runtime)
     }
 
-    /// Whether the listener fault covers `runtime`: its host is routed to a
-    /// port the App may not hold. Its content is then replaced by the
-    /// reopen message.
-    func directFaultCovers(_ runtime: MobileRuntimeContext) -> Bool {
-        directLoadGate(for: runtime) == .fault
-    }
-
-    /// Whether `runtime` was opened under the fault: it has no WebView, only
-    /// the reopen message.
-    func presentsDirectFaultOnly(_ runtime: MobileRuntimeContext) -> Bool {
-        directFaultOnlyIdentity == runtimeIdentity && directFaultCovers(runtime)
-    }
-
-    private func directListenerDidFault() {
-        // The marker first, and whatever else happens: it is what makes the
-        // next launch work. Repeated only until one call has returned.
-        if !directFaultIsMarked {
-            directFaultMarker.mark()
-            directFaultIsMarked = true
+    /// Whether Retry is offered for `runtime`: when the reload may be made,
+    /// and also while something else may hold the listener's port, where
+    /// the tap binds the port again.
+    func offersRetry(for runtime: MobileRuntimeContext) -> Bool {
+        switch directLoadGate(for: runtime) {
+        case .open, .fault:
+            return true
+        case .held:
+            return false
         }
-        guard !directListenerFault else {
+    }
+
+    // MARK: The listener's recovery
+
+    /// What the listener's recovery shows over a runtime's page.
+    enum ListenerRecoveryPresentation: Equatable {
+        /// Nothing: the listener serves, or this runtime's loads do not
+        /// wait for it (its host has no route, or the port is closed and
+        /// WebKit leaves it by itself for the public origin).
+        case none
+        /// Its loads wait for the listener, which is being bound again
+        /// after an attempt that failed, or while something else may hold
+        /// its port: the page stays, with the thin line.
+        case connecting
+        /// They still wait past the patience: the message with Retry.
+        /// The attempts go on underneath.
+        case unreachable
+    }
+
+    /// What to show over `runtime` for the listener's recovery. Read from
+    /// the controller each time; only a runtime whose loads the gate does
+    /// not let through is covered, so an unrouted one never is. An
+    /// ordinary return's first attempt (no attempt has failed, and the
+    /// port was the App's) shows nothing: it is over in well under a
+    /// second, and a line on every return would only flicker.
+    func listenerRecoveryPresentation(
+        for runtime: MobileRuntimeContext
+    ) -> ListenerRecoveryPresentation {
+        guard
+            let directPathController,
+            let recovery = directPathController.listenerRecovery
+        else {
+            return .none
+        }
+        switch directPathController.loadGate(for: runtime) {
+        case .open:
+            return .none
+        case .held, .fault:
+            if listenerRecoveryIsOverdue {
+                return .unreachable
+            }
+            return recovery.lastFailure != nil || recovery.portMayBeForeign
+                ? .connecting
+                : .none
+        }
+    }
+
+    /// The live runtime's WebView has nothing on screen and holds its load
+    /// for the gate (its web content process ended while the listener did
+    /// not serve): the recovery covers it, so no blank page shows.
+    var runtimeHoldsItsAutomaticLoad: Bool {
+        runtimeController?.isHoldingAutomaticLoad ?? false
+    }
+
+    /// Retry, under the recovery's message: an attempt to bind the
+    /// listener's port now, in place. The line shows again until that
+    /// attempt has ended; if it failed too, the message is back at once.
+    func retryListenerRecovery() {
+        guard let directPathController else {
             return
         }
-        directListenerFault = true
-        if let attempt = runtimeOpenAttempt,
-           attempt.phase != .documentLoaded,
-           attempt.phase != .failed,
-           directFaultCovers(attempt.runtime)
-        {
-            finishRuntimeOpenAutomaticBudget(
-                phase: .failed,
-                attemptID: attempt.id
+        // A failure already recorded is heard first, so that it is not
+        // taken for the failure of the attempt this press starts.
+        directPathController.settleRecordedFault()
+        if let recovery = directPathController.listenerRecovery {
+            listenerRetryAfter = recovery.lastFailure?.at ?? recovery.since
+            listenerRecoveryIsOverdue = false
+            scheduleListenerRecoveryPatience(listenerRecoveryPatience, since: recovery.since)
+        }
+        directPathController.retryListenerNow()
+    }
+
+    /// Follows the controller's recovery: a new one (each return to the
+    /// foreground starts one) gets its own patience, counted from when it
+    /// began; one that ended clears everything.
+    private func updateListenerRecovery() {
+        guard let recovery = directPathController?.listenerRecovery else {
+            listenerRecoverySince = nil
+            listenerRetryAfter = nil
+            listenerRecoveryTimer?.cancel()
+            listenerRecoveryTimer = nil
+            if listenerRecoveryIsOverdue {
+                listenerRecoveryIsOverdue = false
+            }
+            return
+        }
+        if listenerRecoverySince != recovery.since {
+            listenerRecoverySince = recovery.since
+            listenerRetryAfter = nil
+            listenerRecoveryIsOverdue = false
+            let waited = recovery.since.duration(to: ContinuousClock.now)
+            scheduleListenerRecoveryPatience(
+                listenerRecoveryPatience - waited,
+                since: recovery.since
             )
+        } else if let pressedAfter = listenerRetryAfter,
+                  let failure = recovery.lastFailure,
+                  failure.at != pressedAfter
+        {
+            // The attempt Retry started has failed as well.
+            listenerRetryAfter = nil
+            listenerRecoveryTimer?.cancel()
+            listenerRecoveryTimer = nil
+            listenerRecoveryIsOverdue = true
         }
-        // A child window is presented above the runtime's own view, which
-        // the reopen message covers; it goes, when the message covers it.
-        if let runtime = route.runtime, directFaultCovers(runtime) {
-            runtimeController?.discardPopupsForListenerFault()
+    }
+
+    private func scheduleListenerRecoveryPatience(
+        _ remaining: Duration,
+        since: ContinuousClock.Instant
+    ) {
+        listenerRecoveryTimer?.cancel()
+        listenerRecoveryTimer = nil
+        guard remaining > .zero else {
+            listenerRecoveryIsOverdue = true
+            return
         }
-        // A held open ends as the reopen message, and a held automatic
-        // load is dropped.
-        directAvailabilityDidChange()
+        listenerRecoveryTimer = runtimeOpenTiming.schedule(after: remaining) { [weak self] in
+            guard let self, self.listenerRecoverySince == since else {
+                return
+            }
+            self.listenerRecoveryTimer = nil
+            self.listenerRetryAfter = nil
+            // Still recovering: a recovery that ended cleared `since`.
+            self.listenerRecoveryIsOverdue = true
+        }
     }
 
     /// Sends the current `direct` state to the runtime's documents.

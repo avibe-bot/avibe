@@ -370,9 +370,36 @@ enum DirectRendezvous {
     static let defaultRetryAfterSeconds = 60
     private static let maxGenerationBytes = 128
 
-    /// The request body: the protocol version and this launch's endpoint ID.
-    static func requestBody(clientEndpointID: DirectEndpointID) -> String {
-        "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\"}"
+    /// The most listener failures one request reports. The instance ignores
+    /// a longer list whole.
+    static let maxListenerFaults = DirectListenerFaultReport.limit
+
+    /// The request body: the protocol version and this launch's endpoint ID;
+    /// and, when the App's own listener failed since the last request that
+    /// was answered, `listener_faults`: the last few failures, oldest
+    /// first. Each entry has exactly `step`, `code` and
+    /// `background_seconds`, as the instance requires
+    /// (docs/plans/remote-direct-rendezvous.md section 2): a failure with
+    /// no error number is sent as `code` 0, and one with no background
+    /// before it as 0 seconds. One entry the instance does not accept makes
+    /// it ignore them all. No wall time, address, port or identifier. An
+    /// instance that does not know the field ignores it.
+    static func requestBody(
+        clientEndpointID: DirectEndpointID,
+        listenerFaults: [DirectListenerFailure]
+    ) -> String {
+        let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
+        let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
+            // Written by hand, in a fixed order: a step is one of six words,
+            // and the rest are integers within the instance's bounds.
+            let code = fault.code ?? 0
+            let seconds = min(max(fault.backgroundSeconds ?? 0, 0), DirectListenerFailure.maxBackgroundSeconds)
+            return "{\"step\":\"\(fault.step.rawValue)\",\"code\":\(code),\"background_seconds\":\(seconds)}"
+        }
+        guard !faults.isEmpty else {
+            return head + "}"
+        }
+        return head + ",\"listener_faults\":[" + faults.joined(separator: ",") + "]}"
     }
 
     /// Reads the answer native code fetched for itself and checks it against
@@ -599,6 +626,36 @@ enum DirectRendezvous {
             case endpoint
             case client
             case retryAfterSeconds = "retry_after_seconds"
+        }
+    }
+}
+
+/// Which of the listener's failures the rendezvous requests still have to
+/// report: each failure goes to the instance once, with the first request
+/// that is answered after it. A request that fails reports them again.
+struct DirectListenerFaultReport {
+    /// The most one request carries.
+    static let limit = 5
+
+    /// When the newest failure an answered request carried happened.
+    private var reportedThrough: ContinuousClock.Instant?
+
+    /// The failures no answered request has carried yet, oldest first, at
+    /// most `limit` (the newest).
+    func pending(from failures: [DirectListenerFailure]) -> [DirectListenerFailure] {
+        let unreported = failures.filter { failure in
+            reportedThrough.map { failure.at > $0 } ?? true
+        }
+        return Array(unreported.suffix(Self.limit))
+    }
+
+    /// A request that carried `sent` was answered.
+    mutating func answered(_ sent: [DirectListenerFailure]) {
+        guard let newest = sent.map(\.at).max() else {
+            return
+        }
+        if reportedThrough.map({ newest > $0 }) ?? true {
+            reportedThrough = newest
         }
     }
 }

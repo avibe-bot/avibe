@@ -4509,7 +4509,10 @@ def _wire_tool_loop(protocol: str, body: dict) -> tuple[list[str], list[str]]:
         # with GPT's call, not with a thinking block of its own, so it goes out with thinking off.
         (("claude-sonnet-4-5", "gpt-6.1-sol", "claude-sonnet-4-5", "gpt-6.1-sol"), {"type": "disabled"}),
         # Two Claude models on one Source identity are still two origins, there and back; adaptive thinking stays on.
-        (("claude-opus-5-5", "claude-fable-5-2", "claude-opus-5-5"), {"type": "adaptive"}),
+        # On the return to Opus its own signed history is present. A new gateway thread pins the
+        # preserved-thinking default CPA would otherwise derive only on this full send.
+        (("claude-opus-5-5", "claude-fable-5-2", "claude-opus-5-5"),
+         {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}),
     ],
     ids=["claude-gpt-claude", "opus-fable"],
 )

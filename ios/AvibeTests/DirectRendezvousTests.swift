@@ -150,7 +150,7 @@ final class DirectRendezvousTests: XCTestCase {
             )
         )
         XCTAssertEqual(
-            DirectRendezvous.requestBody(clientEndpointID: client),
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: []),
             "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\"}"
         )
     }
@@ -527,6 +527,121 @@ final class DirectRendezvousTests: XCTestCase {
 
     private func ready() -> Data {
         data(readyObject())
+    }
+
+    // MARK: The listener's failures
+
+    private func failure(
+        _ step: DirectListenerFailure.Step,
+        code: Int32? = nil,
+        away: Int? = nil,
+        at: ContinuousClock.Instant = .now
+    ) -> DirectListenerFailure {
+        DirectListenerFailure(step: step, code: code, backgroundSeconds: away, at: at)
+    }
+
+    /// `listener_faults` is what the instance accepts and nothing more: at
+    /// most five entries, the newest, each with exactly a step (one it
+    /// knows), a code and the seconds away, all within its bounds; no time,
+    /// address, port or identifier; and no field at all when there is
+    /// nothing to report. (The instance ignores the whole list for one
+    /// entry it does not accept: `vibe/direct_rendezvous.py`.)
+    func testTheRequestReportsTheListenersLastFailuresWithinTheInstancesLimits() throws {
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: []),
+            head + "}"
+        )
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(
+                clientEndpointID: client,
+                listenerFaults: [
+                    failure(.bind, code: EADDRINUSE, away: 1_860),
+                    failure(.deadline),
+                    failure(.socket, code: ECONNABORTED),
+                ]
+            ),
+            head + ",\"listener_faults\":["
+                + "{\"step\":\"bind\",\"code\":48,\"background_seconds\":1860},"
+                // No number and no background before it: zeros, never a
+                // missing key.
+                + "{\"step\":\"deadline\",\"code\":0,\"background_seconds\":0},"
+                + "{\"step\":\"socket\",\"code\":53,\"background_seconds\":0}]}"
+        )
+
+        // Every step is one the instance knows (it also accepts
+        // `foreign`, which the App never sends).
+        let steps: [DirectListenerFailure.Step] = [.bind, .waiting, .ownership, .deadline, .socket]
+        XCTAssertEqual(
+            steps.map(\.rawValue),
+            ["bind", "waiting", "ownership", "deadline", "socket"]
+        )
+
+        // Seven failures: the last five. Seconds away outside what the
+        // instance accepts are sent as its nearest bound.
+        let many = (1...7).map { failure(.bind, code: Int32($0), away: $0 == 7 ? Int.max : -$0) }
+        let body = DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: many)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(body.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(Set(object.keys), ["version", "client_endpoint_id", "listener_faults"])
+        let faults = try XCTUnwrap(object["listener_faults"] as? [[String: Any]])
+        XCTAssertEqual(faults.count, 5)
+        XCTAssertEqual(faults.map { $0["code"] as? Int }, [3, 4, 5, 6, 7])
+        XCTAssertEqual(
+            faults.map { $0["background_seconds"] as? Int },
+            [0, 0, 0, 0, Int(Int32.max)]
+        )
+        for fault in faults {
+            XCTAssertEqual(Set(fault.keys), ["step", "code", "background_seconds"])
+            XCTAssertNotNil(fault["code"] as? Int)
+            XCTAssertNotNil(fault["background_seconds"] as? Int)
+        }
+        // `direct.status()` says the same of one failure.
+        XCTAssertEqual(
+            failure(.bind, code: EADDRINUSE, away: 12).jsonObject as NSDictionary,
+            ["step": "bind", "code": 48, "background_seconds": 12] as NSDictionary
+        )
+        XCTAssertEqual(
+            failure(.ownership).jsonObject as NSDictionary,
+            ["step": "ownership"] as NSDictionary
+        )
+    }
+
+    /// Each failure reaches the instance once, with the first request that
+    /// is answered after it: a request that fails reports it again, and an
+    /// answered one never does.
+    func testEachListenerFailureIsReportedOnceWithTheFirstAnsweredRequest() {
+        var report = DirectListenerFaultReport()
+        let start = ContinuousClock.now
+        func at(_ seconds: Int) -> ContinuousClock.Instant {
+            start.advanced(by: .seconds(seconds))
+        }
+        XCTAssertEqual(report.pending(from: []), [])
+
+        let first = failure(.bind, code: EADDRINUSE, at: at(1))
+        let second = failure(.deadline, at: at(2))
+        XCTAssertEqual(report.pending(from: [first, second]), [first, second])
+        // The request failed: nothing was answered, so both are still due.
+        XCTAssertEqual(report.pending(from: [first, second]), [first, second])
+
+        // A request that carried only the first is answered while the
+        // second has happened: the second is still due.
+        report.answered([first])
+        XCTAssertEqual(report.pending(from: [first, second]), [second])
+        report.answered([second])
+        XCTAssertEqual(report.pending(from: [first, second]), [])
+        // An answer to an older request arriving late takes nothing back.
+        report.answered([first])
+        XCTAssertEqual(report.pending(from: [first, second]), [])
+
+        // A new failure is due again, alone; and never more than five.
+        let third = failure(.socket, code: ECONNABORTED, at: at(3))
+        XCTAssertEqual(report.pending(from: [first, second, third]), [third])
+        let many = (10...16).map { failure(.bind, code: Int32($0), at: at($0)) }
+        XCTAssertEqual(report.pending(from: many), Array(many.suffix(5)))
+        report.answered([])
+        XCTAssertEqual(report.pending(from: [third]), [third])
     }
 
     private func data(_ object: [String: Any]) -> Data {

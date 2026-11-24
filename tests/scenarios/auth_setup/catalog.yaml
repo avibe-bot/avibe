@@ -565,6 +565,34 @@ scenarios:
     backend: shared
     scope: same_service_instance
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_same_service_instance_native_login_conflict_is_localized
+  - id: AUTH-SETUP-212
+    name: A bound computer is reset at the terminal only on a typed yes, then bound only after the account and domain shown are accepted
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account
+    reason: The command as typed, through the real parser, admission, reset, link claim, guarded redemption and publication, read back with `vibe remote status`. Only avibe.bot and the connector are peers; the terminal's answers are scripted.
+    supporting_tests:
+      - tests/test_remote_rebind_cli.py
+      - tests/test_binding_reset.py
+      - tests/test_binding_recovery.py
+  - id: AUTH-SETUP-213
+    name: A bound computer publishes the replacement accepted through its constrained browser return
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_rebind_publishes_replacement
+    reason: Follow the predecessor-bound claim through the initiating browser callback, issuer redemption and durable local publication; read the binding back and verify that Off stays Off.
+  - id: AUTH-SETUP-214
+    name: A qualifying constrained refusal leaves the old binding intact until the initiating browser confirms reset
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_refusal_then_confirmed_reset
+    reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, and read back unpaired without redeeming a new key.
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
@@ -1504,7 +1532,7 @@ scenarios:
     layer: scenario
     backend: personal-claims
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_personal_claim_redirect_through_pairing_journal
-    reason: Owner browser on loopback or an admitted private-network origin. Actual owner routes, browser cookie, return gate, guarded redemption, credentials publication and connector start. Only the control plane and connector are peers.
+    reason: Owner returns on the initiating loopback or private-network origin before publication. After publication only loopback retains the local claim outcome; old private-origin poll and replay are refused without name or account. Real routes, return proof and journal; only control plane and connector are peers.
   - id: AUTH-SETUP-915
     name: Signing out a device revokes its Runtime cookie before the issuer accepts its account sign-out
     status: covered

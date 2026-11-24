@@ -308,11 +308,13 @@ def test_push_gating_records_muted_and_badge_total_excludes_quiet_category(
 
 def test_push_skips_a_removed_bots_session_and_records_hidden(monkeypatch, isolated_state):
     """A push for a Session the owner's Inbox hides would open a conversation they cannot see (D1)."""
+    from config.v2_config import V2Config
     from core.bots import BotService
     from core import web_push_notifications
     from storage import web_push_service
     from storage.db import create_sqlite_engine
 
+    V2Config.default().save()  # The anonymous endpoint belongs to an unbound installation.
     with BotService() as service:
         service.ensure_main_bot()
         bot = service.create_bot(display_name="Researcher")
