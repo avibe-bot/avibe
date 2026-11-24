@@ -223,7 +223,7 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
     store = mobile_store.MobileStore()
     client = app.test_client()
     ui_server._auth_ratelimit.clear()
-    harness = SimpleNamespace(request=None, auth=None, claim=None)
+    harness = SimpleNamespace(request=None, auth=None, claim=None, abandoned_code=None)
     runner = ScenarioRunner(harness)
 
     def connect(h):
@@ -239,18 +239,32 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
         assert sent[0]["url"] == f"/mobile/health/{h.request['id']}"
         assert "伙伴" in sent[0]["title"] and "987654321" not in json.dumps(sent)
 
+    def abandon_before_pair(h):
+        # A native attempt can fail before it calls pair. Its execution deadline
+        # belongs to XCTest; the real instance must still admit an explicit retry.
+        response = client.post("/api/mobile/pairings", json={"request_id": h.request["id"]},
+                               headers=csrf_headers(client))
+        assert response.status_code == 200
+        h.abandoned_code = response.get_json()["pairing_code"]
+        status = client.get(f"/api/mobile/requests/{h.request['id']}").get_json()
+        assert status["state"] == "queued" and status["requires_user"]
+
     def pair(h):
         code = client.post("/api/mobile/pairings", json={"request_id": h.request["id"]},
                            headers=csrf_headers(client))
         assert code.status_code == 200
-        response = client.post("/api/mobile/device/v1/pair", json={
+        assert code.get_json()["pairing_code"] != h.abandoned_code
+        payload = {
             "pairing_code": code.get_json()["pairing_code"], "device_name": "合成 iPhone",
             "platform": "ios", "app_version": "1", "metrics": ["steps", "sleep"],
             "installation_id": "synthetic-install",
-        })
+        }
+        response = client.post("/api/mobile/device/v1/pair", json=payload)
         assert response.status_code == 200
         assert response.get_json()["instance"]["id"] == config.remote_access.vibe_cloud.instance_id
         h.auth = {"Authorization": "Bearer " + response.get_json()["credential"]}
+        replay = client.post("/api/mobile/device/v1/pair", json={**payload, "pairing_code": h.abandoned_code})
+        assert replay.status_code == 401 and replay.get_json()["code"] == "device_unauthorized"
         response = client.post("/api/mobile/device/v1/requests/claim", headers=h.auth,
                                json={"wait_seconds": 0, "max": 1, "request_id": h.request["id"]})
         assert response.status_code == 200
@@ -290,12 +304,13 @@ def test_mobile_health_fake_device_connect_read_and_revoke_closed_loop(monkeypat
 
     asyncio.run(runner.run(
         ScenarioStep("connect-and-persist-card", connect),
+        ScenarioStep("abandon-native-before-pair", abandon_before_pair),
         ScenarioStep("pair-and-claim-same-request", pair),
         ScenarioStep("upload-before-status-result", upload_and_complete),
         ScenarioStep("local-agent-read-and-revoke", read_and_revoke),
     ))
     ScenarioExpect.step_history(runner, [
-        "connect-and-persist-card", "pair-and-claim-same-request",
+        "connect-and-persist-card", "abandon-native-before-pair", "pair-and-claim-same-request",
         "upload-before-status-result", "local-agent-read-and-revoke",
     ])
 

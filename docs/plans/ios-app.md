@@ -172,9 +172,13 @@ App:
   connections ran through is gone.
 - No `rtt_ms`, `attempts`, `connections`, `losses` or `counts`: the desktop
   core measures and records none.
-- `direct.handover()` closes only when the asking window is the only open
-  one with the session's route (its instance view and app windows share one
-  listener); otherwise `skipped: "other_documents"`.
+- `direct.handover()` closes the asking window's own quiet connections and
+  no other window's. Every routed window presents a credential of its own to
+  the session's listener, so the listener knows whose each connection is;
+  with a Show window open beside the instance view, each hands over for
+  itself. The desktop app never answers `skipped: "other_documents"`.
+- The choice of path is delivered with an order, and the bridge keeps the
+  newest: a delivery that arrives late does not put an older choice back.
 - `direct.setPreference` changes the choice the app's own 「连接方式」 menu
   shows, and reloads nothing. The desktop app never sets a choice back
   itself, so `reverted` is always `null` and there is no

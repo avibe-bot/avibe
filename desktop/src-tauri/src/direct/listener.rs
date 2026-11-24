@@ -97,7 +97,7 @@ impl Listener {
         F: Fn(Authority, u16) -> Fut + Send + Sync + Clone + 'static,
         Fut: Future<Output = Result<TcpStream, public::OpenError>> + Send + 'static,
     {
-        let windows = Arc::new(Windows::new()?);
+        let windows = Arc::new(Windows::default());
         let socket = Arc::new(TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.ok()?);
         let reservation = socket.clone();
         let (live, health) = watch::channel(());
@@ -270,7 +270,7 @@ mod tests {
         future::ready,
         io::{Error, ErrorKind},
     };
-    fn basic(credential: &super::super::Credential) -> String {
+    fn basic(credential: &super::super::WindowRegistration) -> String {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let (u, p) = credential.native_login();
         format!("Basic {}", STANDARD.encode(format!("{u}:{p}")))
@@ -284,7 +284,7 @@ mod tests {
         let request = format!(
             "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
             host.host(),
-            basic(l.access.windows.legacy())
+            basic(&l.access.window_credential("test-window").unwrap())
         );
         browser.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
@@ -302,8 +302,8 @@ mod tests {
         let mut browser = TcpStream::connect(socket.local_addr().unwrap()).await.unwrap();
         let (accepted, _) = socket.accept().await.unwrap();
         let (release, waiting) = tokio::sync::oneshot::channel();
-        let keys = Windows::new().unwrap();
-        let authorization = basic(keys.legacy());
+        let keys = Windows::default();
+        let authorization = basic(&keys.credential("test-window").unwrap());
         let worker = tokio::spawn(async move {
             serve(accepted, &host, &keys, || async {
                 Selection::default()

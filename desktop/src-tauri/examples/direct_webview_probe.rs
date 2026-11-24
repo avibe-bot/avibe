@@ -464,7 +464,10 @@ self.addEventListener('fetch', (event) => {
     /// `each-window-presents-its-own-credential` measures: this stand-in
     /// takes each window's own name and password, and remembers for every
     /// `CONNECT` its target and the name presented (`none` without a
-    /// credential, `unknown` for any other). It grants a tunnel and ends it.
+    /// credential, `unknown` for any other). It grants a tunnel and ends it;
+    /// or, started with `tunnelling`, carries it to a loopback port and keeps
+    /// it, by the name that opened it, until told to close that window's
+    /// tunnels: what the real listener does at a hand-over.
     pub const WINDOWS: [(&str, &str, u16); 2] = [
         ("window-one", "password-one-4c1d", 18441),
         ("window-two", "password-two-9e7a", 18442),
@@ -473,21 +476,43 @@ self.addEventListener('fetch', (event) => {
     pub struct Naming {
         pub port: u16,
         heard: Arc<Mutex<Vec<(String, String)>>>,
+        tunnels: Arc<Mutex<Vec<(String, TcpStream)>>>,
     }
 
     impl Naming {
         pub fn start() -> Self {
+            Self::serving(None)
+        }
+
+        /// Carries each granted tunnel to `upstream` and keeps it open.
+        pub fn tunnelling(upstream: u16) -> Self {
+            Self::serving(Some(upstream))
+        }
+
+        fn serving(upstream: Option<u16>) -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("naming port");
             let port = listener.local_addr().expect("naming address").port();
             let heard = Arc::new(Mutex::new(Vec::new()));
-            let log = heard.clone();
+            let tunnels = Arc::new(Mutex::new(Vec::new()));
+            let (log, kept) = (heard.clone(), tunnels.clone());
             thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
-                    let log = log.clone();
-                    thread::spawn(move || serve_naming(stream, &log));
+                    let (log, kept) = (log.clone(), kept.clone());
+                    thread::spawn(move || serve_naming(stream, &log, upstream, &kept));
                 }
             });
-            Self { port, heard }
+            Self { port, heard, tunnels }
+        }
+
+        /// Closes every tunnel `name` opened; how many there were.
+        pub fn close_tunnels_of(&self, name: &str) -> usize {
+            let mut tunnels = self.tunnels.lock().expect("tunnels");
+            let (closing, kept): (Vec<_>, Vec<_>) = tunnels.drain(..).partition(|(opened_by, _)| opened_by == name);
+            *tunnels = kept;
+            for (_, stream) in &closing {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+            closing.len()
         }
 
         /// The names presented for `target` so far, in order.
@@ -502,7 +527,12 @@ self.addEventListener('fetch', (event) => {
         }
     }
 
-    fn serve_naming(mut browser: TcpStream, log: &Mutex<Vec<(String, String)>>) {
+    fn serve_naming(
+        mut browser: TcpStream,
+        log: &Mutex<Vec<(String, String)>>,
+        upstream: Option<u16>,
+        tunnels: &Mutex<Vec<(String, TcpStream)>>,
+    ) {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let _ = browser.set_read_timeout(Some(Duration::from_secs(10)));
         let Some((head, _)) = read_head(&mut browser) else {
@@ -529,8 +559,33 @@ self.addEventListener('fetch', (event) => {
                 "HTTP/1.1 200 Connection Established\r\n\r\n"
             }
         };
-        let _ = browser.write_all(answer.as_bytes());
+        let granted = answer.starts_with("HTTP/1.1 200");
+        let carried = upstream
+            .filter(|_| granted)
+            .and_then(|port| TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok());
+        let Some(mut upstream) = carried else {
+            let _ = browser.write_all(answer.as_bytes());
+            let _ = browser.shutdown(Shutdown::Both);
+            return;
+        };
+        if browser.write_all(answer.as_bytes()).is_err() {
+            return;
+        }
+        let _ = browser.set_read_timeout(None);
+        let (Ok(kept), Ok(mut browser_read), Ok(mut upstream_write)) =
+            (browser.try_clone(), browser.try_clone(), upstream.try_clone())
+        else {
+            return;
+        };
+        tunnels.lock().expect("tunnels").push((name.to_owned(), kept));
+        let up = thread::spawn(move || {
+            let _ = std::io::copy(&mut browser_read, &mut upstream_write);
+            let _ = upstream_write.shutdown(Shutdown::Both);
+        });
+        let _ = std::io::copy(&mut upstream, &mut browser);
         let _ = browser.shutdown(Shutdown::Both);
+        let _ = upstream.shutdown(Shutdown::Both);
+        let _ = up.join();
     }
 
     /// The order in which the two windows ask, by index into `WINDOWS`.
@@ -1174,6 +1229,72 @@ mod macos_probe {
                 }),
             );
         }
+
+        // 16. Two routed windows of one instance at one listener, each with
+        //     a credential of its own, as the shell routes them. The
+        //     listener closes the tunnels of one, as it does for that
+        //     window's hand-over: that window's next request opens a new
+        //     tunnel under its own name, and the other window's tunnel is
+        //     untouched and serves its next request without a new one.
+        let behind = Keeping::start();
+        let shared = Naming::tunnelling(behind.port);
+        let instance_target = format!("{ROUTED}:{}", behind.port);
+        let routed: Vec<Retained<WKWebView>> = WINDOWS
+            .iter()
+            .map(|(name, password, _)| {
+                let view = new_webview(mtm);
+                install_route(
+                    &view,
+                    mtm,
+                    ROUTED,
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, shared.port),
+                    name,
+                    password,
+                );
+                view
+            })
+            .collect();
+        let tunnels_of = |name: &str| {
+            shared
+                .heard(&instance_target)
+                .iter()
+                .filter(|presented| *presented == name)
+                .count()
+        };
+        let (one, two) = (WINDOWS[0].0, WINDOWS[1].0);
+        let loaded = routed
+            .iter()
+            .all(|view| load(view, &format!("http://{instance_target}/"), "kept") && request(view));
+        let (one_before, two_before) = (tunnels_of(one), tunnels_of(two));
+        let closed = shared.close_tunnels_of(one);
+        // WebKit may take a moment to see the close: ask until window one
+        // has opened a tunnel again.
+        let reopened = pump_until(WAIT, || {
+            pump_until(Duration::from_millis(200), || false);
+            request(&routed[0]);
+            tunnels_of(one) > one_before
+        });
+        let other_answered = request(&routed[1]);
+        report.case(
+            "a-hand-over-in-one-window-leaves-the-other-windows-connection",
+            loaded
+                && one_before >= 1
+                && two_before >= 1
+                && closed >= 1
+                && reopened
+                && other_answered
+                && tunnels_of(two) == two_before
+                && shared
+                    .heard(&instance_target)
+                    .iter()
+                    .all(|presented| presented == "none" || presented == one || presented == two),
+            json!({
+                "loaded": loaded, "closed_of_one": closed, "one_reopened": reopened,
+                "tunnels_of_one": [one_before, tunnels_of(one)],
+                "tunnels_of_two": [two_before, tunnels_of(two)],
+                "two_answered": other_answered,
+            }),
+        );
 
         report.failed
     }

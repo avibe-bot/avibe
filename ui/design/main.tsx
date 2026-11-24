@@ -30,7 +30,7 @@ void i18n.changeLanguage(lang);
 declare global {
   interface Window {
     __DESIGN__?: {
-      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: FrameStep[]; wait?: number; press?: string; reducedMotion?: boolean; safeArea?: FrameSafeArea }[];
+      frames: { id: string; file: string; title: string; status: string; width: number; height: number; themes: DesignTheme[]; hover?: string; click?: FrameStep[]; wait?: number; press?: string; reducedMotion?: boolean; browserColorScheme?: boolean; safeArea?: FrameSafeArea }[];
       unfixtured: () => string[];
       quiet: () => Promise<void>;
       t: (key: string) => string;
@@ -98,7 +98,7 @@ async function boot() {
     else Object.defineProperty(window, 'avibeNative', { configurable: true, value: mock });
   }
   window.__DESIGN__ = {
-    frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait, press: f.press, reducedMotion: f.reducedMotion, safeArea: f.safeArea })),
+    frames: frames.map((f) => ({ id: f.id, file: f.file, title: f.title, status: f.status, width: f.width, height: f.height, themes: f.themes ?? ['light', 'dark'], hover: f.hover, click: f.click, wait: f.wait, press: f.press, reducedMotion: f.reducedMotion, browserColorScheme: f.browserColorScheme, safeArea: f.safeArea })),
     unfixtured: () => designNetwork.unfixtured(),
     quiet: () => designNetwork.quiet(),
     // Click selectors name copy by key (`{t:<key>}`); the page resolves it in the frame's language.

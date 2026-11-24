@@ -166,12 +166,13 @@ async fn run(changed_selection: bool) {
         None
     };
     let handover = client.handover();
-    let retired = client.window_credential("second").unwrap();
+    let view = handover.window_credential("instance-view").unwrap();
+    let retired = handover.window_credential("second").unwrap();
     let delayed = handover.close_quiet_public_for_window(host.host(), &retired);
-    client.revoke_window(&retired);
+    handover.revoke_window(&retired);
     let pooled = if let Some((a, b, other)) = public {
-        let first = client.window_credential("first").unwrap();
-        let second = client.window_credential("second").unwrap();
+        let first = handover.window_credential("first").unwrap();
+        let second = handover.window_credential("second").unwrap();
         let mut one = super::credential_tests::connect_as(&client, &first, 200).await;
         let mut two = super::credential_tests::connect_as(&client, &second, 200).await;
         super::credential_tests::echo(&mut one).await;
@@ -185,16 +186,14 @@ async fn run(changed_selection: bool) {
     client.publish(link.clone(), super::EndpointDrain::new(ep));
     assert_eq!(changes_status.borrow_and_update().sequence, 1);
     assert_eq!(
-        handover.close_quiet_public("other-app.avibe.bot", || Some(())).await,
+        handover
+            .close_quiet_public_for_window("other-app.avibe.bot", &view)
+            .await,
         super::HandoverResult::NotUsable
-    );
-    assert_eq!(
-        handover.close_quiet_public(host.host(), || None::<()>).await,
-        super::HandoverResult::OtherDocuments
     );
     if pooled.is_none() {
         assert_eq!(
-            handover.close_quiet_public(host.host(), || Some(())).await,
+            handover.close_quiet_public_for_window(host.host(), &view).await,
             super::HandoverResult::Done { closed: 0, kept: 0 }
         );
     }
@@ -204,13 +203,13 @@ async fn run(changed_selection: bool) {
         "the CONNECT probe is not a browser stream"
     );
     use base64::{engine::general_purpose::STANDARD, Engine};
-    let credential = client.window_credential("to-close").unwrap();
+    let credential = handover.window_credential("to-close").unwrap();
     let mut closing = super::credential_tests::connect_as(&client, &credential, 200).await;
     super::credential_tests::echo(&mut closing).await;
-    client.revoke_window(&credential);
+    handover.revoke_window(&credential);
     assert_retired_read(closing.read(&mut [0]).await);
     drop(super::credential_tests::connect_as(&client, &credential, 407).await);
-    let active = client.window_credential("second").unwrap();
+    let active = handover.window_credential("second").unwrap();
     let (user, pass) = active.native_login();
     let auth = STANDARD.encode(format!("{user}:{pass}"));
     let mut socket = TcpStream::connect((Ipv4Addr::LOCALHOST, client.listener.port))
@@ -258,7 +257,7 @@ async fn run(changed_selection: bool) {
         // First poll is after label reuse, with a replacement leg eligible to close.
         assert_eq!(delayed.await, super::HandoverResult::NotUsable);
         assert_eq!(handover.window_census(&retired), None);
-        client.revoke_window(&retired);
+        handover.revoke_window(&retired);
         assert_eq!(
             handover.window_census(&second),
             Some(super::PublicCensus { quiet: 1, busy: 0 })
@@ -270,7 +269,7 @@ async fn run(changed_selection: bool) {
         assert_retired_read(one.read(&mut [0]).await);
         super::credential_tests::echo(&mut two).await;
         assert_eq!(
-            handover.close_quiet_public(host.host(), || Some(())).await,
+            handover.close_quiet_public_for_window(host.host(), &view).await,
             super::HandoverResult::Done { closed: 1, kept: 0 }
         );
         assert_retired_read(mine.read(&mut [0]).await);
@@ -341,7 +340,7 @@ async fn run(changed_selection: bool) {
         }
     );
     assert_eq!(
-        handover.close_quiet_public(host.host(), || Some(())).await,
+        handover.close_quiet_public_for_window(host.host(), &view).await,
         super::HandoverResult::NotUsable
     );
     ingress_task.await.unwrap();

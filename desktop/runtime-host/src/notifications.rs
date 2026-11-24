@@ -12,7 +12,9 @@ use url::Url;
 
 use crate::LoopbackOrigin;
 
+mod answers;
 mod registry;
+use answers::{AnswerPosts, Turn};
 pub use registry::{NotificationReceipt, NotificationRegistry, NotificationSnapshot};
 
 #[derive(Clone, Debug)]
@@ -201,7 +203,9 @@ impl NotificationPreferences {
     }
 }
 
-struct RunPreferences {
+struct DeliveryContext {
+    slots: Arc<Semaphore>,
+    answers: Arc<Mutex<AnswerPosts>>,
     current: Arc<RwLock<NotificationPreferences>>,
     at_receipt: NotificationPreferences,
     presentation_generation: u64,
@@ -209,6 +213,12 @@ struct RunPreferences {
 }
 
 pub trait NotificationSink: Send + Sync {
+    /// Only a sink that actually submits native reply actions can replace a
+    /// turn's ordinary success notice with its question.
+    fn supports_answer_actions(&self) -> bool {
+        false
+    }
+
     fn registry(&self) -> &Mutex<NotificationRegistry>;
     fn gate(&self) -> NotificationGate;
     /// Capture before asynchronous detail/badge reads. The sink rechecks this
@@ -349,6 +359,8 @@ pub struct RunDetail {
     pub session_label: Option<String>,
     pub definition_name: Option<String>,
     pub notification_category: Option<String>,
+    pub session_id: Option<String>,
+    pub metadata: Option<serde_json::Value>,
 }
 
 const SOURCE_PART_CHARS: usize = 48;
@@ -438,6 +450,7 @@ pub struct AnswerRequest {
     pub revision: Option<String>,
     pub options: Vec<String>,
     pub preview: Option<String>,
+    pub turn_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -451,6 +464,11 @@ struct MessageEvent {
     text: Option<String>,
     #[serde(default)]
     content: Option<serde_json::Value>,
+    metadata: Option<serde_json::Value>,
+}
+
+fn turn_id(metadata: Option<&serde_json::Value>) -> Option<&str> {
+    metadata?.get("turn_id")?.as_str().filter(|id| !id.trim().is_empty())
 }
 
 impl MessageEvent {
@@ -492,6 +510,7 @@ impl MessageEvent {
             revision,
             options,
             preview: preview(self.text.as_deref()),
+            turn_id: turn_id(self.metadata.as_ref()).map(str::to_owned),
         })
     }
 }
@@ -814,6 +833,9 @@ pub async fn run_notifications(
 ) {
     let mut backoff = ReconnectBackoff::default();
     let preferences = Arc::new(RwLock::new(NotificationPreferences::default()));
+    // Scoped to this adopted Runtime connection; a presentation change is
+    // additionally fenced by the epoch in each exact turn key.
+    let answers = Arc::new(Mutex::new(AnswerPosts::default()));
     // Any frame may follow an unread change, and listing the event types that
     // can would miss the next one added, so every connection and every frame
     // (the 15-second heartbeat included) asks for a fresh total. The reader
@@ -900,17 +922,25 @@ pub async fn run_notifications(
                                     .forget(receipt.id());
                                 continue;
                             }
-                            let (transport, sink, slots) = (transport.clone(), sink.clone(), slots.clone());
-                            let preferences = RunPreferences {
+                            if sink.supports_answer_actions() && request.revision.is_some() {
+                                if let Some(turn) = Turn::new(
+                                    presentation_generation,
+                                    Some(&request.session_id),
+                                    request.turn_id.as_deref(),
+                                ) {
+                                    answers.lock().expect("answer posts").observe(turn, &receipt);
+                                }
+                            }
+                            let (transport, sink) = (transport.clone(), sink.clone());
+                            let preferences = DeliveryContext {
+                                slots: slots.clone(),
+                                answers: answers.clone(),
                                 current: preferences.clone(),
                                 at_receipt,
                                 presentation_generation,
                                 receipt,
                             };
                             lookups.spawn(async move {
-                                let Ok(_slot) = slots.acquire_owned().await else {
-                                    return;
-                                };
                                 notify_question(transport, sink, request, preferences).await;
                             });
                         }
@@ -944,20 +974,16 @@ pub async fn run_notifications(
                                 }
                                 continue;
                             }
-                            let (transport, sink, slots) = (transport.clone(), sink.clone(), slots.clone());
-                            let preferences = RunPreferences {
+                            let (transport, sink) = (transport.clone(), sink.clone());
+                            let preferences = DeliveryContext {
+                                slots: slots.clone(),
+                                answers: answers.clone(),
                                 current: preferences.clone(),
                                 at_receipt,
                                 presentation_generation,
                                 receipt,
                             };
                             lookups.spawn(async move {
-                                // Queue behind the request limit rather than
-                                // drop: a run without stamps is only decided
-                                // by its read.
-                                let Ok(_slot) = slots.acquire_owned().await else {
-                                    return;
-                                };
                                 notify_run(transport, sink, run_id, stamps, intent, background, preferences).await;
                             });
                         }
@@ -1011,12 +1037,20 @@ async fn notify_question(
     transport: Arc<dyn NotificationTransport>,
     sink: Arc<dyn NotificationSink>,
     request: AnswerRequest,
-    preferences: RunPreferences,
+    preferences: DeliveryContext,
 ) {
+    let Ok(slot) = preferences.slots.clone().acquire_owned().await else {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(preferences.receipt.id());
+        return;
+    };
     let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.session_detail(&request.session_id))
         .await
         .ok()
         .flatten();
+    drop(slot);
     let category = detail.as_ref().and_then(|detail| detail.category.as_deref());
     let current = preferences.current.read().await;
     let receipt = preferences.receipt;
@@ -1048,12 +1082,20 @@ async fn notify_run(
     mut stamps: RunTimestamps,
     intent: NotificationIntent,
     background: bool,
-    preferences: RunPreferences,
+    preferences: DeliveryContext,
 ) {
+    let Ok(slot) = preferences.slots.clone().acquire_owned().await else {
+        sink.registry()
+            .lock()
+            .expect("notification registry lock")
+            .forget(preferences.receipt.id());
+        return;
+    };
     let detail = tokio::time::timeout(REQUEST_TIMEOUT, transport.run_detail(&run_id))
         .await
         .ok()
         .flatten();
+    drop(slot);
     let source = detail.as_ref().and_then(RunDetail::source);
     // The snapshot covers Avibe Sessions, not IM channels. Unknown/old-server
     // details keep their notification instead of treating absence as a read.
@@ -1078,10 +1120,49 @@ async fn notify_run(
             .forget(preferences.receipt.id());
         return;
     }
+    drop(current);
+    let turn = detail.as_ref().and_then(|detail| {
+        // A stale/inconsistent detail cannot establish a different Session's
+        // ownership, even if the turn string happens to match.
+        (detail.session_id.as_deref() == preferences.receipt.session_id())
+            .then(|| {
+                Turn::new(
+                    preferences.presentation_generation,
+                    detail.session_id.as_deref(),
+                    turn_id(detail.metadata.as_ref()),
+                )
+            })
+            .flatten()
+    });
+    let category = category.map(str::to_owned);
     if let Some(detail) = detail {
         stamps.fill_missing(detail.stamps);
     }
     if (background || stamps.is_long_running()) && sink.gate().allows() && !preferences.receipt.retired() {
+        if matches!(intent, NotificationIntent::RunSucceeded) {
+            if let Some(turn) = turn {
+                preferences
+                    .receipt
+                    .follow_answer(answers::Completion::new(&preferences.answers, turn.clone()));
+                let submissions = preferences.answers.lock().expect("answer posts").submissions(&turn);
+                if answers::any_submitted(submissions).await {
+                    sink.registry()
+                        .lock()
+                        .expect("notification registry lock")
+                        .forget(preferences.receipt.id());
+                    return;
+                }
+            }
+        }
+        // A pending OS response may outlive the preference/focus snapshot.
+        let current = preferences.current.read().await;
+        if !current.allows_run(category.as_deref()) || !sink.gate().allows() || preferences.receipt.retired() {
+            sink.registry()
+                .lock()
+                .expect("notification registry lock")
+                .forget(preferences.receipt.id());
+            return;
+        }
         if !preferences.receipt.readable() {
             sink.registry()
                 .lock()
@@ -1137,6 +1218,7 @@ mod tests {
                 revision: Some(REVISION.into()),
                 options: vec!["Yes".into(), "No".into()],
                 preview: Some("PR #4031 passed review. Merge it now?".into()),
+                turn_id: None,
             }
         );
         // The same message again (a mirror republish) asks nothing new.

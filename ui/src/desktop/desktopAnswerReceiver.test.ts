@@ -31,9 +31,9 @@ describe('desktop answer receiver', () => {
   });
 
   it('names the option group for a choice and the replied message for text', () => {
-    expect(answerBody(choice)).toEqual({ text: 'Yes', operation_id: 'op-1', revision, metadata: { quick_reply_for: 'msg_1' } });
+    expect(answerBody(choice)).toEqual({ text: 'Yes', operation_id: 'op-1', revision, metadata: { quick_reply_for: 'msg_1', input_surface: 'notification_reply' } });
     expect(answerBody({ ...choice, kind: 'text', text: '先补 changelog' })).toEqual({
-      text: '先补 changelog', operation_id: 'op-1', revision, in_reply_to: 'msg_1',
+      text: '先补 changelog', operation_id: 'op-1', revision, in_reply_to: 'msg_1', metadata: { input_surface: 'notification_reply' },
     });
   });
 

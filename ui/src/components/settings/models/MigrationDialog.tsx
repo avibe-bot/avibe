@@ -30,6 +30,7 @@ import {
   type MigrationSelection,
 } from './migrationGrouping';
 import { apiFailure, modelsApi } from './modelsApi';
+import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { serverText } from './serverCopy';
 import { VendorGlyph } from './vendorGlyph';
 import { ACCENT_ICON, ACCENT_TILE, type Accent } from './vendorMeta';
@@ -442,7 +443,11 @@ export const MigrationDialog: React.FC<{
             </span>
             {t(copy.title)}
           </DialogTitle>
-          <DialogDescription className="sm:pl-[52px]">{t(copy.description)}</DialogDescription>
+          <DialogDescription className="flex items-center gap-1.5 sm:pl-[52px]">
+            <span>{t(copy.description)}</span>
+            {/* What an import does with each kind of sign-in, for whoever wants to know before agreeing. */}
+            {scope === 'settings' && <ModelHubInfoHint label={t('settings.models.migration.detailsLabel') as string} content={t('settings.models.migration.details')} />}
+          </DialogDescription>
         </DialogHeader>
 
         {reporting ? (

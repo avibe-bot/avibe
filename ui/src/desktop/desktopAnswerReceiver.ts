@@ -71,8 +71,8 @@ export function answerBody(request: AnswerRequest): Record<string, unknown> {
     operation_id: request.id,
     revision: request.revision,
     ...(request.kind === 'choice'
-      ? { metadata: { quick_reply_for: request.messageId } }
-      : { in_reply_to: request.messageId }),
+      ? { metadata: { quick_reply_for: request.messageId, input_surface: 'notification_reply' } }
+      : { in_reply_to: request.messageId, metadata: { input_surface: 'notification_reply' } }),
   };
 }
 

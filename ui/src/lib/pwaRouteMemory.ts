@@ -30,6 +30,8 @@ const RESTORABLE_EXACT_PATHS = new Set([
   '/settings/platforms/groups',
   '/settings/platforms/users',
   '/settings/remote-access',
+  '/settings/remote-access/activity',
+  '/settings/remote-access/connection',
   '/settings/backends',
   ...AGENT_BACKENDS.map((backend) => backend.settingsRoute),
   '/settings/models',

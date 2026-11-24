@@ -49,7 +49,7 @@ async fn handle_issues_and_revokes_while_client_refresh_is_in_flight() {
     timeout(Duration::from_secs(4), async {
         let host = "one-app.avibe.bot";
         let mut c = Client::new(host, "one".into()).await.unwrap();
-        let mut legacy = super::handover_tests::public_browser(&mut c).await;
+        let mut instance_view = super::handover_tests::public_browser(&mut c).await;
         let proxy = c.route().unwrap().proxy;
         let h = c.handover();
         let fault = c.listener.accept_fault.clone();
@@ -78,7 +78,7 @@ async fn handle_issues_and_revokes_while_client_refresh_is_in_flight() {
             assert!(h.window_credential("a").is_none());
             h.revoke_window(&fresh); // existing streams can still be retired during drain
             assert!(matches!(replacement.read(&mut [0]).await, Ok(0) | Err(_)));
-            echo(&mut legacy).await;
+            echo(&mut instance_view).await;
             release.send(()).unwrap();
         };
         let (outcome, ()) = tokio::join!(refresh, windows);
@@ -92,7 +92,7 @@ async fn handle_issues_and_revokes_while_client_refresh_is_in_flight() {
 
 #[test]
 fn every_credential_byte_is_required_by_the_registry() {
-    let keys = super::credentials::Windows::new().unwrap();
+    let keys = super::credentials::Windows::default();
     let c = keys.credential("one").unwrap();
     let (u, p) = c.native_login();
     let header = format!("Basic {}", STANDARD.encode(format!("{u}:{p}")));
@@ -108,29 +108,30 @@ fn every_credential_byte_is_required_by_the_registry() {
 async fn revoked_window_cannot_open_or_keep_a_connection_or_cross_instances() {
     timeout(Duration::from_secs(4), async {
         let mut c = Client::new("one-app.avibe.bot", "one".into()).await.unwrap();
-        let mut legacy = super::handover_tests::public_browser(&mut c).await;
+        let mut instance_view = super::handover_tests::public_browser(&mut c).await;
+        let h = c.handover();
         let other = Client::new("two-app.avibe.bot", "two".into()).await.unwrap();
-        let a = c.window_credential("a").unwrap();
-        let b = c.window_credential("b").unwrap();
+        let a = h.window_credential("a").unwrap();
+        let b = h.window_credential("b").unwrap();
         let mut sa = connect_as(&c, &a, 200).await;
         let mut sb = connect_as(&c, &b, 200).await;
         echo(&mut sa).await;
         echo(&mut sb).await;
         drop(connect_as(&other, &a, 407).await);
-        let foreign = other.window_credential("a").unwrap();
-        c.revoke_window(&foreign);
+        let foreign = other.handover().window_credential("a").unwrap();
+        h.revoke_window(&foreign);
         assert_eq!(c.handover().window_census(&foreign), None);
         echo(&mut sa).await;
-        c.revoke_window(&a);
+        h.revoke_window(&a);
         let mut byte = [0];
         assert!(matches!(sa.read(&mut byte).await, Ok(0) | Err(_)));
-        let fresh = c.window_credential("a").unwrap();
+        let fresh = h.window_credential("a").unwrap();
         drop(connect_as(&c, &a, 407).await);
-        c.revoke_window(&a); // late teardown, after same-label registration
+        h.revoke_window(&a); // late teardown, after same-label registration
         let mut reopened = connect_as(&c, &fresh, 200).await;
         echo(&mut reopened).await;
         echo(&mut sb).await;
-        echo(&mut legacy).await;
+        echo(&mut instance_view).await;
     })
     .await
     .unwrap();

@@ -65,6 +65,7 @@ import {
 } from '../../lib/voiceRealtime';
 import { resolveVoiceContext, type VoiceContext, type VoiceContextSource } from '../../lib/voiceContext';
 import { VOICE_MESSAGE_METADATA, type VoiceMessageMetadata } from '../../lib/voiceMessage';
+import { readDraftInputSurface, writeDraftInputSurface, type DraftInputSurface } from '../../lib/draftInputSurface';
 import {
   ComposerHoldCard,
   ComposerHoldSurface,
@@ -552,7 +553,7 @@ export interface ComposerHandle {
   /** `addFiles` for a caller that must know whether the composer took the
    *  files: false while it refuses them (disabled, a send in flight, voice
    *  capture owns the draft, no session). Upload failures still toast. */
-  stageFiles: (files: File[]) => boolean;
+  stageFiles: (files: File[], surface?: 'ask_vibey') => boolean;
   /** Insert a `#<session>` reference chip at the cursor (e.g. "reference this
    *  session" from the sidebar). No-op when the mention editor isn't active
    *  (the plain-textarea home composer). */
@@ -564,7 +565,7 @@ export interface ComposerHandle {
   /** Append text on its own line after whatever is already there (typed text
    *  and staged attachments stay), then focus with the caret at the end. It
    *  never sends. False while voice capture owns the draft. */
-  appendLine: (text: string) => boolean;
+  appendLine: (text: string, surface?: 'ask_vibey') => boolean;
   /** Replace the whole draft from outside and focus the input with the caret at
    *  the end — the home's suggestion cards seed a starting task the user then
    *  edits. It never sends, and refuses while voice capture owns the draft. */
@@ -652,6 +653,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   const draftEditedRef = useRef(false);
   // Blocks a same-tick double-submit before the optimistic clear re-renders.
   const pendingRef = useRef(false);
+  // The origin belongs to this draft, never to the Session or future messages.
+  const inputSurfaceRef = useRef<DraftInputSurface>(readDraftInputSurface(sessionId));
+  useEffect(() => {
+    inputSurfaceRef.current = readDraftInputSurface(sessionId);
+  }, [sessionId]);
+  const setInputSurface = (surface: DraftInputSurface) => {
+    inputSurfaceRef.current = surface;
+    writeDraftInputSurface(sessionId, surface);
+  };
   // Set by setDraft; consumed by the layout effect that focuses after the seeded
   // text has rendered.
   const seedFocusRef = useRef(false);
@@ -883,6 +893,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     if (url && stagedUrlsRef.current.delete(url)) URL.revokeObjectURL(url);
     attachmentFilesRef.current.delete(localId);
     const next = attachments.filter((attachment) => attachment.localId !== localId);
+    if (!next.length && !valueRef.current.trim()) setInputSurface(undefined);
     setAttachments(next);
     if (sessionId && !pendingRef.current) {
       sessionDraftAttachmentsCache.write(sessionId, readySessionDraftAttachments(next));
@@ -1776,7 +1787,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         : undefined;
       let started: boolean | void;
       try {
-        started = await onSend(text, sent, undefined, metadata);
+        const surface = inputSurfaceRef.current;
+        started = await onSend(text, sent, undefined,
+          surface ? { ...metadata, input_surface: surface } : metadata);
+        if (started !== false) setInputSurface(undefined);
       } catch {
         started = false;
       } finally {
@@ -2065,9 +2079,10 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // No deps array keeps every exposed operation on the latest render state.
   useImperativeHandle(ref, () => ({
     addFiles: (files: File[]) => void uploadFiles(files),
-    stageFiles: (files: File[]) => {
+    stageFiles: (files: File[], surface?: 'ask_vibey') => {
       if (!mediaEnabled || disabledRef.current || pendingRef.current || voiceDraftLocked()) return false;
       void uploadFiles(files);
+      setInputSurface(surface ?? inputSurfaceRef.current);
       return true;
     },
     insertSessionReference: (refSessionId: string, title?: string | null) => {
@@ -2079,8 +2094,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     appendText: (text: string) => {
       if (!voiceDraftLocked()) mentionRef.current?.append(text);
     },
-    appendLine: (text: string) => {
+    appendLine: (text: string, surface?: 'ask_vibey') => {
       if (voiceDraftLocked()) return false;
+      setInputSurface(surface ?? inputSurfaceRef.current);
       draftEditedRef.current = true;
       if (useMentions) {
         mentionRef.current?.append(text, '\n');
@@ -2139,6 +2155,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }, [busyControls, sessionId]);
 
   const update = (next: string) => {
+    if (!next.trim() && !attachments.length) setInputSurface(undefined);
     draftEditedRef.current = true;
     valueRef.current = next;
     setValue(next);
@@ -2151,6 +2168,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     const submitted = (useMentions ? valueRef.current : value).trim();
     const sent = readyAttachments;
     const sentRefs = referencesRef.current;
+    const inputSurface = inputSurfaceRef.current;
+    setInputSurface(undefined);
     pendingRef.current = true;
     draftEditedRef.current = true;
     const sendGeneration = sessionId
@@ -2176,7 +2195,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       // restore the prompt + attachments for retry — unless the user typed anew.
       let started: boolean | void;
       try {
-        started = await onSend(submitted, sent, useMentions ? sentRefs : undefined);
+        started = await onSend(submitted, sent, useMentions ? sentRefs : undefined,
+          inputSurface ? { input_surface: inputSurface } : undefined);
       } catch {
         showToast(t('chat.compose.sendFailed'), 'error');
         started = false;
@@ -2199,6 +2219,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           // callback still runs after navigation unmounts this Composer, because
           // the original session's local draft must survive even though its UI
           // state no longer exists.
+          setInputSurface(inputSurface);
           valueRef.current = submitted;
           if (!unmountedRef.current) {
             setValue(submitted);
@@ -2418,6 +2439,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               // would save the previous session's draft under this session id
               // (mirrors the plain-textarea path, whose seeding never saves).
               if (!isDraftSeed) draftEditedRef.current = true;
+              if (!isDraftSeed && !text.trim() && !attachments.length) setInputSurface(undefined);
               if (!isDraftSeed && !isVoicePreview) onDraftChange?.(text);
             }}
             onSubmit={submit}

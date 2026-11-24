@@ -594,7 +594,7 @@ const PetSurface: React.FC = () => {
       const row = await api.sendSessionMessage(binding, {
         text: text.trim(),
         ...(references.length ? { content: { references } } : {}),
-        ...(metadata ? { metadata } : {}),
+        metadata: { ...metadata, input_surface: 'mini' },
       });
       if (epoch.isCurrent()) {
         data.noteSent(row && typeof row === 'object' && 'id' in row ? row : null);
