@@ -1372,7 +1372,8 @@ def review_mind(text: Optional[str], previous: str, window: Optional[int] = None
         new = {(name, span) for name, spans in marked.items() for span in spans}
         held = {name: [span for span in spans if (name, span) not in new] for name, spans in _finished(own).items()}
         foldable = _span_tokens(own, held)
-        # Entries this turn marked have to stay this once, so a Goals that fits without them asks no repair. Not so
+        # Entries this turn marked have to stay this once, so a Goals that fits without them asks no repair: what is
+        # shown of it leaves finished entries out and cuts nothing else (``_without_finished``). Not so
         # for a mind past ``mind_revert``: the loop keeps the previous mind instead of it, and the turn must hear of
         # it while it can still condense.
         waived = _section_tokens(_without(own, marked)) <= limit and tokens <= mind_revert(window)
@@ -1412,7 +1413,9 @@ def mind_sizes(mind: str, window: Optional[int] = None) -> str:
 def _without_finished(own: Sequence[MindBlock], marker: str, limit: int) -> tuple[list[MindBlock], bool]:
     """``own`` with the fewest finished entries of Mission and Workstreams left out, from the top, for the section to
     be within ``limit`` as it is shown, ``marker`` its last line, and as a section is counted (``_section_tokens``);
-    with all of them out when even that does not fit (section 10). Whether it fits comes second."""
+    with all of them out when even that does not fit (section 10). Whether it is shown so, with nothing more cut,
+    comes second: it is when it fits, and also when only ``marker`` takes it past the limit, since text that is
+    within its limit is never cut to make room for the harness's own line."""
     spans = [(name, span) for name, found in _finished(own).items() for span in found]
 
     def shown(count: int) -> list[MindBlock]:
@@ -1427,7 +1430,7 @@ def _without_finished(own: Sequence[MindBlock], marker: str, limit: int) -> tupl
 
     low, high = 0, len(spans)
     if not fits(high):
-        return shown(high), False
+        return shown(high), _section_tokens(shown(high)) <= limit
     while low < high:  # the fewest: leaving out one more never makes the section longer
         middle = (low + high) // 2
         low, high = (low, middle) if fits(middle) else (middle + 1, high)
@@ -1451,8 +1454,8 @@ def _head_lines(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
 def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str, list[str]]:
     """``text`` (a mind with its structure intact) with each section past its limit cut to it (section 10): every
     heading line kept; finished entries of Mission and Workstreams left out first, from the top, while the section is
-    past its room; then the head of what is under each heading kept until the room runs out; and ``marker`` once,
-    ending the section. The fixed part, the heading lines and the one marker, is all a section shows when its limit
+    past its room; then, unless what is left is within the limit but for ``marker``, the head of what is under each
+    heading kept until the room runs out; and ``marker`` once, ending the section. The fixed part, the heading lines and the one marker, is all a section shows when its limit
     leaves no more room (a small route's, section 7). The cut sections' whole text, for the next checkpoint request
     (section 11), comes second."""
     parsed, problem = mind_blocks(text)
@@ -1468,8 +1471,8 @@ def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str,
             out.append(whole)
             continue
         cut_sections.append(whole)
-        own, fits = _without_finished(own, marker, limit)
-        if fits:
+        own, whole = _without_finished(own, marker, limit)
+        if whole:
             out.append("\n".join([_block_text(own), marker]))
             continue
         room = 4 * limit - note - sum(_utf8(name) + 1 for name, _ in own if name)

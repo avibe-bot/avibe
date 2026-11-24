@@ -1442,12 +1442,12 @@ def test_a_goals_section_past_its_limit_is_shown_without_its_finished_entries_fi
         "# 2. Goals", "## Mission", "(none yet: mission)", "## Workstreams", "- [x] B", "- [ ] " + "l" * 206, MIND_CUT_UNSTORED,
     ]
     # But the marker is the last line under Workstreams, so a placeholder there is no longer alone and counts: the same
-    # entries under Mission do not fit with it, and what is shown is within the limit as a section is counted.
+    # entries under Mission do not fit with it, and both finished ones go. What is left is within the limit but for
+    # the marker, so nothing of it is cut: the harness's own line never costs a live entry its text.
     mind = _mind(**{"## Mission": "- [x] " + "a" * 200 + "\n- [x] B\n- [ ] " + "l" * 206})
-    shown = fit_mind(mind, MIND_CUT_UNSTORED, 8_000)[0]
-    # (The head cut that follows keeps what fits of the next line, here the placeholder's first seven bytes, as before.)
-    assert _goals(shown) == ["# 2. Goals", "## Mission", "- [ ] " + "l" * 206, "## Workstreams", "(none y", MIND_CUT_UNSTORED]
-    assert review_mind(shown, shown, 8_000).over == ()
+    assert _goals(fit_mind(mind, MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "- [ ] " + "l" * 206, "## Workstreams", "(none yet: workstreams)", MIND_CUT_UNSTORED,
+    ]
     # A finished entry goes with the indented lines under it, blank lines between them included, so its notes cannot
     # take the room of the live entries after it; the purpose line above the list stays.
     noted = _mind(**{"## Mission": "Lead the product.\n- [x] done\n\n  " + "r" * 320 + "\n  - its sub-entry\n- [ ] LIVE",
@@ -1486,6 +1486,10 @@ def test_goals_past_its_limit_only_by_entries_the_turn_marked_asks_no_repair():
     carry = {"## Workstreams": "- carry"}
     exact = _mind(**{"## Mission": "- [ ] QA\n- [ ] " + "l" * 280, **carry})
     assert review_mind(exact.replace("- [ ] QA", "- [x] QA"), exact, 8_000).problems() == []
+    # A waived Goals is shown with every live entry whole, its marker past the limit: 83 tokens of it plus the line.
+    assert _goals(fit_mind(exact.replace("- [ ] QA", "- [x] QA"), MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "- [ ] " + "l" * 280, "## Workstreams", "- carry", MIND_CUT_UNSTORED,
+    ]
     past = _mind(**{"## Mission": "- [ ] ship\n- [ ] " + "l" * 281, **carry})
     assert "Goals is about 86 tokens, at most 83" in review_mind(past.replace("- [ ] ship", "- [x] ship"), past, 8_000).problems()[0]
     # An entry is the one already held only under its own heading: the same words finished under Workstreams do not
