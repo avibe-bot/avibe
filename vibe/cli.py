@@ -2043,8 +2043,9 @@ def _remote_pair_examples_text() -> str:
           Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.
           To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.
           Pairing saves the binding and starts the tunnel. On a computer that was already
-          bound it replaces that binding and signs every remote device out; if remote
-          access was off there, it stays off.
+          bound it replaces that binding. If the address stays the same, devices that are
+          signed in reconnect by themselves; if it changes, open the new address on them.
+          If remote access was off there, it stays off.
           A pairing key works once. If it fails, a new one is needed.
 
         Examples:
