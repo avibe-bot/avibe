@@ -768,7 +768,7 @@ export interface McpServerSummary {
   name: string;
   description?: string;
   transport?: string;
-  source?: 'avibe' | 'claude' | 'codex' | 'opencode' | 'project';
+  source?: 'avibe' | 'claude' | 'codex' | 'opencode' | 'antigravity' | 'project';
   sourcePath?: string;
   /** `global`, or the project scope of a row from the project's `.mcp.json`. */
   scope?: string;
@@ -899,7 +899,7 @@ export type ApiContextType = {
   saveCodexAuth: (payload: CodexAuthPayload) => Promise<CodexAuthSaveResult>;
   getClaudeAuth: () => Promise<ClaudeAuthState>;
   saveClaudeAuth: (payload: ClaudeAuthPayload) => Promise<ClaudeAuthSaveResult>;
-  startOAuthWeb: (backend: 'claude' | 'codex', forceReset?: boolean) => Promise<OAuthWebStartResult>;
+  startOAuthWeb: (backend: 'claude' | 'codex' | 'antigravity', forceReset?: boolean) => Promise<OAuthWebStartResult>;
   startOAuthWebForOpencodeProvider: (
     providerId: string,
     forceReset?: boolean,
@@ -917,15 +917,15 @@ export type ApiContextType = {
     backend: WebOAuthBackend,
     flowId: string,
   ) => Promise<OAuthWebMutationResult>;
-  removeBackendAuth: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
+  removeBackendAuth: (backend: 'claude' | 'codex' | 'antigravity') => Promise<OAuthWebMutationResult>;
   removeClaudeOAuthCredentials: () => Promise<OAuthWebMutationResult>;
   // Selectively clear just the stored API key — leave OAuth credentials
   // intact. Symmetric to OpenCode's per-provider DELETE: lets the user
   // drop a stale key without re-signing in. The backend runtime is
   // refreshed so cached sessions observe the change on the next request.
-  removeBackendApiKey: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
+  removeBackendApiKey: (backend: 'claude' | 'codex' | 'antigravity') => Promise<OAuthWebMutationResult>;
   testBackendAuth: (
-    backend: 'claude' | 'codex',
+    backend: 'claude' | 'codex' | 'antigravity',
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   testOpencodeProvider: (

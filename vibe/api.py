@@ -928,7 +928,7 @@ def _deep_merge_dicts(base: dict, patch: dict) -> dict:
     return merged
 
 
-_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url", "oauth_relay_marker")
+_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url", "oauth_relay_marker", "gcp_project", "gcp_location")
 
 
 def _strip_agent_auth_fields(payload: dict) -> dict:
@@ -946,7 +946,7 @@ def _strip_agent_auth_fields(payload: dict) -> dict:
     if not isinstance(agents, dict):
         return payload
     cleaned_agents = dict(agents)
-    for backend in ("claude", "codex"):
+    for backend in ("claude", "codex", "antigravity"):
         backend_payload = cleaned_agents.get(backend)
         if isinstance(backend_payload, dict):
             cleaned_backend = {
@@ -1527,6 +1527,7 @@ def config_to_payload(
             "opencode": config.agents.opencode.__dict__,
             "claude": _agent_payload(config.agents.claude.__dict__, include_secrets=include_secrets),
             "codex": _agent_payload(config.agents.codex.__dict__, include_secrets=include_secrets),
+            "antigravity": _agent_payload(config.agents.antigravity.__dict__, include_secrets=include_secrets),
             # Mirror ``V2Config.save`` — avault must be emitted here too, or every
             # UI save (which uses this payload as the deep-merge base) silently
             # resets ``agents.avault.cli_path`` to the dataclass default.
@@ -6605,7 +6606,7 @@ def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
         candidates.append(_parse_agent_import_file(path, backend=backend))
     else:
         if source not in NATIVE_CLI_BACKENDS:
-            raise ValueError("from must be one of: claude, codex, opencode")
+            raise ValueError(f"from must be one of: {', '.join(NATIVE_CLI_BACKENDS)}")
         if name and import_all:
             raise ValueError("Use either name or all, not both")
         for path, backend in iter_global_agent_files(str(source)):
@@ -8560,6 +8561,11 @@ def claude_models(*, schedule_refresh: bool = True) -> dict:
     return backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=schedule_refresh)
 
 
+def antigravity_models(*, schedule_refresh: bool = True) -> dict:
+    """Return the immediate shared Antigravity model-catalog snapshot."""
+    return backend_model_catalog.backend_model_snapshot("antigravity", schedule_refresh=schedule_refresh)
+
+
 def _effort_values(reasoning_entries: object) -> list[str]:
     """Extract settable reasoning-effort values, dropping the UI ``__default__`` sentinel."""
     out: list[str] = []
@@ -8768,6 +8774,23 @@ def agent_model_options(
         result = {
             "ok": True,
             "backend": "codex",
+            "models": _flat_catalog_models(data),
+            "source": data.get("source"),
+            "live": bool(data.get("live")),
+            "notes": data.get("notes"),
+            "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
+        }
+    elif normalized_backend == "antigravity":
+        data = antigravity_models()
+        if not data.get("ok"):
+            return {
+                "ok": False,
+                "backend": normalized_backend,
+                "error": data.get("error") or "antigravity model lookup failed",
+            }
+        result = {
+            "ok": True,
+            "backend": "antigravity",
             "models": _flat_catalog_models(data),
             "source": data.get("source"),
             "live": bool(data.get("live")),

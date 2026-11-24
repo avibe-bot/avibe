@@ -282,7 +282,7 @@ def _migrate_gemini_native_sources(payload: dict) -> dict:
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     """Return the bundled fixed-menu ids used by persisted Hub routes."""
 
-    if backend not in {"claude", "codex"}:
+    if backend not in {"claude", "codex", "antigravity"}:
         return ()
     from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
@@ -1214,6 +1214,7 @@ def _reset_recoverable_config_section(
             "opencode": dict(defaults.opencode.__dict__),
             "claude": dict(defaults.claude.__dict__),
             "codex": dict(defaults.codex.__dict__),
+            "antigravity": dict(defaults.antigravity.__dict__),
             "avault": dict(defaults.avault.__dict__),
         }
         return True
@@ -2127,6 +2128,19 @@ class CodexConfig:
 
 
 @dataclass
+class AntigravityConfig:
+    enabled: bool = False
+    cli_path: str = "agy"
+    auto_update: bool = True  # See ``OpenCodeConfig.auto_update``.
+    idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+    auth_mode: Literal["oauth-personal", "oauth-business", "gemini-api-key", "agent-platform"] = "oauth-personal"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    gcp_project: Optional[str] = None
+    gcp_location: Optional[str] = None
+
+
+@dataclass
 class AVaultConfig:
     cli_path: str = "avault"
 
@@ -2137,6 +2151,7 @@ class AgentsConfig:
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    antigravity: AntigravityConfig = field(default_factory=AntigravityConfig)
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
@@ -2941,7 +2956,7 @@ def normalize_storable_backend_model_text(
 
 
 def _default_backend_models(backend: str) -> list[ModelHubBackendModelConfig]:
-    if backend not in {"claude", "codex"}:
+    if backend not in {"claude", "codex", "antigravity"}:
         return []
     from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
@@ -2998,6 +3013,13 @@ class ModelHubAgentSupplyConfig(ModelHubSnapshotNode):
                 mode=mode,
                 menu_kind="open",
                 menu=ModelHubMenuConfig(),
+            )
+        if backend == "antigravity":
+            return cls(
+                backend="antigravity",
+                mode="direct",
+                menu_kind="fixed",
+                models=_default_backend_models("antigravity"),
             )
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
@@ -3658,7 +3680,10 @@ class ModelHubConfig(ModelHubSnapshotNode):
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
+            backend: ModelHubAgentSupplyConfig.default(
+                backend,
+                mode="direct" if backend == "antigravity" else "hub",
+            )
             for backend in MODEL_HUB_BACKENDS
             if backend != "vibey"
         }
@@ -3683,6 +3708,8 @@ class ModelHubConfig(ModelHubSnapshotNode):
         if "vibey" not in self.agents:
             self.agents["vibey"] = ModelHubAgentSupplyConfig.default("vibey", mode="hub")
             self.vibey_supply_pending = True
+        if "antigravity" not in self.agents:
+            self.agents["antigravity"] = ModelHubAgentSupplyConfig.default("antigravity", mode="direct")
 
     @staticmethod
     def source_eligible_for_backend(
@@ -3829,6 +3856,9 @@ class ModelHubConfig(ModelHubSnapshotNode):
         unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
             "vibey", mode="hub"
         )
+        default_antigravity = self.agents["antigravity"] == ModelHubAgentSupplyConfig.default(
+            "antigravity", mode="direct"
+        )
         payload = {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
@@ -3837,6 +3867,7 @@ class ModelHubConfig(ModelHubSnapshotNode):
                 backend: self.agents[backend].to_payload()
                 for backend in MODEL_HUB_BACKENDS
                 if not (backend == "vibey" and unseeded)
+                and not (backend == "antigravity" and default_antigravity)
             },
         }
         if self.hosted_tools:
@@ -4114,6 +4145,10 @@ class V2Config:
                 opencode=OpenCodeConfig(enabled=default_enabled_for_backend("opencode"), cli_path="opencode"),
                 claude=ClaudeConfig(enabled=default_enabled_for_backend("claude"), cli_path="claude"),
                 codex=CodexConfig(enabled=default_enabled_for_backend("codex"), cli_path="codex"),
+                antigravity=AntigravityConfig(
+                    enabled=default_enabled_for_backend("antigravity"),
+                    cli_path="agy",
+                ),
             ),
             model_hub=ModelHubConfig(),
             platform=WORKBENCH_PLATFORM_ID,
@@ -4461,6 +4496,10 @@ class V2Config:
         if not isinstance(codex_payload, dict):
             raise ValueError("Config 'agents.codex' must be an object")
 
+        antigravity_payload = agents_payload.get("antigravity") or {}
+        if not isinstance(antigravity_payload, dict):
+            raise ValueError("Config 'agents.antigravity' must be an object")
+
         avault_payload = agents_payload.get("avault") or {}
         if not isinstance(avault_payload, dict):
             raise ValueError("Config 'agents.avault' must be an object")
@@ -4468,7 +4507,13 @@ class V2Config:
         opencode = OpenCodeConfig(**_filter_dataclass_fields(OpenCodeConfig, opencode_payload))
         claude = ClaudeConfig(**_filter_dataclass_fields(ClaudeConfig, claude_payload))
         codex = CodexConfig(**_filter_dataclass_fields(CodexConfig, codex_payload))
-        for backend_name, backend_config in (("opencode", opencode), ("claude", claude), ("codex", codex)):
+        antigravity = AntigravityConfig(**_filter_dataclass_fields(AntigravityConfig, antigravity_payload))
+        for backend_name, backend_config in (
+            ("opencode", opencode),
+            ("claude", claude),
+            ("codex", codex),
+            ("antigravity", antigravity),
+        ):
             # Unattended upgrades run on this switch, so ``"false"`` must read as off.
             backend_config.auto_update = _named_bool(
                 f"agents.{backend_name}.auto_update", backend_config.auto_update
@@ -4479,6 +4524,7 @@ class V2Config:
             opencode=opencode,
             claude=claude,
             codex=codex,
+            antigravity=antigravity,
             avault=avault,
         )
 
@@ -4789,6 +4835,7 @@ class V2Config:
                 "opencode": self.agents.opencode.__dict__,
                 "claude": self.agents.claude.__dict__,
                 "codex": self.agents.codex.__dict__,
+                "antigravity": self.agents.antigravity.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
             "model_hub": self.model_hub.to_payload(),

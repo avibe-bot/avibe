@@ -1069,6 +1069,7 @@
       "claudeSubtitle": "Detect or install the Claude Code CLI. Sign in or supply an API key from the CLI itself.",
       "claudeDescription": "Anthropic agent · sign in with Claude or supply an API key",
       "codexDescription": "OpenAI agent · ChatGPT login or OPENAI_API_KEY",
+      "antigravityDescription": "Google Antigravity agent · Google sign-in, Gemini API key, or Agent Platform",
       "vibeyDescription": "Built-in agent · models and routes managed in Model Hub",
       "backToBackends": "Back to backends",
       "gatewayOff": "Model Hub is off, so {{name}} has no model to run on.",
@@ -2657,7 +2658,8 @@
         "source": {
           "claude": "Claude Code configuration",
           "codex": "Codex configuration",
-          "opencode": "OpenCode configuration"
+          "opencode": "OpenCode configuration",
+          "antigravity": "Antigravity configuration"
         },
         "detailsLabel": "What an import does",
         "details": "Subscription sign-ins move into Model Hub. API keys are copied as saved, with the originals kept by default. An import does not test keys online or fetch model lists; whether a key works shows when a model is first called."
@@ -7142,6 +7144,11 @@
         "role": "Tester",
         "working": "Running tests",
         "complete": "All tests passed"
+      },
+      "antigravity": {
+        "role": "Assistant",
+        "working": "Working on the task",
+        "complete": "Task complete"
       }
     },
     "access": {
@@ -7171,6 +7178,7 @@
       "claudeGuide": "Sign in with Claude or enter an API key",
       "codexGuide": "Sign in with ChatGPT or use an OpenAI API key",
       "opencodeGuide": "Choose either way to connect",
+      "antigravityGuide": "Sign in with Google, enter a Gemini API key, or use Agent Platform",
       "installFirstNamed": "Install {{name}} first",
       "subscriptionConnectedHint": "Subscription saved. Enter the workspace to use it.",
       "api_keyConnectedHint": "API Key saved. Enter the workspace to use it.",
@@ -7641,6 +7649,7 @@
       "claude": "Claude",
       "codex": "Codex",
       "opencode": "OpenCode",
+      "antigravity": "Antigravity",
       "project": "Project"
     },
     "transportStdio": "stdio",

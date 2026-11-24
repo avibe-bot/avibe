@@ -1069,6 +1069,7 @@
       "claudeSubtitle": "检测或安装 Claude Code CLI。登录与 API Key 请直接通过 CLI 完成。",
       "claudeDescription": "Anthropic Agent · 通过 Claude 登录或填入 API Key",
       "codexDescription": "OpenAI Agent · 通过 ChatGPT 登录或 OPENAI_API_KEY",
+      "antigravityDescription": "Google Antigravity Agent · Google 登录、Gemini API Key 或 Agent Platform",
       "vibeyDescription": "内置 Agent · 在模型网关管理模型和路由",
       "backToBackends": "返回后端列表",
       "gatewayOff": "模型网关已关闭，{{name}} 没有可用的模型。",
@@ -2657,7 +2658,8 @@
         "source": {
           "claude": "Claude Code 配置",
           "codex": "Codex 配置",
-          "opencode": "OpenCode 配置"
+          "opencode": "OpenCode 配置",
+          "antigravity": "Antigravity 配置"
         },
         "detailsLabel": "导入时会做什么",
         "details": "订阅登录转交模型网关托管；API Key 直接复制导入，原配置默认保留。导入时不联网检查 Key，也不拉取模型列表，Key 能不能用要等实际调用时才知道。"
@@ -7142,6 +7144,11 @@
         "role": "测试",
         "working": "执行测试用例",
         "complete": "测试全部通过"
+      },
+      "antigravity": {
+        "role": "助手",
+        "working": "正在处理任务",
+        "complete": "任务已完成"
       }
     },
     "access": {
@@ -7171,6 +7178,7 @@
       "claudeGuide": "通过 Claude 登录或填入 API Key",
       "codexGuide": "通过 ChatGPT 登录，或使用 OpenAI API Key",
       "opencodeGuide": "选择一种方式连接即可",
+      "antigravityGuide": "通过 Google 登录、使用 Gemini API Key 或 Agent Platform",
       "installFirstNamed": "先安装 {{name}}",
       "subscriptionConnectedHint": "订阅已保存，进入工作台即可使用",
       "api_keyConnectedHint": "API Key 已保存，进入工作台即可使用",
@@ -7641,6 +7649,7 @@
       "claude": "Claude",
       "codex": "Codex",
       "opencode": "OpenCode",
+      "antigravity": "Antigravity",
       "project": "项目"
     },
     "transportStdio": "stdio",

@@ -48,6 +48,18 @@
         {"id": "gpt-5.4-mini", "label": "GPT-5.4-Mini", "priority": 23, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.2", "label": "GPT-5.2", "priority": 29, "visibility": "hide", "reasoning_efforts": ["low", "medium", "high", "xhigh"]}
       ]
+    },
+    "antigravity": {
+      "models": [
+        {"id": "gemini-4-neon", "label": "Gemini 4 Neon", "priority": 1, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon", "priority": 2, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "priority": 3, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-argon", "label": "Gemini 4 Argon", "priority": 4, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "priority": 5, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash", "priority": 6, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash", "priority": 7, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "priority": 8, "visibility": "list", "reasoning_efforts": ["low", "high"]}
+      ]
     }
   },
   "providers": {

@@ -693,10 +693,32 @@ class SettingsHandler(BaseHandler):
                 ]
             )
 
+    async def _load_antigravity_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
+        from modules.agents.opencode.utils import resolve_model_reasoning_options
+        from vibe.api import antigravity_models as get_antigravity_models
+
+        models_result = await asyncio.to_thread(get_antigravity_models)
+        if not models_result.get("ok"):
+            return
+        models = [str(model) for model in models_result.get("models", []) if model]
+        labels = models_result.get("model_labels")
+        labels = labels if isinstance(labels, dict) else {}
+        menu.models = [RouteOption(model, str(labels.get(model) or model)) for model in models]
+        catalog = models_result.get("reasoning_options")
+        catalog = catalog if isinstance(catalog, dict) else None
+        default_options = catalog.get("") if isinstance(catalog, dict) else []
+        for model in {"", *models, *wanted}:
+            menu.efforts[model] = _effort_options(
+                resolve_model_reasoning_options(catalog, model, default_options)
+            )
+
     _route_menu_loaders = {
         "opencode": _load_opencode_route_menu,
         "claude": _load_claude_route_menu,
         "codex": _load_codex_route_menu,
+        "antigravity": _load_antigravity_route_menu,
         "vibey": _load_vibey_route_menu,
     }
 

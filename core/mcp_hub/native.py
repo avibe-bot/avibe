@@ -29,8 +29,8 @@ from core.mcp_hub.errors import McpHubError
 
 logger = logging.getLogger(__name__)
 
-CLAUDE, CODEX, OPENCODE = "claude", "codex", "opencode"
-SOURCES = (CLAUDE, CODEX, OPENCODE)
+CLAUDE, CODEX, OPENCODE, ANTIGRAVITY = "claude", "codex", "opencode", "antigravity"
+SOURCES = (CLAUDE, CODEX, OPENCODE, ANTIGRAVITY)
 
 # Native keys that carry no connection meaning for the Hub; kept on rewrite.
 _CODEX_KEPT = {"enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools", "env_vars"}
@@ -55,6 +55,10 @@ def opencode_path() -> Path:
     return next((path for path in candidates if path.exists()), candidates[0])
 
 
+def antigravity_path() -> Path:
+    return Path.home() / ".gemini" / "config" / "mcp_config.json"
+
+
 # ---------------------------------------------------------------------------
 # File I/O (a file that cannot be parsed is never rewritten)
 # ---------------------------------------------------------------------------
@@ -65,7 +69,12 @@ def _unreadable(source: str, path: Path, exc: Exception) -> McpHubError:
 
 
 def _load(source: str) -> tuple[Path, dict[str, Any]]:
-    path = {CLAUDE: claude_path, CODEX: codex_path, OPENCODE: opencode_path}[source]()
+    path = {
+        CLAUDE: claude_path,
+        CODEX: codex_path,
+        OPENCODE: opencode_path,
+        ANTIGRAVITY: antigravity_path,
+    }[source]()
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -178,10 +187,18 @@ def _resolve_cwd(path: Path, cwd: str) -> str:
 
 
 
+def _from_antigravity(entry: dict[str, Any]) -> dict[str, Any]:
+    server = dict(entry)
+    if "serverUrl" in server and "url" not in server:
+        server["url"] = server.pop("serverUrl")
+    return server
+
+
 _READERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     CLAUDE: lambda entry: dict(entry),
     CODEX: _from_codex,
     OPENCODE: _from_opencode,
+    ANTIGRAVITY: _from_antigravity,
 }
 
 
@@ -203,11 +220,13 @@ class NativeServer:
 
 
 def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
-    """The backend's own off switch. Claude has none; Codex/OpenCode use ``enabled``."""
+    """The backend's own off switch. Claude has none; Codex/OpenCode/Antigravity use enabled/disabled."""
 
     if source == CLAUDE:
         return True
-    return entry.get("enabled") is not False and (source != OPENCODE or entry.get("disabled") is not True)
+    return entry.get("enabled") is not False and (
+        source not in (OPENCODE, ANTIGRAVITY) or entry.get("disabled") is not True
+    )
 
 
 def _from_native(source: str, name: str, entry: dict[str, Any], path: Path) -> dict[str, Any]:
@@ -337,6 +356,14 @@ def read_project(root: Path) -> dict[str, NativeServer]:
         except (OSError, ValueError, McpHubError) as exc:
             logger.warning("Skipping OpenCode project config %s: %s", path, exc)
             continue
+
+    antigravity_project_path = root / ".agents" / "mcp_config.json"
+    if antigravity_project_path.exists():
+        try:
+            data = _parse(ANTIGRAVITY, antigravity_project_path.read_text(encoding="utf-8"))
+            add(ANTIGRAVITY, antigravity_project_path, _servers(ANTIGRAVITY, data))
+        except (OSError, ValueError, McpHubError) as exc:
+            logger.warning("Skipping Antigravity project config %s: %s", antigravity_project_path, exc)
     return result
 
 
@@ -375,7 +402,7 @@ def disabled_names() -> set[str]:
 # Delete: remove one entry from its native file
 # ---------------------------------------------------------------------------
 
-_KEY = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}
+_KEY = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp", ANTIGRAVITY: "mcpServers"}
 # One read-modify-write at a time, so two deletes from one file never lose an edit.
 _EDIT_LOCK = threading.Lock()
 

@@ -212,6 +212,10 @@ def _build_config_payload() -> dict:
                 "enabled": True,
                 "cli_path": "codex",
             },
+            "antigravity": {
+                "enabled": False,
+                "cli_path": "agy",
+            },
         },
         "gateway": None,
         "ui": {
@@ -659,6 +663,13 @@ def _normalize_config_payload(path: Path) -> None:
             str(CONTAINER_HOME / ".npm-global" / "bin" / "codex"),
             str(CONTAINER_HOME / ".local" / "bin" / "codex"),
         },
+        "antigravity": {
+            "",
+            "agy",
+            "/usr/bin/agy",
+            "/usr/local/bin/agy",
+            str(CONTAINER_HOME / ".local" / "bin" / "agy"),
+        },
     }
     changed = False
     for backend, known_paths in known_backend_paths.items():
@@ -667,7 +678,7 @@ def _normalize_config_payload(path: Path) -> None:
             continue
         if str(config.get("cli_path") or "") not in known_paths:
             continue
-        config["cli_path"] = backend
+        config["cli_path"] = "agy" if backend == "antigravity" else backend
         changed = True
     if changed:
         _write_json(path, payload)

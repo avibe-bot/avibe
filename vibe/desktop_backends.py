@@ -118,6 +118,10 @@ BACKEND_SPECS: dict[str, DesktopBackendSpec] = {
         package="opencode-ai",
         package_path=("opencode-ai",),
     ),
+    "antigravity": DesktopBackendSpec(
+        package="google-antigravity/antigravity-cli",
+        package_path=("antigravity",),
+    ),
 }
 
 
@@ -266,6 +270,11 @@ def install_desktop_backend(
         raise DesktopBackendError(
             f"Unknown desktop backend: {backend}",
             code="unknown_backend",
+        )
+    if backend == "antigravity":
+        raise DesktopBackendError(
+            "Antigravity requires release-archive installation.",
+            code="unsupported_desktop_install",
         )
     toolchain = desktop_backend_toolchain(base_env)
     if toolchain is None:

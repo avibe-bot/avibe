@@ -15,7 +15,7 @@
         "additionalProperties": false,
         "properties": {
           "id": { "type": "string" },
-          "backend": { "enum": ["claude", "codex", "opencode"] },
+          "backend": { "enum": ["claude", "codex", "opencode", "antigravity"] },
           "kind": { "enum": ["api_key", "oauth_native", "opencode_provider"] },
           "masked_detail": { "type": "string", "description": "e.g. 'sk-…dd3c + 自定义 Base URL'; never full secrets" },
           "proposed_action": {
@@ -35,7 +35,7 @@
           },
           "required_backends": {
             "type": "array",
-            "items": { "enum": ["claude", "codex", "opencode"] },
+            "items": { "enum": ["claude", "codex", "opencode", "antigravity"] },
             "uniqueItems": true,
             "description": "Backend-group consent closure for a shared persisted assignment. Empty/absent means this row's backend alone. The server independently requires the entire closure."
           },

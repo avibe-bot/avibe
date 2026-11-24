@@ -534,6 +534,7 @@
       "opencode": "请启用 OpenCode backend，安装 OpenCode CLI，或设置 OPENCODE_CLI_PATH。",
       "claude": "请启用 Claude Code backend，并确认 Claude Code CLI 路径已配置。",
       "codex": "请启用 Codex backend，安装 Codex CLI，或设置 CODEX_CLI_PATH。",
+      "antigravity": "请启用 Antigravity backend，安装 Antigravity CLI（agy），或配置其 CLI 路径。",
       "generic": "请在 Agent 设置里选择一个已启用的 Agent，或启用该 Agent 使用的 backend。"
     },
     "processMessageFailed": "出错：{error}",

@@ -112,6 +112,9 @@ class CommandHandlers(BaseHandler):
             "claude-code": "claude",
             "cx": "codex",
             "codex": "codex",
+            "ag": "antigravity",
+            "agy": "antigravity",
+            "antigravity": "antigravity",
         }
         return aliases.get(normalized)
 

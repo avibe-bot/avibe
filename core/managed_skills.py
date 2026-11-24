@@ -991,6 +991,9 @@ def resolve_skills(
         (resolved_codex_home / "skills", 2, frozenset({".system"})),
         (resolved_claude_home / "skills", 3, frozenset()),
         (resolved_xdg_home / "opencode" / "skills", 4, frozenset()),
+        (resolved_home / ".gemini" / "config" / "skills", 5, frozenset()),
+        (resolved_home / ".gemini" / "skills", 6, frozenset()),
+        (resolved_home / ".gemini" / "antigravity-cli" / "skills", 7, frozenset()),
     )
     for root, family_rank, ignored_names in global_user_roots:
         if compatibility_budget.exhausted:
@@ -1009,7 +1012,7 @@ def resolve_skills(
         candidates.extend(
             _scan_root(
                 resolved_codex_home / "skills" / ".system",
-                priority=(2, 0, 5),
+                priority=(2, 0, 8),
                 budget=compatibility_budget,
                 seen_directory_identities=compatibility_directory_identities,
             )

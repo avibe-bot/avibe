@@ -174,6 +174,7 @@ def planned_native_references(
         ("claude", claude_settings_paths(home, project_roots)),
         ("codex", codex_config_paths(home, project_roots)),
         ("opencode", opencode_config_paths(home, project_roots)),
+        ("antigravity", ()),
     ):
         for path in paths:
             if path not in edits:
