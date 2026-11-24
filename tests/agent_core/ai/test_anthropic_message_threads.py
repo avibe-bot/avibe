@@ -22,7 +22,9 @@ from tests.agent_core.ai.test_anthropic_prompt_cache import SUCCESS, _breakpoint
 BETA = "message-threads-2026-08-12"
 
 
-@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-fable-5-2"])
+@pytest.mark.parametrize(
+    "model", ["claude-opus-5-5", "claude-fable-5-2", "claude-sonnet-5-5-high", "claude-fable-5.2-high"]
+)
 def test_signed_create_carries_engine_thinking_policy_into_delta(tmp_path, monkeypatch, model):
     import time
     from core.agent_core.ai import message_threads as mt
@@ -232,6 +234,8 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
             assert json.loads(before.body) == seen[1]
     assert isinstance(result[-1], Done)
     assert "LOST" not in repr(result) and "lost" not in repr(result)
+    if case == "unknown":
+        assert obs.attempts[0]["error_code"] == "thread_not_found"
     if case == "thread_400":
         failed, replay = obs.attempts
         assert failed["failure"] == "http_400"

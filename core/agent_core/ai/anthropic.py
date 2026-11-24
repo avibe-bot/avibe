@@ -1000,7 +1000,7 @@ class AnthropicAdapter(ProviderAdapter):
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
                     bound_pin_handback=speculative,
                     on_send=record_send if attempt else None,
-                    on_http_error=(lambda status, body: threads.record_http_error(attempt.record, status, body)) if attempt else None,
+                    on_http_error=(lambda status, body: threads.record_http_error(attempt.record, status, body, hub=self._gateway)) if attempt else None,
                     refused=_rejects_ttl if prefix_ttl is not None and not speculative else None,
                 )
                 rejected = continued = paused = message_started = message_stopped = False

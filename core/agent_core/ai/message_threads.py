@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from config.paths import get_state_dir
+from core.anthropic_thread_errors import thread_error_fields
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
 from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
@@ -270,7 +271,7 @@ def _engine_adds_drop_block(full: dict) -> bool:
     """
     model = full["model"].lower().rsplit("/", 1)[-1].split("[", 1)[0]
     # Only identify provider IDs whose wire capability is known. Other models still try threads normally.
-    if model not in {
+    families = (
         "claude-opus-5-5",
         "claude-fable-5-2",
         "claude-fable-5.2",
@@ -279,7 +280,10 @@ def _engine_adds_drop_block(full: dict) -> bool:
         "claude-sonnet-5-5",
         "claude-haiku-5-5",
         "claude-haiku-5.5",
-    }:
+    )
+    if not any(
+        model == family or (family != "claude-opus-5-5" and model.startswith(family + "-")) for family in families
+    ):
         return False
     thinking = full.get("thinking", {"type": "adaptive"})
     if not isinstance(thinking, dict) or "block_binding" in thinking:
@@ -301,49 +305,8 @@ def _engine_adds_drop_block(full: dict) -> bool:
     )
 
 
-def record_http_error(record: dict, status: int, body: str) -> None:
-    """Copy only contract enums, never arbitrary provider strings, into durable send telemetry."""
-    if status != 400:
-        return
-    try:
-        payload = json.loads(body)
-    except (ValueError, RecursionError):
-        return
-    error = payload.get("error") if isinstance(payload, dict) else None
-    if not isinstance(error, dict):
-        return
-    details = error.get("details")
-    code = details.get("error_code") if isinstance(details, dict) else None
-    if isinstance(code, str):
-        record["error_code"] = (
-            code
-            if code
-            in {
-                "thread_not_found",
-                "thread_fingerprint_mismatch",
-                "thread_already_continued",
-                "thread_continue_in_flight",
-                "thread_unsupported_request",
-            }
-            else "other"
-        )
-    kind = error.get("type")
-    if isinstance(kind, str):
-        record["error_type"] = (
-            kind
-            if kind
-            in {
-                "invalid_request_error",
-                "api_error",
-                "not_found_error",
-                "authentication_error",
-                "permission_error",
-                "rate_limit_error",
-                "overloaded_error",
-                "request_too_large",
-            }
-            else "other"
-        )
+def record_http_error(record: dict, status: int, body: str, *, hub: bool = False) -> None:
+    record.update(thread_error_fields(status, body, hub=hub))
 
 
 def _contains_image(messages: list) -> bool:
