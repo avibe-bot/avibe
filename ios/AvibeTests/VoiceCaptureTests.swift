@@ -2064,8 +2064,25 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(settled, .held)
         XCTAssertTrue(slept.isEmpty)
 
-        // A fault is not waited for here: the take is kept and sent again by itself.
+        // In front a fault is waited for as a held gate is: the listener
+        // recovers by itself, re-binding only in front (#4233), so coming to
+        // the front is when it clears. The load goes once the gate opens.
+        slept = []
+        gates = [.fault, .fault, .held, .open]
+        settled = await Client.settledGate(
+            gate: { gates.count > 1 ? gates.removeFirst() : gates[0] },
+            isActive: { true }, sleep: sleep, now: { clock }
+        )
+        XCTAssertEqual(settled, .open)
+        XCTAssertEqual(slept.count, 3)
+        // A fault that lasts the five seconds is the answer: nothing is loaded.
+        slept = []
         settled = await Client.settledGate(gate: { .fault }, isActive: { true }, sleep: sleep, now: { clock })
+        XCTAssertEqual(settled, .fault)
+        XCTAssertEqual(slept.count, 100)
+        // In the background no re-bind happens: a fault is not waited for.
+        slept = []
+        settled = await Client.settledGate(gate: { .fault }, isActive: { false }, sleep: sleep, now: { clock })
         XCTAssertEqual(settled, .fault)
         XCTAssertTrue(slept.isEmpty)
     }

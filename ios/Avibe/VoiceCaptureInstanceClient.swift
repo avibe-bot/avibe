@@ -208,7 +208,10 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         step: Duration = gateStep
     ) async -> DirectLoadGate {
         let deadline = now() + limit
-        while isActive(), gate() == .held, now() < deadline, !Task.isCancelled {
+        // A fault is waited for as a held gate is: in front the listener
+        // re-binds by itself (#4233), and coming to the front is when it
+        // clears; a fault that lasts the wait is the answer.
+        while isActive(), gate() == .held || gate() == .fault, now() < deadline, !Task.isCancelled {
             await sleep(step)
         }
         return gate()

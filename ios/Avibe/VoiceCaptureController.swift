@@ -1230,7 +1230,7 @@ final class VoiceCaptureController {
         /// Nothing was posted, so sending again is safe: the instance could
         /// not be reached (`offline`), or the take was not turned into text.
         /// `automatic`: sending again by itself can help (the instance was
-        /// unreachable, and not because this process's listener failed).
+        /// unreachable, or the App's listener could not serve yet).
         case kept(VoiceCaptureAttributes.Reason, automatic: Bool)
         case nothingHeard
         /// The App must ask again (voice consent, sign-in).
@@ -1899,9 +1899,9 @@ final class VoiceCaptureController {
                 continue
             }
             let unreachable = Refusal(reason: .offline, needsApp: false, transient: true)
-            // Why it was kept: only one an unreachable instance kept is
-            // sent again by itself (a listener that had failed belongs to
-            // the run that ended).
+            // Why it was kept: only one an unreachable instance kept (or a
+            // listener that could not serve, kept the same way) is sent
+            // again by itself.
             let reason = entry.reason.flatMap(VoiceCaptureAttributes.Reason.init(rawValue:)) ?? .offline
             parked.append(Take(
                 id: entry.id, target: target,
