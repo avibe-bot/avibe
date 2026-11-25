@@ -44,7 +44,6 @@ const SOURCE_KEY = {
   claude: 'settings.models.migration.source.claude',
   codex: 'settings.models.migration.source.codex',
   opencode: 'settings.models.migration.source.opencode',
-  antigravity: 'settings.models.migration.source.antigravity',
 } as const satisfies Record<NativeCliBackend, TranslationKey>;
 
 const sourcePaths = (item: MigrationItem): string[] => [...new Set(item.source_paths ?? [])];

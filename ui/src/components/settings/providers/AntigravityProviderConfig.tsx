@@ -1,7 +1,5 @@
 import { useTranslation } from 'react-i18next';
 import { BackendRuntimeCard } from '../shared/BackendRuntimeCard';
-import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
-import { useModelHubCapability } from '../models/useModelHubCapability';
 import { useBackendRuntime } from '../shared/useBackendRuntime';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { BackendConnectionForm } from './BackendConnectionForm';
@@ -12,7 +10,6 @@ export function AntigravityProviderConfig({ hideEnableToggle }: { hideEnableTogg
   const { t } = useTranslation();
   const meta = getBackendUiMeta('antigravity');
   const runtime = useBackendRuntime({ backend: 'antigravity', defaultCli: meta.defaultCli ?? 'agy' });
-  const modelHubEnabled = useModelHubCapability();
   if (!runtime.loaded) return <p>{t('common.loading')}</p>;
   return (
     <div className="flex flex-col gap-4">
@@ -26,7 +23,6 @@ export function AntigravityProviderConfig({ hideEnableToggle }: { hideEnableTogg
         runtime={runtime}
         hideEnableToggle={hideEnableToggle}
       />
-      {modelHubEnabled === true && <BackendSupplyModeCard backend="antigravity" />}
       <Card>
         <CardContent className="p-6">
           <BackendConnectionForm backend="antigravity" connectionRevision={runtime.connectionRevision} />

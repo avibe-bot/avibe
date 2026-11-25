@@ -1,7 +1,7 @@
 import type { BackendConnectionState, VibeAgentBrief, VibeAgentFull, CliStatus } from '../../context/ApiContext';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import { runtimeIsRunning } from '../settings/models/runtimeLifecycle';
-import type { AgentSupply, RuntimeDependency, SupplyStatus } from '../settings/models/types';
+import { isModelHubBackend, type AgentSupply, type RuntimeDependency, type SupplyStatus } from '../settings/models/types';
 import { BUILTIN_BACKENDS, getBackendUiMeta, isBuiltinBackend, type AgentBackendId } from '@/lib/agentBackends';
 import { isSelectableAgent } from '@/lib/bots';
 import { ASSISTANT_ORDER, type AssistantId } from './collaborationTimeline';
@@ -141,12 +141,13 @@ export function entryCandidates(evidence: EntryEvidence): EntryCandidate[] {
   const connectionOf = new Map(evidence.connections.map((connection) => [connection.backend, connection]));
   const supplyOf = new Map(evidence.supplies.map((supply) => [supply.backend, supply]));
   return ENTRY_ORDER.flatMap((backend) => {
-    if (!backendUsable(backend, connectionOf.get(backend), supplyOf.get(backend), evidence.cliHealthy)) return [];
+    const supply = isModelHubBackend(backend) ? supplyOf.get(backend) : undefined;
+    if (!backendUsable(backend, connectionOf.get(backend), supply, evidence.cliHealthy)) return [];
     return evidence.agents
       // An Agent a new chat can start on, so never a Bot's: setup may make it the default.
       .filter((agent) => agent.backend === backend && isSelectableAgent(agent))
       .flatMap((agent) => {
-        const modelId = routeRunnable(supplyOf.get(backend), agent.name);
+        const modelId = routeRunnable(supply, agent.name);
         return modelId ? [{ agent, backend, modelId }] : [];
       })
       .sort((left, right) => (left.agent.name < right.agent.name ? -1 : left.agent.name > right.agent.name ? 1 : 0));

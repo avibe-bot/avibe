@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import en from '@/i18n/en.json';
 import zh from '@/i18n/zh.json';
 import { BackendConnectionDialog } from '@/components/onboarding/BackendConnectionDialog';
-import { BackendSupplyModeCard } from '../models/BackendSupplyModeCard';
 import { modelsApi } from '../models/modelsApi';
 import { BackendTestPanel } from '../BackendTestPanel';
 import { AntigravityProviderConfig } from './AntigravityProviderConfig';
@@ -107,9 +106,7 @@ beforeEach(async () => {
   mock.api.antigravityModels.mockResolvedValue({ ok: true, models: ['gemini-4-neon', 'gemini-3.8-flash'] });
   mock.api.cancelOAuthWeb.mockResolvedValue({ ok: true });
   mock.api.removeBackendApiKey.mockResolvedValue({ ok: true, restart: { ok: true } });
-  vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([
-    { backend: 'antigravity', cli_present: true, mode: 'direct', menu_kind: 'fixed' },
-  ]);
+  vi.spyOn(modelsApi, 'listAgents').mockResolvedValue([]);
   vi.spyOn(modelsApi, 'scanMigration').mockResolvedValue({ items: [] });
 });
 
@@ -119,16 +116,7 @@ afterEach(() => {
 });
 
 describe('Antigravity settings, auth flows, and onboarding', () => {
-  it.each([
-    [
-      'en',
-      'With a personal Google sign-in, Google allows Antigravity for work you direct yourself. Google says this sign-in does not cover unattended runs or task queues, such as scheduled Tasks, Watches, or work passed from one Agent to another. For automation, sign in with an API key or Agent Platform instead; both are billed by usage.',
-    ],
-    [
-      'zh',
-      '用个人 Google 账号登录时，Google 允许你本人指挥 Antigravity 工作。Google 说明这种登录不包含无人值守的运行和任务队列，例如定时任务、Watch，以及由别的 Agent 转交的工作。需要自动化时，请改用 API key 或 Agent Platform 登录，这两种按用量计费。',
-    ],
-  ] as const)('shows the exact %s personal automation notice above the OAuth sign-in link and completes paste-code flow', async (lang, exactNotice) => {
+  it.each(['en', 'zh'] as const)('completes %s Google paste-code OAuth without personal automation notice or Model Hub card', async (lang) => {
     await i18n.changeLanguage(lang);
     mock.api.startOAuthWeb.mockResolvedValue({
       ok: true,
@@ -142,19 +130,19 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
 
     render(wrap(<AntigravityProviderConfig />));
 
-    const notice = await screen.findByText(exactNotice);
     const signInLabel = lang === 'en' ? en.settings.backends.antigravitySignInGoogle : zh.settings.backends.antigravitySignInGoogle;
-    const signInButton = screen.getByRole('button', { name: signInLabel });
-    expect(notice.compareDocumentPosition(signInButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const signInButton = await screen.findByRole('button', { name: signInLabel });
+    expect(screen.queryByRole('note')).toBeNull();
+    expect(screen.queryByText(lang === 'en' ? en.settings.models.supplyMode.title : zh.settings.models.supplyMode.title)).toBeNull();
+    expect(modelsApi.listAgents).not.toHaveBeenCalled();
     expect(mock.api.testBackendAuth).not.toHaveBeenCalled();
 
     fireEvent.click(signInButton);
     await waitFor(() => expect(mock.api.startOAuthWeb).toHaveBeenCalledWith('antigravity', false, 'oauth-personal'));
 
-    const openLink = await screen.findByRole('link', {
+    await screen.findByRole('link', {
       name: lang === 'en' ? en.settings.models.oauth.openSignIn : zh.settings.models.oauth.openSignIn,
     });
-    expect(notice.compareDocumentPosition(openLink) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
     const codeInput = screen.getByPlaceholderText(
       lang === 'en' ? en.settings.backends.antigravityCallbackCodePlaceholder : zh.settings.backends.antigravityCallbackCodePlaceholder,
@@ -164,7 +152,7 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     await waitFor(() => expect(mock.api.submitOAuthWebCode).toHaveBeenCalledWith('antigravity', 'flow_agy', 'paste-code-123'));
   });
 
-  it('supports Gemini Enterprise terminal fallback, Gemini API key save/remove, and Agent Platform ADC status', async () => {
+  it('shows Gemini Enterprise terminal block only when OAuth returns terminal guidance, and handles Gemini API key and Agent Platform ADC visibility', async () => {
     mock.api.getAntigravityAuth.mockResolvedValue(
       authState({
         auth_mode: 'gemini-api-key',
@@ -178,6 +166,14 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
         adc_present: false,
       }),
     );
+    mock.api.startOAuthWeb.mockResolvedValue({
+      ok: true,
+      flow_id: 'flow_enterprise',
+      backend: 'antigravity',
+      state: 'awaiting_code',
+      terminal_command: 'agy auth login --enterprise',
+      instructions: 'Run this command in a terminal to complete Gemini Enterprise sign-in.',
+    });
     vi.spyOn(window, 'confirm').mockReturnValue(true);
 
     render(wrap(<AntigravityProviderConfig />));
@@ -187,11 +183,22 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     fireEvent.click(screen.getByRole('button', { name: en.settings.backends.antigravityApiKeyRemove }));
     await waitFor(() => expect(mock.api.removeBackendApiKey).toHaveBeenCalledWith('antigravity'));
 
-    // Switch to Gemini Enterprise and check terminal fallback command
+    // Switch to Gemini Enterprise: terminal block is NOT shown by default
     fireEvent.click(screen.getByRole('radio', { name: en.settings.backends.antigravityMethodEnterprise }));
-    expect(screen.getByText('agy')).toBeTruthy();
+    expect(screen.queryByText(en.settings.backends.antigravityEnterpriseTerminalTitle)).toBeNull();
+    expect(screen.queryByText('agy')).toBeNull();
 
-    // Switch to Agent Platform and save project + location
+    // Starting OAuth with terminal command/instructions reveals the terminal block
+    fireEvent.click(screen.getByRole('button', { name: en.settings.backends.antigravitySignInEnterprise }));
+    await waitFor(() => expect(mock.api.startOAuthWeb).toHaveBeenCalledWith('antigravity', false, 'oauth-business'));
+    expect(await screen.findByText(en.settings.backends.antigravityEnterpriseTerminalTitle)).toBeTruthy();
+    expect(screen.getByText('agy auth login --enterprise')).toBeTruthy();
+    expect(screen.getByText('Run this command in a terminal to complete Gemini Enterprise sign-in.')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('button', { name: en.common.cancel }));
+    await waitFor(() => expect(screen.queryByText('agy auth login --enterprise')).toBeNull());
+
+    // Switch to Agent Platform when ADC is missing: ADC command IS shown
     fireEvent.click(screen.getByRole('radio', { name: en.settings.backends.antigravityMethodAgentPlatform }));
     expect(screen.getByText('gcloud auth application-default login')).toBeTruthy();
     fireEvent.change(screen.getByLabelText(en.settings.backends.antigravityGcpProjectLabel), {
@@ -210,12 +217,24 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     );
   });
 
-  it('keeps BackendSupplyModeCard Direct-only for Antigravity without offering Model Hub', async () => {
-    render(wrap(<BackendSupplyModeCard backend="antigravity" />));
-    const direct = await screen.findByRole('radio', { name: /Own login/ });
-    expect(direct.getAttribute('aria-checked')).toBe('true');
-    expect(screen.queryByRole('radio', { name: /Managed by Model Hub/ })).toBeNull();
-    expect(modelsApi.scanMigration).not.toHaveBeenCalled();
+  it('hides the ADC terminal command on Agent Platform when ADC is already detected', async () => {
+    mock.api.getAntigravityAuth.mockResolvedValue(
+      authState({
+        auth_mode: 'agent-platform',
+        authenticated: true,
+        credentials_present: true,
+        gcp_project: 'prod-agent-proj',
+        gcp_location: 'global',
+        adc_present: true,
+        adc_command: 'gcloud auth application-default login',
+      }),
+    );
+
+    render(wrap(<AntigravityProviderConfig />));
+
+    expect(await screen.findByText(en.settings.backends.antigravityAdcPresent)).toBeTruthy();
+    expect(screen.queryByText(en.settings.backends.antigravityAdcCommandHint)).toBeNull();
+    expect(screen.queryByText('gcloud auth application-default login')).toBeNull();
   });
 
   it('pre-selects an Avibe-owned model in BackendTestPanel and shows structured auth/catalog/inference results', async () => {
@@ -243,7 +262,7 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     expect(screen.getByText(en.settings.backends.testConnectionInferenceOk)).toBeTruthy();
   });
 
-  it('opens onboarding BackendConnectionDialog for Antigravity with personal automation notice', async () => {
+  it('opens onboarding BackendConnectionDialog for Antigravity without personal automation notice or default Enterprise terminal block', async () => {
     render(
       wrap(
         <BackendConnectionDialog
@@ -256,7 +275,10 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
       ),
     );
     expect(await screen.findByText(en.onboarding.connection.antigravityDialogIntro)).toBeTruthy();
-    expect(await screen.findByText(en.settings.backends.antigravityPersonalAutomationNotice)).toBeTruthy();
+    expect(screen.queryByRole('note')).toBeNull();
+
+    fireEvent.click(screen.getByRole('radio', { name: en.settings.backends.antigravityMethodEnterpriseCompact }));
+    expect(screen.queryByText(en.settings.backends.antigravityEnterpriseTerminalTitle)).toBeNull();
   });
 
   it('keeps BackendConnectionDialog open with ADC recovery guidance when Agent Platform saves without ADC, and connects once refresh confirms ADC', async () => {

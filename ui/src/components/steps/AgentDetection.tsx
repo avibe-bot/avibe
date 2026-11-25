@@ -38,7 +38,7 @@ import { DEFAULT_NATIVE_AGENT_STATE, NATIVE_CLI_BACKENDS, getBackendUiMeta } fro
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
 import { MODEL_HUB_SETTINGS_PATH } from '../settings/models/modelHubRoutes';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
-import type { AgentChain, AgentSupply, ModelCandidate, Source } from '../settings/models/types';
+import { isModelHubBackend, type AgentChain, type AgentSupply, type ModelCandidate, type Source } from '../settings/models/types';
 import { BackendModelPickerDialog } from '../settings/models/BackendModelPickerDialog';
 import { chosenCandidate } from '../settings/models/backendCatalog';
 import { routeRunnable } from '../onboarding/entryGate';
@@ -225,7 +225,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
           const model = selected?.model ?? null;
           const supply = supplies.find((row) => row.backend === backend);
           let chain: AgentChain | null = null;
-          if (supply?.mode === 'hub' && model) {
+          if (isModelHubBackend(backend) && supply?.mode === 'hub' && model) {
             const backendChains = await modelsApi.getAgentChains(backend);
             chain = backendChains.find((row) => row.model_id === model) ?? null;
           }
@@ -1089,7 +1089,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       </div>
       </div>
       {providerDialog}
-      {pickerFor && (
+      {pickerFor && isModelHubBackend(pickerFor) && (
         <BackendModelPickerDialog open backend={pickerFor} listedIds={NOTHING_LISTED} choose="one" suppliedOnly
           onCancel={() => setPickerFor(null)}
           onAdd={(chosen) => {

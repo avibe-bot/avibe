@@ -10,6 +10,7 @@ import { BackendRuntimeCard } from './shared/BackendRuntimeCard';
 import { useBackendRuntime } from './shared/useBackendRuntime';
 import { BackendSupplyModeCard } from './models/BackendSupplyModeCard';
 import { hubSupplyBlocks, type HubSupplyBlock } from './models/featureFlags';
+import { isModelHubBackend } from './models/types';
 import { useModelHubCapability } from './models/useModelHubCapability';
 // Model Hub classes are drawn here; their stylesheet loads with this module's chunk.
 import './models/modelHubSurface.css';
@@ -76,7 +77,7 @@ export function SettingsBackendPage({ backend }: { backend: AgentBackendId }) {
               </div>
             )}
           />
-          {modelHubEnabled === true && <BackendSupplyModeCard backend={backend} />}
+          {modelHubEnabled === true && isModelHubBackend(backend) && <BackendSupplyModeCard backend={backend} />}
         </div>
       )}
     </SettingsPageShell>

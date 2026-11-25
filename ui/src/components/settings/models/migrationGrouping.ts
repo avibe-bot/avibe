@@ -8,7 +8,7 @@
 // all — they stay native and never block their group — unless the backend's
 // native config cannot be parsed at all.
 import type { TranslationKey } from '@/i18n/types';
-import type { AgentBackend, MigrationItem, MigrationScan } from './types';
+import type { AgentBackend, MigrationItem, MigrationScan, NativeCliBackend } from './types';
 import { NATIVE_SETUP_BACKENDS } from '@/lib/agentBackends';
 
 /**
@@ -23,7 +23,9 @@ export type MigrationSelection = {
   selectedBackends: AgentBackend[];
 };
 
-export const BACKEND_ORDER = NATIVE_SETUP_BACKENDS;
+export const BACKEND_ORDER: readonly NativeCliBackend[] = NATIVE_SETUP_BACKENDS.filter(
+  (backend): backend is NativeCliBackend => backend !== 'antigravity',
+);
 
 export const isImportable = (item: MigrationItem) => item.proposed_action === 'import';
 
