@@ -172,8 +172,6 @@ def validate_plan(plan: object) -> dict:
             raise ValueError("Narrative-only PR must explicitly skip every producer")
     elif any(jobs[job] != "run" for job in (*FAST_JOBS, *PR_TEST_JOBS)):
         raise ValueError("Non-narrative PR must run every cheap Linux check")
-    if plan["mode"] == "PR" and jobs["ios-shell"] != "skip":
-        raise ValueError("PR iOS belongs to its separate advisory workflow until #3418 is fixed")
     return plan
 
 
@@ -265,9 +263,26 @@ def main() -> int:
             print(f"Advisory PR iOS: {route}. {scope.reason}")
             return 0
         plan = make_plan(mode, scope)
+        fast_only = False
+        advisory_ios = heavy_routes(scope)['ios-shell'] if mode == 'PR' else 'skip'
+        if mode == 'PR' and os.environ.get('RUNNER_TEMP'):
+            Path(os.environ['RUNNER_TEMP'], 'fast-pr-paths.json').write_text(json.dumps(scope.paths))
+        if mode == 'PR' and os.environ.get('FAST_PR_ENABLED') == 'true':
+            from scripts.ci_fast_pr import ordinary
+
+            fast_only = ordinary(scope)
+            if not fast_only:
+                # Unproven or sensitive inputs retain the full producer set, not
+                # just the subset a filename appeared to affect under old routing.
+                plan = {**plan, 'docs_only': False, 'jobs': dict.fromkeys(PRODUCERS, 'run')}
+            advisory_ios = 'skip'
+        dispatch = dict.fromkeys(PRODUCERS, 'skip') if fast_only else plan['jobs']
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a", encoding="utf-8") as stream:
+                stream.write(f"advisory_ios={advisory_ios}\n")
+                stream.write(f"fast_only={str(fast_only).lower()}\ndispatch_jobs={json.dumps(dispatch)}\n")
+                stream.write(f"fast_ui={str(bool(scope and any(p.startswith('ui/') for p in scope.paths))).lower()}\n")
                 stream.write(f"unit_python={json.dumps(unit_python_versions(mode))}\n")
                 stream.write(f"mode={mode}\ndocs_only={str(plan['docs_only']).lower()}\nplan={serialized}\n")
         summary = f"## CI scope: {mode}\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in plan["jobs"].items()) + "\n"

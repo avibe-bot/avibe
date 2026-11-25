@@ -103,6 +103,7 @@ class Scope(NamedTuple):
     # A missing path set makes new heavy-job routes fail closed.
     paths: tuple[str, ...] = ()
     routable: bool = False
+    fast_eligible: bool = False  # Deletions (including rename sources) require real producers.
 
 
 def full(reason: str, windows_control_ipc: bool) -> Scope:
@@ -185,10 +186,11 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     if any(status not in {"A", "M", "D"} or {old, new} - {"000000", "100644"}
            for status, old, new, _ in entries):
         return full("non-document file type or mode changed", windows_control_ipc)
+    fast_eligible = all(status in {'A', 'M'} and portable_path(p) for status, _, _, p in entries)
     code = next((path for path in paths if not narrative_path(path)), None)
     if code is None:
         reason = f"all {len(paths)} changed paths are narrative documentation"
-        return Scope(True, reason, False, SKIP, reason, SKIP, reason, tuple(paths), routable)
+        return Scope(True, reason, False, SKIP, reason, SKIP, reason, tuple(paths), routable, fast_eligible)
     # For non-narrative diffs, evaluate added names independently of whether
     # another path already selected platform checks.
     added = next((p for status, _, _, p in entries if status == "A" and not portable_path(p)), None)
@@ -200,7 +202,7 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     browser, browser_reason = route(paths, browser_independent, "browser lanes")
     platform, platform_reason = route(paths, platform_independent, "installed-package platform checks")
     return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason,
-                 tuple(paths), routable)
+                 tuple(paths), routable, fast_eligible)
 
 
 def targets_default_branch(event_name: str, event: dict) -> bool:

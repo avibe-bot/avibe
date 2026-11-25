@@ -14,8 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  # One running full backstop finishes; only the newest pending master waits.
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'push' || github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Each merge gets its own full certificate; only stale PR heads coalesce.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -25,11 +25,15 @@ jobs:
   changes:
     # Sole scope authority: preserve proven docs-only PRs; otherwise run cheap
     # checks and route heavy work. Queue combinations are thin, master is full.
+    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'fast-gate' || 'changes' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 15
     permissions:
       contents: read
     outputs:
+      advisory_ios: ${{ steps.scope.outputs.advisory_ios }}
+      fast_only: ${{ steps.scope.outputs.fast_only }}
+      dispatch_jobs: ${{ steps.scope.outputs.dispatch_jobs }}
       unit_python: ${{ steps.scope.outputs.unit_python }}
       mode: ${{ steps.scope.outputs.mode }}
       plan: ${{ steps.scope.outputs.plan }}
@@ -40,7 +44,24 @@ jobs:
           fetch-depth: 2
       - name: Classify the complete change
         id: scope
+        env:
+          FAST_PR_ENABLED: ${{ vars.FAST_PR_ENABLED }}
         run: python3 scripts/ci_scope.py
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        if: github.event_name == 'pull_request'
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6.1.0
+        if: github.event_name == 'pull_request' && steps.scope.outputs.fast_ui == 'true'
+        with:
+          node-version: '26.13.1'
+      - name: Run fast PR checks on this runner
+        if: github.event_name == 'pull_request'
+        run: |
+          python -m pip install --disable-pip-version-check uv==0.13.7 ruff==0.4.9
+          uv sync --locked --no-install-project --python "$(command -v python)"
+          if [ "${{ steps.scope.outputs.fast_ui }}" = true ]; then (cd ui && npm ci); fi
+          PATH="$PWD/.venv/bin:$PATH" bash scripts/ci_loopback_only.sh python -m scripts.ci_fast_pr
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.scope.outputs.docs_only == 'true'
         with:
@@ -53,19 +74,24 @@ jobs:
           python -m pip install --disable-pip-version-check pytest==9.0.3
           python -m pytest --noconftest -p no:cacheprovider -c /dev/null -q tests/test_repository_guidance.py
 
+  advisory-ios:
+    needs: changes
+    if: needs.changes.outputs.advisory_ios == 'run'
+    uses: ./.github/workflows/ios-shell.yml
+
   ios-shell:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['ios-shell'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['ios-shell'] == 'run'
     uses: ./.github/workflows/ios-shell.yml
 
   desktop-shell:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['desktop-shell'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['desktop-shell'] == 'run'
     uses: ./.github/workflows/desktop-shell.yml
 
   manifest-consistency:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['manifest-consistency'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['manifest-consistency'] == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -115,7 +141,7 @@ jobs:
 
   python-smoke:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['python-smoke'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['python-smoke'] == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -136,6 +162,16 @@ jobs:
       - name: Collect Python tests without running the unit suite
         run: bash scripts/ci_loopback_only.sh .venv/bin/python -m pytest --collect-only -q -m 'not integration' --ignore=tests/e2e tests
 
+  sensitive-proof:
+    needs: [changes, unit-tests, install-upgrade-regression, windows-install-smoke]
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.fast_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every sensitive aggregate to have succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: jq -e 'length == 4 and all(.[]; .result == "success")' <<< "$RESULTS"
+
   master-full-backstop:
     runs-on: ubuntu-latest
     if: always() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
@@ -149,7 +185,7 @@ jobs:
 
   memory-insight-contract:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['memory-insight-contract'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['memory-insight-contract'] == 'run'
     # Repository branch protection still requires this historical context name.
     # An administrator can rename that requirement after this compatibility job
     # has landed; the job itself is a substantive removal contract, not a shim.
@@ -193,7 +229,7 @@ jobs:
 
   ruff:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['ruff'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['ruff'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -211,7 +247,7 @@ jobs:
 
   web-fetch-runtime:
     needs: [changes, build-linux-artifacts]
-    if: fromJSON(needs.changes.outputs.plan).jobs['web-fetch-runtime'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['web-fetch-runtime'] == 'run'
     uses: ./.github/workflows/web-fetch-runtime.yml
     with:
       platforms: >-
@@ -221,7 +257,7 @@ jobs:
 
   web-fetch-macos:
     needs: [changes, build-linux-artifacts]
-    if: fromJSON(needs.changes.outputs.plan).jobs['web-fetch-macos'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['web-fetch-macos'] == 'run'
     uses: ./.github/workflows/web-fetch-runtime.yml
     with:
       platforms: >-
@@ -230,7 +266,7 @@ jobs:
 
   ui-checks:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['ui-checks'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['ui-checks'] == 'run'
     name: ui-checks (static)
     runs-on: ubuntu-latest
     steps:
@@ -252,7 +288,7 @@ jobs:
 
   ui-tests:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['ui-tests'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['ui-tests'] == 'run'
     name: ui-checks (tests)
     runs-on: ubuntu-latest
     steps:
@@ -270,7 +306,7 @@ jobs:
 
   ui-browser-checks:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['ui-browser-checks'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['ui-browser-checks'] == 'run'
     # Browser interactions do not depend on lint, Vitest, or the production
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for every lane, including failure/cancellation. Design captures stay manual.
@@ -402,7 +438,7 @@ jobs:
 
   show-router-integration:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['show-router-integration'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['show-router-integration'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -441,7 +477,7 @@ jobs:
 
   build-linux-artifacts:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['build-linux-artifacts'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['build-linux-artifacts'] == 'run'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -518,7 +554,7 @@ jobs:
 
   unit-test-shards:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['unit-test-shards'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['unit-test-shards'] == 'run'
     name: unit-tests (Python ${{ matrix.python }}, ${{ matrix.shard }}/${{ matrix.shard-total }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -586,7 +622,7 @@ jobs:
 
   model-hub-hosted-wire:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['model-hub-hosted-wire'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['model-hub-hosted-wire'] == 'run'
     # A pull request that replaces the engine must not change how it passes
     # hosted tools through, unless labeled engine-hosted-wire-change
     # (docs/plans/model-hub-cpa-dependency.md). Any other change passes after
@@ -661,7 +697,7 @@ jobs:
   model-hub-lifecycle-native:
     name: model-hub-lifecycle-native (${{ matrix.runner }})
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['model-hub-lifecycle-native'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['model-hub-lifecycle-native'] == 'run'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     strategy:
@@ -749,7 +785,7 @@ jobs:
   unit-tests:
     runs-on: ubuntu-latest
     needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, model-hub-lifecycle-native, manifest-consistency, python-smoke, ios-shell, desktop-shell, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper]
-    if: always()
+    if: always() && needs.changes.outputs.fast_only != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Require exactly the results declared by this CI mode
@@ -771,7 +807,7 @@ jobs:
       - windows-model-hub
       - windows-control-ipc
       - windows-agent
-    if: always() && needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).jobs['scenario-evidence'] == 'run'
+    if: always() && needs.changes.result == 'success' && fromJSON(needs.changes.outputs.dispatch_jobs)['scenario-evidence'] == 'run'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -811,7 +847,7 @@ jobs:
 
   migration-release-guard:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['migration-release-guard'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['migration-release-guard'] == 'run'
     runs-on: ubuntu-latest
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
@@ -878,7 +914,7 @@ jobs:
 
   npm-wrapper:
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['npm-wrapper'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['npm-wrapper'] == 'run'
     # Fork PR code must never execute on a persistent self-hosted machine.
     runs-on: ubuntu-latest
     steps:
@@ -900,7 +936,7 @@ jobs:
     name: install-upgrade-regression (${{ matrix.suite }}, ${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
-    if: fromJSON(needs.changes.outputs.plan).jobs['install-upgrade-shards'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['install-upgrade-shards'] == 'run'
     strategy:
       fail-fast: false
       matrix:
@@ -1014,7 +1050,7 @@ jobs:
   install-upgrade-regression:
     runs-on: ubuntu-latest
     needs: [changes, install-upgrade-shards]
-    if: always()
+    if: always() && needs.changes.outputs.fast_only != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Require exactly the results declared by this CI mode
@@ -1026,7 +1062,7 @@ jobs:
     name: windows-install-smoke (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
-    if: fromJSON(needs.changes.outputs.plan).jobs['windows-install-smoke-runners'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['windows-install-smoke-runners'] == 'run'
     # Relevant PRs and full master both cover x64 and ARM; MG_THIN skips both.
     strategy:
       fail-fast: false
@@ -1230,7 +1266,7 @@ jobs:
   windows-install-smoke:
     runs-on: ubuntu-latest
     needs: [changes, windows-install-smoke-runners, web-fetch-runtime, web-fetch-macos, windows-agent, windows-model-hub, windows-control-ipc]
-    if: always()
+    if: always() && needs.changes.outputs.fast_only != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Require exactly the results declared by this CI mode
@@ -1246,7 +1282,7 @@ jobs:
     name: windows-model-hub (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: [changes, build-linux-artifacts]
-    if: fromJSON(needs.changes.outputs.plan).jobs['windows-model-hub'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['windows-model-hub'] == 'run'
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -1351,7 +1387,7 @@ jobs:
   windows-control-ipc:
     runs-on: windows-latest
     needs: [changes, build-linux-artifacts]
-    if: fromJSON(needs.changes.outputs.plan).jobs['windows-control-ipc'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['windows-control-ipc'] == 'run'
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -1518,7 +1554,7 @@ jobs:
     name: windows-agent (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     needs: changes
-    if: fromJSON(needs.changes.outputs.plan).jobs['windows-agent'] == 'run'
+    if: fromJSON(needs.changes.outputs.dispatch_jobs)['windows-agent'] == 'run'
     timeout-minutes: 20
     strategy:
       fail-fast: false
