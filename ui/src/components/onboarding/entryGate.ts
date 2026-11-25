@@ -92,12 +92,16 @@ export function configuredCliPath(config: Record<string, unknown> | undefined, b
  * Whether this candidate's assistant is enabled, applied, in custody, and actually on disk.
  *
  * Installed is not `connection.installed`. C4 asks for `detectCli(configured path)`
- * and a current-generation `refresh()` whose `cli_present` agrees, plus
- * `getBackendConnection.enabled`. A failed detector, a not-found binary, or a stale
- * refresh cannot be replaced by the connection's own installed bit.
+ * and — for Model Hub backends — a current-generation `refresh()` whose `cli_present`
+ * agrees, plus `getBackendConnection.enabled`. A failed detector, a not-found binary,
+ * or a stale refresh cannot be replaced by the connection's own installed bit.
+ *
+ * Direct-only backends (outside Model Hub, e.g. Antigravity) do not require a Hub
+ * supply or a running Hub engine: their applied, ready connection plus a healthy
+ * `detectCli` observation is their backend gate.
  *
  * A built-in backend has no CLI to be on disk (D3): it is part of the platform, so
- * its applied connection and the runnable route below are the whole of its gate.
+ * its applied connection, Hub readiness, and runnable route below are the whole of its gate.
  *
  * `ready` carries permission and credential ownership; `applied` is the only
  * application state that means the configuration is live. A confirmed `stopped` is
@@ -108,13 +112,37 @@ const backendUsable = (
   connection: BackendConnectionState | undefined,
   supply: AgentSupply | undefined,
   cliHealthy: Readonly<Record<AssistantId, boolean>>,
-): boolean =>
-  connection !== undefined && connection.ok
-  && connection.enabled
-  && connection.ready && connection.application === 'applied'
-  && supply !== undefined
-  && (isBuiltinBackend(backend)
-    || (supply.cli_present === true && cliHealthy[backend as AssistantId] === true));
+  hubReady: boolean,
+): boolean => {
+  if (
+    connection === undefined
+    || !connection.ok
+    || !connection.enabled
+    || !connection.ready
+    || connection.application !== 'applied'
+  ) {
+    return false;
+  }
+  if (!isModelHubBackend(backend)) {
+    return cliHealthy[backend as AssistantId] === true;
+  }
+  return hubReady
+    && supply !== undefined
+    && (isBuiltinBackend(backend)
+      || (supply.cli_present === true && cliHealthy[backend as AssistantId] === true));
+};
+
+/**
+ * Whether a Direct-only backend's named Agent has an explicit selected model.
+ *
+ * Direct-only backends are excluded from Model Hub, so their runnable model comes from
+ * the Agent record itself rather than a Hub `named_agents` row. Avibe owns model
+ * selection, so a missing or blank model is never admitted.
+ */
+export const directModelRunnable = (agent: Pick<VibeAgentBrief, 'model'>): string | null => {
+  const model = agent.model?.trim();
+  return model ? model : null;
+};
 
 /**
  * Whether the server can route THIS named Agent to a model right now.
@@ -134,20 +162,23 @@ export const routeRunnable = (supply: AgentSupply | undefined, name: string): st
 
 /** Every Agent that passes the whole gate, in `ENTRY_ORDER` and then by name. */
 export function entryCandidates(evidence: EntryEvidence): EntryCandidate[] {
-  // Mode alone is not runtime readiness: a backend can be in hub mode while the Hub
-  // that would serve it is down, and then no route on this machine is runnable.
+  if (!evidence.agentsRead) return [];
+  // Mode alone is not runtime readiness: a Hub backend can be in hub mode while the Hub
+  // that would serve it is down, and then no Hub route on this machine is runnable.
   // An unread runtime is the same: we did not observe it, so we may not admit on it.
-  if (!evidence.runtime || !runtimeIsRunning(evidence.runtime) || !evidence.suppliesRead) return [];
+  // Direct-only backends (outside Model Hub) do not depend on the Hub runtime or supply.
+  const hubReady = Boolean(evidence.runtime && runtimeIsRunning(evidence.runtime) && evidence.suppliesRead);
   const connectionOf = new Map(evidence.connections.map((connection) => [connection.backend, connection]));
   const supplyOf = new Map(evidence.supplies.map((supply) => [supply.backend, supply]));
   return ENTRY_ORDER.flatMap((backend) => {
-    const supply = isModelHubBackend(backend) ? supplyOf.get(backend) : undefined;
-    if (!backendUsable(backend, connectionOf.get(backend), supply, evidence.cliHealthy)) return [];
+    const hubBacked = isModelHubBackend(backend);
+    const supply = hubBacked ? supplyOf.get(backend) : undefined;
+    if (!backendUsable(backend, connectionOf.get(backend), supply, evidence.cliHealthy, hubReady)) return [];
     return evidence.agents
       // An Agent a new chat can start on, so never a Bot's: setup may make it the default.
       .filter((agent) => agent.backend === backend && isSelectableAgent(agent))
       .flatMap((agent) => {
-        const modelId = routeRunnable(supply, agent.name);
+        const modelId = hubBacked ? routeRunnable(supply, agent.name) : directModelRunnable(agent);
         return modelId ? [{ agent, backend, modelId }] : [];
       })
       .sort((left, right) => (left.agent.name < right.agent.name ? -1 : left.agent.name > right.agent.name ? 1 : 0));

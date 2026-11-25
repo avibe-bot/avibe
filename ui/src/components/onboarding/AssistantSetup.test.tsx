@@ -1576,4 +1576,36 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     expect(checkedOf(checkbox)).toBe(false);
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
   });
+
+  it('shows healthy Direct-only Antigravity as connected and ready without requiring a Hub supply', async () => {
+    const saved = {
+      ...data(),
+      capabilities: { model_hub: { enabled: true } },
+      agents: {
+        ...data().agents,
+        claude: { enabled: false, cli_path: 'claude', status: 'missing' },
+        codex: { enabled: false, cli_path: 'codex', status: 'missing' },
+        opencode: { enabled: false, cli_path: 'opencode', status: 'missing' },
+        antigravity: { enabled: true, cli_path: 'agy', status: 'ok' },
+      },
+    };
+    mock.models.listSources.mockResolvedValue([setupSource]);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => backend === 'antigravity'
+      ? { ok: true, backend, installed: true, enabled: true, auth: 'subscription', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct' }
+      : { ok: true, backend, installed: false, enabled: false, auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub' });
+    const emptyHubReads = {
+      ...hubReads,
+      read: async () => ({ kind: 'current' as const, value: [] }),
+      refresh: vi.fn(async () => { throw new Error('hub_down'); }),
+    };
+    const onNext = vi.fn();
+    render(wrap(<AgentDetection data={saved} onNext={onNext} onNavigate={vi.fn()} agentReads={emptyHubReads} />));
+
+    expect(await row('Antigravity').findByRole('button', { name: en.onboarding.setup.subscriptionConnected })).toBeTruthy();
+    expect(row('Antigravity').queryByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeNull();
+    const enter = screen.getByRole<HTMLButtonElement>('button', { name: 'Enter workspace' });
+    await waitFor(() => expect(enter.disabled).toBe(false));
+    fireEvent.click(enter);
+    await waitFor(() => expect(onNext).toHaveBeenCalledWith(expect.objectContaining({ readyBackends: ['antigravity'] })));
+  });
 });

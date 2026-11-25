@@ -204,6 +204,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       setRouteRead({ done: true, failed: false, confirmed: { epoch, token }, failure: null,
         chains: {}, models: {}, targets: {}, backendReads: {}, sources: listed, supplies });
       const backendPromises = SETUP_LINEUP.map(async (backend) => {
+        if (!isModelHubBackend(backend)) return true;
         try {
           const candidates = vibeAgents.agents.filter((row) => !row.archived && row.backend === backend)
             .sort((left, right) => {
@@ -264,7 +265,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     return model?.display_name?.trim() || hop.model_id;
   };
   const routeViewFor = (backend: AgentBackendId): AssistantRouteView => {
-    if (!canEditSetupRoute || !modelHubEnabled) return { kind: 'unavailable' };
+    if (!canEditSetupRoute || !modelHubEnabled || !isModelHubBackend(backend)) return { kind: 'unavailable' };
     if (!routeTargetReady(backend)) return { kind: routeFailureCurrent(backend) ? 'failed' : 'pending' };
     if (!routeRead.models[backend]) return { kind: 'no-agent-model' };
     const chain = routeRead.chains[backend];
@@ -294,7 +295,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
     const confirmed = connectionConfirmed[backend];
     if (!active || !activeRef.current || connections[backend]?.ok !== true || connectionPending[backend]
       || confirmed?.epoch !== activation.current || confirmed.token !== connectionTokens.current[backend]) return undefined;
-    return connections[backend]?.supply_mode ?? (!modelHubEnabled ? 'direct' : undefined);
+    return connections[backend]?.supply_mode ?? (!modelHubEnabled || !isModelHubBackend(backend) ? 'direct' : undefined);
   };
   const confirmedSupplyMode = (backend: AgentBackendId) => sharedRouteReady()
     ? routeRead.supplies.find((row) => row.backend === backend)?.mode
@@ -536,12 +537,14 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
       // onto a continuation that never runs and the person's next enable silently does
       // nothing. Its failure is reported where this screen already reports a read that
       // failed, and it does not bury what the write had to say.
-      try {
-        await agentReads?.refresh();
-        if (modelHubEnabled && canEditSetupRoute) await readCardRoutes();
-      } catch (error) {
-        if (enableIntent.current[backend] !== intent) return;
-        setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));
+      if (isModelHubBackend(backend)) {
+        try {
+          await agentReads?.refresh();
+          if (modelHubEnabled && canEditSetupRoute) await readCardRoutes();
+        } catch (error) {
+          if (enableIntent.current[backend] !== intent) return;
+          setConnectionErrors((current) => ({ ...current, [backend]: current[backend] || String(error) }));
+        }
       }
     });
   };
@@ -624,7 +627,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             // The connection refresh below reports an unreadable post-install state.
           }
         }
-        await agentReads?.refresh();
+        if (isModelHubBackend(backend)) await agentReads?.refresh();
       }
     } catch (e) {
       setInstallResults((prev) => ({
@@ -1035,7 +1038,7 @@ export const AgentDetection: React.FC<AgentDetectionProps> = ({ data, onNext, on
             connectionPending={connectionPending[name] || !!choice.picking(name)}
             connectionError={connectionErrors[name] || connections[name]?.message}
             onRefreshConnection={() => void refreshConnection(name, { acknowledge: true })}
-            routeError={canEditSetupRoute && modelHubEnabled && routeFailureCurrent(name)
+            routeError={canEditSetupRoute && modelHubEnabled && isModelHubBackend(name) && routeFailureCurrent(name)
               ? t('settings.models.routeDialog.fail.reconcileRead')
               : ownershipConflict ? t('onboarding.setup.ownershipChanged') : choiceError(name)}
             onRetryRoute={() => {
