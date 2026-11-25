@@ -68,7 +68,7 @@ PYTHON_DECLARATIONS = {
     ("vibe/backend_model_catalog.py", "Dict", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Bundled model catalog files."),
     ("vibe/backend_model_catalog.py", "Set", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Backends with bundled model catalogs."),
     ("vibe/cli.py", "Tuple", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Native-only model picker refresh."),
-    ("vibe/cli.py", "Dict", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "The one model family each single-vendor native CLI runs (Session model refusals)."),
+    ("vibe/cli.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Single-vendor native CLIs for Session model family refusals; Antigravity uses a live multi-vendor menu."),
     ("vibe/desktop_backends.py", "Dict", NATIVE): (1, "native", "CLI package install specifications."),
     ("vibe/cli_health.py", "Dict", NATIVE): (1, "native", "Backend-specific native CLI version grammars, not another Agent universe."),
     ("vibe/cli_repair.py", "Dict", NATIVE): (2, "native", "npm package and Homebrew formula coordinates for source-preserving native CLI repair."),
