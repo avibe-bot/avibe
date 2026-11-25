@@ -47,6 +47,10 @@ class TranscriptStore(Protocol):
         """Context entries of the Session and its fork ancestry, ordered by ``context_seq``."""
         ...
 
+    async def load_for_preview(self, session_id: str) -> RunTranscript:
+        """The same projected window and epoch as a live read, without publishing repairs."""
+        ...
+
     async def load_for_run(self, session_id: str) -> RunTranscript:
         """Projection-valid checkpoint window and prefix facts for live execution.
 

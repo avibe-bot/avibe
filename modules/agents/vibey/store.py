@@ -120,6 +120,9 @@ class AdapterTranscriptStore:
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         return await self._store.load(session_id)
 
+    async def load_for_preview(self, session_id: str) -> RunTranscript:
+        return await self._store.load_for_preview(session_id)
+
     async def load_for_run(self, session_id: str) -> RunTranscript:
         return await self._store.load_for_run(session_id)
 

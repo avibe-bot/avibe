@@ -418,6 +418,7 @@ class Agent:
         self._scope = RunScope(self._ctx.cancel)
         self._outcome = OutcomeOwner()
         self._rows: list[ContextEntry] = []
+        self._carry_projection = ""
         self._committed_state: dict[str, Any] = {}
         self._committed_state_json = "{}"
         # C-9's per-run bound (section 10): unproductive checkpoint attempts this run, in memory only.
@@ -533,6 +534,15 @@ class Agent:
         async with self._lock:
             if self._running:
                 raise RuntimeError("cannot preview an Agent with an active run")
+            if entries is None and context_seq is None:
+                runtime = await self.store.load_for_preview(self.session_id)
+                entries = runtime.entries
+                epoch = runtime.carry_projection
+                preview_session = self.session_id
+            else:
+                # A historical cut or injected row set does not certify the live parent's epoch.
+                epoch = ""
+                preview_session = None
             rows = deepcopy(list(entries if entries is not None else await self.store.load(self.session_id)))
             head = max((row.context_seq for row in rows), default=0)
             if context_seq is not None and context_seq > head:
@@ -573,7 +583,10 @@ class Agent:
             )
             if transition is not None:
                 return RequestPreview(snapshot, "needs_context_transition", transition=transition, **facts)
-        wire = await preview_wire_request(prepared.request, gateway=gateway, media_loader=media_loader, session_id=self.session_id)
+        wire = await preview_wire_request(
+            replace(prepared.request, thread_observation=ThreadObservation(preview_session, carry_projection=epoch)),
+            gateway=gateway, media_loader=media_loader, session_id=preview_session,
+        )
         if isinstance(wire, ProviderError):
             return RequestPreview(snapshot, "preparation_error", error=wire, **facts)
         return RequestPreview(snapshot, "ready", wire=wire, **facts)
@@ -799,6 +812,7 @@ class Agent:
                 self._check_model_route(selected)
                 runtime = await self._scope.call(lambda: self.store.load_for_run(self.session_id))
                 self._rows = list(runtime.entries)
+                self._carry_projection = runtime.carry_projection
                 for route, used_at in runtime.response_clocks.items():
                     self._last_model_at[route] = max(self._last_model_at.get(route, used_at), used_at)
                 if self.context is not None:
@@ -1080,6 +1094,7 @@ class Agent:
                     observation = ThreadObservation(
                         self.session_id if purpose == "conversation" else None,
                         ordinary_retry=len(self._attempts) > first,
+                        carry_projection=self._carry_projection,
                     )
                     request = replace(request, thread_observation=observation)
                     if cache is not None:
@@ -2788,6 +2803,8 @@ class Agent:
             skills=skills,
         )
         seq = max((row.context_seq for row in self._rows), default=0) + 1
+        if self._carry_projection:
+            payload["carry_projection"] = self._carry_projection
         candidate = ContextEntry(self.session_id, seq, "compaction", "uncommitted-compaction", payload=payload)
         after = _borrowed_context_view([*self._rows, candidate])
         # What the next request would carry; it is budgeted for real when it is built.

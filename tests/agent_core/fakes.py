@@ -137,6 +137,10 @@ class InMemoryTranscriptStore:
             prefix = [row for row in await self.load(anchor.session_id) if row.context_seq <= anchor.context_seq]
         return deepcopy(prefix + self.rows.get(session_id, []))
 
+    async def load_for_preview(self, session_id: str):
+        # The in-memory runtime read has no publication side effects.
+        return await self.load_for_run(session_id)
+
     async def load_for_run(self, session_id: str):
         from core.agent_core.harness.runtime import compact_runtime
 

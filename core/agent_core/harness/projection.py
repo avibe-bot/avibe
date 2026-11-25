@@ -230,6 +230,7 @@ _PAYLOAD_SHAPES: dict[str, Check] = {
             "kept_inputs": _list(lambda value: _integer(value) and value > 0),
         },
         {
+            "carry_projection": _string,
             "previous_compaction_id": _nullable(_string),
             "summarizer": _nullable(
                 _object({"origin": _reads(origin_from_dict), "prompt_version": _string, "rounds": _count})
