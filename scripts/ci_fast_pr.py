@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from scripts.ci_docs_only import Scope, WINDOWS_CONTROL_IPC_PATHS
+from scripts.ci_scope import DESKTOP_CONTRACTS, IOS_CONTRACTS
 
 LINUX = frozenset(('ruff', 'unit-test-shards', 'ui-checks', 'ui-tests', 'show-router-integration',
                    'memory-insight-contract', 'npm-wrapper', 'migration-release-guard', 'build-linux-artifacts'))
@@ -41,9 +42,9 @@ def path_groups(path: str) -> set[str]:
         groups.add('install')
     if 'alembic' in p or 'migrat' in p or p == 'storage/compatibility.py':
         groups.add('migration')
-    if p.startswith('desktop/') or any(s in p for s in ('updater', 'auto_update', 'signing', 'codesign', 'notariz')):
+    if path.startswith(DESKTOP_CONTRACTS) or any(s in p for s in ('updater', 'auto_update', 'signing', 'codesign', 'notariz')):
         groups.add('desktop')
-    if p.startswith(('ios/', 'ui/src/mobile/', 'ui/src/lib/native', 'ui/src/lib/usenative')) or p.endswith('.swift'):
+    if path.startswith(IOS_CONTRACTS) or p.endswith('.swift'):
         groups.add('ios')
     if SHARED.search(p) or p.startswith(('.github/', 'patches/', 'scripts/ci_')) or 'release' in p or p in ('hatch_build.py', 'hatch_exact_peer.py'):
         groups.add('shared')

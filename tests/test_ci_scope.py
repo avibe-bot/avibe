@@ -372,6 +372,11 @@ def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
     ('core/private_fs.py', 'identity', 'windows-control-ipc'),
     ('tests/test_control_ipc.py', 'identity', 'windows-control-ipc'),
     ('scripts/desktop_release.py', 'desktop', 'desktop-shell'),
+    ('ui/src/components/workbench/Composer.tsx', 'desktop', 'desktop-shell'),
+    ('ui/src/components/workbench/MentionEditor.tsx', 'desktop', 'desktop-shell'),
+    ('ui/src/components/voice/ComposerHold.tsx', 'desktop', 'desktop-shell'),
+    ('ui/e2e/voice-shortcut/fixture.tsx', 'desktop', 'desktop-shell'),
+    ('assets/mascot/cloud-tuanzi-v2.png', 'ios', 'ios-shell'),
     ('packaging/iroh-apple/release.json', 'ios', 'ios-shell'),
     ('storage/compatibility.py', 'migration', 'install-upgrade-shards'),
 ])
