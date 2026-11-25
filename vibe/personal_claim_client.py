@@ -73,6 +73,10 @@ def text(value, limit: int) -> bool:
     return isinstance(value, str) and 0 < len(value) <= limit and value.strip() == value and value.isprintable()
 
 
+def _valid_hostname(value: str) -> bool:
+    return text(value, 253) and all(_HOST.fullmatch(s) for s in value.split("."))
+
+
 # One address, as avibe.bot's ordinary other-account refusal names the account that confirmed it:
 # printable, no whitespace, angle brackets or quotes, one ``@`` and a dotted domain.
 _EMAIL = re.compile(r'[^\s@<>"]{1,64}@[^\s@<>"]+\.[^\s@<>".]+')
@@ -116,12 +120,12 @@ class Grant:
     def parse(cls, data: dict, hostname: str) -> Grant:
         account = data.get("account")
         if not (isinstance(account, dict) and text(account.get("subject"), 200) and text(account.get("email"), 320)
-                and text(hostname, 253) and all(_HOST.fullmatch(s) for s in hostname.split("."))):
+                and _valid_hostname(hostname)):
             raise ClaimError("invalid_claim_response")
         return cls(account["subject"], account["email"], hostname)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class Ticket:
     id: str
     code: str
@@ -129,6 +133,7 @@ class Ticket:
     expiry: str
     deadline: float
     interval: int
+    ordinary_decision_readback: bool = False
 
 
 @dataclass(frozen=True, repr=False)
@@ -171,9 +176,10 @@ class ClaimsClient:
         self._decision_ticket = data.get("claim_id") if data.get("ordinary_decision_readback") is True else None
 
     def _disposition(self, data, key):
-        if key.startswith("vrp2_"):
+        disposition = data.get("binding_disposition")
+        if key.startswith("vrp2_") or disposition not in (None, "new", "existing"):
             raise ClaimError("invalid_claim_response")
-        return None
+        return disposition  # Ordinary issuance: target check only, never a journal discriminator.
 
     def _check_error(self, suffix, payload, status, data):
         if (status != 409 or suffix != "/redeem" or not self._decision_ticket
@@ -258,6 +264,8 @@ class ClaimsClient:
         return status, data, delay
 
     def start(self, installation: str, device: str, mode: str, locale: str, *, origin="", state="") -> Ticket:
+        if mode == "desktop" and self.base != "https://avibe.bot":
+            raise ClaimError("invalid_backend")  # never send the machine identity to an alternate issuer
         payload = {"installation_id": installation, "device_name": device, "mode": mode, "locale": locale,
                    "code_challenge": s256(self._verifier)}
         if mode == "redirect":
@@ -274,7 +282,7 @@ class ClaimsClient:
             url = self.base + "/connect/" + code
             if (status == 201 and str(UUID(ident)) == ident and self._user_code.fullmatch(code)
                     and d["user_url"] == url and type(interval) is int and 1 <= interval <= 86400):
-                return Ticket(ident, code, url, expiry, _instant(expiry), interval)
+                return Ticket(ident, code, url, expiry, _instant(expiry), interval, self._decision_ticket == ident)
         except (KeyError, ValueError, TypeError, AttributeError):
             pass
         raise ClaimError("invalid_claim_response")

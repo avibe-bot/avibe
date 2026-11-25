@@ -22100,8 +22100,24 @@ def main():
     so nested local calls never inherit an outer remote authority.
     """
 
-    cache_running_vibe_path()
     argv = sys.argv[1:]
+    if argv[:1] == ["__desktop-claim-pipe"]:
+        # An internal child protocol, never an argparse/Harness command. Do not
+        # echo extra argv or mask an inherited represented invocation as local.
+        if len(argv) != 1:
+            sys.exit(1)
+        try:
+            from vibe.authorization import current_invocation_authority
+
+            if current_invocation_authority() is not None or _cli_invocation_authority() is not None:
+                sys.exit(1)
+            from vibe.desktop_claim_pipe import run_private_stdio
+
+            status = run_private_stdio()
+        except Exception:
+            status = 1  # even missing handles or an authority-resolution error has no diagnostic body
+        sys.exit(status)
+    cache_running_vibe_path()
     if not (argv and argv[0] in (*_INTERNAL_ACTIVATION_COMMANDS, "mcp", "mcp-add", "mcp-discover")):
         parser = build_parser()
         args = parser.parse_args()

@@ -57,7 +57,7 @@ from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, CliComma
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from tests.test_desktop_local_instance import desktop_host as desktop_host
-from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser
+from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser, service_adoptions as service_adoptions
 from tests.test_pairing_recovery import pairing_host as pairing_host
 from tests.test_claim_wire_rebind import issuer as issuer
 from tests.test_rebind_routes import machine as rebind_machine
@@ -114,7 +114,7 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     CliCommandObservations().bind(monkeypatch)
 
 
-def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_browser, monkeypatch):
+def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_browser, service_adoptions):
     """AUTH-SETUP-914: browser return, subject acceptance, key redemption and local publication.
 
     The owner's browser may be on this machine or another computer on an admitted home network."""
@@ -122,11 +122,9 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
     import base64
     import time
     from tests.test_personal_claims import _assert_bad_return, _start, callback_proof
-    from vibe import remote_access, ui_server
+    from vibe import remote_access
     from config.v2_config import V2Config
 
-    monitored = []
-    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: monitored.append(V2Config.load().remote_access.vibe_cloud.instance_id))
     origin, environ = owner_browser
     client = app.test_client()
     start = _start(client, origin, environ)
@@ -163,7 +161,7 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
         assert 'Location' not in replay.headers
     else:
         _assert_bad_return(replay)
-    assert monitored == ["inst_A"]
+    assert service_adoptions == ["inst_A"]
     assert outcome["account"] == {"email": "actual@fixture.test"} and outcome["hostname"] == "fixture.avibe.bot"
     assert claim_peer.decisions == ["owner-id"]
     cloud = V2Config.load().remote_access.vibe_cloud

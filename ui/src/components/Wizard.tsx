@@ -594,8 +594,11 @@ export function Wizard() {
     // Where turning remote access on can work from here, Setup offers it once, as its own page;
     // a status that cannot be read offers nothing.
     const desktopShell = hasDesktopClient() || isDesktopShell();
+    // The Desktop App on this computer's own instance turns remote access on in its claim dialog,
+    // so Setup offers the step there too (owner, 2026-11-20; ui/design: desktop/bind-home/setup-*).
+    const desktopLocal = hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local';
     let paired: boolean | null = null;
-    if (!remote && !desktopShell && !isNativeShell()) {
+    if (!remote && (!desktopShell || desktopLocal) && !isNativeShell()) {
       try {
         const status = await api.remoteAccessStatus();
         paired = typeof status?.paired === 'boolean' ? status.paired : null;
@@ -604,12 +607,12 @@ export function Wizard() {
       }
     }
     const offer = offersRemoteAccessStep({
-      remote, desktopShell, nativeShell: isNativeShell(), paired, organization: instanceKind === 'organization',
+      remote, desktopShell, desktopClient: desktopLocal, nativeShell: isNativeShell(), paired, organization: instanceKind === 'organization',
     });
     navigate(offer ? SETUP_REMOTE_ACCESS_PATH : '/', { replace: true });
-    if (hasDesktopClient() && isClientProjection(desktop) && desktop.connection.committed.kind === 'local') {
-      presentDesktopClient('setup-complete');
-    }
+    // Where the step is offered it is the Desktop's end of Setup (its claim dialog signs in);
+    // otherwise the shell's own setup-complete view still offers to start or sign in.
+    if (desktopLocal && !offer) presentDesktopClient('setup-complete');
   };
   /**
    * 「稍后再配」: finish setup with no provider. Someone without a subscription or key

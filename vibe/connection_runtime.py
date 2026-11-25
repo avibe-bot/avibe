@@ -917,9 +917,13 @@ def start():
             return
         home = paths.get_state_dir()
         def run():
+            from vibe import service_claim_binding
+
             backoff = 1
             while paths.get_state_dir() == home:
                 _wake.clear()
+                if (observe := service_claim_binding.current()) is not None:
+                    observe()  # independent of any settings journal or Desktop reply
                 try:
                     _consume_pin_attempt()
                     idle = recover()

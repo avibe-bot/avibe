@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, ArrowRight, Check, Laptop, ShieldCheck, TriangleAlert } from 'lucide-react';
+import { ArrowLeft } from 'lucide-react';
 import { Button } from '../components/ui/button';
-import { Badge } from '../components/ui/badge';
-import { Skeleton } from '../components/ui/skeleton';
 import { cn } from '../lib/utils';
-import { AccountSecondFactorView } from './AccountSecondFactorView';
+import { AccountSecondFactorView, RecoveryCodesView } from './AccountSecondFactorView';
 import { DesktopSignIn } from './DesktopSignIn';
 import { openLinkInNewContext } from '../lib/pwaNavigation';
 import { ACCOUNT_SECURITY_URL } from '../sign-in/links';
 import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
+import { SetupCompleteView } from './SetupCompleteView';
+import { BindDialog, ComputerBindingCard } from './BindComputerView';
+import { useDesktopClaim } from './useDesktopClaim';
 import { AddInstanceView } from './AddInstanceView';
-import { DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
+import { DESKTOP_CLAIM_VIEW, DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
 import { UpdatePanel, UpdateSubjectsPanel } from '../components/update/UpdatePanel';
 import { instanceSection } from './instanceUpdateModel';
@@ -164,6 +165,8 @@ export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>
   />;
 }
 
+const noop = () => undefined;
+
 // Document-local replay suppression. Native owns one-time admission and consumption.
 const attemptedSignOutIntents = new Set<string>();
 
@@ -175,16 +178,23 @@ export function AccountApp() {
   const [controlsLeft] = useState(() => getComputedStyle(document.documentElement).getPropertyValue('--shell-window-controls-left').trim());
   const [popover] = useState(() => new URLSearchParams(window.location.search).get('view') === UPDATE_POPOVER);
   const install = useAcceptedInstall(state?.desktop.update.phase);
-  const [view, setView] = useState<DesktopClientView | 'profile' | 'add'>(() => {
+  const [view, setView] = useState<DesktopClientView | typeof DESKTOP_CLAIM_VIEW | 'profile' | 'add'>(() => {
     const initial = new URLSearchParams(window.location.search).get('view');
-    return isDesktopClientView(initial) ? initial : 'account';
+    return initial === DESKTOP_CLAIM_VIEW ? initial : isDesktopClientView(initial) ? initial : 'account';
   });
+  // The view native opened this document for. Claim commands are admitted only in an Account or
+  // claim document, so another document opens a real one rather than drawing the page itself.
+  const [documentView] = useState(() => new URLSearchParams(window.location.search).get('view') ?? 'account');
+  // ui/design: desktop/bind-home/*. This computer's binding: read on the Account page, claimed only
+  // in the claim view, which the Workbench's 「开启远程访问」 asks the shell to open.
+  const claimDocument = documentView === DESKTOP_CLAIM_VIEW;
+  const claim = useDesktopClaim(state, !popover && (claimDocument ? view === 'claim'
+    : documentView === 'account' && (view === 'account' || view === 'profile')), claimDocument ? 'claim' : 'account');
   // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
   // When the last action was one sent to the selected instance's updater: the time of that click.
   const [instanceAction, setInstanceAction] = useState<number | null>(null);
-  const [reviewChange, setReviewChange] = useState(false);
   const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
   const [material, setMaterial] = useState<{ generation: number; result: DesktopClientDirectResult } | null>(null);
   // "Use a different account" that could not forget the stored account: shown until the next step.
@@ -195,7 +205,13 @@ export function AccountApp() {
   // commits material. Native still owns authoritative invalidation/cleanup.
   const recoveryProtection = useRef<{ generation: number } | null>(null);
   const direct = material && material.generation === state?.generation ? material.result : null;
-  const awaitingRecoveryAcknowledgement = direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length;
+  // Recovery codes a binding's authenticator setup returned are shown once, like the ordinary ones:
+  // nothing leaves the document until the person says they saved them.
+  // Also while the authenticator setup that returns them is finishing.
+  const claimCodes = claim.held;
+  const claimCodesShown = useRef(false);
+  useLayoutEffect(() => { claimCodesShown.current = claimCodes; }, [claimCodes]);
+  const awaitingRecoveryAcknowledgement = (direct?.type === 'totp_enrolled' && !!direct.recoveryCodes?.length) || claimCodes;
   const [inputGeneration, setInputGeneration] = useState(state?.generation);
   if (inputGeneration !== state?.generation) {
     setInputGeneration(state?.generation);
@@ -216,7 +232,7 @@ export function AccountApp() {
       const view: unknown = (detail as { view?: unknown } | null)?.view;
       const token: unknown = (detail as { presentationToken?: unknown } | null)?.presentationToken;
       if (!isDesktopClientView(view) || typeof token !== 'string' || !token.length
-        || new TextEncoder().encode(token).length > 128 || recoveryProtection.current) return;
+        || new TextEncoder().encode(token).length > 128 || recoveryProtection.current || claimCodesShown.current) return;
       presentDesktopClient(view, token, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
     };
     window.addEventListener(DESKTOP_PRESENT_EVENT, present);
@@ -262,7 +278,7 @@ export function AccountApp() {
   }, [send, state?.generation, state?.consent?.instance_id]);
   const leave = useCallback((type: 'cancel' | 'return_local' | 'sign_out', recoveryAcknowledged = false) => {
     // Only the saved-codes action acknowledges; native invalidation remains independent.
-    if (recoveryProtection.current && !recoveryAcknowledged) return;
+    if ((recoveryProtection.current || claimCodesShown.current) && !recoveryAcknowledged) return;
     epoch.current += 1;
     recoveryProtection.current = null;
     setMaterial(null);
@@ -271,17 +287,30 @@ export function AccountApp() {
     // Escape remains usable during a blocked or slow request. Native fences late completion.
     void send({ type });
   }, [send]);
+  // Leaving the claim view ends its review (Cancel) before the shell returns to the Workbench; the
+  // shell also retires it when the document is hidden.
+  const { close: closeClaim } = claim;
+  const exitClaim = useCallback(() => {
+    if (claimCodesShown.current) return;
+    closeClaim();
+    leave('cancel');
+  }, [closeClaim, leave]);
+  // Every way out of a claim document ends its review first, from any of its views (updates too).
+  const exit = claimDocument ? exitClaim : () => leave('cancel');
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape' || event.isComposing || event.defaultPrevented) return;
       event.preventDefault();
       // The popup has no account flow to cancel: Escape closes it, as it closes a popover.
       if (popover) { closeUpdatePopover(); return; }
+      // The claim dialog closes itself on Escape (and leaves through exitClaim).
+      if (claimDocument && view === 'claim') return;
+      if (claimDocument) { exitClaim(); return; }
       leave('cancel');
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [leave, popover]);
+  }, [leave, exitClaim, popover, claimDocument, view]);
   useEffect(() => {
     if (popover || !signOutIntent || signOutIntent.generation !== state?.generation || attemptedSignOutIntents.has(signOutIntent.intent_id)) return;
     // Like the hook's initial native read, defer dispatch until this effect is
@@ -298,12 +327,17 @@ export function AccountApp() {
     });
     return () => { active = false; };
   }, [signOutIntent, state?.generation, send, popover]);
-  const localButton = <Button variant="ghost" onClick={() => leave('return_local')}>{t('desktopClient.continueLocal')}</Button>;
+  // The Account page in an Account document: here if this is one, else native opens one.
+  const openAccount = () => {
+    if (documentView === 'account') { setView('profile'); return; }
+    if (recoveryProtection.current) return;
+    presentDesktopClient('account', undefined, desktopLocale(i18n.resolvedLanguage ?? i18n.language));
+  };
   const instances = () => {
     if (recoveryProtection.current) return;
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
-  const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopClient.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopClient.errors.upgrade' : error === 'invalid_credentials' ? 'desktopClient.errors.credentials' : error === 'rate_limited' ? 'desktopClient.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopClient.errors.code' : 'desktopClient.errors.request');
+  const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopAccount.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopAccount.errors.upgrade' : error === 'invalid_credentials' ? 'desktopAccount.errors.credentials' : error === 'rate_limited' ? 'desktopAccount.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopAccount.errors.code' : 'desktopAccount.errors.request');
   // An install the instance refused or failed is told by its section (the shell's receipt says `failed`). Any
   // other failed action there, a check or a switch, has no such place, and keeps this page's notice.
   // A refusal that leaves no receipt (the shell busy, a selection under way, the offer changed) keeps it too.
@@ -318,7 +352,7 @@ export function AccountApp() {
   const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null}
     busy={busy} pendingId={failedPending ? null : state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
     failure={activeSelection?.error ? { instanceId: activeSelection.id, message: explainError(activeSelection.error) } : null}
-    onAccount={() => setView('profile')} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
+    onAccount={openAccount} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
     onLocal={() => leave('return_local')} onCancel={() => leave('cancel')} onRefresh={() => void act({ type: 'refresh_instances' })}
     onConsent={(approve) => void act({ type: 'decide_consent', approve })} consentError={state.consent ? errorMessage : null} />;
   const failure = errorMessage && (popover || view === 'updates' || view === 'setup-complete'
@@ -333,32 +367,10 @@ export function AccountApp() {
       </>}
     </UpdatePopover>;
   }
-  let content: ReactNode;
-  let centerLogin = false;
-  if (!state) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
-  } else if (view === 'updates') {
-    // ui/design: update/panel/trusted-view
-    // With the instance's section beside the app's, the panel says whose each is; the heading only names the page.
-    const both = state.connection.committed.kind === 'remote' && Boolean(state.instance_update);
-    content = <div className="mx-auto w-full max-w-md pt-12">{both ? <Heading title={t('dashboard.versionAndUpdate')} /> : <Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading>}<div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={() => leave('cancel')} /></div>{failure}</div>;
-  } else if (view === 'sign-out') {
-    content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
-  } else if (view === 'setup-complete') {
-    content = <div className="mx-auto max-w-xl pt-12"><ShieldCheck className="mb-6 size-10 text-mint-ink" /><Heading title={t('desktopClient.setupReady')}>{t('desktopClient.setupBody')}</Heading><Notice>{t('desktopClient.registrationDisclosure')}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" onClick={() => leave('return_local')}>{t('desktopClient.startLocal')}</Button><Button variant="outline" onClick={() => setView('account')}>{t('desktopClient.signInAndAdd')}<ArrowRight className="size-4" /></Button></div><p className="mt-5 text-sm text-muted">{t('desktopClient.signInLater')}</p>{failure}</div>;
-  } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
-    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopClient.recoveryTitle')}>{t('desktopClient.recoveryBody')}</Heading><ul className="grid grid-cols-2 gap-3 rounded-xl border border-edge bg-field p-5 font-mono text-sm select-text">{direct.recoveryCodes.map((value) => <li key={value}>{value}</li>)}</ul><Button variant="brand" className="mt-7" disabled={busy} onClick={() => {
-      recoveryProtection.current = null;
-      setMaterial(null);
-      if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
-      else setView('account');
-    }}>{t('desktopClient.savedCodes')}</Button>{failure}</div>;
-  } else if (state.account.status !== 'signed_in') {
-    // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
-    // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
-    centerLogin = true;
-    content = <><DesktopSignIn state={state} send={send}
-      onLocal={() => leave('return_local')}
+  /** The App's own sign-in, as its page or as the claim dialog's first face (whose way out cancels). */
+  const signIn = (inClaim: boolean) => state && <><DesktopSignIn state={state} send={send}
+      onLocal={() => { if (inClaim) exitClaim(); else leave('return_local'); }} exitLabel={inClaim ? t('common.cancel') : undefined}
+      heading={inClaim ? <h2 className="mb-2 text-xl font-semibold tracking-tight">{t('desktopAccount.bind.signInTitle')}</h2> : undefined}
       onDifferentAccount={() => void send({ type: 'abort_sign_in' }).then((reply) => {
         setForgetFailure(reply && 'ok' in reply && !reply.ok ? { code: reply.error.code, generation: reply.state.generation } : null);
       })}
@@ -367,33 +379,67 @@ export function AccountApp() {
         material={direct?.type === 'totp_enrollment' ? direct : null} errorMessage={errorMessage}
         onCodeChange={setCode}
         onVerify={() => void act({ type: 'finish_totp_enrollment', code })}
-        onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onLocal={() => leave('return_local')} />} />
+        onEnroll={() => void act({ type: 'begin_totp_enrollment' })} onLocal={() => { if (inClaim) exitClaim(); else leave('return_local'); }} exitLabel={inClaim ? t('common.cancel') : undefined} />} />
       {forgetFailure?.generation === state.generation && <p role="alert" className="mx-auto mt-4 w-full max-w-md text-sm leading-6 text-destructive-ink">{explainError(forgetFailure.code)}</p>}</>;
+  let content: ReactNode;
+  let centerLogin = false;
+  if (!state) {
+    content = <div className="mx-auto max-w-xl pt-12"><Heading title={t('desktopAccount.loading')} />{failure}<Button variant="outline" className="mt-6" onClick={() => void act({ type: 'get_state' })} disabled={busy}>{t('common.retry')}</Button></div>;
+  } else if (view === 'updates') {
+    // ui/design: update/panel/trusted-view
+    // With the instance's section beside the app's, the panel says whose each is; the heading only names the page.
+    const both = state.connection.committed.kind === 'remote' && Boolean(state.instance_update);
+    content = <div className="mx-auto w-full max-w-md pt-12">{both ? <Heading title={t('dashboard.versionAndUpdate')} /> : <Heading title={t('update.trustedView.title')}>{t('update.trustedView.body')}</Heading>}<div className="overflow-hidden rounded-xl border border-edge bg-popover shadow-elevation-2"><DesktopUpdatePanels state={state} act={act} busy={busy} install={install} close={exit} /></div>{failure}</div>;
+  } else if (view === 'sign-out') {
+    content = <AccountSignOutView signingOut={!!signOutIntent} errorMessage={errorMessage} onRetry={() => leave('sign_out')} onBack={() => leave('cancel')} />;
+  } else if (view === 'setup-complete') {
+    content = <SetupCompleteView onLocal={() => leave('return_local')} onSignIn={openAccount} failure={failure} />;
+  } else if (direct?.type === 'totp_enrolled' && direct.recoveryCodes?.length) {
+    content = <RecoveryCodesView codes={direct.recoveryCodes} busy={busy} onSaved={() => {
+      recoveryProtection.current = null;
+      setMaterial(null);
+      // The claim view goes on to the name; elsewhere a finished sign-in returns to the Workbench.
+      if (claimDocument) setView('claim');
+      else if (state.account.status === 'signed_in' && state.enrollment.status === 'paired_this_account' && !errorMessage) leave('cancel', true);
+      else setView('account');
+    }}>{failure}</RecoveryCodesView>;
+  } else if (claimDocument && view === 'claim') {
+    // ui/design: desktop/bind-home/*-sheet. The shell's own document in front of the Workbench, and
+    // the one dialog over it: the App's sign-in first if needed, then the name.
+    content = claim.step && <BindDialog step={claim.step} account={claim.account || (state.account.identity?.email ?? '')} busy={claim.busy}
+      signIn={signIn(true)}
+      onNameChange={claim.changeName} onPick={(prefix) => void claim.pick(prefix)} onConfirm={() => void claim.confirm()}
+      onSendCode={() => void claim.sendCode()} onCodeChange={claim.setCode} onSubmitCode={(code) => void claim.submitCode(code)}
+      onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
+      onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
+      onRestart={claim.restart} restartable={claim.restartable} holding={claim.held} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')}
+      onCheckAgain={() => void claim.recheck()} onSignInOther={() => { setView('sign-out'); leave('sign_out'); }} onClose={exitClaim} />;
+  // A binding in progress keeps its dialog, also while its new sign-in owes a second factor.
+  } else if (state.account.status !== 'signed_in') {
+    // ui/design: desktop/sign-in/*. The iPhone's steps and words (Max, 2026-11-18); the window keeps
+    // "continue on this computer", Back to Workbench and the in-app authenticator setup below.
+    centerLogin = true;
+    content = signIn(false);
   } else if (state.consent || (state.connection.status === 'switching' && !failedPending) || (state.connection.status === 'remote_unreachable' && view === 'instances')) {
     content = switcher;
-  } else if (view === 'profile' || (view === 'account' && ['unknown', 'unpaired', 'paired_this_account'].includes(state.enrollment.status))) {
+  } else if (view === 'profile' || view === 'account') {
     content = <AccountDetailsView email={state.account.identity?.email ?? state.account.email ?? ''}
-      localRemoteUrl={state.local.remote_access === 'on' ? state.local.remote_access_url ?? null : null}
       busy={busy} errorMessage={errorMessage} onBack={instances}
-      onSignOut={() => { setView('sign-out'); leave('sign_out'); }} />;
+      onSignOut={() => { setView('sign-out'); leave('sign_out'); }}>
+      {/* ui/design: desktop/bind-home/account-*. The Account page keeps only the account: this
+          computer shows only when bound, as one read-only line with its domain. Binding lives in
+          Settings › Devices (the claim view). */}
+      {claim.binding.state === 'bound' && <ComputerBindingCard binding={claim.binding} computer={state.local.name}
+        onBind={noop} onRefresh={noop} onUpdates={noop} onSignInOther={noop} />}
+    </AccountDetailsView>;
   } else if (view === 'add') {
     content = <AddInstanceView onBack={() => setView('instances')} onRefresh={instances} busy={busy} />;
-  } else if (view !== 'instances' && ['registering', 'conflict', 'failed', 'paired_tunnel_unavailable'].includes(state.enrollment.status)) {
-    const status = state.enrollment.status;
-    const conflict = status === 'conflict';
-    const failed = status === 'failed';
-    const tunnel = status === 'paired_tunnel_unavailable';
-    const registering = status === 'registering';
-    content = <div className="mx-auto max-w-xl pt-12"><div className="mb-6 grid size-14 place-items-center rounded-2xl border border-edge bg-field">{conflict || failed || tunnel ? <TriangleAlert className="size-6 text-gold-ink" /> : registering ? <Laptop className="size-6 text-muted" /> : <ShieldCheck className="size-6 text-mint-ink" />}</div><Heading title={t(conflict ? 'desktopClient.conflictTitle' : failed ? 'desktopClient.registrationFailed' : tunnel ? 'desktopClient.tunnelUnavailable' : 'desktopClient.registering')}>{state.local.name}</Heading>
-      {conflict ? <><Notice warning>{t('desktopClient.conflictBody')}</Notice>{reviewChange && <p role="status" className="mt-5 text-sm leading-6 text-muted">{t('desktopClient.transferSteps')}</p>}<div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" onClick={() => leave('return_local')}>{t('desktopClient.keepLink')}</Button><Button variant="outline" onClick={() => setReviewChange(true)}>{t('desktopClient.reviewChange')}</Button></div><Button variant="link" className="mt-3 px-0" onClick={instances}>{t('desktopClient.otherInstances')}</Button></>
-        : registering ? <><p className="mb-4 flex items-center gap-2 text-sm"><Check className="size-4 text-mint-ink" />{t('desktopClient.signedIn')}</p><Skeleton className="h-5 w-3/4" /><p className="mt-4 text-sm text-muted">{t('desktopClient.registeringBody')}</p><div className="mt-7">{localButton}</div></>
-        : <><Notice warning={failed || tunnel}>{failed ? t('desktopClient.registrationFailedBody') : <><div className="flex items-center justify-between gap-3"><p className="font-medium">{t('desktopClient.remoteAccessTitle')}</p><Badge variant={tunnel ? 'warning' : 'success'}>{t(`desktopClient.remoteAccess.${state.local.remote_access}`)}</Badge></div><p className="mt-3">{t('desktopClient.tunnelBody')}</p></>}</Notice><div className="mt-7 flex flex-wrap gap-3"><Button variant="brand" disabled={busy} onClick={() => failed ? void act({ type: 'retry_enrollment' }) : void act({ type: 'retry_local_remote_access' })}>{t(failed ? 'common.retry' : 'desktopClient.retryRemoteAccess')}</Button>{localButton}</div>{(failed || tunnel) && <Button variant="link" className="mt-3 px-0" onClick={instances}>{t('desktopClient.otherInstances')}</Button>}</>}{failure}</div>;
   } else {
     content = switcher;
   }
   return <div className="flex h-dvh flex-col bg-background text-foreground">
     <div aria-hidden="true" className="h-[var(--shell-titlebar-inset)] shrink-0 bg-surface" />
-    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={() => leave('cancel')}><ArrowLeft className="size-4" />{t('desktopClient.backWorkbench')}</Button></header>}
+    {!awaitingRecoveryAcknowledgement && <header className="flex shrink-0 items-center px-8 py-3" style={controlsLeft ? { paddingLeft: 'var(--shell-window-controls-left)' } : undefined}><Button variant="ghost" size="sm" onClick={exit}><ArrowLeft className="size-4" />{t('desktopAccount.backWorkbench')}</Button></header>}
     <main className={cn('min-h-0 flex-1 overflow-y-auto px-10 pb-5', centerLogin && 'flex flex-col')} aria-busy={busy}>{content}</main>
   </div>;
 }

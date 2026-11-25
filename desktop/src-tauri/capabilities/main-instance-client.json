@@ -4,5 +4,5 @@
   "description": "Account actions only for the native-owned account WebView. Rust additionally verifies its exact document, bundled path and admission. Sharing the physical main window grants no account authority.",
   "local": true,
   "webviews": ["main-account-*"],
-  "permissions": ["allow-desktop-client-request"]
+  "permissions": ["allow-desktop-client-request", "allow-desktop-claim-review", "allow-desktop-account-recovery"]
 }

@@ -1245,7 +1245,12 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
+    reason: >-
+      Native password and typed-code adapters are separate: only the hosted
+      first-party endpoint verifies a typed code. The runtime-host fixtures
+      exercise discovery-only recovery after an accepted code and reject a
+      different subject after MFA even when the email matches. Live issuer,
+      private claim-owner integration, and installed acceptance remain gates.
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success

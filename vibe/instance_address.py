@@ -1360,18 +1360,23 @@ def describe() -> dict[str, Any]:
 # --- the worker: asks avibe.bot, then applies ----------------------------------------
 
 
-def start(*, wake_pages: Callable[[], None], close_connections: Callable[[set[str]], None]) -> None:
-    """Start the worker once per process; it resumes an unfinished journal first."""
+def start(
+    *, wake_pages: Callable[[], None], close_connections: Callable[[set[str]], None], binding_changed: bool = False
+) -> None:
+    """Ensure the one service worker exists. A published binding also owes a fresh read."""
 
     global _worker_started
 
-    _hooks["wake_pages"] = wake_pages
-    _hooks["close_connections"] = close_connections
     with _worker_guard:
-        if _worker_started:
+        _hooks["wake_pages"] = wake_pages
+        _hooks["close_connections"] = close_connections
+        if not _worker_started:
+            # Don't latch success if the OS refused to start the thread. The next
+            # service reconciliation can retry without losing this generation.
+            threading.Thread(target=_worker_loop, name="instance-address", daemon=True).start()
+            _worker_started = True
+        elif not binding_changed:
             return
-        _worker_started = True
-    threading.Thread(target=_worker_loop, name="instance-address", daemon=True).start()
     _wake_worker(read_state=True)
 
 
@@ -1427,15 +1432,20 @@ def _read_when_asked() -> bool:
 
     if not _worker_read_requested.is_set():
         return True
-    binding = current_binding()
-    if _eligibility(binding) is not None and (binding is None or _journal(binding) is None):
-        # Not a personal, paired instance on a managed name: it has no former
-        # names and nothing to read for. A pairing or a hint asks again.
-        _worker_read_requested.clear()
-        return True
-    if refresh_state(force=True):
-        _worker_read_requested.clear()
-        return True
+    # Claim only the read that was already owed. A publication/hint arriving
+    # during eligibility or network I/O belongs to the next pass, even if this
+    # pass succeeds (or concluded that the *previous* root wasn't paired).
+    _worker_read_requested.clear()
+    try:
+        binding = current_binding()
+        if _eligibility(binding) is not None and (binding is None or _journal(binding) is None):
+            return True
+        if refresh_state(force=True):
+            return True
+    except Exception:
+        _worker_read_requested.set()
+        raise
+    _worker_read_requested.set()  # keep the worker's existing backoff; don't signal an immediate retry
     return False
 
 

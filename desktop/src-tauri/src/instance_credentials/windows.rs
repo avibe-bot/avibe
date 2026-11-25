@@ -5,7 +5,10 @@ mod os;
 mod tests;
 
 use super::{ClientError, Credentials, NativeCredentials};
-use avibe_runtime_host::{hashing::lower_hex, instance_client::storage::CredentialWrite};
+use avibe_runtime_host::{
+    hashing::lower_hex,
+    instance_client::storage::{CredentialReadback, CredentialWrite},
+};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
@@ -143,11 +146,11 @@ impl Scope {
         h.finalize().into()
     }
     fn read(&self) -> Result<Option<Vec<u8>>> {
-        let Some(root) = read_entry(&self.root)? else {
-            return Ok(None);
-        };
+        read_entry(&self.root)?.map(|root| self.decode(root)).transpose()
+    }
+    fn decode(&self, root: Vec<u8>) -> Result<Vec<u8>> {
         if root.first() != Some(&0xff) {
-            return Ok(Some(root));
+            return Ok(root);
         }
         let m = Manifest::parse(&root)?;
         let mut sealed = Vec::with_capacity(m.len);
@@ -162,7 +165,7 @@ impl Scope {
         if !(CHUNK + 1..=MAX_JAR).contains(&plain.len()) || read_entry(&self.root)?.as_ref() != Some(&root) {
             return Err(unavailable());
         }
-        Ok(Some(plain))
+        Ok(plain)
     }
     fn stage(&self, prior: Option<&[u8]>, bytes: &[u8]) -> Result<Vec<u8>> {
         if bytes.is_empty() || bytes.len() > MAX_JAR || bytes.first() == Some(&0xff) {
@@ -227,9 +230,24 @@ impl Change {
     }
 }
 impl CredentialWrite for Change {
+    fn observe(&self) -> Result<CredentialReadback> {
+        let root = read_entry(&self.scope.root)?.ok_or_else(unavailable)?;
+        CredentialReadback::from_root(
+            root,
+            self.prior(),
+            self.attempted.as_ref().map(|r| r.as_slice()),
+            |root| self.scope.decode(root),
+        )
+    }
     fn publish(&mut self, bytes: &[u8]) -> Result<()> {
+        // Staging against a stale manifest can overwrite the bank now selected by
+        // another root, even if the final root write is refused. Cooperating writers
+        // hold Scope; the two comparisons are not an OS CAS against legacy writers.
+        if self.attempted.is_some() || read_entry(&self.scope.root)?.as_deref() != self.prior() {
+            return Err(unavailable());
+        }
         let next = Zeroizing::new(self.scope.stage(self.prior(), bytes)?);
-        // A released binary does not share the lock. Never knowingly publish against a changed root.
+        // Check again after the chunk writes, before touching the commit record.
         if read_entry(&self.scope.root)?.as_deref() != self.prior() {
             return Err(unavailable());
         }
@@ -242,7 +260,7 @@ impl CredentialWrite for Change {
             Err(unavailable())
         }
     }
-    fn rollback(self: Box<Self>) -> Result<()> {
+    fn restore_root(&mut self) -> Result<()> {
         let Some(attempted) = &self.attempted else {
             return Ok(());
         };

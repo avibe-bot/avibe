@@ -8,7 +8,8 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import type { RemoteAccessStatus } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import { desktopLocale, hasDesktopClient, presentDesktopClient } from '@/desktop/bridge';
+import { hasDesktopClient } from '@/desktop/bridge';
+import { useDesktopClaimRequest } from '@/desktop/useDesktopClaimRequest';
 import { useToast } from '@/context/ToastContext';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
@@ -191,6 +192,7 @@ export function DevicesPage() {
     void load();
   }, [load]);
   const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd, returned });
+  const claimRequest = useDesktopClaimRequest();
 
   // One navigation settles the address this page was opened at: on to the connection page for a
   // bind-again, else the callback's word is removed. Never both, or the second undoes the first.
@@ -289,7 +291,7 @@ export function DevicesPage() {
   // An Avibe this computer's own record calls an organization's is not bound by a person's claim,
   // from here or from the App: the page says so and offers nothing.
   else if ((!status.paired || !host) && instanceKind === 'organization') reach = { state: 'off', surface: 'browser', problem: { code: 'organization' } };
-  else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', account: null, name: '' };
+  else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', busy: claimRequest.requested };
   else if (!status.paired || !host) reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue };
   else if (status.running || status.pid_state === 'unknown') {
     const tunnel = tunnelFromStatus(status, now, justStarted);
@@ -497,8 +499,11 @@ export function DevicesPage() {
       busy={busy || switching}
       add={add}
       view={location.pathname.replace(/\/+$/, '') === DEVICES_ACTIVITY_PATH ? 'activity' : 'page'}
-      onTurnOn={() => { setClaimIssue(undefined); void flow.start(); }}
-      onSignIn={() => { presentDesktopClient('account', undefined, desktopLocale(i18n.resolvedLanguage ?? i18n.language)); }}
+      onTurnOn={() => {
+        // The Desktop binds in the shell's own claim dialog; this page reads the result when shown again.
+        if (hasDesktopClient()) { claimRequest.request(); return; }
+        setClaimIssue(undefined); void flow.start();
+      }}
       onCancelClaim={(id) => { setClaimIssue(undefined); void flow.cancel(id); }}
       onRemoteAccessChange={(on) => {
         if (!on && turnOffNeedsConfirm(devices)) setConfirm('turn-off');

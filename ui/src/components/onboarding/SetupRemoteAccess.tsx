@@ -1,10 +1,14 @@
 // Setup's optional remote-access step, wired (`/setup/remote-access`): the same claim as Settings ·
-// Devices. Turning it on leaves for avibe.bot once and comes back to the Devices page, where the
-// phone is added; skipping goes to the workbench. Setup is already complete when this is shown.
+// Devices. In a browser, turning it on leaves for avibe.bot once and comes back to the Devices page,
+// where the phone is added. In the Desktop App it asks the shell for its claim dialog and, bound,
+// goes on to the Devices page. Skipping goes to the workbench. Setup is already complete here.
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
+import { hasDesktopClient } from '../../desktop/bridge';
+import { useDesktopClaimRequest } from '../../desktop/useDesktopClaimRequest';
+import { onPageReactivated } from '../../lib/pageActivity';
 import { devicesApi } from '../devices/api';
 import { DEVICES_PATH } from '../devices/paths';
 import type { ClaimProblem } from '../devices/types';
@@ -28,13 +32,20 @@ export function SetupRemoteAccess() {
   }, [navigate]);
   const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd });
 
-  // Opened again while bound (the back button after turning it on): nothing to offer here.
+  const desktop = hasDesktopClient();
+  const claimRequest = useDesktopClaimRequest();
+  // Opened again while bound (the back button after turning it on), or shown again after the
+  // Desktop's claim dialog bound it: nothing to offer here.
   useEffect(() => {
     let current = true;
-    void devicesApi.status().then((status) => {
-      if (current && status.paired === true) navigate(DEVICES_PATH, { replace: true });
-    }).catch(() => undefined);
-    return () => { current = false; };
+    const check = () => {
+      void devicesApi.status().then((status) => {
+        if (current && status.paired === true) navigate(DEVICES_PATH, { replace: true });
+      }).catch(() => undefined);
+    };
+    check();
+    const stop = onPageReactivated(check);
+    return () => { current = false; stop(); };
   }, [navigate]);
 
   // A claim this tab left open is followed on the Devices page, with its way to cancel: also one
@@ -45,6 +56,10 @@ export function SetupRemoteAccess() {
     if (open) navigate(DEVICES_PATH, { replace: true });
   }, [navigate, open]);
 
+  if (desktop) {
+    return <SetupRemoteAccessView surface="desktop" busy={claimRequest.requested} onTurnOn={claimRequest.request}
+      onSkip={() => navigate('/', { replace: true })} />;
+  }
   return (
     <SetupRemoteAccessView
       surface="browser"
