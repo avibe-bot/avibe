@@ -21869,6 +21869,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
     ("remote", "rebind"): "owner",
+    ("remote", "reset"): "owner",
     ("remote", "direct", "on"): "owner",
     ("remote", "direct", "off"): "owner",
     ("remote", "direct", "status"): "member",

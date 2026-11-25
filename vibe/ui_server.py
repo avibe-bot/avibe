@@ -10166,11 +10166,15 @@ async def restrict_host_network(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
-def _device_owner_fields():
-    from vibe import binding_unbind
+def _owner_proxy_fields():
     config, _ = position_snapshot()
     policy = declared_proxy.listener_policy(config)
-    fields = policy.projection() if policy is not None else {}
+    return policy.projection() if policy is not None else {}
+
+
+def _device_owner_fields():
+    from vibe import binding_unbind
+    fields = _owner_proxy_fields()
     state = binding_unbind.device_state(_load_remote_access_config())
     return {**fields, 'unbind': state} if state is not None else fields
 
