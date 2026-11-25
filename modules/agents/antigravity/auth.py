@@ -51,7 +51,26 @@ _AUTH_ERROR_NEEDLES = (
     "login required", "logged out", "invalid api key", "api key not valid",
     "invalid credentials", "credentials expired", "token expired", "re-auth",
     "re-authenticate", "application default credentials",
-    "could not find default credentials", "oauth",
+    "could not find default credentials", "oauth", "verification required",
+)
+_VERIFICATION_REQUIRED_BANNER_RE = re.compile(
+    r"^(?:\*{1,2}\s*)?⚠\ufe0f?\s*verification\s+required\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_REQUIRED_PLAIN_RE = re.compile(
+    r"^(?:\*{1,2}\s*)?verification\s+required(?:\s*(?:\*{1,2})?\s*(?:[:\-\n]|$))",
+    re.IGNORECASE,
+)
+_VERIFICATION_REQUIRED_CUES = (
+    "verify",
+    "google",
+    "account",
+    "agy",
+    "http://",
+    "https://",
+    "eligibility",
+    "sign in",
+    "log in",
 )
 
 
@@ -211,6 +230,21 @@ def classify_antigravity_auth_error(error_text: str) -> bool:
     if text == "401" or _HTTP_401_RE.search(text) or _HTTP_401_CLIENT_RE.search(text):
         return True
     return bool(_ACP_AUTH_CODE_RE.search(text)) or any(needle in text for needle in _AUTH_ERROR_NEEDLES)
+
+
+def is_antigravity_verification_required_reply(text: str) -> bool:
+    """Return True when an Antigravity reply is a Google account verification notice."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if _VERIFICATION_REQUIRED_BANNER_RE.match(stripped):
+        return True
+    if _VERIFICATION_REQUIRED_PLAIN_RE.match(stripped):
+        if len(stripped) <= 32:
+            return True
+        lowered = stripped.lower()
+        return any(cue in lowered for cue in _VERIFICATION_REQUIRED_CUES)
+    return False
 
 
 async def authenticate_antigravity_client(client: acp.AcpClient, auth_mode: str | None) -> str:
@@ -505,6 +539,16 @@ async def run_antigravity_connection_probe(
                 response_text = "".join(chunks).strip()
                 if not response_text:
                     return _result(False, error="empty_response", detail="Antigravity ACP prompt returned no response text.")
+                if is_antigravity_verification_required_reply(response_text):
+                    state["authenticated"] = False
+                    state["inference_verified"] = False
+                    excerpt = excerpt_picker(response_text)
+                    guidance = (
+                        "Antigravity account verification is required. "
+                        "Run `agy` once in a terminal to complete Google verification, then retry."
+                    )
+                    detail = f"{guidance}\n{excerpt}" if excerpt else guidance
+                    return _result(False, error="not_logged_in", detail=detail[:600], excerpt=excerpt)
                 state["inference_verified"] = True
                 return _result(True, excerpt=excerpt_picker(response_text))
             finally:

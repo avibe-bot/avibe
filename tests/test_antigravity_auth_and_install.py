@@ -38,6 +38,7 @@ from modules.agents.antigravity import AntigravityAgent
 from modules.agents.antigravity import agent as agy_agent_module
 from modules.agents.antigravity.auth import (
     extract_antigravity_oauth_url,
+    is_antigravity_verification_required_reply,
     run_antigravity_connection_probe,
 )
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
@@ -564,6 +565,8 @@ def test_classify_auth_error_and_env_command_guards() -> None:
         ("HTTP 401 Unauthorized", True),
         ("Could not find default credentials", True),
         ("API key not valid", True),
+        ("Antigravity authentication required (ACP -32000, verification required): ⚠ Verification Required", True),
+        ("Verification required for this account", True),
         ("SyntaxError: unexpected token on port 32000", False),
         ("", False),
     ):
@@ -804,3 +807,96 @@ def test_desktop_archive_install_rejects_bad_checksum_traversal_and_symlink(
     assert raised.value.code == expected_code and extract_called is False and not (tmp_path / "outside-agy").exists()
     backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "antigravity"
     assert not (backend_root / "current.json").exists() and list(backend_root.glob(".staging-*")) == [] and list(backend_root.glob("releases/*")) == []
+
+
+@pytest.mark.parametrize(
+    ("reply_text", "expected"),
+    [
+        ("", False),
+        ("   \n\t  ", False),
+        ("⚠ Verification Required", True),
+        ("⚠️ Verification Required\nPlease complete verification at https://accounts.google.com/verify", True),
+        ("**⚠ Verification Required**\nVerify your Google account to continue.", True),
+        ("*⚠ Verification Required*", True),
+        ("Verification Required", True),
+        ("**Verification Required**", True),
+        ("Verification Required:\nPlease verify your Google account.", True),
+        ("Verification Required - Run agy to complete eligibility check.", True),
+        ("Verification required in OAuth flows means the client must validate the token.", False),
+        ("Verification required: in a typical CI pipeline, tests run before merge.", False),
+        ("Here is how verification works in Google OAuth:\n⚠ Verification Required is an example banner.", False),
+        ("Hi! How can I help you today?", False),
+    ],
+)
+def test_is_antigravity_verification_required_reply(reply_text: str, expected: bool) -> None:
+    assert is_antigravity_verification_required_reply(reply_text) is expected
+
+
+@pytest.mark.asyncio
+async def test_connection_probe_fails_when_reply_is_verification_required(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _VerificationRequiredClient:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.supports_close = True
+            self._notify: Any = None
+
+        async def __aenter__(self) -> _VerificationRequiredClient:
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+        def on_notification(self, cb: Any) -> None:
+            self._notify = cb
+
+        async def initialize(self, **_kw: Any) -> dict[str, Any]:
+            return {"protocolVersion": 1}
+
+        async def authenticate(self, _method_id: str) -> dict[str, Any]:
+            return {}
+
+        async def session_new(self, _cwd: str, **_kw: Any) -> dict[str, Any]:
+            return {
+                "sessionId": "sess-verify-1",
+                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+            }
+
+        async def session_set_config_option(self, _sid: str, _cid: str, _val: Any) -> dict[str, Any]:
+            return {
+                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+            }
+
+        async def session_prompt(self, _sid: str, _blocks: Any, **_kw: Any) -> dict[str, Any]:
+            if self._notify is not None:
+                await self._notify(
+                    "session/update",
+                    {
+                        "sessionId": "sess-verify-1",
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {
+                                "type": "text",
+                                "text": "⚠ Verification Required\nPlease verify your Google account to continue.",
+                            },
+                        },
+                    },
+                )
+            return {"stopReason": "end_turn"}
+
+        async def session_close(self, _sid: str) -> dict[str, Any]:
+            return {}
+
+    monkeypatch.setattr(acp, "AcpClient", _VerificationRequiredClient)
+    res = await run_antigravity_connection_probe(
+        binary="/fake/agy",
+        cwd=str(tmp_path),
+        model="gemini-4-neon",
+        config=AntigravityConfig(auth_mode="oauth-personal"),
+    )
+    assert (res["ok"], res["authenticated"], res["inference_verified"], res["error"]) == (
+        False, False, False, "not_logged_in"
+    )
+    assert "agy" in (res.get("detail") or "")
+    assert "Verification Required" in (res.get("detail") or "")
+    assert "Verification Required" in (res.get("excerpt") or "")

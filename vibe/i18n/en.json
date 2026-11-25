@@ -569,6 +569,7 @@
     "codexCliNotFound": "Codex could not start because its CLI was not found. Install Codex or set its CLI path on the Backends page in Settings, then retry this input.",
     "agentRuntimeRetired": "{agent} was turned off, or Avibe is stopping, so this message was not started. Send it again once {agent} is enabled.",
     "antigravityAuthRequired": "Antigravity authentication required (ACP {code}): {detail}",
+    "antigravityVerificationRequired": "Antigravity account verification is required. Run `agy` once in a terminal to complete Google verification, then retry.\n\n{detail}",
     "antigravityCapabilityMissing": "Antigravity ACP server does not advertise {capability}, so Avibe cannot attach Agent instructions and tool-policy rules. Upgrade the Antigravity CLI (agy) or enable {capability} support before retrying.",
     "antigravityCliNotFound": "Antigravity CLI not found: {detail}",
     "antigravityLaunchFailed": "Antigravity CLI failed to launch: {detail}",

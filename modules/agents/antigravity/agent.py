@@ -90,6 +90,7 @@ from modules.agents.acp import (
 from modules.agents.antigravity.auth import (
     authenticate_antigravity_client,
     build_antigravity_auth_env,
+    is_antigravity_verification_required_reply,
     normalize_antigravity_auth_mode,
     resolve_antigravity_cli_path as resolve_antigravity_cli_path,
 )
@@ -1387,6 +1388,17 @@ class AntigravityAgent(BaseAgent):
             )
             return diagnostic, f"❌ {display}", "capability_missing"
         if isinstance(error, AcpRpcError) and error.code == ACP_AUTH_REQUIRED:
+            if isinstance(error.data, Mapping) and error.data.get("verification_required"):
+                diagnostic = (
+                    f"Antigravity authentication required (ACP {error.code}, verification required): "
+                    f"{error.message}"
+                )
+                display = i18n_t(
+                    "error.antigravityVerificationRequired",
+                    language,
+                    detail=error.message,
+                )
+                return diagnostic, f"❌ {display}", "auth_required"
             diagnostic = f"Antigravity authentication required (ACP {error.code}): {error.message}"
             display = i18n_t(
                 "error.antigravityAuthRequired",
@@ -1503,8 +1515,16 @@ class AntigravityAgent(BaseAgent):
     async def _settle_turn_done(self, session: _RuntimeSession, turn: _ActiveTurn) -> None:
         if turn.settled:
             return
-        turn.settled = True
         final_text = "".join(turn.reply_chunks)
+        if is_antigravity_verification_required_reply(final_text):
+            err = AcpRpcError(
+                ACP_AUTH_REQUIRED,
+                final_text.strip()[:400],
+                data={"verification_required": True},
+            )
+            await self._settle_turn_failure(session, turn, turn.request, err)
+            return
+        turn.settled = True
         await self.emit_result_message(
             turn.request.context,
             final_text,

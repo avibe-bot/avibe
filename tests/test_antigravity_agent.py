@@ -1061,3 +1061,74 @@ async def test_acp_client_session_fork_applies_request_timeout() -> None:
             17.5,
         )
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "expected_guidance"),
+    [
+        ("en", "Run `agy` once in a terminal to complete Google verification"),
+        ("zh", "请先在终端运行一次 `agy` 完成验证后再重试"),
+    ],
+)
+async def test_verification_required_reply_fails_turn_and_normal_verification_prose_succeeds(
+    tmp_path: Path, language: str, expected_guidance: str
+) -> None:
+    from core.agent_auth_service import classify_auth_error
+
+    verification_banner = (
+        "⚠ Verification Required\n"
+        "Please verify your Google account at https://accounts.google.com/verify before continuing."
+    )
+    normal_prose = "Verification required in OAuth flows means the client validates the returned token."
+    title_backfills: list[str] = []
+
+    async with make_agent_harness(tmp_path, language=language, name=f"verify-req-{language}") as h:
+        orig_get = h.agent._get_or_create_session
+        h.agent._maybe_backfill_session_title = lambda _req, sid: title_backfills.append(sid)  # type: ignore[method-assign]
+
+        reply_holder = {"text": verification_banner}
+
+        async def _wrapped(*a: Any, **kw: Any) -> Any:
+            sess = await orig_get(*a, **kw)
+
+            async def _scripted_prompt(sid: str, _blocks: Any, **_pkw: Any) -> dict[str, Any]:
+                await h.agent._handle_notification(
+                    sess,
+                    "session/update",
+                    {
+                        "sessionId": sid,
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": reply_holder["text"]},
+                        },
+                    },
+                )
+                return {"stopReason": "end_turn"}
+
+            sess.client.session_prompt = _scripted_prompt  # type: ignore[method-assign]
+            return sess
+
+        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
+
+        await h.agent.handle_message(make_request(message="hello", workdir=h.workdir))
+        results = h.controller.events("result")
+        notes = h.controller.events("notify")
+        assert len(results) == 1 and results[0][2].get("is_error") is True
+        assert not any(not opts.get("is_error") for _, _, opts in results)
+        diagnostic = results[0][2].get("terminal_error") or ""
+        assert "verification required" in diagnostic.lower()
+        assert classify_auth_error("antigravity", diagnostic) is True
+        assert len(notes) == 1 and expected_guidance in notes[0][1]
+        assert "Verification Required" in notes[0][1]
+        assert title_backfills == []
+
+        h.controller.emitted.clear()
+        reply_holder["text"] = normal_prose
+        await h.agent.handle_message(make_request(message="explain oauth", workdir=h.workdir))
+        ok_results = h.controller.events("result")
+        assert len(ok_results) == 1
+        assert ok_results[0][1] == normal_prose
+        assert not ok_results[0][2].get("is_error")
+        assert h.controller.events("notify") == []
+        assert len(title_backfills) == 1

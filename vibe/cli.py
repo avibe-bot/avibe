@@ -9190,8 +9190,8 @@ def _session_queue_remove(args, invocation: _ServiceInvocation):
 
 
 #: The one model family each single-vendor native CLI runs; Vibey and OpenCode run every family on their menus.
-_NATIVE_BACKEND_VENDORS = {"claude": "anthropic", "codex": "openai", "antigravity": "gemini"}
-_VENDOR_FAMILY_LABELS = {"anthropic": "Claude", "openai": "GPT", "gemini": "Gemini"}
+_NATIVE_BACKEND_VENDORS = {"claude": "anthropic", "codex": "openai", "antigravity": "google"}
+_VENDOR_FAMILY_LABELS = {"anthropic": "Claude", "openai": "GPT", "google": "Gemini"}
 
 
 def _remote_hub_agent_reader():

@@ -55,6 +55,10 @@ HUB = {
         "mode": "hub",
         "catalog_models": [_hub_row("claude-opus-5-5", fast=True), _hub_row("claude-sonnet-5-5")],
     },
+    "antigravity": {
+        "mode": "direct",
+        "catalog_models": [],
+    },
 }
 
 
@@ -291,3 +295,60 @@ def test_session_models_reports_an_explicitly_pinned_null_as_the_sessions_own(mo
     assert pinned["current"]["from"] == {"model": "session", "reasoning_effort": "session"}
     assert (inherited["current"]["model"], inherited["current"]["reasoning_effort"]) == ("gpt-6.1-sol", "high")
     assert inherited["current"]["from"] == {"model": "agent", "reasoning_effort": "agent"}
+
+
+def test_antigravity_direct_session_model_accepts_gemini_and_rejects_other_families(monkeypatch, tmp_path, capsys):
+    engine = _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        api,
+        "agent_model_options",
+        lambda backend, **kwargs: {
+            "ok": True,
+            "backend": backend,
+            "models": [
+                {"value": "gemini-2.5-pro", "reasoning_efforts": ["low", "high"]},
+                {"value": "gemini-3-pro", "reasoning_efforts": ["low", "high"]},
+            ],
+        },
+    )
+    _seed(engine, "sesag", backend="antigravity", model="gemini-3-pro", effort="low")
+
+    code, payload = _update(capsys, "sesag", "--model", "gemini-2.5-pro")
+    assert code == 0, payload
+    assert payload["session"]["model"] == "gemini-2.5-pro"
+    assert _row(engine, "sesag") == ("gemini-2.5-pro", "low", None)
+
+    assert (
+        cli._session_model_override_fields(
+            backend="antigravity",
+            agent_label="antigravity",
+            model="gemini-2.5-pro",
+            reasoning_effort="high",
+            hub_agent_reader=_hub_reader,
+            help_command="vibe agent run --help",
+        )
+        == {}
+    )
+
+    code, menu = _run(cli.cmd_session_models, ["session", "models", "--session-id", "sesag"], capsys)
+    assert code == 0, menu
+    assert any("only Gemini models" in note for note in menu["notes"])
+
+    for wrong_model in ("gpt-6.1-sol", "claude-opus-5-5"):
+        status, err = _update(capsys, "sesag", "--model", wrong_model)
+        assert status == 1 and err["code"] == "model_family_unsupported"
+        assert "Gemini" in err["error"]
+        assert err["hint"]
+        assert _row(engine, "sesag") == ("gemini-2.5-pro", "low", None)
+
+    with pytest.raises(cli.TaskCliError) as refused:
+        cli._session_model_override_fields(
+            backend="antigravity",
+            agent_label="antigravity",
+            model="gpt-6.1-sol",
+            reasoning_effort=None,
+            hub_agent_reader=_hub_reader,
+            help_command="vibe agent run --help",
+        )
+    assert refused.value.code == "model_family_unsupported"
+    assert "Gemini" in str(refused.value)
