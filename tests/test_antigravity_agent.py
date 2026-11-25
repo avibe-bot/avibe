@@ -648,6 +648,10 @@ def test_rules_rendering_splits_over_24k_and_skips_unchanged_rewrite(tmp_path: P
     assert first.written is True and len(first.directories) >= 3
     assert all((Path(d) / "AGENTS.md").is_file() and len((Path(d) / "AGENTS.md").read_bytes()) <= MAX_RULE_FILE_BYTES and Path(d).is_relative_to(rules_base) for d in first.directories)
 
+    rendered = (Path(first.directories[0]) / "AGENTS.md").read_text(encoding="utf-8")
+    assert "Do not create Antigravity native automations, sidecars" in rendered
+    assert all(command in rendered for command in ("vibe task add", "vibe watch add", "vibe agent run"))
+
     mtimes = {d: (Path(d) / "AGENTS.md").stat().st_mtime_ns for d in first.directories}
     second = render_session_rules("sess-key:repo", large, base_dir=rules_base)
     assert second.written is False and second.digest == first.digest and second.directories == first.directories and {d: (Path(d) / "AGENTS.md").stat().st_mtime_ns for d in second.directories} == mtimes

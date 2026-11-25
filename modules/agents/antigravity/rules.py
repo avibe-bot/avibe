@@ -29,6 +29,12 @@ _RULE_FILENAME = "AGENTS.md"
 _HOOKS_DIRNAME = ".agents"
 _HOOKS_CONFIG_FILENAME = "hooks.json"
 _HOOKS_SCRIPT_FILENAME = "avibe_tool_policy_hook.py"
+_NATIVE_AUTOMATION_RULE = (
+    "Do not create Antigravity native automations, sidecars, or other native scheduled/background agents "
+    "(for example via the built-in automation, run-workflow, or swarm skills). "
+    "For later, recurring, or background work, use the Avibe Harness: "
+    "`vibe task add`, `vibe watch add`, or `vibe agent run`."
+)
 _TRUNCATION_MARKER = "\n\n[Avibe rules truncated to stay within Antigravity's 20,000-token rule budget.]\n"
 
 
@@ -215,7 +221,7 @@ def render_session_rules(
     match.
     """
     chunks = split_rule_content(
-        content,
+        f"{_NATIVE_AUTOMATION_RULE}\n\n{content}",
         max_file_bytes=max_file_bytes,
         max_total_bytes=max_total_bytes,
     )
