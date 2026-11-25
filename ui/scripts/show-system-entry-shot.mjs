@@ -46,17 +46,22 @@ small{opacity:.7}#last-line{margin-top:auto;padding-top:20px;font-size:13px}butt
         await page.addScriptTag({ content: script });
         const entry = page.getByRole('button', { name: platform === 'iphone' ? copy.iosCta : copy.macCta, exact: true });
         for (const state of ['collapsed', 'expanded']) {
-          if (state === 'expanded') {
+          if (state === 'expanded' && platform === 'iphone') {
             await entry.click();
             await page.waitForFunction(() => document.querySelector('[data-avibe-show-system-entry]')?.shadowRoot.activeElement?.classList.contains('collapse'));
+          }
+          if (platform === 'mac') {
+            await page.evaluate((value) => localStorage.setItem(`avibe-show-system-entry:${location.pathname}`, value), state);
+            await page.addScriptTag({ content: script });
+            assert.equal(await page.locator('[data-avibe-show-system-entry], [data-avibe-show-system-entry-spacer]').count(), 0);
           }
           const file = `${platform}-${lang}-${theme}-${state}.png`;
           const geometry = await page.evaluate(() => {
             const rect = (element) => { const r = element.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right }; };
-            const panel = document.querySelector('[data-avibe-show-system-entry]').shadowRoot.querySelector('.panel');
-            return { lastLine: rect(document.querySelector('#last-line')), panel: panel.hidden ? null : rect(panel), annotation: rect(document.querySelector('[data-show-annotation-ui]')), path: location.pathname };
+            const panel = document.querySelector('[data-avibe-show-system-entry]')?.shadowRoot.querySelector('.panel');
+            return { lastLine: rect(document.querySelector('#last-line')), panel: !panel || panel.hidden ? null : rect(panel), annotation: rect(document.querySelector('[data-show-annotation-ui]')), path: location.pathname };
           });
-          if (state === 'expanded') {
+          if (state === 'expanded' && platform === 'iphone') {
             assert.ok(geometry.lastLine.bottom <= geometry.panel.top);
             assert.ok(geometry.lastLine.top >= 0);
             assert.ok(geometry.panel.bottom <= geometry.annotation.top);

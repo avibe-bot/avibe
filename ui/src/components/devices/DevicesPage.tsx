@@ -142,7 +142,7 @@ export function DevicesPage() {
     }
     if (!owner || devices.status !== 'fulfilled') return result;
     // A device signed out lately is no longer listed: its sign-out receipt still has its name, so the
-    // activity says the same name as 「最近退出的设备」 on the same page.
+    // activity names it rather than saying 「一台已不在列表里的设备」.
     const byId = new Map<string, string>(devices.value.signedOut.flatMap((each) => (each.deviceId && each.device ? [[each.deviceId, each.device] as const] : [])));
     for (const each of devices.value.devices) byId.set(each.id, deviceName(t, each));
     const nameOf = (id: string | undefined) => (id ? byId.get(id) ?? null : null);
@@ -417,7 +417,7 @@ export function DevicesPage() {
         const gone = new Set(answer.signedOut.flatMap((each) => (each.deviceId ? [each.deviceId] : [])));
         // The device in use stays even when a sibling sign-in on it was ended, and the computer itself too.
         setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.self || each.kind === 'host' || !gone.has(each.id)) }));
-        // One line; a device among them left signed in to the account says so in 「最近退出的设备」.
+        // One line, whatever avibe.bot did; the sign-outs also appear in 最近活动.
         showToast(t('devices.signedOut.toastOthers'), 'success');
       });
     }
@@ -466,7 +466,6 @@ export function DevicesPage() {
       viewerAccount={selfAccount}
       bulk={snapshot.bulk}
       unlinkedHealth={snapshot.unlinkedHealth}
-      signedOut={snapshot.signedOut}
       unrecognizedChange={unrecognizedChange}
       // 「解除绑定」 as the instance reports it: running, or done, with the name it had and its day
       // (30 days where the instance gives none).

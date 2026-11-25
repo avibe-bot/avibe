@@ -272,6 +272,11 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   );
   // Safari installs the top-level document, never an embedded Workbench Show.
   if (window.top !== window.self || standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
+  const userAgent = navigator.userAgent || '';
+  const ios = /iP(hone|ad|od)/.test(userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // Mac users install through Safari or the share panel; never alter the Show body.
+  if (/Macintosh|Mac OS X/.test(userAgent) && !ios) return;
   const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
   const readPreference = () => {
     try {
@@ -372,24 +377,14 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   shadow.append(wrap);
   document.body.append(root);
 
-  const userAgent = navigator.userAgent || '';
-  const ios = /iP(hone|ad|od)/.test(userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
     !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
-  const mac = /Macintosh|Mac OS X/.test(userAgent) && !ios;
   if (ios) {
     button.textContent = copy.iosCta || copy.cta || 'Add to Home Screen';
-  } else if (mac) {
-    button.textContent = copy.macCta || copy.cta || 'Add to Dock';
   }
   if (ios && safari) {
     title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
     body.textContent = copy.iosBody || '';
-    steps.hidden = true;
-  } else if (mac && safari) {
-    title.textContent = copy.macTitle || copy.title || 'Add to Dock';
-    body.textContent = copy.macBody || '';
     steps.hidden = true;
   } else {
     title.textContent = copy.title || 'Add this Show Page';

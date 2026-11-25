@@ -14,7 +14,7 @@ import { DevicesPage } from './DevicesPage';
 import { DevicesPageView } from './DevicesPageView';
 import { functionControl, lockedOutCount } from './rules';
 import { said } from './testText';
-import type { Device, Reach, SignedOutDevice } from './types';
+import type { Device, Reach } from './types';
 import type { DevicesSnapshot } from './wire';
 
 // ui/design: settings/devices/*
@@ -321,7 +321,7 @@ describe('DevicesPage · devices', () => {
     let signedOut = false;
     vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot([macbook, chrome]))));
     vi.spyOn(devicesApi, 'signOut').mockImplementation(async () => { signedOut = true; return {
-      signedOut: [{ id: 'o1', device: 'Chrome · Windows', kind: 'browser', owner: 'mine', results: ['queued'] }], healthCleanupPending: true,
+      signedOut: [{ device: 'Chrome · Windows' }], healthCleanupPending: true,
     }; });
     mount();
 
@@ -343,10 +343,10 @@ describe('DevicesPage · devices', () => {
     // The reload after the sign-out does not answer: what the list shows is the page's own removal.
     vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot(mine, { bulk: 'other_sessions' }))));
     vi.spyOn(devicesApi, 'signOutOthers').mockImplementation(async () => { signedOut = true; return {
-      signedOut: [{ id: 'o1', deviceId: 'chrome', device: 'Chrome', kind: 'browser', owner: 'mine', results: ['accepted'] },
-        { id: 'o2', deviceId: 'safari', device: 'Safari', kind: 'browser', owner: 'mine', results: ['accepted'] },
+      signedOut: [{ deviceId: 'chrome', device: 'Chrome' },
+        { deviceId: 'safari', device: 'Safari' },
         // A sibling sign-in on the device in use: the row of the device in use stays.
-        { id: 'o3', deviceId: 'iphone', device: 'iPhone', kind: 'iphone', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
+        { deviceId: 'iphone', device: 'iPhone' }], healthCleanupPending: false,
     }; });
     mount();
     await screen.findByText('Sara Chrome');
@@ -364,7 +364,7 @@ describe('DevicesPage · devices', () => {
     const nameless: Device = { ...chrome, id: 'nameless', name: null, client: { kind: 'browser' } };
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, nameless]));
     vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-      signedOut: [{ id: 'o1', device: null, kind: 'browser', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
+      signedOut: [{ device: null }], healthCleanupPending: false,
     });
     mount();
     fireEvent.click(await screen.findByText('未识别的客户端'));
@@ -372,22 +372,19 @@ describe('DevicesPage · devices', () => {
     await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「未识别的客户端」', 'success'));
   });
 
-  it.each(['queued', 'accepted', 'localOnly', 'refused', 'unconfirmed', 'sharedSignIn', 'keeperUnknown'] as const)(
-    'says only 已退出 whatever avibe.bot did (%s), and the toast leaves by itself', async (result) => {
-      toasts.show.mockClear();
-      vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
-      vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-        signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'mine', results: [result] }], healthCleanupPending: true,
-      });
-      mount();
-      fireEvent.click(await screen.findByText('Chrome'));
-      fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
-      // A plain toast: no action, nothing that keeps it on screen, no card above the list.
-      await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「Chrome」', 'success'));
-      expect(screen.queryByRole('status')).toBeNull();
-    });
+  it('says only 已退出, and the toast leaves by itself', async () => {
+    toasts.show.mockClear();
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
+    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({ signedOut: [{ device: 'Chrome' }], healthCleanupPending: true });
+    mount();
+    fireEvent.click(await screen.findByText('Chrome'));
+    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+    // A plain toast: no action, nothing that keeps it on screen, no card above the list.
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「Chrome」', 'success'));
+    expect(screen.queryByRole('status')).toBeNull();
+  });
   it('names a device signed out lately in the activity as its sign-out receipt does', async () => {
-    const receipt = { id: 'o1', deviceId: 'gone', device: 'Chrome · macOS', kind: 'browser' as const, owner: 'mine' as const, results: ['accepted' as const] };
+    const receipt = { deviceId: 'gone', device: 'Chrome · macOS' };
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook], { signedOut: [receipt] }));
     vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
     vi.spyOn(devicesApi, 'activity').mockImplementation(async (nameOf) => ({
@@ -403,7 +400,7 @@ describe('DevicesPage · devices', () => {
   it('asks before signing out a device that synced Health, then says only 已退出', async () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone, sara]));
     const signOut = vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-      signedOut: [{ id: 'o1', device: 'iPhone', kind: 'iphone', owner: 'unknown', results: ['localOnly'] }], healthCleanupPending: true,
+      signedOut: [{ device: 'iPhone' }], healthCleanupPending: true,
     });
     mount();
 
@@ -768,16 +765,18 @@ describe('DevicesPage · an instance without binding again', () => {
     expect(await screen.findByText(said('服务器上没有浏览器的话，在它的终端运行 vibe remote rebind。'))).toBeTruthy();
   });
 
-  it('lists signed-out devices by name only, whatever avibe.bot did', () => {
-    const row = (id: string, results: SignedOutDevice['results'], extra: Partial<SignedOutDevice> = {}): SignedOutDevice =>
-      ({ id, device: id, kind: 'browser', owner: 'mine', results, ...extra });
-    render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[
-      row('Queued', ['queued']), row('Accepted', ['accepted']), row('Old', ['localOnly']), row('Refused', ['refusedCredential']),
-      row('Nameless', ['unconfirmed'], { device: null }),
-    ]} />);
-    const panel = screen.getByText('最近退出的设备').closest('section') ?? document.body;
-    expect(panel.textContent).toBe('最近退出的设备QueuedAcceptedOldRefused未识别的客户端');
-    expect(screen.queryByRole('link')).toBeNull();
+  it('lists no signed-out devices, even with sign-out receipts at hand: they are in 最近活动 only', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook], { signedOut: [{ deviceId: 'gone', device: 'Chrome · macOS' }] }));
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    vi.spyOn(devicesApi, 'activity').mockImplementation(async (nameOf) => ({
+      items: [{ id: 'e1', deviceId: 'gone', at: new Date().toISOString(), device: nameOf('gone'), event: { kind: 'signedOut', actor: null } }],
+      nextCursor: null,
+    }));
+    mount();
+    const activity = (await screen.findByText('最近活动')).closest('section') ?? document.body;
+    await waitFor(() => expect(activity.textContent).toContain('Chrome · macOS 已被退出'));
+    expect(screen.queryByText('最近退出的设备')).toBeNull();
+    expect(screen.getAllByText(/Chrome · macOS/)).toHaveLength(1);
   });
 });
 
