@@ -179,8 +179,10 @@ export function ConnectionPage() {
    *  that reports none means nothing began (a request lost before it arrived). */
   const unbindPressedAt = useRef<number | null>(null);
   const unbindPresses = useRef(0);
-  /** This page started the unbinding it follows: its end takes the page on to the Devices page. */
+  /** This page started the unbinding it follows: its end takes the page on to the Devices page.
+   *  `followed` re-runs that check when following begins, for an end already read before it. */
   const followingUnbind = useRef(false);
+  const [followed, setFollowed] = useState(0);
   const readDevices = useCallback(async () => {
     const startedAt = unbindPresses.current;
     try {
@@ -206,6 +208,7 @@ export function ConnectionPage() {
     unbindPresses.current += 1;
     unbindPressedAt.current = unbindPresses.current;
     followingUnbind.current = true;
+    setFollowed((count) => count + 1);
     setUnbindPressed(true);
   }, []);
   const [step, setStep] = useState<RenameStep | undefined>();
@@ -698,7 +701,7 @@ export function ConnectionPage() {
     followingUnbind.current = false;
     clearClaimMarker();
     navigate(DEVICES_PATH, { replace: true, state: location.state });
-  }, [location.state, navigate, unbound]);
+  }, [followed, location.state, navigate, unbound]);
   useEffect(() => {
     if (!unbindRunning) return undefined;
     const timer = window.setInterval(() => { void readDevices(); void readStatus(); void readAddress(); }, FOLLOW_UNBIND_MS);

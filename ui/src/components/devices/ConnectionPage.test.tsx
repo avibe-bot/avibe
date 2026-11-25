@@ -694,6 +694,26 @@ describe('ConnectionPage · binding again', () => {
     expect(readClaimMarker()).toBeNull();
   });
 
+  it('goes on to the Devices page when the end was read before the confirmation\'s answer arrived', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    let answer: () => void = () => undefined;
+    vi.spyOn(devicesApi, 'unbindCommit').mockImplementation(() => new Promise<void>((resolve) => {
+      // It went through at once; the page reads that before this answer arrives.
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbound', host } });
+      answer = resolve;
+    }));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '解除绑定' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+    expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection');
+    await act(async () => { answer(); });
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+    vi.useRealTimers();
+  });
+
   it('goes back to 「解除绑定」 when a confirmation lost on its way began nothing', async () => {
     vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
     vi.spyOn(devicesApi, 'unbindCommit').mockRejectedValue(new LostAnswer());
