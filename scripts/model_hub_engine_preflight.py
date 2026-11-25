@@ -70,23 +70,6 @@ def qualify_promotion(repo, commit, release, parent, payload, *, published, api,
                                                  baselines={k: hashlib.sha256(v).hexdigest() for k, v in manifests.items()}, avibe=roles)
         qualification.build_evidence(candidate, tmp / qualification.UNTRUSTED_ASSETS_ARTIFACT)
 
-
-
-
-def check_available(release):
-    # Materialize only this reviewed manifest. In particular, do not fetch an
-    # archive just to stop offering it. Check every retained fallback instead.
-    with tempfile.TemporaryDirectory() as directory:
-        candidate = Path(directory) / release.asset_release_tag
-        candidate.mkdir()
-        (candidate / qualification.MANIFEST_FILE).write_bytes(release.manifest_bytes)
-        (candidate / qualification.CANDIDATE_FILE).write_text(json.dumps({
-            'schema_version': 1, 'asset_release_tag': release.asset_release_tag,
-            'manifest_sha256': release.manifest_sha256, 'min_avibe_version': release.min_avibe_version,
-        }))
-        qualification.require_published(candidate, Path(directory) / 'verified')
-
-
 def preflight(repo, base, head, *, published, api, token):
     old, desired = snapshot.revision_step(repo, base, head)
     if desired is None or (old and desired.raw == old.raw):
@@ -98,7 +81,7 @@ def preflight(repo, base, head, *, published, api, token):
         # index already offers them. Otherwise qualification is mandatory.
         if not any(p and p.release(release.asset_release_tag) == release for p in (old, current)):
             qualify_promotion(repo, head, release, old, desired, published=current, api=api, token=token)
-        check_available(release)
+        qualification.require_listed_assets(release)
     for withdrawal in desired.revoked:
         target = old and old.release(withdrawal.asset_release_tag)
         if target and desired.release(withdrawal.rollback_to).minimum > target.minimum:

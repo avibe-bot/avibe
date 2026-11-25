@@ -750,6 +750,19 @@ def verified_assets(candidate_dir: Path, asset_dir: Path) -> Candidate:
     return candidate
 
 
+def require_listed_assets(release: channel.ChannelRelease) -> None:
+    """Check both live download sources against this exact installable release."""
+    with tempfile.TemporaryDirectory() as directory:
+        candidate = Path(directory) / release.asset_release_tag
+        candidate.mkdir()
+        (candidate / MANIFEST_FILE).write_bytes(release.manifest_bytes)
+        (candidate / CANDIDATE_FILE).write_text(json.dumps({
+            'schema_version': 1, 'asset_release_tag': release.asset_release_tag,
+            'manifest_sha256': release.manifest_sha256, 'min_avibe_version': release.min_avibe_version,
+        }))
+        require_published(candidate, Path(directory) / 'verified')
+
+
 def require_published(candidate_dir: Path, work: Path) -> None:
     """Require the release and its mirror to serve exactly the candidate's asset set.
 
