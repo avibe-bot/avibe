@@ -344,7 +344,9 @@ describe('DevicesPage · devices', () => {
     vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot(mine, { bulk: 'other_sessions' }))));
     vi.spyOn(devicesApi, 'signOutOthers').mockImplementation(async () => { signedOut = true; return {
       signedOut: [{ id: 'o1', deviceId: 'chrome', device: 'Chrome', kind: 'browser', owner: 'mine', results: ['accepted'] },
-        { id: 'o2', deviceId: 'safari', device: 'Safari', kind: 'browser', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
+        { id: 'o2', deviceId: 'safari', device: 'Safari', kind: 'browser', owner: 'mine', results: ['accepted'] },
+        // A sibling sign-in on the device in use: the row of the device in use stays.
+        { id: 'o3', deviceId: 'iphone', device: 'iPhone', kind: 'iphone', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
     }; });
     mount();
     await screen.findByText('Sara Chrome');
@@ -354,6 +356,7 @@ describe('DevicesPage · devices', () => {
     await waitFor(() => expect(screen.queryByText('Chrome')).toBeNull());
     expect(screen.queryByText('Safari')).toBeNull();
     expect(screen.getByText('Sara Chrome')).toBeTruthy();
+    expect(screen.getByText('本设备')).toBeTruthy();
   });
 
   it('names a device with no name of its own as an unrecognized client', async () => {
