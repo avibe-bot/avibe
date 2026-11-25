@@ -350,7 +350,12 @@ export type RebindState =
 /** Open dialogs of the bind-again row. */
 export type RebindDialog =
   | { kind: 'confirm' }
-  | { kind: 'asNew'; healthConnected: boolean }
+  /** Binding as a new computer, clearing this computer only. `afterRefusal`: avibe.bot did not
+   *  accept deleting the old binding (its key no longer works), so only this computer is cleared. */
+  | { kind: 'asNew'; healthConnected: boolean; afterRefusal?: boolean }
+  /** Binding as a new computer by first deleting the old binding at avibe.bot (the instance's new
+   *  preview). `releaseAt` / `holdDays`: how long the name stays the original account's. */
+  | { kind: 'asNewCloud'; healthConnected: boolean; releaseAt?: string; holdDays?: number }
   /** The reset finished: this computer is no longer bound. `oldHost`: the name it had. */
   | { kind: 'resetDone'; oldHost?: string }
   /** Bound again. */

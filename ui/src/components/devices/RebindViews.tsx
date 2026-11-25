@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { KeptTail } from '../ui/kept-tail';
+import { longDay } from './format';
 import { rebindRefusalText } from './texts';
 import type { RebindDialog, RebindState } from './types';
 
@@ -153,7 +154,7 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
   busy?: boolean;
   actions: RebindActions;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const close = (open: boolean) => { if (!open) actions.onRebindClose?.(); };
   const domain = host ?? t('devices.rebind.currentDomain');
   if (dialog.kind === 'confirm') {
@@ -175,18 +176,63 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
       </Dialog>
     );
   }
-  if (dialog.kind === 'asNew') {
+  if (dialog.kind === 'asNewCloud') {
     const other = state.state === 'asNewOffered' && state.reason === 'other_account';
     const hint = state.state === 'asNewOffered' ? state.hint : undefined;
+    const date = dialog.releaseAt ? longDay(dialog.releaseAt, i18n.language) : undefined;
+    const kept = date
+      ? t('devices.rebind.asNewCloud.loseName', { host: domain, date })
+      : typeof dialog.holdDays === 'number'
+        ? t('devices.rebind.asNewCloud.loseNameDays', { host: domain, count: dialog.holdDays })
+        : t('devices.rebind.asNewCloud.loseNamePlain', { host: domain });
     return (
       <Dialog open onOpenChange={close}>
         <DialogContent className="max-w-xl content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
           <DialogHeader>
             <DialogTitle className="text-balance">{t('devices.rebind.asNewAction')}</DialogTitle>
             <DialogDescription>
-              {/* Whose Avibe it is comes first when it is another account's: the masked hint, nothing more. */}
               {other && <><KeptTail text={hint ? t('devices.rebind.asNew.whose', { hint }) : t('devices.rebind.asNew.whosePlain')} /><br /></>}
-              <KeptTail text={t('devices.rebind.asNew.intro')} />
+              <KeptTail text={t('devices.rebind.asNewCloud.intro')} />
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 rounded-lg bg-field px-4 py-3">
+            <List
+              title={t('devices.rebind.asNew.lose')}
+              items={[
+                t('devices.rebind.asNewCloud.loseAvibe', { host: domain }),
+                t('devices.rebind.asNew.loseDevices'),
+                t('devices.rebind.asNew.losePeople'),
+                t('devices.rebind.asNew.loseLinks'),
+                dialog.healthConnected ? t('devices.rebind.asNew.loseHealth') : null,
+                kept,
+              ]}
+            />
+            <List title={t('devices.rebind.asNew.keep')} items={[t('devices.rebind.asNew.keepAll'), t('devices.rebind.asNewCloud.keepKeys')]} />
+          </div>
+          <p className="text-[13px] font-medium text-foreground">{t('devices.rebind.asNew.irreversible')}</p>
+          <DialogFooter>
+            <Button variant="ghost" onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
+            <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNewAction')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+  if (dialog.kind === 'asNew') {
+    const other = state.state === 'asNewOffered' && state.reason === 'other_account';
+    const hint = state.state === 'asNewOffered' ? state.hint : undefined;
+    // After avibe.bot did not accept deleting the old binding, why only this computer is cleared comes first.
+    const refused = dialog.afterRefusal === true;
+    return (
+      <Dialog open onOpenChange={close}>
+        <DialogContent className="max-w-xl content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
+          <DialogHeader>
+            <DialogTitle className="text-balance">{t(refused ? 'devices.rebind.asNew.localAction' : 'devices.rebind.asNewAction')}</DialogTitle>
+            <DialogDescription>
+              {/* Whose Avibe it is comes first when it is another account's: the masked hint, nothing more. */}
+              {refused && <><KeptTail text={t('devices.rebind.asNew.refusedLead')} /><br /></>}
+              {!refused && other && <><KeptTail text={hint ? t('devices.rebind.asNew.whose', { hint }) : t('devices.rebind.asNew.whosePlain')} /><br /></>}
+              <KeptTail text={t(refused ? 'devices.rebind.asNew.introLocal' : 'devices.rebind.asNew.intro')} />
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col gap-3 rounded-lg bg-field px-4 py-3">
@@ -208,7 +254,9 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
           <p className="text-[13px] font-medium text-foreground">{t('devices.rebind.asNew.irreversible')}</p>
           <DialogFooter>
             <Button variant="ghost" onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
-            <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNewAction')}</Button>
+            <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>
+              {t(refused ? 'devices.rebind.asNew.localAction' : 'devices.rebind.asNewAction')}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

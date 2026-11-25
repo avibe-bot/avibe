@@ -88,6 +88,19 @@ const designFrames = frames([
 
   // 6. Only this computer can sort it out: the page's existing sentence, no new one.
   frame('needs-repair', '需要在这台电脑上处理 · 复用已有的那句，不加新句子；按钮都收起', PAGE, { unbind: { state: 'needsRepair' } }),
+
+  // 7. 「作为一台新电脑重新绑定」 now deletes the old binding at avibe.bot first; where avibe.bot does
+  //    not accept that (its key no longer works), a separate confirmation clears this computer only.
+  frame('as-new-cloud', '作为一台新电脑重新绑定 · 先在 avibe.bot 上删除原来的 Avibe：名字为原来的账号保留到哪天', { width: 1440, height: 1200 },
+    { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: true, releaseAt: RELEASE, holdDays: 30 } }),
+  frame('as-new-cloud-other-account', '作为一台新电脑重新绑定 · 属于另一个账号：先说是谁的，名字为那个账号保留', { width: 1440, height: 1200 },
+    { rebind: { state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: false, releaseAt: RELEASE, holdDays: 30 } }),
+  frame('as-new-cloud-phone', '作为一台新电脑重新绑定（删除云端）· 390 宽', { ...IPHONE_17_PRO, width: 390, height: 1500 },
+    { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: true, releaseAt: RELEASE, holdDays: 30 } }),
+  frame('as-new-local-after-401', 'avibe.bot 没有接受删除（钥匙已经不能用）：单独确认，只清这台电脑', { width: 1440, height: 1250 },
+    { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true, afterRefusal: true } }),
+  frame('as-new-local-after-401-phone', '只清这台电脑 · 390 宽', { ...IPHONE_17_PRO, width: 390, height: 1700 },
+    { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true, afterRefusal: true } }),
 ]);
 
 export default designFrames;

@@ -8502,7 +8502,10 @@
         "unchangedAvibe": "The Avibe on avibe.bot is not deleted. If it still exists it keeps its name, and it can no longer reach this computer. If it belongs to another account, that account is not told.",
         "unchangedCredentials": "No credential is changed: not the tunnel credential, not model keys, not the Vault.",
         "copiedData": "If someone may have copied this computer's Avibe data as a whole, also delete the old Avibe at avibe.bot: until then, whoever holds the copy can still use it.",
-        "irreversible": "This cannot be undone."
+        "irreversible": "This cannot be undone.",
+        "refusedLead": "avibe.bot did not accept the deletion: the key this computer keeps no longer works, and the Avibe at avibe.bot was not deleted.",
+        "introLocal": "You can clear the binding on this computer only, then bind it as a new computer to any account.",
+        "localAction": "Clear this computer's binding only"
       },
       "resetDoneTitle": "This computer is no longer bound",
       "resetDone": "Done. This computer is no longer bound to any Avibe. Everything on it is as it was.",
@@ -8520,7 +8523,16 @@
       "inBrowser": "Binding again continues in this computer's browser.",
       "openInBrowser": "Open in the browser",
       "invalidReturn": "Not bound again: the return from avibe.bot did not pass verification, so nothing changed. Try again.",
-      "refusedUnknown": "This did not complete. (code: {{code}})"
+      "refusedUnknown": "This did not complete. (code: {{code}})",
+      "asNewCloud": {
+        "intro": "The Avibe this computer is bound to is deleted at avibe.bot first; then this computer can be bound as a new computer to any account.",
+        "loseAvibe": "This Avibe is deleted at avibe.bot, and remote access through {{host}} stops at once.",
+        "loseName": "{{host}} stays with the original account until {{date}}; after that someone else can claim it.",
+        "loseNameDays_one": "{{host}} stays with the original account for {{count}} day; after that someone else can claim it.",
+        "loseNameDays_other": "{{host}} stays with the original account for {{count}} days; after that someone else can claim it.",
+        "loseNamePlain": "{{host}} stays with the original account for a while; after that someone else can claim it.",
+        "keepKeys": "Model keys and the Vault do not change."
+      }
     },
     "notice": {
       "dismiss": "Got it"

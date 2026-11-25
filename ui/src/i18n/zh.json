@@ -8502,7 +8502,10 @@
         "unchangedAvibe": "avibe.bot 上的那个 Avibe 不会被删除。它如果还在，名字仍然归它，只是再也连不到这台电脑。如果它属于别的账号，对方不会收到任何通知。",
         "unchangedCredentials": "不会更换任何凭证：隧道凭证、模型密钥、Vault 都不变。",
         "copiedData": "如果这台电脑上的 Avibe 数据可能被人整个复制走过，还要在 avibe.bot 上删除原来的 Avibe：在那之前，拿到副本的人仍然可以用它。",
-        "irreversible": "这一步不能撤销。"
+        "irreversible": "这一步不能撤销。",
+        "refusedLead": "avibe.bot 没有接受删除：这台电脑保存的钥匙已经不能用了，avibe.bot 上的那个 Avibe 没有被删除。",
+        "introLocal": "可以只清除这台电脑上的绑定，之后作为一台新电脑绑定到任何账号。",
+        "localAction": "只清除这台电脑上的绑定"
       },
       "resetDoneTitle": "这台电脑已不再绑定",
       "resetDone": "完成。这台电脑不再绑定任何 Avibe，电脑上的内容原样保留。",
@@ -8520,7 +8523,16 @@
       "inBrowser": "重新绑定会在这台电脑的浏览器里继续。",
       "openInBrowser": "在浏览器里打开",
       "invalidReturn": "没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。",
-      "refusedUnknown": "这次没有完成。（代码：{{code}}）"
+      "refusedUnknown": "这次没有完成。（代码：{{code}}）",
+      "asNewCloud": {
+        "intro": "会先在 avibe.bot 上删除这台电脑现在绑定的 Avibe，然后这台电脑可以作为一台新电脑绑定到任何账号。",
+        "loseAvibe": "avibe.bot 上的这个 Avibe 会被删除，通过 {{host}} 的远程访问立即停止。",
+        "loseName": "{{host}} 为原来的账号保留到 {{date}}；之后别人可以领取。",
+        "loseNameDays_one": "{{host}} 为原来的账号保留 {{count}} 天；之后别人可以领取。",
+        "loseNameDays_other": "{{host}} 为原来的账号保留 {{count}} 天；之后别人可以领取。",
+        "loseNamePlain": "{{host}} 会为原来的账号保留一段时间；之后别人可以领取。",
+        "keepKeys": "模型密钥和 Vault 都不变。"
+      }
     },
     "notice": {
       "dismiss": "知道了"
