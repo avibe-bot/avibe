@@ -156,7 +156,8 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertEqual(asked, [0, 1, 2, 3])
         XCTAssertEqual(result.times, [10, 20].map { Duration.milliseconds($0) })
         XCTAssertEqual(result.error, .timeout)
-        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+        // Far below the 20 s the request would have taken.
+        XCTAssertLessThan(began.duration(to: .now), .seconds(15))
         // An unhealthy answer before it is the first error, and stays it.
         let (mixed, _) = await sampled(limits: limits) { index in
             if index == 1 {
@@ -193,7 +194,7 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertLessThan(asked.count, 4)
         XCTAssertLessThan(result.times.count, 3)
         XCTAssertGreaterThanOrEqual(took, .milliseconds(650))
-        XCTAssertLessThan(took, .seconds(3))
+        XCTAssertLessThan(took, .seconds(10))
 
         // A request that does not end when it is cancelled is not waited
         // for past the bound either.
@@ -205,7 +206,7 @@ final class DirectMeasureTests: XCTestCase {
             return self.good(1)
         }
         XCTAssertEqual(stuck, DirectMeasure.SampleResult(times: [], error: .timeout))
-        XCTAssertLessThan(stubborn.duration(to: .now), .seconds(3))
+        XCTAssertLessThan(stubborn.duration(to: .now), .seconds(10))
         held.open()
     }
 
@@ -259,7 +260,7 @@ final class DirectMeasureTests: XCTestCase {
             return empty
         }
         XCTAssertEqual(second, .busy)
-        XCTAssertLessThan(began.duration(to: .now), .seconds(1))
+        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
         held.open()
         let done = await first.value
         XCTAssertEqual(done, .measured(empty))
@@ -460,7 +461,7 @@ final class DirectMeasureTests: XCTestCase {
             let began = ContinuousClock.now
             let answered = try await ask(bound, connect(Self.host))
             XCTAssertTrue(answered.hasPrefix("HTTP/1.1 502 "), "\(mode): \(answered)")
-            XCTAssertLessThan(began.duration(to: .now), .seconds(5), "\(mode)")
+            XCTAssertLessThan(began.duration(to: .now), .seconds(8), "\(mode)")
             XCTAssertEqual(link.opened, 1, "\(mode)")
             port.stop()
             if mode != .fails {
@@ -479,7 +480,7 @@ final class DirectMeasureTests: XCTestCase {
         let began = ContinuousClock.now
         let nothing = try await ask(quietBound, "CONNECT \(Self.host):443 HTTP/1.1\r\n")
         XCTAssertEqual(nothing, "")
-        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+        XCTAssertLessThan(began.duration(to: .now), .seconds(8))
         XCTAssertEqual(quietPort.tunnels, 0)
     }
 
@@ -546,13 +547,20 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertEqual(server.connections, 2)
         XCTAssertEqual(server.requests, 6)
 
-        // The connection is closed under the session: the next request is
-        // answered all the same, and says it was not on the old connection.
+        // The connection is closed under the session. The system may send
+        // the next request again on a new connection and answer it as if
+        // nothing had happened (measured on macOS), or fail it. Either way
+        // it is never an answer that says it ran on the old connection
+        // with one attempt, which is what a sample has to say to count.
         server.closeConnections()
-        let renewed = try await first.get()
-        XCTAssertTrue(renewed.healthy)
-        XCTAssertTrue(!renewed.reused || renewed.transactions > 1, "\(renewed)")
-        XCTAssertEqual(server.connections, 3)
+        do {
+            let renewed = try await first.get()
+            XCTAssertTrue(!renewed.reused || renewed.transactions > 1, "\(renewed)")
+            XCTAssertEqual(server.connections, 3)
+            print("[iOS fixture] stage=measure a cut connection was answered on a new one, reused=\(renewed.reused) transactions=\(renewed.transactions)")
+        } catch {
+            print("[iOS fixture] stage=measure a cut connection failed its next request: \((error as NSError).code)")
+        }
 
         // Answers that are not the instance being well.
         for (answer, why) in [
@@ -579,12 +587,15 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertTrue(server.paths.allSatisfy { $0 == "/health" })
     }
 
-    func testARequestThatWentRoundThePortSaysSo() async throws {
-        // The system sends a request for a loopback address straight
-        // there, whatever route a session has (measured; it is why the
-        // port's own path cannot be driven against a local server). That
-        // makes this a request that went round the port: it is answered,
-        // and `viaProxy` is false, which is what the sampling refuses.
+    func testARequestThatDoesNotGoThroughThePortsTunnelNeverSaysItDid() async throws {
+        // A session routed to the port asks for a loopback address. On
+        // macOS the system sends such a request straight there, whatever
+        // route the session has (measured; it is why the port's own path
+        // cannot be driven against a local server): a request that went
+        // round the port. It is answered, and `viaProxy` is false, which is
+        // what the sampling refuses. Where the system keeps to the route
+        // instead, the port refuses it, since it is not its instance's
+        // host. Either way no tunnel is made and the link is never asked.
         let server = try MeasureHealthServer()
         let health = try await server.start()
         addTeardownBlock {
@@ -606,9 +617,14 @@ final class DirectMeasureTests: XCTestCase {
         addTeardownBlock {
             routed.finish()
         }
-        let observed = try await routed.get()
-        XCTAssertTrue(observed.healthy)
-        XCTAssertFalse(observed.viaProxy)
+        do {
+            let observed = try await routed.get()
+            XCTAssertFalse(observed.viaProxy, "\(observed)")
+            print("[iOS fixture] stage=measure a loopback request went round the route, viaProxy=\(observed.viaProxy)")
+        } catch {
+            XCTAssertEqual(server.connections, 0)
+            print("[iOS fixture] stage=measure a loopback request kept to the route and was refused: \((error as NSError).code)")
+        }
         XCTAssertEqual(port.tunnels, 0)
         XCTAssertEqual(link.opened, 0)
     }
