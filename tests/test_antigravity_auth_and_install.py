@@ -928,3 +928,31 @@ async def test_connection_probe_fails_when_reply_is_verification_required(
     assert "agy" in (res.get("detail") or "")
     assert "Verification Required" in (res.get("detail") or "")
     assert "Verification Required" in (res.get("excerpt") or "")
+
+
+@pytest.mark.parametrize("updated", ["1.5.17", "1.5.18", "broken"])
+def test_script_auto_update_verifies_settled_version_and_restores_binary(tmp_path, monkeypatch, updated):
+    binary = tmp_path / "agy"
+    binary.write_text("1.5.16")
+    binary.chmod(0o755)
+    cfg = V2Config.default()
+    cfg.agents.antigravity.cli_path = str(binary)
+    cfg.save()
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda _p: False)
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "resolve_cli_path", lambda _p: str(binary))
+    def health(path, _name):
+        version = Path(path).read_text()
+        return {"found": True, "path": str(path), "status": "broken" if version == "broken" else "ok", "version": None if version == "broken" else version, "reason": None}
+    monkeypatch.setattr(api, "detect_cli", health)
+    def update(name, cmd, truncate, **kwargs):
+        assert cmd == [str(binary), "update"] and kwargs["env"]["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
+        binary.write_text(updated)
+        valid = kwargs["readback_validator"](str(binary))
+        return {"ok": valid, "code": None if valid else "cli_readback_failed", "path": str(binary)}
+    monkeypatch.setattr(api, "_run_install_command", update)
+    result = api.install_agent("antigravity", version="1.5.17")
+    assert result["ok"] is (updated == "1.5.17"), result
+    assert binary.read_text() == ("1.5.17" if updated == "1.5.17" else "1.5.16")
+    if updated != "1.5.17":
+        assert result["restore"] == "restored"

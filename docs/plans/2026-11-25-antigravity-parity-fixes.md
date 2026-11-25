@@ -15,3 +15,5 @@ Each item is a separate commit with a regression at its owning boundary:
 - A11: A complete newest native end_turn wins a concurrent Stop and keeps the completed reply, including steered chains.
 
 Final validation includes Antigravity, ACP, steering, registration, Session CLI and changed Skills/updater suites; changed-file Ruff. The PM owns real-provider probes after installation. No reopening or merging this PR.
+
+Script-update guarantee: Avibe keeps the existing release settle window and idle reservation. Because `agy update` cannot pin its download, a healthy script executable is saved before updating and fresh readback must equal the selected settled version. Overshoot, broken readback or a failed command restores and verifies the previous executable before returning. Restoration failure reports failure and retains the saved binary for fix-forward. Managed agy processes continue disabling native automatic updates. Fresh/broken script bootstrap cannot promise a pinned release; it retains its explicit unsupported-version refusal rather than bypassing the settle rule.

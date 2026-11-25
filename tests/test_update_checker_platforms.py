@@ -1490,3 +1490,32 @@ def test_backend_auto_update_skips_antigravity_when_auto_update_unsupported(
     assert admissions == []
     assert install_calls == []
     assert checker.state.backend_auto_update_attempts == {}
+
+
+def test_antigravity_script_update_waits_for_settle_and_idle(monkeypatch, tmp_path, sqlite_schema_db_factory):
+    busy = [True]
+    installs = []
+    class Coordinator:
+        async def run_when_idle(self, backend, operation):
+            if busy[0]:
+                return None
+            return await operation()
+    runtimes = {backend: {"auto_update": False} for backend in ("claude", "codex", "opencode")}
+    runtimes["antigravity"] = {
+        "ok": True, "enabled": True, "installed": True, "auto_update_supported": True,
+        "auto_update": True, "has_update": True, "latest_version": "1.5.17",
+        "current_version": "1.5.16", "status": "ok", "managed_by": None,
+    }
+    def install(name, version=None):
+        installs.append((name, version))
+        runtimes[name].update(current_version=version, has_update=False)
+        return {"ok": True}
+    checker = _backend_auto_update_checker(monkeypatch, tmp_path, sqlite_schema_db_factory, Coordinator(), runtimes, install)
+    asyncio.run(checker._reconcile_backend_auto_updates())
+    assert installs == []
+    _settled(checker, antigravity="1.5.17")
+    asyncio.run(checker._reconcile_backend_auto_updates())
+    assert installs == []
+    busy[0] = False
+    asyncio.run(checker._reconcile_backend_auto_updates())
+    assert installs == [("antigravity", "1.5.17")]

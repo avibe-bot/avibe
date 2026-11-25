@@ -1439,7 +1439,7 @@ def test_non_desktop_antigravity_refuses_pinned_version(monkeypatch, tmp_path, m
     result = api.install_agent("antigravity", version="0.4.0")
 
     assert result["ok"] is False
-    assert result["code"] == "pinned_version_unsupported"
+    assert result["code"] == ("cli_readback_failed" if mode == "existing" else "pinned_version_unsupported")
     assert executed == []
 
 
@@ -1487,7 +1487,7 @@ def test_antigravity_windows_repair_source_matches_native_vendor_install_target(
 def test_antigravity_get_backend_runtime_reports_auto_update_capability_by_install_source(
     monkeypatch, tmp_path, managed
 ):
-    """System-installed agy reports auto_update_supported=False and auto_update=None; desktop-managed enables it."""
+    """Both script and desktop installs expose Avibe-owned idle automatic updates."""
     from config.v2_config import V2Config
     from vibe import api
 
@@ -1510,5 +1510,5 @@ def test_antigravity_get_backend_runtime_reports_auto_update_capability_by_insta
 
     assert runtime["ok"] is True
     assert runtime["managed_by"] == ("desktop" if managed else None)
-    assert runtime["auto_update_supported"] is managed
-    assert runtime["auto_update"] is (True if managed else None)
+    assert runtime["auto_update_supported"] is True
+    assert runtime["auto_update"] is True

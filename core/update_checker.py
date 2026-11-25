@@ -604,7 +604,7 @@ class UpdateChecker:
                     count = attempt["count"] + 1 if attempt and attempt["version"] == release else 1
                     self.state.backend_auto_update_attempts[name] = {"version": release, "count": count}
                     self.state.save()
-                    if previous and result.get("code") != "pinned_version_unsupported":
+                    if previous and result.get("code") != "pinned_version_unsupported" and result.get("restore") != "restored":
                         result = {**result, "restore": await self._restore_backend(name, previous)}
                     return result
 

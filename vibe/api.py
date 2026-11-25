@@ -9149,6 +9149,67 @@ _DESKTOP_BACKEND_ERROR_I18N_KEYS = {
 }
 
 
+def _run_antigravity_script_update(existing_path: str, truncate_output, version: str) -> dict:
+    """Update an idle script install; accept only the selected settled release, else restore it.
+
+    agy's self-updater cannot pin its download. Keep the old executable until fresh
+    version readback proves the requested release. A failed restore retains its backup.
+    """
+    import shutil
+    import tempfile
+
+    launcher = Path(existing_path)
+    backup_dir = None
+    backup = None
+    changed = False
+    cleanup = True
+    try:
+        target = launcher.resolve(strict=True)
+        original_link = os.readlink(launcher) if launcher.is_symlink() else None
+        previous = detect_cli(existing_path, "antigravity")
+        if previous.get("status") != "ok" or not previous.get("version"):
+            return _antigravity_pinned_version_unsupported()
+        backup_dir = Path(tempfile.mkdtemp(prefix=".avibe-agy-update-", dir=target.parent))
+        backup = backup_dir / "previous"
+        shutil.copy2(target, backup)
+        changed = True
+
+        def verified(path: str) -> bool:
+            observed = detect_cli(path, "antigravity")
+            return observed.get("status") == "ok" and str(observed.get("version") or "").lstrip("vV") == version.lstrip("vV")
+
+        result = _run_install_command(
+            "antigravity", [existing_path, "update"], truncate_output, mode="upgrade",
+            env={**_command_env_for(existing_path), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
+            expected_path=existing_path, readback_validator=verified,
+        )
+        if result.get("ok"):
+            return result
+        # Publish the saved executable before the idle-update reservation is released.
+        restored = backup_dir / "restored"
+        shutil.copy2(backup, restored)
+        os.replace(restored, target)
+        if original_link is not None and (not launcher.is_symlink() or os.readlink(launcher) != original_link):
+            with tempfile.TemporaryDirectory(prefix=".avibe-agy-link-", dir=launcher.parent) as directory:
+                link = Path(directory) / "agy"
+                link.symlink_to(original_link)
+                os.replace(link, launcher)
+        health = detect_cli(existing_path, "antigravity")
+        restored_ok = health.get("status") == "ok" and health.get("version") == previous["version"]
+        cleanup = restored_ok
+        return {**result, "restore": "restored" if restored_ok else "failed", **({} if restored_ok else {"backup_path": str(backup)})}
+    except Exception:
+        # Keep the saved binary for fix-forward if publication/readback could not finish.
+        cleanup = not changed
+        logger.exception("Antigravity script update or restoration failed; backup=%s", backup)
+        return {"ok": False, "code": "cli_readback_failed",
+                "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
+                "restore": "failed" if changed else "not_needed", "backup_path": str(backup) if backup else None}
+    finally:
+        if cleanup and backup_dir is not None:
+            shutil.rmtree(backup_dir)
+
+
 def _antigravity_pinned_version_unsupported() -> dict:
     return {
         "ok": False,
@@ -9454,7 +9515,7 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
             cmd, command_env = upgrade
         elif name == "antigravity":
             if version is not None:
-                return _antigravity_pinned_version_unsupported()
+                return _run_antigravity_script_update(existing_path, _truncate_output, version)
             cmd = [existing_path, "update"]
             command_env = {**_command_env_for(existing_path), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
         else:
@@ -12905,7 +12966,7 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
         if private_backend or legacy_bundled_codex
         else None
     )
-    auto_update_supported = (managed_by == "desktop") if name == "antigravity" else True
+    auto_update_supported = True
 
     current_version = health["version"]
     latest_version = None if legacy_bundled_codex else await asyncio.to_thread(_cached_latest, name)
