@@ -1192,10 +1192,10 @@ final class DirectPathController {
             accountEpoch: accountEpoch
         )
         // The status's `sequence` advances at every change of the path's
-        // kind this controller hears of. The transport's mark is finer: it
-        // also changes with another path of the same kind (another relay,
-        // another address), and with any report from the watch of the
-        // connection's paths, which is all a change that went back leaves.
+        // kind this controller hears of. The transport's mark is finer and
+        // sooner: it also changes with another path of the same kind
+        // (another relay, another address), and as soon as the binding has
+        // reported a change, before this controller is told.
         let sequence = sequence
         let selected = transport.pathDiagnostics.selected
         // The labels were read between two equal marks: they are that

@@ -355,22 +355,22 @@ stickiness, closure or count, under 「仅直连和中继」 too.
   after its body: the selection, lease, listener and path generation a
   plan's direct candidate needs, the status's `sequence`, and the
   transport's mark of the path (`DirectPathMark`). The mark changes when
-  the transport's connection does, when a read finds another path selected
-  than the read before (another relay, or another address of the same
-  family, is another path), and with every report from the binding's watch
-  of the connection's paths, whatever the report says. The last is for a
-  path that changed and changed back: the binding reports the paths as they
-  are when it looks, so such a change may show as a report that names the
-  path there was before, and as nothing else. The report is counted where
-  the binding makes it, not a turn of the main actor later. Only counts
-  leave the transport; which path it is stays there.
-  - What this costs: a report about another path of the connection (one
-    opened or closed while the selected one stayed) ends the leg as
-    `failed` too. Measuring again is the remedy.
-  - What it does not see: a change the binding has not reported by the
-    time the request's body has been read. If the path is then the one it
-    was, the sample counts. Nothing the App can read tells that case from
-    no change.
+  the transport's connection does, and whenever an observation finds
+  another path selected than the observation before: another relay, or
+  another address of the same family, is another path. An observation is a
+  report from the binding's watch of the connection's paths, taken where
+  the binding makes it and not a turn of the main actor later, or a read of
+  the mark. A report that leaves the selected path as it was changes
+  nothing: while it runs through a relay the connection keeps opening and
+  closing other paths, looking for a direct one, and that is not a change
+  of the path being measured. Only counts leave the transport; which path
+  it is stays there.
+  - What it does not see: a path that changed and changed back between two
+    observations. The binding reports the paths as they are when it looks,
+    so two changes in quick succession may reach the App as one report that
+    names the path there was before. Changes reported one by one are each
+    counted. The binding's per-event watch (`watchPathEvents`) would close
+    this; it is not used yet.
 - **Time** is the continuous clock's. A request is not begun at or after its
   bound or the measurement's, and a result that arrives at or after it is
   `timeout`, whichever of the request and the timer the scheduler ran

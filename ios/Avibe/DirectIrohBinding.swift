@@ -100,16 +100,11 @@ struct DirectIrohBinding: DirectIrohEngine {
         }
 
         var selectedPathIdentity: String? {
-            guard let path = connection.paths().first(where: \.isSelected) else {
-                return nil
-            }
-            // For a relay path the far address is the relay's URL, so
-            // another relay is another path, as another address is.
-            return "\(path.isRelay ? "relay" : "address") \(path.remoteAddr)"
+            Self.identity(of: connection.paths())
         }
 
         func watchSelectedPath(
-            _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+            _ onChange: @escaping @Sendable (DirectPathKind?, String?) -> Void
         ) -> (any DirectPathWatch)? {
             Watch(handle: connection.watchPaths(callback: PathCallback(handler: onChange)))
         }
@@ -123,17 +118,28 @@ struct DirectIrohBinding: DirectIrohEngine {
             }
             return path.isIp ? DirectPathKind.family(ofSocketAddress: path.remoteAddr) : nil
         }
+
+        /// The selected path of `paths` as `selectedPathIdentity` names it,
+        /// for a read and for a report of the watch alike.
+        static func identity(of paths: [IrohLib.PathSnapshot]) -> String? {
+            guard let path = paths.first(where: \.isSelected) else {
+                return nil
+            }
+            // For a relay path the far address is the relay's URL, so
+            // another relay is another path, as another address is.
+            return "\(path.isRelay ? "relay" : "address") \(path.remoteAddr)"
+        }
     }
 
     private final class PathCallback: IrohLib.PathChangeCallback, @unchecked Sendable {
-        private let handler: @Sendable (DirectPathKind?) -> Void
+        private let handler: @Sendable (DirectPathKind?, String?) -> Void
 
-        init(handler: @escaping @Sendable (DirectPathKind?) -> Void) {
+        init(handler: @escaping @Sendable (DirectPathKind?, String?) -> Void) {
             self.handler = handler
         }
 
         func onChange(paths: [IrohLib.PathSnapshot]) async throws {
-            handler(Live.kind(of: paths))
+            handler(Live.kind(of: paths), Live.identity(of: paths))
         }
     }
 

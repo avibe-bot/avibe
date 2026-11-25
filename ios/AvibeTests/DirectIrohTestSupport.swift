@@ -255,10 +255,10 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         set { lock.withLock { storedIdentity = newValue } }
     }
 
-    private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
+    private var pathWatcher: (@Sendable (DirectPathKind?, String?) -> Void)?
 
     func watchSelectedPath(
-        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+        _ onChange: @escaping @Sendable (DirectPathKind?, String?) -> Void
     ) -> (any DirectPathWatch)? {
         lock.withLock { pathWatcher = onChange }
         let log = log
@@ -271,13 +271,24 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         }
     }
 
-    /// The connection's paths changed: the selected one is now `kind`.
-    func movePath(to kind: DirectPathKind?) {
-        let watcher: (@Sendable (DirectPathKind?) -> Void)? = lock.withLock {
+    /// The connection's paths changed: the selected one is now `kind`,
+    /// named `identity`, or by its kind alone when none is given.
+    func movePath(to kind: DirectPathKind?, identity: String? = nil) {
+        let (watcher, named) = lock.withLock {
             storedPath = kind
-            return pathWatcher
+            storedIdentity = identity
+            return (pathWatcher, identity ?? kind?.rawValue)
         }
-        watcher?(kind)
+        watcher?(kind, named)
+    }
+
+    /// The connection's paths changed and the selected one did not: another
+    /// path was opened, or closed.
+    func reportOtherPaths() {
+        let (watcher, kind, named) = lock.withLock {
+            (pathWatcher, storedPath, storedIdentity ?? storedPath?.rawValue)
+        }
+        watcher?(kind, named)
     }
 
     /// `answers` are what the first read of each new stream returns, in

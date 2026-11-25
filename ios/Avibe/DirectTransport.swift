@@ -510,18 +510,24 @@ protocol DirectTransporting: AnyObject, Sendable {
 }
 
 /// A mark of the path a transport's connection runs on, for a measurement
-/// (`DirectMeasure.swift`). Two equal marks mean: the same connection, no
-/// report from the watch of its paths between the two, and the same path
-/// selected at both reads. Any report counts, whatever it says: the binding
-/// reports the state as it is when it looks, so a path that changed and
-/// changed back shows only as a report. Counts only: which path it is, by
-/// its address or its relay, stays in the transport.
+/// (`DirectMeasure.swift`). Two equal marks mean: the same connection, and
+/// the same path selected at every observation from the first to the
+/// second. An observation is a report from the watch of the connection's
+/// paths or a read of the mark. A report that leaves the selected path as
+/// it was changes nothing: the connection opens and closes other paths all
+/// the time while it looks for a better one. Another path of the same kind
+/// (another relay, another address) is another path. Counts only: which
+/// path it is, by its address or its relay, stays in the transport.
+///
+/// Not seen: a path that changed and changed back between two
+/// observations. The binding reports the paths as they are when it looks,
+/// so two changes in quick succession may reach it as one report that
+/// names the path there was before.
 struct DirectPathMark: Equatable, Sendable {
     /// Which of the transport's connections.
     let connection: Int
-    /// How often the watch of its paths has reported.
-    let reports: Int
-    /// How often a read found another path selected than the read before.
+    /// How often an observation found another path selected than the one
+    /// before it.
     let moves: Int
 }
 

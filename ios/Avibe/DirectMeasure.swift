@@ -46,8 +46,8 @@ struct DirectMeasureLink: Sendable {
     /// Opens one stream over the link. Throws when the link is gone.
     let open: @Sendable () async throws -> any DirectByteStream
     /// Whether the selection, lease, listener and path this was made under
-    /// are all still the same, with no report of a change of the
-    /// connection's paths in between (`DirectPathMark`).
+    /// are all still the same, with no other path found selected in
+    /// between (`DirectPathMark`).
     let isCurrent: @MainActor @Sendable () -> Bool
 }
 

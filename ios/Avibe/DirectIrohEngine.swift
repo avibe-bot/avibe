@@ -108,16 +108,18 @@ protocol DirectIrohConnection: AnyObject, Sendable {
 
     /// What tells the selected path from every other this connection may
     /// select: its kind with its far address, or with its relay. Nil when
-    /// none is selected. For comparing two reads only (`DirectPathMark`);
-    /// it stays in the transport and is never shown, sent or logged.
+    /// none is selected. For comparing two observations only
+    /// (`DirectPathMark`); it stays in the transport and is never shown,
+    /// sent or logged.
     var selectedPathIdentity: String? { get }
 
-    /// Calls `onChange` with the selected path whenever the connection's
-    /// paths change, once for each report the binding makes: a report that
-    /// names the same path as the one before is still a call. Nil when the
-    /// binding cannot watch.
+    /// Calls `onChange` whenever the connection's paths change, with the
+    /// path that is selected then: its kind, and its identity as
+    /// `selectedPathIdentity` gives it. A change of the paths that leaves
+    /// the selected one as it was is a call too, with the same identity.
+    /// Nil when the binding cannot watch.
     func watchSelectedPath(
-        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+        _ onChange: @escaping @Sendable (DirectPathKind?, String?) -> Void
     ) -> (any DirectPathWatch)?
 }
 
@@ -139,10 +141,8 @@ extension DirectIrohConnection {
         selectedPath?.rawValue
     }
 
-    /// Calls `onChange` with the selected path whenever the connection's
-    /// paths change. Nil when the binding cannot watch.
     func watchSelectedPath(
-        _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
+        _ onChange: @escaping @Sendable (DirectPathKind?, String?) -> Void
     ) -> (any DirectPathWatch)? {
         nil
     }

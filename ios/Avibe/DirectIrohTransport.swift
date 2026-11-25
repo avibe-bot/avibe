@@ -224,20 +224,25 @@ final class DirectIrohTransport {
         case renewal
     }
 
-    /// How often a connection's path watch has reported. Counted on
-    /// whichever thread the binding reports on, so that a read sees a
-    /// report as soon as it was made and not a turn of the main actor later.
-    private final class PathReports: @unchecked Sendable {
+    /// Which path a connection was last found to have selected, and how
+    /// often that was another than the time before (`DirectPathMark`). It
+    /// is told by each report of the path watch, on whichever thread the
+    /// binding reports on, and by each read on the main actor: a change is
+    /// counted as soon as either has seen it.
+    private final class PathFence: @unchecked Sendable {
         private let lock = NSLock()
-        private var reports = 0
+        private var path: String?
+        private var moves = 0
 
-        var count: Int {
-            lock.withLock { reports }
-        }
-
-        func note() {
+        /// Notes the path found selected now. Returns how often, so far,
+        /// one was found that was not the one found before.
+        func observe(_ path: String?) -> Int {
             lock.withLock {
-                reports += 1
+                if path != self.path {
+                    self.path = path
+                    moves += 1
+                }
+                return moves
             }
         }
     }
@@ -262,12 +267,8 @@ final class DirectIrohTransport {
         /// that reports changes.
         var lastPath: DirectPathKind?
         var pathWatch: (any DirectPathWatch)?
-        /// For a measurement's fence (`pathMark`): how often the watch has
-        /// reported, counted where it reports; which path a read last found
-        /// selected; and how often a read found another than the one before.
-        let pathReports = PathReports()
-        var markedPath: String?
-        var pathMoves = 0
+        /// For a measurement's fence (`pathMark`).
+        let pathFence = PathFence()
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link, authority: DirectIrohAuthority) {
             self.id = id
@@ -1302,10 +1303,12 @@ final class DirectIrohTransport {
     /// runs on (relay, IPv4, IPv6) while the session is current and usable.
     private func watchPath(of session: Session) {
         let id = session.id
-        let reports = session.pathReports
-        session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind in
-            // Every report, whatever it says (`DirectPathMark`).
-            reports.note()
+        let fence = session.pathFence
+        session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind, identity in
+            // Here, not a turn of the main actor later: a measurement
+            // reads the mark as soon as the binding has reported. A report
+            // that leaves the selected path as it was changes nothing.
+            _ = fence.observe(identity)
             Task { @MainActor [weak self] in
                 self?.pathDidChange(to: kind, session: id)
             }
@@ -1487,28 +1490,22 @@ extension DirectIrohTransport: DirectTransporting {
     }
 
     /// A mark of the path the usable session's connection runs on now
-    /// (`DirectPathMark`). Reading it is how a change of the selected path
-    /// that the watch has not reported yet is found, so each read is kept:
-    /// a path found to be another one than at the read before stays counted
-    /// if it changes back.
+    /// (`DirectPathMark`). A read is an observation like a report of the
+    /// watch: it finds a change of the selected path that has not been
+    /// reported yet, and the change stays counted if the path changes back.
     var pathMark: DirectPathMark? {
-        // Without a watch there are no reports to count.
+        // Without a watch nothing is told of a path that changed and
+        // changed back between two reads. The watch ends only with its
+        // connection, whose end ends the session.
         guard let session, session.isUsable, session.pathWatch != nil else {
             return nil
         }
         let path = session.link.connection.selectedPathIdentity
-        if path != session.markedPath {
-            session.markedPath = path
-            session.pathMoves += 1
-        }
+        let moves = session.pathFence.observe(path)
         guard path != nil else {
             return nil
         }
-        return DirectPathMark(
-            connection: session.id,
-            reports: session.pathReports.count,
-            moves: session.pathMoves
-        )
+        return DirectPathMark(connection: session.id, moves: moves)
     }
 
     func select(

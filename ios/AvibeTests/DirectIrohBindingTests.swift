@@ -76,7 +76,7 @@ final class DirectIrohBindingTests: XCTestCase {
             pair.client.close()
         }
         let reports = PathReportCount()
-        let watch = try XCTUnwrap(pair.client.watchSelectedPath { _ in reports.note() })
+        let watch = try XCTUnwrap(pair.client.watchSelectedPath { _, _ in reports.note() })
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while reports.count == 0, ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))
