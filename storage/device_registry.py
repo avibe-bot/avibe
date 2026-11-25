@@ -94,6 +94,26 @@ def _deadline(conn, key, now, expiry):
     )
 
 
+def _prune_owner_marks(conn, now):
+    """One bounded page of owner sign-out marks that are past their time or whose tombstone is gone
+    (one an older version pruned alone): the page selects only such marks, so none is starved."""
+    from storage.device_account_signout import OWNER_SIGNED_OUT_PREFIX
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+
+    end = OWNER_SIGNED_OUT_PREFIX[:-1] + chr(ord(OWNER_SIGNED_OUT_PREFIX[-1]) + 1)
+    stone = state_meta.alias("stone")
+    tombstone = select(stone.c.key).where(
+        stone.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX)
+        + func.substr(state_meta.c.key, len(OWNER_SIGNED_OUT_PREFIX) + 1)).exists()
+    page = select(state_meta.c.key).where(
+        state_meta.c.key >= OWNER_SIGNED_OUT_PREFIX, state_meta.c.key < end,
+        or_(cast(state_meta.c.value_json, Integer) <= now, ~tombstone),
+    ).limit(32)
+    keys = conn.execute(page).scalars().all()
+    if keys:
+        conn.execute(state_meta.delete().where(state_meta.c.key.in_(keys)))
+
+
 def prune(conn, now):
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
@@ -127,10 +147,8 @@ def prune(conn, now):
         if type(value) is int and value <= now:
             expired.append(key)
     if expired:
-        from storage.device_account_signout import OWNER_SIGNED_OUT_PREFIX
-        # A session's owner sign-out mark goes with its tombstone.
-        marks = [OWNER_SIGNED_OUT_PREFIX + key[len(REVOKED_BROWSER_SESSION_KEY_PREFIX):] for key in expired]
-        conn.execute(state_meta.delete().where(state_meta.c.key.in_(expired + marks)))
+        conn.execute(state_meta.delete().where(state_meta.c.key.in_(expired)))
+    _prune_owner_marks(conn, now)
     if len(page) == 32:
         marker = insert(state_meta).values(key=cursor_key, value_json=json.dumps(page[-1].key), updated_at=str(now))
         conn.execute(
@@ -287,8 +305,10 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
             if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
                 raise AccountSessionSignedOut('account_session_signed_out')
             # Used once: a sign-in that comes back with the same old cookie later is an ordinary one.
+            # Only a mark still in force, by the clock read after the lock.
             if conn.execute(state_meta.delete().where(
-                    state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + owner_signed_out)).rowcount == 1:
+                    state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + owner_signed_out,
+                    cast(state_meta.c.value_json, Integer) > locked_now)).rowcount == 1:
                 revoke_late(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now)
                 return ENDED
         old = _replaced(conn, binding, subject, previous, locked_now) if fresh else None

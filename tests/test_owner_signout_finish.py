@@ -230,3 +230,45 @@ def test_the_mark_goes_with_its_tombstone(issuer):
     with get_cached_sqlite_engine().begin() as conn:
         device_registry.prune(conn, late)
     assert tombstone(sid) is None and mark(sid) is None
+
+
+def test_a_maintenance_admin_sign_out_leaves_nothing_to_finish(issuer, monkeypatch, quiet):
+    from tests.test_remote_access_vibe_cloud import _session_claims
+    cfg = issuer
+    old = first_login(cfg)
+    sid = sid_of(cfg, old)
+    # The owner role from an email grant (avibe.bot's maintenance admin), not from ownership.
+    claims = {**_session_claims(cfg, role="owner"), "vibe_instance_access_source": "email"}
+    admin = browser(remote_access.make_session_cookie(cfg, "admin@test.invalid", "admin", session_claims=claims,
+                                                     device_headers={"User-Agent": "Mozilla/5.0 (Macintosh) Chrome/131.0 Safari/537.36"}))
+    (device,) = [d for d in listing(admin)["others"] if d["account"]["subject"] == "owner"]
+    assert sign_out(admin, device["id"] + "/sign-out").status_code == 200
+    assert tombstone(sid) is not None and mark(sid) is None
+    c = browser(old)
+    answer = finish(c, monkeypatch, cfg, start(c), ref=REF)
+    assert answer.status_code == 302 and issued(answer) and job_rows() == []
+
+
+def test_a_mark_that_runs_out_while_the_sign_in_waits_is_not_used(issuer, monkeypatch, quiet):
+    cfg = issuer
+    old, sid = signed_out_by_owner(cfg)
+    soon = int(time.time()) + 30
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(state_meta.update().where(state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + sid)
+                     .values(value_json=str(soon)))
+    c = browser(old)
+    asked = start(c)
+    # Past the mark, still inside the handshake: an ordinary sign-in, and nothing is queued.
+    monkeypatch.setattr(device_registry, "time", SimpleNamespace(time=lambda: soon + 1))
+    answer = finish(c, monkeypatch, cfg, asked, ref=REF)
+    assert answer.status_code == 302 and issued(answer) and job_rows() == []
+
+
+def test_an_orphan_or_expired_mark_is_pruned(issuer):
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+    old, sid = signed_out_by_owner(issuer)
+    # An older version pruned the tombstone alone.
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.execute(state_meta.delete().where(state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + sid))
+        device_registry.prune(conn, int(time.time()))
+    assert mark(sid) is None

@@ -9924,7 +9924,8 @@ def remote_access_auth_callback():
                 config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)),
         )
     except AccountSignInEnded:
-        # Committed: this browser's sign-out is finished at avibe.bot. Its old cookie goes too.
+        # Committed here: avibe.bot's sign-out of this account session is queued (the worker may
+        # not have sent it yet, or will not for a refused pairing). The old cookie goes too.
         response = _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
         response.delete_cookie(remote_access.SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="Lax")
         return response
@@ -10329,7 +10330,9 @@ def device_sign_out(device_id=None):
         ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
                                       delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope,
-                                      by_owner=owner)
+                                      # Only the real owner's action (or this computer): never a
+                                      # maintenance admin's, which has the owner role but not the source.
+                                      by_owner=delegate)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
     if device_id is not None and not (ids or results):
