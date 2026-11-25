@@ -502,27 +502,29 @@ protocol DirectTransporting: AnyObject, Sendable {
     @MainActor
     var pathCounts: DirectPathCounts { get }
 
-    /// A mark of the path the usable connection runs on now, for a
-    /// measurement's fence. Nil with no usable connection, with none of its
-    /// paths selected, or when the transport cannot watch its paths.
+    /// The path the usable connection runs on now, read now, with its
+    /// mark: for a measurement. Nil with no usable connection, with none of
+    /// its paths selected or one that has no kind, or when the transport
+    /// cannot watch its paths.
     @MainActor
-    var pathMark: DirectPathMark? { get }
+    var markedPath: DirectMarkedPath? { get }
 }
 
 /// A mark of the path a transport's connection runs on, for a measurement
 /// (`DirectMeasure.swift`). Two equal marks mean: the same connection, and
 /// the same path selected at every observation from the first to the
-/// second. An observation is a report from the watch of the connection's
-/// paths or a read of the mark. A report that leaves the selected path as
-/// it was changes nothing: the connection opens and closes other paths all
-/// the time while it looks for a better one. Another path of the same kind
+/// second. An observation is a read of the connection's selected path made
+/// then: when the mark is read, and whenever the watch of the connection's
+/// paths reports. A report after which the selected path is the one it was
+/// changes nothing: the connection opens and closes other paths all the
+/// time while it looks for a better one. Another path of the same kind
 /// (another relay, another address) is another path. Counts only: which
 /// path it is, by its address or its relay, stays in the transport.
 ///
 /// Not seen: a path that changed and changed back between two
-/// observations. The binding reports the paths as they are when it looks,
-/// so two changes in quick succession may reach it as one report that
-/// names the path there was before.
+/// observations. The binding's watch reports once for changes that follow
+/// each other closely, so the read a report causes may find the path there
+/// was before.
 struct DirectPathMark: Equatable, Sendable {
     /// Which of the transport's connections.
     let connection: Int
@@ -531,9 +533,16 @@ struct DirectPathMark: Equatable, Sendable {
     let moves: Int
 }
 
+/// A path with its mark, both from one observation: the labels are the
+/// marked path's own, whatever the controller has been told so far.
+struct DirectMarkedPath: Equatable, Sendable {
+    let mark: DirectPathMark
+    let path: DirectSelectedPath
+}
+
 extension DirectTransporting {
     @MainActor
-    var pathMark: DirectPathMark? {
+    var markedPath: DirectMarkedPath? {
         nil
     }
 

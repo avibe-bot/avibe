@@ -210,6 +210,11 @@ final class DirectMeasureTests: XCTestCase {
         held.open()
     }
 
+    /// Keeps the thread it is called on, idle, for `seconds`.
+    private static func holdThread(for seconds: TimeInterval) {
+        Thread.sleep(forTimeInterval: seconds)
+    }
+
     func testNothingIsBegunOrTakenAtOrAfterItsDeadline() async {
         // A deadline that has passed: the work is not begun, and the
         // answer is `timeout`, every time and not as the scheduler has it.
@@ -224,21 +229,60 @@ final class DirectMeasureTests: XCTestCase {
         }
         XCTAssertEqual(begun.next(), 0)
 
-        // Work that ends after its deadline, without ever waiting, gives
-        // `timeout` whichever of it and the timer is run first; and so
-        // does work that fails then.
+        // Work that begins in time and ends after its deadline, while the
+        // timer cannot be first: every other thread that runs tasks is held
+        // from the moment the work begins. Its result is not taken, whether
+        // it succeeded or failed.
         struct Refused: Error {}
+        let threads = ProcessInfo.processInfo.activeProcessorCount
         for fails in [false, true] {
-            let deadline = ContinuousClock.now.advanced(by: .milliseconds(50))
+            let holders = MeasureLog<Task<Void, Never>>()
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(100))
             let overran = await DirectMeasure.bounded(until: deadline) { () -> Int in
-                while ContinuousClock.now < deadline.advanced(by: .milliseconds(20)) {}
+                for _ in 0..<(2 * threads) {
+                    holders.add(Task { Self.holdThread(for: 0.5) })
+                }
+                Self.holdThread(for: 0.3)
                 if fails {
                     throw Refused()
                 }
                 return 1
             }
             XCTAssertEqual(overran, .failure(.timeout), "\(fails)")
+            for task in holders.values {
+                await task.value
+            }
         }
+
+        // The work's task is first run after the deadline, though the
+        // call was made before it: every thread that runs tasks is held
+        // meanwhile, as a device under load or just resumed holds them.
+        // The work is not begun then. (Where a thread was free after all
+        // and the work began in time, that is in order too: what is asked
+        // is that it never begins late.)
+        let entered = MeasureLog<Duration>()
+        let holding = (0..<(2 * threads)).map { _ in
+            Task {
+                Self.holdThread(for: 0.25)
+            }
+        }
+        let tight = ContinuousClock.now.advanced(by: .milliseconds(5))
+        let crowded = await DirectMeasure.bounded(until: tight) { () -> Int in
+            entered.add(tight.duration(to: .now))
+            return 1
+        }
+        for task in holding {
+            await task.value
+        }
+        if crowded != .success(1) {
+            XCTAssertEqual(crowded, .failure(.timeout))
+        }
+        // Give a late start of the work, if there was one, time to show.
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(
+            entered.values.allSatisfy { $0 < .milliseconds(50) },
+            "work was begun \(entered.values) after its deadline"
+        )
 
         // In time: the work's own result.
         let far = ContinuousClock.now.advanced(by: .seconds(30))
@@ -699,8 +743,10 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertEqual(port.tunnels, 0)
         XCTAssertEqual(link.opened, 0)
 
-        // The connections it holds are served: the measurement's own
-        // request, on one of them, gets the one stream.
+        // The connections it holds are served, and the first request for
+        // the host among them gets the one stream. The port cannot tell
+        // whose it is: the measurement's own, or another process's that
+        // came first.
         try await held[0].sendAll(Data(connect(Self.host).utf8))
         let head = try await read(held[0]) { $0.hasSuffix("\r\n\r\n") }
         XCTAssertEqual(head, "HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -710,7 +756,8 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertEqual(port.tunnels, 1)
         XCTAssertEqual(link.opened, 1)
 
-        // The same request on another of them: counted, refused, and the
+        // The same request on another of them (the measurement's, if the
+        // first was not): counted, which ends the leg, refused, and the
         // link is not asked for a second stream.
         try await held[1].sendAll(Data(connect(Self.host).utf8))
         let refused = await readToEnd(held[1])

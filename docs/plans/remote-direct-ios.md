@@ -336,9 +336,12 @@ stickiness, closure or count, under 「仅直连和中继」 too.
   the device can reach it while a measurement runs. It holds at most four
   connections at once, whatever they have sent; one beyond that is closed
   unread, with no task of its own. It opens one stream over the link in its
-  whole life, for the first request for its host. A second such request is
-  refused and counted, which ends the leg: it is the session's connection
-  made anew, or someone else. The link is asked whether it is still current
+  whole life, for the first request for its host that reaches it. The port
+  cannot tell who asks: another process on the device that asks first gets
+  that stream, to the instance's ingress, where the App's own listener
+  would have taken it too (section 4), and the measurement's request is
+  then refused and its leg fails. A second request is always refused and
+  counted, which ends the leg. The link is asked whether it is still current
   before the stream is opened and again after the instance has answered,
   before the client is told `200` or any byte it sent early is sent on.
 - **The tunnel** is measured by a second ephemeral URLSession with no route,
@@ -353,28 +356,40 @@ stickiness, closure or count, under 「仅直连和中继」 too.
   metrics are read and not only the result.
 - **The path the measurement began on** is asked before every request and
   after its body: the selection, lease, listener and path generation a
-  plan's direct candidate needs, the status's `sequence`, and the
-  transport's mark of the path (`DirectPathMark`). The mark changes when
-  the transport's connection does, and whenever an observation finds
-  another path selected than the observation before: another relay, or
-  another address of the same family, is another path. An observation is a
-  report from the binding's watch of the connection's paths, taken where
-  the binding makes it and not a turn of the main actor later, or a read of
-  the mark. A report that leaves the selected path as it was changes
-  nothing: while it runs through a relay the connection keeps opening and
-  closing other paths, looking for a direct one, and that is not a change
-  of the path being measured. Only counts leave the transport; which path
-  it is stays there.
+  plan's direct candidate needs, and the transport's mark of the path
+  (`DirectPathMark`). The mark changes when the transport's connection
+  does, and whenever an observation finds another path selected than the
+  observation before: another relay, or another address of the same
+  family, is another path.
+  - An observation is always a read of the connection made at that moment:
+    when the mark is read, and whenever the binding's watch of the
+    connection's paths reports, on the binding's thread and not a turn of
+    the main actor later. What a report carries is not compared: it is the
+    state as the binding found it, and may arrive after the path has moved
+    on. Reads are made one at a time, so the paths noted are in the order
+    they were selected.
+  - A report after which the selected path is the one it was changes
+    nothing: while it runs through a relay the connection keeps opening
+    and closing other paths, looking for a direct one, and that is not a
+    change of the path being measured.
+  - The leg's labels (kind, local or global, the relay's region) are read
+    in the same observation as the mark it begins on, not from what the
+    controller has been told: the transport may have found a move a turn
+    before the controller hears of it. For the same reason the status's
+    `sequence` is no part of this: it advances when that news arrives, and
+    for closures and preferences, none of which is a change of the path.
+  - Only counts and labels leave the transport; which path it is stays
+    there.
   - What it does not see: a path that changed and changed back between two
-    observations. The binding reports the paths as they are when it looks,
-    so two changes in quick succession may reach the App as one report that
-    names the path there was before. Changes reported one by one are each
-    counted. The binding's per-event watch (`watchPathEvents`) would close
-    this; it is not used yet.
+    observations. The binding's watch reports once for changes that follow
+    each other closely, so the read a report causes may find the path
+    there was before. Changes reported one by one are each counted. The
+    binding's per-event watch (`watchPathEvents`) would close this; it is
+    not used yet.
 - **Time** is the continuous clock's. A request is not begun at or after its
-  bound or the measurement's, and a result that arrives at or after it is
-  `timeout`, whichever of the request and the timer the scheduler ran
-  first. The session's own request timeout is `timeout` as well; any other
+  bound or the measurement's, however late its task is first run, and a
+  result that arrives at or after it is `timeout`, whichever of the request
+  and the timer the scheduler ran first. The session's own request timeout is `timeout` as well; any other
   failure of the connection, the name or the certificate is `failed`.
 - **Labels** are the link's own: `relay`, `ipv4` or `ipv6`; `local` or
   `global` from the selected path's remote address class; and for the relay

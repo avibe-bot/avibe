@@ -810,6 +810,7 @@ final class DirectIrohTransportTests: XCTestCase {
         let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
         connection.selectedPath = .relay
         connection.selectedPathIdentity = "relay one"
+        connection.selectedPathDetail = DirectSelectedPath(kind: .relay, local: nil, rttMs: 90, relayRegion: "euc1")
         endpoint.connection.resolve(connection)
         harness.rendezvous.answer(
             DirectIrohFixtures.ready(
@@ -822,88 +823,129 @@ final class DirectIrohTransportTests: XCTestCase {
     }
 
     /// The mark a measurement fences on (`DirectPathMark`), at the
-    /// transport's side of the binding. A report of the watch that leaves
-    /// the selected path as it was changes nothing: the connection opens
-    /// and closes other paths while it looks for a better one. A report, or
-    /// a read, that finds another path selected changes the mark, another
-    /// path of the same kind included, and it stays changed if the path
-    /// changes back.
-    func testThePathsMarkChangesOnlyWhenAnotherPathIsFoundSelected() async throws {
+    /// transport's side of the binding. Every observation is a read of the
+    /// connection made then. A report of the watch after which the selected
+    /// path is the one it was changes nothing, whatever that report was
+    /// made about and however late it comes. A read that finds another
+    /// path selected changes the mark, another path of the same kind
+    /// included, and it stays changed if the path changes back.
+    func testThePathsMarkChangesOnlyWhenAReadFindsAnotherPathSelected() async throws {
         // No connection: nothing to mark.
-        XCTAssertNil(Harness().transport.pathMark)
+        XCTAssertNil(Harness().transport.markedPath)
         let (harness, connection) = try await relayedPath()
+        let mark = { try XCTUnwrap(harness.transport.markedPath).mark }
 
-        // Read again with nothing in between: the same mark.
-        let first = try XCTUnwrap(harness.transport.pathMark)
-        XCTAssertEqual(harness.transport.pathMark, first)
+        // The path moves to another relay. The binding made a report while
+        // the first relay was selected, and has not delivered it yet.
+        connection.selectedPathIdentity = "relay two"
+        // A measurement begins: read twice with nothing in between, the
+        // same mark.
+        let baseline = try mark()
+        XCTAssertEqual(try mark(), baseline)
+        // Now that earlier report is delivered. The path is read afresh
+        // for it and is the second relay, as at the baseline: no change.
+        connection.deliverEarlierReport(of: .relay)
+        XCTAssertEqual(try mark(), baseline)
 
-        // Another path is opened, and closed again; the selected one stays.
+        // Other paths are opened and closed; the selected one stays.
         connection.reportOtherPaths()
-        XCTAssertEqual(harness.transport.pathMark, first)
+        XCTAssertEqual(try mark(), baseline)
         connection.reportOtherPaths()
         connection.reportOtherPaths()
-        XCTAssertEqual(harness.transport.pathMark, first)
+        XCTAssertEqual(try mark(), baseline)
 
-        // The watch reports another relay selected: the same kind, another
-        // path. The mark has changed at once, before the main actor has
-        // heard of the report.
-        connection.movePath(to: .relay, identity: "relay two")
-        let afterReport = try XCTUnwrap(harness.transport.pathMark)
-        XCTAssertNotEqual(afterReport, first)
-        XCTAssertEqual(harness.transport.pathMark, afterReport)
+        // A real change after the baseline, reported: the first relay
+        // again. The same kind, another path. The mark has changed at
+        // once, before the main actor has heard of the report.
+        connection.movePath(to: .relay, identity: "relay one")
+        let afterReport = try mark()
+        XCTAssertNotEqual(afterReport, baseline)
+        XCTAssertEqual(try mark(), afterReport)
 
         // Each of two changes reported one after the other counts: out to
         // an address and back, the path is the one it was and the mark is
         // not.
         connection.movePath(to: .ipv6, identity: "address a")
-        connection.movePath(to: .relay, identity: "relay two")
-        let outAndBack = try XCTUnwrap(harness.transport.pathMark)
-        XCTAssertNotEqual(outAndBack, afterReport)
+        connection.movePath(to: .relay, identity: "relay one")
+        let outAndBack = try mark()
         XCTAssertEqual(outAndBack.moves, afterReport.moves + 2)
 
         // Found by a read, with no report yet: another relay again.
-        connection.selectedPathIdentity = "relay one"
-        let afterRead = try XCTUnwrap(harness.transport.pathMark)
-        XCTAssertNotEqual(afterRead, outAndBack)
+        connection.selectedPathIdentity = "relay two"
+        let afterRead = try mark()
+        XCTAssertEqual(afterRead.moves, outAndBack.moves + 1)
         // The report of that change, when it comes, is no second change.
         connection.reportOtherPaths()
-        XCTAssertEqual(harness.transport.pathMark, afterRead)
+        XCTAssertEqual(try mark(), afterRead)
         // Back by a read: it stays a change for every mark taken before.
-        connection.selectedPathIdentity = "relay two"
-        let back = try XCTUnwrap(harness.transport.pathMark)
-        for earlier in [first, afterReport, outAndBack, afterRead] {
+        connection.selectedPathIdentity = "relay one"
+        let back = try mark()
+        for earlier in [baseline, afterReport, outAndBack, afterRead] {
             XCTAssertNotEqual(back, earlier)
         }
 
         // No path selected: no mark, and the one after it is a new one.
         connection.selectedPath = nil
         connection.selectedPathIdentity = nil
-        XCTAssertNil(harness.transport.pathMark)
+        XCTAssertNil(harness.transport.markedPath)
         connection.selectedPath = .relay
-        connection.selectedPathIdentity = "relay two"
-        XCTAssertNotEqual(try XCTUnwrap(harness.transport.pathMark), back)
+        connection.selectedPathIdentity = "relay one"
+        XCTAssertNotEqual(try mark(), back)
 
         // The connection is given up: nothing to mark.
         harness.transport.deselect()
-        XCTAssertNil(harness.transport.pathMark)
+        XCTAssertNil(harness.transport.markedPath)
+    }
+
+    /// The labels a measurement gives its leg are read with the mark, in
+    /// the one observation: they are the marked path's, also while the
+    /// controller has not been told of a move yet.
+    func testAMarkedPathsLabelsAreReadWithItsMark() async throws {
+        let (harness, connection) = try await relayedPath()
+        let relayed = try XCTUnwrap(harness.transport.markedPath)
+        XCTAssertEqual(relayed.path, DirectSelectedPath(kind: .relay, local: nil, rttMs: 90, relayRegion: "euc1"))
+
+        // The connection reaches an address on the same network. Nothing
+        // has been reported: the next read has the new path's labels with
+        // the new mark.
+        connection.selectedPath = .ipv4
+        connection.selectedPathIdentity = "address a"
+        connection.selectedPathDetail = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 3)
+        let direct = try XCTUnwrap(harness.transport.markedPath)
+        XCTAssertNotEqual(direct.mark, relayed.mark)
+        XCTAssertEqual(direct.path, DirectSelectedPath(kind: .ipv4, local: true, rttMs: 3))
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        // The same path a moment later: the same mark, whatever its round
+        // trip is now.
+        connection.selectedPathDetail = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 9)
+        XCTAssertEqual(try XCTUnwrap(harness.transport.markedPath).mark, direct.mark)
+
+        harness.transport.deselect()
     }
 
     /// The same at a measurement's sampling, fenced on the transport's mark
     /// as `measurementLink` fences it: reports about other paths while a
-    /// leg runs keep every sample; another path selected ends the leg with
-    /// what was timed before it.
+    /// leg runs, and a report made before the leg began, keep every sample;
+    /// another path selected ends the leg with what was timed before it.
     func testALegKeepsItsSamplesThroughReportsAboutOtherPathsAndEndsWhenAnotherIsSelected() async throws {
         let (harness, connection) = try await relayedPath()
         let transport = harness.transport
         let sample = DirectMeasure.Sample(elapsed: .milliseconds(20), healthy: true, counts: true)
         let far = { ContinuousClock.now.advanced(by: .seconds(30)) }
 
-        let steady = try XCTUnwrap(transport.pathMark)
+        // The path moved before the leg; the report made before that move
+        // is still to come.
+        connection.selectedPathIdentity = "relay two"
+        let steady = try XCTUnwrap(transport.markedPath).mark
         let kept = await DirectMeasure.sample(
             limits: .standard,
             end: far(),
-            unchanged: { _ in await MainActor.run { transport.pathMark == steady } }
-        ) { _ in
+            unchanged: { _ in await MainActor.run { transport.markedPath?.mark == steady } }
+        ) { index in
+            if index == 1 {
+                // During the first timed request: that earlier report.
+                connection.deliverEarlierReport(of: .relay)
+            }
             // Another path opened and closed during every request.
             connection.reportOtherPaths()
             connection.reportOtherPaths()
@@ -912,16 +954,16 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertEqual(kept.times.count, DirectMeasure.samples)
         XCTAssertNil(kept.error)
 
-        let before = try XCTUnwrap(transport.pathMark)
+        let before = try XCTUnwrap(transport.markedPath).mark
         XCTAssertEqual(before, steady)
         let ended = await DirectMeasure.sample(
             limits: .standard,
             end: far(),
-            unchanged: { _ in await MainActor.run { transport.pathMark == before } }
+            unchanged: { _ in await MainActor.run { transport.markedPath?.mark == before } }
         ) { index in
             if index == 3 {
                 // During the third timed request: another relay.
-                connection.movePath(to: .relay, identity: "relay two")
+                connection.movePath(to: .relay, identity: "relay one")
             }
             return sample
         }

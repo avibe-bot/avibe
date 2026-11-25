@@ -76,7 +76,7 @@ final class DirectIrohBindingTests: XCTestCase {
             pair.client.close()
         }
         let reports = PathReportCount()
-        let watch = try XCTUnwrap(pair.client.watchSelectedPath { _, _ in reports.note() })
+        let watch = try XCTUnwrap(pair.client.watchSelectedPath { _ in reports.note() })
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while reports.count == 0, ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(20))
@@ -90,9 +90,11 @@ final class DirectIrohBindingTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(20))
         }
         if pair.client.selectedPath != nil {
-            let named = try XCTUnwrap(pair.client.selectedPathIdentity)
-            XCTAssertTrue(named.hasPrefix("address "))
-            XCTAssertEqual(pair.client.selectedPathIdentity, named)
+            let read = try XCTUnwrap(pair.client.selectedPathRead)
+            XCTAssertTrue(read.identity.hasPrefix("address "))
+            XCTAssertEqual(pair.client.selectedPathRead?.identity, read.identity)
+            // A path to an address has its labels in the same read.
+            XCTAssertNotNil(read.labels)
         }
         print(
             "[iOS fixture] stage=measure the real binding's path watch reported \(reports.count) time(s);"

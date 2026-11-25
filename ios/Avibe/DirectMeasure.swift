@@ -27,9 +27,12 @@ import Network
 //   path ends that leg: what is left would be another connection's or
 //   another path's numbers.
 // - The port holds a few connections at most and opens one stream over the
-//   link in its whole life: the measurement's. Whatever else on this
-//   device reaches the port gets no handler beyond those few and no stream
-//   at all.
+//   link in its whole life, for the first request for its host that reaches
+//   it. The port cannot tell who asks: another process on this device that
+//   asks first gets that stream, to the instance's ingress, which is where
+//   the App's own listener would have taken it, and the measurement's
+//   request is then refused and its leg fails. Nothing is opened beyond
+//   that one stream, and no handler beyond those few connections.
 
 /// The App's admitted direct or relay link to one instance, for a
 /// measurement only (`DirectPathController.measurementLink`).
@@ -363,9 +366,10 @@ enum DirectMeasure {
     /// `work`'s result if it ended before `deadline`, else `timeout`.
     ///
     /// - The deadline is a point on the continuous clock, and the clock is
-    ///   what decides: `work` is not begun at or after it, and a result
-    ///   that arrives at or after it is `timeout`, whichever of the work
-    ///   and the timer the scheduler ran first.
+    ///   what decides: `work` is not begun at or after it, however late
+    ///   its task is first run, and a result that arrives at or after it
+    ///   is `timeout`, whichever of the work and the timer the scheduler
+    ///   ran first.
     /// - The wait ends at the deadline even if `work` does not end when it
     ///   is cancelled: it is cancelled then and left to finish by itself.
     /// - `work` reporting that its own request timed out is `timeout` too;
@@ -380,6 +384,17 @@ enum DirectMeasure {
         }
         let settled = Settled<Result<Value, Failure>>()
         let working = Task {
+            // This task may first run long after it was made. Asked here,
+            // immediately before the work: nothing is begun for a caller
+            // that has gone, or at or after the deadline.
+            guard !Task.isCancelled else {
+                settled.resume(.failure(.failed))
+                return
+            }
+            guard clock.now < deadline else {
+                settled.resume(.failure(.timeout))
+                return
+            }
             let result: Result<Value, Failure>
             do {
                 result = .success(try await work())
@@ -610,9 +625,10 @@ final class DirectMeasurePort: @unchecked Sendable {
     }
 
     /// How many requests for the link's host it has had so far. A
-    /// measurement's requests all run in the first one's tunnel, and only
-    /// the first is given a stream: a second is a connection made anew, or
-    /// someone else, and is refused.
+    /// measurement's requests all run in one tunnel, and only the first
+    /// request the port has is given a stream, whoever sent it. A second is
+    /// refused: it is the session's connection made anew, or the session's
+    /// own after someone else's came first, and either ends the leg.
     var tunnels: Int {
         lock.withLock { tunnelCount }
     }
