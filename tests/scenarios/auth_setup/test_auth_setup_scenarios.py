@@ -6776,7 +6776,7 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
 
 
 def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-917 — Antigravity HTTP settings save, passive status, ADC check, and API-key removal."""
+    """Scenario: AUTH-SETUP-918 — Antigravity HTTP settings save, passive status, ADC check, and API-key removal."""
     from core import agent_auth_service
     from core.command_runner import SupervisedCommandResult
     from vibe import api, cli_health, internal_client
@@ -6921,7 +6921,7 @@ def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, t
 
 
 def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-918 — -32000 recovery card and explicit probe distinguishing auth, catalog, and inference."""
+    """Scenario: AUTH-SETUP-919 — -32000 recovery card and explicit probe distinguishing auth, catalog, and inference."""
     from modules.agents import acp
     from modules.im import MessageContext
 

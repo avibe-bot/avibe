@@ -1592,7 +1592,7 @@ scenarios:
       it on submits only the form the instance issued and hands the open claim
       to the Devices page. The claim's server side (owner routes, browser
       cookie, return gate, redemption) is the closed loop of AUTH-SETUP-914.
-  - id: AUTH-SETUP-917
+  - id: AUTH-SETUP-918
     name: Antigravity passive status, API-key and Agent Platform ADC settings save, and API-key removal complete through HTTP without inference
     status: covered
     kind: happy_path
@@ -1603,7 +1603,7 @@ scenarios:
       - tests/test_antigravity_auth_and_install.py::test_passive_status_uses_session_list_never_infers_or_exposes_sessions
       - tests/test_antigravity_auth_and_install.py::test_api_key_save_authenticate_and_remove_never_touches_gemini_dir
       - tests/test_antigravity_auth_and_install.py::test_agent_platform_adc_detection_and_gcp_settings
-  - id: AUTH-SETUP-918
+  - id: AUTH-SETUP-919
     name: Antigravity -32000 auth error triggers recovery and explicit connection test separates auth, catalog, and inference
     status: covered
     kind: recovery
