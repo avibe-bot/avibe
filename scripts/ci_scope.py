@@ -172,6 +172,8 @@ def validate_plan(plan: object) -> dict:
             raise ValueError("Narrative-only PR must explicitly skip every producer")
     elif any(jobs[job] != "run" for job in (*FAST_JOBS, *PR_TEST_JOBS)):
         raise ValueError("Non-narrative PR must run every cheap Linux check")
+    if plan['mode'] == 'PR' and jobs['ios-shell'] != 'skip':
+        raise ValueError('The PR simulator is advisory; master requires the real result')
     return plan
 
 
@@ -271,11 +273,13 @@ def main() -> int:
             from scripts.ci_fast_pr import ordinary
 
             fast_only = ordinary(scope)
-            if not fast_only:
-                # Unproven or sensitive inputs retain the full producer set, not
-                # just the subset a filename appeared to affect under old routing.
+            if fast_only:
+                advisory_ios = 'skip'
+            else:
+                # Keep the existing PR simulator advisory on affected/unknown inputs;
+                # it is always a required producer on the full master backstop.
                 plan = {**plan, 'docs_only': False, 'jobs': dict.fromkeys(PRODUCERS, 'run')}
-            advisory_ios = 'skip'
+                plan['jobs']['ios-shell'] = 'skip'
         dispatch = dict.fromkeys(PRODUCERS, 'skip') if fast_only else plan['jobs']
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):

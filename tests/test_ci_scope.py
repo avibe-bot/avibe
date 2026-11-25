@@ -323,8 +323,10 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     routed = dict(line.split('=', 1) for line in output.read_text().splitlines())
     only = path == 'docs/guide.md'
     assert routed['fast_only'] == str(only).lower()
-    assert set(json.loads(routed['dispatch_jobs']).values()) == ({'skip'} if only else {'run'})
-    assert routed['advisory_ios'] == 'skip'
+    dispatch = json.loads(routed['dispatch_jobs'])
+    assert dispatch.pop('ios-shell') == 'skip'
+    assert set(dispatch.values()) == ({'skip'} if only else {'run'})
+    assert routed['advisory_ios'] == ('skip' if only else ios)
     assert json.loads((tmp_path / 'fast-pr-paths.json').read_text()) == [path]
     output.unlink()
     result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
@@ -348,6 +350,33 @@ def test_native_ui_listener_changes_run_on_all_three_operating_systems(path):
 @pytest.mark.parametrize("path", ["vibe/ui_server.py", "vibe/desktop_runtime.py"])
 def test_listener_consumers_alone_do_not_trigger_install_regressions(path):
     assert make_plan("PR", scope(path))["jobs"]["install-upgrade-shards"] == "skip"
+
+
+@pytest.mark.parametrize('source,expected', [
+    ('def test_one(): pass', None), ('# no tests', subprocess.CalledProcessError),
+    ('import pytest\n@pytest.mark.skip\ndef test_skip(): pass', RuntimeError),
+])
+def test_fast_python_requires_at_least_one_executed_test_per_file(tmp_path, monkeypatch, source, expected):
+    from scripts.ci_fast_pr import check_python_file
+
+    monkeypatch.setenv('PYTEST_DISABLE_PLUGIN_AUTOLOAD', '1')
+    file = tmp_path / 'test_selected.py'
+    file.write_text(source)
+    if expected:
+        with pytest.raises(expected):
+            check_python_file(str(file))
+    else:
+        check_python_file(str(file))
+
+
+def test_fast_ui_checks_application_types(monkeypatch):
+    from scripts import ci_fast_pr
+
+    commands = []
+    monkeypatch.setattr(ci_fast_pr, 'check_python_file', lambda case: None)
+    monkeypatch.setattr(ci_fast_pr.subprocess, 'run', lambda cmd, **kwargs: commands.append((cmd, kwargs)))
+    ci_fast_pr.run(['ui/src/components/SidebarResizer.tsx'])
+    assert (['node_modules/.bin/tsc', '-p', 'tsconfig.app.json', '--noEmit'], {'cwd': 'ui', 'check': True}) in commands
 
 
 def test_fast_route_requires_proven_leaf_inputs_and_no_rename_or_deletion():

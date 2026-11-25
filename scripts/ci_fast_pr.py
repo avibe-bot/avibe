@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
+import xml.etree.ElementTree as ET
 
 from scripts.ci_docs_only import Scope
 from scripts.ci_scope import presentation_only
@@ -34,14 +36,27 @@ def ordinary(scope: Scope) -> bool:
     )
 
 
+def check_python_file(case: str) -> None:
+    # A green floor file cannot vouch for another file collecting zero items
+    # or skipping all of them. Each invocation and fresh report is for one file.
+    with TemporaryDirectory() as directory:
+        report = Path(directory) / 'result.xml'
+        subprocess.run([sys.executable, '-m', 'pytest', '-q', f'--junitxml={report}', case], check=True)
+        if not any(all(node.find(kind) is None for kind in ('skipped', 'error', 'failure'))
+                   for node in ET.parse(report).iter('testcase')):
+            raise RuntimeError(f'No passing test executed in {case}')
+
+
 def run(paths: list[str]) -> None:
     subprocess.run(['ruff', 'check', '.'], check=True)
     cases = {'tests/test_repository_guidance.py', 'tests/test_ci_unit_test_shards.py'}
     for path in paths:
         cases.update(PY_CASES.get(path, ()))
-    subprocess.run([sys.executable, '-m', 'pytest', '-q', *sorted(cases)], check=True)
+    for case in sorted(cases):
+        check_python_file(case)
     if any(p.startswith('ui/') for p in paths):
-        for cmd in (['npm', 'run', 'lint'], ['npm', 'run', 'typecheck:tests']):
+        for cmd in (['npm', 'run', 'lint'], ['node_modules/.bin/tsc', '-p', 'tsconfig.app.json', '--noEmit'],
+                    ['npm', 'run', 'typecheck:tests']):
             subprocess.run(cmd, cwd='ui', check=True)
         if any(p.startswith('ui/design/') for p in paths):
             subprocess.run(['npm', 'run', 'typecheck:design'], cwd='ui', check=True)
