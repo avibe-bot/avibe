@@ -31,7 +31,9 @@ Historical runs with no explicit full-backstop certificate are not assumed
 equivalent.
 
 This is the gate for every release tag, stable `v*` and GitHub-only
-`gh-vX.Y.ZrcN` alike, in Stage 1, Stage 2 and `Publish to PyPI`. An RC is cut
+`gh-vX.Y.ZrcN` alike, in Stage 1, Stage 2 and `Publish to PyPI` as defined on
+current `master` (older commits' Stage 1 still accepts the RC pull-request gate;
+see below). An RC is cut
 only from a SHA whose own full `lint` run on `master` (a push run, or a manual
 full run at that exact SHA) completed green. A parent's or a later SHA's green
 run does not count. If the SHA's run is red or cancelled, rerun that same run or
@@ -52,8 +54,9 @@ GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
 
 `ci_release_backstop.py` still has an `--rc-pull-request-gate` option, which
 reports whether an RC tag's merged pull request passed `master`'s required
-checks. No release workflow passes it; it is only for reading that state by
-hand.
+checks. No release workflow on current `master` passes it; Stage 1 as defined
+on commits before this rule still does, which the mandatory pre-tag check above
+covers.
 
 ### Before pushing the tag
 
