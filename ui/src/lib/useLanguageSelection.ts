@@ -228,6 +228,9 @@ export const adoptPersistedLanguage = (held: LanguageHost, code: unknown): void 
   if (operation.picks > 0) return;
   if (code === becoming(host)) return;
   ask(host, operation, code);
+  // The instance's saved language is a stored choice, not a detection: keep it
+  // so the next load starts in it rather than in the browser's language.
+  rememberLanguageChoice(code);
 };
 
 /**
@@ -276,9 +279,14 @@ export const useLanguageSelection = (): LanguageSelection => {
     void Promise.resolve(i18n.loadLanguages([...APP_LANGUAGES])).catch(() => undefined);
   }, [i18n]);
 
-  const select = (code: string): Promise<void> => (
-    code === becoming(instanceOf(i18n)) ? Promise.resolve() : selectLanguage(i18n, code)
-  );
+  const select = (code: string): Promise<void> => {
+    if (code !== becoming(instanceOf(i18n))) return selectLanguage(i18n, code);
+    // Picking the language already on screen changes nothing here, but it is
+    // still the reader's choice: from now on this browser keeps it instead of
+    // following its environment.
+    rememberLanguageChoice(code);
+    return Promise.resolve();
+  };
 
   return { languages, current, select };
 };

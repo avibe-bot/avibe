@@ -110,3 +110,24 @@ describe('the language before the reader picks one', () => {
     expect(window.localStorage.getItem('i18nextLng')).toBe('en');
   });
 });
+
+describe('the instance language an owner\'s browser adopts', () => {
+  it('is kept, so the next load starts in it', async () => {
+    environment('en-US');
+    const i18n = await open();
+    const { adoptPersistedLanguage } = await import('../lib/useLanguageSelection');
+    adoptPersistedLanguage(i18n, 'zh');
+
+    await vi.waitFor(() => expect(i18n.language).toBe('zh'));
+    expect(window.localStorage.getItem('i18nextLng')).toBe('zh');
+  });
+
+  it('stores nothing when it is the language the browser already shows', async () => {
+    environment('zh-CN');
+    const i18n = await open();
+    const { adoptPersistedLanguage } = await import('../lib/useLanguageSelection');
+    adoptPersistedLanguage(i18n, 'zh');
+
+    expect(window.localStorage.getItem('i18nextLng')).toBeNull();
+  });
+});
