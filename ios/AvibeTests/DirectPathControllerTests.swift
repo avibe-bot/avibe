@@ -358,6 +358,71 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testPendingStrictCONNECTRecoversOnRelayWithoutOpeningPublic() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(test: self)
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        let controller = harness.controller
+        try await harness.signIn()
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.currentPath = .ipv6
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        harness.transport.streams.setMode(.hang)
+        let client = LoopbackClient(port: try harness.listenerPort(since: listening))
+        defer { client.close() }
+        try await client.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        try await eventually { harness.transport.streams.attempts == 1 }
+        harness.transport.report(.verifying, for: target)
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        harness.transport.streams.setMode(.open)
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let recovered = try await harness.transport.streams.waitForStream(count: 1)
+        recovered.instanceSends(Data(established.utf8))
+        let answer = try await client.receive(count: established.utf8.count)
+        XCTAssertEqual(answer, Data(established.utf8))
+        XCTAssertEqual(harness.publicOrigin.streams.attempts, 0)
+        XCTAssertEqual(controller.strictFailureCount(forInstanceURL: url), 0)
+    }
+
+    @MainActor
+    func testFailedForegroundRebindHoldsOnlyStrictHostAndReturnBootstrapsAgain() async throws {
+        let harness = try Harness(timing: .recovering, test: self)
+        let controller = harness.controller
+        try await harness.signIn()
+        try await harness.select("instance-2")
+        let automatic = try XCTUnwrap(harness.lastOpened).instance.url
+        try await harness.select("instance-1")
+        let url = try XCTUnwrap(harness.lastOpened).instance.url
+        let authority = try XCTUnwrap(DirectAuthority(instanceURL: url))
+        let first = try XCTUnwrap(harness.transport.selections.last)
+        controller.setDirectOnly(true, forInstanceURL: url)
+        harness.transport.report(.usable(generation: "g1"), for: first)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        harness.enterBackground()
+        try await eventually { controller.listenerState == .closedForBackground }
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        _ = try await harness.enterForegroundFailingItsBind(
+            binding: DirectListenerFailureCause(.waiting, code: ENETDOWN),
+            ready: DirectListenerFailureCause(.socket, code: ENETDOWN)
+        )
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertEqual(controller.loadGate(forInstanceURL: automatic), .open)
+        try await eventually { controller.listenerState == .ready && harness.transport.selections.last != first }
+        let bootstrap = try XCTUnwrap(controller.plan(for: authority))
+        XCTAssertNil(bootstrap.openDirect)
+        XCTAssertNotNil(bootstrap.openPublic)
+        harness.transport.report(.usable(generation: "old"), for: first)
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        harness.transport.report(.usable(generation: "new"), for: try XCTUnwrap(harness.transport.selections.last))
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertEqual(controller.strictFailureCount(forInstanceURL: url), 0)
+    }
+
+    @MainActor
     func testOnlyAnActualUnroutedLoadNeedsRelaunch() throws {
         let harness = try Harness(test: self)
         let first = try XCTUnwrap(URL(string: "https://\(one)"))
