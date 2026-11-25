@@ -247,6 +247,53 @@ describe('ShowPageVoiceDictation', () => {
     dictation.abort();
   });
 
+  it('records on the microphone its press opened, asking for none of its own', async () => {
+    const { stream, stop } = fakeStream();
+    const getUserMedia = vi.fn(async () => fakeStream().stream);
+    let options: VoiceRecordingPipelineOptions | undefined;
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold', stream: Promise.resolve(stream) }, {
+      getUserMedia,
+      createRealtime: () => ({
+        start: async () => undefined,
+        sendPcm: vi.fn(() => true),
+        finish: async () => ({ text: '', cleanup: 'success' as const }),
+        abort: vi.fn(),
+      }),
+      createPipeline: (pipelineOptions) => {
+        options = pipelineOptions;
+        return { start: async () => true, finish: vi.fn(), abort: vi.fn() };
+      },
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    await dictation.start();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(options?.stream).toBe(stream);
+    // Ready when the take began: the trace's wait for the microphone is about nothing.
+    expect(options?.trace?.toEvent('sent').micMs).toBeLessThan(50);
+    expect(stop).not.toHaveBeenCalled();
+    dictation.abort();
+  });
+
+  it('closes the microphone its press opened when the take ends before using it', async () => {
+    const { stream, stop } = fakeStream();
+    const getUserMedia = vi.fn(async () => fakeStream().stream);
+    const createPipeline = vi.fn();
+    const dictation = new ShowPageVoiceDictation({ before: '', after: '', entry: 'hold', stream: Promise.resolve(stream) }, {
+      getUserMedia,
+      createPipeline,
+      createQueue: () => ({ enqueue: async () => undefined }),
+    });
+
+    const starting = dictation.start();
+    dictation.abort();
+    await expect(starting).rejects.toMatchObject({ code: 'cancelled' });
+    await Promise.resolve();
+    expect(stop).toHaveBeenCalled();
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(createPipeline).not.toHaveBeenCalled();
+  });
+
   it('closes a microphone granted after the take was cancelled, and frees the capture', async () => {
     // A permission alert can answer after the press that asked has ended.
     const { stream, stop } = fakeStream();
