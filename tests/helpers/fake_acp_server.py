@@ -369,6 +369,51 @@ class FakeAcpServer:
             )
             return
 
+        if method == "session/fork":
+            session_caps = self._agent_capabilities.get("sessionCapabilities")
+            if not isinstance(session_caps, dict) or "fork" not in session_caps:
+                self._send_error(req_id, -32601, "Method not found: session/fork")
+                return
+            source = self._get_session(req_id, params.get("sessionId"))
+            if source is None:
+                return
+            session_num = self._state["next_session_num"]
+            self._state["next_session_num"] = session_num + 1
+            session_id = f"sess-{session_num}"
+            config_options = _deep_copy_json(source["configOptions"])
+            forked = {
+                "sessionId": session_id,
+                "cwd": params.get("cwd", source["cwd"]),
+                "mcpServers": params.get("mcpServers", []),
+                "additionalDirectories": params.get(
+                    "additionalDirectories",
+                    _deep_copy_json(source.get("additionalDirectories", [])),
+                ),
+                "configOptions": config_options,
+                "mode": source["mode"],
+                "model": source["model"],
+                "title": source["title"],
+                "history": _deep_copy_json(source["history"]),
+            }
+            self._state["sessions"][session_id] = forked
+            self._save_state()
+            self._send_result(
+                req_id,
+                {
+                    "sessionId": session_id,
+                    "configOptions": _deep_copy_json(config_options),
+                    "modes": {
+                        "currentModeId": forked["mode"],
+                        "availableModes": [{"id": m, "name": m.title()} for m in DEFAULT_MODES],
+                    },
+                    "models": {
+                        "currentModelId": forked["model"],
+                        "availableModels": [{"modelId": m, "name": m} for m in DEFAULT_MODELS],
+                    },
+                },
+            )
+            return
+
         if method == "session/resume":
             session = self._get_session(req_id, params.get("sessionId"))
             if session is None:

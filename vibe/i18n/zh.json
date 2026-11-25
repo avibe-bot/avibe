@@ -569,6 +569,7 @@
     "codexCliNotFound": "找不到 Codex CLI，因此 Codex 无法启动。请在设置的“后端”页面安装 Codex 或设置其 CLI 路径，然后重试这条输入。",
     "agentRuntimeRetired": "{agent} 已关闭或 Avibe 正在停止，这条消息没有开始执行。请在 {agent} 启用后重新发送。",
     "antigravityAuthRequired": "Antigravity 需要身份验证（ACP {code}）：{detail}",
+    "antigravityCapabilityMissing": "Antigravity ACP 服务器未声明 {capability} 能力，Avibe 无法附加 Agent 指令和工具策略规则。请升级 Antigravity CLI（agy）或启用 {capability} 支持后重试。",
     "antigravityCliNotFound": "找不到 Antigravity CLI：{detail}",
     "antigravityLaunchFailed": "Antigravity CLI 启动失败：{detail}",
     "antigravityError": "Antigravity 错误：{detail}",

@@ -2362,3 +2362,455 @@ async def test_unrecoverable_effort_override_after_eviction_and_restart_fails_ex
         assert not any(r.get("method") == "session/prompt" for r in rpcs4)
     finally:
         await agent2.shutdown_runtime()
+
+
+# ---------------------------------------------------------------------------
+# 18. Native fork preserves reserved boundary when source advances
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_native_fork_preserves_reserved_boundary_and_falls_back_when_source_advances(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import select
+
+    from config import paths
+    from core.services.session_fork import (
+        FORK_HANDOFF_MODE_NATIVE,
+        FORK_HANDOFF_MODE_SUMMARY,
+        can_use_native_tip_fork,
+        reserve_forked_session,
+    )
+    from core.vibe_agents import VibeAgentStore
+    from storage import messages_service
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from storage.models import agent_sessions, scope_settings
+    from storage.sessions_service import SQLiteSessionsService
+    from storage.settings_service import upsert_scope
+    from tests.helpers.antigravity_harness import (
+        make_acp_capabilities,
+        make_agent_harness,
+        make_request,
+    )
+
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    ensure_sqlite_state(primary_platform="avibe")
+    db_path = paths.get_sqlite_state_path()
+    SQLiteSessionsService(db_path).close()
+
+    store = VibeAgentStore(db_path)
+    try:
+        agy_worker = store.create(name="agy-boundary-worker", backend="antigravity", model="model-alpha")
+    finally:
+        store.close()
+
+    engine = create_sqlite_engine(db_path)
+    try:
+        with engine.begin() as conn:
+            scope_id = upsert_scope(
+                conn,
+                platform="avibe",
+                scope_type="project",
+                native_id="proj_agy_fork_boundary",
+                now="2026-11-24T00:00:00Z",
+            )
+            conn.execute(
+                scope_settings.insert().values(
+                    scope_id=scope_id,
+                    enabled=1,
+                    role=None,
+                    workdir=str(workdir),
+                    agent_name="agy-boundary-worker",
+                    agent_backend="antigravity",
+                    agent_variant="antigravity",
+                    model="model-alpha",
+                    reasoning_effort=None,
+                    require_mention=None,
+                    settings_version=1,
+                    settings_json="{}",
+                    created_at="2026-11-24T00:00:00Z",
+                    updated_at="2026-11-24T00:00:00Z",
+                )
+            )
+            source_session_id = create_agent_session_row(
+                conn,
+                scope_id=scope_id,
+                session_anchor=None,
+                agent_backend="antigravity",
+                agent_variant="antigravity",
+                agent_id=agy_worker.id,
+                agent_name="agy-boundary-worker",
+                model="model-alpha",
+                workdir=str(workdir),
+                native_session_id="sess-1",
+                title="Source Antigravity Session",
+            )
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_session_id,
+                platform="avibe",
+                author="user",
+                message_type="user",
+                text="PRE-FORK-USER-FACT: keep alpha",
+            )
+            messages_service.append(
+                conn,
+                scope_id=scope_id,
+                session_id=source_session_id,
+                platform="avibe",
+                author="agent",
+                message_type="result",
+                text="PRE-FORK-AGENT-FACT: acknowledged alpha",
+            )
+    finally:
+        engine.dispose()
+
+    def _read_metadata(session_id: str) -> dict[str, Any]:
+        eng = create_sqlite_engine(db_path)
+        try:
+            with eng.connect() as conn:
+                row = conn.execute(
+                    select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == session_id)
+                ).mappings().one()
+                return json.loads(row["metadata_json"] or "{}")
+        finally:
+            eng.dispose()
+
+    # Track that boundary checks execute off the controller event loop.
+    loop_tid = threading.get_ident()
+    check_tids: list[int] = []
+    orig_check = agy_agent_module.can_use_native_tip_fork
+
+    def _recording_check(*args: Any, **kwargs: Any) -> bool:
+        check_tids.append(threading.get_ident())
+        return orig_check(*args, **kwargs)
+
+    monkeypatch.setattr(agy_agent_module, "can_use_native_tip_fork", _recording_check)
+
+    # Reserve two forks at the exact same pre-advance boundary.
+    unadvanced_fork = reserve_forked_session(source_session_id=source_session_id, db_path=db_path)
+    advanced_fork = reserve_forked_session(source_session_id=source_session_id, db_path=db_path)
+    assert can_use_native_tip_fork(unadvanced_fork.fork.to_metadata(), db_path=db_path) is True
+    assert (
+        can_use_native_tip_fork(
+            {**unadvanced_fork.fork.to_metadata(), "trim_latest_running_turn": True},
+            db_path=db_path,
+        )
+        is False
+    )
+    assert (
+        can_use_native_tip_fork(
+            {"source_session_id": "missing-ses", "source_native_session_id": "sess-1", "source_backend": "antigravity"},
+            db_path=tmp_path / "nonexistent.sqlite3",
+        )
+        is True
+    )
+
+    async with make_agent_harness(
+        tmp_path,
+        workdir=workdir,
+        record_rpc=True,
+        server_config={"agentCapabilities": make_acp_capabilities(fork=True, logout=False)},
+        name="fork-boundary",
+    ) as h:
+        # Seed the source native session ("sess-1") in FakeAcpServer state with pre-fork history.
+        h.state_file.write_text(
+            json.dumps(
+                {
+                    "authenticated": True,
+                    "next_session_num": 2,
+                    "sessions": {
+                        "sess-1": {
+                            "sessionId": "sess-1",
+                            "cwd": str(workdir),
+                            "mcpServers": [],
+                            "additionalDirectories": [],
+                            "configOptions": [
+                                {
+                                    "id": "model",
+                                    "name": "Model",
+                                    "category": "model",
+                                    "type": "select",
+                                    "currentValue": "model-alpha",
+                                    "options": [
+                                        {"value": "model-alpha", "name": "Model Alpha"},
+                                        {"value": "model-beta", "name": "Model Beta"},
+                                    ],
+                                }
+                            ],
+                            "mode": "code",
+                            "model": "model-alpha",
+                            "title": "Source",
+                            "history": [
+                                {"prompt": "PRE-FORK-NATIVE-HISTORY", "reply": "ok"},
+                            ],
+                        }
+                    },
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+        # Case 1: Source has NOT advanced -> native session/fork IS used.
+        target_unadvanced = {
+            "id": unadvanced_fork.session_id,
+            "agent_backend": "antigravity",
+            "native_session_id": "",
+            "native_session_fork": unadvanced_fork.fork.to_metadata(),
+        }
+        await h.agent.handle_message(
+            make_request(
+                message="recall",
+                workdir=workdir,
+                base_session_id=unadvanced_fork.session_id,
+                model="model-alpha",
+                platform_specific={"agent_session_target": target_unadvanced},
+            )
+        )
+        results1 = h.controller.events("result")
+        assert len(results1) == 1
+        assert not results1[0][2].get("is_error")
+        assert "PRE-FORK-NATIVE-HISTORY" in results1[0][1]
+        assert any(r.get("method") == "session/fork" for r in h.rpcs())
+        assert not any(r.get("method") == "session/new" for r in h.rpcs())
+        assert _read_metadata(unadvanced_fork.session_id).get("fork_handoff_mode") == FORK_HANDOFF_MODE_NATIVE
+
+        # Now advance the source session AFTER reservation (both SQLite transcript and native state).
+        engine = create_sqlite_engine(db_path)
+        try:
+            with engine.begin() as conn:
+                messages_service.append(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=source_session_id,
+                    platform="avibe",
+                    author="user",
+                    message_type="user",
+                    text="POST-FORK-SECRET-LEAK: must not appear in child",
+                )
+                messages_service.append(
+                    conn,
+                    scope_id=scope_id,
+                    session_id=source_session_id,
+                    platform="avibe",
+                    author="agent",
+                    message_type="result",
+                    text="POST-FORK-AGENT-LEAK: must not appear in child",
+                )
+        finally:
+            engine.dispose()
+
+        assert can_use_native_tip_fork(advanced_fork.fork.to_metadata(), db_path=db_path) is False
+
+        # Case 2: Source HAS advanced -> MUST skip session/fork and fall back to session/new + bounded summary handoff.
+        assert h.rpc_log is not None
+        h.rpc_log.unlink(missing_ok=True)
+        h.controller.emitted.clear()
+
+        target_advanced = {
+            "id": advanced_fork.session_id,
+            "agent_backend": "antigravity",
+            "native_session_id": "",
+            "native_session_fork": advanced_fork.fork.to_metadata(),
+        }
+        await h.agent.handle_message(
+            make_request(
+                message="continue from reserved boundary",
+                workdir=workdir,
+                base_session_id=advanced_fork.session_id,
+                model="model-alpha",
+                platform_specific={"agent_session_target": target_advanced},
+            )
+        )
+        results2 = h.controller.events("result")
+        assert len(results2) == 1
+        assert not results2[0][2].get("is_error")
+
+        methods2 = [r.get("method") for r in h.rpcs()]
+        assert "session/fork" not in methods2
+        assert "session/new" in methods2
+
+        prompt_rpcs = h.rpcs("session/prompt")
+        assert len(prompt_rpcs) == 1
+        sent_text = "\n".join(
+            block.get("text", "")
+            for block in prompt_rpcs[0]["params"]["prompt"]
+            if block.get("type") == "text"
+        )
+        assert "[Avibe handoff]" in sent_text
+        assert "PRE-FORK-USER-FACT: keep alpha" in sent_text
+        assert "PRE-FORK-AGENT-FACT: acknowledged alpha" in sent_text
+        assert "POST-FORK-SECRET-LEAK" not in sent_text
+        assert "POST-FORK-AGENT-LEAK" not in sent_text
+        assert _read_metadata(advanced_fork.session_id).get("fork_handoff_mode") == FORK_HANDOFF_MODE_SUMMARY
+
+    assert check_tids and all(tid != loop_tid for tid in check_tids)
+
+
+# ---------------------------------------------------------------------------
+# 19. Missing sessionCapabilities.additionalDirectories fails explicitly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("language", "expected_snippet"),
+    [
+        ("en", "sessionCapabilities.additionalDirectories"),
+        ("zh", "sessionCapabilities.additionalDirectories"),
+    ],
+)
+async def test_missing_additional_directories_capability_refuses_turn_explicitly(
+    tmp_path: Path,
+    language: str,
+    expected_snippet: str,
+) -> None:
+    from core.native_dispatch_phase import (
+        DISPATCH_PHASE_PREWRITE,
+        prewrite_failure_evidence,
+        set_dispatch_phase,
+    )
+    from tests.helpers.antigravity_harness import (
+        make_acp_capabilities,
+        make_agent_harness,
+        make_request,
+    )
+
+    caps_without_add_dirs = make_acp_capabilities(additional_directories=False)
+    async with make_agent_harness(
+        tmp_path,
+        record_rpc=True,
+        language=language,
+        server_config={"agentCapabilities": caps_without_add_dirs},
+        name=f"no-add-dirs-{language}",
+    ) as h:
+        req = make_request(
+            message="do not run without rules",
+            workdir=h.workdir,
+            model="model-alpha",
+        )
+        req.vibe_agent_system_prompt = "STRICT AGENT INSTRUCTION: never run without this."
+        set_dispatch_phase(req.context, DISPATCH_PHASE_PREWRITE)
+
+        await h.agent.handle_message(req)
+
+        # Neither session/new nor session/prompt may ever be sent when rules cannot be attached.
+        methods = [r.get("method") for r in h.rpcs()]
+        assert "initialize" in methods
+        assert "session/new" not in methods
+        assert "session/resume" not in methods
+        assert "session/fork" not in methods
+        assert "session/prompt" not in methods
+
+        # No runtime session may be cached after capability refusal.
+        assert h.agent._sessions == {}
+
+        # Failure is surfaced explicitly with actionable capability detail and prewrite reason.
+        notifies = h.controller.events("notify")
+        assert len(notifies) == 1
+        assert expected_snippet in notifies[0][1]
+        assert prewrite_failure_evidence(req.context).get("reason") == "capability_missing"
+
+
+# ---------------------------------------------------------------------------
+# 20. Antigravity native-agent import preserves thought_level / thoughtLevel
+# ---------------------------------------------------------------------------
+
+
+def test_antigravity_native_agent_import_preserves_thought_level_aliases(tmp_path: Path) -> None:
+    from config import paths
+    from core.vibe_agents import VibeAgentStore, parse_agent_file
+    from modules.agents.subagent_router import load_antigravity_subagent
+    from storage.importer import ensure_sqlite_state
+
+    ensure_sqlite_state(primary_platform="avibe")
+    agents_dir = tmp_path / "workspace" / ".agents" / "agents"
+    agents_dir.mkdir(parents=True)
+
+    snake_file = agents_dir / "snake-reviewer.md"
+    snake_file.write_text(
+        "---\n"
+        "name: snake-reviewer\n"
+        "description: Snake thought level\n"
+        "model: model-alpha\n"
+        "thought_level: high\n"
+        "custom_tag: keep-me\n"
+        "---\n\n"
+        "Review carefully.\n",
+        encoding="utf-8",
+    )
+
+    camel_file = agents_dir / "camel-reviewer.md"
+    camel_file.write_text(
+        "---\n"
+        "name: camel-reviewer\n"
+        "description: Camel thought level\n"
+        "model: model-beta\n"
+        "thoughtLevel: low\n"
+        "---\n\n"
+        "Fast check.\n",
+        encoding="utf-8",
+    )
+
+    both_file = agents_dir / "precedence-reviewer.md"
+    both_file.write_text(
+        "---\n"
+        "name: precedence-reviewer\n"
+        "model: model-alpha\n"
+        "reasoning_effort: medium\n"
+        "thought_level: high\n"
+        "thoughtLevel: low\n"
+        "---\n\n"
+        "Precedence test.\n",
+        encoding="utf-8",
+    )
+
+    # 1. parse_agent_file(..., backend="antigravity") preserves effort aliases and strips them from metadata.
+    snake_cand = parse_agent_file(snake_file, backend="antigravity")
+    assert snake_cand.reasoning_effort == "high"
+    assert snake_cand.metadata == {"custom_tag": "keep-me"}
+
+    camel_cand = parse_agent_file(camel_file, backend="antigravity")
+    assert camel_cand.reasoning_effort == "low"
+    assert camel_cand.metadata == {}
+
+    both_cand = parse_agent_file(both_file, backend="antigravity")
+    assert both_cand.reasoning_effort == "medium"
+    assert "thought_level" not in both_cand.metadata
+    assert "thoughtLevel" not in both_cand.metadata
+
+    # 2. load_antigravity_subagent() agrees with parse_agent_file() on all three definitions.
+    for cand in (snake_cand, camel_cand, both_cand):
+        subagent = load_antigravity_subagent(cand.name, project_root=tmp_path / "workspace")
+        assert subagent is not None
+        assert subagent.reasoning_effort == cand.reasoning_effort
+        assert subagent.model == cand.model
+        assert subagent.description == cand.description
+
+    # 3. import_candidates() persists reasoning_effort into VibeAgentStore without leaking alias metadata.
+    store = VibeAgentStore(paths.get_sqlite_state_path())
+    try:
+        result = store.import_candidates([snake_cand, camel_cand, both_cand])
+        assert result.skipped == []
+        by_name = {agent.name: agent for agent in result.imported}
+        assert by_name["snake-reviewer"].reasoning_effort == "high"
+        assert by_name["snake-reviewer"].metadata.get("custom_tag") == "keep-me"
+        assert "thought_level" not in by_name["snake-reviewer"].metadata
+        assert by_name["camel-reviewer"].reasoning_effort == "low"
+        assert "thoughtLevel" not in by_name["camel-reviewer"].metadata
+        assert by_name["precedence-reviewer"].reasoning_effort == "medium"
+        assert "thought_level" not in by_name["precedence-reviewer"].metadata
+    finally:
+        store.close()
+
+    # 4. Non-Antigravity backends do not silently consume thought_level.
+    claude_cand = parse_agent_file(snake_file, backend="claude")
+    assert claude_cand.reasoning_effort is None
+    assert claude_cand.metadata.get("thought_level") == "high"

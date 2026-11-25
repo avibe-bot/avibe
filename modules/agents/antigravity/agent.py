@@ -63,6 +63,7 @@ from core.services.session_fork import (
     FORK_HANDOFF_MODE_NATIVE,
     FORK_HANDOFF_MODE_SUMMARY,
     build_fork_summary_handoff_text,
+    can_use_native_tip_fork,
     clear_pending_fork_handoff,
     pending_native_fork,
     pending_summary_fork_handoff_for_session,
@@ -190,6 +191,14 @@ class AntigravityResumeUnavailableError(RuntimeError):
             "not starting an empty conversation to avoid silently losing context."
         )
         super().__init__(f"{msg} ({detail})" if detail else msg)
+
+
+class AntigravityCapabilityError(RuntimeError):
+    """Raised when the Antigravity ACP peer lacks a capability Avibe requires."""
+
+    def __init__(self, capability: str, message: str) -> None:
+        self.capability = capability
+        super().__init__(message)
 
 
 def _config_cli_path(config: Any) -> str:
@@ -921,7 +930,17 @@ class AntigravityAgent(BaseAgent):
                     client,
                     _config_str(self.antigravity_config, "auth_mode"),
                 )
-                add_dirs = list(spec.rules_dirs) if (spec.rules_dirs and client.supports_additional_directories) else None
+                if spec.rules_dirs and not client.supports_additional_directories:
+                    raise AntigravityCapabilityError(
+                        "sessionCapabilities.additionalDirectories",
+                        (
+                            "Antigravity ACP server does not advertise "
+                            "sessionCapabilities.additionalDirectories, so Avibe cannot attach "
+                            "Agent instructions and tool-policy rules. Upgrade the Antigravity CLI "
+                            "(agy) or enable additionalDirectories support before retrying."
+                        ),
+                    )
+                add_dirs = list(spec.rules_dirs) if spec.rules_dirs else None
 
                 use_backend_anchor = self._uses_namespaced_backend_session(
                     request.context,
@@ -961,20 +980,33 @@ class AntigravityAgent(BaseAgent):
                 else:
                     resp = None
                     if pending_fork is not None and client.supports_fork:
-                        fork_params: dict[str, Any] = {
-                            "sessionId": pending_fork["source_native_session_id"],
-                            "cwd": request.working_path,
-                            "mcpServers": [],
-                        }
-                        if add_dirs is not None:
-                            fork_params["additionalDirectories"] = add_dirs
-                        try:
-                            resp = await client.send_request("session/fork", fork_params)
-                            fork_handoff_mode = FORK_HANDOFF_MODE_NATIVE
-                        except AcpRpcError as exc:
-                            if exc.code != JSONRPC_METHOD_NOT_FOUND:
-                                raise
-                            resp = None
+                        can_native_fork = await asyncio.to_thread(
+                            can_use_native_tip_fork,
+                            pending_fork,
+                        )
+                        if not can_native_fork:
+                            logger.info(
+                                "Skipping native Antigravity session/fork for %s because source %s "
+                                "advanced past reserved boundary %s; falling back to bounded summary handoff",
+                                agent_session_id or runtime_key,
+                                pending_fork.get("source_session_id"),
+                                pending_fork.get("source_message_id"),
+                            )
+                        else:
+                            fork_params: dict[str, Any] = {
+                                "sessionId": pending_fork["source_native_session_id"],
+                                "cwd": request.working_path,
+                                "mcpServers": [],
+                            }
+                            if add_dirs is not None:
+                                fork_params["additionalDirectories"] = add_dirs
+                            try:
+                                resp = await client.send_request("session/fork", fork_params)
+                                fork_handoff_mode = FORK_HANDOFF_MODE_NATIVE
+                            except AcpRpcError as exc:
+                                if exc.code != JSONRPC_METHOD_NOT_FOUND:
+                                    raise
+                                resp = None
 
                     if resp is None:
                         resp = await client.session_new(
@@ -1323,6 +1355,14 @@ class AntigravityAgent(BaseAgent):
 
     @staticmethod
     def _classify_failure(error: Exception, *, language: str = "en") -> tuple[str, str, str | None]:
+        if isinstance(error, AntigravityCapabilityError):
+            diagnostic = str(error)
+            display = i18n_t(
+                "error.antigravityCapabilityMissing",
+                language,
+                capability=error.capability,
+            )
+            return diagnostic, f"❌ {display}", "capability_missing"
         if isinstance(error, AcpRpcError) and error.code == ACP_AUTH_REQUIRED:
             diagnostic = f"Antigravity authentication required (ACP {error.code}): {error.message}"
             display = i18n_t(

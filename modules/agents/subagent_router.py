@@ -314,11 +314,13 @@ def _parse_antigravity_agent_definition(path: Path, source: str) -> Optional[Sub
     description = _clean_optional_str(data.get("description"))
     developer_instructions = _clean_optional_str(body)
     model = _clean_optional_str(data.get("model"))
-    reasoning_effort = _clean_optional_str(
-        data.get("thought_level")
-        or data.get("thoughtLevel")
-        or data.get("reasoning_effort")
-        or data.get("reasoningEffort")
+    reasoning_effort = next(
+        (
+            cleaned
+            for key in ("reasoning_effort", "reasoningEffort", "thought_level", "thoughtLevel")
+            if (cleaned := _clean_optional_str(data.get(key))) is not None
+        ),
+        None,
     )
 
     return SubagentDefinition(

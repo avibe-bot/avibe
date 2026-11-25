@@ -614,6 +614,140 @@ def pending_native_fork_source(context: Any, backend: str) -> Optional[str]:
     return str(fork.get("source_native_session_id") or "").strip() or None
 
 
+def _fork_source_state_on_conn(
+    conn: Any,
+    source_session_id: str,
+    source_message_id: str,
+) -> Optional[ForkSourceState]:
+    """Inspect source transcript state relative to ``source_message_id`` on an open connection."""
+
+    from sqlalchemy import and_, func, or_, select
+
+    from storage.messages_service import transcript_order_value
+    from storage.models import messages, session_turns
+
+    anchor = conn.execute(
+        select(
+            transcript_order_value().label("transcript_order_at"),
+            messages.c.id,
+            messages.c.author,
+            messages.c.type,
+            messages.c.metadata_json,
+        )
+        .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
+        .limit(1)
+    ).mappings().first()
+    if anchor is None:
+        return None
+    anchor_order_at = anchor["transcript_order_at"]
+    anchor_id = anchor["id"]
+    after_anchor = (
+        (transcript_order_value() > anchor_order_at)
+        | ((transcript_order_value() == anchor_order_at) & (messages.c.id > anchor_id))
+    )
+    latest_after_anchor = conn.execute(
+        select(messages.c.author, messages.c.type, messages.c.metadata_json)
+        .where(
+            messages.c.session_id == source_session_id,
+            or_(
+                messages.c.type.in_(
+                    [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
+                ),
+                *(
+                    and_(
+                        messages.c.type == message_type,
+                        func.json_extract(messages.c.metadata_json, "$.event").in_(
+                            spec_for(message_type)["terminalWhenEvents"]
+                        ),
+                    )
+                    for message_type in _CONDITIONAL_TERMINAL_TYPES
+                ),
+            ),
+            after_anchor,
+            ~and_(
+                messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
+                func.coalesce(
+                    func.json_extract(messages.c.metadata_json, "$.detached"),
+                    0,
+                )
+                == 1,
+            ),
+            ~and_(
+                messages.c.type == "notify",
+                func.coalesce(
+                    func.json_extract(messages.c.metadata_json, "$.event"), ""
+                ) == "backend_failure",
+                func.coalesce(
+                    func.json_extract(messages.c.metadata_json, "$.replayed"), 0
+                ) == 1,
+            ),
+        )
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    latest_after_anchor_author = (
+        str(latest_after_anchor["author"] or "").strip() if latest_after_anchor else ""
+    )
+    latest_after_anchor_type = (
+        str(latest_after_anchor["type"] or "").strip() if latest_after_anchor else ""
+    )
+    latest_after_anchor_metadata = _load_metadata(
+        latest_after_anchor["metadata_json"] if latest_after_anchor else None
+    )
+    latest_after_anchor_role = activity_role_for(
+        latest_after_anchor_type,
+        latest_after_anchor_metadata,
+    )
+    has_terminal_agent_output_after_anchor = latest_after_anchor_author == "agent" and (
+        latest_after_anchor_role == "terminal"
+        or (
+            latest_after_anchor_role == "reply"
+            # A reply ends nothing while its Turn still runs: input steered
+            # into it is being answered. IM Turns have no durable row, so
+            # their reply stays the latest evidence.
+            and conn.execute(
+                select(session_turns.c.id)
+                .where(
+                    session_turns.c.session_id == source_session_id,
+                    session_turns.c.state.in_(("starting", "active")),
+                )
+                .limit(1)
+            ).first()
+            is None
+        )
+    )
+    has_input_turn_after_anchor = (
+        conn.execute(
+            select(messages.c.id)
+            .where(
+                messages.c.session_id == source_session_id,
+                or_(
+                    *(
+                        and_(messages.c.author == author, messages.c.type == message_type)
+                        for author, message_type in INPUT_TURN_AUTHOR_TYPES
+                    )
+                ),
+                after_anchor,
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
+    return ForkSourceState(
+        anchor_author=str(anchor["author"] or "").strip() or None,
+        anchor_type=str(anchor["type"] or "").strip() or None,
+        latest_after_anchor_author=latest_after_anchor_author or None,
+        latest_after_anchor_type=latest_after_anchor_type or None,
+        has_messages_after_anchor=latest_after_anchor is not None,
+        has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
+        has_input_turn_after_anchor=has_input_turn_after_anchor,
+        anchor_activity_role=activity_role_for(
+            str(anchor["type"] or "").strip(),
+            _load_metadata(anchor["metadata_json"]),
+        ),
+    )
+
+
 def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     """Return source transcript state relative to the fork reservation anchor."""
 
@@ -624,137 +758,15 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     if not source_session_id or not source_message_id:
         return ForkSourceState()
 
-    from sqlalchemy import and_, func, or_, select
-
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-    from storage.messages_service import transcript_order_value
-    from storage.models import messages, session_turns
 
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
-            anchor = conn.execute(
-                select(
-                    transcript_order_value().label("transcript_order_at"),
-                    messages.c.id,
-                    messages.c.author,
-                    messages.c.type,
-                    messages.c.metadata_json,
-                )
-                .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
-                .limit(1)
-            ).mappings().first()
-            if anchor is None:
-                return ForkSourceState()
-            anchor_order_at = anchor["transcript_order_at"]
-            anchor_id = anchor["id"]
-            after_anchor = (
-                (transcript_order_value() > anchor_order_at)
-                | ((transcript_order_value() == anchor_order_at) & (messages.c.id > anchor_id))
-            )
-            latest_after_anchor = conn.execute(
-                select(messages.c.author, messages.c.type, messages.c.metadata_json)
-                .where(
-                    messages.c.session_id == source_session_id,
-                    or_(
-                        messages.c.type.in_(
-                            [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
-                        ),
-                        *(
-                            and_(
-                                messages.c.type == message_type,
-                                func.json_extract(messages.c.metadata_json, "$.event").in_(
-                                    spec_for(message_type)["terminalWhenEvents"]
-                                ),
-                            )
-                            for message_type in _CONDITIONAL_TERMINAL_TYPES
-                        ),
-                    ),
-                    after_anchor,
-                    ~and_(
-                        messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
-                        func.coalesce(
-                            func.json_extract(messages.c.metadata_json, "$.detached"),
-                            0,
-                        )
-                        == 1,
-                    ),
-                    ~and_(
-                        messages.c.type == "notify",
-                        func.coalesce(
-                            func.json_extract(messages.c.metadata_json, "$.event"), ""
-                        ) == "backend_failure",
-                        func.coalesce(
-                            func.json_extract(messages.c.metadata_json, "$.replayed"), 0
-                        ) == 1,
-                    ),
-                )
-                .order_by(transcript_order_value().desc(), messages.c.id.desc())
-                .limit(1)
-            ).mappings().first()
-            latest_after_anchor_author = (
-                str(latest_after_anchor["author"] or "").strip() if latest_after_anchor else ""
-            )
-            latest_after_anchor_type = (
-                str(latest_after_anchor["type"] or "").strip() if latest_after_anchor else ""
-            )
-            latest_after_anchor_metadata = _load_metadata(
-                latest_after_anchor["metadata_json"] if latest_after_anchor else None
-            )
-            latest_after_anchor_role = activity_role_for(
-                latest_after_anchor_type,
-                latest_after_anchor_metadata,
-            )
-            has_terminal_agent_output_after_anchor = latest_after_anchor_author == "agent" and (
-                latest_after_anchor_role == "terminal"
-                or (
-                    latest_after_anchor_role == "reply"
-                    # A reply ends nothing while its Turn still runs: input steered
-                    # into it is being answered. IM Turns have no durable row, so
-                    # their reply stays the latest evidence.
-                    and conn.execute(
-                        select(session_turns.c.id)
-                        .where(
-                            session_turns.c.session_id == source_session_id,
-                            session_turns.c.state.in_(("starting", "active")),
-                        )
-                        .limit(1)
-                    ).first()
-                    is None
-                )
-            )
-            has_input_turn_after_anchor = (
-                conn.execute(
-                    select(messages.c.id)
-                    .where(
-                        messages.c.session_id == source_session_id,
-                        or_(
-                            *(
-                                and_(messages.c.author == author, messages.c.type == message_type)
-                                for author, message_type in INPUT_TURN_AUTHOR_TYPES
-                            )
-                        ),
-                        after_anchor,
-                    )
-                    .limit(1)
-                ).first()
-                is not None
-            )
-            return ForkSourceState(
-                anchor_author=str(anchor["author"] or "").strip() or None,
-                anchor_type=str(anchor["type"] or "").strip() or None,
-                latest_after_anchor_author=latest_after_anchor_author or None,
-                latest_after_anchor_type=latest_after_anchor_type or None,
-                has_messages_after_anchor=latest_after_anchor is not None,
-                has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
-                has_input_turn_after_anchor=has_input_turn_after_anchor,
-                anchor_activity_role=activity_role_for(
-                    str(anchor["type"] or "").strip(),
-                    _load_metadata(anchor["metadata_json"]),
-                ),
-            )
+            state = _fork_source_state_on_conn(conn, source_session_id, source_message_id)
+            return state if state is not None else ForkSourceState()
     except Exception as exc:
         import logging
 
@@ -765,6 +777,136 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
             exc,
         )
         return ForkSourceState()
+    finally:
+        engine.dispose()
+
+
+def can_use_native_tip_fork(
+    fork: Mapping[str, Any] | None,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Whether a tip-only native fork (such as ACP ``session/fork``) matches the reserved boundary.
+
+    Returns ``False`` when the reservation requires trimming a running turn or when
+    the source session has advanced past ``source_message_id`` (new messages/turns
+    or an active turn/run), so the backend adapter falls back to a fresh session
+    with a bounded summary handoff instead of inheriting post-reservation turns.
+    Degrades safely to ``True`` when no persisted DB boundary exists.
+    """
+
+    if not isinstance(fork, Mapping):
+        return False
+    if bool(fork.get("trim_latest_running_turn")):
+        return False
+
+    source_session_id = _clean_optional(
+        fork.get("source_session_id") or fork.get("fork_source_session_id")
+    )
+    if not source_session_id:
+        return True
+
+    source_message_id = _clean_optional(
+        fork.get("source_message_id") or fork.get("fork_source_message_id")
+    )
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return True
+
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_runs, agent_sessions, messages, session_turns
+
+    engine = create_sqlite_engine(path, read_only=True)
+    try:
+        with engine.connect() as conn:
+            source_exists = (
+                conn.execute(
+                    select(agent_sessions.c.id)
+                    .where(agent_sessions.c.id == source_session_id)
+                    .limit(1)
+                ).first()
+                is not None
+            )
+            if not source_exists:
+                return True
+
+            has_active_turn = (
+                conn.execute(
+                    select(session_turns.c.id)
+                    .where(
+                        session_turns.c.session_id == source_session_id,
+                        session_turns.c.state.in_(("starting", "active")),
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            )
+            if has_active_turn:
+                return False
+
+            has_active_run = (
+                conn.execute(
+                    select(agent_runs.c.id)
+                    .where(
+                        agent_runs.c.session_id == source_session_id,
+                        agent_runs.c.status.in_(ACTIVE_SOURCE_RUN_STATUSES),
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            )
+            if has_active_run:
+                return False
+
+            if not source_message_id:
+                has_any_anchor_msg = (
+                    conn.execute(
+                        select(messages.c.id)
+                        .where(
+                            messages.c.session_id == source_session_id,
+                            messages.c.type.in_(_FORK_ANCHOR_TYPES),
+                        )
+                        .limit(1)
+                    ).first()
+                    is not None
+                )
+                return not has_any_anchor_msg
+
+            state = _fork_source_state_on_conn(conn, source_session_id, source_message_id)
+            if state is None:
+                return False
+            if (
+                state.has_messages_after_anchor
+                or state.has_input_turn_after_anchor
+                or state.has_terminal_agent_output_after_anchor
+            ):
+                return False
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return True
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to verify native fork boundary for %s after %s: %s",
+            source_session_id,
+            source_message_id,
+            exc,
+        )
+        return False
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to verify native fork boundary for %s after %s: %s",
+            source_session_id,
+            source_message_id,
+            exc,
+        )
+        return False
     finally:
         engine.dispose()
 

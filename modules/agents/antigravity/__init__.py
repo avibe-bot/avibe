@@ -3,6 +3,7 @@
 from modules.agents.antigravity.agent import (
     AGY_CLI_DISABLE_AUTO_UPDATE_ENV,
     AntigravityAgent,
+    AntigravityCapabilityError,
     AntigravityLaunchSpec,
     AntigravityResumeUnavailableError,
     auth_config_fingerprint,
@@ -30,6 +31,7 @@ __all__ = [
     "MAX_RULE_TOTAL_BYTES",
     "MAX_RULE_TOTAL_TOKENS",
     "AntigravityAgent",
+    "AntigravityCapabilityError",
     "AntigravityLaunchSpec",
     "AntigravityModelSelectionError",
     "AntigravityResumeUnavailableError",
