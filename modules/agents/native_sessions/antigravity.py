@@ -14,7 +14,10 @@ from modules.agents.antigravity.agent import (
     build_antigravity_env,
     resolve_antigravity_cli_path,
 )
-from modules.agents.antigravity.auth import authenticate_antigravity_client
+from modules.agents.antigravity.auth import (
+    authenticate_antigravity_client,
+    normalize_antigravity_auth_mode,
+)
 
 from .base import (
     NativeSessionProvider,
@@ -112,6 +115,11 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
 
     async def _list_raw_sessions(self, working_path: str) -> list[dict[str, Any]]:
         config = await asyncio.to_thread(self._effective_config)
+        if (
+            normalize_antigravity_auth_mode(config) == "gemini-api-key"
+            and not (getattr(config, "api_key", None) or "").strip()
+        ):
+            return []
         command, env = await asyncio.to_thread(self._build_launch, working_path, config=config)
         client = AcpClient(
             command,

@@ -85,6 +85,49 @@ async def test_launch_argv_and_env_contract_for_execution_and_passive_list(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_live_env_never_inherits_gemini_api_key_and_missing_key_fails_without_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inherited = {
+        "PATH": os.environ.get("PATH", ""),
+        "GEMINI_API_KEY": "controller-secret-key",
+        "GOOGLE_GEMINI_BASE_URL": "https://inherited.example.test/v1",
+    }
+
+    for mode, api_key in (("gemini-api-key", ""), ("gemini-api-key", "   "), ("api_key", ""), ("agent-platform", "ignored"), ("oauth-personal", "ignored")):
+        env = build_antigravity_env(
+            antigravity_config("agy", auth_mode=mode, api_key=api_key),
+            base_env=inherited,
+            caller_env={"GEMINI_API_KEY": "caller-secret", "GOOGLE_GEMINI_BASE_URL": "https://caller.example.test/v1"},
+        )
+        assert env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV] == "true"
+        assert "GEMINI_API_KEY" not in env and "GOOGLE_GEMINI_BASE_URL" not in env
+
+    configured = build_antigravity_env(
+        antigravity_config("agy", auth_mode="gemini-api-key", api_key="cfg-key", base_url=""),
+        base_env=inherited,
+    )
+    assert configured["GEMINI_API_KEY"] == "cfg-key"
+    assert "GOOGLE_GEMINI_BASE_URL" not in configured
+
+    monkeypatch.setenv("GEMINI_API_KEY", "controller-secret-key")
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", "https://inherited.example.test/v1")
+    async with make_agent_harness(tmp_path, auth_mode="gemini-api-key", api_key="", name="empty-key") as h:
+        req = make_request(message="hello", workdir=h.workdir, model="model-alpha")
+        set_dispatch_phase(req.context, DISPATCH_PHASE_PREWRITE)
+        await h.agent.handle_message(req)
+        assert h.launches() == []
+        assert prewrite_failure_evidence(req.context).get("reason") == "auth_required"
+        assert h.controller.events("result")[0][2].get("is_error") is True
+        note = h.controller.events("notify")[0][1]
+        assert "-32000" in note and "Gemini API key is not configured." in note
+
+        provider = AntigravityNativeSessionProvider(cli_path=str(h.shim), config=h.agy_cfg)
+        assert await asyncio.to_thread(provider.list_metadata, str(h.workdir)) == []
+        assert h.launches() == []
+
+
+@pytest.mark.asyncio
 async def test_build_launch_runs_env_and_rules_prep_off_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async with make_agent_harness(tmp_path, cli_path="agy") as h:
         loop_tid, observed = threading.get_ident(), {}

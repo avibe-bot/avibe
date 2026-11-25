@@ -88,6 +88,8 @@ from modules.agents.acp import (
 )
 from modules.agents.antigravity.auth import (
     authenticate_antigravity_client,
+    build_antigravity_auth_env,
+    normalize_antigravity_auth_mode,
     resolve_antigravity_cli_path as resolve_antigravity_cli_path,
 )
 from modules.agents.antigravity.models import (
@@ -116,9 +118,6 @@ _STOP_CANCEL_GRACE_SECONDS = 3.0
 _LIVE_CONFIG_FIELDS = frozenset({"idle_timeout_seconds", "auto_update"})
 _SELECTION_METADATA_KEY = "antigravity_selection"
 _MAX_CACHED_SELECTION_STATES = 512
-_API_KEY_AUTH_MODES = frozenset({"api_key", "gemini-api-key"})
-_AGENT_PLATFORM_AUTH_MODES = frozenset({"agent_platform", "agent-platform", "adc"})
-_OAUTH_AUTH_MODES = frozenset({"oauth", "oauth-personal", "oauth-business"})
 _IMAGE_MIME_EXTENSIONS = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -271,35 +270,15 @@ def build_antigravity_env(
         env = desktop_env
 
     prepend_managed_tools_to_path(env, base_env=env, working_dir=working_dir)
-    env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV] = "true"
 
     if managed_skills_env:
         env.update(managed_skills_env)
 
-    auth_mode = _config_str(antigravity_config, "auth_mode").lower()
-    if auth_mode in _API_KEY_AUTH_MODES:
-        api_key = _config_str(antigravity_config, "api_key")
-        base_url = _config_str(antigravity_config, "base_url")
-        if api_key:
-            env["GEMINI_API_KEY"] = api_key
-        if base_url:
-            env["GOOGLE_GEMINI_BASE_URL"] = base_url
-        else:
-            env.pop("GOOGLE_GEMINI_BASE_URL", None)
-    elif auth_mode in _AGENT_PLATFORM_AUTH_MODES:
-        project = _config_str(antigravity_config, "gcp_project")
-        location = _config_str(antigravity_config, "gcp_location")
-        if project:
-            env["GOOGLE_CLOUD_PROJECT"] = project
-        if location:
-            env["GOOGLE_CLOUD_LOCATION"] = location
-    elif auth_mode in _OAUTH_AUTH_MODES:
-        env.pop("GEMINI_API_KEY", None)
-        env.pop("GOOGLE_GEMINI_BASE_URL", None)
-
     if caller_env:
         env.update(caller_env)
 
+    env = build_antigravity_auth_env(antigravity_config, base_env=env)
+    env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV] = "true"
     return env
 
 
@@ -1647,6 +1626,11 @@ class AntigravityAgent(BaseAgent):
         turn: _ActiveTurn | None = None
 
         try:
+            if (
+                normalize_antigravity_auth_mode(self.antigravity_config) == "gemini-api-key"
+                and not _config_str(self.antigravity_config, "api_key")
+            ):
+                raise AcpRpcError(ACP_AUTH_REQUIRED, "Gemini API key is not configured.")
             spec, launch_env, skill_catalog = await self._build_launch(
                 request,
                 runtime_key=runtime_key,
