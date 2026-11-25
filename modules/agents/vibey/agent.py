@@ -1243,10 +1243,10 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool, persist: bool = True, catalog: Optional[dict] = None,
     ) -> PromptState:
         """Read, compare and publish optional prefix state off the loop, once per Turn."""
-        # Request preview is strictly read-only, including optional derived
-        # checkpoint metadata. Historical reads remain the preview's contract.
-        runtime = await self.store.load_for_run(agent.session_id) if persist else None
-        entries = runtime.entries if runtime is not None else await self.store.load(agent.session_id)
+        # Preview uses the same carry-aware prefix decisions without publishing a capsule.
+        runtime = (await self.store.load_for_run(agent.session_id) if persist
+                   else await self.store.load_for_preview(agent.session_id))
+        entries = runtime.entries
         endpoint = router.preflight.endpoint
 
         def prepare():
@@ -1908,6 +1908,7 @@ class VibeyAgent(BaseAgent):
         """
         images = []
         listed = []
+        outcomes = []
         for attachment in files or ():
             if not attachment.local_path:
                 continue
@@ -1919,12 +1920,16 @@ class VibeyAgent(BaseAgent):
                             attachment.local_path, mime, session_id=session_id, name=attachment.name or None
                         )
                     )
+                    if attachment.media_token:
+                        outcomes.append((attachment.media_token, len(images) - 1))
                     continue
                 except OSError:
                     # Unreadable now: listed by path, as the native backends pass every attachment.
                     logger.warning("Vibey lists an image it could not snapshot: %s", attachment.local_path)
             size = f", {attachment.size} bytes" if attachment.size else ""
             listed.append(f"- File: {attachment.local_path} ({attachment.mimetype}{size})")
+            if attachment.media_token:
+                outcomes.append((attachment.media_token, listed[-1]))
         body = message or ""
         if listed:
             body = "\n".join([body, "", "[User Attachments]", *listed]) if body.strip() else "\n".join(
@@ -1932,6 +1937,14 @@ class VibeyAgent(BaseAgent):
             )
         rendered = self.render_input(body, metadata)
         content = ([text_block(rendered)] if rendered or not images else []) + images
+        handoff = (metadata.handoff or "").rstrip() if metadata else ""
+        if outcomes or (metadata and (metadata.harness_source or handoff)):
+            from storage.carry_members import RenderedInput
+
+            header = rendered.removesuffix(body)
+            return RenderedInput(tuple(content), header=header,
+                                 handoff_chars=len(handoff) if header.startswith(handoff + "\n\n") else 0,
+                                 body_text_block=bool(rendered or not images), files=tuple(outcomes))
         return UserMessage(content=tuple(content))
 
     def _display_source(

@@ -137,6 +137,16 @@ class InMemoryTranscriptStore:
             prefix = [row for row in await self.load(anchor.session_id) if row.context_seq <= anchor.context_seq]
         return deepcopy(prefix + self.rows.get(session_id, []))
 
+    async def load_for_preview(self, session_id: str, *, context_seq: int | None = None):
+        if context_seq is not None:
+            from core.agent_core.harness.runtime import compact_runtime
+
+            rows = await self.load(session_id)
+            if context_seq > max((row.context_seq for row in rows), default=0):
+                raise ValueError("context_seq is beyond the committed context")
+            return compact_runtime([row for row in rows if row.context_seq <= context_seq])
+        return await self.load_for_run(session_id)
+
     async def load_for_run(self, session_id: str):
         from core.agent_core.harness.runtime import compact_runtime
 

@@ -350,6 +350,33 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
     )
 
 
+async def test_same_byte_carry_reanchors_then_binds_only_the_new_epoch(monkeypatch, tmp_path):
+    from core.agent_core.ai.preview import preview_wire_request
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sends = []
+
+    def handle(wire):
+        sends.append(json.loads(wire.content))
+        stream = SUCCESS.replace('"usage":{"input_tokens":1}', f'"id":"msg_{len(sends)}","usage":{{"input_tokens":22000}}')
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=stream)
+
+    history = [UserMessage((TextBlock("same input"),))]
+    base = _request(messages=tuple(history))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        for epoch in ("", "a" * 64, "a" * 64, "a" * 64):
+            obs = ThreadObservation("carry-session", carry_projection=epoch)
+            req = replace(base, messages=tuple(history), thread_observation=obs)
+            preview = await preview_wire_request(req, session_id=obs.session_id)
+            events = [event async for event in adapter.stream(req, CancelToken())]
+            assert isinstance(events[-1], Done) and json.loads(preview.body) == sends[-1]
+            history.extend([events[-1].message, UserMessage((TextBlock("next"),))])
+    assert [body.get("thread") for body in sends] == [
+        {"type": "create"}, None, {"type": "create"}, {"type": "continue", "previous_message_id": "msg_3"},
+    ]
+
+
 async def test_resume_preserves_overlapping_lookup_windows():
     # Last two marks are close, but only the earlier lookup can reach the warmed first user block.
     from core.agent_core.messages import AssistantMessage, Origin

@@ -411,11 +411,13 @@ def reserve_forked_session(
                 # reach the child (C-10 fork.md section 2).
                 from core.agent_core.harness.fork import ForkPointError
                 from storage.agent_transcript import resolve_fork_point
+                from storage.carry_projection import fork_mask
 
                 try:
                     metadata["fork_source_context_seq"] = resolve_fork_point(
                         conn, str(row["id"]), as_of=as_of, self_fork=self_fork
                     )
+                    metadata["fork_source_carry_mask"] = fork_mask(conn, str(row["id"]), metadata["fork_source_context_seq"])
                 except ForkPointError as exc:
                     raise SessionForkError(str(exc), code=f"session_fork_point_{exc.code}") from exc
             if opencode_fork_message_id:
