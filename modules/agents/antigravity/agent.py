@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import difflib
 import hashlib
 import json
 import logging
@@ -95,9 +96,11 @@ from modules.agents.antigravity.auth import (
 from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
+    auth_config_fingerprint as auth_config_fingerprint,
     extract_current_model_and_effort,
     extract_initial_default_effort,
     has_model_config_option,
+    record_antigravity_live_models,
     resolve_requested_model_and_effort,
 )
 from modules.agents.antigravity.rules import render_session_rules
@@ -215,19 +218,6 @@ def _config_extra_args(config: Any) -> tuple[str, ...]:
 def _config_str(config: Any, field_name: str) -> str:
     value = getattr(config, field_name, None)
     return str(value).strip() if value is not None else ""
-
-
-def auth_config_fingerprint(antigravity_config: Any) -> str:
-    """Hash auth-affecting Antigravity config fields without exposing secrets."""
-    payload = {
-        "auth_mode": _config_str(antigravity_config, "auth_mode").lower(),
-        "api_key": _config_str(antigravity_config, "api_key"),
-        "base_url": _config_str(antigravity_config, "base_url"),
-        "gcp_project": _config_str(antigravity_config, "gcp_project"),
-        "gcp_location": _config_str(antigravity_config, "gcp_location"),
-    }
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def build_antigravity_command(
@@ -568,6 +558,40 @@ def _specs_compatible(existing: _RuntimeSession, desired: AntigravityLaunchSpec)
     return False
 
 
+_DIFF_PREVIEW_MAX_LINES = 4
+_DIFF_PREVIEW_MAX_LINE_CHARS = 200
+
+
+def _truncate_diff_line(line: str, max_chars: int = _DIFF_PREVIEW_MAX_LINE_CHARS) -> str:
+    if len(line) <= max_chars:
+        return line
+    return line[: max_chars - 3] + "..."
+
+
+def _format_diff_preview_lines(old_text: str | None, new_text: str) -> list[str]:
+    new_lines = new_text.splitlines() if new_text else []
+    if old_text is None:
+        return [f"+ {_truncate_diff_line(line)}" for line in new_lines[:_DIFF_PREVIEW_MAX_LINES]]
+
+    old_lines = old_text.splitlines() if old_text else []
+    if old_lines == new_lines:
+        return []
+
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        preview: list[str] = []
+        if tag in ("replace", "delete"):
+            for line in old_lines[i1:i2][:_DIFF_PREVIEW_MAX_LINES]:
+                preview.append(f"- {_truncate_diff_line(line)}")
+        if tag in ("replace", "insert"):
+            for line in new_lines[j1:j2][:_DIFF_PREVIEW_MAX_LINES]:
+                preview.append(f"+ {_truncate_diff_line(line)}")
+        return preview
+    return []
+
+
 def _format_tool_activity(update: AcpToolCallUpdate, state: dict[str, Any]) -> tuple[str, str]:
     """Render one ACP tool call or incremental update into concise activity text."""
     title = state.get("title") or state.get("tool_kind") or update.tool_call_id
@@ -577,11 +601,7 @@ def _format_tool_activity(update: AcpToolCallUpdate, state: dict[str, Any]) -> t
 
     for diff in update.diffs:
         lines.append(f"diff: {diff.path}")
-        if diff.old_text is not None:
-            old_preview = diff.old_text.splitlines()[0] if diff.old_text else ""
-            lines.append(f"- {old_preview}")
-        new_preview = diff.new_text.splitlines()[0] if diff.new_text else ""
-        lines.append(f"+ {new_preview}")
+        lines.extend(_format_diff_preview_lines(diff.old_text, diff.new_text))
 
     return "\n".join(lines), title
 
@@ -971,15 +991,13 @@ class AntigravityAgent(BaseAgent):
                                 pending_fork.get("source_message_id"),
                             )
                         else:
-                            fork_params: dict[str, Any] = {
-                                "sessionId": pending_fork["source_native_session_id"],
-                                "cwd": request.working_path,
-                                "mcpServers": [],
-                            }
-                            if add_dirs is not None:
-                                fork_params["additionalDirectories"] = add_dirs
                             try:
-                                resp = await client.send_request("session/fork", fork_params)
+                                resp = await client.session_fork(
+                                    pending_fork["source_native_session_id"],
+                                    request.working_path,
+                                    mcp_servers=(),
+                                    additional_directories=add_dirs,
+                                )
                                 fork_handoff_mode = FORK_HANDOFF_MODE_NATIVE
                             except AcpRpcError as exc:
                                 if exc.code != JSONRPC_METHOD_NOT_FOUND:
@@ -1011,6 +1029,12 @@ class AntigravityAgent(BaseAgent):
                     tuple(dict(item) for item in raw_options if isinstance(item, Mapping))
                     if isinstance(raw_options, list)
                     else ()
+                )
+                await asyncio.to_thread(
+                    record_antigravity_live_models,
+                    self.antigravity_config,
+                    resp,
+                    auth_fingerprint=spec.auth_fingerprint,
                 )
                 session.activation = self._attach_activation(runtime_key)
                 self._sessions[runtime_key] = session
@@ -1226,6 +1250,15 @@ class AntigravityAgent(BaseAgent):
             return
 
         if isinstance(update, AcpToolCallUpdate):
+            if turn.reply_chunks:
+                pre_tool_text = "".join(turn.reply_chunks).strip()
+                if pre_tool_text:
+                    turn.reply_chunks.clear()
+                    await emit_output(
+                        self.controller,
+                        turn.request.context,
+                        Narration(text=pre_tool_text),
+                    )
             state = turn.tool_calls.setdefault(update.tool_call_id, {})
             if update.title is not None:
                 state["title"] = update.title
@@ -1670,6 +1703,13 @@ class AntigravityAgent(BaseAgent):
             session.selection_dirty = False
             if applied.default_effort is not None:
                 session.default_efforts[applied.model] = applied.default_effort
+            if applied.config_options:
+                await asyncio.to_thread(
+                    record_antigravity_live_models,
+                    self.antigravity_config,
+                    applied.config_options,
+                    auth_fingerprint=spec.auth_fingerprint,
+                )
             await self._persist_session_selection_state(session)
         except AntigravityResumeUnavailableError as exc:
             mark_prewrite_recovery_required(request.context, "native_session_not_found")
@@ -1793,24 +1833,42 @@ class AntigravityAgent(BaseAgent):
 
         turn = session.active_turn
         turn.cancelled = True
+        deadline = time.monotonic() + _STOP_CANCEL_GRACE_SECONDS
+        prompt_task = turn.prompt_task
+        cancel_timed_out = False
+
         if session.client.is_alive:
             try:
-                await session.client.session_cancel(turn.native_session_id)
+                await asyncio.wait_for(
+                    session.client.session_cancel(turn.native_session_id),
+                    timeout=max(0.0, deadline - time.monotonic()),
+                )
+            except asyncio.TimeoutError:
+                cancel_timed_out = True
+                logger.warning("Antigravity session/cancel timed out during stop; closing session")
             except AcpTransportError as exc:
                 logger.debug("Antigravity session/cancel failed during stop: %s", exc)
 
-        prompt_task = turn.prompt_task
-        if prompt_task is not None and not prompt_task.done():
-            try:
-                await asyncio.wait_for(asyncio.shield(prompt_task), timeout=_STOP_CANCEL_GRACE_SECONDS)
-            except asyncio.TimeoutError:
+        if cancel_timed_out:
+            if prompt_task is not None and not prompt_task.done():
+                prompt_task.cancel()
+            await self._close_session(session, intentional=True, retire_activation=True)
+        elif prompt_task is not None and not prompt_task.done():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 prompt_task.cancel()
                 await self._close_session(session, intentional=True, retire_activation=True)
-            except (AcpTransportError, AcpRpcError) as exc:
-                logger.debug("Antigravity prompt ended with error during stop: %s", exc)
-            except asyncio.CancelledError:
-                if not prompt_task.cancelled():
-                    raise
+            else:
+                try:
+                    await asyncio.wait_for(asyncio.shield(prompt_task), timeout=remaining)
+                except asyncio.TimeoutError:
+                    prompt_task.cancel()
+                    await self._close_session(session, intentional=True, retire_activation=True)
+                except (AcpTransportError, AcpRpcError) as exc:
+                    logger.debug("Antigravity prompt ended with error during stop: %s", exc)
+                except asyncio.CancelledError:
+                    if not prompt_task.cancelled():
+                        raise
 
         await self._settle_turn_stopped(turn)
         return True

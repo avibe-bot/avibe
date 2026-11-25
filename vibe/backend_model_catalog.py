@@ -1382,8 +1382,13 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         sources = _claude_sources(remote_catalog, bundled_catalog)
         blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     elif backend_key == "antigravity":
-        sources = _antigravity_sources(remote_catalog, bundled_catalog)
-        blocked = _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
+        local_catalog = _read_antigravity_models_cache()
+        sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
+        blocked = (
+            set()
+            if local_catalog
+            else _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
+        )
     else:
         local_catalog = _read_codex_models_cache()
         remote_entries = backend_model_entries("codex", remote_catalog)
@@ -1490,9 +1495,14 @@ def backend_builtin_snapshot(
         )
         blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     elif backend_key == "antigravity":
+        local_catalog = _read_antigravity_models_cache()
         local_complete = True
-        sources = _antigravity_sources(remote_catalog, bundled_catalog)
-        blocked = _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
+        sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
+        blocked = (
+            set()
+            if local_catalog
+            else _antigravity_blocked_model_ids(remote_catalog, bundled_catalog)
+        )
     else:
         local_catalog, local_catalog_read = _read_codex_models_cache_with_status()
         local_complete = not cli_installed or local_catalog_read
@@ -1747,14 +1757,62 @@ def _bundled_retired_model_ids(
     }
 
 
+def _read_antigravity_models_cache() -> list[dict[str, Any]]:
+    from modules.agents.antigravity.models import read_antigravity_live_models
+
+    return read_antigravity_live_models()
+
+
 def _antigravity_sources(
     remote_catalog: dict[str, Any],
     bundled_catalog: dict[str, Any],
+    local_catalog: Sequence[dict[str, Any]] | None = None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     remote_entries = backend_model_entries("antigravity", remote_catalog)
+    visible_remote = [entry for entry in remote_entries if not _model_hidden(entry)]
+    bundled_entries = backend_model_entries("antigravity", bundled_catalog)
+
+    live_entries = (
+        list(local_catalog)
+        if local_catalog is not None
+        else _read_antigravity_models_cache()
+    )
+    normalized_live = [
+        entry
+        for item in live_entries
+        if (entry := _normalize_model_entry(item)) and not _model_hidden(entry)
+    ]
+    if normalized_live:
+        metadata_by_id: dict[str, dict[str, Any]] = {}
+        for fallback_entry in (*bundled_entries, *visible_remote):
+            model_id = fallback_entry["id"]
+            existing = metadata_by_id.get(model_id)
+            if existing is None:
+                metadata_by_id[model_id] = dict(fallback_entry)
+            else:
+                if fallback_entry.get("label"):
+                    existing["label"] = fallback_entry["label"]
+                if fallback_entry.get("reasoning_efforts"):
+                    existing["reasoning_efforts"] = list(fallback_entry["reasoning_efforts"])
+
+        enriched_live: list[dict[str, Any]] = []
+        for entry in normalized_live:
+            merged_entry = dict(entry)
+            meta = metadata_by_id.get(entry["id"])
+            if meta is not None:
+                if (
+                    not merged_entry.get("label")
+                    or merged_entry["label"] == entry["id"]
+                ) and meta.get("label"):
+                    merged_entry["label"] = meta["label"]
+                if not merged_entry.get("reasoning_efforts") and meta.get("reasoning_efforts"):
+                    merged_entry["reasoning_efforts"] = list(meta["reasoning_efforts"])
+            enriched_live.append(merged_entry)
+        return [("local", enriched_live)]
+
     return [
-        ("remote", [entry for entry in remote_entries if not _model_hidden(entry)]),
-        ("bundled", backend_model_entries("antigravity", bundled_catalog)),
+        ("remote", visible_remote),
+        ("bundled", bundled_entries),
     ]
 
 

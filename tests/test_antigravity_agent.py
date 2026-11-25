@@ -782,3 +782,202 @@ async def test_sibling_runtime_isolation_and_running_agents_end(tmp_path: Path) 
         ended = await end_running_agent(h.controller, backend="antigravity", state="idle", base_session_id="slack_thread_A")
         assert ended["ok"] is True and ended["process_killed"] is True and req_a.composite_session_id not in h.agent._sessions and sess_b.client.is_alive
         assert await h.agent.clear_sessions("slack::channel::C2") == 1 and not sess_b.client.is_alive
+
+
+@pytest.mark.asyncio
+async def test_handle_stop_bounds_blocked_session_cancel_drain_within_grace_period(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(agy_agent_module, "_STOP_CANCEL_GRACE_SECONDS", 0.2)
+    async with make_agent_harness(tmp_path, name="stop-blocked-drain") as h:
+        stop_req = make_request(message="wait_cancel", workdir=h.workdir)
+        turn_task = asyncio.create_task(h.agent.handle_message(stop_req))
+        for _ in range(100):
+            if h.agent.runtime_has_active_turns():
+                break
+            await asyncio.sleep(0.02)
+        assert h.agent.runtime_has_active_turns()
+
+        sess = h.agent._sessions[stop_req.composite_session_id]
+        assert sess.client._process is not None and sess.client._process.stdin is not None
+        block_event = asyncio.Event()
+
+        async def _blocked_drain() -> None:
+            await block_event.wait()
+
+        monkeypatch.setattr(sess.client._process.stdin, "drain", _blocked_drain)
+
+        started = time.monotonic()
+        stopped = await h.agent.handle_stop(stop_req)
+        elapsed = time.monotonic() - started
+        await asyncio.wait_for(turn_task, timeout=2.0)
+
+        assert stopped is True
+        assert elapsed < 2.0
+        assert not sess.client.is_alive
+        assert stop_req.composite_session_id not in h.agent._sessions
+        assert len(h.controller.events("result")) == 1
+        assert h.controller.events("result")[0][2]["output"].settled_by == SETTLED_BY_STOPPED
+
+
+@pytest.mark.asyncio
+async def test_effort_option_receipt_model_mismatch_fails_before_prompt(tmp_path: Path) -> None:
+    class _EffortModelDriftClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, Any]] = []
+
+        async def session_set_config_option(self, _sid: str, cid: str, val: Any) -> dict[str, Any]:
+            self.calls.append((cid, val))
+            if cid == "model":
+                return {"configOptions": make_model_config_options(model="model-alpha", effort="medium")}
+            return {"configOptions": make_model_config_options(model="model-beta", effort="high")}
+
+    base = make_model_config_options(model="model-beta", effort="medium")
+    drift_client = _EffortModelDriftClient()
+    with pytest.raises(AntigravityModelSelectionError) as exc:
+        await apply_model_and_effort(drift_client, "sess-1", base, model="model-alpha", effort="high")  # type: ignore[arg-type]
+    assert exc.value.reason == "model_mismatch"
+    assert drift_client.calls == [("model", "model-alpha"), ("thought_level", "high")]
+
+    async with make_agent_harness(tmp_path, name="effort-model-drift") as h:
+        prompt_called, orig_get = False, h.agent._get_or_create_session
+
+        async def _wrapped(*a: Any, **kw: Any) -> Any:
+            sess = await orig_get(*a, **kw)
+            sess.config_options = tuple(make_model_config_options(model="model-beta", effort="medium"))
+            sess.client.session_set_config_option = _EffortModelDriftClient().session_set_config_option  # type: ignore[method-assign]
+
+            async def _guard(*_pa: Any, **_pkw: Any) -> dict[str, Any]:
+                nonlocal prompt_called
+                prompt_called = True
+                return {"stopReason": "end_turn"}
+
+            sess.client.session_prompt = _guard  # type: ignore[method-assign]
+            return sess
+
+        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
+        req = make_request(message="never-sent", workdir=h.workdir, model="model-alpha", effort="high")
+        set_dispatch_phase(req.context, DISPATCH_PHASE_PREWRITE)
+        await h.agent.handle_message(req)
+        assert prompt_called is False
+        assert prewrite_failure_evidence(req.context).get("reason") == "model_mismatch"
+        assert h.controller.events("result")[0][2].get("is_error") is True
+
+
+@pytest.mark.asyncio
+async def test_pre_tool_text_flushes_as_narration_before_end_turn_without_duplication(tmp_path: Path) -> None:
+    async with make_agent_harness(tmp_path, name="pre-tool-narration") as h:
+        paused_after_tool = asyncio.Event()
+        resume_prompt = asyncio.Event()
+        orig_get = h.agent._get_or_create_session
+
+        async def _wrapped(*a: Any, **kw: Any) -> Any:
+            sess = await orig_get(*a, **kw)
+
+            async def _scripted_prompt(sid: str, _blocks: Any, **_pkw: Any) -> dict[str, Any]:
+                await h.agent._handle_notification(
+                    sess,
+                    "session/update",
+                    {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Checking files"}}},
+                )
+                await h.agent._handle_notification(
+                    sess,
+                    "session/update",
+                    {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " before edit."}}},
+                )
+                await h.agent._handle_notification(
+                    sess,
+                    "session/update",
+                    {"sessionId": sid, "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}},
+                )
+                paused_after_tool.set()
+                await resume_prompt.wait()
+                await h.agent._handle_notification(
+                    sess,
+                    "session/update",
+                    {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Final answer after tool."}}},
+                )
+                return {"stopReason": "end_turn"}
+
+            sess.client.session_prompt = _scripted_prompt  # type: ignore[method-assign]
+            return sess
+
+        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
+        turn_task = asyncio.create_task(h.agent.handle_message(make_request(message="multi-step", workdir=h.workdir)))
+        await asyncio.wait_for(paused_after_tool.wait(), timeout=5.0)
+
+        # Pre-tool text is emitted as Narration BEFORE ToolActivity and BEFORE end_turn.
+        assert [(kind, text) for kind, text, _ in h.controller.emitted] == [
+            ("assistant", "Checking files before edit."),
+            ("toolcall", "Read file (in_progress)"),
+        ]
+        assert h.controller.events("assistant")[0][2].get("level") is None
+        assert h.controller.events("result") == []
+
+        resume_prompt.set()
+        await asyncio.wait_for(turn_task, timeout=5.0)
+
+        results = h.controller.events("result")
+        assert len(results) == 1
+        assert results[0][1] == "Final answer after tool."
+        assert "Checking files" not in results[0][1]
+
+
+def test_format_tool_activity_renders_real_diff_hunk_preview() -> None:
+    from modules.agents.acp.events import AcpDiffBlock, AcpToolCallUpdate
+
+    def _render(old_text: str | None, new_text: str) -> str:
+        update = AcpToolCallUpdate(
+            session_id="sess-1",
+            kind="tool_call_update",
+            tool_call_id="tc-diff",
+            title="Edit file",
+            tool_kind="edit",
+            status="completed",
+            raw_input=None,
+            raw_output=None,
+            content=(),
+            diffs=(AcpDiffBlock(path="app.py", old_text=old_text, new_text=new_text, raw={}),),
+            locations=(),
+            raw={},
+        )
+        text, _ = agy_agent_module._format_tool_activity(update, {"title": "Edit file", "status": "completed"})
+        return text
+
+    changed = _render("# header\nold\n", "# header\nnew\n")
+    assert "- old" in changed and "+ new" in changed
+    assert "- # header" not in changed and "+ # header" not in changed
+
+    new_file = _render(None, "l1\nl2\nl3\nl4\nl5\n")
+    assert "+ l1" in new_file and "+ l4" in new_file and "+ l5" not in new_file
+
+    identical = _render("# same\nline2\n", "# same\nline2\n")
+    assert identical.splitlines() == ["Edit file (completed)", "diff: app.py"]
+
+    long_line = "x" * 240
+    truncated = _render("a\n", f"a\n{long_line}\n")
+    plus_lines = [line for line in truncated.splitlines() if line.startswith("+ ")]
+    assert len(plus_lines) == 1 and plus_lines[0].endswith("...") and len(plus_lines[0][2:]) <= 200
+
+
+@pytest.mark.asyncio
+async def test_acp_client_session_fork_applies_request_timeout() -> None:
+    from modules.agents.acp.client import AcpClient
+
+    client = AcpClient(["agy", "acp"], request_timeout=17.5)
+    recorded: list[tuple[str, dict[str, Any], float | None]] = []
+
+    async def _fake_send_request(method: str, params: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
+        recorded.append((method, dict(params or {}), timeout))
+        return {"sessionId": "forked-1"}
+
+    client.send_request = _fake_send_request  # type: ignore[method-assign]
+    resp = await client.session_fork("src-1", "/tmp/work", additional_directories=["/tmp/rules"])
+    assert resp == {"sessionId": "forked-1"}
+    assert recorded == [
+        (
+            "session/fork",
+            {"sessionId": "src-1", "cwd": "/tmp/work", "mcpServers": [], "additionalDirectories": ["/tmp/rules"]},
+            17.5,
+        )
+    ]

@@ -499,6 +499,64 @@ async def test_connection_probe_validates_model_receipt_and_end_turn_stop_reason
     assert observed == {"prompt_called": expect_prompt, "closed": True}
 
 
+@pytest.mark.asyncio
+async def test_connection_probe_ignores_message_chunks_from_other_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _OtherSessionChunkClient:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.supports_close = True
+            self._notify: Any = None
+
+        async def __aenter__(self) -> _OtherSessionChunkClient:
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+        def on_notification(self, cb: Any) -> None:
+            self._notify = cb
+
+        async def initialize(self, **_kw: Any) -> dict[str, Any]:
+            return {"protocolVersion": 1}
+
+        async def authenticate(self, _method_id: str) -> dict[str, Any]:
+            return {}
+
+        async def session_new(self, _cwd: str, **_kw: Any) -> dict[str, Any]:
+            return {
+                "sessionId": "sess-probe-1",
+                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+            }
+
+        async def session_set_config_option(self, _sid: str, _cid: str, _val: Any) -> dict[str, Any]:
+            return {
+                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+            }
+
+        async def session_prompt(self, _sid: str, _blocks: Any, **_kw: Any) -> dict[str, Any]:
+            if self._notify is not None:
+                await self._notify(
+                    "session/update",
+                    {"sessionId": "other-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "foreign reply"}}},
+                )
+            return {"stopReason": "end_turn"}
+
+        async def session_close(self, _sid: str) -> dict[str, Any]:
+            return {}
+
+    monkeypatch.setattr(acp, "AcpClient", _OtherSessionChunkClient)
+    res = await run_antigravity_connection_probe(
+        binary="/fake/agy",
+        cwd=str(tmp_path),
+        model="gemini-4-neon",
+        config=AntigravityConfig(auth_mode="oauth-personal"),
+    )
+    assert (res["ok"], res["authenticated"], res["catalog_available"], res["inference_verified"], res["error"]) == (
+        False, True, True, False, "empty_response"
+    )
+
+
 def test_classify_auth_error_and_env_command_guards() -> None:
     for msg, exp in (
         ("ACP RPC error -32000: Authentication required", True),

@@ -214,3 +214,146 @@ def test_antigravity_managed_skills_native_agents_and_mcp_sources(tmp_path: Path
     proj_cfg.write_text(json.dumps({"mcpServers": {"ag-proj": {"command": "python3", "args": ["-V"]}}}), encoding="utf-8")
     proj_servers = mcp_native.read_project(workspace)
     assert "ag-proj" in proj_servers and proj_servers["ag-proj"].source == "antigravity" and proj_servers["ag-proj"].definition is not None
+
+
+@pytest.mark.asyncio
+async def test_antigravity_live_model_catalog_cache_is_account_scoped_and_enriches_efforts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from modules.agents import acp
+    from modules.agents.antigravity.auth import run_antigravity_connection_probe
+    from vibe.backend_model_catalog import backend_builtin_snapshot
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+    cfg = V2Config.default()
+    cfg.agents.antigravity.enabled = True
+    cfg.agents.antigravity.auth_mode = "oauth-personal"
+    cfg.save()
+
+    spawn_count = 0
+
+    class _LiveCatalogClient:
+        def __init__(self, *_a: object, **_kw: object) -> None:
+            nonlocal spawn_count
+            spawn_count += 1
+            self.supports_close = True
+            self._notify: object = None
+
+        async def __aenter__(self) -> _LiveCatalogClient:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        def on_notification(self, cb: object) -> None:
+            self._notify = cb
+
+        async def initialize(self, **_kw: object) -> dict[str, object]:
+            return {"protocolVersion": 1}
+
+        async def authenticate(self, _method_id: str) -> dict[str, object]:
+            return {}
+
+        async def session_new(self, _cwd: str, **_kw: object) -> dict[str, object]:
+            return {
+                "sessionId": "sess-live-1",
+                "models": {
+                    "currentModelId": "live-only-model",
+                    "availableModels": [
+                        {"modelId": "live-only-model", "name": "Live Only Model"},
+                        {"modelId": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+                    ],
+                },
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "currentValue": "live-only-model",
+                        "options": [
+                            {"value": "live-only-model", "name": "Live Only Model"},
+                            {"value": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+                        ],
+                    },
+                    {
+                        "id": "thought_level",
+                        "category": "thought_level",
+                        "currentValue": "low",
+                        "options": [{"value": "low"}, {"value": "xhigh"}],
+                    },
+                ],
+            }
+
+        async def session_set_config_option(self, _sid: str, cid: str, val: object) -> dict[str, object]:
+            assert cid == "model" and val == "gemini-2.5-pro"
+            return {
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "currentValue": "gemini-2.5-pro",
+                        "options": [
+                            {"value": "live-only-model", "name": "Live Only Model"},
+                            {"value": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+                        ],
+                    },
+                    {
+                        "id": "thought_level",
+                        "category": "thought_level",
+                        "currentValue": "medium",
+                        "options": [{"value": "low"}, {"value": "medium"}],
+                    },
+                ]
+            }
+
+        async def session_prompt(self, _sid: str, _blocks: object, **_kw: object) -> dict[str, object]:
+            if callable(self._notify):
+                await self._notify(
+                    "session/update",
+                    {
+                        "sessionId": "sess-live-1",
+                        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}},
+                    },
+                )
+            return {"stopReason": "end_turn"}
+
+        async def session_close(self, _sid: str) -> dict[str, object]:
+            return {}
+
+    monkeypatch.setattr(acp, "AcpClient", _LiveCatalogClient)
+    probe = await run_antigravity_connection_probe(
+        binary="/fake/agy",
+        cwd=str(tmp_path),
+        model="gemini-2.5-pro",
+        config=cfg.agents.antigravity,
+    )
+    assert probe["ok"] is True and spawn_count == 1
+
+    # (a) Matching fingerprint uses authoritative live models and preserves per-model efforts.
+    snapshot = backend_model_snapshot("antigravity", schedule_refresh=False)
+    assert snapshot["models"] == ["live-only-model", "gemini-2.5-pro"]
+    assert "gemini-4-neon" not in snapshot["models"]
+    assert snapshot["model_labels"] == {
+        "live-only-model": "Live Only Model",
+        "gemini-2.5-pro": "Gemini 2.5 Pro",
+    }
+    assert [i["value"] for i in snapshot["reasoning_options"]["live-only-model"] if i["value"] != "__default__"] == [
+        "low",
+        "xhigh",
+    ]
+    assert [i["value"] for i in snapshot["reasoning_options"]["gemini-2.5-pro"] if i["value"] != "__default__"] == [
+        "low",
+        "medium",
+    ]
+    builtin = backend_builtin_snapshot("antigravity", schedule_refresh=False)
+    assert [m["id"] for m in builtin["models"]] == ["live-only-model", "gemini-2.5-pro"]
+    assert spawn_count == 1
+
+    # (b) Changing auth_mode/api_key invalidates the fingerprint and falls back to static catalog without spawning.
+    cfg.agents.antigravity.auth_mode = "gemini-api-key"
+    cfg.agents.antigravity.api_key = "AIza-different-account-key"
+    cfg.save()
+
+    fallback = backend_model_snapshot("antigravity", schedule_refresh=False)
+    assert "gemini-4-neon" in fallback["models"]
+    assert "live-only-model" not in fallback["models"]
+    assert spawn_count == 1

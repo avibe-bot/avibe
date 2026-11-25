@@ -20,7 +20,9 @@ from modules.agents import acp
 from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
+    auth_config_fingerprint,
     has_model_config_option,
+    record_antigravity_live_models,
     validate_model_selection_receipt,
 )
 
@@ -371,7 +373,12 @@ def _default_classify_failure(_stdout: str, stderr: str, auth_mode: str) -> str:
     return "cli_failed"
 
 
-async def _apply_probe_model(client: acp.AcpClient, session_id: str, session: Mapping[str, Any], model: str) -> None:
+async def _apply_probe_model(
+    client: acp.AcpClient,
+    session_id: str,
+    session: Mapping[str, Any],
+    model: str,
+) -> tuple[dict[str, Any], ...]:
     raw_options = session.get("configOptions")
     config_options = (
         tuple(dict(item) for item in raw_options if isinstance(item, Mapping))
@@ -380,7 +387,7 @@ async def _apply_probe_model(client: acp.AcpClient, session_id: str, session: Ma
     )
     if has_model_config_option(config_options):
         try:
-            await apply_model_and_effort(
+            applied = await apply_model_and_effort(
                 client,
                 session_id,
                 config_options,
@@ -388,7 +395,7 @@ async def _apply_probe_model(client: acp.AcpClient, session_id: str, session: Ma
                 effort=None,
                 force_reapply=True,
             )
-            return
+            return applied.config_options
         except AntigravityModelSelectionError as exc:
             if not (
                 exc.reason == "model_rejected"
@@ -398,7 +405,7 @@ async def _apply_probe_model(client: acp.AcpClient, session_id: str, session: Ma
                 raise
 
     resp = await client.session_set_model(session_id, model)
-    validate_model_selection_receipt(resp, model)
+    return validate_model_selection_receipt(resp, model)
 
 
 async def run_antigravity_connection_probe(
@@ -415,6 +422,7 @@ async def run_antigravity_connection_probe(
     """Run explicit Antigravity ACP probe distinguishing auth, catalog, and inference."""
     started = time.monotonic()
     auth_mode, env, local_creds, missing = _probe_context(config, base_env)
+    probe_fingerprint = auth_config_fingerprint(config)
     classifier = classify_failure or _default_classify_failure
     excerpt_picker = pick_excerpt or _default_pick_excerpt
     state: dict[str, Any] = {
@@ -434,14 +442,24 @@ async def run_antigravity_connection_probe(
         return _result(False, error="invalid_credentials", detail="Gemini API key is not configured.")
 
     chunks: list[str] = []
+    active_session_id: str | None = None
 
     async def _on_notification(method: str, params: dict[str, Any]) -> None:
         if method == "session/update":
-            update = acp.parse_session_update(params)
-            if isinstance(update, acp.AcpMessageChunkUpdate) and update.text:
+            try:
+                update = acp.parse_session_update(params)
+            except ValueError:
+                return
+            if (
+                isinstance(update, acp.AcpMessageChunkUpdate)
+                and update.text
+                and active_session_id is not None
+                and update.session_id == active_session_id
+            ):
                 chunks.append(update.text)
 
     async def _execute() -> dict[str, Any]:
+        nonlocal active_session_id
         session_id: str | None = None
         resolved_binary = await asyncio.to_thread(resolve_antigravity_cli_path, binary)
         cmd = antigravity_acp_command(resolved_binary, login=False)
@@ -451,13 +469,27 @@ async def run_antigravity_connection_probe(
             await authenticate_antigravity_client(client, auth_mode)
             session = await client.session_new(cwd, mcp_servers=())
             session_id = str(session.get("sessionId") or "").strip() or None
+            active_session_id = session_id
             live_models = extract_acp_live_models(session)
             state.update(authenticated=True, credentials_present=True, models=live_models, catalog_available=bool(live_models))
+            await asyncio.to_thread(
+                record_antigravity_live_models,
+                config,
+                session,
+                auth_fingerprint=probe_fingerprint,
+            )
 
             try:
                 if not session_id:
                     return _result(False, error="session_create_failed", detail="ACP session/new returned no sessionId.")
-                await _apply_probe_model(client, session_id, session, model)
+                applied_options = await _apply_probe_model(client, session_id, session, model)
+                if applied_options:
+                    await asyncio.to_thread(
+                        record_antigravity_live_models,
+                        config,
+                        applied_options,
+                        auth_fingerprint=probe_fingerprint,
+                    )
                 prompt_result = await client.session_prompt(session_id, [{"type": "text", "text": "Hi"}], timeout=timeout)
                 raw_stop_reason = prompt_result.get("stopReason") if isinstance(prompt_result, Mapping) else None
                 stop_reason = raw_stop_reason.strip() if isinstance(raw_stop_reason, str) else ""
