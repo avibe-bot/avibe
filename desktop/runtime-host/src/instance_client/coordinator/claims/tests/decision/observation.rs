@@ -340,7 +340,7 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
         ),
         _ => {
             let state = match case {
-                "owner" => "owner_observed",
+                "owner" | "restarted" => "owner_observed",
                 "shared" => "bound_owner_unconfirmed",
                 "absent" => "no_published_binding",
                 "legacy" => "legacy_review_required",
