@@ -219,6 +219,8 @@ describe('unbindFromWire', () => {
   it('reads what the instance reports about unbinding, and nothing it does not know', () => {
     expect(unbindFromWire({ state: 'unbinding' })).toEqual({ state: 'unbinding' });
     expect(unbindFromWire({ state: 'unbound' })).toEqual({ state: 'unbound' });
+    expect(unbindFromWire({ state: 'unbound', host: 'max-app.avibe.bot', release_at: '2026-12-25T00:00:00Z' })).toEqual({ state: 'unbound', host: 'max-app.avibe.bot', releaseAt: '2026-12-25T00:00:00.000Z' });
+    expect(unbindFromWire({ state: 'unbound', host: null, release_at: null })).toEqual({ state: 'unbound' });
     expect(unbindFromWire({ state: 'reset_repair_required' })).toEqual({ state: 'repair' });
     expect(unbindFromWire({ state: 'not_unbound', reason_code: 'ineligible' })).toEqual({ state: 'notUnbound', reason: 'ineligible' });
     expect(unbindFromWire({ state: 'not_unbound', reason_code: 'invalid_credential' })).toEqual({ state: 'notUnbound', reason: 'invalidCredential' });

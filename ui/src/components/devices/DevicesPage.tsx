@@ -493,10 +493,12 @@ export function DevicesPage() {
       signedOut={snapshot.signedOut}
       signOutNotice={notice}
       unrecognizedChange={unrecognizedChange}
-      // 「解除绑定」 as the instance reports it: running, or done (the name stays 30 days where the
-      // instance gives no day).
+      // 「解除绑定」 as the instance reports it: running, or done, with the name it had and its day
+      // (30 days where the instance gives none).
       unbind={snapshot.unbind?.state === 'unbinding' ? { state: 'unbinding' }
-        : snapshot.unbind?.state === 'unbound' ? { state: 'done', holdDays: 30 } : undefined}
+        : snapshot.unbind?.state === 'unbound'
+          ? { state: 'done', host: snapshot.unbind.host, releaseAt: snapshot.unbind.releaseAt, holdDays: 30 }
+          : undefined}
       proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}
       problem={problem}

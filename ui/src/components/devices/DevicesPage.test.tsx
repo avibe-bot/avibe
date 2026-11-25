@@ -957,3 +957,18 @@ describe('DevicesPage · a declared reverse proxy', () => {
     expect(screen.queryByText(said('不用登录，就是这个 Avibe 的所有者'))).toBeNull();
   });
 });
+
+describe('DevicesPage · 解除绑定 done', () => {
+  it('says the computer is unbound, the name it had and until when it stays the account\'s, or 30 days', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ ...snapshot([macbook]), unbind: { state: 'unbound', host, releaseAt: '2026-12-25T00:00:00.000Z' } });
+    const { unmount } = mount();
+    expect(await screen.findByText('这台电脑已解除绑定')).toBeTruthy();
+    expect(screen.getByText(said(`${host} 在你的账号下保留到 12月25日，这期间可以在这台或别的电脑上领回。`))).toBeTruthy();
+    expect(screen.getByRole('button', { name: '开启远程访问' })).toBeTruthy();
+    unmount();
+
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ ...snapshot([macbook]), unbind: { state: 'unbound', host } });
+    mount();
+    expect(await screen.findByText(said(`${host} 在你的账号下保留 30 天，这期间可以在这台或别的电脑上领回。`))).toBeTruthy();
+  });
+});

@@ -140,7 +140,9 @@ export type DevicesSnapshot = {
  *  as not eligible or because this computer's key no longer works. `repair`: only this computer can
  *  sort it out. */
 export type UnbindReport =
-  | { state: 'unbinding' | 'unbound' | 'repair' }
+  | { state: 'unbinding' | 'repair' }
+  /** Done: the name it had and until when it stays the account's, where the instance says. */
+  | { state: 'unbound'; host?: string; releaseAt?: string }
   | { state: 'notUnbound'; reason: 'ineligible' | 'invalidCredential' };
 
 export function unbindFromWire(raw: unknown): UnbindReport | undefined {
@@ -148,8 +150,11 @@ export function unbindFromWire(raw: unknown): UnbindReport | undefined {
   switch (body.state) {
     case 'unbinding':
       return { state: 'unbinding' };
-    case 'unbound':
-      return { state: 'unbound' };
+    case 'unbound': {
+      const host = text(body.host) ?? undefined;
+      const releaseAt = instant(body.release_at) ?? undefined;
+      return { state: 'unbound', ...(host ? { host } : {}), ...(releaseAt ? { releaseAt } : {}) };
+    }
     case 'reset_repair_required':
       return { state: 'repair' };
     case 'not_unbound':
