@@ -71,13 +71,17 @@ enum VoiceCaptureFailureNotification {
             queue.run { center.remove([unsentIdentifier]) }
             return
         }
-        // The delay is the one asked for now, not when the queue reaches it.
-        let request = UNNotificationRequest(
-            identifier: unsentIdentifier,
-            content: unsentContent(),
-            trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(date.timeIntervalSinceNow, 1), repeats: false)
-        )
-        queue.run { center.add(request, "unsent notice not scheduled") }
+        let content = unsentContent()
+        queue.run {
+            // The interval counts from when the center gets it, so it is
+            // taken here: a wait in the queue does not move the notice later.
+            let request = UNNotificationRequest(
+                identifier: unsentIdentifier,
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(date.timeIntervalSinceNow, 1), repeats: false)
+            )
+            center.add(request, "unsent notice not scheduled")
+        }
     }
 
     static func post(

@@ -13,7 +13,12 @@ final class NotificationCenterQueueTests: XCTestCase {
         let queue = NotificationCenterQueue(label: "NotificationCenterQueueTests.\(UUID().uuidString)")
         let recorder = CenterRecorder()
         let center = VoiceCaptureFailureNotification.Center(
-            add: { request, _ in recorder.record("add \(request.identifier)") },
+            add: { request, _ in
+                recorder.record("add \(request.identifier)")
+                if let trigger = request.trigger as? UNTimeIntervalNotificationTrigger {
+                    recorder.recordInterval(trigger.timeInterval)
+                }
+            },
             remove: { identifiers in recorder.record("remove \(identifiers.joined(separator: ","))") }
         )
         // Hold the queue so every call below waits behind it.
@@ -33,6 +38,7 @@ final class NotificationCenterQueueTests: XCTestCase {
         // Nothing reached the center while the queue was held.
         XCTAssertEqual(recorder.calls, [])
 
+        let releasedAt = Date()
         held.signal()
         let _: Void = await queue.value { answer in answer(()) }
         XCTAssertEqual(
@@ -46,6 +52,13 @@ final class NotificationCenterQueueTests: XCTestCase {
             ]
         )
         XCTAssertEqual(recorder.onMainThread, [false, false, false, false, false])
+        // The unsent notice's delay was taken when the queue reached it,
+        // after the hold, not when it was asked for: the time it waited is
+        // not added to it.
+        XCTAssertEqual(recorder.intervals.count, 2)
+        for interval in recorder.intervals {
+            XCTAssertLessThanOrEqual(interval, later.timeIntervalSince(releasedAt))
+        }
     }
 
     /// `value` answers after every call submitted before it, off the main
@@ -117,6 +130,19 @@ private final class CenterRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [String] = []
     private var threads: [Bool] = []
+    private var triggerIntervals: [TimeInterval] = []
+
+    func recordInterval(_ interval: TimeInterval) {
+        lock.lock()
+        triggerIntervals.append(interval)
+        lock.unlock()
+    }
+
+    var intervals: [TimeInterval] {
+        lock.lock()
+        defer { lock.unlock() }
+        return triggerIntervals
+    }
 
     func record(_ call: String) {
         lock.lock()
