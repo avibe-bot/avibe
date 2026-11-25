@@ -798,7 +798,7 @@ any `notes`:
 - `applies_from: "next_request"` on a Vibey Session. A running Turn takes the
   change at its next model request, so there is no need to wait for the Turn
   or stop it. The Turn keeps its tool list and system prompt until it ends.
-- `applies_from: "next_turn"` on a Claude Code, Codex, or OpenCode Session. A
+- `applies_from: "next_turn"` on a Claude Code, Codex, OpenCode, or Antigravity Session. A
   running Turn keeps its settings, and so does a message that joins it, so
   send the next message with `vibe agent run --session-id <id> --queue`, or
   stop the Turn with `vibe runs cancel <run-id>` first.

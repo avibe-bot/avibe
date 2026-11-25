@@ -203,14 +203,14 @@ Local-first here means your files and the work stay on your machine, not necessa
 </details>
 
 <details>
-<summary><b>Do I need Claude Code, Codex, or OpenCode?</b></summary>
+<summary><b>Do I need Claude Code, Codex, OpenCode, or Antigravity?</b></summary>
 
 No. Vibey is built in. The coding agents are optional, and setup can install the ones you choose.
 </details>
 
 ## For developers
 
-**Bring your coding agents.** The official Claude Code, Codex, and OpenCode CLIs run unchanged next to Vibey, each with its own model and reasoning effort. Vibey can hand them work, and **Runs** draws who started which session and where it reports back. Setup detects the ones you have and installs the ones you pick.
+**Bring your coding agents.** The official Claude Code, Codex, OpenCode, and Antigravity CLIs run unchanged next to Vibey, each with its own model and reasoning effort. Vibey can hand them work, and **Runs** draws who started which session and where it reports back. Setup detects the ones you have and installs the ones you pick.
 
 **Instruction files.** Vibey loads `~/.avibe/AGENTS.md`, then each `AGENTS.md` (or `CLAUDE.md`) from the filesystem root down to the working directory, at the start of every turn. See [Vibey](https://docs.avibe.bot/agents/vibey).
 
