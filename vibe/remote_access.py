@@ -4883,8 +4883,11 @@ def _write_device_access_switch(config, enabled):
 def stop(config: V2Config | None = None) -> dict[str, Any]:
     """Stop the connector and withdraw the request that keeps one running."""
 
+    from vibe import binding_admission as gate
     try:
         with _connector_lifecycle():
+            if gate.reset_in_progress() and not gate.owns_reset_admission():
+                return {'ok': False, 'error': 'reset_in_progress', 'status': 409}
             requested = _connector_requested_path().is_file()
             try:
                 # A new-version Stop can arrive before the first UI startup.
@@ -4986,9 +4989,14 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         loaded = config or V2Config.load()
     except Exception:
         loaded = None
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return {'ok': False, 'error': 'reset_in_progress', 'status': 409}
     install_failure = _ensure_cloudflared_pin(loaded)
     try:
         with _connector_lifecycle():
+            if reset_in_progress():
+                return {'ok': False, 'error': 'reset_in_progress', 'status': 409}
             requested = _connector_requested_path().is_file()
             result = _start(loaded or config, record_request=True, install_failure=install_failure)
             if result.get('ok') and not requested and _connector_requested_path().is_file():
@@ -7091,9 +7099,11 @@ def _persist_pairing_impl(
             except (OSError, ClaimError):
                 return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         from vibe.binding_health import clear_after_publication
+        from vibe.binding_unbind import clear_result
         _check_pairing_home()
         try:
             clear_after_publication()
+            clear_result()  # A later local-only reset must not revive the old unbind result.
         except OSError:
             return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         if not _retire_pending_pairing(operation_id=str(record["operation_id"])):

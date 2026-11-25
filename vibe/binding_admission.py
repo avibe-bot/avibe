@@ -51,6 +51,12 @@ def reset_intent_path():
     return paths.get_remote_binding_reset_path()
 
 
+def owns_reset_admission():
+    """Only the current thread holding reset admission for this root may stop on its behalf."""
+    root = os.path.realpath(paths.get_state_dir())
+    return getattr(_owner, 'key', None) == (root, 'reset')
+
+
 def reset_in_progress():
     # A malformed marker, including a dangling link, is never permission to
     # start another writer. Recovery must validate its contents separately.

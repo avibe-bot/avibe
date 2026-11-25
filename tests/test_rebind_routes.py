@@ -122,7 +122,7 @@ def test_rebind_through_shared_callback(machine, reason):
         assert cloud.instance_secret == 'fixture-rotated'
 
 
-@pytest.mark.parametrize('finish', ['confirm', 'cancel', 'expired'])
+@pytest.mark.parametrize('finish', ['confirm', 'cancel', 'expired', 'cloud_then_local'])
 def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
     from vibe import binding_admission, desktop_local_instance as local, direct_certificates
 
@@ -150,6 +150,30 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
     old, fresh = (post(path + '/preview', {}).get_json()['confirmation_id'] for _ in range(2))
     assert old != fresh and post(path, {'confirmation_id': old}).status_code == 409
     assert not binding_admission.reset_in_progress() and local._installation_id()
+    if finish == 'cloud_then_local':
+        from vibe import binding_unbind
+        sends = []
+        monkeypatch.setattr(binding_unbind, 'send_original', lambda cfg, operation, **kw:
+                            sends.append(operation) or 'invalid_credential')
+        cloud = path + '/unbind'
+        fallback = path + '/local-after-refusal'
+        preview = post(cloud + '/preview', {})
+        assert preview.status_code == 200, preview.get_json()
+        cloud_token = {'confirmation_id': preview.get_json()['confirmation_id']}
+        assert post(cloud, {'confirmation_id': fresh}).status_code == 409
+        assert post(path, cloud_token).status_code == 409
+        assert post(fallback + '/preview', {}).status_code == 409
+        assert post(cloud, cloud_token).status_code == 202 and not sends
+        assert remote_access._drive_pending_pairing()[0] and len(sends) == 1
+        assert local._installation_id() and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+        second = post(fallback + '/preview', {})
+        assert second.status_code == 200, second.get_json()
+        token = {'confirmation_id': second.get_json()['confirmation_id']}
+        assert post(fallback, cloud_token).status_code == 409
+        assert post(fallback, token).get_json() == {'state': 'unpaired'}
+        assert post(fallback, token).status_code == 409
+        assert not local._installation_id() and len(sends) == 1 and not redeems
+        return
     if finish == 'cancel':
         assert post(scope + '/cancel', {}).status_code == 200
     elif finish == 'expired':

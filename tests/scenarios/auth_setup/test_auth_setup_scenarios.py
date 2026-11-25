@@ -6716,3 +6716,65 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
     assert relogin["local"]["remote_access"]["requested"] is False
     assert V2Config.load().remote_access == before
     assert starts == ["唯一实例"]
+
+
+def test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt(pairing_host, monkeypatch):
+    """Scenario: AUTH-SETUP-917"""
+    import http.client
+    from tests.ui_server_test_helpers import csrf_headers
+    from vibe import binding_admission, desktop_local_instance, direct_certificates, remote_access, ui_server
+
+    root, _ = pairing_host
+    assert remote_access.pair("key_A", "https://avibe.bot")["ok"]
+    desktop_local_instance.ensure_installation_id()
+    workspace = root / "untouched-workspace"
+    workspace.write_text("keep")
+    stopped = []
+    monkeypatch.setattr(remote_access, "stop", lambda cfg: stopped.append(binding_admission.reset_in_progress()) or {"ok": True})
+    monkeypatch.setattr(remote_access, "_stop_direct_lifecycle_before_pairing_discard", lambda cfg: None)
+    monkeypatch.setattr(direct_certificates, "discard_direct_certificates", lambda: None)
+    monkeypatch.setattr(remote_access, "_validated_backend_proxy_url", lambda url: None)
+    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: None)
+    from vibe import permissions
+
+    def offline(*args, **kwargs):
+        raise permissions.PermissionsError("offline")  # The Devices list reads no account here.
+
+    monkeypatch.setattr(permissions, "get_current_permissions", offline)
+    posts = []
+
+    class Issuer:
+        def connect(self):
+            pass
+
+        def request(self, method, path, *, body, headers):
+            posts.append((method, path, body, headers["X-Vibe-Device-Secret"]))
+
+        def getresponse(self):
+            if len(posts) == 1:
+                raise http.client.RemoteDisconnected()
+            data = {"status": "unbound", **json.loads(posts[-1][2])}
+            return SimpleNamespace(status=200, read=lambda size: json.dumps(data).encode(),
+                                   getheader=lambda key: {"Content-Type": "application/json"}.get(key))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(remote_access, "_validated_backend_connections", lambda *args: [Issuer()])
+    browser = ui_server.app.test_client()
+    headers = csrf_headers(browser)
+    preview = browser.post("/api/remote-access/unbind/preview", headers=headers, json={})
+    assert preview.status_code == 200 and not posts
+    committed = browser.post("/api/remote-access/unbind/commit", headers=headers,
+                             json={"confirmation_id": preview.get_json()["confirmation_id"]})
+    assert committed.status_code == 202 and stopped == [True] and not posts
+    assert browser.get("/api/devices").get_json()["unbind"] == {"state": "unbinding"}
+    remote_access._drive_pending_pairing()
+    assert len(posts) == 1 and V2Config.load().remote_access.vibe_cloud.instance_id == "inst_A"
+    remote_access._drive_pending_pairing()
+    assert len(posts) == 2 and posts[0] == posts[1]
+    assert posts[0][:2] == ("POST", "/api/v1/paired-instance/unbind")
+    assert not binding_admission.reset_in_progress()
+    assert not V2Config.load().remote_access.vibe_cloud.instance_id
+    assert desktop_local_instance._installation_id() is None and workspace.read_text() == "keep"
+    assert browser.get("/api/devices").get_json()["unbind"] == {"state": "unbound"}

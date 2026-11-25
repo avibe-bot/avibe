@@ -71,6 +71,177 @@ def test_worker_keeps_damaged_or_stale_intent_fenced(reset_host, damage):
     assert workspace.read_text() == 'keep' and len(calls) == 1
 
 
+def test_unbind_protocol_conflict_stays_fenced_across_worker_restart(reset_host):
+    from vibe import binding_recovery
+    from vibe.binding_unbind import root_stamp
+
+    record, workspace, calls = reset_host
+    operation = '52932f11-9742-49e5-94ae-ad97afcf966b'
+    reset._save({**record, 'schema': 2, 'operation': operation, 'phase': 'repair',
+                 'accepted': True, 'was_requested': False, 'root': root_stamp()})
+    for _ in range(2):
+        view = binding_recovery._resume_reset()
+        assert view == {'state': 'reset_repair_required', 'reason_code': 'unbind_requires_attention'}
+        assert reset._read()['operation'] == operation
+    assert gate.reset_in_progress() and local._installation_id() is not None
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    assert workspace.read_text() == 'keep' and len(calls) == 1
+
+
+@pytest.mark.parametrize('responses,final', [
+    (('retry', 'pending', 'unbound'), 'unpaired'),
+    (('pending', 'repair'), 'reset_repair_required'),
+])
+def test_hosted_worker_resumes_only_the_sealed_operation(reset_host, monkeypatch, responses, final):
+    from vibe import binding_recovery, binding_unbind as unbind
+
+    record, workspace, _ = reset_host
+    op = '292784aa-366b-46fb-a109-bc646a25f6ce'
+    reset._save({**record, 'schema': 2, 'operation': op, 'phase': 'cloud',
+                 'accepted': False, 'was_requested': False, 'root': unbind.root_stamp()})
+    observed = []
+    def send(config, operation, *, accepted):
+        observed.append((operation, config.remote_access.vibe_cloud.instance_id, accepted))
+        return responses[len(observed) - 1]
+    monkeypatch.setattr(unbind, 'send_original', send)
+    for index, response in enumerate(responses):
+        view = binding_recovery._resume_reset()
+        if index < len(responses) - 1:
+            assert view['state'] == 'unbinding'
+            assert reset._read()['accepted'] is (response == 'pending')
+            assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    assert view['state'] == final
+    assert [item[:2] for item in observed] == [(op, 'inst_A')] * len(responses)
+    assert observed[-1][2] is True
+    assert gate.reset_in_progress() is (final != 'unpaired')
+    assert workspace.read_text() == 'keep'
+
+
+@pytest.mark.parametrize('switch', ['start', 'stop'])
+def test_user_switch_cannot_modify_intent_while_reset_owns_it(tmp_path, monkeypatch, switch):
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    path = gate.reset_intent_path()
+    request = remote._connector_requested_path()
+    assert path.is_relative_to(tmp_path) and request.is_relative_to(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('sealed')  # Even an unreadable marker must keep switch writers out.
+    request.parent.mkdir(parents=True, exist_ok=True)
+    request.touch()
+    called = []
+    monkeypatch.setattr(remote, '_ensure_cloudflared_pin', lambda _: None)
+    monkeypatch.setattr(remote, '_start', lambda *a, **kw: called.append('start') or {'ok': True})
+    monkeypatch.setattr(remote, '_stop_connector', lambda *a: called.append('stop') or {'ok': True})
+    monkeypatch.setattr(remote, '_record_device_access_switch', lambda *a: None)
+    result = getattr(remote, switch)(object())
+    assert not result['ok'] and result['error'] == 'reset_in_progress'
+    assert request.exists() and not called
+
+
+def test_unbind_seal_requires_current_preview_and_never_dispatches(pairing_host, monkeypatch):
+    from vibe import binding_unbind as unbind
+
+    assert remote.pair('key_A', 'https://backend.test')['ok']
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.backend_url = 'https://avibe.bot'
+    cfg.save()
+    expected = reset.unbind_snapshot()
+    monkeypatch.setattr(unbind, 'send_original', lambda *a, **kw: pytest.fail('dispatch inside sealing'))
+    cfg.remote_access.vibe_cloud.instance_secret = 'fixture-new-key'
+    cfg.save()
+    with pytest.raises(ClaimError, match='local_binding_changed'):
+        reset.seal_unbind(expected)
+    assert not gate.reset_in_progress()
+    expected = reset.unbind_snapshot()
+    reset.seal_unbind(expected)
+    record = reset._read()
+    assert record['phase'] == 'cloud' and record['schema'] == 2
+    assert unbind.valid_operation(record['operation']) and not record['accepted']
+    assert 'fixture-new-key' not in gate.reset_intent_path().read_text()
+    with pytest.raises(ClaimError, match='operation_in_progress'):
+        reset.seal_unbind(expected)
+    assert reset._read() == record
+
+
+@pytest.mark.parametrize(('phase', 'requested'), [('invalid_credential', False), ('ineligible', True)])
+def test_rejected_unbind_restores_intent_without_connecting_or_sending(reset_host, monkeypatch, phase, requested):
+    from vibe import binding_unbind as unbind
+
+    record, workspace, _ = reset_host
+    cfg = V2Config.load()
+    assert cfg.remote_access.vibe_cloud.enabled is False
+    op = '5b81d74b-ad22-42b3-9c20-f3eb2c2d11b9'
+    reset._save({**record, 'schema': 2, 'operation': op, 'phase': phase,
+                 'accepted': False, 'was_requested': requested, 'root': unbind.root_stamp()})
+    monkeypatch.setattr(unbind, 'send_original', lambda *a, **kw: pytest.fail('resent after refusal'))
+    monkeypatch.setattr(remote, 'start', lambda *a: pytest.fail('connected after refusal'))
+    expected = {'state': 'not_unbound', 'reason_code': phase}
+    assert reset.resume() == {**expected, 'operation': op}
+    assert unbind.last_result(cfg) == expected
+    # A generic status visible to the device page must not enable local-only consent for another op.
+    assert unbind.last_result(cfg, operation=op) == expected
+    assert unbind.last_result(cfg, operation='fee333ee-ed9c-42fd-bace-1ee148a67c56') is None
+    assert not gate.reset_in_progress()
+    assert remote._connector_requested_path().exists() is requested
+    assert reset._stamp(V2Config.load().remote_access.vibe_cloud) == record['source']
+    assert workspace.read_text() == 'keep' and local._installation_id() is not None
+
+
+@pytest.mark.parametrize('reply', ['lose_first_response', 'malformed_503'])
+def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, monkeypatch, reply):
+    import http.client
+    import json
+    from types import SimpleNamespace
+    from vibe import binding_unbind as unbind, direct_certificates
+
+    assert remote.pair('key_A', 'https://backend.test')['ok']
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.backend_url = 'https://avibe.bot'
+    cfg.save()
+    local.ensure_installation_id()
+    monkeypatch.setattr(remote, 'stop', lambda _: {'ok': True})
+    monkeypatch.setattr(remote, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
+    monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    monkeypatch.setattr(remote, '_validated_backend_proxy_url', lambda _: None)
+    posts = []
+
+    class Connection:
+        def connect(self):
+            pass
+
+        def request(self, method, path, *, body, headers):
+            assert (method, path) == ('POST', '/api/v1/paired-instance/unbind')
+            posts.append((body, headers['X-Vibe-Device-Secret']))
+
+        def getresponse(self):
+            if reply == 'lose_first_response' and len(posts) == 1:
+                raise http.client.RemoteDisconnected()
+            bad = reply == 'malformed_503'
+            data = {'error': 'unbind_unavailable', 'extra': 1} if bad else {
+                'status': 'unbound', **json.loads(posts[-1][0])}
+            return SimpleNamespace(status=503 if bad else 200, read=lambda size: json.dumps(data).encode(),
+                                   getheader=lambda key: {'Content-Type': 'application/json'}.get(key))
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(remote, '_validated_backend_connections', lambda *a: [Connection()])
+    reset.seal_unbind(reset.unbind_snapshot())
+    op = reset._read()['operation']
+    assert remote._drive_pending_pairing()[0]
+    first = unbind.device_state(V2Config.load())['state']
+    assert first == ('unbinding' if reply == 'lose_first_response' else 'reset_repair_required')
+    assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
+    assert remote._drive_pending_pairing()[0]
+    second = unbind.device_state(V2Config.load())['state']
+    if reply == 'lose_first_response':
+        assert second == 'unbound' and len(posts) == 2 and posts[0] == posts[1]
+        assert unbind.last_result(V2Config.load()) == {'state': 'unbound'}
+        assert unbind.last_result(cfg) is None
+    else:
+        assert second == 'reset_repair_required' and len(posts) == 1 and gate.reset_in_progress()
+    assert json.loads(posts[0][0]) == {'operation_id': op}
+
+
 def test_worker_finishes_authorized_reset_including_private_health_store(reset_host, monkeypatch):
     from storage import mobile_store
     _, workspace, calls = reset_host
@@ -108,6 +279,31 @@ def cli_host(pairing_host, monkeypatch):
     monkeypatch.setattr(remote, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
     monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
     return pairing_host
+
+
+@pytest.mark.parametrize(('phase', 'entry'), [('repair', 'rebind'), ('repair', 'reset'), ('cloud', 'reset')])
+def test_terminal_replaces_cloud_marker_locally_without_new_operation(cli_host, monkeypatch, phase, entry):
+    from vibe import binding_unbind as unbind
+    cfg = V2Config.load()
+    op = '060bb169-2fa6-498d-9a4f-bf269a448b95'
+    reset._save({**reset._new_record(cfg), 'schema': 2, 'operation': op, 'phase': phase,
+                 'accepted': True, 'was_requested': True, 'root': unbind.root_stamp()})
+    monkeypatch.setattr(unbind, 'send_original', lambda *a, **kw: pytest.fail('local override sent a request'))
+    snapshots = []
+    save = reset._save
+    def observe(record):
+        snapshots.append((record['schema'], record['phase'], record['operation']))
+        save(record)
+    monkeypatch.setattr(reset, '_save', observe)
+    if entry == 'rebind':
+        decision = lambda consent: reset.reset_interactively(confirm=consent, repair=True)
+    else:
+        decision = lambda consent: reset.reset_local_only_interactively(confirm=consent)
+    assert decision(lambda: False) == {'state': 'declined'} and not snapshots
+    assert decision(lambda: True) == {'state': 'unpaired'}
+    assert snapshots[0][:2] == (1, 'retire')
+    assert {operation for _, _, operation in snapshots} == {op.replace('-', '')}
+    assert not gate.reset_in_progress() and not V2Config.load().remote_access.vibe_cloud.instance_id
 
 
 @pytest.mark.parametrize('kind', ['stdin', 'stdout', 'delegated', 'http'])
