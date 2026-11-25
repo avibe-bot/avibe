@@ -148,7 +148,7 @@ def test_manager_stop_dispatches_surviving_reports_once(managers, cancel_one):
 
 def test_pending_failed_steer_only_enters_recovery_context_on_its_own_admission(managers):
     from storage.agent_transcript import SQLiteTranscriptStore
-    from tests.test_agent_runtime_transcript import _user
+    from tests.test_agent_transcript import COMPACTION, _user
 
     manager, _, engine, _, _ = managers
     sid = "ses_fsm"
@@ -157,8 +157,16 @@ def test_pending_failed_steer_only_enters_recovery_context_on_its_own_admission(
     ids = [_merge(manager, name) for name in ("report A", "report B")]
     for row, name in zip(ids, ("report A", "report B")):
         asyncio.run(transcript.consume_input(sid, row, _user(name)))
+    # A released checkpoint can keep an unchecked model-authored summary of the old inputs.
+    # Load it once to leave a warm derived capsule on disk before creating the actual carry.
+    stale = asyncio.run(transcript.append_payload(sid, "compaction", {
+        **COMPACTION, "first_kept_seq": 2, "summarized_to_seq": 1, "checkpoint": "report B",
+    }))
+    assert stale in asyncio.run(transcript.load_for_run(sid)).entries
     with engine.begin() as conn:
         _end(conn, failed, kind="server")
+    transcript = SQLiteTranscriptStore(engine)  # A restart must not trust the pre-upgrade capsule.
+    epoch = None
     for index, (row, name) in enumerate(zip(ids, ("report A", "report B"))):
         carried = row + "~carry"
         with engine.begin() as conn:
@@ -170,12 +178,48 @@ def test_pending_failed_steer_only_enters_recovery_context_on_its_own_admission(
                                     runtime_turn_id=turn, native_turn_id=turn)
             store.materialize_start_acceptance(conn, turn_id=turn, evidence={})
         asyncio.run(transcript.consume_input(sid, carried, _user(name)))
-        visible = [entry.row_id for entry in asyncio.run(transcript.load_for_run(sid)).entries if entry.kind == "input"]
+        runtime = asyncio.run(transcript.load_for_run(sid))
+        assert runtime == asyncio.run(transcript.load_for_preview(sid))
+        assert stale.row_id not in {entry.row_id for entry in runtime.entries}
+        assert runtime.carry_projection and epoch in (None, runtime.carry_projection)
+        epoch = runtime.carry_projection
+        visible = [entry.row_id for entry in runtime.entries if entry.kind == "input"]
         assert visible == [item + "~carry" for item in ids[:index + 1]]
         with engine.begin() as conn:
             store.terminalize_turn(conn, turn, outcome="completed", settled_by="terminal_result",
                                    evidence_kind="terminal_result")
             assert [item["id"] for item in store.list_queued(conn, sid)] == [item + "~carry" for item in ids[index + 1:]]
+
+
+def test_repeated_carry_suppresses_occurrences_not_matching_text_or_future_fork_work(managers):
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from storage.carry_projection import fork_mask, read_projection
+    from tests.test_agent_transcript import _session, _user
+    from storage.models import agent_sessions
+
+    manager, _, engine, _, _ = managers
+    sid = "ses_fsm"
+    transcript = SQLiteTranscriptStore(engine)
+    failed, _ = asyncio.run(_activate(manager, text="human request"))
+    unrelated = _merge(manager, "same", harness=False)
+    report = _merge(manager, "same")
+    for mid in (unrelated, report):
+        asyncio.run(transcript.consume_input(sid, mid, _user("same")))
+    with engine.begin() as conn:
+        # A self-fork taken before settlement must not retroactively change later.
+        bound = 2
+        scope = conn.execute(select(agent_sessions.c.scope_id).where(agent_sessions.c.id == sid)).scalar_one()
+        _session(conn, "child_frozen", scope, {"fork_source_session_id": sid, "fork_source_context_seq": bound,
+                 "fork_source_carry_mask": fork_mask(conn, sid, bound)})
+        _end(conn, failed, kind="server")
+        next_turn = _start_next(conn)
+    asyncio.run(transcript.consume_input(sid, report + "~carry", _user("same")))
+    with engine.begin() as conn:
+        _end(conn, next_turn, kind="server")
+        assert fork_mask(conn, sid, 3) == sorted([report, report + "~carry"])
+        assert read_projection(conn, [(sid, None)]).identity
+    assert [r.row_id for r in asyncio.run(transcript.load_for_preview(sid)).entries] == [unrelated]
+    assert [r.row_id for r in asyncio.run(transcript.load_for_preview("child_frozen")).entries] == [unrelated, report]
 
 
 def test_late_acceptance_of_report_after_stop_starts_it_once(managers):

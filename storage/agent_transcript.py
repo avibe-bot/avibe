@@ -276,6 +276,11 @@ class SQLiteTranscriptStore:
             await self._write(session_id, publish)
         return snapshot
 
+    async def load_for_preview(self, session_id: str) -> RunTranscript:
+        """Same projected read snapshot, without publishing derived checkpoint metadata."""
+        runtime, _ = await asyncio.to_thread(self._load_runtime, session_id)
+        return runtime
+
     def _load_runtime(self, session_id: str):
         from storage.agent_runtime_transcript import read_runtime
 

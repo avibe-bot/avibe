@@ -35,6 +35,7 @@ class RunTranscript:
     response_clocks: Mapping[tuple[str, str], float] = field(default_factory=dict)
     cache_records: tuple[Mapping[str, Any], ...] = ()
     change_seqs: Mapping[str, int] = field(default_factory=dict)
+    carry_projection: str = ""
 
 
 def is_anchor_response(row: ContextEntry) -> bool:
