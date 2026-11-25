@@ -1739,6 +1739,11 @@ async fn sign_in(f: &Fixture, session: Value) {
 }
 /// Replies for one remote selection up to its readiness read, which is last.
 fn selection(session: &Value, id: &str, ready: Reply) -> Vec<(&'static str, Reply)> {
+    selection_at(session, id, ready)
+}
+/// The same, for an instance at `https://{host}.avibe.bot`.
+fn selection_at(session: &Value, host: &str, ready: Reply) -> Vec<(&'static str, Reply)> {
+    let id = host;
     let mut redirect = response(302, json!({}), None);
     redirect.headers.insert(
         LOCATION,
@@ -2871,6 +2876,14 @@ async fn a_kept_sign_in_the_instance_no_longer_takes_is_replaced_by_a_new_one() 
         );
         // The instance's page was asked once for a newer cookie; it had none.
         assert_eq!(f.view.cookie_reads.load(Ordering::SeqCst), reads + 1, "{case}");
+        // The refused sign-in is signed out of the instance once.
+        let logouts = logouts(&f, 1).await;
+        assert_eq!(logouts.len(), 1, "{case}: {logouts:?}");
+        assert_eq!(logouts[0][1], "https://one.avibe.bot", "{case}");
+        assert!(
+            logouts[0][3].contains("__Host-vibe_remote_session=instance-only"),
+            "{case}"
+        );
         // The new sign-in is kept.
         let from = f.http.calls.lock().unwrap().len();
         f.http.replies.lock().unwrap().extend([
@@ -2880,6 +2893,112 @@ async fn a_kept_sign_in_the_instance_no_longer_takes_is_replaced_by_a_new_one() 
         assert!(select(&f, "one").await.ok, "{case}");
         assert_eq!(since(&f, from).0, ["/api/mobile/session", "/api/session"], "{case}");
     }
+}
+
+/// The instance sign-outs attempted so far, once there are at least `count`.
+async fn logouts(f: &Fixture, count: usize) -> Vec<[String; 4]> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while f.http.logouts.lock().unwrap().len() < count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the instance sign-out was attempted");
+    // Anything more would come from the same turn of the runtime.
+    tokio::task::yield_now().await;
+    f.http.logouts.lock().unwrap().clone()
+}
+
+/// When the instance gives no answer about a kept sign-in (unreachable, a
+/// server error, or it cannot check the account with avibe.bot just now),
+/// the sign-in is kept: the opening fails, nothing is signed out, and no new
+/// sign-in is made. The next opening goes on with it.
+#[tokio::test]
+async fn a_kept_sign_in_survives_an_instance_that_cannot_answer() {
+    let unanswered: Vec<(&str, Reply)> = vec![
+        ("unreachable", Reply::Failure),
+        (
+            "server error",
+            Reply::Ready(response(503, json!({"error": "unavailable"}), None)),
+        ),
+        (
+            "account check unavailable",
+            Reply::Ready(response(
+                200,
+                json!({"remote": true, "authenticated": true, "authorization_state": "unavailable"}),
+                None,
+            )),
+        ),
+    ];
+    for (case, answer) in unanswered {
+        let f = selected_for_update().await;
+        let session = catalog("account-a", &["one"]);
+        let from = f.http.calls.lock().unwrap().len();
+        let reads = f.view.cookie_reads.load(Ordering::SeqCst);
+        f.http
+            .replies
+            .lock()
+            .unwrap()
+            .extend([("/api/mobile/session", ok(session.clone())), ("/api/session", answer)]);
+        let reply = select(&f, "one").await;
+        assert!(!reply.ok, "{case}");
+        assert_eq!(since(&f, from).0, ["/api/mobile/session", "/api/session"], "{case}");
+        assert_eq!(f.view.cookie_reads.load(Ordering::SeqCst), reads, "{case}");
+        tokio::task::yield_now().await;
+        assert!(f.http.logouts.lock().unwrap().is_empty(), "{case}");
+
+        let from = f.http.calls.lock().unwrap().len();
+        f.http.replies.lock().unwrap().extend([
+            ("/api/mobile/session", ok(session.clone())),
+            ("/api/session", Reply::Ready(ready("account-a", "one"))),
+        ]);
+        let reply = select(&f, "one").await;
+        assert!(reply.ok, "{case}: {:?}", reply.error);
+        let (calls, cookies) = since(&f, from);
+        assert_eq!(calls, ["/api/mobile/session", "/api/session"], "{case}");
+        assert!(
+            cookies[1].contains("__Host-vibe_remote_session=instance-only"),
+            "{case}"
+        );
+    }
+}
+
+/// An instance renamed meanwhile opens at its new origin with a sign-in of
+/// its own; the one kept at the old origin is signed out there.
+#[tokio::test]
+async fn a_renamed_instance_signs_in_at_its_new_origin_and_ends_the_old_sign_in() {
+    let f = selected_for_update().await;
+    let mut renamed = catalog("account-a", &["one"]);
+    renamed["instances"][0]["host"] = json!("one-renamed.avibe.bot");
+    renamed["instances"][0]["url"] = json!("https://one-renamed.avibe.bot");
+    let from = f.http.calls.lock().unwrap().len();
+    let mut replies = vec![("/api/mobile/session", ok(renamed.clone()))];
+    replies.extend(
+        selection_at(&renamed, "one-renamed", Reply::Ready(ready("account-a", "one")))
+            .into_iter()
+            .skip(1),
+    );
+    f.http.replies.lock().unwrap().extend(replies);
+    let reply = select(&f, "one").await;
+    assert!(reply.ok, "{:?}", reply.error);
+    assert!(since(&f, from).0.contains(&"/auth/callback".to_owned()));
+    assert!(matches!(
+        &f.client.state().connection.committed,
+        ClientTarget::Remote { canonical_origin, .. } if canonical_origin == "https://one-renamed.avibe.bot"
+    ));
+    let logouts = logouts(&f, 1).await;
+    assert_eq!(logouts.len(), 1, "{logouts:?}");
+    assert_eq!(logouts[0][1], "https://one.avibe.bot");
+    assert!(logouts[0][3].contains("__Host-vibe_remote_session=instance-only"));
+
+    // The new origin's sign-in is the one kept.
+    let from = f.http.calls.lock().unwrap().len();
+    f.http.replies.lock().unwrap().extend([
+        ("/api/mobile/session", ok(renamed.clone())),
+        ("/api/session", Reply::Ready(ready("account-a", "one"))),
+    ]);
+    assert!(select(&f, "one").await.ok);
+    assert_eq!(since(&f, from).0, ["/api/mobile/session", "/api/session"]);
 }
 
 /// Signing out signs each instance sign-in of this run out of its instance,
