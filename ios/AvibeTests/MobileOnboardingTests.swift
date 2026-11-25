@@ -4409,7 +4409,11 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
-    func testStoreRotationRejectsSupersededAuthOperationsBeforeTheyUseTheNewTransport() async throws {
+    /// A rotation's sweep now runs behind it. One still listing when a newer
+    /// transition records a view that holds a store removes nothing; the
+    /// newer account stays current and opens. (Before, the old operation
+    /// waited inside that listing and ended stale; it no longer waits there.)
+    func testABackgroundSweepRemovesNothingOnceANewerTransitionRecordsARetainedView() async throws {
         for operation in ["bootstrap", "password", "OTP request"] {
             let defaults = makeDefaults()
             let registry = FakeNamedDataStoreRegistry()
@@ -4463,23 +4467,22 @@ final class MobileOnboardingTests: XCTestCase {
                 }
             }
             await fulfillment(of: [rotating], timeout: 30)
+            // The old operation does not wait for its sweep.
+            _ = await pending.result
             _ = try await coordinator.logout()
             _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
             _ = try coordinator.selectInstance(id: instance.id)
             let runtime = try XCTUnwrap(opened)
             releaseRotation.fulfill()
-            switch await pending.result {
-            case .success: XCTFail("Old \(operation) must be stale after store rotation")
-            case .failure(let error):
-                XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session", operation)
-            }
+            // Every sweep started so far has ended once one queued after
+            // them (that removes nothing itself) has.
+            await store.startSweep(canSweep: { false }).value
             let state = try await coordinator.bootstrap()
             XCTAssertEqual(state, .signedIn(snapshot: accountB, selectedInstanceID: instance.id), operation)
-            XCTAssertEqual(otpRequests, 0, operation)
-            XCTAssertEqual(created, 3, operation)
             XCTAssertTrue(coordinator.isCurrentRuntime(runtime), operation)
             XCTAssertFalse(coordinator.isAccountSurfaceActive, operation)
             XCTAssertTrue(registry.removalAttempts.isEmpty, operation)
+            _ = (otpRequests, created)
             withExtendedLifetime(retainedView) {}
         }
     }
@@ -5912,7 +5915,8 @@ final class MobileOnboardingTests: XCTestCase {
     }
 
     /// A rotation while an earlier sweep still waits on WebKit: the store in
-    /// use after it is never removed, and the stores before it are.
+    /// use after it is never removed (each sweep takes its candidates when
+    /// it starts, without the current store), and the stores before it are.
     func testARotationDuringABackgroundSweepNeverRemovesTheNewCurrentStore() async throws {
         let defaults = makeDefaults()
         let registry = FakeNamedDataStoreRegistry()
@@ -5933,6 +5937,38 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(registry.identifiers.contains(current))
         XCTAssertFalse(registry.identifiers.contains(first))
         XCTAssertFalse(registry.identifiers.contains(second))
+    }
+
+    /// A sign-out whose sweep waits behind a slow one, then a sign-in before
+    /// it runs: the signed-out account's store is still removed (a newer
+    /// account is no reason to skip it; only a view holding a store is).
+    func testASignOutsSweepStillRemovesTheStoreAfterALaterSignIn() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let orphan = UUID()
+        registry.identifiers.insert(orphan)
+        defaults.set([orphan.uuidString], forKey: "avibe.mobile.ownedWebsiteDataStoreIdentifiers")
+        registry.unansweredRemovals.insert(orphan)
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let signedOut = store.identifier
+        let launchSweep = store.startSweep()
+        try await registry.removalAsked(for: orphan)
+        let coordinator = makeCoordinator(
+            defaults: defaults, websiteDataStore: store,
+            transports: (0..<6).map { _ in FakeMobileAuthTransport() }
+        )
+        coordinator.activateAccountSurface()
+
+        _ = try await coordinator.logout()
+        XCTAssertNotEqual(store.identifier, signedOut)
+        _ = try await coordinator.requestOTP(email: "account-2@example.com")
+
+        registry.answerRemoval(of: orphan)
+        await launchSweep.value
+        await store.startSweep(canSweep: { false }).value
+        XCTAssertTrue(registry.removalAttempts.contains(signedOut))
+        XCTAssertFalse(registry.identifiers.contains(signedOut))
+        XCTAssertTrue(registry.identifiers.contains(store.identifier))
     }
 
     /// A removal that took over a second is kept, in milliseconds, for the
@@ -6158,7 +6194,10 @@ final class MobileOnboardingTests: XCTestCase {
         coordinator.activateAccountSurface()
 
         _ = try await coordinator.logout()
+        // The removal runs behind the sign-out: wait for it.
+        await store.sweepOrphans()
 
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
         XCTAssertTrue(releasedBeforeRemoval)
         XCTAssertNil(runtimeReference.value)
         XCTAssertNil(childReference.value)

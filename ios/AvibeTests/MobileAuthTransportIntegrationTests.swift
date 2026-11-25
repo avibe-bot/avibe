@@ -1904,7 +1904,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
         oldWebView?.stopLoading()
         oldWebView = nil
-        await accountStore.rotate()
+        // With its sweep: the store's removal must not outlive the test.
+        await accountStore.rotate()?.value
         releaseResponse.signal()
         await fulfillment(
             of: [lateResponseSent.expectation],

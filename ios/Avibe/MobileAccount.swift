@@ -2443,10 +2443,14 @@ final class MobileSessionCoordinator {
         try requireCurrentGeneration(requestGeneration)
         await websiteDataStore.rotate(
             sweepOwnedStores: pendingStoreReleaseBarriers.isEmpty,
+            // The sweep runs behind the rotation, possibly after a newer
+            // transition: it removes only stores no longer current, so a
+            // newer account is no reason to skip it (its store is the current
+            // one). What still stops it is a view still holding a store:
+            // every transition records its views here as it begins.
             canSweep: { [weak self] in
                 guard let self else { return false }
-                return self.generation == requestGeneration
-                    && self.pendingStoreReleaseBarriers.allSatisfy(\.isReleased)
+                return self.pendingStoreReleaseBarriers.allSatisfy(\.isReleased)
             }
         )
         try requireCurrentGeneration(requestGeneration)

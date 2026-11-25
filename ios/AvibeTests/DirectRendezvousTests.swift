@@ -540,12 +540,6 @@ final class DirectRendezvousTests: XCTestCase {
         DirectListenerFailure(step: step, code: code, backgroundSeconds: away, at: at)
     }
 
-    /// `listener_faults` is what the instance accepts and nothing more: at
-    /// most five entries, the newest, each with exactly a step (one it
-    /// knows), a code and the seconds away, all within its bounds; no time,
-    /// address, port or identifier; and no field at all when there is
-    /// nothing to report. (The instance ignores the whole list for one
-    /// entry it does not accept: `vibe/direct_rendezvous.py`.)
     /// The App's slow store removals ride on the same request, as at most
     /// five non-negative integers the instance accepts (milliseconds), and
     /// no field when there are none.
@@ -570,6 +564,12 @@ final class DirectRendezvousTests: XCTestCase {
         )
     }
 
+    /// `listener_faults` is what the instance accepts and nothing more: at
+    /// most five entries, the newest, each with exactly a step (one it
+    /// knows), a code and the seconds away, all within its bounds; no time,
+    /// address, port or identifier; and no field at all when there is
+    /// nothing to report. (The instance ignores the whole list for one
+    /// entry it does not accept: `vibe/direct_rendezvous.py`.)
     func testTheRequestReportsTheListenersLastFailuresWithinTheInstancesLimits() throws {
         let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
         XCTAssertEqual(
