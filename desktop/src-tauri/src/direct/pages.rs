@@ -10,9 +10,18 @@
 //! A routed window has a registration of its own with its session's
 //! listener (`registered.rs`), kept here: its credential is what the window
 //! presents, and its page's hand-over closes that window's connections only.
+//!
+//! An answer that takes time (a hand-over, a measurement) is given to the
+//! page that asked and to no other. Two things hold that. Here, before the
+//! answer is sent: the label must still be the window whose page asked
+//! (`Pages::asker`), since a label is used again. In the window, as the
+//! answer arrives: the document must be the one that asked, by its mark
+//! (`bridge::delivery`), since a window loads other documents and nothing
+//! here sees one commit in time.
 use super::{choose, direct, lock, perform, Direct};
 use crate::direct::{
     bridge::{self, Ledger, Message, Method, Request, Told},
+    measure,
     registered::Registered,
     rendezvous::origin_of,
     Client, Handover, HandoverResult, PathStatus, PreferredPath, WindowRegistration,
@@ -53,6 +62,53 @@ struct Live {
 pub(super) struct Pages {
     windows: HashMap<String, Page>,
     sessions: HashMap<u64, Live>,
+}
+
+/// What a label is, when an answer is ready, to the page that asked under it.
+#[derive(Debug, PartialEq, Eq)]
+enum Asker {
+    /// The same window, registered as it was.
+    Same,
+    /// The same window, but no longer registered as it was when it asked:
+    /// its session ended, or it has another's route now.
+    Reregistered,
+    /// Another window has the label, or none.
+    Gone,
+}
+
+impl Pages {
+    /// `token` is the asking page's window's own, and `registration` what
+    /// that window was registered as when it asked, if it was. `session`:
+    /// the session that routes the label now.
+    fn asker(
+        &self,
+        label: &str,
+        token: &str,
+        session: Option<u64>,
+        registration: Option<&WindowRegistration>,
+    ) -> Asker {
+        if self.windows.get(label).is_none_or(|page| page.token != token) {
+            return Asker::Gone;
+        }
+        let Some(registration) = registration else {
+            return Asker::Same;
+        };
+        let kept = session
+            .and_then(|session| self.sessions.get(&session))
+            .is_some_and(|live| live.registered.is(label, registration));
+        if kept {
+            Asker::Same
+        } else {
+            Asker::Reregistered
+        }
+    }
+}
+
+/// `Pages::asker`, as things are now. (The wiring is let go before the
+/// pages are taken.)
+fn asker(state: &Arc<Direct>, label: &str, token: &str, registration: Option<&WindowRegistration>) -> Asker {
+    let session = lock(&state.wiring).routed_by(label);
+    lock(&state.pages).asker(label, token, session, registration)
 }
 
 /// The bridge script for a window of another computer's instance that is
@@ -295,6 +351,7 @@ fn act(view: &Webview, url: &url::Url) {
             let choice = Told::new(mode, reverted, order);
             let reply = Message::Reply {
                 id: request.id,
+                document: request.document,
                 result: choice.preference.clone(),
                 choice: Some(choice),
             };
@@ -305,6 +362,7 @@ fn act(view: &Webview, url: &url::Url) {
             let choice = Told::new(mode, None, choose(app, &state, &account, &origin, mode));
             let reply = Message::Reply {
                 id: request.id,
+                document: request.document,
                 result: choice.preference.clone(),
                 choice: Some(choice),
             };
@@ -331,13 +389,78 @@ fn act(view: &Webview, url: &url::Url) {
                     }
                     _ => HandoverResult::NotUsable,
                 };
+                // Another window may have the label by now.
+                if asker(&state, &label, &token, None) == Asker::Gone {
+                    return;
+                }
                 let reply = Message::Reply {
                     id: request.id,
+                    document: request.document,
                     result: bridge::handover(&result),
                     choice: None,
                 };
                 answer(&app, &label, &origin, reply);
             });
         }
+        Method::Measure => {
+            // What is measured is the instance this window was made for,
+            // by the address the shell keeps for it: nothing of the request
+            // names a host. The path in use is measured as this window has
+            // it, through its own registration; a window with no session
+            // (the Cloudflare tunnel only, or no route) has none, and the
+            // tunnel is measured all the same.
+            // (The wiring is let go before the pages are taken.)
+            let session = lock(&state.wiring).routed_by(label);
+            let own = session.and_then(|session| {
+                lock(&state.pages)
+                    .sessions
+                    .get(&session)?
+                    .registered
+                    .handing_over(label)
+            });
+            let (app, label) = (app.clone(), label.to_owned());
+            tauri::async_runtime::spawn(async move {
+                let Some(host) = origin.strip_prefix("https://") else {
+                    return;
+                };
+                // Up to 30 s; one measurement at a time in the whole app.
+                let measured = measure(
+                    host,
+                    own.as_ref().map(|(handover, registration)| (handover, registration)),
+                )
+                .await;
+                let refusal = |code| Message::Refusal {
+                    id: request.id.clone(),
+                    document: request.document.clone(),
+                    code,
+                };
+                let message = match asker(
+                    &state,
+                    &label,
+                    &token,
+                    own.as_ref().map(|(_, registration)| registration),
+                ) {
+                    // Another window's page has nothing to do with it.
+                    Asker::Gone => return,
+                    // The path it measured is no longer this window's.
+                    Asker::Reregistered => refusal("unavailable"),
+                    Asker::Same => match measured.map(|result| serde_json::to_value(&result)) {
+                        Ok(Ok(result)) => Message::Reply {
+                            id: request.id.clone(),
+                            document: request.document.clone(),
+                            result,
+                            choice: None,
+                        },
+                        Ok(Err(_)) => refusal("unavailable"),
+                        Err(_busy) => refusal("busy"),
+                    },
+                };
+                answer(&app, &label, &origin, message);
+            });
+        }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/direct/pages.rs"]
+mod tests;

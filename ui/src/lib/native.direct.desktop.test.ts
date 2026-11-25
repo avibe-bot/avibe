@@ -18,6 +18,15 @@ const script = new Function(`return (${readFileSync(
   'utf8',
 )})`)() as (token: string, version: string, asksBeforeLeaving: boolean) => void;
 
+// What the shell evaluates in the window to deliver
+// (desktop/src-tauri/src/direct/page_delivery.js), with the arguments
+// `bridge.rs` gives it: the instance's origin, the mark of the document that
+// asked (none for a state), the message, and whether it may wait for a bridge.
+const delivery = new Function(`return (${readFileSync(
+  resolve(dirname(fileURLToPath(import.meta.url)), '../../../desktop/src-tauri/src/direct/page_delivery.js'),
+  'utf8',
+)})`)() as (origin: string, asker: string | null, message: unknown, keep: boolean) => void;
+
 /**
  * Runs the script as a new document would. Its two properties cannot be
  * redefined, which a real document never needs; here every case is a new
@@ -37,7 +46,7 @@ const install = (token: string, version: string, asksBeforeLeaving: boolean) => 
   }
 };
 
-type Request = { token: string; id: string; method: string; params: Record<string, unknown> };
+type Request = { token: string; id: string; document: string; method: string; params: Record<string, unknown> };
 
 const requests: Request[] = [];
 let leaveQuestions = 0;
@@ -93,7 +102,7 @@ const state = (
 afterEach(() => {
   window.removeEventListener('beforeunload', onLeave);
   document.removeEventListener('click', onClick);
-  for (const name of ['avibeNative', '__AVIBE_DIRECT_DELIVER__', '__AVIBE_DIRECT_EARLY__']) {
+  for (const name of ['avibeNative', '__AVIBE_DIRECT_DELIVER__', '__AVIBE_DIRECT_EARLY__', '__AVIBE_DIRECT_DOCUMENT__']) {
     Reflect.deleteProperty(window, name);
   }
   requests.length = 0;
@@ -321,6 +330,117 @@ describe('the desktop direct bridge', () => {
     expect(requests[0]).toMatchObject({ method: 'direct.preference' });
     deliver({ reply: { id: requests[0].id, result: { mode: 'tunnel', pendingRelaunch: false, reverted: null } } });
     await expect(asked).resolves.toEqual({ mode: 'tunnel', pendingRelaunch: false, reverted: null });
+  });
+
+  it('asks the shell for a measurement, with nothing but the window\'s token and the document\'s mark', async () => {
+    await load(state(1, 'ipv4'));
+    const bridge = window.avibeNative!;
+    expect(bridge.capabilities).toMatchObject({ direct: 3, directPreference: 2, directMeasure: 1 });
+
+    // Whatever the page passes, nothing of it goes to the shell: what is
+    // measured is the instance the window was made for.
+    const measured = bridge.call('direct.measure', { host: 'other.example', url: 'https://other.example/health' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toEqual({
+      token: 'window-token',
+      id: requests[0].id,
+      document: (window as unknown as { __AVIBE_DIRECT_DOCUMENT__: string }).__AVIBE_DIRECT_DOCUMENT__,
+      method: 'direct.measure',
+      params: {},
+    });
+    expect(requests[0].document).toMatch(/^[0-9a-f-]{36}$/);
+    const result = {
+      measuredAt: 1795000000000,
+      basis: 'warm-https-health',
+      samples: 5,
+      current: { kind: 'ipv4', scope: 'local', relayRegion: null, ok: 5, medianMs: 3.2, maxMs: 4.1, error: null },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 4, medianMs: 48.5, maxMs: 61, error: 'timeout' },
+    };
+    delivery(window.location.origin, requests[0].document, { reply: { id: requests[0].id, result } }, false);
+    await expect(measured).resolves.toEqual(result);
+  });
+
+  it('rejects a measurement the shell refuses with the shell\'s word, and waits 35 s for one it does not answer', async () => {
+    vi.useFakeTimers();
+    await load(state(1, 'ipv4'));
+    const bridge = window.avibeNative!;
+
+    // Another measurement is running, in this window or another.
+    const second = bridge.call('direct.measure');
+    delivery(window.location.origin, requests[0].document, { reply: { id: requests[0].id, error: { code: 'busy' } } }, false);
+    await expect(second).rejects.toMatchObject({ code: 'busy' });
+
+    // The shell bounds a measurement at 30 s: the page waits past that, and
+    // past the 10 s every other request is given.
+    let settled: string | null = null;
+    const slow = bridge.call('direct.measure').then(
+      () => { settled = 'resolved'; },
+      (error: { code: string }) => { settled = error.code; },
+    );
+    await vi.advanceTimersByTimeAsync(34_900);
+    expect(settled).toBeNull();
+    await vi.advanceTimersByTimeAsync(200);
+    await slow;
+    expect(settled).toBe('unavailable');
+    // An answer that comes after that is no one's.
+    delivery(window.location.origin, requests[1].document, { reply: { id: requests[1].id, result: {} } }, false);
+    expect(settled).toBe('unavailable');
+  });
+
+  it('hands an answer to the document that asked and to no document that has taken its place', async () => {
+    await load(state(1, 'ipv4'));
+    const asked = window.avibeNative!.call('direct.measure');
+    let outcome: unknown = 'pending';
+    void asked.then((value) => { outcome = value; }, (error) => { outcome = error; });
+    const request = requests[0];
+    const answer = { reply: { id: request.id, result: { basis: 'warm-https-health' } } };
+    type Page = { __AVIBE_DIRECT_DELIVER__: (message: unknown) => void; __AVIBE_DIRECT_DOCUMENT__: string };
+    const page = window as unknown as Page;
+
+    // Another origin's document in the window: nothing, as before.
+    const first = vi.fn(page.__AVIBE_DIRECT_DELIVER__);
+    Object.defineProperty(window, '__AVIBE_DIRECT_DELIVER__', { value: first, configurable: true });
+    delivery('https://elsewhere.example', request.document, answer, false);
+    // Another document's mark: nothing.
+    delivery(window.location.origin, crypto.randomUUID(), answer, false);
+    expect(first).not.toHaveBeenCalled();
+    await settle();
+    expect(outcome).toBe('pending');
+
+    // The window loads the instance again (a reload, a navigation within
+    // it): a new document, with its own bridge and its own mark, at the same
+    // origin. The old document's answer arrives now.
+    for (const name of ['avibeNative', '__AVIBE_DIRECT_DELIVER__', '__AVIBE_DIRECT_DOCUMENT__']) {
+      Reflect.deleteProperty(window, name);
+    }
+    install('window-token', '3.2.7', true);
+    expect(page.__AVIBE_DIRECT_DOCUMENT__).not.toBe(request.document);
+    const second = vi.fn(page.__AVIBE_DIRECT_DELIVER__);
+    Object.defineProperty(window, '__AVIBE_DIRECT_DELIVER__', { value: second, configurable: true });
+    delivery(window.location.origin, request.document, answer, false);
+    // Not handed to the new document at all: its receiver is never called
+    // with it, whatever it would have made of the id.
+    expect(second).not.toHaveBeenCalled();
+    expect((window as unknown as Record<string, unknown>).__AVIBE_DIRECT_EARLY__).toBeUndefined();
+
+    // A document with no bridge (it has not started, or is not the
+    // instance's page): an answer is not kept for it either.
+    Reflect.deleteProperty(window, '__AVIBE_DIRECT_DELIVER__');
+    Reflect.deleteProperty(window, '__AVIBE_DIRECT_DOCUMENT__');
+    delivery(window.location.origin, request.document, answer, false);
+    expect((window as unknown as Record<string, unknown>).__AVIBE_DIRECT_EARLY__).toBeUndefined();
+    // A state is: it is for whatever document of the instance is there.
+    delivery(window.location.origin, null, state(9, 'relay'), true);
+    expect((window as unknown as Record<string, unknown>).__AVIBE_DIRECT_EARLY__).toEqual(state(9, 'relay'));
+
+    // And the new document's own request is answered as ever.
+    Reflect.deleteProperty(window, 'avibeNative');
+    install('window-token', '3.2.7', true);
+    const again = window.avibeNative!.call('direct.handover');
+    const own = requests[requests.length - 1];
+    expect(own.document).toBe(page.__AVIBE_DIRECT_DOCUMENT__);
+    delivery(window.location.origin, own.document, { reply: { id: own.id, result: { closed: 0, kept: 0 } } }, false);
+    await expect(again).resolves.toEqual({ closed: 0, kept: 0 });
   });
 
   it('is not installed over a bridge that is already there', () => {
