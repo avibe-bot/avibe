@@ -174,16 +174,34 @@ export function ConnectionPage() {
   const [unbindPressed, setUnbindPressed] = useState(false);
   const [unbindFailed, setUnbindFailed] = useState(false);
   const unbindConfirmation = useRef<string | null>(null);
+  /** Which press of this page (unbinding, or binding as new deleting first) has no report read
+   *  since. An unbinding the instance accepted is reported at once, so a read begun after the press
+   *  that reports none means nothing began (a request lost before it arrived). */
+  const unbindPressedAt = useRef<number | null>(null);
+  const unbindPresses = useRef(0);
+  /** This page started the unbinding it follows: its end takes the page on to the Devices page. */
+  const followingUnbind = useRef(false);
   const readDevices = useCallback(async () => {
+    const startedAt = unbindPresses.current;
     try {
       const snapshot = await api.devices();
       if (!alive.current) return;
       setDevices(snapshot.devices);
       setUnbindReport(snapshot.unbind);
-      if (snapshot.unbind) setUnbindPressed(false);
+      const pressedAt = unbindPressedAt.current;
+      if (snapshot.unbind || (pressedAt !== null && startedAt >= pressedAt)) {
+        unbindPressedAt.current = null;
+        setUnbindPressed(false);
+      }
     } catch {
       // The list stays as it was read last.
     }
+  }, []);
+  const markUnbindPressed = useCallback(() => {
+    unbindPresses.current += 1;
+    unbindPressedAt.current = unbindPresses.current;
+    followingUnbind.current = true;
+    setUnbindPressed(true);
   }, []);
   const [step, setStep] = useState<RenameStep | undefined>();
   const preview = useRef<Preview | null>(null);
@@ -609,7 +627,7 @@ export function ConnectionPage() {
         if (result === 'unbinding') {
           if (alive.current) {
             setRebindDialog(undefined);
-            setUnbindPressed(true);
+            markUnbindPressed();
           }
           return;
         }
@@ -663,6 +681,15 @@ export function ConnectionPage() {
   // ── 「解除绑定」 ──
   // A running unbinding is followed until it settles.
   const unbindRunning = unbindPressed || unbindReport?.state === 'unbinding';
+  // An unbinding this page started has ended at avibe.bot and here: on to the Devices page, which
+  // says so and offers 「开启远程访问」 (binding as a new computer continues from there too).
+  const unbound = unbindReport?.state === 'unbound';
+  useEffect(() => {
+    if (!unbound || !followingUnbind.current) return;
+    followingUnbind.current = false;
+    clearClaimMarker();
+    navigate(DEVICES_PATH, { replace: true, state: location.state });
+  }, [location.state, navigate, unbound]);
   useEffect(() => {
     if (!unbindRunning) return undefined;
     const timer = window.setInterval(() => { void readDevices(); void readStatus(); void readAddress(); }, FOLLOW_UNBIND_MS);
@@ -705,10 +732,10 @@ export function ConnectionPage() {
       try {
         await api.unbindCommit(confirmation);
         unbindConfirmation.current = null;
-        if (alive.current) setUnbindPressed(true);
+        if (alive.current) markUnbindPressed();
       } catch (error) {
         // A lost answer from afar is expected: remote access stops before the answer arrives.
-        if (alive.current && (error instanceof LostAnswer || (error instanceof DevicesApiError && error.code === 'operation_in_progress'))) setUnbindPressed(true);
+        if (alive.current && (error instanceof LostAnswer || (error instanceof DevicesApiError && error.code === 'operation_in_progress'))) markUnbindPressed();
         // Refused before it began (an expired confirmation, a binding that changed): said, and it can be pressed again.
         else if (alive.current) setUnbindFailed(true);
       } finally {
