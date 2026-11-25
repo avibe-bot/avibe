@@ -216,6 +216,7 @@ class _TurnExecution:
     """Resources and settlement state owned by one gateway request boundary."""
 
     resolved: ResolvedInvocation | None = None
+    thread_receipt: bool = False
     # Set the moment this gateway takes the upstream body, which is also the
     # moment it takes the call's metering from the resolver. Assigned before
     # anything downstream can fail, so it outlives every ending after it.
@@ -1176,6 +1177,7 @@ class ModelHubTurnGateway:
                 turn_outcome=REQUEST_NONFALLBACK_TURN_OUTCOME,
             )
         thread_calls = frozenset()
+        execution.thread_receipt = bool(pin_source_id and endpoint == "messages" and thread_mode(payload) in ("create", "continue"))
         if pin_source_id and endpoint == "messages" and thread_mode(payload) == "continue":
             try:
                 thread_calls = read_thread_calls(request.headers.get(THREAD_CALLS_HEADER, ""))
@@ -1346,6 +1348,7 @@ class ModelHubTurnGateway:
                     status=exc.status,
                     code=exc.code,
                     turn_outcome=turn_outcome,
+                    thread_fields=exc.data.get("thread_error_fields"),
                 )
             response.headers.update(_response_origin_headers(exc))
             return await self._through_committed_stream(execution, protocol, response)
@@ -1518,7 +1521,7 @@ class ModelHubTurnGateway:
         if resolved.outcome is not None:
             # A call that reached the resolver's own hands has already been
             # metered there; its body never becomes this gateway's to forward.
-            response = self._outcome_response(resolved.outcome)
+            response = self._outcome_response(resolved.outcome, thread_receipt=execution.thread_receipt)
             response.headers.update(origin_headers)
             return response
         handle = resolved.handle
@@ -1622,6 +1625,7 @@ class ModelHubTurnGateway:
                 response = self._outcome_response(
                     outcome,
                     error_code=settlement.decision.error_code,
+                    thread_receipt=execution.thread_receipt,
                     status_override=settlement.decision.downstream_status,
                     rendered=rendered,
                 )
@@ -1951,6 +1955,7 @@ class ModelHubTurnGateway:
         status: int,
         code: str,
         turn_outcome: TurnOutcomeProjectionInput | None,
+        thread_fields: dict | None = None,
     ) -> web.Response:
         rendered = self._commit_and_render_turn_outcome(
             execution,
@@ -1965,6 +1970,7 @@ class ModelHubTurnGateway:
             status=status,
             code=code,
             rendered=rendered,
+            thread_fields=thread_fields,
             retry_after=math.ceil(delay) if delay is not None else None,
         )
 
@@ -2056,6 +2062,7 @@ class ModelHubTurnGateway:
         outcome: RawCallOutcome,
         *,
         error_code: Optional[str] = None,
+        thread_receipt: bool = False,
         status_override: int | None = None,
         rendered: _RenderedTurnOutcome | None = None,
     ) -> web.Response:
@@ -2067,6 +2074,7 @@ class ModelHubTurnGateway:
         return self._error_response(
             status=status,
             code=error_code or outcome.error_code or "api_error",
+            thread_fields=dict(outcome.thread_error_fields) if thread_receipt else None,
             rendered=rendered,
         )
 
@@ -2077,6 +2085,7 @@ class ModelHubTurnGateway:
         code: str,
         rendered: _RenderedTurnOutcome | None = None,
         retry_after: int | None = None,
+        thread_fields: dict | None = None,
     ) -> web.Response:
         language = self._language_provider() or "en"
         message = rendered.message if rendered is not None else None
@@ -2094,6 +2103,7 @@ class ModelHubTurnGateway:
                     "type": code,
                     "code": code,
                     "message": message,
+                    **({"details": {("upstream_error_type" if k == "error_type" else k): v for k, v in thread_fields.items()}} if thread_fields else {}),
                 }
             },
             status=status,

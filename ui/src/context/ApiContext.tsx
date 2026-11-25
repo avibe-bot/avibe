@@ -848,6 +848,7 @@ export type ApiContextType = {
     deviceId?: string,
     previousEndpoints?: string[],
     backgroundRotation?: boolean,
+    intent?: WebPushSubscribeIntent,
   ) => Promise<WebPushSubscriptionResult>;
   unsubscribeWebPush: (endpoint: string, deviceId?: string) => Promise<{ ok: boolean; disabled: boolean }>;
   sendWebPushTest: (payload?: { title?: string; body?: string; url?: string; endpoint?: string }) => Promise<WebPushTestResult>;
@@ -891,6 +892,11 @@ export type ApiContextType = {
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
   getMacOSLoginSessionStatus: () => Promise<MacOSLoginSessionStatus>;
   installDependency: (dep: string) => Promise<InstallResult>;
+  /** One request to the Model Hub engine's owner: start a check or an update, or read a receipt.
+   *  Answers with the body whatever the status, so a refusal is a result (`engineOperations.ts`). */
+  engineOperationRequest: (action: 'check' | 'update' | { job: string }) => Promise<EngineOperationReceipt>;
+  /** Turn the Model Hub engine's routine updates on or off. */
+  setEngineAutoUpdate: (enabled: boolean) => Promise<{ ok: boolean; auto_update?: boolean }>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string, cliPath?: string) => Promise<BackendRuntimeInfo>;
   restartBackend: (name: string) => Promise<BackendRestartResult>;
@@ -2371,7 +2377,42 @@ export type DependencyItem = {
   inspection_error?: { kind: string; message: string } | null;
   /** avault only: the binary cannot read the Vault key until the user authorizes it once. */
   authorization_required?: boolean;
+  /** Model Hub engine only: its own update channel (docs/plans/model-hub-engine-channel.md, section 5).
+   *  Releases are full build tags (`model-hub-engine-v8.0.63-2`). `latest_version` and `has_update`
+   *  above serve repair only; an update is offered from `available_release` and `update_state`. */
+  active_release?: string | null;
+  default_release?: string | null;
+  available_release?: string | null;
+  min_avibe_version?: string | null;
+  auto_update?: boolean;
+  update_state?: EngineUpdateState;
+  update_reason?: string | null;
+  last_checked_at?: string | null;
+  last_result?: string | null;
+  operation_id?: string | null;
 };
+
+/**
+ * The receipt of one engine check or update. A started operation is not an applied change: the
+ * outcome is the final `status` and `update_state`. `error` without a `job_id` means the request
+ * was refused before any work began (no controller, another operation running, a manifest override).
+ */
+export type EngineOperationReceipt = {
+  ok: boolean;
+  error?: string;
+  job_id?: string;
+  operation_id?: string;
+  kind?: 'check' | 'update';
+  status?: 'running' | 'succeeded' | 'failed';
+  update_state?: EngineUpdateState;
+  update_reason?: string | null;
+};
+
+export type EngineUpdateState =
+  | 'idle' | 'recovering' | 'checking' | 'up_to_date' | 'available' | 'requires_avibe_update'
+  | 'updating' | 'deferred' | 'applied' | 'rolling_back' | 'rolled_back' | 'withdrawing' | 'blocked'
+  | 'failed' | 'offline' | 'uncommissioned' | 'opted_out' | 'unavailable' | 'rejected'
+  | 'waiting_for_controller';
 
 /** avault's one-time macOS Keychain authorization (see vibe/avault_authorization.py). */
 export type AvaultAuthorizationAttempt = {
@@ -2774,8 +2815,22 @@ export type WebPushStatus = {
   subscription_count: number;
   current_subscription_enabled?: boolean;
   current_subscription_repairable?: boolean;
+  /**
+   * Binding this Avibe to an account stopped this subscription, and the page is open on the
+   * computer that runs it: it may be taken back with `binding_repair`. Not enabled, and not a
+   * choice of "off".
+   */
+  current_subscription_binding_retired?: boolean;
   normal_delivery?: WebPushNormalDelivery;
 };
+
+/**
+ * Why a subscription is posted, when it is more than keeping an existing one in step.
+ * `explicit_enable`: the person pressed the switch just now. `binding_repair`: the page, open in
+ * the foreground on the computer that runs Avibe, takes back the subscription binding stopped;
+ * never together with a background rotation. Neither on a retry whose origin is not known.
+ */
+export type WebPushSubscribeIntent = 'explicit_enable' | 'binding_repair';
 
 export type WebPushStatusPayload = {
   endpoint?: string;
@@ -4418,13 +4473,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     getWebPushStatus: (payload) =>
       payload ? postJson('/api/web-push/status', payload) : getJson('/api/web-push/status'),
     getWebPushVapidPublicKey: () => getJson('/api/web-push/vapid-public-key'),
-    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation) =>
+    subscribeWebPush: (subscription, deviceLabel, deviceId, previousEndpoints, backgroundRotation, intent) =>
       postJson('/api/web-push/subscriptions', {
         subscription,
         device_label: deviceLabel,
         device_id: deviceId,
         previous_endpoints: previousEndpoints,
         background_rotation: backgroundRotation,
+        ...(intent === 'explicit_enable' ? { explicit_enable: true } : {}),
+        ...(intent === 'binding_repair' ? { binding_repair: true } : {}),
       }),
     unsubscribeWebPush: (endpoint, deviceId) =>
       deleteJson('/api/web-push/subscriptions', { endpoint, device_id: deviceId }),
@@ -4528,6 +4585,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     getMacOSLoginSessionStatus: () => getJson('/api/macos/login-session'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
+    engineOperationRequest: (action) => (typeof action === 'string'
+      ? postJson(`/api/dependencies/model-hub-engine/${action}`, {}, { handleError: false })
+      : getJson(`/api/dependencies/model-hub-engine/install/${encodeURIComponent(action.job)}`, { handleError: false })),
+    setEngineAutoUpdate: (enabled) => postJson('/api/dependencies/model-hub-engine/auto-update', { enabled }, { handleError: false }),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name, cliPath) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime${cliPath === undefined ? '' : `?cli_path=${encodeURIComponent(cliPath)}`}`),
     restartBackend: (name) => postJson(`/api/backend/${encodeURIComponent(name)}/restart`, {}),

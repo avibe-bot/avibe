@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -9,9 +9,8 @@ import { DENIED_INSTANCE_CAPABILITIES } from '@/lib/sessionInfo';
 import i18n from '../../i18n';
 import { DevicesApiError, devicesApi } from './api';
 import { ConnectionPage } from './ConnectionPage';
-import { RENAME_ENTRY_ENABLED } from './features';
 
-// 「更改域名」 as this release ships it: off, whatever the instance says (features.ts).
+// 「更改域名」 as this release ships it: offered where the instance says the name is eligible.
 
 const host = 'max-app.avibe.bot';
 
@@ -53,23 +52,24 @@ afterEach(() => {
 });
 
 describe('ConnectionPage · 「更改域名」 in this release', () => {
-  it('is turned off', () => {
-    expect(RENAME_ENTRY_ENABLED).toBe(false);
-  });
-
-  it('offers no entry even where the instance says the name is eligible', async () => {
+  it('is offered where the instance says the name is eligible, and opens its dialog', async () => {
     mount();
-    expect(await screen.findByText('域名')).toBeTruthy();
-    expect(screen.getByText(host)).toBeTruthy();
-    await waitFor(() => expect(devicesApi.address).toHaveBeenCalled());
-    expect(screen.queryByRole('button', { name: '更改域名' })).toBeNull();
-    expect(document.body.textContent).not.toContain('更改域名');
+    fireEvent.click(await screen.findByRole('button', { name: '更改域名' }));
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection/address'));
+    expect(await screen.findByRole('textbox', { name: '新名称' })).toBeTruthy();
   });
 
-  it('opens no dialog at the rename\'s own address, and goes back to the connection page', async () => {
+  it('opens its dialog at the rename\'s own address', async () => {
+    mount('/settings/remote-access/connection/address');
+    expect(await screen.findByRole('textbox', { name: '新名称' })).toBeTruthy();
+    expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection/address');
+  });
+
+  it('is not offered where the name is not eligible, and its address goes back to the connection page', async () => {
+    vi.spyOn(devicesApi, 'address').mockResolvedValue({ hostname: host, eligible: false, retired: [], healthConnected: false });
     mount('/settings/remote-access/connection/address');
     await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection'));
     expect(screen.queryByRole('dialog')).toBeNull();
-    expect(screen.queryByRole('textbox', { name: '新名称' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '更改域名' })).toBeNull();
   });
 });

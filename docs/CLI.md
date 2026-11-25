@@ -706,6 +706,14 @@ vibe remote stop
 
 Use `--json` on these subcommands for the JSON envelope.
 
+To bind a computer again, run this by hand in a terminal on that computer (an SSH session works):
+
+```bash
+vibe remote rebind
+```
+
+It shows which Avibe the computer is bound to and what state the binding is in. Binding the same Avibe again is done in a browser at the computer's own address, on the Devices page; the command explains how, including SSH port forwarding for a server with no browser. The command itself offers "Bind as a new computer": it lists what is lost and kept, asks for a typed `yes`, then prints a link, waits for it to be approved on avibe.bot, and asks you to accept the account and the domain it shows. It does not run from an Agent, a Task, a script or a pipe. When `vibe remote status` prints a `Binding:` line, this is the command it points at.
+
 ### `vibe screenshot`
 
 Capture the local desktop as a PNG file.

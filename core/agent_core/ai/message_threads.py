@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from config.paths import get_state_dir
+from core.anthropic_thread_errors import thread_error_fields
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
 from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
@@ -18,6 +19,7 @@ from core.agent_core.ai.provider import ModelEndpoint
 BETA = "message-threads-2026-08-12"
 MIN_PARENT_TOKENS = 20_000
 MIN_PARENT_TO_STATIC_RATIO = 3
+MAX_RESTORABLE_PERCENT = 75
 MIN_USAGE_PERCENT = 90
 PARENT_SECONDS = 300
 COOLDOWN_SECONDS = 86400
@@ -64,6 +66,7 @@ class Parent:
     reads: int = 0
     trial: bootstrap.Trial | None = None
     terminal_mark: bool = False
+    pinned_drop_block: bool = False
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
@@ -197,6 +200,7 @@ class Attempt:
     record: dict
     capture_warm: bool
     trial: bootstrap.Trial | None
+    pinned_drop_block: bool = False
 
     async def check_reads(self, route: bytes, reads: int) -> None:
         if self.trial is None:
@@ -258,6 +262,71 @@ def terminal_mark(body: dict) -> bool:
     messages = body["messages"]
     blocks = messages[-1]["content"] if messages else None
     return bool(isinstance(blocks, list) and blocks and "cache_control" in blocks[-1])
+
+
+def _engine_adds_drop_block(full: dict) -> bool:
+    """Mirror the shipped CPA preserved-thinking default on the supported gateway model IDs.
+
+    On a delta CPA no longer sees the signed blocks that caused it to derive the create's fixed fields.
+    Never invent this policy for unknown models, disabled thinking, explicit bindings or forced tool use.
+    """
+    model = full["model"].lower().rsplit("/", 1)[-1].split("[", 1)[0]
+    # Only identify provider IDs whose wire capability is known. Other models still try threads normally.
+    families = (
+        "claude-opus-5-5",
+        "claude-fable-5-2",
+        "claude-fable-5.2",
+        "claude-fable-5-1",
+        "claude-fable-5.1",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-haiku-5.5",
+    )
+    if not any(
+        model == family or (family != "claude-opus-5-5" and model.startswith(family + "-")) for family in families
+    ):
+        return False
+    thinking = full.get("thinking", {"type": "adaptive"})
+    if not isinstance(thinking, dict) or "block_binding" in thinking:
+        return False
+    if thinking.get("type") != "adaptive" and not (
+        thinking.get("type") == "enabled" and ("opus" in model or "fable" in model)
+    ):
+        return False
+    choice = full.get("tool_choice")
+    if isinstance(choice, dict) and choice.get("type") in ("tool", "any"):
+        return False
+    return any(
+        isinstance(block.get(key), str) and block[key].strip()
+        for msg in full["messages"]
+        if isinstance(msg["content"], list)
+        for block in msg["content"]
+        for tag, key in (("thinking", "signature"), ("redacted_thinking", "data"))
+        if block.get("type") == tag
+    )
+
+
+def record_http_error(record: dict, status: int, body: str, *, hub: bool = False) -> None:
+    record.update(thread_error_fields(status, body, hub=hub))
+
+
+def _continuation_budget(full: dict, suffix: list, parent_tokens: int) -> str | None:
+    # Same four UTF-8 bytes/token estimate as the context planner, but over rendered JSON
+    # so tool schemas, block framing and structured results are included. Not a tokenizer.
+    suffix_bytes = len(encoded(suffix))
+    static_bytes = len(encoded([full.get("tools"), full.get("system")]))
+    restorable_bytes = static_bytes + 1 + suffix_bytes  # comma before the final array element
+    estimated_tokens = (restorable_bytes + 3) // 4
+    if parent_tokens < MIN_PARENT_TO_STATIC_RATIO * estimated_tokens:
+        return "large_static_or_delta"
+    # Bound the bare suffix independently. A relay can also restore the real system/tools
+    # without restoring the conversation: budget all that text at one token per UTF-8 byte,
+    # leaving headroom below the first-event floor. Neither estimate proves provenance.
+    if parent_tokens < MIN_PARENT_TO_STATIC_RATIO * suffix_bytes:
+        return "dense_delta_risk"
+    if 100 * restorable_bytes > MAX_RESTORABLE_PERCENT * parent_tokens:
+        return "restorable_text_risk"
+    return None
 
 
 def _contains_image(messages: list) -> bool:
@@ -355,10 +424,8 @@ def prepare(
             # usage heuristic for a suffix containing images, including a tool's returned images.
             if _contains_image(suffix):
                 mode, reason = "full", "image_delta"
-            elif parent.tokens < MIN_PARENT_TO_STATIC_RATIO * len(
-                encoded([full.get("tools"), full.get("system"), suffix])
-            ):
-                reason = "large_static_or_delta"
+            elif budget_reason := _continuation_budget(full, suffix, parent.tokens):
+                reason = budget_reason
             elif parent.message_id is None:
                 warm = parent.reads > 0
             elif parent.trial is not None and not bootstrap.owns(route, parent.trial):
@@ -373,6 +440,9 @@ def prepare(
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
     # Only a create actually sends the marker-stripped full history. For a verified delta,
     # the unsent full body's lookup windows are irrelevant.
+    delta_rejection = (
+        reason if parent is not None and parent.message_id and mode != "continue" and not ordinary else None
+    )
     if mode == "create" and cache_reason:
         reason = cache_reason
         if warm and omitted_mark is not None:
@@ -387,6 +457,18 @@ def prepare(
             msg = msgs[omitted_mark]
             unmarked = [{k: v for k, v in b.items() if k != "cache_control"} for b in msg["content"]]
             body["messages"] = [*msgs[:omitted_mark], {**msg, "content": unmarked}, *msgs[omitted_mark + 1 :]]
+    pinned_drop_block = gateway and (
+        (mode == "create" and _engine_adds_drop_block(body))
+        or (mode == "continue" and parent is not None and parent.pinned_drop_block)
+    )
+    if pinned_drop_block:
+        body = {
+            **body,
+            "thinking": {
+                **body.get("thinking", {"type": "adaptive"}),
+                "block_binding": {"prefix_mismatch_behavior": "drop_block"},
+            },
+        }
     if mode != "full":
         betas.append(BETA)
         if gateway:
@@ -402,6 +484,8 @@ def prepare(
     # The transport records actual bytes only once a send is handed to HTTPX.
     # A plain send needs no extra serialization to measure the counterfactual.
     record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
+    if delta_rejection and delta_rejection != reason:
+        record["delta_rejection"] = delta_rejection
     if trial:
         record.update(bootstrap_baseline_reads=trial.reads, bootstrap_prior_proven=trial.proven)
     return Attempt(
@@ -414,4 +498,5 @@ def prepare(
         record,
         capture_warm,
         trial,
+        pinned_drop_block,
     )

@@ -15,9 +15,7 @@ import { said } from './testText';
 import type { AddressState, ConnectionState, TunnelChange } from './types';
 
 // ui/design: settings/devices-connection/*, settings/devices-rename/*
-// The rename's own behaviour is tested with its entry turned on; this release ships it off
-// (features.ts, ConnectionPage.renameOff.test.tsx).
-vi.mock('./features', () => ({ RENAME_ENTRY_ENABLED: true }));
+// Where the entry is offered at all: ConnectionPage.renameEntry.test.tsx.
 const host = 'max-app.avibe.bot';
 const settings = { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: 'auto', edge_bind_address: '' } as const;
 const connection = (extra: Partial<ConnectionState> = {}): ConnectionState => ({ settings: { ...settings }, interfaces: [], direct: 'ready', ...extra });
@@ -398,6 +396,26 @@ describe('ConnectionPage · the domain', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
     expect(await screen.findByText(`域名已改为 ${newHost}`)).toBeTruthy();
     expect(screen.getAllByText(newHost).length).toBeGreaterThan(0);
+    // The name given up is kept for this account, until the day the instance reports.
+    expect(screen.getByRole('dialog').textContent).toContain(`12月23日之前只有你的账号能拿回 ${host}；之后别人可以领取。`);
+  });
+
+  it('says first, under the title, that the old name is kept, with its day or without one', () => {
+    const newHost = 'maxwell-app.avibe.bot';
+    const retired = { hostname: host, releaseAt: '2026-12-23T00:00:00.000Z', devices: [] };
+    const { unmount } = view({ host: newHost, address: address({ hostname: newHost, retired: [retired] }), rename: { step: 'done', hostname: newHost, previous: host, retired } });
+    const dated = screen.getByRole('dialog').textContent ?? '';
+    const kept = dated.indexOf(`12月23日之前只有你的账号能拿回 ${host}；之后别人可以领取。`);
+    expect(kept).toBeGreaterThan(dated.indexOf(`域名已改为 ${newHost}`));
+    expect(kept).toBeLessThan(dated.indexOf('设备再打开旧地址时会自己清理'));
+    unmount();
+
+    // The instance reports no day (the list could not be read): kept, without a day, in the same place.
+    view({ host: newHost, address: address({ hostname: newHost }), rename: { step: 'done', hostname: newHost, previous: host, retired: null } });
+    const plain = screen.getByRole('dialog').textContent ?? '';
+    const keptPlain = plain.indexOf('放弃的名字会先为你的账号保留一段时间，之后别人可以领取。');
+    expect(keptPlain).toBeGreaterThan(-1);
+    expect(keptPlain).toBeLessThan(plain.indexOf('设备再打开旧地址时会自己清理'));
   });
 
   it('shows a device clearing its old-address data while the clean-up dialog is open', async () => {
@@ -512,7 +530,7 @@ describe('ConnectionPage · binding again', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
     // The key is retired when it is done, not before; neither the account nor the address is promised.
-    expect(dialog.textContent).toContain('完成后，旧的设备密钥作废，所有远程设备都会退出、要重新登录');
+    expect(dialog.textContent).toContain('完成后，旧的设备密钥作废；这台电脑上的页面不受影响。重新绑定后，已登录的设备会自动重新连上。');
     expect(dialog.textContent).toContain('地址通常不变；如果变了，完成后这里会显示新地址');
     expect(dialog.textContent).not.toContain('立即作废');
     expect(start).not.toHaveBeenCalled();
@@ -715,11 +733,36 @@ describe('ConnectionPageView', () => {
     expect(screen.getByText(said('隧道现在临时用 HTTP/2 连着，没有按固定的边缘网络 IP；保存的设置没有变。'))).toBeTruthy();
   });
 
-  it('offers this device 「自动」 and 「仅 Cloudflare 隧道」 only, and never a number of seconds', () => {
-    view({ remote: true, preference: { mode: 'tunnel', reverted: { at: '2026-11-21T01:00:00.000Z', reason: 'unreachable' } } });
+  it('offers this device 「自动」 and 「仅 Cloudflare 隧道」 only where 「仅直连和中继」 is not offered, and never a number of seconds', () => {
+    view({ remote: true, preference: { mode: 'tunnel', reverted: { at: '2026-11-21T01:00:00.000Z', reason: 'unreachable', from: 'tunnel' } } });
     const choice = screen.getByRole('radiogroup', { name: '这台设备' });
     expect(within(choice).getAllByRole('radio').map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ']);
+    expect(document.body.textContent).not.toContain('仅直连和中继');
     expect(document.body.textContent).not.toMatch(/\d+\s*秒/);
+  });
+
+  it('offers 「仅直连和中继」 third where it is offered, and keeps it listed while it is the choice', () => {
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: null } });
+    const choice = screen.getByRole('radiogroup', { name: '这台设备' });
+    const radios = within(choice).getAllByRole('radio');
+    expect(radios.map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ', '仅直']);
+    expect(radios[2].textContent).toContain('建立连接时经过一次 Cloudflare 隧道，之后只走直连和中继。');
+    unmount();
+
+    // Chosen, then direct turned off on the instance: the choice made is still the one shown.
+    view({ remote: true, directOnly: false, preference: { mode: 'direct', reverted: null } });
+    expect(screen.getByRole('radio', { name: /^仅直连和中继/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('says which choice went back to automatic, and by which shell', () => {
+    const at = '2026-11-21T01:00:00.000Z';
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });
+    expect(document.body.textContent).toMatch(/「仅直连和中继」.*连不上，App 已自己改回「自动」。/);
+    unmount();
+
+    view({ remote: true, directOnly: true, choiceShell: 'desktop', preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });
+    expect(document.body.textContent).toMatch(/「仅直连和中继」.*连不上，Avibe Desktop 已自己改回「自动」。/);
+    expect(document.body.textContent).toContain('选「仅直连和中继」后连不上，Avibe Desktop 会自己改回「自动」。');
   });
 
   it('shows names still kept for the account with their real days, and never calls the list clean', () => {

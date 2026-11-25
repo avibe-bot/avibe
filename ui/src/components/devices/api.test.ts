@@ -26,6 +26,19 @@ describe('devicesApi', () => {
     await expect(devicesApi.changeConnection('protocol', 'http2')).rejects.toBeInstanceOf(LostAnswer);
   });
 
+  it('asks for "this computer only" with the mode alone: no address, and nothing afterwards', async () => {
+    fetched.mockResolvedValue(answer(200, { ok: true, mode: 'this_computer' }));
+    await devicesApi.restrictToThisComputer();
+    expect(fetched).toHaveBeenCalledOnce();
+    const [path, init] = fetched.mock.calls[0];
+    expect(path).toBe('/api/devices/host/network-access');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ mode: 'this_computer' });
+    // The instance's refusals reach the page with their codes.
+    fetched.mockResolvedValue(answer(409, { ok: false, error: 'network_access_bound' }));
+    await expect(devicesApi.restrictToThisComputer()).rejects.toMatchObject({ status: 409, code: 'network_access_bound' });
+  });
+
   it('says binding again is offered only on the instance\'s own word', async () => {
     // The instance has it: an overview, or its own refusal away from the computer.
     fetched.mockResolvedValue(answer(200, { binding_state: 'bound' }));

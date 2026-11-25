@@ -15,6 +15,7 @@ from typing import Any, Mapping
 
 from sqlalchemy import literal_column, or_, select
 
+from storage.web_push_cutover import may_dispatch
 from storage import messages_service, web_push_service
 from storage.agent_session_rows import WORKSPACE_NOTICE_SESSION_ID, WORKSPACE_NOTICE_UNREAD_METADATA_KEY
 from storage.models import agent_sessions, messages
@@ -1332,6 +1333,8 @@ def _reconcile_badge_for_owner(
             sent_count = 0
             failed_count = 0
             for subscription in deliveries:
+                if not may_dispatch(engine, subscription):
+                    continue
                 try:
                     send_badge_update(
                         subscription=subscription,
@@ -1339,7 +1342,7 @@ def _reconcile_badge_for_owner(
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_success(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             badge_count=badge_count,
                         )
@@ -1352,7 +1355,7 @@ def _reconcile_badge_for_owner(
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_failure(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             disable=status_code in {404, 410},
                         )
@@ -1367,7 +1370,7 @@ def _reconcile_badge_for_owner(
             disposition = (
                 BADGE_DISPOSITION_FAILED
                 if failed_count
-                else BADGE_DISPOSITION_SENT
+                else BADGE_DISPOSITION_SENT if sent_count else BADGE_DISPOSITION_NO_NATIVE_SUBSCRIPTION
             )
             _record_badge_disposition(
                 user_key=user_key,
@@ -1599,6 +1602,8 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                         user_key=delivery_owner,
                         contexts=contexts,
                     )
+                if not may_dispatch(engine, subscription):
+                    continue
                 try:
                     send_web_push(
                         subscription=subscription,
@@ -1606,7 +1611,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     )
                     with engine.begin() as conn:
                         web_push_service.mark_send_success(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             badge_count=badge_count,
                         )
@@ -1624,7 +1629,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
                     logger.warning("web push: send failed", exc_info=True)
                     with engine.begin() as conn:
                         web_push_service.mark_send_failure(
-                            conn,
+                            conn, subscription=subscription,
                             endpoint=subscription["endpoint"],
                             disable=disable,
                         )
@@ -1635,7 +1640,7 @@ def _send_to_enabled_subscriptions(payload: dict[str, Any]) -> None:
         # Provider outcomes are per owner: in a merged delivery the owner whose
         # endpoint failed must not be told the attempt was sent, and an
         # authorized owner with no enabled endpoint is told so explicitly.
-        _mark_owners_without_delivery(attempt, [owner for _s, owner in deliveries])
+        _mark_owners_without_delivery(attempt, [*owner_sent_counts, *owner_failed_counts, *owner_suppressed_read_counts])
         for delivery_owner in {owner for _s, owner in deliveries}:
             owner_entry = attempt["owners"].setdefault(
                 delivery_owner,

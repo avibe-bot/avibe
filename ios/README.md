@@ -591,8 +591,8 @@ public edge; the shell adds no trust override and sees only ciphertext.
 **Nothing in this shell implements a transport, and `AvibeApp` passes none.**
 Without one, `AppModel` creates no `DirectPathController`: no listener, no
 `proxyConfigurations` write (not even a clear), no `direct` capability,
-`direct.status()` answers `unsupported`, no event, no read or write of the
-listener-fault marker, and a runtime opens exactly as before. The tests hold this from outside the App's code: they count every
+`direct.status()` answers `unsupported`, no event, nothing of the listener's
+recovery, and a runtime opens exactly as before. The tests hold this from outside the App's code: they count every
 call of WebKit's `proxyConfigurations` setter in the process, on any store,
 from before the App exists, and scan the process's listening sockets on any
 address of either family, across launch, opening and switching instances,
@@ -658,8 +658,9 @@ With a transport:
   asked under: a runtime stop or an account change settles held answers as
   `failed`. Nothing is bound and no route is written in the background; a
   first bind under way there is retired (no route points at it), and a
-  return's re-bind that ends there is parked for the next return. That
-  re-bind of the same port is the only recovery in a process.
+  return's re-bind that ends there is parked for the next return. A bind of
+  that port, or its check, that fails is tried again (the listener's
+  recovery, below).
 - **One authority per listener** (`DirectListenerLifecycle`): the phase
   (`idle`, `binding`, `verifying`, `serving`, `closing`, `closed`, `failed`,
   `stopped`), one bind generation, a monotonic "a route was published" fact
@@ -694,43 +695,82 @@ With a transport:
   next stay has its own. The lifecycle applies the deadline at the start of
   every decision it makes, so a listener still neither serving nor failed
   at the deadline is failed for whoever asks next, a late confirmation
-  included; the controller's single wake-up only delivers that. It is a
+  included; the controller's single wake-up only delivers that. A failure
+  like any other: the recovery follows. It is a
   backstop for a process that is running: it does nothing while the App is
   suspended.
 - **The load gate** decides, synchronously and from the route table and
-  the phase alone, whether the shell may create or reload a runtime's
-  WebView: open with no route on the current store or a serving listener;
-  held while a routed listener is closed for the background or being bound
-  again; the fault once it failed. An open that meets a held gate stays on
-  the loading route in one slot owned by its runtime identity; Retry is
-  shown and acted on only while open; the WebView's own automatic loads
-  (its first load and the reload after its web content process ended) pass
-  the same gate where they are made, and one that meets a held gate is kept
-  as one pending bit, made once when the gate opens and dropped by the
-  fault or the controller's invalidation. The controller announces each
-  change that is not the fault (the background close, a settled return);
-  nothing waits on a timer.
-- **The listener fault** (accepted for the internal trial, 2026-11-12;
-  narrowed to one terminal failure, 2026-11-13). Any failure of the current
-  bind, of its ownership check, or of the listening socket, before or after
-  a route, is terminal for the process: direct is never authorized again,
-  no listener is made again, and nothing is re-bound or rewritten. A
-  deliberate close, a stale generation, or a replaced attempt is never a
-  failure, and an ordinary loss of the direct path is not one either: it
-  falls back to the public origin for new connections, without a relaunch.
-  Each runtime whose host is routed on the current store shows the existing
-  failure view with "Connection lost — reopen the app" (`zh-Hans`:
-  "连接中断，请重新打开 App") and no Retry; one opened under the fault gets no
-  WebView. Status reads for a routed host get the bridge error `failed` from
-  the moment the failure is recorded, and no event follows. A host with no
-  route keeps WebKit's normal path and is not interrupted. The fault writes
-  one marker in the App's preferences; the next launch with a transport
-  consumes it in `AppModel.init` and runs that whole launch without a path
-  controller, on the public origin. The launch after that uses the
-  transport again. The marker is written before the fault is shown, by
-  every path that delivers it; that a `mark()` call returned says nothing
-  about the disk. The cost: a single transient failure of the first bind
-  loses direct for that launch and the next one.
+  the listener's phase, whether the shell may create or reload a runtime's
+  WebView. Open: no route on the current store, a serving listener, or,
+  after a failed attempt, a port that is closed or refusing (WebKit then
+  leaves it for the public origin by itself; `allowFailover`). Held: a
+  routed listener closed for the background or on its return's first
+  attempt; in the foreground this is always bounded. Fault: something else
+  may hold the port (a bind found it in use), so WebKit would send the
+  host there. It is not terminal: the attempts go on, and
+  it ends when one serves or finds the port merely closed; it holds in the
+  background and across a return too. Nobody waits it out: a caller with
+  its own bound (the voice capture's client) refuses on fault, where it
+  would go on after a held gate. An open that meets a held or fault gate
+  stays on the loading route in one slot owned by its runtime identity;
+  Retry reloads only while open; the WebView's own automatic loads (its
+  first load and the reload after its web content process ended) pass the
+  same gate where they are made, and one that meets a held or fault gate
+  is kept as one pending bit, made once when the gate opens and dropped by
+  the controller's invalidation. The controller announces each change;
+  nothing in the gate waits on a timer.
+- **The listener's recovery** (2026-11-24, replacing the terminal listener
+  fault of 2026-11-12, which showed "Connection lost — reopen the app" and
+  ran the next launch without a listener). No failure of the listener is
+  terminal. When the bind of the listener's port, its ownership check, or
+  the listening socket fails for a listener a route points at, the
+  controller binds and checks the same port again, attempt after attempt
+  (0.25, 0.5, 1, 2 s apart, then every 5 s), for as long as the App is in
+  the foreground, and says so (`listenerRecovery`: since when in this stay,
+  the last failure, whether something else may hold the port).
+  `docs/plans/remote-direct-ios.md` section 9 has the listener's side.
+  What the shell does with it:
+  - **Nothing is rebuilt.** The runtime, its WebView and its page stay, so
+    what was typed and not sent is still there. A child window stays too.
+  - **Only a runtime whose loads the gate does not let through is
+    covered** (held or fault), so an unrouted host never is, and neither is
+    a routed one whose port is merely closed: its page already loads over
+    the public origin, and direct comes back when the listener serves.
+  - **While its loads wait after an attempt has failed,** or while
+    something else may hold the port: the thin progress line over the
+    page. An ordinary return's first attempt shows nothing; it is over in
+    well under a second. If
+    the page's web content process ended meanwhile, the skeleton stands in
+    for the blank WebView.
+  - **Past `listenerRecoveryPatience`** (10 s, counted from when this
+    stay's recovery began): the existing "can't reach" row over the page
+    (`runtime.open.cached_timeout.*`), or, with no page left, the existing
+    failure screen (`browser.error.*`), both with Retry. No new text. The
+    attempts go on underneath.
+  - **Retry** (`retryListenerRecovery`) asks for an attempt now, in place:
+    the line again while it runs, the message back as soon as it failed
+    too. Nothing asks the user to reopen the App, and no state needs it.
+  - **An open under way** has its own line, rows and failure screen; a
+    held open waits in its slot and goes on when the gate opens. Their
+    Retry is offered under the fault gate too: nothing is reloaded against
+    a port someone else may hold, but the tap binds the port again and the
+    request is kept for that open (`heldRuntimeRetry`, one slot), with the
+    line; it is made by itself as soon as the gate opens, so the user taps
+    once. A newer open, another runtime, or a selection that ended drops
+    it.
+  - **The one cause an attempt cannot cure** is a port someone else holds.
+    The App keeps trying and shows the message with Retry; it is cured
+    when the other holder lets go. The App does not move to another WebKit
+    store to load over the public origin meanwhile.
+  - **No marker.** Nothing is written for the next launch, and every launch
+    with a transport uses it. A launch with a transport removes the
+    earlier version's marker (`avibe.direct.listenerFault`) unread.
+  - Each failure is on record (step, error number, seconds in the
+    background before that stay) in `direct.status()` and on the next
+    rendezvous request, so the instance's log has it.
+  - A take the voice capture keeps under the fault gate is not sent again
+    by itself (`untilReopened`, from when the fault was terminal); that is
+    the voice capture's to revisit.
 - `DirectRouteOwner` is the only writer of `proxyConfigurations` on an
   account data store, which the runtime WebViews and the hidden account
   transport share. A store's route lists exact instance hosts (at most 16 per

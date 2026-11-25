@@ -1,0 +1,171 @@
+"""The dependency API observes the owner, and explicit requests have stable receipts."""
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass
+import json
+import threading
+
+import pytest
+
+from config import paths
+from config.v2_config import V2Config
+from core.handlers.model_hub import ModelHubError
+from tests.test_model_hub_engine_lifecycle import owner_fixture, signed_candidate
+from tests.ui_server_test_helpers import csrf_headers
+from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
+from vibe.model_hub_runtime.controls import EngineJobs, auto_update_enabled
+
+
+def test_policy_endpoint_changes_only_engine_setting_and_survives_legacy_read(tmp_path, monkeypatch):
+    """A permissive old section must ignore the new key without touching source data."""
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    config = V2Config.default()
+    config.save()
+    path = paths.get_config_path()
+    before = json.loads(path.read_bytes())
+    client = app.test_client()
+    url = "/api/dependencies/model-hub-engine/auto-update"
+    assert client.post(url, json={"enabled": False}).status_code == 403
+    headers = csrf_headers(client)
+    assert client.post(url, json={"enabled": "false"}, headers=headers).status_code == 422
+    r = client.post(url, json={"enabled": False}, headers=headers)
+    assert r.status_code == 200 and r.get_json() == {"auto_update": False, "ok": True}
+    after = json.loads(path.read_bytes())
+    before["update"]["model_hub_engine_auto_update"] = False
+    assert after == before
+
+    @dataclass
+    class ReleasedUpdateConfig:  # v3.2.7 update-section constructor
+        auto_update: bool = True
+        check_interval_minutes: int = 60
+        idle_minutes: int = 30
+        notify_admins: bool = True
+        prereleases: bool = False
+
+    with monkeypatch.context() as old:
+        old.setattr("config.v2_config.UpdateConfig", ReleasedUpdateConfig)
+        assert not hasattr(V2Config.load().update, "model_hub_engine_auto_update")
+    assert not auto_update_enabled()
+    del after["update"]["model_hub_engine_auto_update"]  # existing pre-feature config, nothing to migrate
+    assert V2Config.from_payload(after).update.model_hub_engine_auto_update is True
+
+
+@pytest.mark.parametrize("damaged", [b"{", b'{"update":"not an object"}'])
+def test_recovery_defaults_cannot_enable_routine_adoption(tmp_path, monkeypatch, damaged):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    V2Config.default().save()
+    paths.get_config_path().write_bytes(damaged)
+    assert auto_update_enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_pollable_check_never_adopts_or_claims_active_and_update_intent_is_not_lost(tmp_path, monkeypatch):
+    owner, supervisor, _ = owner_fixture(tmp_path, monkeypatch)
+    candidate, _, _, envelope = signed_candidate(owner, tmp_path)
+    adapter = CLIProxyEngineAdapter(supervisor=supervisor, state_store=object(), routine_adoption=lambda: False)
+    entered, release = threading.Event(), threading.Event()
+
+    def fetch():
+        entered.set()
+        assert release.wait(8)
+        return envelope
+
+    owner.channel._fetch = fetch
+    before = owner.journal.load()["active"]
+    # Status cannot fetch metadata, adopt or launch. Staged files aren't running.
+    snapshot = await adapter.engine_status()
+    assert snapshot["active_release"] is None and snapshot["available_release"] == candidate.asset_release_tag
+    assert not entered.is_set() and not snapshot["auto_update"]
+    from vibe import api
+    monkeypatch.setattr("vibe.model_hub_client.engine_control_sync", lambda action: snapshot)
+    monkeypatch.setattr("vibe.model_hub_runtime.installer.EngineRuntimeManager", lambda **_: owner.manager)
+    row = api._model_hub_engine_dependency_status()
+    assert row["available_release"] == candidate.asset_release_tag and not row["has_update"]
+    assert row["latest_version"] == before["runtime_version"] != candidate.runtime_version
+    job = await adapter.request_engine_operation()
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        assert (await adapter.request_engine_operation())["operation_id"] == job["job_id"]
+        with pytest.raises(ModelHubError) as busy:
+            await adapter.request_engine_operation(update=True)
+        assert busy.value.status == 409 and busy.value.data["operation_id"] == job["job_id"]
+        assert (await adapter.engine_job(job["job_id"]))["status"] == "running"
+    finally:
+        release.set()
+        await adapter._engine_operation_task
+    terminal = await adapter.engine_job(job["job_id"])
+    assert terminal["status"] == "succeeded" and terminal["update_state"] == "available"
+    assert EngineJobs(owner.manager.runtime_dir).get(job["job_id"]) == terminal
+    assert owner.journal.load()["active"] == before and supervisor.running is None
+    # Explicit update can adopt while policy is off, but not start a stopped engine.
+    new = await adapter.request_engine_operation(update=True)
+    await adapter._engine_operation_task
+    assert (await adapter.engine_job(new["job_id"]))["update_state"] == "applied"
+    assert owner.journal.load()["active"] == candidate.document() and supervisor.running is None
+    after = await adapter.engine_status()
+    assert after["active_release"] is None and after["available_release"] is None
+    assert after["last_result"] == "applied"
+
+
+@pytest.mark.parametrize(("cached", "expected_live"), [
+    ("deferred", "deferred"), ("rolling_back", "rolling_back"), ("rolled_back", "rolled_back"),
+    ("withdrawing", "withdrawing"), ("activating", "updating"), ("blocked", "blocked"),
+])
+def test_only_live_observations_can_report_current_engine_activity(tmp_path, cached, expected_live):
+    from vibe.model_hub_runtime.controls import project
+    from vibe.model_hub_runtime.journal import write_document
+    from vibe.model_hub_runtime.lifecycle import EngineLifecycleView
+
+    observed = {"state": cached, "reason": "engine_withdrawn", "available": "new-tag",
+                "last_checked_at": "yesterday", "last_result": "rolled_back"}
+    options = dict(default="bundled", automatic=True, participation=None)
+    live = project(observed, live=True, **options)
+    assert live["active_release"] is None and live["update_state"] == expected_live
+    write_document(tmp_path / "lifecycle-status.json", {**observed, "running": {"asset_release_tag": "old-tag"},
+                                                       "journal_block_reason": "stale observation"})
+    snapshot = EngineLifecycleView.read(tmp_path)
+    for policy in (None, "opted_out", "uncommissioned"):
+        offline = project(snapshot, live=False, **{**options, "participation": policy})
+        assert offline["update_state"] == offline["update_reason"] == (policy or "waiting_for_controller")
+        assert offline["active_release"] is offline["available_release"] is offline["operation_id"] is None
+        assert offline["last_checked_at"] == "yesterday" and offline["last_result"] == "rolled_back"
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_offline_projection_preserves_journal_block_and_history(tmp_path, unreadable):
+    from vibe.model_hub_runtime.controls import project
+    from vibe.model_hub_runtime.journal import write_document
+    from vibe.model_hub_runtime.lifecycle import EngineJournal, EngineLifecycleView
+
+    journal = EngineJournal(tmp_path)
+    if unreadable:
+        journal.path.write_bytes(b"{")
+        reason = "engine_journal_unreadable"
+    else:
+        reason = "engine_withdrawn"
+        journal.save({**journal.empty(), "blocked": reason})
+    write_document(tmp_path / "lifecycle-status.json", {"state": "activating", "last_result": "applied"})
+    result = project(EngineLifecycleView.read(tmp_path), default=None, automatic=True, participation=None, live=False)
+    assert (result["update_state"], result["update_reason"], result["last_result"]) == ("blocked", reason, "applied")
+    assert result["active_release"] is result["available_release"] is None
+
+
+def test_interrupted_receipt_is_failed_not_replayed(tmp_path):
+    jobs = EngineJobs(tmp_path)
+    jobs.store(jobs.started("engine-lost", True))
+    assert EngineJobs(tmp_path).get("engine-lost")["update_reason"] == "operation_interrupted"
+
+
+@pytest.mark.parametrize("action", ["check", "update"])
+def test_channel_http_requests_refuse_without_controller_not_direct_install(action, monkeypatch, tmp_path):
+    from vibe.ui_server import app
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    client = app.test_client()
+    path = f"/api/dependencies/model-hub-engine/{action}"
+    assert client.post(path).status_code == 403
+    response = client.post(path, headers=csrf_headers(client))
+    assert response.status_code == 503 and response.get_json()["update_state"] == "waiting_for_controller"

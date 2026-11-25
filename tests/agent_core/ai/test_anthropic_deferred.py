@@ -98,15 +98,19 @@ async def test_a_result_from_another_source_cannot_complete_the_previous_sources
     assert "server_tool_use" not in json.dumps(json.loads(sent[0].content)["messages"])
 
 
-@pytest.mark.parametrize("reported", [0, 1])
-async def test_deferred_completion_never_invents_a_charge_from_a_result_block(reported):
+@pytest.mark.parametrize("reported,served", [(0, True), (1, True), (0, False)])
+async def test_deferred_completion_never_invents_a_charge_from_a_result_block(reported, served):
     request, _ = await _paused()
     result = {**RESULT, "tool_use_id": "srvtoolu_0"}
-    _, events = await _stream(lambda _: httpx.Response(200, headers=_served(),
+    _, events = await _stream(lambda _: httpx.Response(200, headers=_served(reported=served),
         text=_sse([result, {"type": "text", "text": "done"}], stop="end_turn", searches=reported)), request)
     message = events[-1].message
-    assert message.hosted_summary.counts == ({"web_search_requests": 1} if reported else {})
-    assert message.hosted_summary.cost is None
+    if not served:
+        assert message.content == (TextBlock("done"),) and message.hosted_summary is None
+        assert message.hosted_call_unretained  # C-9: the result alone disqualifies its usage as an anchor.
+    else:
+        assert message.hosted_summary.counts == ({"web_search_requests": 1} if reported else {})
+        assert message.hosted_summary.cost is None
 
 
 async def test_deferred_result_then_pause_turn_keeps_the_native_exchange_without_replay_evidence():

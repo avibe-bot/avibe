@@ -726,6 +726,12 @@ If you already have a pairing key:
 vibe remote pair vrp_abc123
 ```
 
+To bind a computer again, by hand in a terminal on that computer:
+
+```bash
+vibe remote rebind
+```
+
 ### `vibe screenshot`
 
 ```bash

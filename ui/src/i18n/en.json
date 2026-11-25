@@ -982,6 +982,9 @@
     "configRestartRefused": "Saved, but the service was not restarted: the Avibe running here could not be confirmed as this desktop app's own.",
     "consoleServerTitle": "Console server",
     "consoleServerHint": "Saving these values restarts only the Web UI server.",
+    "consoleServerBound": "This Avibe is bound to an account. A network address here does not let other devices in without signing in.",
+    "consoleServerInvalidHost": "That is not a usable address. Nothing was saved.",
+    "consoleServerOwnerOnly": "Only the owner can change this address and port.",
     "instanceNameTitle": "Instance name",
     "instanceNameHint": "Shown in the browser tab title (\"Avibe - name\"). Leave blank to use the remote-access name when paired, otherwise the system hostname.",
     "consoleServerRedirecting": "UI server moved. Redirecting to {{origin}}...",
@@ -1023,6 +1026,29 @@
       "backendsTitle": "Agent backends",
       "backendsDetail": "Claude · OpenCode · Codex — managed in the Backends tab.",
       "manageBackends": "Manage in Backends",
+      "engineUpdates": {
+        "current": "Up to date · checked {{time}}",
+        "recovering": "Reading the engine's state…",
+        "available": "v{{version}} is available",
+        "updating": "Updating…",
+        "updatingTo": "Updating to v{{version}}…",
+        "waitingForIdle": "Model Hub is busy. The update is tried again by itself once it is idle.",
+        "waitingForIdleManual": "Model Hub is busy, so it wasn't updated. Try again once it is idle.",
+        "undone": "The last update didn't work, so the previous version was put back. Model Hub works as before.",
+        "unfinished": "The last update didn't finish. Model Hub still works.",
+        "attemptUnfinished": "The last attempt didn't finish. Model Hub still works.",
+        "replaced": "The earlier version was withdrawn and replaced with a safe one. Model Hub works as before.",
+        "needsAvibe": "A newer engine needs Avibe {{version}} or later. Update Avibe first.",
+        "cannotCheck": "Can't check for updates right now. The current version is not affected.",
+        "withdrawing": "This version was withdrawn. Switching to a safe one; Model Hub is back shortly.",
+        "stopped": "Model Hub is stopped: the engine was withdrawn. It works again once its replacement can run here.",
+        "cannotStart": "Model Hub is stopped: the engine can't start. See Diagnostics & Logs for the cause.",
+        "autoUpdate": "Auto-update",
+        "checkingButton": "Checking…",
+        "updatingButton": "Updating…",
+        "cannotUpdate": "Can't update right now. The current version is not affected.",
+        "settingFailed": "Couldn't change the setting. Try again."
+      },
       "items": {
         "askill": {
           "label": "askill",
@@ -1033,8 +1059,10 @@
           "detail": "Vault custody core — required for local Vault operations."
         },
         "model-hub-engine": {
-          "label": "Model Hub engine (CPA)",
-          "detail": "Pinned CLIProxyAPI runtime used by Model Hub."
+          "label": "Model Hub engine",
+          "detail": "The local engine that runs Model Hub.",
+          "attribution": "Built on the open-source project <project>CLIProxyAPI</project> (CPA).",
+          "attributionLabel": "About this engine"
         },
         "show-runtime": {
           "label": "Show Page runtime",
@@ -3352,10 +3380,10 @@
     }
   },
   "accessBlocked": {
-    "title": "Can't open the control panel here",
-    "body": "Avibe is running, but it refused to open the control panel at this address.",
-    "hint": "Open Avibe from your https://<your-slug>.avibe.bot link, or use http://127.0.0.1:5123 on the machine running Avibe. A raw LAN or Tailscale IP is blocked while remote access is on.",
-    "codeLabel": "Reason",
+    "title": "This address can't open Avibe",
+    "body": "Avibe is running, but it does not open at this address.",
+    "hint": "Open it on the computer that runs Avibe. If this Avibe is bound to an account, you can also sign in at avibe.bot and open it from your list.",
+    "code": "Reason: {{code}}",
     "retry": "Retry"
   },
   "errors": {
@@ -3440,7 +3468,7 @@
     "project_agent_conflict": "The project's Agent changed elsewhere. Reloading it — apply your change again.",
     "project_order_conflict": "Project order changed elsewhere. The list has been refreshed; move the project again.",
     "invalid_project_order": "Project order could not be saved. Refresh the list and try again.",
-    "remote_access_host_mismatch": "This address can't open the Avibe control panel. Open it from your https://<your-slug>.avibe.bot link, or http://127.0.0.1:5123 on the machine running Avibe.",
+    "remote_access_host_mismatch": "This address can't open Avibe. Open it on the computer that runs Avibe; if this Avibe is bound to an account, you can also sign in at avibe.bot and open it from your list.",
     "remote_access_config_unavailable": "Avibe couldn't read its configuration. Check that the service is healthy and try again.",
     "remote_access_public_url_invalid": "Remote access is misconfigured (the public URL is invalid). Re-pair this device or fix the remote-access settings.",
     "remote_access_session_secret_missing": "Remote access is misconfigured (missing session secret). Re-pair this device to restore access.",
@@ -8131,6 +8159,7 @@
         "freshClaim": "The reply from avibe.bot was lost after you accepted, and it cannot be asked for again. This computer is not bound. Turn it on and approve once more.",
         "nameTaken": "That domain was taken before the binding finished. Nothing was bound. Turn it on again and choose another name.",
         "unexplained": "avibe.bot refused this request and gave no reason. Nothing was bound.",
+        "otherAccount": "The Avibe this computer used is not under {{email}}. Sign in to avibe.bot with the account that owns it, then try again.",
         "loopbackRequired": "avibe.bot refused: this computer has been bound before, and a computer like that is bound from a browser at its own address. Nothing was bound.",
         "activeElsewhere": "avibe.bot refused: that Avibe is running on another computer that was active in the last 15 minutes. Nothing was bound. To move it to this computer: quit Avibe on that computer, wait 15 minutes and try again. If that computer is no longer yours to reach: delete that Avibe on avibe.bot and bind again; its access list is lost, and its name is kept for your account for 30 days.",
         "bindingChanged": "This computer's binding has just changed. Nothing more was done here.",
@@ -8381,7 +8410,19 @@
       "noCertificate": "no valid certificate",
       "lastConnection": "Last connection",
       "lastConnectionLegs": "direct {{direct}} / Cloudflare {{public}}",
-      "lastConnectionNone": "none recorded on this device"
+      "lastConnectionNone": "none recorded on this device",
+      "directOnly": "Direct and relay only",
+      "directOnlyHint": "Uses the Cloudflare tunnel once to connect, then only direct and relay.",
+      "choiceHintDesktop": "This choice is for this device only. If Direct and relay only then cannot connect, Avibe Desktop goes back to Automatic by itself.",
+      "choiceHintDesktopPlain": "This choice is for this device only.",
+      "choiceRevertedDirectUndated": "Direct and relay only could not connect, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectToday": "Direct and relay only could not connect today at {{time}}, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectYesterday": "Direct and relay only could not connect yesterday at {{time}}, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectDated": "Direct and relay only could not connect on {{date}} at {{time}}, so the App went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopUndated": "Direct and relay only could not connect, so Avibe Desktop went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopToday": "Direct and relay only could not connect today at {{time}}, so Avibe Desktop went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopYesterday": "Direct and relay only could not connect yesterday at {{time}}, so Avibe Desktop went back to Automatic by itself.",
+      "choiceRevertedDirectDesktopDated": "Direct and relay only could not connect on {{date}} at {{time}}, so Avibe Desktop went back to Automatic by itself."
     },
     "rename": {
       "title": "Change the domain",
@@ -8522,7 +8563,20 @@
       "gone": "That device is no longer in the list.",
       "lost": "No answer came back, so it is not known whether it went through. What is shown below was read again.",
       "offFromAfar": "No answer came back, which is what turning it off looks like from here: once remote access is off, this device cannot be answered. To use it again, turn it back on at the computer running Avibe.",
-      "closedFromAfar": "Remote access is off. This device can no longer reach this Avibe; to use it again, turn it back on at the computer running Avibe."
+      "closedFromAfar": "Remote access is off. This device can no longer reach this Avibe; to use it again, turn it back on at the computer running Avibe.",
+      "restrictedFromAfar": "Done. This device can no longer open this Avibe; change it back on that computer."
+    },
+    "networkOpen": {
+      "body": "Devices on the same network can open this Avibe without signing in. After you turn on remote access, they sign in first.",
+      "action": "This computer only",
+      "confirmTitle": "This computer only?",
+      "confirmBody": "After this, this device can't open it either; change it back on that computer.",
+      "closedBody": "Only this computer can open this Avibe."
+    },
+    "proxyAccess": {
+      "body": "Browsers that open {{hosts}} are not signed in and act as this Avibe's owner; they are not on this list and cannot be signed out here.",
+      "range": "The trusted proxy is declared as a range of addresses, and every machine in that range gets in this way.",
+      "where": "This is this computer's reverse-proxy declaration. Change it in the computer's configuration and start-up environment."
     },
     "outsideChange": {
       "title": "This Avibe's address was changed somewhere else",
@@ -8551,7 +8605,7 @@
       "currentDomain": "the current domain",
       "oldName": "the old name",
       "confirmTitle": "Bind remote access again?",
-      "confirmBody": "This computer registers with avibe.bot again, under the account you sign in with at avibe.bot next. When it is done, the old device key stops working and every remote device is signed out and signs in again; pages on this computer are not affected. The address usually stays; if it changes, the new address is shown here when it is done, and the old name can be taken back under Change the domain.",
+      "confirmBody": "This computer registers with avibe.bot again, under the account you sign in with at avibe.bot next. When it is done, the old device key stops working; pages on this computer are not affected. After binding again, devices that are signed in reconnect by themselves. The address usually stays; if it changes, the new address is shown here when it is done, and the old name can be taken back under Change the domain.",
       "copiedData": "If someone may have copied this computer's Avibe data as a whole, delete this Avibe at avibe.bot, bind it again, then take your name back.",
       "asNew": {
         "whose": "The Avibe this computer is bound to belongs to another account ({{hint}}).",
@@ -8582,9 +8636,9 @@
       },
       "toDevices": "Go and turn on remote access",
       "boundTitle": "Bound again",
-      "boundExisting": "Bound again. Every remote device has to sign in again.",
+      "boundExisting": "Bound again. Devices that are signed in reconnect by themselves.",
       "boundNew": "Bound as a new Avibe: {{host}}. Every remote device signs in again at the new address.",
-      "boundPlain": "Bound. Every remote device has to sign in again.",
+      "boundPlain": "Bound.",
       "inBrowser": "Binding again continues in this computer's browser.",
       "openInBrowser": "Open in the browser",
       "invalidReturn": "Not bound again: the return from avibe.bot did not pass verification, so nothing changed. Try again.",
