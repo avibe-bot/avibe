@@ -390,7 +390,8 @@ impl MachineAttempt {
             return Err(invalid());
         }
         let source = host
-            .claim_source()
+            .live_claim_source()
+            .await
             .ok_or_else(|| ClientError::new("local_runtime_upgrade_required"))?;
         Self::open_source(source, transport, subject, locale, document_retired).await
     }

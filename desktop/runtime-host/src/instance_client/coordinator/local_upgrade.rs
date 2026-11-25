@@ -116,11 +116,8 @@ impl Coordinator {
             // The new Runtime answers. It must also be this Desktop's again (an
             // adoption the claim pipe can use), and have the claim protocol.
             // A restart too short for the shell's recovery leaves the adoption
-            // with a retired claim channel; arm it again for the same Runtime.
-            if host.claim_source().is_none() && !host.rearm_claim().await {
-                continue;
-            }
-            let Some(source) = host.claim_source() else {
+            // with a retired claim channel; this arms it again for the same Runtime.
+            let Some(source) = host.live_claim_source().await else {
                 continue;
             };
             // A restart long enough for the shell's monitor to lose the Runtime
@@ -167,7 +164,7 @@ impl Coordinator {
             .request(Method::GET, "/api/desktop/local-instance", None)
             .await
             .is_ok_and(|reply| reply.success());
-        if !described || host.claim_source().is_none() {
+        if !described || host.live_claim_source().await.is_none() {
             return Some(false);
         }
         machine::claim_route(origin, self.transport.clone()).await

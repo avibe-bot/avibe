@@ -332,6 +332,19 @@ impl RuntimeHost {
         }
     }
 
+    /// The claim source, arming the adoption's channel again first when a
+    /// short restart retired it (`rearm_claim`). Every claim entry uses this.
+    pub(crate) async fn live_claim_source(&self) -> Option<crate::instance_client::machine::ClaimSource> {
+        if let Some(source) = self.claim_source() {
+            return Some(source);
+        }
+        if self.rearm_claim().await {
+            self.claim_source()
+        } else {
+            None
+        }
+    }
+
     /// Whether this host retains a launch attempt for launch deduplication.
     pub fn has_launched(&self) -> bool {
         self.launched_runtime().attempt.is_some()

@@ -19,11 +19,16 @@ const ORIGIN: &str = "http://127.0.0.1:40123";
 struct Fixture {
     root: PathBuf,
     case: &'static str,
+    /// Nothing answers at the origin: the Runtime is restarting.
+    down: Arc<std::sync::atomic::AtomicBool>,
 }
 #[async_trait::async_trait]
 impl HealthProbe for Fixture {
     async fn presence(&self, origin: &LoopbackOrigin, _: Option<&str>) -> Presence {
         assert_eq!(origin.as_str(), ORIGIN);
+        if self.down.load(Ordering::SeqCst) {
+            return Presence::Absent;
+        }
         Presence::Unmanaged
     }
 }
@@ -150,6 +155,11 @@ impl Transport for Wire {
         Ok(Response { status, body, headers })
     }
 }
+/// One shell monitor probe while the Runtime is (or is no longer) down.
+async fn monitor_probe(host: &RuntimeHost, flag: &std::sync::atomic::AtomicBool, origin: &LoopbackOrigin, down: bool) {
+    flag.store(down, Ordering::SeqCst);
+    assert_eq!(host.is_serving(origin).await, !down);
+}
 fn request(generation: u64, action: Value) -> ClaimRequest {
     serde_json::from_value(json!({"expected_generation":generation,"action":action})).unwrap()
 }
@@ -158,7 +168,9 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     let fixture = Arc::new(Fixture {
         root: root.path().to_owned(),
         case,
+        down: Arc::default(),
     });
+    let down = fixture.down.clone();
     let host = RuntimeHost::new(fixture.clone(), fixture, RuntimeHostSettings::default());
     if case != "no_source" {
         assert_eq!(
@@ -167,6 +179,17 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
         );
     }
     eprintln!("observation fixture: bootstrap complete");
+    if case == "restarted" {
+        // A restart shorter than the shell's readiness-loss threshold: one
+        // missed monitor probe retires the claim channel, the next sees the
+        // Runtime again, and no recovery bootstrap follows. The observation
+        // below arms the channel again for the same Runtime.
+        let origin = LoopbackOrigin::parse(ORIGIN).unwrap();
+        monitor_probe(&host, &down, &origin, true).await;
+        assert!(host.claim_source().is_none());
+        monitor_probe(&host, &down, &origin, false).await;
+        assert!(host.claim_source().is_none());
+    }
     let wire = Arc::new(Wire {
         case,
         calls: AtomicU64::new(0),
@@ -351,6 +374,7 @@ async fn current_binding_is_read_only_and_only_the_original_document_receives_it
         "no_source",
         "old_cli",
         "exits",
+        "restarted",
     ] {
         let root = tempfile::tempdir().unwrap();
         let run = exercise(case, &root);
