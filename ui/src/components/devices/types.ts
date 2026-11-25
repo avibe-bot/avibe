@@ -354,6 +354,9 @@ export type RebindDialog =
  *  remote access is as it was before. `needsRepair`: only this computer can sort it out. */
 export type UnbindState =
   | { state: 'ready' }
+  /** This page's own ask was refused before anything began (a preview or a confirmation that did
+   *  not go through): the page's 「没有完成，请再试一次。」, and the entry stays. */
+  | { state: 'failed' }
   /** The instance says this Avibe cannot be unbound here: no entry, as for 「更改域名」. */
   | { state: 'ineligible' }
   | { state: 'unbinding' }

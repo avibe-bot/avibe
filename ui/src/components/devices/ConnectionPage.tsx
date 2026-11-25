@@ -172,6 +172,7 @@ export function ConnectionPage() {
   const [unbindReport, setUnbindReport] = useState<UnbindReport | undefined>();
   const [unbindConfirm, setUnbindConfirm] = useState<UnbindConfirmState | undefined>();
   const [unbindPressed, setUnbindPressed] = useState(false);
+  const [unbindFailed, setUnbindFailed] = useState(false);
   const unbindConfirmation = useRef<string | null>(null);
   const readDevices = useCallback(async () => {
     try {
@@ -673,10 +674,11 @@ export function ConnectionPage() {
         : unbindReport?.state === 'notUnbound'
           // A key that no longer works is the binding-rejected state the row below already says.
           ? (unbindReport.reason === 'ineligible' ? { state: 'notChanged' } : { state: 'ineligible' })
-          : { state: 'ready' };
+          : unbindFailed ? { state: 'failed' } : { state: 'ready' };
   const hostName = devices.find((each) => each.kind === 'host');
   const openUnbind = () => {
     setUnbindConfirm(undefined);
+    setUnbindFailed(false);
     void (async () => {
       try {
         unbindConfirmation.current = await api.unbindPreview();
@@ -689,7 +691,8 @@ export function ConnectionPage() {
           holdDays: address?.holdDays,
         });
       } catch {
-        // Nothing was asked of avibe.bot: the report read below says what stands.
+        // Nothing was asked of avibe.bot. Said, never silent; the report read below says what stands.
+        if (alive.current) setUnbindFailed(true);
         await readDevices();
       }
     })();
@@ -706,6 +709,8 @@ export function ConnectionPage() {
       } catch (error) {
         // A lost answer from afar is expected: remote access stops before the answer arrives.
         if (alive.current && (error instanceof LostAnswer || (error instanceof DevicesApiError && error.code === 'operation_in_progress'))) setUnbindPressed(true);
+        // Refused before it began (an expired confirmation, a binding that changed): said, and it can be pressed again.
+        else if (alive.current) setUnbindFailed(true);
       } finally {
         if (alive.current) setUnbindConfirm(undefined);
         await readDevices();

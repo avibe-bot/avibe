@@ -21,6 +21,9 @@ export function UnbindLine({ state }: { state: UnbindState }) {
       </div>
     );
   }
+  if (state.state === 'failed') {
+    return <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink"><KeptTail text={t('devices.problem.failed')} /></div>;
+  }
   if (state.state === 'notChanged') {
     return <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink"><KeptTail text={t('devices.unbind.notChanged')} /></div>;
   }

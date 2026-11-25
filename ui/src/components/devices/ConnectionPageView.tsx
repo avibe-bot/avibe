@@ -381,7 +381,7 @@ export function ConnectionPageView({
               </Button>
             )}
             {/* Refused as not eligible, it is not offered again: nothing here would change that. */}
-            {unbind?.state === 'ready' && (
+            {(unbind?.state === 'ready' || unbind?.state === 'failed') && (
               <Button variant="ghost" size="compact" className="text-destructive-ink" onClick={actions.onUnbind}>
                 {t('devices.unbind.action')}
               </Button>

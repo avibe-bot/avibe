@@ -40,7 +40,7 @@ const PHONE = { ...IPHONE_17_PRO, width: 390, height: 1100 };
 function frame(name: string, title: string, size: { width: number; height: number; safeArea?: { top: number; bottom: number } }, props: Partial<ConnectionPageViewProps>, extra: Partial<FrameSpec> & { app?: boolean } = {}): FrameSpec {
   const { app, ...spec } = extra;
   return {
-    name, title, ...size, status: 'proposed', themes: ['light'], route: CONNECTION,
+    name, title, ...size, status: 'shipped', themes: ['light'], route: CONNECTION,
     fixtures: settingsFixtures({}, app ? { nativeShell: IOS_APP_CAPABILITIES } : {}),
     render: settingsPage('remote-access/connection', <ConnectionPageView {...base} {...props} />),
     ...spec,
@@ -54,7 +54,7 @@ const macbook: Device = {
 const devicesBase: DevicesPageViewProps = { reach: { state: 'off', surface: 'browser' }, devices: [macbook] };
 function devices(name: string, title: string, size: { width: number; height: number; safeArea?: { top: number; bottom: number } }, props: Partial<DevicesPageViewProps>): FrameSpec {
   return {
-    name, title, ...size, status: 'proposed', themes: ['light'], route: DEVICES,
+    name, title, ...size, status: 'shipped', themes: ['light'], route: DEVICES,
     fixtures: settingsFixtures({}),
     render: settingsPage('remote-access', <DevicesPageView {...devicesBase} {...props} />),
   };

@@ -667,6 +667,16 @@ describe('ConnectionPage · binding again', () => {
     expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
   });
 
+  it('says a preview that did not go through, and lets 「解除绑定」 be pressed again', async () => {
+    vi.spyOn(devicesApi, 'unbindPreview').mockRejectedValue(new DevicesApiError(409, 'operation_in_progress', {}));
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    expect(await screen.findByText(said('没有完成，请再试一次。'))).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: '解除绑定' })).toBeTruthy();
+  });
+
   it('says what the instance reports about an unbinding: refused as not eligible, or left for this computer', async () => {
     const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'notUnbound', reason: 'ineligible' } });
     const { unmount } = mount();
