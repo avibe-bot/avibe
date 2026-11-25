@@ -470,6 +470,9 @@ export function AntigravityConnectionForm({
               </div>
             )}
 
+            {method === 'oauth-personal' && (
+              <p className="connection-notice" role="note">{t('settings.backends.antigravityPersonalNotice')}</p>
+            )}
             {isOAuthMethod && (!compact ? (
               <BackendOAuthPanel
                 key={oauthAuthMode} backend="antigravity" authMode={oauthAuthMode}

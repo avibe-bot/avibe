@@ -850,6 +850,7 @@
       "manualFallback": "如果当前平台不支持按钮，请执行 `/setup {backend}`。",
       "codexInstructions": "Codex 登录修复已开始。\n\n1. 在浏览器打开这个地址：\n{url}\n\n2. 输入这个一次性验证码：\n`{code}`\n\nBot 会继续等待，并在登录完成后回消息确认。",
       "claudeInstructions": "Claude 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器回调页面会显示最终的 `authorizationCode#state`，请直接把它发回当前聊天。",
+      "antigravityPersonalNotice": "用个人 Google 账号登录时，Google 允许你本人指挥 Antigravity 工作。Google 说明这种登录不包含无人值守的运行和任务队列，例如定时任务、Watch，以及由别的 Agent 转交的工作。需要自动化时，请改用 API key 或 Agent Platform 登录，这两种按用量计费。",
       "antigravityInstructions": "Antigravity 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器显示授权码后，请直接把它发回当前聊天。",
       "antigravityBusinessFallback": "如果 Gemini Enterprise 在这里没有提供可粘贴的授权码，请在终端运行 `{command}` 完成登录。",
       "antigravityAdcRecoveryPrompt": "Antigravity Agent Platform 需要有效的 Application Default Credentials。请在终端运行 `{command}` 或检查设置后重试。",

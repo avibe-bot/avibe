@@ -596,6 +596,26 @@ async def test_maybe_emit_auth_recovery_message_branches_for_antigravity(fake_ag
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("method", "shows_notice"), [("oauth-personal", True), ("oauth-business", False)])
+async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_only(fake_agy: FakeAgyAuthFixture, method: str, shows_notice: bool) -> None:
+    service, ctx = _make_auth_service(), MessageContext(user_id="u1", channel_id="c1", platform="slack")
+    service._send_message = AsyncMock()
+    service.controller._get_settings_key = lambda context: context.channel_id
+    flow = auth_mod.AgentAuthFlow(
+        flow_id="f1", backend="antigravity", settings_key="c1", initiator_user_id="u1",
+        context=ctx, process=None, reader_task=None, waiter_task=None, auth_method=method,
+    )
+    service._flow_registry.put(flow, flow_key=service._make_flow_key(ctx, "antigravity"))
+
+    await service._handle_process_text(ctx, "antigravity", "Open https://accounts.google.com/o/oauth2/auth?client_id=agy&state=s1\n")
+
+    sent = service._send_message.await_args.args[1]
+    notice = service._t("command.setup.antigravityPersonalNotice")
+    assert "https://accounts.google.com/o/oauth2/auth" in sent
+    assert sent.startswith(notice) if shows_notice else notice not in sent
+
+
+@pytest.mark.asyncio
 async def test_antigravity_auth_service_expands_tilde_cli_path_non_desktop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     workdir, empty_path = tmp_path / "repo", tmp_path / "empty-path"
     workdir.mkdir()

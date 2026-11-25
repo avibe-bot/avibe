@@ -104,7 +104,7 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('Antigravity settings, auth flows, and onboarding', () => {
-  it.each(['en', 'zh'] as const)('completes %s Google paste-code OAuth without personal automation notice or Model Hub card', async (lang) => {
+  it.each(['en', 'zh'] as const)('completes %s Google paste-code OAuth with the personal sign-in notice and no Model Hub card', async (lang) => {
     await i18n.changeLanguage(lang);
     const t = lang === 'en' ? en : zh;
     mock.api.startOAuthWeb.mockResolvedValue({
@@ -115,7 +115,7 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     renderProvider();
 
     const signInButton = await screen.findByRole('button', { name: t.settings.backends.antigravitySignInGoogle });
-    expect(screen.queryByRole('note')).toBeNull();
+    expect(screen.getByRole('note').textContent).toBe(t.settings.backends.antigravityPersonalNotice);
     expect(screen.queryByText(t.settings.models.supplyMode.title)).toBeNull();
     expect(modelsApi.listAgents).not.toHaveBeenCalled();
     expect(mock.api.testBackendAuth).not.toHaveBeenCalled();
@@ -191,11 +191,12 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     expect(screen.getByText(B.testConnectionInferenceOk)).toBeTruthy();
   });
 
-  it('opens onboarding BackendConnectionDialog for Antigravity without personal automation notice or default Enterprise terminal block', async () => {
+  it('shows the personal sign-in notice in the onboarding dialog for the Google method only, without a default Enterprise terminal block', async () => {
     renderDialog('oauth');
     expect(await screen.findByText(C.antigravityDialogIntro)).toBeTruthy();
-    expect(screen.queryByRole('note')).toBeNull();
+    expect(screen.getByRole('note').textContent).toBe(B.antigravityPersonalNotice);
     fireEvent.click(screen.getByRole('radio', { name: B.antigravityMethodEnterpriseCompact }));
+    expect(screen.queryByRole('note')).toBeNull();
     expect(screen.queryByText(B.antigravityEnterpriseTerminalTitle)).toBeNull();
   });
 

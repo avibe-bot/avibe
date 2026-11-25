@@ -2189,10 +2189,10 @@ class AgentAuthService:
                 flow.awaiting_code = True
             if flow.url and not flow.login_prompt_sent:
                 flow.login_prompt_sent = True
-                await self._send_message(
-                    flow.context,
-                    self._t("command.setup.antigravityInstructions", url=flow.url),
-                )
+                instructions = self._t("command.setup.antigravityInstructions", url=flow.url)
+                if flow.auth_method == "oauth-personal":
+                    instructions = f"{self._t('command.setup.antigravityPersonalNotice')}\n\n{instructions}"
+                await self._send_message(flow.context, instructions)
             return
 
         maybe_code = CODEX_DEVICE_CODE_RE.search(clean)

@@ -1105,6 +1105,7 @@
       "antigravityMethodEnterpriseCompact": "企业版",
       "antigravityMethodApiKeyCompact": "API Key",
       "antigravityMethodAgentPlatformCompact": "Agent Platform",
+      "antigravityPersonalNotice": "用个人 Google 账号登录时，Google 允许你本人指挥 Antigravity 工作。Google 说明这种登录不包含无人值守的运行和任务队列，例如定时任务、Watch，以及由别的 Agent 转交的工作。需要自动化时，请改用 API key 或 Agent Platform 登录，这两种按用量计费。",
       "antigravityOauthPersonalTitle": "使用 Google 账号登录",
       "antigravityOauthPersonalSubtitle": "在浏览器中打开登录链接并批准访问，然后将返回的授权码粘贴到这里。",
       "antigravityOauthPersonalSignedIn": "Antigravity 已通过 Google 账号登录。",

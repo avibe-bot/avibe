@@ -1105,6 +1105,7 @@
       "antigravityMethodEnterpriseCompact": "Enterprise",
       "antigravityMethodApiKeyCompact": "API Key",
       "antigravityMethodAgentPlatformCompact": "Agent Platform",
+      "antigravityPersonalNotice": "With a personal Google sign-in, Google allows Antigravity for work you direct yourself. Google says this sign-in does not cover unattended runs or task queues, such as scheduled Tasks, Watches, or work passed from one Agent to another. For automation, sign in with an API key or Agent Platform instead; both are billed by usage.",
       "antigravityOauthPersonalTitle": "Sign in with your Google account",
       "antigravityOauthPersonalSubtitle": "Open the sign-in link in your browser, approve access, and paste the returned code here.",
       "antigravityOauthPersonalSignedIn": "Antigravity is signed in with your Google account.",
