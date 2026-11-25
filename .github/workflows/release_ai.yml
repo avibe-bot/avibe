@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       rc_runner_exception:
-        description: "Single unassigned job | reason and quoted Product go for this RC. Release lead only."
+        description: "Single unassigned job | reason | verbatim Product approval for this RC. Release lead only."
         type: string
         required: false
       model:
@@ -715,16 +715,21 @@ jobs:
             printf "\n\nFull Changelog: %s\n" "$COMPARE_URL" >> release.md
           fi
 
-      - name: Record the approved runner exception in the RC notes
-        if: inputs.rc_runner_exception != ''
+      - name: Record or preserve the approved runner exception in the RC notes
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
         env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
           RC_RUNNER_EXCEPTION: ${{ inputs.rc_runner_exception }}
         run: |
           python - <<'PY'
-          import html, os
-          with open('release.md', 'a') as notes:
-              print('\nRunner exception (release lead, quoted Product approval): <code>' +
-                    html.escape(os.environ['RC_RUNNER_EXCEPTION']) + '</code>', file=notes)
+          import os
+          from pathlib import Path
+          from scripts.github_release import get_release
+          from scripts.ci_protected_rc import preserve_exception_notes
+          existing = get_release(os.environ['GITHUB_REPOSITORY'], os.environ['RELEASE_TAG'])
+          notes = Path('release.md')
+          notes.write_text(preserve_exception_notes(notes.read_text(), existing.body if existing else '', os.environ['RC_RUNNER_EXCEPTION']))
           PY
 
       - name: Preserve silent-update marker (tag annotation or existing release body)

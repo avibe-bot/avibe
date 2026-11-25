@@ -367,8 +367,22 @@ def _named_jobs(api: GitHubApi, sha: str) -> dict[str, dict[str, Any]]:
     if not runs:
         raise ReleaseBackstopError(f"Missing protected native evidence for exact SHA {sha}")
     run = max(runs, key=lambda r: r['id'])
+    run_id, attempt = run.get('id'), run.get('run_attempt')
+    if type(run_id) is not int or type(attempt) is not int or attempt < 1:
+        raise ReleaseBackstopError('Invalid master run identity')
+    path = f'actions/runs/{run_id}/attempts/{attempt}'
+    proof = api.get(path)
+    if not isinstance(proof, dict) or any(proof.get(k) != v for k, v in {
+        'id': run_id, 'run_attempt': attempt, 'head_sha': sha, 'path': WORKFLOW_PATH,
+        'head_branch': MASTER_BRANCH, 'event': run['event'],
+    }.items()):
+        raise ReleaseBackstopError('Master attempt identity does not match the selected source')
+    began = _timestamp(proof.get('run_started_at'), context='master attempt start')
     jobs: dict[str, dict[str, Any]] = {}
-    for job in _jobs(api, run['id']):
+    for job in _paged(api, path + '/jobs', query={}):
+        if (job.get('run_id') != run_id or job.get('run_attempt') != attempt or job.get('head_sha') != sha
+                or not job.get('started_at') or _timestamp(job['started_at'], context='job start') < began):
+            continue  # A partial rerun can relabel an inherited result. It is not fresh evidence.
         name = job.get('name')
         if not isinstance(name, str) or name in jobs:
             raise ReleaseBackstopError("Ambiguous master job evidence")
@@ -390,9 +404,15 @@ def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str) -> None:
         return
     # The release lead records Product's explicit approval. It is an operational
     # rule, not a distinct GitHub identity; the mechanical conditions still apply.
-    name, sep, reason = waiver.partition(' | ')
-    if not sep or not reason.strip() or len(waiver) > 500 or any(not ch.isprintable() for ch in waiver):
-        raise ReleaseBackstopError('Expected one job | reason and quoted approval on one line')
+    fields = waiver.split(' | ')
+    if (len(fields) != 3 or not all(f.strip() for f in fields) or len(waiver) > 500
+            or any(not ch.isprintable() for ch in waiver)):
+        raise ReleaseBackstopError('Expected one job | reason | verbatim Product approval on one line')
+    name, _reason, _approval = fields
+    if not missing and name in wanted:
+        # The same SHA now has strictly stronger proof. Stage 2 independently
+        # checks this historical waiver against the published Stage 1 notes.
+        return
     if missing != [name]:
         raise ReleaseBackstopError('Exception must name exactly the one non-green protected job')
     job = jobs.get(name, {})
@@ -405,10 +425,10 @@ def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str) -> None:
         raise ReleaseBackstopError('Exception requires one exact parent')
     parent = _sha(parents[0].get('sha'), context='RC parent')
     try:
-        affected = protected.required_jobs(protected.touched(parent, sha))
+        affected = protected.inputs_changed(name, protected.touched(parent, sha))
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         raise ReleaseBackstopError('Cannot prove parent inputs unchanged') from exc
-    if name in affected or not passed(_named_jobs(api, parent).get(name, {})):
+    if affected or not passed(_named_jobs(api, parent).get(name, {})):
         raise ReleaseBackstopError('Parent job must pass and candidate changes must not reach its inputs')
 
 

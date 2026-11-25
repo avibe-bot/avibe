@@ -6,8 +6,11 @@ check contexts. Classify both sides of a rename, and every commit since publicat
 
 from __future__ import annotations
 
+import html
 import subprocess
 from pathlib import Path
+
+from scripts.ci_docs_only import narrative_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,21 +50,44 @@ def required_jobs(paths: set[str]) -> set[str]:
     """Only these disjoint roots can narrow the proof; shared tooling is fail-closed."""
     jobs: set[str] = set()
     for path in paths:
-        if (
-            path.startswith("docs/")
-            and path.endswith(".md")
-            and not path.startswith(("docs/plans/", "docs/contracts/"))
-        ):
+        if narrative_path(path):
             continue
         if path.startswith("storage/"):
             jobs.update(MIGRATIONS | INSTALL | IDENTITY)
         elif path.startswith("desktop/"):
-            jobs.update(DESKTOP | INSTALL | IDENTITY)
+            jobs.update(DESKTOP | FETCH | INSTALL | IDENTITY)
         elif path.startswith(("core/handlers/model_hub/", "vibe/model_hub_runtime/")):
             jobs.update(NATIVE | FETCH | INSTALL | IDENTITY)
         else:
             jobs.update(ALL)
     return jobs
+
+
+NOTE_PREFIX = 'Runner exception (release lead, quoted Product approval): <code>'
+
+
+def exception_note(value: str) -> str:
+    return NOTE_PREFIX + html.escape(value) + '</code>'
+
+
+def preserve_exception_notes(generated: str, existing: str, waiver: str) -> str:
+    # Only the exact release's existing body and the structured dispatch input
+    # can supply this audit line. Generated prose cannot create an authorization.
+    fresh = [line for line in generated.splitlines() if not line.startswith(NOTE_PREFIX)]
+    preserved = [line for line in existing.splitlines() if line.startswith(NOTE_PREFIX) and line.endswith('</code>')]
+    if waiver:
+        preserved.append(exception_note(waiver))
+    return '\n'.join(fresh + ([''] + list(dict.fromkeys(preserved)) if preserved else [])) + '\n'
+
+
+def inputs_changed(name: str, paths: set[str]) -> bool:
+    """A stricter question than range classification: could this producer read the delta?"""
+    if name == "install-upgrade-regression (installer, macos-15)":
+        # This producer installs the Linux wheel and exercises the Python installer
+        # and native listener. The iOS Xcode project and its test targets are not
+        # packaged or used there. Do not extend this exemption to unknown roots.
+        paths = {p for p in paths if not (p == "ios/Avibe.xcodeproj/project.pbxproj" or p.startswith("ios/AvibeTests/"))}
+    return name in required_jobs(paths)
 
 
 def touched(base: str, source: str) -> set[str]:

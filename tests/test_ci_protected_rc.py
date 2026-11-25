@@ -43,7 +43,8 @@ def prove(monkeypatch, *, job=None, waiver="", other=None, parent=GREEN, files=(
 
 def test_exact_evidence_or_single_unassigned_exception(monkeypatch):
     prove(monkeypatch, job=GREEN)
-    prove(monkeypatch, job=CANCELLED, waiver=f"{JOB} | Release lead quotes Product approval for this RC")
+    prove(monkeypatch, job=CANCELLED, waiver=f"{JOB} | no runner | approved for this RC")
+    prove(monkeypatch, job=GREEN, waiver=f"{JOB} | no runner | previously approved for this RC")
 
 
 @pytest.mark.parametrize(
@@ -58,7 +59,8 @@ def test_missing_red_or_skipped_blocks_by_default(monkeypatch, job):
     "kwargs",
     [
         {"job": None},
-        {"job": GREEN},
+        {"waiver": f"{JOB} | reason without approval"},
+        {"waiver": f"{JOB} |  | quoted go"},
         {"job": {**CANCELLED, "conclusion": "failure"}},
         {"job": {**CANCELLED, "runner_id": 451}},
         {"job": {**CANCELLED, "steps": [{"name": "start"}]}},
@@ -74,7 +76,7 @@ def test_missing_red_or_skipped_blocks_by_default(monkeypatch, job):
 )
 def test_override_does_not_cover_any_other_case(monkeypatch, kwargs):
     with pytest.raises(gate.ReleaseBackstopError):
-        prove(monkeypatch, **({"job": CANCELLED, "waiver": f"{JOB} | quoted go"} | kwargs))
+        prove(monkeypatch, **({"job": CANCELLED, "waiver": f"{JOB} | no runner | quoted go"} | kwargs))
 
 
 def test_range_records_reverted_and_renamed_files(monkeypatch, tmp_path):
@@ -98,4 +100,11 @@ def test_range_records_reverted_and_renamed_files(monkeypatch, tmp_path):
     assert policy.touched(base, candidate) == {"original", "desktop/risk.rs"}
     assert policy.DESKTOP <= policy.required_jobs({"desktop/risk.rs"})
     assert policy.required_jobs({"docs/guide.md"}) == set()
+    assert policy.required_jobs({'CODE_OF_CONDUCT.md'}) == set()
+    assert policy.required_jobs({'docs/INSTALL_FOR_AI.md'}) >= policy.INSTALL
+    assert policy.required_jobs({'docs/INSTALL_FOR_AI_ZH.md'}) >= policy.IDENTITY
+    assert policy.required_jobs({'desktop/scripts/build-runtime-bundle.py'}) >= policy.FETCH
+    mac = 'install-upgrade-regression (installer, macos-15)'
+    assert not policy.inputs_changed(mac, {'ios/AvibeTests/Foo.swift', 'ios/Avibe.xcodeproj/project.pbxproj'})
+    assert policy.inputs_changed(mac, {'ios/AvibeTests/Foo.swift', 'scripts/check.py'})
     assert policy.required_jobs({"new-build-input"}) == policy.ALL
