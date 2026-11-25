@@ -94,16 +94,21 @@ impl EnrollmentFlow {
 }
 
 impl EnrollmentFlow {
+    /// A Runtime too old to describe itself still has its pairing in the
+    /// owner's config projection (`remote_access.vibe_cloud`, credentials
+    /// removed, unchanged since 3.2.0): its instance ID counts only while that
+    /// projection says it is paired. Remote-access status has no ID.
     async fn bound_instance(local: &mut NativeSession) -> Option<String> {
-        let response = local
-            .request(Method::GET, "/api/remote-access/status", None)
-            .await
-            .ok()?;
+        let response = local.request(Method::GET, "/api/config", None).await.ok()?;
         if !response.success() {
             return None;
         }
-        let status: Value = serde_json::from_slice(&response.body).ok()?;
-        let id = status.get("instance_id")?.as_str()?.trim();
+        let config: Value = serde_json::from_slice(&response.body).ok()?;
+        let cloud = config.get("remote_access")?.get("vibe_cloud")?;
+        if cloud.get("paired")?.as_bool() != Some(true) {
+            return None;
+        }
+        let id = cloud.get("instance_id")?.as_str()?.trim();
         (!id.is_empty() && id.len() <= 120 && id.bytes().all(|b| b.is_ascii_graphic())).then(|| id.to_owned())
     }
 }

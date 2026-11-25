@@ -36,9 +36,10 @@ struct Runtime {
     still_old: bool,
     /// The claim protocol is already there.
     current: bool,
-    /// No local description (before 3.2.6rc16); what remote-access status says.
+    /// No local description (before 3.2.6rc16); what the owner's config
+    /// projection says about the pairing.
     describes: bool,
-    status_instance: Option<&'static str>,
+    paired: Option<&'static str>,
     state: StdMutex<(bool, bool)>, // (prereleases switched on here, upgraded)
     calls: StdMutex<Vec<String>>,
 }
@@ -92,9 +93,13 @@ impl Transport for Runtime {
                     (200, json!({"ok": true, "restarting": true}))
                 }
             }
-            ("GET", "/api/desktop/claim/v1/admit") => {
+            ("POST", "/api/desktop/claim/v1/admit") => {
+                // The probe: an owner POST with an empty body. The handler refuses
+                // it; a Runtime without the route answers its unknown-API 404.
+                assert_eq!(r.body, Some(json!({})));
+                assert_eq!(r.headers["x-vibe-csrf-token"], "fixture");
                 let has = self.current || (upgraded && !self.still_old);
-                (if has { 405 } else { 404 }, Value::Null)
+                (if has { 400 } else { 404 }, Value::Null)
             }
             ("GET", "/api/desktop/local-instance") if self.describes || upgraded => (
                 200,
@@ -102,9 +107,16 @@ impl Transport for Runtime {
                     "pairing":null,"remote_access":{"configured_enabled":false,"requested":false,"running":false}}),
             ),
             ("GET", "/api/desktop/local-instance") => (404, Value::Null),
-            ("GET", "/api/remote-access/status") => (
+            // The released shape: `vibe_cloud` is the config dataclass with
+            // credentials removed, plus `paired`; remote-access status has no ID.
+            ("GET", "/api/config") => (
                 200,
-                json!({"paired": self.status_instance.is_some(), "instance_id": self.status_instance}),
+                json!({"remote_access": {"provider": "vibe_cloud", "vibe_cloud": {
+                    "enabled": self.paired.is_some(),
+                    "instance_id": self.paired.unwrap_or(""),
+                    "public_url": "",
+                    "paired": self.paired.is_some(),
+                }}}),
             ),
             other => panic!("unexpected local request {other:?}"),
         };
@@ -341,7 +353,7 @@ async fn an_upgrade_that_does_not_help_ends_with_its_own_answer() {
 async fn a_runtime_too_old_to_describe_itself_still_names_its_binding() {
     for (said, expected) in [(Some("inst_local"), Some("inst_local")), (None, None)] {
         let runtime = Runtime {
-            status_instance: said,
+            paired: said,
             ..Default::default()
         };
         let (c, _runtime, _host, _root) = setup(runtime, "3.2.9").await;

@@ -7,7 +7,6 @@ use super::{
 };
 use crate::{launcher::ClaimHelperCommand, LoopbackOrigin, RuntimeHost};
 use chrono::DateTime;
-use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
@@ -48,9 +47,15 @@ fn too_old() -> ClientError {
 /// route does not exist. Asked only after a claim pipe failed before its first
 /// frame (an older CLI does not know the pipe) or the route answered 404; any
 /// other answer, or none, is not taken as age.
+///
+/// The route only takes POST, and a GET of any API path reaches the static
+/// catch-all, which answers 404 whether or not the route exists. So this asks
+/// with the same owner POST (CSRF and Origin) as the Workbench: where the route
+/// exists its handler refuses an empty body (400/403) without acting; where it
+/// does not, the Runtime's unknown-API handler answers 404.
 pub(crate) async fn claim_protocol_missing(origin: &LoopbackOrigin, transport: Arc<dyn Transport>) -> bool {
     let mut local = NativeSession::new(origin.navigation_url(), transport);
-    matches!(local.request(Method::GET, ADMIT, None).await, Ok(reply) if reply.status == 404)
+    matches!(local_mutation(&mut local, ADMIT, json!({})).await, Ok(reply) if reply.status == 404)
 }
 fn text(s: &str, max: usize) -> bool {
     !s.is_empty() && s.trim() == s && !s.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')) && s.chars().count() <= max

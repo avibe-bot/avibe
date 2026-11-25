@@ -73,13 +73,32 @@ impl Transport for Wire {
         eprintln!("observation fixture: transport call {call}");
         if matches!(self.case, "old_cli" | "exits") {
             // The pipe ended before its first frame: the Runtime is asked
-            // whether it has the claim route at all, and nothing else.
-            assert_eq!(call, 0);
+            // whether it has the claim route at all (an owner POST, as a GET
+            // reaches the static catch-all), and nothing else.
+            if call == 0 {
+                assert_eq!(
+                    (r.method, r.url.as_str()),
+                    (Method::GET, "http://127.0.0.1:40123/api/csrf-token")
+                );
+                headers.insert(SET_COOKIE, "vibe_csrf_token=probe; Path=/".parse().unwrap());
+                return Ok(Response {
+                    status: 200,
+                    body: br#"{"csrf_token":"probe"}"#.to_vec(),
+                    headers,
+                });
+            }
+            assert_eq!(call, 1);
             assert_eq!(
-                (r.method, r.url.as_str()),
-                (Method::GET, "http://127.0.0.1:40123/api/desktop/claim/v1/admit")
+                (r.method, r.url.as_str(), r.body),
+                (
+                    Method::POST,
+                    "http://127.0.0.1:40123/api/desktop/claim/v1/admit",
+                    Some(json!({}))
+                )
             );
-            let status = if self.case == "old_cli" { 404 } else { 405 };
+            assert_eq!(r.headers["x-vibe-csrf-token"], "probe");
+            // Missing: the unknown-API answer. Present: the handler refuses the empty body.
+            let status = if self.case == "old_cli" { 404 } else { 400 };
             return Ok(Response {
                 status,
                 body: vec![],
@@ -234,7 +253,7 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
                 "invalid_machine_response"
             }
         );
-        assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 2);
         return;
     }
     if case == "no_source" {
