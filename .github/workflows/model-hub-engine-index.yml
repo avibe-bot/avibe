@@ -83,7 +83,7 @@ jobs:
   publish:
     needs: [prepare, sign]
     # Master-only deployment policy, separate from owner approval for asset releases.
-    environment: model-hub-engine-index-writer
+    environment: model-hub-engine-channel-writer
     runs-on: ubuntu-latest
     steps:
       - *tools

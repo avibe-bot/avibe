@@ -1343,7 +1343,7 @@ def test_snapshot_workflow_separates_signer_from_origin_and_uses_only_pinned_too
         assert 'python3 ledger/' not in json.dumps(job)
         secret_steps = [step for step in job['steps'] if 'secrets.' in json.dumps(step)]
         assert len(secret_steps) == (0 if name == 'prepare' else 1)
-        assert job.get('environment') == {'sign': producer.SIGNER_ENVIRONMENT, 'publish': 'model-hub-engine-index-writer'}.get(name)
+        assert job.get('environment') == {'sign': producer.SIGNER_ENVIRONMENT, 'publish': 'model-hub-engine-channel-writer'}.get(name)
         assert ('secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE' in json.dumps(secret_steps)) == (name == 'sign')
         assert ('secrets.R2_SECRET_ACCESS_KEY' in json.dumps(secret_steps)) == (name == 'publish')
 
