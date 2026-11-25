@@ -627,11 +627,34 @@ def _format_diff_preview_lines(old_text: str | None, new_text: str) -> list[str]
 def _format_tool_activity(update: AcpToolCallUpdate, state: dict[str, Any]) -> tuple[str, str]:
     """Render one ACP tool call or incremental update into concise activity text."""
     title = state.get("title") or state.get("tool_kind") or update.tool_call_id
+    if title.startswith("File ") and state.get("cwd"):
+        path = (Path(state["cwd"]) / title[5:]).resolve()
+        try:
+            readable = str(path.relative_to(state["cwd"]))
+        except ValueError:
+            readable = str(path)
+        title = f"File {readable}"
     status = state.get("status")
     header = f"{title} ({status})" if status else title
     lines = [header]
+    raw_input = state.get("raw_input")
+    if state.get("tool_kind") == "execute" and isinstance(raw_input, Mapping):
+        command = next((raw_input.get(key) for key in ("CommandLine", "command", "commandLine", "command_line") if raw_input.get(key)), None)
+        if isinstance(command, str):
+            lines.append(command[:1000])
+    raw_output = state.get("raw_output")
+    if isinstance(raw_output, Mapping):
+        for key in ("exitCode", "exit_code"):
+            if key in raw_output:
+                lines.append(f"exit {raw_output[key]}")
+                break
+        summary = raw_output.get("stdout") or raw_output.get("output") or raw_output.get("stderr")
+    else:
+        summary = raw_output
+    if isinstance(summary, str) and summary.strip():
+        lines.extend(summary.strip()[:1000].splitlines()[:4])
 
-    for diff in update.diffs:
+    for diff in state.get("diffs", update.diffs):
         lines.append(f"diff: {diff.path}")
         lines.extend(_format_diff_preview_lines(diff.old_text, diff.new_text))
 
@@ -1306,9 +1329,12 @@ class AntigravityAgent(BaseAgent):
             if update.locations:
                 state["locations"] = update.locations
             if update.diffs:
-                text, status_label = await asyncio.to_thread(_format_tool_activity, update, dict(state))
-            else:
-                text, status_label = _format_tool_activity(update, state)
+                state["diffs"] = update.diffs
+            if state.get("status") not in {"completed", "failed"} or state.get("emitted"):
+                return
+            state["emitted"] = True
+            state["cwd"] = session.workdir
+            text, status_label = await asyncio.to_thread(_format_tool_activity, update, dict(state))
             await emit_output(
                 self.controller,
                 turn.request.context,

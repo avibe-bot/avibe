@@ -386,6 +386,12 @@ class FakeAcpServer:
                 resp = await self._send_server_request("vendor/unhandled_op", {"sessionId": sid, "detail": "probe"})
                 self._send_text(sid, f"unknown_req_error:{resp.get('error', {}).get('code')}")
                 return self._send_result(req_id, {"stopReason": "end_turn", "clientResponse": resp})
+            if text == "tool_details":
+                self._send_update(sid, {"sessionUpdate": "tool_call", "toolCallId": "exec", "kind": "execute", "title": "Run command", "status": "in_progress", "rawInput": {"CommandLine": "printf hello"}})
+                self._send_update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "exec", "status": "completed", "rawOutput": {"stdout": "hello\n" + "x" * 5000, "exitCode": 0}})
+                self._send_update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "exec", "status": "completed"})
+                self._send_update(sid, {"sessionUpdate": "tool_call", "toolCallId": "file", "title": "File ../outside.md", "kind": "read", "status": "completed"})
+                return self._finish_reply(req_id, session, text, "done")
             if text == "stream_all":
                 self._send_text(sid, "planning edit", "agent_thought_chunk")
                 self._send_update(sid, {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Update greeting", "kind": "edit", "status": "in_progress", "rawInput": {"path": "hello.py"}, "locations": [{"path": "hello.py", "line": 1}]})

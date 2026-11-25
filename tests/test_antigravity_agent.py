@@ -467,7 +467,7 @@ async def test_streaming_updates_usage_permissions_and_single_turn_end(tmp_path:
         await h.agent.handle_message(req)
         narr, tools, res = h.controller.events("assistant"), h.controller.events("toolcall"), h.controller.events("result")
         assert len(narr) == 1 and narr[0][1] == "planning edit" and narr[0][2].get("level") == "process"
-        assert len(tools) == 2 and any("diff: hello.py" in tc[1] and "print('new')" in tc[1] for tc in tools)
+        assert len(tools) == 1 and any("diff: hello.py" in tc[1] and "print('new')" in tc[1] for tc in tools)
         assert len(res) == 1 and res[0][1] == "Updated hello.py." and h.controller.token_notes == [(req.context, 1200)]
 
         for prompt, expected in (("request_permission", "permission:reject_once"), ("request_unknown", "unknown_req_error:-32601")):
@@ -899,6 +899,10 @@ async def test_pre_tool_text_flushes_as_narration_before_end_turn_without_duplic
                 paused_after_tool.set()
                 await resume_prompt.wait()
                 await h.agent._handle_notification(
+                    sess, "session/update",
+                    {"sessionId": sid, "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed"}},
+                )
+                await h.agent._handle_notification(
                     sess,
                     "session/update",
                     {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Final answer after tool."}}},
@@ -912,10 +916,9 @@ async def test_pre_tool_text_flushes_as_narration_before_end_turn_without_duplic
         turn_task = asyncio.create_task(h.agent.handle_message(make_request(message="multi-step", workdir=h.workdir)))
         await asyncio.wait_for(paused_after_tool.wait(), timeout=5.0)
 
-        # Pre-tool text is emitted as Narration BEFORE ToolActivity and BEFORE end_turn.
+        # Pre-tool narration is immediate; the single tool row waits for completion.
         assert [(kind, text) for kind, text, _ in h.controller.emitted] == [
             ("assistant", "Checking files before edit."),
-            ("toolcall", "Read file (in_progress)"),
         ]
         assert h.controller.events("assistant")[0][2].get("level") is None
         assert h.controller.events("result") == []
@@ -985,6 +988,7 @@ async def test_large_diff_preview_is_bounded_and_offloaded_off_event_loop(
     session = SimpleNamespace(
         runtime_key=runtime_key,
         native_session_id="sess-large-diff",
+        workdir=str(tmp_path),
         retired=False,
         active_turn=turn,
         last_activity=time.monotonic(),
@@ -1145,7 +1149,7 @@ async def _start_steer_chain(h):
     h.controller.agent_service.mark_runtime_turn_started = lambda *_a, **_kw: observed.append(h.agent.steering_native_turn_id(target))
     task = asyncio.create_task(h.agent.handle_message(req))
     async def wait_started():
-        while not h.controller.events("toolcall"):
+        while not h.controller.token_notes:
             await asyncio.sleep(0.01)
     await asyncio.wait_for(wait_started(), 5)
     session = h.agent._sessions[req.composite_session_id]
@@ -1196,7 +1200,7 @@ async def test_native_steer_chain_accepts_without_settling_superseded_prompt(tmp
         await asyncio.wait_for(task, 3)
         assert len(h.controller.events("result")) == 1
         assert h.controller.events("result")[0][1] == "FIRST BANANA"
-        assert len(h.controller.events("toolcall")) == 2
+        assert len(h.controller.events("toolcall")) == 1
         assert h.controller.token_notes == [(req.context, 100), (req.context, 150)]
         assert h.agent.steering_native_turn_id(target) is None
 
@@ -1260,3 +1264,15 @@ async def test_unknown_steer_reconciles_receipt_without_resending_even_after_set
         assert h.agent.reconciliation_steer_target(reconcile) == target
         assert (await h.agent.reconcile_steer_attempt(reconcile, target)).outcome == SteerOutcome.ACCEPTED
         assert len(h.rpcs("session/prompt")) == 2
+
+
+@pytest.mark.asyncio
+async def test_tool_activity_emits_one_row_with_command_output_and_readable_path(tmp_path):
+    async with make_agent_harness(tmp_path) as h:
+        await h.agent.handle_message(make_request(message="tool_details", workdir=h.workdir))
+        rows = h.controller.events("toolcall")
+        assert len(rows) == 2
+        assert "printf hello" in rows[0][1] and "hello" in rows[0][1] and "exit 0" in rows[0][1]
+        assert len(rows[0][1]) < 1600
+        assert "../" not in rows[1][1]
+        assert str((h.workdir / "../outside.md").resolve()) in rows[1][1]
