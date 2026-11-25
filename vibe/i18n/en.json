@@ -1959,6 +1959,7 @@
     }
   },
   "antigravityNotice": {
+      "summaryFork": "This fork starts from a summary of the conversation, not its full history.",
       "effortAdjusted": "{model} uses thinking level {effort}.",
       "noEffort": "{model} runs without a thinking level."
   }

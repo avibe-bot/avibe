@@ -197,7 +197,8 @@ async def test_antigravity_title_backfill_and_native_discovery_do_not_block_even
 
 
 @pytest.mark.asyncio
-async def test_fork_without_native_capability_builds_bounded_summary_handoff(tmp_path: Path) -> None:
+@pytest.mark.parametrize("language,phrase", [("en", "summary of the conversation"), ("zh", "对话摘要")])
+async def test_fork_without_native_capability_builds_bounded_summary_handoff(tmp_path: Path, language, phrase) -> None:
     workdir = tmp_path / "repo"
     workdir.mkdir()
     msgs = [("user" if i % 2 == 0 else "agent", "user" if i % 2 == 0 else "result", f"turn-marker-{i:02d} " + ("payload " * 250)) for i in range(40)]
@@ -205,7 +206,7 @@ async def test_fork_without_native_capability_builds_bounded_summary_handoff(tmp
     fork_result = reserve_forked_session(source_session_id=source_id, db_path=db_path)
     assert (fork_result.agent_backend, fork_result.fork.source_native_session_id) == ("antigravity", "sess-source-native")
 
-    async with make_agent_harness(tmp_path, workdir=workdir, record_rpc=True, server_config={"agentCapabilities": make_acp_capabilities(fork=False, logout=False)}, name="fork") as h:
+    async with make_agent_harness(tmp_path, workdir=workdir, record_rpc=True, server_config={"agentCapabilities": make_acp_capabilities(fork=False, logout=False)}, name="fork", language=language) as h:
         for msg in ("continue from fork", "second turn after fork"):
             await h.agent.handle_message(make_request(message=msg, workdir=workdir, base_session_id=fork_result.session_id, platform="avibe", platform_specific={"agent_session_target": _fork_target(fork_result)}))
         methods = [m.get("method") for m in h.rpcs()]
@@ -217,6 +218,8 @@ async def test_fork_without_native_capability_builds_bounded_summary_handoff(tmp
     assert "bounded summary handoff" in handoff and "rather than full native history" in handoff and "switched" not in handoff and "(earlier messages omitted)" in handoff
     assert "turn-marker-39" in handoff and "turn-marker-00" not in handoff and handoff.index("turn-marker-38") < handoff.index("turn-marker-39")
     assert f"WHERE session_id='{source_id}'" in handoff and "continue from fork" in first_prompt and "[Avibe handoff]" not in second_prompt and "second turn after fork" in second_prompt
+    notices = h.controller.events("notify")
+    assert len(notices) == 1 and phrase in notices[0][1]
     assert read_session_row(fork_result.session_id, db_path)["metadata"]["fork_handoff_mode"] == FORK_HANDOFF_MODE_SUMMARY
 
 

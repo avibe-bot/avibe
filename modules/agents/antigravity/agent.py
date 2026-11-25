@@ -1161,6 +1161,10 @@ class AntigravityAgent(BaseAgent):
                     session.default_efforts[init_model] = init_effort
                 if session.default_efforts:
                     await self._persist_session_selection_state(session)
+            if fork_handoff_mode == FORK_HANDOFF_MODE_SUMMARY:
+                await emit_output(self.controller, request.context, Notice(text=i18n_t(
+                    "antigravityNotice.summaryFork", self._language(),
+                )))
             if fork_handoff_mode and session.agent_session_id:
                 await asyncio.to_thread(
                     record_fork_handoff_mode,

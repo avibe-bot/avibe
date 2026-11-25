@@ -1959,6 +1959,7 @@
     }
   },
   "antigravityNotice": {
+      "summaryFork": "此分支从对话摘要开始，不包含完整历史。",
       "effortAdjusted": "{model} 使用思考级别 {effort}。",
       "noEffort": "{model} 不使用思考级别。"
   }
