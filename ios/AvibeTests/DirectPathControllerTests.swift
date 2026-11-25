@@ -268,6 +268,7 @@ final class DirectPathControllerTests: XCTestCase {
         try await harness.signIn()
         try await harness.select("instance-1")
         controller.noteInstanceLoad(forInstanceURL: url)
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover, "Only the listener may bootstrap")
         let bootstrap = try XCTUnwrap(controller.plan(for: authority))
         XCTAssertNil(bootstrap.openDirect)
         XCTAssertNotNil(bootstrap.openPublic)
@@ -292,6 +293,83 @@ final class DirectPathControllerTests: XCTestCase {
         try await eventually { harness.currentRoutes.first?.allowFailover == true }
         XCTAssertFalse(waiting.isCurrent())
         XCTAssertNotNil(try XCTUnwrap(controller.plan(for: authority)).openPublic)
+    }
+
+    @MainActor
+    func testCONNECTWaitsThroughHostDrainWithoutAnAnswerOrPublicDial() async throws {
+        try await checkHeldCONNECT(strictAtFirstLoad: false)
+    }
+
+    @MainActor
+    func testExpiredHeldCONNECTOnNoFailoverRouteCanStillFinishCutover() async throws {
+        try await checkHeldCONNECT(strictAtFirstLoad: true)
+    }
+
+    @MainActor
+    private func checkHeldCONNECT(strictAtFirstLoad: Bool) async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           strictOpenSeconds: 1), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        if strictAtFirstLoad { controller.setDirectOnly(true, forInstanceURL: url) }
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: baseline)
+        let head = "CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n"
+        let old = LoopbackClient(port: port)
+        defer { old.close() }
+        let oldStream = try await establishPublic(old, harness: harness)
+        oldStream.holdCancellation()
+        defer { oldStream.releaseCancellation() }
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await eventually { oldStream.isCancelled }
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .held)
+        let waiting = LoopbackClient(port: port)
+        defer { waiting.close() }
+        let started = ContinuousClock.now
+        try await waiting.send(head)
+        let bytes = try await waiting.receiveUntilClosed()
+        XCTAssertTrue(bytes.isEmpty)
+        XCTAssertGreaterThanOrEqual(started.duration(to: .now), .milliseconds(700))
+        XCTAssertEqual(harness.publicOrigin.streams.attempts, 1)
+        XCTAssertEqual(harness.transport.streams.attempts, 0)
+        XCTAssertEqual(controller.directOnlyNeedsRelaunch(forInstanceURL: url), !strictAtFirstLoad)
+        if !strictAtFirstLoad {
+            oldStream.releaseCancellation()
+            try await eventually { harness.currentRoutes.first?.allowFailover == false }
+            XCTAssertTrue(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+            XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+            return
+        }
+        let next = LoopbackClient(port: port)
+        defer { next.close() }
+        try await next.send(head)
+        oldStream.releaseCancellation()
+        let stream = try await harness.transport.streams.waitForStream(count: 1)
+        stream.instanceSends(Data(established.utf8))
+        let response = try await next.receive(count: established.utf8.count)
+        XCTAssertEqual(response, Data(established.utf8))
+        XCTAssertEqual(harness.publicOrigin.streams.attempts, 1)
+    }
+
+    @MainActor
+    func testStrictSlowFirstBindPublishesWithoutUserAction() async throws {
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 0, rebindSeconds: 10,
+                                                           strictOpenSeconds: 0, retrySeconds: [0.1]), test: self)
+        try await harness.signIn()
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let pending = try XCTUnwrap(harness.lastOpened)
+        harness.controller.setDirectOnly(true, forInstanceURL: pending.instance.url)
+        await harness.controller.prepareRoute(for: pending) { harness.coordinator.isCurrentRuntime(pending) }
+        XCTAssertEqual(harness.controller.loadGate(for: pending), .held)
+        try await eventually { harness.controller.loadGate(for: pending) == .open }
+        XCTAssertTrue(harness.controller.routeOwner.routes(one, store: harness.websiteDataStore.identifier))
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+        XCTAssertTrue(harness.transport.selections.isEmpty)
     }
 
     @MainActor
@@ -372,6 +450,14 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .held)
         failed.controller.setDirectOnly(false, forInstanceURL: url)
         XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .open)
+        // Same host and diagnostic ring; this new wait has not failed yet.
+        failed.enterBackground()
+        failed.controller.setDirectOnly(true, forInstanceURL: url)
+        await failed.controller.prepareRoute(for: pending) { failed.coordinator.isCurrentRuntime(pending) }
+        failed.enterForeground()
+        XCTAssertFalse(failed.controller.listenerFailures.isEmpty)
+        XCTAssertNil(try XCTUnwrap(failed.controller.listenerRecovery).lastFailure)
+        failed.controller.setDirectOnly(false, forInstanceURL: url)
     }
 
     @MainActor

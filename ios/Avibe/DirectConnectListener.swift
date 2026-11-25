@@ -339,6 +339,9 @@ struct DirectConnectPlan: Sendable {
     /// miss: the direct candidate runs alone for up to `stickySeconds`
     /// instead of the hedge, bounded by that too.
     var strictWaitSeconds: TimeInterval?
+    /// A drain is still running. Neither opener nor an HTTP refusal is allowed.
+    var rewriteWaitSeconds: TimeInterval?
+    var rewriteTimedOut: (@MainActor @Sendable () -> Void)?
     var sticky = false
     /// The kind of path the App's direct connection ran on when planned.
     var path: DirectPathKind?
@@ -389,6 +392,11 @@ actor DirectConnectListener {
 
     private let limits: DirectConnectLimits
     private let planner: DirectConnectPlanner
+    // A plan sampled across a host drain must not start a candidate after the
+    // drain's snapshot. Only routed hosts can reach this table.
+    private var drainEpoch: [String: UInt64] = [:]
+
+    private func drainStamp(for host: String) -> UInt64 { drainEpoch[host, default: 0] }
     /// Called when this listener's socket failed, after `lifecycle` recorded
     /// it.
     private let onListenerFailure: @Sendable () -> Void
@@ -714,7 +722,11 @@ actor DirectConnectListener {
     /// relay has cancelled its client socket. Does not close the listener or
     /// an unrelated host. The controller holds new plans across the rewrite.
     func drainHost(_ host: String) async {
-        let selected = relays.filter { $0.value.host == host }
+        // An identified request without an admitted plan has started no opener.
+        // Leave it for the rewrite hold; a plan sampled across this snapshot
+        // cannot be admitted with its pre-drain stamp.
+        drainEpoch[host, default: 0] &+= 1
+        let selected = relays.filter { $0.value.host == host && $0.value.plan != nil }
         for (id, _) in selected {
             lifecycle.end(id)
             drain(id)
@@ -1015,6 +1027,8 @@ actor DirectConnectListener {
     /// before it got here.
     private func planned(
         _ id: UUID,
+        host: String,
+        stamp: UInt64,
         scope: DirectPlanScope,
         generation: Int,
         race: DirectRaceHandle
@@ -1031,6 +1045,7 @@ actor DirectConnectListener {
         else {
             return .refused
         }
+        guard stamp == drainStamp(for: host) else { return .obsolete }
         relays[id]?.plan = (scope, generation, race)
         return generation < retiredGeneration ? .obsolete : .admitted
     }
@@ -1132,8 +1147,8 @@ actor DirectConnectListener {
         }
         // Bytes sent ahead of the answer are held, never forwarded before a
         // backend is selected, and bounded.
-        guard earlyData.count <= limits.earlyBytes,
-              await listener?.identify(id, host: authority.host) == true else {
+        guard earlyData.count <= limits.earlyBytes, let listener,
+              await listener.identify(id, host: authority.host) else {
             return
         }
         // From here on every read of WebKit's side goes through the reader,
@@ -1151,16 +1166,24 @@ actor DirectConnectListener {
         // selection and account only.
         var scope: DirectPlanScope?
         var ordinaryPlans = 0
-        var strictDeadline: ContinuousClock.Instant?
-        while strictDeadline.map({ ContinuousClock.now < $0 }) ?? (ordinaryPlans < 2) {
+        var deadline: ContinuousClock.Instant?
+        var strictOnly = false
+        var heldExpiry: (@MainActor @Sendable () -> Void)?
+        let planningStarted = ContinuousClock.now
+        while true {
+            if let deadline, ContinuousClock.now >= deadline {
+                await heldExpiry?()
+                return
+            }
+            if deadline == nil, ordinaryPlans >= 2 { break }
             let race = DirectRaceHandle()
+            let stamp = await listener.drainStamp(for: authority.host)
             guard
                 !Task.isCancelled,
                 let plan = await planner(authority),
-                scope == nil || plan.scope == scope,
-                let listener
+                scope == nil || plan.scope == scope
             else {
-                if !Task.isCancelled, strictDeadline == nil {
+                if !Task.isCancelled, deadline == nil {
                     await refuse(
                         connection,
                         status: scope == nil ? 403 : 503,
@@ -1170,22 +1193,36 @@ actor DirectConnectListener {
                 }
                 return
             }
+            if let seconds = plan.rewriteWaitSeconds {
+                guard plan.openPublic == nil, plan.openDirect == nil else { return }
+                scope = plan.scope
+                heldExpiry = plan.rewriteTimedOut
+                let end = deadline ?? planningStarted.advanced(by: .seconds(seconds))
+                deadline = end
+                do { try await Task.sleep(until: min(end, .now.advanced(by: .milliseconds(25))), clock: .continuous) }
+                catch { return }
+                continue
+            }
+            heldExpiry = nil
             if let seconds = plan.strictWaitSeconds {
                 guard plan.openPublic == nil else { return }
-                if strictDeadline == nil { strictDeadline = .now.advanced(by: .seconds(seconds)) }
+                strictOnly = true
+                if deadline == nil { deadline = planningStarted.advanced(by: .seconds(seconds)) }
             } else {
                 // A deliberate re-establishment is for a new navigation, never this request.
-                guard strictDeadline == nil else { return }
+                guard !strictOnly, ordinaryPlans < 2 else { return }
                 ordinaryPlans += 1
             }
             let admission = await listener.planned(
                 id,
+                host: authority.host,
+                stamp: stamp,
                 scope: plan.scope,
                 generation: plan.generation,
                 race: race
             )
             guard admission != .refused else {
-                if !Task.isCancelled, strictDeadline == nil {
+                if !Task.isCancelled, deadline == nil {
                     await refuse(
                         connection,
                         status: 503,
@@ -1202,14 +1239,14 @@ actor DirectConnectListener {
             } else {
                 // The race runs as its own task, so a newer path generation
                 // can cancel it without ending the CONNECT.
-                let deadline = strictDeadline
+                let limit = deadline
                 let raceTask = Task {
                     await raceWatchingClient(
                         plan,
                         authority: authority,
                         limits: limits,
                         reader: reader,
-                        deadline: deadline
+                        deadline: limit
                     )
                 }
                 race.attach { raceTask.cancel() }
@@ -1239,7 +1276,7 @@ actor DirectConnectListener {
                 guard !Task.isCancelled else {
                     return
                 }
-                if strictDeadline != nil {
+                if strictOnly {
                     // Wait for an eligible replacement without spinning or restarting the budget.
                     do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
                     continue
@@ -1265,9 +1302,9 @@ actor DirectConnectListener {
                 let host = authority.host
                 let generation = plan.generation
                 let isCurrent = plan.isCurrent
-                let deadline = strictDeadline
+                let limit = deadline
                 let grant: FinalGrant = await MainActor.run {
-                    guard deadline.map({ ContinuousClock.now < $0 }) ?? true, isCurrent() else {
+                    guard limit.map({ ContinuousClock.now < $0 }) ?? true, isCurrent() else {
                         return .fenced
                     }
                     return lifecycle.grant(
@@ -1319,7 +1356,7 @@ actor DirectConnectListener {
                 return
             }
         }
-        if strictDeadline == nil {
+        if deadline == nil {
             await refuse(connection, status: 503, reader: reader, within: limits.headSeconds)
         }
     }
