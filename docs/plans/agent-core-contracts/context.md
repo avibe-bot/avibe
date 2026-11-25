@@ -654,12 +654,15 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   **A live Mission entry stays.** The Mission's entries are its top-level bullets and numbered items; one whose box
   is checked (`- [x]`) is finished, any other is live. A mind is accepted when
   `live(new) + finished_since(new) >= live(started from)`, where `finished_since` counts the finished entries whose
-  line is not a finished entry of the mind the turn started from. So a live entry stays, in whatever words, or is
-  finished where it stands, and only an entry a mind already kept as finished may be folded or dropped: one finished
-  and folded away in the same turn reads as a live entry gone. The repair says how many live entries there were and
-  are, and asks for each unfinished one back, whole, and for each finished one to be marked where it stands. The rule
-  is a count, like the one before it: it cannot see a live entry deleted in the turn that adds another, or that
-  rewrites a finished line. Before `checkpoint-v5.2` the Mission's entries could never become fewer, so finished ones
+  line is not a finished entry of the mind the turn started from, less one when a finished entry of that mind is gone
+  or reworded: one new finished line is then the fold of the earlier ones, and it must not stand in for a live entry
+  that left in the same turn. So a live entry stays, in whatever words, or is finished where it stands, and only an
+  entry a mind already kept as finished may be folded or dropped: one finished and folded away in the same turn reads
+  as a live entry gone. The repair says how many live entries there were and are, and asks for each unfinished one
+  back, whole, and for each finished one to be marked where it stands. The rule is a count, like the one before it.
+  It cannot see a live entry deleted in the turn that adds another, or in a turn that rewords two finished lines; and
+  a turn that drops its finished history while it marks a live entry gets the repair, though it lost nothing. All 396
+  consolidations of the pre-merge replay (§11) pass it, 44 of them folds. Before `checkpoint-v5.2` the Mission's entries could never become fewer, so finished ones
   could not be folded and only piled up (§11).
 
   The repair names each section past its limit with its size, its limit, how much to take out (the excess and a

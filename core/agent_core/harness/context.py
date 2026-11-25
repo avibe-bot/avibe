@@ -1296,7 +1296,7 @@ HEADINGS_ADVICE = "keep every heading line of it exactly as it is, in order"
 MISSION_ADVICE = (
     'put back, whole, each entry that is not finished (one that still waits on an answer is not), and mark each '
     'finished one "- [x]" where it stands: an entry leaves the Mission only at a later consolidation, after one has '
-    'kept it as "- [x]"'
+    'kept it as "- [x]", and the line that folds earlier "- [x]" entries does not count as one marked now'
 )
 #: How the repair says to condense each section past its limit (section 10), by the section's title.
 CONDENSE_ADVICE: Mapping[str, str] = {
@@ -1362,6 +1362,10 @@ def review_mind(text: Optional[str], previous: str, window: Optional[int] = None
         had, was_finished = mission_entries(before[1])
         live, finished = mission_entries(blocks)
         since = sum((Counter(finished) - Counter(was_finished)).values())
+        # When finished entries the mind held are gone or reworded, one new finished line is their fold, not a live
+        # entry just marked: it must not stand in for a live entry that left in the same turn.
+        if since and Counter(was_finished) - Counter(finished):
+            since -= 1
         if live + since < had:
             lost = f'its Mission started with {had} live entries and now has {live}, with {since} more newly marked "- [x]"'
     sections = _sections(preamble, blocks, window)

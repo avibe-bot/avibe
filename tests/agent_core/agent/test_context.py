@@ -1313,7 +1313,8 @@ def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mis
     assert lost.problems() == [
         "mind.md lost its structure: its Mission started with 2 live entries and now has 1, with 0 more newly marked "
         '"- [x]"; put back, whole, each entry that is not finished (one that still waits on an answer is not), and mark each finished one "- [x]" where it stands: '
-        'an entry leaves the Mission only at a later consolidation, after one has kept it as "- [x]"'
+        'an entry leaves the Mission only at a later consolidation, after one has kept it as "- [x]", and the line '
+        'that folds earlier "- [x]" entries does not count as one marked now'
     ]
     assert review_mind(None, previous).structure == "it is not a readable file"
     # Text before the first heading counts toward the first section: it cannot grow the mind past its limits.
@@ -1356,7 +1357,7 @@ def test_a_live_mission_entry_stays_and_a_finished_one_leaves_only_after_a_mind_
     gone = _mission("- [ ] audit the billing export")
     review = review_mind(gone, first)
     assert review.structure == 'its Mission started with 3 live entries and now has 1, with 0 more newly marked "- [x]"'
-    assert review.problems()[0].endswith('after one has kept it as "- [x]"') and review.over == () and not review.empty
+    assert review.problems()[0].endswith("does not count as one marked now") and review.over == () and not review.empty
     # The one repair names every problem: a mind that lost a live entry and is past a limit hears of both.
     both = review_mind(gone.replace(MIND_PLACEHOLDERS["# 4. Lessons"], "l" * 8_000), first)
     assert [problem.split(":")[0] for problem in both.problems()] == [
@@ -1368,6 +1369,19 @@ def test_a_live_mission_entry_stays_and_a_finished_one_leaves_only_after_a_mind_
                                               "- [x] ship the importer: shipped in 2.4")).structure is not None
     kept_old = _mission("- [x] ship the importer: shipped in 2.4", "1. [X] migrate the old reports: withdrawn by the user")
     assert review_mind(kept_old, second).structure is not None
+    # The line that folds earlier finished entries is new, but it is their fold, not a live entry just marked: it
+    # cannot stand in for a live entry that left in the same turn. With it, a live entry marked in that turn still counts.
+    held = _mission("- [x] ship the importer: shipped in 2.4", "- [ ] audit the billing export (waiting on finance)")
+    assert review_mind(_mission("- [x] Earlier: the importer shipped"), held).structure == (
+        'its Mission started with 1 live entries and now has 0, with 0 more newly marked "- [x]"'
+    )
+    assert review_mind(_mission("- [x] ship the importer: shipped", "- [ ] publish the changelog"), held).problems() == []
+    assert review_mind(_mission("- [x] ship the importer: shipped"), held).structure is not None  # reworded, one live gone
+    assert review_mind(
+        _mission("- [x] Earlier: the importer shipped", "- [x] audit the billing export: done, finance signed off"), held
+    ).problems() == []
+    # The price: history dropped in the very turn a live entry is marked reads the same, and gets the repair.
+    assert review_mind(_mission("- [x] audit the billing export: done"), held).structure is not None
     # Entries are counted, each line as often as it stands: a live entry finished into the words of one already
     # finished is newly finished all the same.
     twice = _mission("- [x] ship", "- [ ] ship", "- [ ] audit")
@@ -1480,7 +1494,8 @@ def test_goals_past_its_limit_only_by_entries_the_turn_marked_asks_no_repair():
         "them (about 78 tokens of it), keeping what in them still binds, then move finished detail out of live entries"
     ]
     # Without the old one it fits but for the entry just marked: nothing to repair, and the cut shows the live ones.
-    fresh = review_mind(marked.replace("- [x] old: " + "o" * 300 + "\n", ""), started, 8_000)
+    old = "- [x] old: " + "o" * 300 + "\n"
+    fresh = review_mind(marked.replace(old, ""), started.replace(old, ""), 8_000)
     assert [title for title, _, _ in fresh.over] == ["Goals"] and fresh.problems() == []
     assert review_mind(marked, marked, 8_000).problems() != []  # at the next consolidation it may be folded, and is asked
     # The remainder is measured as a section is, on both sides of its limit: 83 of 83 asks nothing, 84 does.
