@@ -794,6 +794,7 @@ describe('Composer native App Lock cancellation', () => {
     try {
       signal(false); renderComposer('retry-lock-owner', { initialDraft: 'original draft', onSend });
       const textbox = await screen.findByRole('textbox') as HTMLTextAreaElement;
+      await screen.findByRole('button', { name: en.chat.compose.voice });
       fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
       await screen.findByRole('button', { name: en.chat.compose.stopRecording });
       act(() => {
@@ -841,6 +842,8 @@ describe('Composer native App Lock cancellation', () => {
       signal(false);
       renderComposer('app-lock-' + phase, { initialDraft: 'original draft', onSend });
       const textbox = await screen.findByRole('textbox');
+      // ⌥Z starts only once the status read has shown the voice control.
+      await screen.findByRole('button', { name: en.chat.compose.voice });
       fireEvent.keyDown(textbox, { code: 'KeyZ', altKey: true });
       await waitFor(() => expect(voiceMocks.getUserMedia).toHaveBeenCalled());
       if (phase !== 'permission') await waitFor(() => expect(voiceMocks.pipelineStart).toHaveBeenCalled());
