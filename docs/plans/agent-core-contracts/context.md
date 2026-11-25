@@ -661,12 +661,14 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   the same turn reads as a live entry gone. The repair says how many live entries there were and are, and asks for
   each unfinished one back, whole, and for each finished one to be marked where it stands.
 
-  The rule is a count over lines, like the one before it, and these are all its limits. It accepts what it should
-  not when a live entry is deleted in a turn in which another entry becomes live, added or reopened from finished,
-  or in a turn that puts two or more new finished lines in place of earlier ones. It asks a repair that nothing
-  needed when a turn drops its finished history while it marks a live entry, or folds while it marks a live entry in
-  the very words of a finished one the mind held. A finished entry counts as gone whenever its line is no longer
-  among the finished ones, a reopened entry included. All
+  The rule compares counts, never identities, like the one before it, and that is its whole limit. Each entry that
+  is live after the turn, and each finished line the previous mind did not hold (less the one taken as a fold),
+  stands for one entry that was live before, whether or not it is the same goal. So a live entry that leaves goes
+  unnoticed whenever anything else takes its place in the count: an entry added live or added already finished, one
+  reopened from finished, a second new finished line beside a fold. And a turn that loses nothing is asked a repair
+  when one of its own marks is not counted: when it drops its finished history while it marks a live entry, or folds
+  while it marks a live entry in the very words of a finished one the mind held. A finished entry counts as gone
+  whenever its line is no longer among the finished ones, a reopened entry included. All
   396 consolidations of the pre-merge replay (§11) pass it, 44 of them folds. Before `checkpoint-v5.2` the Mission's entries could never become fewer, so finished ones
   could not be folded and only piled up (§11).
 
