@@ -71,6 +71,21 @@ impl Transport for Wire {
         assert!(!r.headers.contains_key(AUTHORIZATION));
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         eprintln!("observation fixture: transport call {call}");
+        if matches!(self.case, "old_cli" | "exits") {
+            // The pipe ended before its first frame: the Runtime is asked
+            // whether it has the claim route at all, and nothing else.
+            assert_eq!(call, 0);
+            assert_eq!(
+                (r.method, r.url.as_str()),
+                (Method::GET, "http://127.0.0.1:40123/api/desktop/claim/v1/admit")
+            );
+            let status = if self.case == "old_cli" { 404 } else { 405 };
+            return Ok(Response {
+                status,
+                body: vec![],
+                headers,
+            });
+        }
         let (status, body) = match call {
             0 => {
                 assert_eq!(
@@ -207,6 +222,21 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     }
     let pending = work.await;
     eprintln!("observation fixture: dispatch returned");
+    if matches!(case, "old_cli" | "exits") {
+        // Too old only when the Runtime has no claim route: a pipe that fails on
+        // a Runtime that has one keeps its own error.
+        let code = pending.unwrap().deliver().unwrap_err().code;
+        assert_eq!(
+            code,
+            if case == "old_cli" {
+                "local_runtime_too_old"
+            } else {
+                "invalid_machine_response"
+            }
+        );
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 1);
+        return;
+    }
     if case == "no_source" {
         assert!(pending.is_err());
         assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
@@ -300,6 +330,8 @@ async fn current_binding_is_read_only_and_only_the_original_document_receives_it
         "drop",
         "naming",
         "no_source",
+        "old_cli",
+        "exits",
     ] {
         let root = tempfile::tempdir().unwrap();
         let run = exercise(case, &root);

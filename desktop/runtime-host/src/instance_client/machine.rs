@@ -7,6 +7,7 @@ use super::{
 };
 use crate::{launcher::ClaimHelperCommand, LoopbackOrigin, RuntimeHost};
 use chrono::DateTime;
+use reqwest::Method;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
@@ -35,6 +36,21 @@ fn retired() -> ClientError {
 }
 fn expired() -> ClientError {
     ClientError::new("expired")
+}
+/// This computer's Runtime has no claim protocol: it predates it, and only an
+/// upgrade of that Runtime helps (`Coordinator::upgrade_local_runtime`).
+pub const TOO_OLD: &str = "local_runtime_too_old";
+fn too_old() -> ClientError {
+    ClientError::new(TOO_OLD)
+}
+
+/// Whether the Runtime at `origin` lacks the claim protocol: its admission
+/// route does not exist. Asked only after a claim pipe failed before its first
+/// frame (an older CLI does not know the pipe) or the route answered 404; any
+/// other answer, or none, is not taken as age.
+pub(crate) async fn claim_protocol_missing(origin: &LoopbackOrigin, transport: Arc<dyn Transport>) -> bool {
+    let mut local = NativeSession::new(origin.navigation_url(), transport);
+    matches!(local.request(Method::GET, ADMIT, None).await, Ok(reply) if reply.status == 404)
 }
 fn text(s: &str, max: usize) -> bool {
     !s.is_empty() && s.trim() == s && !s.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')) && s.chars().count() <= max
@@ -196,6 +212,7 @@ fn known_error(code: &str) -> ClientError {
         | "local_binding_unavailable"
         | "local_claim_unavailable"
         | "local_instance_conflict"
+        | "local_runtime_too_old"
         | "local_runtime_upgrade_required"
         | "name_taken"
         | "pairing_recovery_required"
@@ -245,9 +262,24 @@ async fn admit<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
     hello: Value,
 ) -> Result<()> {
     timeout(Duration::from_secs(15), async {
-        write(input, hello).await?;
-        let Frame::Challenge { v: 1, challenge } = read(output).await? else {
-            return Err(invalid());
+        // A CLI that predates the pipe exits on its unknown command: the hello
+        // cannot be written, or no first frame comes. Only the Runtime's own
+        // missing route turns that into "too old".
+        let first = async {
+            write(input, hello).await?;
+            read(output).await
+        }
+        .await;
+        let challenge = match first {
+            Ok(Frame::Challenge { v: 1, challenge }) => challenge,
+            Ok(_) => return Err(invalid()),
+            Err(error) => {
+                return Err(if claim_protocol_missing(origin, transport).await {
+                    too_old()
+                } else {
+                    error
+                })
+            }
         };
         if !nonce(&challenge) {
             return Err(invalid());
@@ -257,11 +289,11 @@ async fn admit<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
             .await
             .map_err(|_| ClientError::new("local_admission_failed"))?;
         if reply.status != 204 || !reply.body.is_empty() {
-            return Err(ClientError::new(if reply.status == 404 {
-                "local_runtime_upgrade_required"
+            return Err(if reply.status == 404 {
+                too_old()
             } else {
-                "local_admission_failed"
-            }));
+                ClientError::new("local_admission_failed")
+            });
         }
         write(input, json!({"v":1,"op":"begin","challenge":challenge})).await
     })

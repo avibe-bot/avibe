@@ -36,9 +36,15 @@ impl EnrollmentFlow {
     pub async fn read(local: &mut NativeSession, state: &mut ClientState) -> Result<(), ClientError> {
         state.local.instance_id = None;
         state.local.remote_access_url = None;
+        state.local.runtime_too_old = false;
         let response = local.request(Method::GET, "/api/desktop/local-instance", None).await?;
         if response.status == 404 {
-            return Err(ClientError::new("local_runtime_upgrade_required"));
+            // A Runtime from before this description (3.2.6rc16) still says which
+            // instance it is bound to on its remote-access status, from the same
+            // loopback origin: its own word, never a guess from a name or URL.
+            state.local.runtime_too_old = true;
+            state.local.instance_id = Self::bound_instance(local).await;
+            return Err(ClientError::new(crate::instance_client::machine::TOO_OLD));
         }
         if !response.success() {
             return Err(ClientError::new("local_runtime_unavailable"));
@@ -84,6 +90,21 @@ impl EnrollmentFlow {
             *instance_id = state.local.instance_id.clone();
         }
         Ok(())
+    }
+}
+
+impl EnrollmentFlow {
+    async fn bound_instance(local: &mut NativeSession) -> Option<String> {
+        let response = local
+            .request(Method::GET, "/api/remote-access/status", None)
+            .await
+            .ok()?;
+        if !response.success() {
+            return None;
+        }
+        let status: Value = serde_json::from_slice(&response.body).ok()?;
+        let id = status.get("instance_id")?.as_str()?.trim();
+        (!id.is_empty() && id.len() <= 120 && id.bytes().all(|b| b.is_ascii_graphic())).then(|| id.to_owned())
     }
 }
 
