@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Final, Iterable
 
 import yaml
+from packaging.version import InvalidVersion, Version
 
 from config.atomic_io import write_atomic
 from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
@@ -33,6 +34,7 @@ def write_engine_config(
     sources: Iterable[SourceRecord],
     state_store: EngineStateStore,
     generation: str = "0",
+    engine_version: str | None = None,
 ) -> None:
     _secure_write_text(
         path,
@@ -45,6 +47,7 @@ def write_engine_config(
             sources=sources,
             state_store=state_store,
             generation=generation,
+            engine_version=engine_version,
         ),
     )
 
@@ -59,6 +62,7 @@ def render_engine_config(
     sources: Iterable[SourceRecord],
     state_store: EngineStateStore,
     generation: str = "0",
+    engine_version: str | None = None,
 ) -> str:
     """Render the engine YAML that ``path`` holds, for a start or a hot reload.
 
@@ -68,7 +72,6 @@ def render_engine_config(
     if host != "127.0.0.1":
         raise EngineStateError("model hub engine must bind to 127.0.0.1")
     payload: dict[str, Any] = {
-        "server": {"server-id": runtime_secrets.server_id},
         "host": host,
         "port": port,
         "tls": {"enable": False, "cert": "", "key": ""},
@@ -117,6 +120,13 @@ def render_engine_config(
         "routing": {"strategy": "fill-first", "session-affinity": False},
         "ws-auth": True,
     }
+    # A server section triggers a layout migration on the previous engine pin.
+    try:
+        supports_server_id = Version(engine_version or "") >= Version("8.1.2")
+    except InvalidVersion:
+        supports_server_id = False
+    if supports_server_id:
+        payload["server"] = {"server-id": runtime_secrets.server_id}
     for source in sources:
         _append_source(payload, source, state_store, generation)
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)

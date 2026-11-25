@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import psutil
 import pytest
 import yaml
+from packaging.version import Version
 
 from core.handlers.model_hub.service import ModelHubError
 from tests.e2e.test_model_hub_runtime import _isolated_engine_adapter
@@ -154,6 +155,7 @@ def test_engine_keeps_avibe_config_content_across_start_and_hot_reload(tmp_path,
         store = adapter.state_store
         store.replace_sources(_all_protocol_sources(store))
         connection = adapter.supervisor.ensure_running()
+        expects_id = Version(adapter.supervisor.installer.status()["version"]) >= Version("8.1.2")
         [config_path] = list(store.root.glob("instances/*/config.yaml"))
         start_text = written[str(config_path)]
         client = EngineClient(connection)
@@ -180,8 +182,11 @@ def test_engine_keeps_avibe_config_content_across_start_and_hot_reload(tmp_path,
         # Avibe supplies the same instance identity on every render. Check the
         # effective identity as well as full document equality after load.
         server_id = loaded.get("server", {}).get("server-id")
-        assert isinstance(server_id, str) and uuid.UUID(server_id).version == 4
-        assert str(uuid.UUID(server_id)) == server_id
+        if expects_id:
+            assert isinstance(server_id, str) and uuid.UUID(server_id).version == 4
+            assert str(uuid.UUID(server_id)) == server_id
+        else:
+            assert "server" not in rendered and "server" not in loaded
         server_ids.append(server_id)
         evidence[phase] = {
             "avibe_sha": _sha(avibe_text.encode()),
