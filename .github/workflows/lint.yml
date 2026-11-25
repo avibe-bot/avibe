@@ -526,7 +526,8 @@ jobs:
       matrix:
         # Each Python version runs the full suite over 16 timing-balanced lanes,
         # two per runner, under the same 20-minute job deadline.
-        python: ['3.12', '3.15']
+        # Forward compatibility runs on the full master backstop, not on PRs.
+        python: ${{ fromJSON((github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master')) && '["3.12","3.15"]' || '["3.12"]') }}
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         shard-total: [8]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).

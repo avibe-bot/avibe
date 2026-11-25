@@ -89,8 +89,19 @@ def common_input(path: str) -> bool:
     )
 
 
+def presentation_only(path: str) -> bool:
+    """Design sources are still checked on Linux; they are not shipped native inputs."""
+    return well_formed(path) and (
+        narrative_path(path) or path.startswith(("ui/design/", "design/", "frames/"))
+        or (path.startswith(("shots/", "assets/screenshots/")) and path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))
+    )
+
+
 def heavy_routes(scope: Scope) -> dict[str, str]:
     if scope.docs_only and scope.routable and scope.paths:
+        return dict.fromkeys(HEAVY_JOBS, "skip")
+    if (scope.routable and scope.paths and not scope.platform_reason.startswith("added name ")
+            and all(presentation_only(p) for p in scope.paths)):
         return dict.fromkeys(HEAVY_JOBS, "skip")
     if (not scope.paths or not scope.routable or any(common_input(p) for p in scope.paths)
             or scope.platform_reason.startswith("added name ")):

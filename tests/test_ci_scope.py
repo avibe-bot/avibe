@@ -51,6 +51,9 @@ def scope(*paths):
 
 
 @pytest.mark.parametrize("paths,expected", [
+    (("ui/design/frames/vault/example.design.tsx", "docs/guide.md"), set()),
+    (("assets/screenshots/example.png",), set()),
+    (("ui/design/frame.ts", "desktop/src-tauri/src/main.rs"), {"ui-browser-checks", "desktop-shell", "install-upgrade-shards", "web-fetch-runtime", "web-fetch-macos", "windows-install-smoke-runners"}),
     (("ui/src/App.tsx",), {"ui-browser-checks"}),
     (("core/controller.py",), {"web-fetch-runtime", "windows-agent", "windows-model-hub", "windows-control-ipc", "model-hub-lifecycle-native"}),
     (("ios/Avibe/NavigationPolicy.swift",), {"ui-browser-checks", "ios-shell", "web-fetch-runtime"}),
