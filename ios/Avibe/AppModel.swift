@@ -1552,10 +1552,6 @@ final class AppModel: ObservableObject {
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
         // Retire earlier-build cards locally before any account cleanup can send.
         if !turnActivities.deviceEnabled { await turnActivities.endAllLocally() }
-        // Started, not waited for: WebKit answers a removal only once the
-        // store's own web process has exited, and the open below (open-first
-        // included) must not wait on that. Sweeps run one after another.
-        websiteDataStore.startSweep()
         // Open first: with the last session avibe.bot confirmed and its
         // selected instance on this device, open that instance now and check
         // the session behind it. The check's answer decides as a refresh
@@ -1582,6 +1578,11 @@ final class AppModel: ObservableObject {
             // A tap or shortcut that arrived meanwhile waited for the
             // check, so it opens against the answered session.
             await completeBootstrap()
+            // Then the stores left behind are removed, started and not waited
+            // for: WebKit answers a removal only once the store's own web
+            // process has exited, and the open (open-first included) has
+            // started its own WebView by now. Sweeps run one after another.
+            websiteDataStore.startSweep()
             return
         }
         sessionCoordinator.activateAccountSurface()
@@ -1611,6 +1612,11 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         await completeBootstrap()
+        // Then the stores left behind are removed, started and not waited
+        // for: WebKit answers a removal only once the store's own web
+        // process has exited, and the open (open-first included) has
+        // started its own WebView by now. Sweeps run one after another.
+        websiteDataStore.startSweep()
     }
 
     /// After an open-first's session check: push work the open started was
