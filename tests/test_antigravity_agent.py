@@ -493,13 +493,21 @@ async def test_streaming_updates_usage_permissions_and_single_turn_end(tmp_path:
         ("stop_reason_missing", "partial:missing", "error_during_execution"),
     ],
 )
-async def test_strict_stop_reason_settlement_preserves_partial_text_and_fails(tmp_path: Path, prompt: str, expected_partial: str, expected_subtype: str) -> None:
+async def test_strict_stop_reason_settlement_preserves_partial_text_and_fails(tmp_path: Path, prompt: str, expected_partial: str, expected_subtype: str, monkeypatch) -> None:
+    calls = []
+    original = agy_agent_module.emit_backend_failure
+    async def failure(*args, **kwargs):
+        calls.append(args)
+        return await original(*args, **kwargs)
+    monkeypatch.setattr(agy_agent_module, "emit_backend_failure", failure)
     async with make_agent_harness(tmp_path, show_duration=True) as h:
         req = make_request(message=prompt, workdir=h.workdir)
         req.started_at -= 1.0
         await h.agent.handle_message(req)
         _, text, opts = h.controller.events("result")[0]
-        assert expected_partial in text and opts.get("is_error") is True and opts.get("terminal_error") and (opts.get("result_footer") or "").startswith(f"{expected_subtype}:")
+        assert len(calls) == 1  # The shared failure owner supplies the standard Retry affordance.
+        assert expected_partial in h.controller.events("assistant")[0][1]
+        assert opts.get("is_error") is True and opts.get("terminal_error")
 
 
 @pytest.mark.asyncio
@@ -516,7 +524,9 @@ async def test_localized_zh_failure_and_incomplete_turn_copy(tmp_path: Path) -> 
     async with make_agent_harness(tmp_path, language="zh", name="zh-stop") as h:
         await h.agent.handle_message(make_request(message="stop_reason:max_tokens", workdir=h.workdir))
         _, text, opts = h.controller.events("result")[0]
-        assert "partial:max_tokens" in text and "回合未完整结束" in text and opts.get("is_error") is True and opts.get("terminal_error") == "Antigravity turn stopped incomplete (max_tokens)."
+        assert "partial:max_tokens" in h.controller.events("assistant")[0][1]
+        assert "回合未完整结束" in h.controller.events("notify")[0][1] and opts.get("is_error") is True
+        assert opts.get("terminal_error") == "Antigravity turn stopped incomplete (max_tokens)."
 
 
 @pytest.mark.asyncio
@@ -535,6 +545,8 @@ async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(t
         h.controller.emitted.clear()
         crash_req = make_request(message="crash_mid_prompt", workdir=h.workdir)
         await h.agent.handle_message(crash_req)
+        assert h.controller.events("assistant")[0][1] == "starting before crash"
+        assert h.controller.emitted[0][0] == "assistant"
         assert "simulated peer crash" in h.controller.events("notify")[0][1] or "exited with code 2" in h.controller.events("notify")[0][1]
         assert h.controller.events("result")[0][2].get("is_error") is True and crash_req.composite_session_id not in h.agent._sessions
 

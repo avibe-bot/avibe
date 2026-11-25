@@ -1582,68 +1582,35 @@ class AntigravityAgent(BaseAgent):
         if session.native_session_id and not session.reported_title:
             self._maybe_backfill_session_title(turn.request, session.native_session_id)
 
+    async def _flush_partial_reply(self, turn: _ActiveTurn) -> None:
+        text = "".join(turn.reply_chunks).strip()
+        turn.reply_chunks.clear()
+        if text and not is_antigravity_verification_required_reply(text):
+            await emit_output(self.controller, turn.request.context, Narration(text=text))
+
     async def _settle_turn_incomplete(
-        self,
-        session: _RuntimeSession,
-        turn: _ActiveTurn,
-        *,
-        stop_reason: str,
+        self, session: _RuntimeSession, turn: _ActiveTurn, *, stop_reason: str,
     ) -> None:
         del session
         if turn.settled:
             return
         turn.settled = True
-
-        language = self._language()
+        await self._flush_partial_reply(turn)
         if stop_reason in ("max_tokens", "max_turn_requests"):
-            subtype = "error_max_turns"
-            failure_reason = f"Antigravity turn stopped incomplete ({stop_reason})."
-            localized_reason = i18n_t("error.antigravityTurnIncomplete", language, reason=stop_reason)
+            diagnostic = f"Antigravity turn stopped incomplete ({stop_reason})."
+            localized = i18n_t("error.antigravityTurnIncomplete", self._language(), reason=stop_reason)
         elif stop_reason == "refusal":
-            subtype = "error_during_execution"
-            failure_reason = "Antigravity refused to complete the turn (refusal)."
-            localized_reason = i18n_t("error.antigravityTurnRefused", language)
+            diagnostic = "Antigravity refused to complete the turn (refusal)."
+            localized = i18n_t("error.antigravityTurnRefused", self._language())
         elif stop_reason:
-            subtype = "error_during_execution"
-            failure_reason = f"Antigravity turn ended with unexpected stopReason: {stop_reason}."
-            localized_reason = i18n_t("error.antigravityTurnUnexpectedStop", language, reason=stop_reason)
+            diagnostic = f"Antigravity turn ended with unexpected stopReason: {stop_reason}."
+            localized = i18n_t("error.antigravityTurnUnexpectedStop", self._language(), reason=stop_reason)
         else:
-            subtype = "error_during_execution"
-            failure_reason = "Antigravity turn ended without a stopReason."
-            localized_reason = i18n_t("error.antigravityTurnMissingStopReason", language)
-
-        partial_text = "".join(turn.reply_chunks).strip()
-        note = f"⚠️ {localized_reason}"
-        body = f"{partial_text}\n\n{note}" if partial_text else note
-
-        result_footer: str | None = None
-        if getattr(self.config, "show_duration", True):
-            duration_ms = self._calculate_duration_ms(turn.started_at)
-            token_field = ""
-            get_token_field = getattr(self.controller, "session_token_field", None)
-            if callable(get_token_field):
-                try:
-                    token_field = get_token_field(turn.request.context) or ""
-                except Exception:
-                    token_field = ""
-            if duration_ms > 0 or token_field:
-                result_footer = self._get_formatter(turn.request.context).format_result_footer(
-                    subtype,
-                    duration_ms,
-                    token_field=token_field,
-                )
-
-        await emit_output(
-            self.controller,
-            turn.request.context,
-            TurnEnd(
-                outcome=TurnOutcome.FAILED,
-                text=body,
-                parse_mode="markdown",
-                footer=result_footer,
-                terminal_error=failure_reason,
-                output=terminal_output_for(turn.request),
-            ),
+            diagnostic = "Antigravity turn ended without a stopReason."
+            localized = i18n_t("error.antigravityTurnMissingStopReason", self._language())
+        await emit_backend_failure(
+            self.controller, turn.request.context, self.name, diagnostic,
+            display_text=f"❌ {localized}", request=turn.request,
         )
         await self._remove_ack_reaction(turn.request)
 
@@ -1658,6 +1625,7 @@ class AntigravityAgent(BaseAgent):
             if turn.settled:
                 return
             turn.settled = True
+            await self._flush_partial_reply(turn)
         diagnostic, display_text, _ = self._classify_failure(error, language=self._language())
         if session is not None and not session.client.is_alive:
             session.exit_failure = (diagnostic, display_text)
