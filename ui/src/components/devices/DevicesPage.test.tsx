@@ -12,7 +12,7 @@ import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm } from './api';
 import { awayOnClaim, readClaimMarker, writeClaimMarker } from './claimFlow';
 import { DevicesPage } from './DevicesPage';
 import { DevicesPageView } from './DevicesPageView';
-import { ACCOUNT_SIGN_OUT_PATIENCE_MS, functionControl, lockedOutCount, stillSignedIn } from './rules';
+import { functionControl, lockedOutCount } from './rules';
 import { said } from './testText';
 import type { Device, Reach, SignedOutDevice } from './types';
 import type { DevicesSnapshot } from './wire';
@@ -372,44 +372,20 @@ describe('DevicesPage · devices', () => {
     await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「未识别的客户端」', 'success'));
   });
 
-  it('says calmly, until closed, that an old sign-in is still signed in to the account, with avibe.bot\'s way to sign it out', async () => {
-    toasts.show.mockClear();
-    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
-    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-      signedOut: [{ id: 'o1', device: 'Chrome · Windows', kind: 'browser', owner: 'mine', results: ['localOnly'] }], healthCleanupPending: false,
+  it.each(['queued', 'accepted', 'localOnly', 'refused', 'unconfirmed', 'sharedSignIn', 'keeperUnknown'] as const)(
+    'says only 已退出 whatever avibe.bot did (%s), and the toast leaves by itself', async (result) => {
+      toasts.show.mockClear();
+      vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
+      vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
+        signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'mine', results: [result] }], healthCleanupPending: true,
+      });
+      mount();
+      fireEvent.click(await screen.findByText('Chrome'));
+      fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+      // A plain toast: no action, nothing that keeps it on screen, no card above the list.
+      await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「Chrome」', 'success'));
+      expect(screen.queryByRole('status')).toBeNull();
     });
-    mount();
-    fireEvent.click(await screen.findByText('Chrome'));
-    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
-    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith(
-      '已退出「Chrome」。它还登录着你的 avibe.bot 账号。不是你的设备？', 'success',
-      expect.objectContaining({ label: '退出其他设备' }), { persist: true }));
-    const open = vi.spyOn(window, 'open').mockReturnValue(null);
-    toasts.show.mock.calls[0]![2].onClick();
-    expect(open.mock.calls[0]![0]).toBe('https://avibe.bot/app/account/security#sessions');
-    expect(document.body.textContent).not.toContain('可能自己回来');
-    // No card above the list, whatever the result.
-    expect(screen.queryByRole('status')).toBeNull();
-  });
-
-  it.each([
-    ['a member\'s or guest\'s device', 'notEligible' as const, 'mine' as const],
-    ['a notification registration with no sign-in of its own', 'pushOnly' as const, 'mine' as const],
-    ['a device that shares the viewer\'s own sign-in', 'sharedSignIn' as const, 'mine' as const],
-    ['someone else\'s device', 'localOnly' as const, 'others' as const],
-  ])('signs out %s with the plain toast and no word about what is not ended', async (_label, result, owner) => {
-    toasts.show.mockClear();
-    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
-    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-      signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner, results: [result] }], healthCleanupPending: true,
-    });
-    mount();
-    fireEvent.click(await screen.findByText('Chrome'));
-    fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
-    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「Chrome」', 'success'));
-    expect(screen.queryByRole('status')).toBeNull();
-  });
-
   it('names a device signed out lately in the activity as its sign-out receipt does', async () => {
     const receipt = { id: 'o1', deviceId: 'gone', device: 'Chrome · macOS', kind: 'browser' as const, owner: 'mine' as const, results: ['accepted' as const] };
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook], { signedOut: [receipt] }));
@@ -424,7 +400,7 @@ describe('DevicesPage · devices', () => {
     expect(document.body.textContent).not.toContain('一台已不在列表里的设备');
   });
 
-  it('asks before signing out a device that synced Health, and says once that it stays signed in to the account', async () => {
+  it('asks before signing out a device that synced Health, then says only 已退出', async () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone, sara]));
     const signOut = vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
       signedOut: [{ id: 'o1', device: 'iPhone', kind: 'iphone', owner: 'unknown', results: ['localOnly'] }], healthCleanupPending: true,
@@ -443,8 +419,7 @@ describe('DevicesPage · devices', () => {
     toasts.show.mockClear();
     fireEvent.click(within(asked).getByRole('button', { name: '退出' }));
     await waitFor(() => expect(signOut).toHaveBeenCalledWith('iphone'));
-    // The row the page acted on was one of the viewer's own: still signed in to the account, said once.
-    await waitFor(() => expect(toasts.show).toHaveBeenCalledWith(expect.stringContaining('它还登录着你的 avibe.bot 账号'), 'success', expect.anything(), { persist: true }));
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「iPhone」', 'success'));
   });
 
   it('says from another device that signing out deletes the Health data', async () => {
@@ -793,22 +768,17 @@ describe('DevicesPage · an instance without binding again', () => {
     expect(await screen.findByText(said('服务器上没有浏览器的话，在它的终端运行 vibe remote rebind。'))).toBeTruthy();
   });
 
-  it('lists a signed-out device with nothing about avibe.bot until it will not be ended', () => {
-    const now = Date.now();
+  it('lists signed-out devices by name only, whatever avibe.bot did', () => {
     const row = (id: string, results: SignedOutDevice['results'], extra: Partial<SignedOutDevice> = {}): SignedOutDevice =>
-      ({ id, device: id, kind: 'browser', owner: 'mine', results, signedOutAt: now - 60_000, ...extra });
-    render(<DevicesPageView reach={on} devices={[macbook]} now={now} signedOut={[
-      row('Queued', ['queued']), row('Retrying', ['retrying']), row('Accepted', ['accepted']),
-      row('Theirs', ['localOnly'], { owner: 'others' }), row('Shared', ['sharedSignIn']),
-      row('Credential', ['refusedCredential']), row('Waited', ['retrying'], { signedOutAt: now - ACCOUNT_SIGN_OUT_PATIENCE_MS - 1 }),
-      row('Member', ['notEligible']), row('Push', ['pushOnly']),
+      ({ id, device: id, kind: 'browser', owner: 'mine', results, ...extra });
+    render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[
+      row('Queued', ['queued']), row('Accepted', ['accepted']), row('Old', ['localOnly']), row('Refused', ['refusedCredential']),
+      row('Nameless', ['unconfirmed'], { device: null }),
     ]} />);
-    // The old sign-in and the one that waited a day: the same calm line, with the same way out.
-    expect(screen.getAllByRole('link', { name: '退出其他设备' })).toHaveLength(2);
-    expect(document.body.textContent?.split('它还登录着你的 avibe.bot 账号。不是你的设备？').length).toBe(3);
-    for (const word of ['avibe.bot 不再接受', '排队', '重试', '已通知', '重新绑定']) expect(document.body.textContent).not.toContain(word);
+    const panel = screen.getByText('最近退出的设备').closest('section') ?? document.body;
+    expect(panel.textContent).toBe('最近退出的设备QueuedAcceptedOldRefused未识别的客户端');
+    expect(screen.queryByRole('link')).toBeNull();
   });
-
 });
 
 describe('DevicesPageView', () => {
@@ -834,20 +804,6 @@ describe('DevicesPageView', () => {
     expect(functionControl({ kind: 'notifications', on: true, canChange: false })).toBe('state');
     expect(functionControl({ kind: 'health', on: false, canChange: true, data: [] })).toBe('state');
     expect(functionControl({ kind: 'computerUse', status: 'ready' })).toBe('state');
-  });
-
-  it('says a device is still signed in only when nothing here will end it, or after a day of waiting', () => {
-    const now = 1_000_000_000;
-    const at = (results: SignedOutDevice['results'], owner: SignedOutDevice['owner'] = 'mine', waited = 60_000) => stillSignedIn({ owner, results, signedOutAt: now - waited }, now);
-    for (const result of ['queued', 'retrying', 'accepted', 'sharedSignIn', 'notEligible', 'pushOnly', 'unknown'] as const) expect(at([result])).toBe(false);
-    for (const result of ['refused', 'refusedCredential', 'unconfirmed', 'keeperUnknown', 'localOnly'] as const) expect(at([result])).toBe(true);
-    // Someone else's device: avibe.bot does not sign other people out; nothing to say.
-    expect(at(['localOnly'], 'others')).toBe(false);
-    expect(at(['localOnly'], 'unknown')).toBe(true);
-    // Waiting: a day is patience; past it, the same line.
-    expect(at(['retrying'], 'mine', ACCOUNT_SIGN_OUT_PATIENCE_MS)).toBe(false);
-    expect(at(['queued'], 'mine', ACCOUNT_SIGN_OUT_PATIENCE_MS + 1)).toBe(true);
-    expect(stillSignedIn({ owner: 'mine', results: ['queued'] }, now)).toBe(false);
   });
 
   it('counts who is locked out without counting notification-only rows', () => {

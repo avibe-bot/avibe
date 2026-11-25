@@ -134,10 +134,7 @@ export function DesignShell({
 }) {
   const { t } = useTranslation();
   const inbox = useMemo(() => inboxValue(fixtures), [fixtures]);
-  const initialToasts = useMemo(() => fixtures.toasts?.map((each) => ({
-    message: t(each.key, each.values), type: each.type,
-    action: each.action ? { label: t(each.action), onClick: () => {} } : undefined,
-  })), [fixtures, t]);
+  const initialToasts = useMemo(() => fixtures.toasts?.map((each) => ({ message: t(each.key, each.values), type: each.type })), [fixtures, t]);
   const pendingVaultRequests = useMemo(() => pendingVaultRequestsValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
   const status = useMemo(() => statusValue(fixtures), [fixtures]);

@@ -90,8 +90,8 @@ export interface WorkbenchFixtures {
   /** Events the page's event stream delivers, each `after` ms once the page opens it (a reply arriving, a turn ending). */
   stream?: DesignStreamEvent[];
   /** Toasts on screen when the frame opens, as the App's toast draws them, by locale key: what the page
-   *  just said (「已退出…」). Each stays; `action` names its one action's label. */
-  toasts?: { key: TranslationKey; values?: Record<string, string>; type?: 'success' | 'error' | 'warning'; action?: TranslationKey }[];
+   *  just said (「已退出…」). */
+  toasts?: { key: TranslationKey; values?: Record<string, string>; type?: 'success' | 'error' | 'warning' }[];
 }
 
 /** Everything the frame's providers fetch, as the network stub serves it. */

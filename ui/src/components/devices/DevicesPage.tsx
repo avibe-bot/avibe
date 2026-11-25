@@ -2,7 +2,6 @@
 // `DevicesPageView`. Every change goes to the instance and the page then reads again; nothing
 // is shown as done before the instance said so. Routes: `/settings/remote-access` (the page) and
 // `/settings/remote-access/activity` (the full list).
-import type { TFunction } from 'i18next';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -15,15 +14,14 @@ import { useToast } from '@/context/ToastContext';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { copyTextToClipboard } from '@/lib/utils';
-import { ACCOUNT_SIGN_OUT_OTHERS_URL } from '@/sign-in/links';
-import { DevicesApiError, LostAnswer, devicesApi as api, type SignOutAnswer } from './api';
+import { DevicesApiError, LostAnswer, devicesApi as api } from './api';
 import { awayOnClaim, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
 import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
-import { functionOffNeedsConfirm, stillSignedIn, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
+import { functionOffNeedsConfirm, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
 import type {
-  AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach, SignedOutDevice,
+  AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach,
 } from './types';
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
 import { useNow } from './useNow';
@@ -59,18 +57,6 @@ function joinNewest(current: ActivityFeed, page: { items: DeviceActivity[]; next
     return { items: page.items, cursor: page.nextCursor, extended: false };
   }
   return { items: [...page.items, ...current.items.filter((each) => !fresh.has(each.id))], cursor: current.cursor, extended: true };
-}
-
-/** avibe.bot's 「退出其他设备」, outside the App. */
-const signOutOthersThere = (t: TFunction) => ({
-  label: t('devices.signedOut.signOutOtherDevices'),
-  onClick: () => { openLinkInNewContext(ACCOUNT_SIGN_OUT_OTHERS_URL, 'noopener,noreferrer'); },
-});
-
-/** Whether a sign-out just made leaves a device still signed in to the account, with nothing this
- *  Avibe will do about it: the one case its toast says more than 「已退出」 (product, 2026-11-25). */
-function leftSignedIn(answer: SignOutAnswer, owner: SignedOutDevice['owner']): boolean {
-  return answer.signedOut.some((each) => stillSignedIn({ ...each, owner: each.owner !== 'unknown' ? each.owner : owner }, Date.now()));
 }
 
 export function DevicesPage() {
@@ -405,20 +391,13 @@ export function DevicesPage() {
   }, [act, failed, load]);
 
   const signOut = useCallback((device: Device) => act(async () => {
-    const answer = await api.signOut(device.id);
+    await api.signOut(device.id);
     // Only its own panel is closed: another device opened meanwhile stays open.
     setDetail((current) => (current === device.id ? undefined : current));
     // Out of the list at once; the reload that follows confirms it.
     setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.id !== device.id) }));
-    const name = deviceName(t, device);
-    // One line, where the App says such things. Only a device left signed in to the account, with
-    // nothing here to end it, says more, and that stays until it is closed.
-    if (leftSignedIn(answer, device.group === 'mine' ? 'mine' : device.group === 'others' ? 'others' : 'unknown')) {
-      // Calm, not a warning; it stays until closed, with the one way to sign it out there.
-      showToast(t('devices.signedOut.toastStillSignedIn', { device: name }), 'success', signOutOthersThere(t), { persist: true });
-    } else {
-      showToast(t('devices.signedOut.toast', { device: name }), 'success');
-    }
+    // One line where the App says such things, gone by itself (owner, 2026-11-25).
+    showToast(t('devices.signedOut.toast', { device: deviceName(t, device) }), 'success');
   }), [act, t, showToast]);
 
   const confirmed = () => {
@@ -486,7 +465,6 @@ export function DevicesPage() {
       bulk={snapshot.bulk}
       unlinkedHealth={snapshot.unlinkedHealth}
       signedOut={snapshot.signedOut}
-      now={now}
       unrecognizedChange={unrecognizedChange}
       proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}

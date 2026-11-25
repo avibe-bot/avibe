@@ -125,10 +125,7 @@ describe('signedOutFromWire', () => {
     expect(receipt([{ status: 'pending', reason: 'queued' }])?.results).toEqual(['queued']);
     expect(receipt([{ status: 'pending', reason: 'retrying' }])?.results).toEqual(['retrying']);
     expect(receipt([{ status: 'accepted', reason: null }])?.results).toEqual(['accepted']);
-    expect(receipt([{ status: 'not_applicable', reason: 'no_reference' }, { status: 'not_applicable', reason: 'binding_changed' }])?.results).toEqual(['localOnly']);
-    // Not this Avibe's to end, or nothing to end: told apart from an old sign-in without a reference.
-    expect(receipt([{ status: 'not_applicable', reason: 'not_eligible' }])?.results).toEqual(['notEligible']);
-    expect(receipt([{ status: 'not_applicable', reason: 'push_only' }])?.results).toEqual(['pushOnly']);
+    expect(receipt([{ status: 'not_applicable', reason: 'no_reference' }, { status: 'not_applicable', reason: 'not_eligible' }, { status: 'not_applicable', reason: 'binding_changed' }])?.results).toEqual(['localOnly']);
     expect(receipt([{ status: 'not_applicable', reason: 'shared_sign_in' }])?.results).toEqual(['sharedSignIn']);
     expect(receipt([{ status: 'not_applicable', reason: 'keeper_unknown' }])?.results).toEqual(['keeperUnknown']);
     expect(receipt([{ status: 'refused', reason: 'credential' }])?.results).toEqual(['refusedCredential']);

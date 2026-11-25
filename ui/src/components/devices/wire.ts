@@ -95,10 +95,7 @@ function accountResult(raw: unknown): AccountResult {
   const { status, reason } = record(raw);
   if (status === 'pending') return reason === 'retrying' ? 'retrying' : 'queued';
   if (status === 'accepted') return 'accepted';
-  if (status === 'not_applicable') {
-    return reason === 'shared_sign_in' ? 'sharedSignIn' : reason === 'keeper_unknown' ? 'keeperUnknown'
-      : reason === 'not_eligible' ? 'notEligible' : reason === 'push_only' ? 'pushOnly' : 'localOnly';
-  }
+  if (status === 'not_applicable') return reason === 'shared_sign_in' ? 'sharedSignIn' : reason === 'keeper_unknown' ? 'keeperUnknown' : 'localOnly';
   if (status === 'refused') return reason === 'credential' ? 'refusedCredential' : 'refused';
   if (status === 'unconfirmed') return 'unconfirmed';
   return 'unknown';
@@ -117,7 +114,6 @@ export function signedOutFromWire(raw: unknown): SignedOutDevice | null {
     // The instance says whose it was when it can; nothing here is inferred from a name or a kind.
     owner: row.group === 'mine' || row.group === 'others' ? row.group : 'unknown',
     results,
-    signedOutAt: typeof row.signed_out_at === 'number' && Number.isFinite(row.signed_out_at) ? row.signed_out_at * 1000 : undefined,
   };
 }
 

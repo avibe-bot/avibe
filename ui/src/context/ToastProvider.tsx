@@ -32,12 +32,12 @@ const DEDUPE_WINDOW_MS = 4000;
 const ACTION_TOAST_MS = 6000;
 const PLAIN_TOAST_MS = 3000;
 
-/** A toast already on screen when the provider mounts: a design frame's toast state. It stays until closed. */
-export type InitialToast = { message: string; type?: ToastType; action?: ToastAction };
+/** A toast already on screen when the provider mounts: a design frame's toast state (`fixtures.toasts`). */
+export type InitialToast = { message: string; type?: ToastType };
 
 export const ToastProvider: React.FC<{ children: React.ReactNode; initial?: InitialToast[] }> = ({ children, initial }) => {
   const [toasts, setToasts] = useState<Toast[]>(() => (initial ?? []).map((each) => (
-    { id: ++toastId, message: each.message, type: each.type ?? 'success', repeats: 0, action: each.action })));
+    { id: ++toastId, message: each.message, type: each.type ?? 'success', repeats: 0 })));
   // Ref so dedupe lookups don't rerender. Maps message -> {id, expiresAt}
   // for currently-visible toasts; we evict on auto-dismiss.
   const recentRef = useRef<Map<string, RecentToast>>(new Map());
@@ -74,14 +74,14 @@ export const ToastProvider: React.FC<{ children: React.ReactNode; initial?: Init
   }, []);
 
   const showToast = useCallback(
-    (message: string, type: ToastType = 'success', action?: ToastAction, options?: { persist?: boolean }) => {
+    (message: string, type: ToastType = 'success', action?: ToastAction) => {
       // Coalesce duplicate messages from polling / retry loops. The user
       // sees one toast with a "(×N)" badge instead of a wall of identical
       // popups; this matters most for transient 503s during daemon restarts.
       // Actionable toasts opt out (see shouldCoalesceToast).
       const now = Date.now();
       const existing = recentRef.current.get(message);
-      if (!options?.persist && shouldCoalesceToast(!!action, existing, now)) {
+      if (shouldCoalesceToast(!!action, existing, now)) {
         cancelTimer(existing!.timer);
         setToasts((prev) =>
           prev.map((t) => (t.id === existing!.id ? { ...t, repeats: t.repeats + 1, type } : t)),
@@ -101,8 +101,6 @@ export const ToastProvider: React.FC<{ children: React.ReactNode; initial?: Init
       const id = ++toastId;
       // Only track plain toasts for dedupe; actionable ones are always distinct.
       setToasts((prev) => [...prev, { id, message, type, repeats: 0, action }]);
-      // A toast that asks for a decision stays until it is closed.
-      if (options?.persist) return;
 
       // Auto dismiss (longer for actionable toasts so undo is reachable).
       const timer = scheduleTimer(() => {
@@ -184,32 +182,29 @@ export const ToastProvider: React.FC<{ children: React.ReactNode; initial?: Init
         {toasts.map((toast) => (
           <ToastCard key={toast.id} toast={toast} joins={toasts.some((other) => other.id < toast.id && !other.leaving)} onDismiss={dismissToast} onGone={remove} register={register}>
             {toast.type === 'success' ? (
-              <CheckCircle size={18} className="shrink-0" />
+              <CheckCircle size={18} />
             ) : toast.type === 'warning' ? (
-              <AlertTriangle size={18} className="shrink-0" />
+              <AlertTriangle size={18} />
             ) : (
-              <XCircle size={18} className="shrink-0" />
+              <XCircle size={18} />
             )}
-            {/* On a phone the action goes under the message, so a longer message keeps its width. */}
-            <div className="flex min-w-0 flex-col items-start gap-1 sm:flex-row sm:items-center sm:gap-0">
-              <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{toast.message}</span>
-              {toast.repeats > 0 && (
-                <span className="ml-1 rounded-full bg-current/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums opacity-80">
-                  ×{toast.repeats + 1}
-                </span>
-              )}
-              {toast.action && (
-                <button
-                  onClick={() => {
-                    toast.action!.onClick();
-                    dismissToast(toast.id);
-                  }}
-                  className="-ml-1.5 shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-semibold underline underline-offset-2 hover:opacity-80 sm:ml-1"
-                >
-                  {toast.action.label}
-                </button>
-              )}
-            </div>
+            <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{toast.message}</span>
+            {toast.repeats > 0 && (
+              <span className="ml-1 rounded-full bg-current/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums opacity-80">
+                ×{toast.repeats + 1}
+              </span>
+            )}
+            {toast.action && (
+              <button
+                onClick={() => {
+                  toast.action!.onClick();
+                  dismissToast(toast.id);
+                }}
+                className="ml-1 shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold underline underline-offset-2 hover:opacity-80"
+              >
+                {toast.action.label}
+              </button>
+            )}
             <button
               onClick={() => dismissToast(toast.id)}
               className="ml-2 opacity-60 hover:opacity-100 transition-opacity"

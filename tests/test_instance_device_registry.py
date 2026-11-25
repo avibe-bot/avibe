@@ -206,6 +206,25 @@ def _pre_registry_cookie(config, issued_cookie):
     return remote_access._encode_session_cookie(config.remote_access.vibe_cloud.session_secret, payload)
 
 
+def test_desktop_sign_ins_that_describe_themselves_list_as_one_computer(install):
+    # Each opening of an instance in the Desktop app signs in afresh, with the app's User-Agent on
+    # the callback; its view of the instance then reports the computer (device_description.rs).
+    def sign_in():
+        return client(remote_access.make_session_cookie(
+            install, "member@test.invalid", "member", session_claims=_session_claims(install, role="member"),
+            device_headers={"User-Agent": "AvibeDesktop/0.4.2"},
+        ))
+
+    first, second = sign_in(), sign_in()
+    rows = listing(first)["mine"]
+    assert [(row["kind"], row["display_name"]) for row in rows] == [("desktop_app", "Avibe Desktop")] * 2
+    computer = dict(kind="desktop_app", display_name="Studio Mac", app_version="0.4.2", system_version="macOS 26.1")
+    for each in (first, second):
+        assert report(each, "3f" * 32, **computer).get_json() == {"ok": True}
+    (row,) = listing(first)["mine"]
+    assert {key: row[key] for key in computer} == computer
+
+
 def test_bulk_fence_covers_unseen_and_racing_legacy_cookie_preserves_caller(install):
     caller = login(install, "member", "member")
     known = login(install, "member", "member")
@@ -524,9 +543,6 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
     assert_local_result(stopped, 0)
     # A device left with notifications only is still known by its proven account and that account's role.
     assert [row["group"] for row in stopped.get_json()["sign_out_results"]] == ["mine"]
-    # A registration with no sign-in of its own says so, not that a sign-in had no reference.
-    assert [row["account_results"] for row in stopped.get_json()["sign_out_results"]] == [
-        [{"status": "not_applicable", "reason": "push_only", "count": 1}]]
     from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
 
     with get_cached_sqlite_engine().connect() as conn:
@@ -610,8 +626,7 @@ def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
             select(receipts.c.id).where(receipts.c.device_id == own_spare))))
     assert groups(owner) == {own_spare: None, member_spare: "others"}
     for row in listing(owner)["recent_sign_outs"]:
-        assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results",
-                            "signed_out_at"}
+        assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results"}
     # A viewer on this computer itself has no account: by the role the device signed in with.
     install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
     install.save()

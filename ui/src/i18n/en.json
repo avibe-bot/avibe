@@ -8423,10 +8423,7 @@
     "signedOut": {
       "title": "Recently signed out",
       "toast": "Signed out {{device}}",
-      "toastOthers": "Signed out your other devices",
-      "toastStillSignedIn": "Signed out {{device}}. It is still signed in to your avibe.bot account. Not your device?",
-      "stillSignedIn": "It is still signed in to your avibe.bot account. Not your device?",
-      "signOutOtherDevices": "Sign out other devices"
+      "toastOthers": "Signed out your other devices"
     },
     "problem": {
       "functionNeedsDevice": "Turn this on on that device first.",

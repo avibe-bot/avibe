@@ -8423,10 +8423,7 @@
     "signedOut": {
       "title": "最近退出的设备",
       "toast": "已退出「{{device}}」",
-      "toastOthers": "已退出其他设备",
-      "toastStillSignedIn": "已退出「{{device}}」。它还登录着你的 avibe.bot 账号。不是你的设备？",
-      "stillSignedIn": "它还登录着你的 avibe.bot 账号。不是你的设备？",
-      "signOutOtherDevices": "退出其他设备"
+      "toastOthers": "已退出其他设备"
     },
     "problem": {
       "functionNeedsDevice": "要先在那台设备上打开这一项。",

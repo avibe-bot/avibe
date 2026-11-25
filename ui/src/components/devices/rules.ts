@@ -5,7 +5,7 @@ import type { TFunction } from 'i18next';
 import type { TranslationKey } from '@/i18n/types';
 import { dayText, healthText } from './format';
 import { instanceUrl } from './paths';
-import type { AccountResult, Device, DeviceActivity, DeviceFunction, RenameDevice, SignedOutDevice, TunnelSetting } from './types';
+import type { Device, DeviceActivity, DeviceFunction, RenameDevice, TunnelSetting } from './types';
 
 /** The Avibe App's TestFlight invitation; TestFlight lists the App as 「Avibe OS」. */
 export const TESTFLIGHT_INVITE_URL = 'https://testflight.apple.com/join/HXqwMqeX';
@@ -102,26 +102,6 @@ export function activityText(t: TFunction, language: string, item: DeviceActivit
     case 'remoteAccessOff':
       return t('devices.activity.remoteAccessOff');
   }
-}
-
-/** How long an account sign-out may stay pending before the page says so (product, 2026-11-25). */
-export const ACCOUNT_SIGN_OUT_PATIENCE_MS = 24 * 60 * 60 * 1000;
-
-/** Results after which this Avibe will not end that device's avibe.bot sign-in. */
-const NOT_ENDED: AccountResult[] = ['refused', 'refusedCredential', 'unconfirmed', 'keeperUnknown', 'localOnly'];
-
-/**
- * Whether a signed-out device is still signed in to the avibe.bot account with nothing this Avibe
- * will do about it, or has waited longer than a day for that (product, 2026-11-25): the one case
- * worth a word. Nothing is said while the request is on its way, once it went through, about
- * someone else's device, a member's or guest's, a notification registration, or a device that
- * shares the viewer's own sign-in.
- */
-export function stillSignedIn(device: Pick<SignedOutDevice, 'owner' | 'results' | 'signedOutAt'>, now: number): boolean {
-  const results = device.owner === 'others' ? device.results.filter((each) => each !== 'localOnly') : device.results;
-  if (results.some((each) => NOT_ENDED.includes(each))) return true;
-  const pending = results.some((each) => each === 'queued' || each === 'retrying');
-  return pending && device.signedOutAt !== undefined && now - device.signedOutAt > ACCOUNT_SIGN_OUT_PATIENCE_MS;
 }
 
 /** A tunnel setting's stored value, as its own control names it. */

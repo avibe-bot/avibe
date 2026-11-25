@@ -4,5 +4,3 @@
  * default browser).
  */
 export const ACCOUNT_SECURITY_URL = 'https://avibe.bot/app/account/security';
-/** The same page at its 「退出其他设备」 (Signed-in devices) section. */
-export const ACCOUNT_SIGN_OUT_OTHERS_URL = `${ACCOUNT_SECURITY_URL}#sessions`;

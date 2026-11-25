@@ -81,8 +81,6 @@ def test_local_commit_then_exact_request_and_durable_result(paired, monkeypatch,
     assert ids == ['A'] and count == 1 and result['device_id'] == target and calls == []
     assert result['account_results'] == [{'status': 'pending', 'reason': 'queued', 'count': 1}]
     assert read() == [result]
-    # When this Avibe ended it, read back unchanged, so a page can tell a long wait from a new one.
-    assert result['signed_out_at'] == clock[0]
     with get_cached_sqlite_engine().connect() as conn:
         assert conn.execute(select(sessions.c.session_id)).scalars().all() == ['B']
         assert conn.scalar(select(refs.c.reference)) == B
@@ -301,21 +299,6 @@ def test_a_recorded_role_leaves_with_its_receipt(paired, monkeypatch):
 
 
 @pytest.mark.no_sqlite_template
-def test_signed_out_at_is_the_local_sign_out_time_and_survives_later_reads(paired, monkeypatch):
-    cfg, clock, enroll, stop, read = paired
-    enroll('A', A)
-    enroll('B', B)
-    fake_issuer(monkeypatch, 503)
-    signed_out = clock[0]
-    _, _, [result], _ = stop(None)
-    assert result['signed_out_at'] == signed_out
-    clock[0] += 86400 + 1
-    assert worker.run_once(lambda: cfg)
-    [later] = read()
-    assert later['signed_out_at'] == signed_out
-    assert later['account_results'] == [{'status': 'pending', 'reason': 'retrying', 'count': 1}]
-
-
 def test_receipt_role_migration_round_trip_keeps_existing_receipts(tmp_path):
     import sqlite3
 
