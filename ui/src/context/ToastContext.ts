@@ -5,7 +5,8 @@ import type { ToastAction } from './toastCoalesce';
 export type ToastType = 'success' | 'error' | 'warning';
 
 interface ToastContextType {
-  showToast: (message: string, type?: ToastType, action?: ToastAction) => void;
+  /** `persist`: the toast asks the person something and stays until they close it. */
+  showToast: (message: string, type?: ToastType, action?: ToastAction, options?: { persist?: boolean }) => void;
 }
 
 export const ToastContext = createContext<ToastContextType | null>(null);

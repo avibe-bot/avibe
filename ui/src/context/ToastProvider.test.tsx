@@ -63,6 +63,28 @@ describe('ToastProvider', () => {
     expect(screen.queryByRole('status')).toBeNull();
   });
 
+  it('keeps a toast that asks for a decision until it is closed', () => {
+    vi.useFakeTimers();
+    const Persist = () => {
+      const { showToast } = useToast();
+      return <button type="button" onClick={() => showToast('Still signed in', 'warning', undefined, { persist: true })}>Sign out</button>;
+    };
+    render(
+      <ToastProvider>
+        <Persist />
+      </ToastProvider>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(screen.getByRole('status').textContent).toContain('Still signed in');
+    // Never folded into another: a second one is its own.
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out' }));
+    expect(screen.getAllByRole('status')).toHaveLength(2);
+    for (const close of screen.getAllByRole('button').filter((each) => each.textContent === '' || each.getAttribute('aria-label'))) fireEvent.click(close);
+    act(() => vi.advanceTimersByTime(1000));
+    expect(screen.queryAllByRole('status')).toHaveLength(0);
+  });
+
   it('clears actionable auto-dismiss timers when the provider unmounts', () => {
     vi.useFakeTimers();
     const rendered = render(

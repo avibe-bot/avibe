@@ -103,20 +103,8 @@ export type SignedOutDevice = {
   /** Whose device it was, where that is known without guessing; it decides which advice applies. */
   owner: 'mine' | 'others' | 'unknown';
   results: AccountResult[];
-};
-
-/** The answer of a sign-out just made. `healthCleanupPending`: a conditional clean-up of synced
- *  Health data is not confirmed yet (it does not say the device had any). */
-export type SignOutNotice = {
-  device: string | null;
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-  healthCleanupPending: boolean;
-  /** The signed-out row showed Health on this page. */
-  hadHealth: boolean;
-  /** The row listed what the device does and Health was not among it: nothing is said about
-   *  Health's clean-up, which cannot concern it. */
-  withoutHealth?: boolean;
+  /** When this Avibe signed it out (epoch ms), as the instance recorded it. */
+  signedOutAt?: number;
 };
 
 /** Why a claim (turning remote access on) did not go through: the local outcome names of

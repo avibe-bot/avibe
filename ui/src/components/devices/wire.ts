@@ -114,6 +114,7 @@ export function signedOutFromWire(raw: unknown): SignedOutDevice | null {
     // The instance says whose it was when it can; nothing here is inferred from a name or a kind.
     owner: row.group === 'mine' || row.group === 'others' ? row.group : 'unknown',
     results,
+    signedOutAt: typeof row.signed_out_at === 'number' && Number.isFinite(row.signed_out_at) ? row.signed_out_at * 1000 : undefined,
   };
 }
 

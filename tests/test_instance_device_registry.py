@@ -607,7 +607,8 @@ def test_a_sign_out_receipt_says_whose_device_it_was_for_each_viewer(install):
             select(receipts.c.id).where(receipts.c.device_id == own_spare))))
     assert groups(owner) == {own_spare: None, member_spare: "others"}
     for row in listing(owner)["recent_sign_outs"]:
-        assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results"}
+        assert set(row) == {"operation_id", "device_id", "kind", "display_name", "group", "local_status", "account_results",
+                            "signed_out_at"}
     # A viewer on this computer itself has no account: by the role the device signed in with.
     install.remote_access.vibe_cloud.instance_secret = "paired-test-instance"
     install.save()

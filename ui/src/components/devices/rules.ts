@@ -104,32 +104,24 @@ export function activityText(t: TFunction, language: string, item: DeviceActivit
   }
 }
 
-const accountKeys = {
-  queued: 'devices.signedOut.queued',
-  retrying: 'devices.signedOut.retrying',
-  accepted: 'devices.signedOut.accepted',
-  sharedSignIn: 'devices.signedOut.sharedSignIn',
-  keeperUnknown: 'devices.signedOut.keeperUnknown',
-  refusedCredential: 'devices.signedOut.refusedCredential',
-  refused: 'devices.signedOut.refused',
-  unconfirmed: 'devices.signedOut.unconfirmed',
-  unknown: 'devices.signedOut.unknown',
-} as const satisfies Record<Exclude<AccountResult, 'localOnly'>, TranslationKey>;
+/** How long an account sign-out may stay pending before the page says so (product, 2026-11-25). */
+export const ACCOUNT_SIGN_OUT_PATIENCE_MS = 24 * 60 * 60 * 1000;
+
+/** Results after which this Avibe will not end that device's avibe.bot sign-in. */
+const NOT_ENDED: AccountResult[] = ['refused', 'refusedCredential', 'unconfirmed', 'keeperUnknown', 'localOnly'];
 
 /**
- * What avibe.bot did about a signed-out device's account sign-in, one sentence per distinct
- * result. Never "ended": accepted is accepted. Where only this Avibe's sign-in ended, the advice
- * depends on whose device it was; where that is not known, both halves are said.
+ * The one thing worth saying about a signed-out device's avibe.bot sign-in, or nothing (product,
+ * 2026-11-25): nothing while the request is on its way or once it went through; one line when it
+ * will not be ended, or when it has waited longer than a day. Someone else's device (avibe.bot does
+ * not sign other people out) and a device that shares the viewer's own sign-in say nothing.
  */
-export function accountResultTexts(t: TFunction, device: Pick<SignedOutDevice, 'owner' | 'results'>, rebindOffered = true): string[] {
-  return [...new Set(device.results)].map((result) => {
-    // Where this instance has no way to bind again, the sentence does not send anyone there.
-    if (result === 'refusedCredential' && !rebindOffered) return t('devices.signedOut.refusedCredentialPlain');
-    if (result !== 'localOnly') return t(accountKeys[result]);
-    if (device.owner === 'mine') return t('devices.signedOut.localOnlyMine');
-    if (device.owner === 'others') return t('devices.signedOut.localOnlyOthers');
-    return t('devices.signedOut.localOnlyEither');
-  });
+export function accountSignOutLine(device: Pick<SignedOutDevice, 'owner' | 'results' | 'signedOutAt'>, now: number): 'stillSignedIn' | 'waiting' | null {
+  const results = device.owner === 'others' ? device.results.filter((each) => each !== 'localOnly') : device.results;
+  if (results.some((each) => NOT_ENDED.includes(each))) return 'stillSignedIn';
+  const pending = results.some((each) => each === 'queued' || each === 'retrying');
+  if (pending && device.signedOutAt !== undefined && now - device.signedOutAt > ACCOUNT_SIGN_OUT_PATIENCE_MS) return 'waiting';
+  return null;
 }
 
 /** A tunnel setting's stored value, as its own control names it. */

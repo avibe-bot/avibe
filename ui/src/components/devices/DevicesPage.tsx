@@ -19,9 +19,9 @@ import { awayOnClaim, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
 import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
-import { functionOffNeedsConfirm, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
+import { accountSignOutLine, functionOffNeedsConfirm, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
 import type {
-  AccountResult, AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach, SignOutNotice,
+  AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach, SignedOutDevice,
 } from './types';
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
 import { useNow } from './useNow';
@@ -59,23 +59,10 @@ function joinNewest(current: ActivityFeed, page: { items: DeviceActivity[]; next
   return { items: [...page.items, ...current.items.filter((each) => !fresh.has(each.id))], cursor: current.cursor, extended: true };
 }
 
-/** What a sign-out's answer says about whose devices they were: the instance's word when it
- *  gives one, else what the page itself knows without guessing. */
-/** The row listed what the device does, and Health was not among it (Product, 2026-11-23). */
-const listedWithoutHealth = (device: Device) => device.functions.length > 0 && !device.functions.some((each) => each.kind === 'health');
-
-function noticeFrom(answer: SignOutAnswer, known: { device: string | null; owner: SignOutNotice['owner']; hadHealth: boolean; withoutHealth: boolean }): SignOutNotice {
-  const owners = new Set(answer.signedOut.map((each) => each.owner));
-  const said = owners.size === 1 ? [...owners][0] : 'unknown';
-  const results = [...new Set(answer.signedOut.flatMap((each) => each.results))] as AccountResult[];
-  return {
-    device: known.device,
-    owner: said !== 'unknown' ? said : known.owner,
-    results,
-    healthCleanupPending: answer.healthCleanupPending,
-    hadHealth: known.hadHealth,
-    withoutHealth: known.withoutHealth || undefined,
-  };
+/** Whether a sign-out just made leaves a device still signed in to the account, with nothing this
+ *  Avibe will do about it: the one case its toast says more than 「已退出」 (product, 2026-11-25). */
+function leftSignedIn(answer: SignOutAnswer, owner: SignedOutDevice['owner']): boolean {
+  return answer.signedOut.some((each) => accountSignOutLine({ ...each, owner: each.owner !== 'unknown' ? each.owner : owner }, Date.now()) === 'stillSignedIn');
 }
 
 export function DevicesPage() {
@@ -123,7 +110,6 @@ export function DevicesPage() {
   // page has been shown).
   const [rebindReturn] = useState(() => awayOnClaim('rebind'));
   const [claimIssue, setClaimIssue] = useState<ClaimProblem | undefined>(() => (returned && !rebindReturn ? claimProblem(returned) : undefined));
-  const [notice, setNotice] = useState<SignOutNotice | undefined>();
   const alive = useRef(true);
   const readCount = useRef(0);
   /** A turn-off from this remote device is waiting for its answer: a read that fails meanwhile is
@@ -414,14 +400,17 @@ export function DevicesPage() {
     const answer = await api.signOut(device.id);
     // Only its own panel is closed: another device opened meanwhile stays open.
     setDetail((current) => (current === device.id ? undefined : current));
-    setNotice(noticeFrom(answer, {
-      device: deviceName(t, device),
-      // The row the page just acted on says whose it was: no guess.
-      owner: device.group === 'mine' ? 'mine' : device.group === 'others' ? 'others' : 'unknown',
-      hadHealth: signOutNeedsConfirm(device),
-      withoutHealth: listedWithoutHealth(device),
-    }));
-  }), [act, t]);
+    // Out of the list at once; the reload that follows confirms it.
+    setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.id !== device.id) }));
+    const name = deviceName(t, device);
+    // One line, where the App says such things. Only a device left signed in to the account, with
+    // nothing here to end it, says more, and that stays until it is closed.
+    if (leftSignedIn(answer, device.group === 'mine' ? 'mine' : device.group === 'others' ? 'others' : 'unknown')) {
+      showToast(t('devices.signedOut.toastStillSignedIn', { device: name }), 'warning', undefined, { persist: true });
+    } else {
+      showToast(t('devices.signedOut.toast', { device: name }), 'success');
+    }
+  }), [act, t, showToast]);
 
   const confirmed = () => {
     if (confirm === 'turn-off') return void switchRemoteAccess(false);
@@ -434,13 +423,9 @@ export function DevicesPage() {
       const all = confirm === 'remove-all-remote';
       return void act(async () => {
         const answer = await api.signOutOthers();
-        setNotice(noticeFrom(answer, {
-          device: null,
-          // "My other devices" are the viewer's own; every remote device may be anyone's.
-          owner: all ? 'unknown' : 'mine',
-          hadHealth: devices.some((each) => !each.self && each.kind !== 'host' && signOutNeedsConfirm(each)),
-          withoutHealth: ((left) => left.length > 0 && left.every(listedWithoutHealth))(devices.filter((each) => !each.self && each.kind !== 'host')),
-        }));
+        setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.self || each.kind === 'host') }));
+        // "My other devices" are the viewer's own; every remote device may be anyone's.
+        showToast(t('devices.signedOut.toastOthers'), leftSignedIn(answer, all ? 'unknown' : 'mine') ? 'warning' : 'success');
       });
     }
     if (typeof confirm === 'object') {
@@ -489,7 +474,7 @@ export function DevicesPage() {
       bulk={snapshot.bulk}
       unlinkedHealth={snapshot.unlinkedHealth}
       signedOut={snapshot.signedOut}
-      signOutNotice={notice}
+      now={now}
       unrecognizedChange={unrecognizedChange}
       proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}
@@ -537,7 +522,7 @@ export function DevicesPage() {
       onDisconnectHealth={(id) => setConfirm({ unlinkedHealth: id })}
       onConfirm={confirmed}
       onCancelConfirm={() => setConfirm(undefined)}
-      onDismissNotice={() => { setNotice(undefined); setProblem(undefined); }}
+      onDismissNotice={() => { setProblem(undefined); }}
       onShowActivity={() => go(DEVICES_ACTIVITY_PATH)}
       moreActivity={nextCursor ? (loadingOlder ? 'loading' : 'available') : undefined}
       onMoreActivity={() => { void loadOlder(); }}

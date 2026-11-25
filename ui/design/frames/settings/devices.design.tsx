@@ -12,7 +12,11 @@ import { DevicesPageView, type DevicesPageViewProps } from '@/components/devices
 import type { AccountResult, Device, DeviceActivity, DeviceFunction, Reach, SignedOutDevice } from '@/components/devices/types';
 import { tunnelFromStatus } from '@/components/devices/wire';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
+import type { ReactNode } from 'react';
+import en from '@/i18n/en.json';
 import { MovedPage, SignInNotFinishedPage } from '../../kit/devices-pages';
+import { RaiseToast } from '../../kit/raise-toast';
+import { copyFor } from '../desktop/instances-fixtures';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access';
@@ -148,24 +152,21 @@ const memberDevices: Device[] = [
   { ...saraPhone, group: 'mine', person: undefined, functions: [{ kind: 'notifications', on: true, canChange: true }, { kind: 'schedule', on: true, canChange: true }] },
 ];
 
-const signedOutRow = (id: string, device: string | null, results: AccountResult[], owner: SignedOutDevice['owner'] = 'unknown'): SignedOutDevice => (
-  { id, device, kind: 'browser', owner, results }
+const signedOutRow = (id: string, device: string | null, results: AccountResult[], owner: SignedOutDevice['owner'] = 'unknown', minutesAgo = 5): SignedOutDevice => (
+  { id, device, kind: 'browser', owner, results, signedOutAt: DESIGN_NOW - minutesAgo * 60_000 }
 );
-/** One row per distinct thing the instance can say about the account sign-in. */
+/** What the list says (product, 2026-11-25): nothing while the account sign-out is on its way or
+ *  once it went through; one line when that device stays signed in to the account, or after a day. */
 const signedOut: SignedOutDevice[] = [
   signedOutRow('s1', 'iPhone 14', ['queued'], 'mine'),
-  signedOutRow('s2', 'Firefox · Linux', ['retrying'], 'mine'),
+  signedOutRow('s2', 'Firefox · Linux', ['retrying'], 'mine', 3 * 60),
   signedOutRow('s3', 'Chrome · Windows', ['accepted'], 'mine'),
   signedOutRow('s4', 'Safari · iPad', ['localOnly'], 'mine'),
   signedOutRow('s5', 'Chrome · macOS', ['localOnly'], 'others'),
-  signedOutRow('s6', null, ['localOnly']),
+  signedOutRow('s6', null, ['accepted']),
   signedOutRow('s7', 'Edge · Windows', ['sharedSignIn'], 'mine'),
-  signedOutRow('s8', 'Arc · macOS', ['keeperUnknown'], 'mine'),
-  signedOutRow('s9', 'iPad Air', ['refusedCredential'], 'mine'),
-  signedOutRow('s10', 'Pixel 8', ['refused'], 'mine'),
-  signedOutRow('s11', 'Galaxy S24', ['unconfirmed'], 'mine'),
-  signedOutRow('s12', 'Vivaldi · Linux', ['unknown']),
-  signedOutRow('s13', 'Mac mini（客厅）', ['accepted', 'localOnly'], 'mine'),
+  signedOutRow('s8', 'Galaxy S24', ['unconfirmed'], 'mine'),
+  signedOutRow('s9', 'Pixel 8', ['retrying'], 'mine', DAY + 30),
 ];
 
 const at = (height: number) => ({ width: 1440, height });
@@ -364,20 +365,24 @@ const designFrames = frames([
   frame('confirm-sign-out-all-remote', '在运行 Avibe 的电脑上退出所有远程设备：包括别人的', at(860),
     { reach: on, devices: [...all('host'), sara], activity, bulk: 'all_remote', confirm: 'remove-all-remote' }),
 
-  // 6. Signing out: what avibe.bot did about the account sign-in. Never 「已结束」.
-  frame('sign-out-queued', '刚退出 · 已排队；这一行显示过健康，所以健康清理说「尚未确认」', TALL,
-    { reach: on, devices: all('host'), activity, signOutNotice: { device: 'iPhone 14', owner: 'mine', results: ['queued'], healthCleanupPending: true, hadHealth: true } }),
-  frame('sign-out-local-mine', '刚退出我自己的一台 · 只在这个 Avibe 上退出了：只说对自己设备成立的那一半', TALL,
-    { reach: on, devices: all('host'), activity, signOutNotice: { device: 'Safari · iPad', owner: 'mine', results: ['localOnly'], healthCleanupPending: true, hadHealth: false } }),
-  frame('sign-out-local-others', '刚退出别人的一台 · 只说对别人设备成立的那一半', TALL,
-    { reach: on, devices: [...all('host'), sara], activity, signOutNotice: { device: 'Chrome · macOS', owner: 'others', results: ['localOnly'], healthCleanupPending: false, hadHealth: false } }),
-  frame('sign-out-many', '刚退出所有远程设备 · 几种结果各一句，不知道是谁的就两半都说', at(1100),
-    { reach: on, devices: onlyHost, activity, signOutNotice: { device: null, owner: 'unknown', results: ['accepted', 'localOnly', 'retrying'], healthCleanupPending: false, hadHealth: false } }),
-  frame('sign-out-many-phone', '刚退出所有远程设备 · 375 宽', { width: 375, height: 1300 },
-    { reach: on, devices: onlyHost, activity, signOutNotice: { device: null, owner: 'unknown', results: ['accepted', 'localOnly', 'retrying'], healthCleanupPending: false, hadHealth: false } }),
-  frame('signed-out', '最近退出的设备：接口能说出的每一种结果各一行', at(2100),
-    { reach: on, devices: all('host'), signedOut }),
-  frame('signed-out-phone', '最近退出的设备 · 375 宽', { width: 375, height: 3300 }, { reach: on, devices: onlyHost, signedOut }),
+  // 6. Signing out (product, 2026-11-25): one toast where the App shows toasts, the row leaves at
+  //    once; only a device left signed in to the account says more, and stays until closed.
+  ...(['zh', 'en'] as const).flatMap((lang) => {
+    const copy = lang === 'en' ? { copy: copyFor(en) } : {};
+    const fx = { fixtures: fixtures(copy) };
+    const remaining = all('host').filter((each) => each.id !== 'safari');
+    const toast = <RaiseToast i18nKey="devices.signedOut.toast" values={{ device: 'Safari · iPad' }} />;
+    const still = <RaiseToast i18nKey="devices.signedOut.toastStillSignedIn" values={{ device: 'Safari · iPad' }} type="warning" persist />;
+    const page = (raise: ReactNode, props: Partial<DevicesPageViewProps> = {}) => settingsPage('remote-access', <><DevicesPageView reach={on} devices={remaining} activity={activity} now={DESIGN_NOW} {...props} />{raise}</>);
+    return [
+      frame(`sign-out-toast-${lang}`, `刚退出 · 一个提示条，那一行马上不见 · ${lang}`, at(900), { reach: on, devices: remaining }, { ...fx, render: page(toast) }),
+      frame(`sign-out-toast-390-${lang}`, `刚退出 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining }, { ...fx, render: page(toast) }),
+      frame(`sign-out-still-signed-in-${lang}`, `刚退出，但它还登录着账号、这里结束不了：同一个提示条多一句，关掉才走 · ${lang}`, at(900), { reach: on, devices: remaining }, { ...fx, render: page(still) }),
+      frame(`sign-out-still-signed-in-390-${lang}`, `同上 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining }, { ...fx, render: page(still) }),
+      frame(`signed-out-list-${lang}`, `最近退出的设备：等待中、已送达、别人的、同一次登录都不说；结束不了和等了一天多才各一句 · ${lang}`, at(1500), { reach: on, devices: onlyHost, signedOut }, { ...fx, render: page(null, { devices: onlyHost, activity: [], signedOut }) }),
+      frame(`signed-out-list-390-${lang}`, `最近退出的设备 · 390 宽 · ${lang}`, { width: 390, height: 2000 }, { reach: on, devices: onlyHost, signedOut }, { ...fx, render: page(null, { devices: onlyHost, activity: [], signedOut }) }),
+    ];
+  }),
 
   // 7. Health connections no listed device is proven to own; things that did not happen.
   frame('unlinked-health', '未对应到设备的健康连接：各自一行，按自己的编号断开', at(1100),

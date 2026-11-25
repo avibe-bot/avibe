@@ -144,7 +144,7 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
         for (status, reason, job), count in counts.items():
             aggregate[status, reason] += count
             children.append(dict(receipt=op, status=status, reason=reason, job=job, count=count))
-        output.append(_public(op, device, kind, name, aggregate, receipt_group(actor, subject, role)))
+        output.append(_public(op, device, kind, name, aggregate, receipt_group(actor, subject, role), now))
     if parents:
         conn.execute(receipts.insert(), parents)
         conn.execute(items.insert(), children)
@@ -153,14 +153,17 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
     return output
 
 
-def _public(op, device, kind, name, counts, group):
+def _public(op, device, kind, name, counts, group, signed_out_at):
+    # ``signed_out_at``: when this Avibe ended it (epoch seconds), so a page can tell an account
+    # sign-out still waiting after a long time from one that has just started.
     return dict(operation_id=op, device_id=device, kind=kind, display_name=name, group=group, local_status='ended',
+                signed_out_at=signed_out_at,
                 account_results=[dict(status=s, reason=r, count=n) for (s, r), n in sorted(counts.items())])
 
 
 def recent(conn, binding, subject, owner, now):
     query = select(receipts.c.id, receipts.c.device_id, receipts.c.kind, receipts.c.display_name,
-                   receipts.c.subject, receipt_roles.c.login_role).select_from(
+                   receipts.c.subject, receipts.c.created_at, receipt_roles.c.login_role).select_from(
         receipts.outerjoin(receipt_roles, receipt_roles.c.receipt == receipts.c.id)).where(
         receipts.c.binding == binding, or_(receipts.c.expires_at.is_(None), receipts.c.expires_at > now))
     if not owner:
@@ -173,4 +176,4 @@ def recent(conn, binding, subject, owner, now):
             groups[op][status, reason] += n
     # ``subject`` is the viewer's account, or None for a viewer on this computer itself.
     return [_public(p.id, p.device_id, p.kind, p.display_name, groups[p.id],
-                    receipt_group(subject, p.subject, p.login_role)) for p in parents]
+                    receipt_group(subject, p.subject, p.login_role), p.created_at) for p in parents]

@@ -70,14 +70,14 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, []);
 
   const showToast = useCallback(
-    (message: string, type: ToastType = 'success', action?: ToastAction) => {
+    (message: string, type: ToastType = 'success', action?: ToastAction, options?: { persist?: boolean }) => {
       // Coalesce duplicate messages from polling / retry loops. The user
       // sees one toast with a "(×N)" badge instead of a wall of identical
       // popups; this matters most for transient 503s during daemon restarts.
       // Actionable toasts opt out (see shouldCoalesceToast).
       const now = Date.now();
       const existing = recentRef.current.get(message);
-      if (shouldCoalesceToast(!!action, existing, now)) {
+      if (!options?.persist && shouldCoalesceToast(!!action, existing, now)) {
         cancelTimer(existing!.timer);
         setToasts((prev) =>
           prev.map((t) => (t.id === existing!.id ? { ...t, repeats: t.repeats + 1, type } : t)),
@@ -97,6 +97,8 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const id = ++toastId;
       // Only track plain toasts for dedupe; actionable ones are always distinct.
       setToasts((prev) => [...prev, { id, message, type, repeats: 0, action }]);
+      // A toast that asks for a decision stays until it is closed.
+      if (options?.persist) return;
 
       // Auto dismiss (longer for actionable toasts so undo is reachable).
       const timer = scheduleTimer(() => {
