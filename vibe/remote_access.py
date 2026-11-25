@@ -7391,6 +7391,7 @@ def make_session_cookie(
     account_session_ref: str | None = None,
     account_enroll_before: int | None = None,
     previous: Mapping[str, Any] | None = None,
+    owner_signed_out: Mapping[str, Any] | None = None,
 ) -> str:
     """Issue a new session. ``previous`` (from :func:`same_browser_session`) is the session this
     browser already holds; the new one takes over its device row and it is signed out."""
@@ -7442,7 +7443,7 @@ def make_session_cookie(
     cookie = _encode_session_cookie(cloud.session_secret, payload)
     register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True,
                             account_session_ref=account_session_ref, account_enroll_before=account_enroll_before,
-                            previous=previous)
+                            previous=previous, owner_signed_out=owner_signed_out)
     return cookie
 
 
@@ -7454,7 +7455,7 @@ def device_binding(config: V2Config) -> str:
 
 
 def register_device_session(config, identity, claims, headers, *, fresh=False, account_session_ref=None,
-                            account_enroll_before=None, previous=None):
+                            account_enroll_before=None, previous=None, owner_signed_out=None):
     from vibe.account_session_revoke import pairing_epoch
     from storage import device_health_registry, device_registry
     from storage.db import get_cached_sqlite_engine
@@ -7465,12 +7466,31 @@ def register_device_session(config, identity, claims, headers, *, fresh=False, a
         expires_at=identity['auth_time'] + SESSION_ABSOLUTE_TTL_SECONDS, now=int(time.time()), fresh=fresh,
         epoch=pairing_epoch(config) if account_session_ref else None, reference=account_session_ref,
         account_enroll_before=account_enroll_before, previous=previous if fresh else None,
+        owner_signed_out=owner_signed_out if fresh else None,
     )
+    if replaced == device_registry.ENDED:
+        from storage.device_account_signout import AccountSignInEnded
+        raise AccountSignInEnded('account_session_signed_out')
     if replaced:
         # Committed: close the replaced session's streams, then clear its unused Health codes.
         old_sid, pending = replaced
         publish_browser_session_revoked(old_sid)
         device_health_registry.finish_pending(get_cached_sqlite_engine(), pending)
+
+
+def signed_out_session(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+    """The signed-out session this request's own cookie names, verified with this instance's
+    current secret: its id and the cookie's own deadline (its ``exp``, or ``iat`` + the
+    organization limit). Whether the owner ended it, and whether that is finished, is for
+    ``record_session`` to read under its lock."""
+    identity = parse_session_identity(config, cookie_value, allow_revoked=True)
+    sid = identity.get(_SESSION_BROWSER_ID_KEY) if identity is not None else None
+    if not isinstance(sid, str) or not _SESSION_BROWSER_ID_RE.fullmatch(sid):
+        return None
+    valid_until = int(identity["exp"])
+    if _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) == "organization":
+        valid_until = min(valid_until, int(identity["iat"]) + ORGANIZATION_SESSION_TTL_SECONDS)
+    return {"sid": sid, "valid_until": valid_until}
 
 
 def same_browser_session(config: V2Config, cookie_value: str | None, subject: str) -> dict[str, Any] | None:
