@@ -191,8 +191,13 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
           : t('devices.rebind.asNewCloud.loseNamePlain', { host: domain }))
       : unbindNameKeptText(t, domain, date, dialog.holdDays);
     return (
-      <Dialog open onOpenChange={close}>
-        <DialogContent className="max-w-md content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
+      <Dialog open onOpenChange={(open) => { if (!busy) close(open); }}>
+        <DialogContent
+          className={`max-w-md content-start ${busy ? '[&>button.absolute]:hidden' : ''}`}
+          mobileSheetHeight="tall"
+          keepOnOutsideClick={busy}
+          closeLabel={t('common.close')}
+        >
           <DialogHeader>
             <DialogTitle className="text-balance">{t('devices.rebind.asNewCloud.title', { host: domain })}</DialogTitle>
             <DialogDescription>
@@ -205,7 +210,7 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
             <KeptTail fill text={t('devices.rebind.asNewCloud.next')} />
           </p>
           <DialogFooter>
-            <Button variant="ghost" onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
+            <Button variant="ghost" disabled={busy} onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
             <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNewAction')}</Button>
           </DialogFooter>
         </DialogContent>
@@ -217,8 +222,13 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
   // avibe.bot, then bind as a new computer. Offered at the computer only, as binding again is.
   if (dialog.kind === 'asNew' && dialog.afterRefusal) {
     return (
-      <Dialog open onOpenChange={close}>
-        <DialogContent className="max-w-md content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
+      <Dialog open onOpenChange={(open) => { if (!busy) close(open); }}>
+        <DialogContent
+          className={`max-w-md content-start ${busy ? '[&>button.absolute]:hidden' : ''}`}
+          mobileSheetHeight="tall"
+          keepOnOutsideClick={busy}
+          closeLabel={t('common.close')}
+        >
           <DialogHeader>
             <DialogTitle className="text-balance">{t('devices.rebind.asNewLocal.title')}</DialogTitle>
             <DialogDescription><KeptTail text={t('devices.rebind.asNew.refusedLead')} /></DialogDescription>
@@ -229,7 +239,7 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
             <KeptTail fill text={t('devices.rebind.asNewLocal.next')} />
           </p>
           <DialogFooter>
-            <Button variant="ghost" onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
+            <Button variant="ghost" disabled={busy} onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
             <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNew.localAction')}</Button>
           </DialogFooter>
         </DialogContent>

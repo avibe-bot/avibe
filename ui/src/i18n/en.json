@@ -8564,7 +8564,6 @@
       "unbinding": "Unbinding. This continues by itself.",
       "done": "This computer is unbound",
       "notChanged": "Not unbound. Nothing changed. avibe.bot does not allow unbinding this Avibe here; the remote access switch is back as it was before.",
-      "needsRepair": "Unbinding did not finish, and this page cannot handle it. Run vibe remote reset in this computer's terminal.",
       "thatComputer": "the computer running Avibe"
     }
   },

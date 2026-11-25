@@ -88,7 +88,7 @@ const designFrames = frames([
   frame('ineligible', '实例说不能在这里解除绑定：没有入口，和「更改域名」一样', PAGE, { unbind: { state: 'ineligible' } }),
 
   // 6. Only this computer can sort it out: the page's existing sentence, no new one.
-  frame('needs-repair', '需要在这台电脑上处理 · 指向 vibe remote reset；按钮都收起', PAGE, { unbind: { state: 'needsRepair' } }),
+  frame('needs-repair', '需要在这台电脑上处理 · 复用已有的那句（vibe remote rebind 这时只清本机）；按钮都收起', PAGE, { unbind: { state: 'needsRepair' } }),
 
   // 7. 「作为一台新电脑重新绑定」 now deletes the old binding at avibe.bot first; where avibe.bot does
   //    not accept that (its key no longer works), a separate confirmation clears this computer only.
@@ -100,6 +100,8 @@ const designFrames = frames([
     { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: true, releaseAt: RELEASE, holdDays: 30 } }),
   frame('as-new-local-after-401', '先删云端时 avibe.bot 答什么都没变、旧钥匙已经失效：单独问一次，只清这台电脑；不动 avibe.bot 上的任何东西；之后绑定到接下来登录的账号', { width: 1440, height: 1250 },
     { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true, afterRefusal: true } }),
+  frame('as-new-cloud-busy', '作为新电脑绑定（删除云端）· 按下以后：取消和关闭都不起作用', { width: 1440, height: 1200 },
+    { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindBusy: true, rebindDialog: { kind: 'asNewCloud', healthConnected: true, releaseAt: RELEASE, holdDays: 30 } }),
   frame('as-new-local-after-401-phone', '只清这台电脑 · 390 宽', { ...IPHONE_17_PRO, width: 390, height: 1700 },
     { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true, afterRefusal: true } }),
 ]);

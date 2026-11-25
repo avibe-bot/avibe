@@ -63,3 +63,21 @@ describe('UnbindConfirm', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 });
+
+describe('RebindDialogs · binding as a new computer, once pressed', () => {
+  it('cannot be cancelled or closed, the delete-first one and the local-only one alike', async () => {
+    const { RebindDialogs } = await import('./RebindViews');
+    const state = { state: 'asNewOffered', reason: 'predecessor_unrecoverable' } as const;
+    for (const dialog of [
+      { kind: 'asNewCloud', healthConnected: true, holdDays: 30 } as const,
+      { kind: 'asNew', healthConnected: true, afterRefusal: true } as const,
+    ]) {
+      const onRebindClose = vi.fn();
+      const { unmount } = render(<RebindDialogs dialog={dialog} state={state} host={host} busy actions={{ onRebindClose }} />);
+      expect((screen.getByRole('button', { name: '取消' }) as HTMLButtonElement).disabled).toBe(true);
+      fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+      expect(onRebindClose).not.toHaveBeenCalled();
+      unmount();
+    }
+  });
+});

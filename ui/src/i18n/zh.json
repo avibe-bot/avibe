@@ -8564,7 +8564,6 @@
       "unbinding": "正在解除绑定，会自动继续。",
       "done": "这台电脑已解除绑定",
       "notChanged": "没有解除绑定，什么都没变。avibe.bot 不允许在这里解除这个 Avibe 的绑定；远程访问的开关恢复到了按下之前。",
-      "needsRepair": "解除绑定没有做完，这一页处理不了。请在这台电脑的终端运行 vibe remote reset。",
       "thatComputer": "运行 Avibe 的那台电脑"
     }
   },

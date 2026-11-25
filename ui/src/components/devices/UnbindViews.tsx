@@ -25,8 +25,9 @@ export function UnbindLine({ state }: { state: UnbindState }) {
     return <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink"><KeptTail text={t('devices.unbind.notChanged')} /></div>;
   }
   if (state.state === 'needsRepair') {
-    // Binding again is held while an unbinding is unfinished: the way out is the terminal's reset.
-    return <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink"><KeptTail text={t('devices.unbind.needsRepair')} /></div>;
+    // The page's own sentence: at this computer `vibe remote rebind` clears only this computer, as
+    // `vibe remote reset` does, while an unbinding is unfinished. No new sentence.
+    return <div role="alert" className="mt-1 text-[11px] leading-relaxed text-gold-ink"><KeptTail text={t('devices.rebind.needsTerminal')} /></div>;
   }
   return null;
 }
