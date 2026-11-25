@@ -618,6 +618,10 @@ final class DirectPathController {
     private var completionAwaitingCloses: DirectRebindCompletion?
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
+    // The runtime whose first strict route was not ready. Unlike an excluded
+    // host it may prepare again: its gate has not admitted a WebKit load.
+    private var firstRouteWait: (runtime: MobileRuntimeContext, store: UUID, since: ContinuousClock.Instant)?
+    private var firstRouteRetry: Task<Void, Never>?
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -841,7 +845,7 @@ final class DirectPathController {
         guard !routeOwner.isExcluded(authority.host, store: store) else {
             return
         }
-        let ready = await ensureListener()
+        let ready = await ensureListener(for: authority.host)
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -851,7 +855,13 @@ final class DirectPathController {
             let listenerPort,
             listenerState == .ready
         else {
-            routeOwner.exclude(authority.host, store: store)
+            if needsListener(authority.host) {
+                if firstRouteWait?.runtime != runtime || firstRouteWait?.store != store {
+                    firstRouteWait = (runtime, store, .now)
+                }
+            } else {
+                routeOwner.exclude(authority.host, store: store)
+            }
             return
         }
         // The listener accepts the host before WebKit can be routed to it.
@@ -883,7 +893,13 @@ final class DirectPathController {
                 )
             })
         else {
-            routeOwner.exclude(authority.host, store: store)
+            if needsListener(authority.host) {
+                if firstRouteWait?.runtime != runtime || firstRouteWait?.store != store {
+                    firstRouteWait = (runtime, store, .now)
+                }
+            } else {
+                routeOwner.exclude(authority.host, store: store)
+            }
             return
         }
     }
@@ -1049,6 +1065,9 @@ final class DirectPathController {
     /// that selection close; public relays and closures are untouched (the
     /// documents that would act on a closure are gone).
     func runtimeDidStop() {
+        firstRouteRetry?.cancel()
+        firstRouteRetry = nil
+        firstRouteWait = nil
         let hadSelection = runtime != nil || target != nil
         runtime = nil
         settleHeldReplies()
@@ -1600,7 +1619,7 @@ final class DirectPathController {
     /// Waits, at most the listener bound, for the listener to be ready:
     /// starting it if none exists, or letting a bind or a re-bind under way
     /// finish.
-    private func ensureListener() async -> Bool {
+    private func ensureListener(for host: String) async -> Bool {
         switch listenerState {
         case .ready:
             return true
@@ -1624,11 +1643,11 @@ final class DirectPathController {
             break
         }
         // The bind runs on its own; this wait is bounded either way.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(timing.listenerWaitSeconds))
-        while listenerState == .binding || listenerState == .rebinding,
-              ContinuousClock.now < deadline
-        {
-            try? await Task.sleep(for: .milliseconds(25))
+        let started = ContinuousClock.now
+        while listenerState == .binding || listenerState == .rebinding {
+            let seconds = needsListener(host) ? timing.strictOpenSeconds : timing.listenerWaitSeconds
+            guard !Task.isCancelled, ContinuousClock.now < started.advanced(by: .seconds(seconds)) else { break }
+            do { try await Task.sleep(for: .milliseconds(25)) } catch { return false }
         }
         return listenerState == .ready
     }
@@ -1775,6 +1794,13 @@ final class DirectPathController {
     /// `lastFailure` is `nil`. Every change of it is announced through
     /// `onAvailabilityChanged`.
     var listenerRecovery: DirectListenerRecovery? {
+        if let waiting = firstRouteWait, !isInBackground, waiting.runtime == runtime,
+           waiting.store == websiteDataStore.identifier,
+           let host = DirectAuthority(instanceURL: waiting.runtime.instance.url)?.host,
+           needsListener(host), !routeOwner.routes(host, store: waiting.store) {
+            return DirectListenerRecovery(since: waiting.since, lastFailure: listenerFailures.last,
+                                          portMayBeForeign: portLastKnownForeign)
+        }
         guard
             let listener,
             let recovery,
@@ -1802,6 +1828,29 @@ final class DirectPathController {
     func retryListenerNow() {
         settleRecordedFault()
         startAttemptIfFailed()
+        retryFirstRouteIfNeeded()
+    }
+
+    private func retryFirstRouteIfNeeded() {
+        guard let waiting = firstRouteWait, waiting.runtime == runtime, !isInBackground,
+              waiting.store == websiteDataStore.identifier, firstRouteRetry == nil,
+              let host = DirectAuthority(instanceURL: waiting.runtime.instance.url)?.host,
+              needsListener(host), !routeOwner.routes(host, store: waiting.store) else { return }
+        firstRouteRetry = Task { [weak self] in
+            guard let self else { return }
+            await self.prepareRoute(for: waiting.runtime) {
+                !Task.isCancelled && self.runtime == waiting.runtime && !self.isInBackground &&
+                    self.websiteDataStore.identifier == waiting.store && self.needsListener(host)
+            }
+            guard !Task.isCancelled else { return }
+            self.firstRouteRetry = nil
+            if self.routeOwner.routes(host, store: waiting.store) {
+                self.firstRouteWait = nil
+                self.select()
+                self.updatePreference()
+            }
+            self.onAvailabilityChanged()
+        }
     }
 
     /// The listening socket of `failed` failed, as its lifecycle recorded
@@ -2135,6 +2184,7 @@ final class DirectPathController {
             return
         }
         isInBackground = false
+        retryFirstRouteIfNeeded()
         if let leftForegroundAt {
             awaySeconds = Int(leftForegroundAt.duration(to: ContinuousClock.now).components.seconds)
         }

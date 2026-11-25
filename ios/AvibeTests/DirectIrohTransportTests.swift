@@ -55,7 +55,7 @@ final class DirectIrohTransportTests: XCTestCase {
 
         XCTAssertEqual(harness.rendezvous.requests.count, 4)
         XCTAssertEqual(harness.log.all, ["key"])
-        XCTAssertEqual(harness.reports, [])
+        XCTAssertEqual(harness.reports, [.answeredWithoutLink])
     }
 
     func testAHostThatIsNotADNSNameIsNeverAskedFor() async throws {
@@ -195,7 +195,7 @@ final class DirectIrohTransportTests: XCTestCase {
         try await eventually("the silent path is closed") {
             harness.log.count(of: "connection.close") == 3 && harness.scheduler.pending == [5]
         }
-        XCTAssertEqual(harness.reports, [])
+        XCTAssertEqual(harness.reports, Array(repeating: .answeredWithoutLink, count: 3))
     }
 
     func testADialThatDoesNotAnswerEndsAtItsBoundAndALateConnectionIsClosed() async throws {
@@ -217,7 +217,7 @@ final class DirectIrohTransportTests: XCTestCase {
             harness.log.count(of: "connection.close") == 1
         }
         XCTAssertEqual(harness.log.count(of: "open"), 0)
-        XCTAssertEqual(harness.reports, [])
+        XCTAssertEqual(harness.reports, [.answeredWithoutLink])
     }
 
     func testDeselectEndsADialAtOnceAndWhatArrivesLateIsClosed() async throws {
@@ -685,7 +685,7 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("the withdrawal is reported") {
-            harness.reports.count == 4 && harness.reports.last == .lost
+            harness.reports == [.usable(generation: "boot:1"), .lost, .usable(generation: "boot:2"), .lost, .answeredWithoutLink]
         }
         XCTAssertEqual(harness.log.count(of: "connection.close"), 2)
         XCTAssertEqual(harness.scheduler.pending, [60])
@@ -752,7 +752,7 @@ final class DirectIrohTransportTests: XCTestCase {
             )
         )
         XCTAssertTrue(harness.scheduler.fire(0.25))
-        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+        try await eventually("the path comes up") { harness.reports == [.answeredWithoutLink, .usable(generation: "boot:1")] }
         XCTAssertEqual(harness.transport.pathDiagnostics.attempts.last, DirectDialAttempt(
             offered: DirectAddressFamilies(), offeredRelay: true,
             local: DirectAddressFamilies(ipv4: 1, ipv6: 1), path: .relay
@@ -984,7 +984,7 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.rendezvous.answer(DirectIrohFixtures.unavailable(retryAfterSeconds: 60))
         XCTAssertTrue(harness.scheduler.fire(240))
         try await eventually("the withdrawal is reported") {
-            harness.reports == [.usable(generation: "boot:1"), .lost]
+            harness.reports == [.usable(generation: "boot:1"), .lost, .answeredWithoutLink]
         }
         XCTAssertEqual(harness.scheduler.pending, [60])
         await assertStale { _ = try await harness.transport.openStream(for: harness.tag("boot:1", path: 9)) }
@@ -1307,7 +1307,7 @@ final class DirectIrohTransportTests: XCTestCase {
             hold.release()
             try await Task.sleep(nanoseconds: 150_000_000)
             XCTAssertEqual(harness.log.all, ["key"])
-            XCTAssertEqual(harness.reports, [])
+            XCTAssertEqual(harness.reports, [.answeredWithoutLink, .answeredWithoutLink])
             XCTAssertEqual(harness.scheduler.pending, [90])
         }
         // The dial's own bound ends it, and then the selection ends.
@@ -1342,7 +1342,7 @@ final class DirectIrohTransportTests: XCTestCase {
             hold.release()
             try await Task.sleep(nanoseconds: 150_000_000)
             XCTAssertEqual(harness.log.all, ["key"])
-            XCTAssertEqual(harness.reports, [])
+            XCTAssertEqual(harness.reports, [.answeredWithoutLink])
         }
         do {
             let harness = Harness()
@@ -1478,7 +1478,7 @@ final class DirectIrohTransportTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 50_000_000)
             XCTAssertEqual(harness.log.count(of: "connect"), 0)
-            XCTAssertEqual(harness.reports, [])
+            XCTAssertEqual(harness.reports, [.answeredWithoutLink])
             XCTAssertEqual(harness.scheduler.pending, [90])
         }
         // The selection ends while the bind is in the binding.
@@ -1692,7 +1692,7 @@ final class DirectIrohTransportTests: XCTestCase {
             harness.log.count(of: "connection.close") == 1
         }
         try await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(harness.reports, [])
+        XCTAssertEqual(harness.reports, [.answeredWithoutLink])
         XCTAssertEqual(harness.scheduler.pending, [90])
     }
 

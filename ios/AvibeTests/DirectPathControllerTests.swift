@@ -256,6 +256,59 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertNil(harness.controller.plan(for: authority)?.openDirect)
     }
 
+    @MainActor
+    func testStrictBootstrapUsesTunnelThenFencesItAndAcceptsRelay() async throws {
+        let harness = try Harness(test: self)
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        let authority = try XCTUnwrap(DirectAuthority(instanceURL: url))
+        let controller = harness.controller
+        controller.setDirectOnly(true, forInstanceURL: url)
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        controller.noteInstanceLoad(forInstanceURL: url)
+        let bootstrap = try XCTUnwrap(controller.plan(for: authority))
+        XCTAssertNil(bootstrap.openDirect)
+        XCTAssertNotNil(bootstrap.openPublic)
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertFalse(bootstrap.isCurrent())
+        let linked = try XCTUnwrap(controller.plan(for: authority))
+        XCTAssertNotNil(linked.openDirect)
+        XCTAssertNil(linked.openPublic)
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+        harness.transport.report(.lost, for: target)
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        let waiting = try XCTUnwrap(controller.plan(for: authority))
+        XCTAssertNil(waiting.openDirect)
+        XCTAssertNil(waiting.openPublic)
+        XCTAssertEqual(controller.strictFailureCount(forInstanceURL: url), 0)
+        harness.transport.report(.answeredWithoutLink, for: target)
+        XCTAssertEqual(controller.unlinkedRendezvousCount(forInstanceURL: url), 1)
+        controller.setDirectOnly(false, forInstanceURL: url)
+        try await eventually { harness.currentRoutes.first?.allowFailover == true }
+        XCTAssertFalse(waiting.isCurrent())
+        XCTAssertNotNil(try XCTUnwrap(controller.plan(for: authority)).openPublic)
+    }
+
+    @MainActor
+    func testOnlyAnActualUnroutedLoadNeedsRelaunch() throws {
+        let harness = try Harness(test: self)
+        let first = try XCTUnwrap(URL(string: "https://\(one)"))
+        let other = try XCTUnwrap(URL(string: "https://\(two)"))
+        let controller = harness.controller
+        _ = controller.loadGate(forInstanceURL: other)
+        controller.noteInstanceLoad(forInstanceURL: first)
+        for url in [first, other] { controller.setDirectOnly(true, forInstanceURL: url) }
+        XCTAssertTrue(controller.directOnlyNeedsRelaunch(forInstanceURL: first))
+        XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: other))
+        controller.setDirectOnly(false, forInstanceURL: first)
+        XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: first))
+    }
+
     // MARK: The path's kind, stickiness, and the race record
 
     /// `direct.status()` says whether the selected path's far end is on a
