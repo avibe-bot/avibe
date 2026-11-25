@@ -839,13 +839,40 @@ delivered but whose answer the user still owed was marked finished, then, told t
 "he did not answer, I stopped asking"; so the request says that only the answer, or the user dropping the matter,
 ends a wait.
 
-One thing is worse and is tracked separately (owner decision 2026-11-25): attributions to the user that the record
-does not support, counted by the judges over three runs, rose from 32 to 38 for one judge and from 75 to 108 for the
-other. They are not in Goals or Agreements but in the now, and two thirds are one pattern in one Session whose inputs
-are all Watch events: the Watch's standing instruction quoted as the user's words (52 before, 74 after). The other
-kind, the agent's own proposal or inference written as the user's, went from 9 to 15. The replay does not show why a
-change to Goals raises a count in the now; every wording of `checkpoint-v5.2` tried was above `checkpoint-v5.1`. The
-request:
+One thing is worse: attributions to the user that the record does not support, counted by the judges over three
+runs, rose from 32 to 38 for one judge and from 75 to 108 for the other. They are not in Goals or Agreements but in
+the now and in the probe answers, and two thirds are one pattern in one Session whose inputs are all Watch events:
+the Watch's standing instruction quoted as the user's words (52 before, 74 after). The other kind, the agent's own
+proposal or inference written as the user's, went from 9 to 15. The replay does not show why a change to Goals raises
+a count in the now; every wording of `checkpoint-v5.2` tried was above `checkpoint-v5.1`. The owner accepted it
+(2026-11-25) and set these figures as the baseline the next change to the request is measured against:
+
+| Baseline of 2026-11-25 | `checkpoint-v5.1` | `checkpoint-v5.2` |
+| --- | --- | --- |
+| Live mission retained after the 8th checkpoint, stored memory (Opus / Sol) | 100.0 / 98.8 | 100.0 / 94.6 |
+| the same, probe answer | 100.0 / 97.6 | 100.0 / 97.0 |
+| Live mission retained, all points, stored memory | 98.4 / 94.5 | 98.4 / 95.0 |
+| the same, probe answer | 97.7 / 92.4 | 98.4 / 92.7 |
+| A live mission judged lost, any point, either judge | 0 | 0 |
+| The user's constraints recalled, stored memory | 97.7 / 93.9 | 97.2 / 95.0 |
+| the same, probe answer | 88.7 / 81.7 | 87.5 / 81.4 |
+| Attributions to the user without support, per run, stored and probe (Opus) | 10, 11, 11 | 7, 13, 18 |
+| the same (Sol) | 24, 28, 23 | 38, 35, 35 |
+| Fabrications, per run (Opus) | 5, 4, 10 | 4, 3, 6 |
+| the same (Sol) | 130, 120, 122 | 141, 152, 113 |
+| Goals after the 8th checkpoint, tokens (of them finished entries) | 1,290 (720) | 525 (252) |
+| Minds shown cut, of 147 | 4 | 0 |
+| Requests per checkpoint | 2.59 | 2.48 |
+
+Its shape: five real Sessions (four on gpt-6-astra, one on gpt-6.1-sol; 14, 11, 10, 7, and 7 compaction points),
+each replayed as a chain through the shipped loop, a run continuing from its own earlier checkpoints, three runs per
+version; after each point one probe request with tools stubbed; each stored memory and probe answer judged blind
+against that point's Gold by claude-opus-5-5 and gpt-6.1-sol, at high effort. The Gold lists, per point, the missions,
+cursors, and the user's constraints the raw record supports, with their status; a mission counts as live while its
+result is undelivered or the user still asks for more of it. Percentages are means over points of the run means. The
+Gold holds conversation content and is kept outside the repository. A replay sends each request with a session id
+and a prompt cache key: without them a compaction's follow-up requests, whose prefix is the first request's, were
+cached 17 to 20% of the time, with them 99.9%. The request:
 
 ```text
 <context-checkpoint-request>
