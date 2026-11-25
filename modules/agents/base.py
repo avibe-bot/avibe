@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from core.agent_input import AgentInputMetadata
@@ -485,13 +486,21 @@ class BaseAgent(ABC):
         async def _run(delay: float | None = None) -> None:
             if delay:
                 await asyncio.sleep(delay)
-            updated = await asyncio.to_thread(
-                self._backfill_session_title_once,
-                agent_session_id=agent_session_id,
-                native_session_id=str(native_session_id),
-                working_path=working_path,
-                fallback_first_user_message=request.user_message,
-            )
+            if self.name in NATIVE_CLI_BACKENDS:
+                updated = await asyncio.to_thread(
+                    self._backfill_session_title_once,
+                    agent_session_id=agent_session_id,
+                    native_session_id=str(native_session_id),
+                    working_path=working_path,
+                    fallback_first_user_message=request.user_message,
+                )
+            else:
+                updated = self._backfill_session_title_once(
+                    agent_session_id=agent_session_id,
+                    native_session_id=str(native_session_id),
+                    working_path=working_path,
+                    fallback_first_user_message=request.user_message,
+                )
             if updated is None and delay is None and retry_delay_seconds:
                 asyncio.create_task(_run(retry_delay_seconds))
 

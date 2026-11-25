@@ -93,6 +93,7 @@ from modules.agents.antigravity.auth import (
 from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
+    extract_current_model_and_effort,
     extract_initial_default_effort,
     has_model_config_option,
     resolve_requested_model_and_effort,
@@ -113,6 +114,8 @@ AGY_CLI_DISABLE_AUTO_UPDATE_ENV = "AGY_CLI_DISABLE_AUTO_UPDATE"
 _CLIENT_INFO = {"name": "avibe", "version": "1.0.0"}
 _STOP_CANCEL_GRACE_SECONDS = 3.0
 _LIVE_CONFIG_FIELDS = frozenset({"idle_timeout_seconds", "auto_update"})
+_SELECTION_METADATA_KEY = "antigravity_selection"
+_MAX_CACHED_SELECTION_STATES = 512
 _API_KEY_AUTH_MODES = frozenset({"api_key", "gemini-api-key"})
 _AGENT_PLATFORM_AUTH_MODES = frozenset({"agent_platform", "agent-platform", "adc"})
 _OAUTH_AUTH_MODES = frozenset({"oauth", "oauth-personal", "oauth-business"})
@@ -333,6 +336,194 @@ class _ActiveTurn:
     prompt_task: asyncio.Task[dict[str, Any]] | None = None
 
 
+@dataclass(frozen=True)
+class _PersistedSelectionState:
+    default_efforts: dict[str, str] = field(default_factory=dict)
+    current_effort: str | None = None
+    native_session_id: str | None = None
+
+
+def _load_json_dict(raw: Any) -> dict[str, Any]:
+    try:
+        loaded = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _serialize_selection_state(
+    *,
+    default_efforts: Mapping[str, str],
+    current_effort: str | None,
+    native_session_id: str | None,
+) -> dict[str, Any]:
+    cleaned_defaults = {
+        str(model).strip(): str(effort).strip()
+        for model, effort in sorted(default_efforts.items())
+        if isinstance(model, str) and isinstance(effort, str) and model.strip() and effort.strip()
+    }
+    cleaned_effort = (
+        current_effort.strip()
+        if isinstance(current_effort, str) and current_effort.strip()
+        else None
+    )
+    cleaned_native = (
+        native_session_id.strip()
+        if isinstance(native_session_id, str) and native_session_id.strip()
+        else None
+    )
+    payload: dict[str, Any] = {
+        "default_efforts": cleaned_defaults,
+        "current_effort": cleaned_effort,
+    }
+    if cleaned_native is not None:
+        payload["native_session_id"] = cleaned_native
+    return payload
+
+
+def _parse_selection_state(raw: Any) -> _PersistedSelectionState | None:
+    if not isinstance(raw, Mapping):
+        return None
+    raw_defaults = raw.get("default_efforts")
+    default_efforts: dict[str, str] = {}
+    if isinstance(raw_defaults, Mapping):
+        for model, effort in raw_defaults.items():
+            if isinstance(model, str) and isinstance(effort, str):
+                cleaned_model = model.strip()
+                cleaned_effort = effort.strip()
+                if cleaned_model and cleaned_effort:
+                    default_efforts[cleaned_model] = cleaned_effort
+    raw_effort = raw.get("current_effort")
+    current_effort = (
+        raw_effort.strip()
+        if isinstance(raw_effort, str) and raw_effort.strip()
+        else None
+    )
+    raw_native = raw.get("native_session_id")
+    native_session_id = (
+        raw_native.strip()
+        if isinstance(raw_native, str) and raw_native.strip()
+        else None
+    )
+    return _PersistedSelectionState(
+        default_efforts=default_efforts,
+        current_effort=current_effort,
+        native_session_id=native_session_id,
+    )
+
+
+def _load_persisted_selection_state(
+    agent_session_id: str,
+    *,
+    expected_native_session_id: str | None = None,
+    db_path: Path | None = None,
+) -> _PersistedSelectionState | None:
+    cleaned_id = (agent_session_id or "").strip()
+    if not cleaned_id:
+        return None
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return None
+
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path, read_only=True)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+        if row is None:
+            return None
+        metadata = _load_json_dict(row["metadata_json"])
+        parsed = _parse_selection_state(metadata.get(_SELECTION_METADATA_KEY))
+        if parsed is None:
+            return None
+        if (
+            expected_native_session_id
+            and parsed.native_session_id
+            and parsed.native_session_id != expected_native_session_id
+        ):
+            return None
+        return parsed
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        logger.debug("Antigravity selection state load skipped for %s: %s", cleaned_id, exc)
+        return None
+    except Exception:
+        logger.debug("Antigravity selection state load failed for %s", cleaned_id, exc_info=True)
+        return None
+    finally:
+        engine.dispose()
+
+
+def _save_persisted_selection_state(
+    agent_session_id: str,
+    *,
+    default_efforts: Mapping[str, str],
+    current_effort: str | None,
+    native_session_id: str | None,
+    db_path: Path | None = None,
+) -> bool:
+    cleaned_id = (agent_session_id or "").strip()
+    if not cleaned_id:
+        return False
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return False
+
+    from sqlalchemy import select, update
+    from sqlalchemy.exc import OperationalError
+
+    from storage.agent_session_rows import reserve_write_lock
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    serialized = _serialize_selection_state(
+        default_efforts=default_efforts,
+        current_effort=current_effort,
+        native_session_id=native_session_id,
+    )
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            metadata = _load_json_dict(row["metadata_json"])
+            if metadata.get(_SELECTION_METADATA_KEY) == serialized:
+                return True
+            metadata[_SELECTION_METADATA_KEY] = serialized
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == cleaned_id)
+                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
+            )
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        logger.debug("Antigravity selection state save skipped for %s: %s", cleaned_id, exc)
+        return False
+    except Exception:
+        logger.debug("Antigravity selection state save failed for %s", cleaned_id, exc_info=True)
+        return False
+    finally:
+        engine.dispose()
+
+
 @dataclass
 class _RuntimeSession:
     runtime_key: str
@@ -348,6 +539,8 @@ class _RuntimeSession:
     current_effort: str | None = None
     default_efforts: dict[str, str] = field(default_factory=dict)
     selection_dirty: bool = False
+    persist_selection_to_db: bool = True
+    last_persisted_selection: tuple[str | None, tuple[tuple[str, str], ...], str | None] | None = None
     activation: RuntimeActivationIdentity | None = None
     active_turn: _ActiveTurn | None = None
     last_activity: float = field(default_factory=time.monotonic)
@@ -427,6 +620,7 @@ class AntigravityAgent(BaseAgent):
         self._rules_base_dir = rules_base_dir
         self._sessions: dict[str, _RuntimeSession] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+        self._selection_states: dict[str, _PersistedSelectionState] = {}
         self._renewal_epoch: int = 0
         self._shutting_down: bool = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -574,6 +768,90 @@ class AntigravityAgent(BaseAgent):
         skill_catalog = skill_catalog_sink[0] if skill_catalog_sink else None
         return spec, launch_env, skill_catalog
 
+    def _cache_session_selection_state(
+        self,
+        session: _RuntimeSession,
+    ) -> _PersistedSelectionState | None:
+        native_id = (session.native_session_id or "").strip()
+        if not native_id:
+            return None
+        state = _PersistedSelectionState(
+            default_efforts=dict(session.default_efforts),
+            current_effort=session.current_effort,
+            native_session_id=native_id,
+        )
+        self._selection_states.pop(native_id, None)
+        self._selection_states[native_id] = state
+        while len(self._selection_states) > _MAX_CACHED_SELECTION_STATES:
+            oldest_key = next(iter(self._selection_states))
+            self._selection_states.pop(oldest_key, None)
+        return state
+
+    async def _persist_session_selection_state(self, session: _RuntimeSession) -> None:
+        state = self._cache_session_selection_state(session)
+        if state is None or not session.persist_selection_to_db or not session.agent_session_id:
+            return
+        fingerprint = (
+            state.native_session_id,
+            tuple(sorted(state.default_efforts.items())),
+            state.current_effort,
+        )
+        if session.last_persisted_selection == fingerprint:
+            return
+        saved = await asyncio.to_thread(
+            _save_persisted_selection_state,
+            session.agent_session_id,
+            default_efforts=state.default_efforts,
+            current_effort=state.current_effort,
+            native_session_id=state.native_session_id,
+        )
+        if saved:
+            session.last_persisted_selection = fingerprint
+
+    async def _restore_selection_state(
+        self,
+        *,
+        agent_session_id: str,
+        native_session_id: str,
+        fallback_native_id: str | None = None,
+        load_from_db: bool = True,
+    ) -> _PersistedSelectionState | None:
+        mem_state = self._selection_states.get(native_session_id)
+        if mem_state is None and fallback_native_id and fallback_native_id != native_session_id:
+            mem_state = self._selection_states.get(fallback_native_id)
+
+        db_state: _PersistedSelectionState | None = None
+        if load_from_db and agent_session_id:
+            expected_native = fallback_native_id or native_session_id
+            db_state = await asyncio.to_thread(
+                _load_persisted_selection_state,
+                agent_session_id,
+                expected_native_session_id=expected_native,
+            )
+            if db_state is None and expected_native != native_session_id:
+                db_state = await asyncio.to_thread(
+                    _load_persisted_selection_state,
+                    agent_session_id,
+                    expected_native_session_id=native_session_id,
+                )
+
+        if mem_state is None and db_state is None:
+            return None
+        merged_defaults: dict[str, str] = {}
+        if db_state is not None:
+            merged_defaults.update(db_state.default_efforts)
+        if mem_state is not None:
+            merged_defaults.update(mem_state.default_efforts)
+            current_effort = mem_state.current_effort
+        else:
+            assert db_state is not None
+            current_effort = db_state.current_effort
+        return _PersistedSelectionState(
+            default_efforts=merged_defaults,
+            current_effort=current_effort,
+            native_session_id=native_session_id,
+        )
+
     async def _close_session(
         self,
         session: _RuntimeSession,
@@ -581,6 +859,8 @@ class AntigravityAgent(BaseAgent):
         intentional: bool = True,
         retire_activation: bool = True,
     ) -> bool:
+        if session.native_session_id and (session.default_efforts or session.current_effort is not None):
+            self._cache_session_selection_state(session)
         session.retired = True
         if intentional:
             session.intentional_teardown = True
@@ -722,13 +1002,6 @@ class AntigravityAgent(BaseAgent):
                     if isinstance(raw_options, list)
                     else ()
                 )
-                seeded_default = extract_initial_default_effort(
-                    session.config_options,
-                    allow_current_value=not stored_native_id,
-                )
-                if seeded_default is not None:
-                    init_model, init_effort = seeded_default
-                    session.default_efforts[init_model] = init_effort
                 session.activation = self._attach_activation(runtime_key)
                 self._sessions[runtime_key] = session
             except BaseException:
@@ -739,6 +1012,64 @@ class AntigravityAgent(BaseAgent):
             bound_id = self.bind_agent_session_id(request, native_session_id)
             if bound_id:
                 session.agent_session_id = bound_id
+            reserved_id = self._reserved_agent_session_id(request.context)
+            session.persist_selection_to_db = not (
+                use_backend_anchor and reserved_id and session.agent_session_id == reserved_id
+            )
+
+            if stored_native_id:
+                restored = await self._restore_selection_state(
+                    agent_session_id=session.agent_session_id,
+                    native_session_id=native_session_id,
+                    fallback_native_id=stored_native_id,
+                    load_from_db=session.persist_selection_to_db,
+                )
+                if restored is not None:
+                    session.default_efforts.update(restored.default_efforts)
+                    session.current_effort = restored.current_effort
+                seeded_default = extract_initial_default_effort(
+                    session.config_options,
+                    allow_current_value=False,
+                )
+                if seeded_default is not None:
+                    init_model, init_effort = seeded_default
+                    session.default_efforts[init_model] = init_effort
+                if session.default_efforts or session.current_effort is not None:
+                    await self._persist_session_selection_state(session)
+            elif fork_handoff_mode == FORK_HANDOFF_MODE_NATIVE and isinstance(pending_fork, Mapping):
+                source_native_id = str(pending_fork.get("source_native_session_id") or "").strip()
+                source_session_id = str(
+                    pending_fork.get("source_session_id")
+                    or pending_fork.get("fork_source_session_id")
+                    or ""
+                ).strip()
+                inherited = await self._restore_selection_state(
+                    agent_session_id=source_session_id,
+                    native_session_id=source_native_id,
+                    load_from_db=bool(source_session_id),
+                )
+                if inherited is not None:
+                    session.default_efforts.update(inherited.default_efforts)
+                    session.current_effort = inherited.current_effort
+                seeded_default = extract_initial_default_effort(
+                    session.config_options,
+                    allow_current_value=False,
+                )
+                if seeded_default is not None:
+                    init_model, init_effort = seeded_default
+                    session.default_efforts[init_model] = init_effort
+                if session.default_efforts or session.current_effort is not None:
+                    await self._persist_session_selection_state(session)
+            else:
+                seeded_default = extract_initial_default_effort(
+                    session.config_options,
+                    allow_current_value=True,
+                )
+                if seeded_default is not None:
+                    init_model, init_effort = seeded_default
+                    session.default_efforts[init_model] = init_effort
+                if session.default_efforts:
+                    await self._persist_session_selection_state(session)
             if fork_handoff_mode and session.agent_session_id:
                 await asyncio.to_thread(
                     record_fork_handoff_mode,
@@ -848,6 +1179,13 @@ class AntigravityAgent(BaseAgent):
 
         if isinstance(update, AcpConfigOptionUpdate):
             session.config_options = update.config_options
+            seeded_default = extract_initial_default_effort(
+                session.config_options,
+                allow_current_value=False,
+            )
+            if seeded_default is not None:
+                upd_model, upd_effort = seeded_default
+                session.default_efforts[upd_model] = upd_effort
             return
 
         if isinstance(update, AcpSessionInfoUpdate):
@@ -1224,18 +1562,33 @@ class AntigravityAgent(BaseAgent):
     ) -> None:
         """Invalidate cached selection state after any failed model/effort apply.
 
-        Preserves ``default_efforts`` and any active ``current_effort`` override so
-        the next turn explicitly reapplies the requested model and still restores
-        the model's baseline effort when an override is cleared.
+        Preserves ``default_efforts`` and any active or server-mutated
+        ``current_effort`` override so the next turn (even after transport
+        eviction or restart) explicitly reapplies the requested model and
+        restores the baseline effort when an override is cleared.
         """
         session.current_model = None
         session.selection_dirty = True
-        if (
-            isinstance(error, AntigravityModelSelectionError)
-            and error.config_options
-            and has_model_config_option(error.config_options)
-        ):
+        if not isinstance(error, AntigravityModelSelectionError):
+            return
+        if error.model and error.default_effort:
+            session.default_efforts[error.model] = error.default_effort
+        if error.config_options and has_model_config_option(error.config_options):
             session.config_options = error.config_options
+            seeded_default = extract_initial_default_effort(
+                error.config_options,
+                allow_current_value=False,
+            )
+            if seeded_default is not None:
+                init_model, init_effort = seeded_default
+                session.default_efforts[init_model] = init_effort
+            observed_model, observed_effort = extract_current_model_and_effort(error.config_options)
+            known_default = session.default_efforts.get(observed_model) if observed_model else None
+            if observed_effort is not None and (
+                error.reason == "effort_mismatch"
+                or (known_default is not None and observed_effort != known_default)
+            ):
+                session.current_effort = observed_effort
 
     async def handle_message(self, request: AgentRequest) -> None:
         if self._shutting_down or getattr(self.antigravity_config, "enabled", True) is False:
@@ -1286,6 +1639,10 @@ class AntigravityAgent(BaseAgent):
                 )
             except BaseException as exc:
                 self._invalidate_session_selection(session, exc)
+                if isinstance(exc, Exception):
+                    await self._persist_session_selection_state(session)
+                else:
+                    self._cache_session_selection_state(session)
                 raise
             session.config_options = applied.config_options
             session.current_model = applied.model
@@ -1293,6 +1650,7 @@ class AntigravityAgent(BaseAgent):
             session.selection_dirty = False
             if applied.default_effort is not None:
                 session.default_efforts[applied.model] = applied.default_effort
+            await self._persist_session_selection_state(session)
         except AntigravityResumeUnavailableError as exc:
             mark_prewrite_recovery_required(request.context, "native_session_not_found")
             await self._settle_turn_failure(session, None, request, exc)

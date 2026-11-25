@@ -2101,3 +2101,264 @@ async def test_partial_selection_failure_without_notification_reapplies_model_an
         assert session.current_model == "model-alpha"
         assert session.current_effort is None
         assert session.selection_dirty is False
+
+
+# ---------------------------------------------------------------------------
+# 17. Effort-reset state preserved across transport eviction and restart
+# ---------------------------------------------------------------------------
+
+
+def _peer_option_value(state_file: Path, session_id: str, option_id: str) -> str | None:
+    state = json.loads(state_file.read_text(encoding="utf-8"))
+    options = state["sessions"][session_id]["configOptions"]
+    for opt in options:
+        if opt.get("id") == option_id:
+            return opt.get("currentValue")
+    return None
+
+
+@pytest.mark.asyncio
+async def test_effort_reset_preserved_across_transport_eviction(tmp_path: Path) -> None:
+    from tests.helpers.antigravity_harness import make_agent_harness, make_request
+
+    async with make_agent_harness(tmp_path, record_rpc=True, name="effort-evict") as h:
+        # Turn 1: model-alpha defaults to "medium" (no defaultValue); override to "high".
+        req1 = make_request(message="t1", workdir=h.workdir, model="model-alpha", effort="high")
+        await h.agent.handle_message(req1)
+        assert not h.controller.events("result")[0][2].get("is_error")
+        assert _peer_option_value(h.state_file, "sess-1", "thought_level") == "high"
+
+        # Evict the cached transport/session in-process (e.g., idle timeout / spec change).
+        session = h.agent._sessions[req1.composite_session_id]
+        await h.agent._close_session(session, intentional=True, retire_activation=True)
+        assert h.agent._sessions == {}
+
+        # Turn 2: clear effort override (effort=None) -> resumes sess-1 and MUST reset to "medium".
+        assert h.rpc_log is not None
+        h.rpc_log.unlink(missing_ok=True)
+        h.controller.emitted.clear()
+        req2 = make_request(message="t2", workdir=h.workdir, model="model-alpha", effort=None)
+        await h.agent.handle_message(req2)
+
+        results2 = h.controller.events("result")
+        assert len(results2) == 1
+        assert not results2[0][2].get("is_error")
+        assert len(h.rpcs("session/resume")) == 1
+
+        set_calls = [
+            (rpc["params"]["configId"], rpc["params"]["value"])
+            for rpc in h.rpcs("session/set_config_option")
+        ]
+        assert ("thought_level", "medium") in set_calls
+        assert _peer_option_value(h.state_file, "sess-1", "thought_level") == "medium"
+
+
+@pytest.mark.asyncio
+async def test_effort_reset_preserved_across_agent_restart_via_sqlite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from config.v2_sessions import SessionsStore
+    from core.services import sessions as sessions_service
+    from modules.sessions_facade import SessionsFacade
+    from storage.db import create_sqlite_engine
+    from storage.importer import ensure_sqlite_state
+    from tests.helpers.antigravity_harness import (
+        FakeController,
+        antigravity_config,
+        app_config,
+        create_fake_agy_shim,
+        make_request,
+        read_jsonl,
+    )
+
+    ensure_sqlite_state()
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    state_file = tmp_path / "restart-state.json"
+    launch_log = tmp_path / "restart-launches.jsonl"
+    rpc_log = tmp_path / "restart-rpc.jsonl"
+    shim = create_fake_agy_shim(
+        tmp_path,
+        state_file=state_file,
+        launch_log=launch_log,
+        rpc_log=rpc_log,
+        name="fake-agy-restart",
+    )
+
+    loop_tid = threading.get_ident()
+    db_thread_ids: list[int] = []
+    orig_load = agy_agent_module._load_persisted_selection_state
+    orig_save = agy_agent_module._save_persisted_selection_state
+
+    def _recording_load(*args: Any, **kwargs: Any) -> Any:
+        db_thread_ids.append(threading.get_ident())
+        return orig_load(*args, **kwargs)
+
+    def _recording_save(*args: Any, **kwargs: Any) -> Any:
+        db_thread_ids.append(threading.get_ident())
+        return orig_save(*args, **kwargs)
+
+    monkeypatch.setattr(agy_agent_module, "_load_persisted_selection_state", _recording_load)
+    monkeypatch.setattr(agy_agent_module, "_save_persisted_selection_state", _recording_save)
+
+    # Process 1: run Turn 1 with effort="high" backed by real SQLite SessionsStore.
+    agy_cfg1 = antigravity_config(shim)
+    ctrl1 = FakeController(app_config(agy_cfg1), sessions=SessionsFacade(SessionsStore()))
+    agent1 = AntigravityAgent(ctrl1, agy_cfg1, rules_base_dir=tmp_path / "rules-1")
+    try:
+        req1 = make_request(message="t1", workdir=workdir, model="model-alpha", effort="high")
+        await agent1.handle_message(req1)
+        assert not ctrl1.events("result")[0][2].get("is_error")
+        agent_session_id = str(req1.context.platform_specific["agent_session_id"])
+        assert _peer_option_value(state_file, "sess-1", "thought_level") == "high"
+    finally:
+        await agent1.shutdown_runtime()
+
+    # Verify durable metadata persisted in SQLite agent_sessions.metadata_json.
+    engine = create_sqlite_engine()
+    try:
+        with engine.connect() as conn:
+            row = sessions_service.get_session(conn, agent_session_id)
+    finally:
+        engine.dispose()
+    assert row is not None
+    persisted_sel = row["metadata"]["antigravity_selection"]
+    assert persisted_sel == {
+        "native_session_id": "sess-1",
+        "default_efforts": {"model-alpha": "medium"},
+        "current_effort": "high",
+    }
+
+    # Process 2: brand-new AntigravityAgent instance (empty in-memory cache) resumes with effort=None.
+    rpc_log.unlink(missing_ok=True)
+    agy_cfg2 = antigravity_config(shim)
+    ctrl2 = FakeController(app_config(agy_cfg2), sessions=SessionsFacade(SessionsStore()))
+    agent2 = AntigravityAgent(ctrl2, agy_cfg2, rules_base_dir=tmp_path / "rules-2")
+    try:
+        req2 = make_request(message="t2", workdir=workdir, model="model-alpha", effort=None)
+        await agent2.handle_message(req2)
+        results2 = ctrl2.events("result")
+        assert len(results2) == 1
+        assert not results2[0][2].get("is_error")
+
+        rpcs = read_jsonl(rpc_log)
+        assert any(r.get("method") == "session/resume" for r in rpcs)
+        set_calls = [
+            (r["params"]["configId"], r["params"]["value"])
+            for r in rpcs
+            if r.get("method") == "session/set_config_option"
+        ]
+        assert ("thought_level", "medium") in set_calls
+        assert _peer_option_value(state_file, "sess-1", "thought_level") == "medium"
+    finally:
+        await agent2.shutdown_runtime()
+
+    # Confirm all SQLite selection reads/writes ran off the controller event loop.
+    assert db_thread_ids and all(tid != loop_tid for tid in db_thread_ids)
+
+    # Confirm persisted current_effort is cleared back to None while baseline remains recorded.
+    engine = create_sqlite_engine()
+    try:
+        with engine.connect() as conn:
+            row_after = sessions_service.get_session(conn, agent_session_id)
+    finally:
+        engine.dispose()
+    assert row_after is not None
+    assert row_after["metadata"]["antigravity_selection"] == {
+        "native_session_id": "sess-1",
+        "default_efforts": {"model-alpha": "medium"},
+        "current_effort": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_unrecoverable_effort_override_after_eviction_and_restart_fails_explicitly(
+    tmp_path: Path,
+) -> None:
+    from config.v2_sessions import SessionsStore
+    from core.native_dispatch_phase import (
+        DISPATCH_PHASE_PREWRITE,
+        prewrite_failure_evidence,
+        set_dispatch_phase,
+    )
+    from modules.sessions_facade import SessionsFacade
+    from storage.importer import ensure_sqlite_state
+    from tests.helpers.antigravity_harness import (
+        FakeController,
+        antigravity_config,
+        app_config,
+        create_fake_agy_shim,
+        make_request,
+        read_jsonl,
+    )
+
+    ensure_sqlite_state()
+    workdir = tmp_path / "repo"
+    workdir.mkdir()
+    state_file = tmp_path / "unrecoverable-state.json"
+    launch_log = tmp_path / "unrecoverable-launches.jsonl"
+    rpc_log = tmp_path / "unrecoverable-rpc.jsonl"
+    shim = create_fake_agy_shim(
+        tmp_path,
+        state_file=state_file,
+        launch_log=launch_log,
+        rpc_log=rpc_log,
+        name="fake-agy-unrecoverable",
+    )
+
+    agy_cfg1 = antigravity_config(shim)
+    ctrl1 = FakeController(app_config(agy_cfg1), sessions=SessionsFacade(SessionsStore()))
+    agent1 = AntigravityAgent(ctrl1, agy_cfg1, rules_base_dir=tmp_path / "rules-unrec-1")
+    try:
+        # Turn 1: override model-alpha to "high".
+        req1 = make_request(message="t1", workdir=workdir, model="model-alpha", effort="high")
+        await agent1.handle_message(req1)
+        assert not ctrl1.events("result")[0][2].get("is_error")
+
+        # Turn 2: switch to model-beta while keeping effort="high"; peer preserves "high" and omits defaultValue,
+        # so model-beta has no known baseline effort while current_effort="high".
+        ctrl1.emitted.clear()
+        req2 = make_request(message="t2", workdir=workdir, model="model-beta", effort="high")
+        await agent1.handle_message(req2)
+        assert not ctrl1.events("result")[0][2].get("is_error")
+        assert _peer_option_value(state_file, "sess-1", "model") == "model-beta"
+        assert _peer_option_value(state_file, "sess-1", "thought_level") == "high"
+
+        # Evict transport in-process and attempt to clear effort on model-beta.
+        session = agent1._sessions[req2.composite_session_id]
+        await agent1._close_session(session, intentional=True, retire_activation=True)
+        rpc_log.unlink(missing_ok=True)
+        ctrl1.emitted.clear()
+
+        req3 = make_request(message="t3", workdir=workdir, model="model-beta", effort=None)
+        set_dispatch_phase(req3.context, DISPATCH_PHASE_PREWRITE)
+        await agent1.handle_message(req3)
+        results3 = ctrl1.events("result")
+        assert len(results3) == 1
+        assert results3[0][2].get("is_error") is True
+        assert prewrite_failure_evidence(req3.context).get("reason") == "effort_reset_unavailable"
+        rpcs3 = read_jsonl(rpc_log)
+        assert any(r.get("method") == "session/resume" for r in rpcs3)
+        assert not any(r.get("method") == "session/prompt" for r in rpcs3)
+    finally:
+        await agent1.shutdown_runtime()
+
+    # Full restart (brand-new AntigravityAgent) must also fail explicitly rather than silently keeping "high".
+    rpc_log.unlink(missing_ok=True)
+    agy_cfg2 = antigravity_config(shim)
+    ctrl2 = FakeController(app_config(agy_cfg2), sessions=SessionsFacade(SessionsStore()))
+    agent2 = AntigravityAgent(ctrl2, agy_cfg2, rules_base_dir=tmp_path / "rules-unrec-2")
+    try:
+        req4 = make_request(message="t4", workdir=workdir, model="model-beta", effort=None)
+        set_dispatch_phase(req4.context, DISPATCH_PHASE_PREWRITE)
+        await agent2.handle_message(req4)
+        results4 = ctrl2.events("result")
+        assert len(results4) == 1
+        assert results4[0][2].get("is_error") is True
+        assert prewrite_failure_evidence(req4.context).get("reason") == "effort_reset_unavailable"
+        rpcs4 = read_jsonl(rpc_log)
+        assert any(r.get("method") == "session/resume" for r in rpcs4)
+        assert not any(r.get("method") == "session/prompt" for r in rpcs4)
+    finally:
+        await agent2.shutdown_runtime()

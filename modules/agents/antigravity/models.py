@@ -19,10 +19,14 @@ class AntigravityModelSelectionError(RuntimeError):
         *,
         reason: str = "model_selection_failed",
         config_options: tuple[dict[str, Any], ...] | None = None,
+        model: str | None = None,
+        default_effort: str | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
         self.config_options = config_options
+        self.model = model
+        self.default_effort = default_effort
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,21 @@ def extract_initial_default_effort(
     return init_model, init_effort
 
 
+def extract_current_model_and_effort(
+    config_options: Sequence[Mapping[str, Any]],
+) -> tuple[str | None, str | None]:
+    """Return ``(model, effort)`` currently reported in ``config_options``."""
+    model_option = _find_config_option(config_options, categories=("model",), ids=("model",))
+    effort_option = _find_config_option(
+        config_options,
+        categories=_EFFORT_CATEGORIES,
+        ids=_EFFORT_IDS,
+    )
+    current_model = _option_current_value(model_option) if model_option is not None else None
+    current_effort = _option_current_value(effort_option) if effort_option is not None else None
+    return current_model, current_effort
+
+
 def has_model_config_option(config_options: Sequence[Mapping[str, Any]]) -> bool:
     """Return True when ``config_options`` advertises a selectable ``model`` option."""
     model_option = _find_config_option(config_options, categories=("model",), ids=("model",))
@@ -245,6 +264,7 @@ async def _set_effort_option(
     options: tuple[dict[str, Any], ...],
     *,
     fallback_config_options: tuple[dict[str, Any], ...] | None = None,
+    default_effort: str | None = None,
 ) -> tuple[dict[str, Any], ...]:
     try:
         resp = await client.session_set_config_option(session_id, effort_option_id, target_effort)
@@ -254,6 +274,8 @@ async def _set_effort_option(
             f"{exc.message}",
             reason="effort_rejected",
             config_options=fallback_config_options,
+            model=selected_model,
+            default_effort=default_effort,
         ) from exc
     updated = _normalize_config_options(resp.get("configOptions"))
     if not updated:
@@ -276,6 +298,8 @@ async def _set_effort_option(
                 f"{target_effort!r} for model {selected_model!r}.",
                 reason="effort_mismatch",
                 config_options=updated,
+                model=selected_model,
+                default_effort=default_effort,
             )
     return updated
 
@@ -374,6 +398,8 @@ async def apply_model_and_effort(
                 f"for requested effort {selected_effort!r}.",
                 reason="effort_option_unavailable",
                 config_options=latest_options,
+                model=selected_model,
+                default_effort=baseline_effort,
             )
         if allowed_efforts and selected_effort not in allowed_efforts:
             raise AntigravityModelSelectionError(
@@ -381,6 +407,8 @@ async def apply_model_and_effort(
                 f"(available: {', '.join(sorted(allowed_efforts))}).",
                 reason="effort_unsupported",
                 config_options=latest_options,
+                model=selected_model,
+                default_effort=baseline_effort,
             )
 
         effort_option_id = str(effort_option["id"])
@@ -395,6 +423,7 @@ async def apply_model_and_effort(
                 selected_model,
                 options,
                 fallback_config_options=latest_options,
+                default_effort=baseline_effort,
             )
     elif effort_option is not None and isinstance(effort_option.get("id"), str):
         effort_option_id = str(effort_option["id"])
@@ -412,6 +441,7 @@ async def apply_model_and_effort(
                 selected_model,
                 options,
                 fallback_config_options=latest_options,
+                default_effort=baseline_effort,
             )
         elif prior_effort is not None and reset_target is None:
             if not model_needs_apply:
@@ -446,6 +476,7 @@ async def apply_model_and_effort(
                             selected_model,
                             options,
                             fallback_config_options=latest_options,
+                            default_effort=baseline_effort,
                         )
                 elif server_effort == prior_effort and bool(allowed_efforts - {prior_effort}):
                     raise AntigravityModelSelectionError(
@@ -453,6 +484,8 @@ async def apply_model_and_effort(
                         "after clearing the override and advertised no default value to restore.",
                         reason="effort_reset_unavailable",
                         config_options=latest_options,
+                        model=selected_model,
+                        default_effort=baseline_effort,
                     )
                 else:
                     baseline_effort = _valid_option_value(server_effort, allowed_efforts)
