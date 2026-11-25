@@ -137,16 +137,8 @@ def release_producer(producer):
 
 def test_publish_waits_for_successful_current_attempt_before_downloading(producer, tmp_path, monkeypatch):
     release_producer(producer)
-    producer["jobs"][0].update(status="in_progress", conclusion=None)
-    sleeps = []
-
-    def finish(seconds):
-        sleeps.append(seconds)
-        producer["jobs"][0].update(status="completed", conclusion="success")
-
-    monkeypatch.setattr(artifacts.time, "sleep", finish)
-    artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist")
-    assert sleeps == [15]
+    monkeypatch.setattr(artifacts.time, "sleep", lambda _: pytest.fail("unexpected runner wait"))
+    artifacts.fetch_build(REPO, "42", 2, SHA, tmp_path / "dist")
     assert (tmp_path / "dist/index.html").read_bytes() == b"verified UI"
 
 
@@ -166,7 +158,7 @@ def test_publish_fails_closed_for_failure_cancel_and_rerun(producer, tmp_path, c
     else:
         producer["run"]["conclusion"] = "cancelled"
     with pytest.raises(artifacts.ArtifactError):
-        artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist")
+        artifacts.fetch_build(REPO, "42", 2, SHA, tmp_path / "dist")
     assert not (tmp_path / "dist").exists()
 
 
@@ -184,8 +176,8 @@ def test_transient_status_failure_retries_but_never_becomes_proof(producer, tmp_
     sleeps = []
     monkeypatch.setattr(artifacts, "gh_json", transient)
     monkeypatch.setattr(artifacts.time, "sleep", sleeps.append)
-    artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist")
-    assert sleeps == [15]
+    artifacts.fetch_build(REPO, "42", 2, SHA, tmp_path / "dist")
+    assert sleeps == [1]
     assert (tmp_path / "dist/index.html").exists()
 
 
@@ -196,16 +188,21 @@ def test_persistent_status_failure_exhausts_the_wait_budget(producer, tmp_path, 
         raise subprocess.TimeoutExpired(["gh", "api"], 60)
 
     monkeypatch.setattr(artifacts, "gh_json", unavailable)
-    with pytest.raises(artifacts.ArtifactError, match="Timed out"):
-        artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist", timeout=0)
+    sleeps = []
+    monkeypatch.setattr(artifacts.time, "sleep", sleeps.append)
+    with pytest.raises(subprocess.TimeoutExpired):
+        artifacts.fetch_build(REPO, "42", 2, SHA, tmp_path / "dist")
+    assert sleeps == [1, 2]
     assert not (tmp_path / "dist").exists()
 
 
-def test_missing_job_cannot_wait_forever(producer, tmp_path):
+@pytest.mark.parametrize("jobs", [[], [dict(job("build-assets"), status="in_progress", conclusion=None)]])
+def test_missing_or_unfinished_job_refuses_immediately(producer, tmp_path, monkeypatch, jobs):
     release_producer(producer)
-    producer["jobs"] = []
-    with pytest.raises(artifacts.ArtifactError, match="Timed out"):
-        artifacts.wait_build(REPO, "42", 2, SHA, tmp_path / "dist", timeout=0)
+    producer["jobs"] = jobs
+    monkeypatch.setattr(artifacts.time, "sleep", lambda _: pytest.fail("unexpected runner wait"))
+    with pytest.raises(artifacts.ArtifactError, match="No completed"):
+        artifacts.fetch_build(REPO, "42", 2, SHA, tmp_path / "dist")
 
 
 def test_ui_cli_fallback_is_nonfatal_but_publish_proof_failure_is_fatal(producer, tmp_path, monkeypatch):
@@ -217,5 +214,5 @@ def test_ui_cli_fallback_is_nonfatal_but_publish_proof_failure_is_fatal(producer
     monkeypatch.setattr("sys.argv", arguments)
     assert artifacts.main() == 0
     assert output.read_text() == "reused=false\n"
-    arguments[1] = "wait-build"
+    arguments[1] = "fetch-build"
     assert artifacts.main() == 1
