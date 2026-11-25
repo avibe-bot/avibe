@@ -1957,5 +1957,9 @@
       "refreshTitle": "{name} 请求更新健康数据",
       "notificationBody": "请在 iPhone 上打开 Avibe 处理。"
     }
+  },
+  "antigravityNotice": {
+      "effortAdjusted": "{model} 使用思考级别 {effort}。",
+      "noEffort": "{model} 不使用思考级别。"
   }
 }

@@ -22,6 +22,7 @@ from config import paths
 from core.agent_input import AgentInputMetadata
 from core.agent_output import (
     Narration,
+    Notice,
     ToolActivity,
     TurnEnd,
     TurnOutcome,
@@ -1778,6 +1779,11 @@ class AntigravityAgent(BaseAgent):
                 else:
                     self._cache_session_selection_state(session)
                 raise
+            if resolved_effort is not None and applied.effort != resolved_effort:
+                await emit_output(self.controller, request.context, Notice(text=i18n_t(
+                    "antigravityNotice.effortAdjusted" if applied.effort else "antigravityNotice.noEffort",
+                    self._language(), model=applied.model, effort=applied.effort or "",
+                )))
             session.config_options = applied.config_options
             session.current_model = applied.model
             session.current_effort = applied.effort

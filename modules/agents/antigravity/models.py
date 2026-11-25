@@ -472,26 +472,18 @@ async def apply_model_and_effort(
         allowed_efforts = set()
         baseline_effort = None
 
-    if selected_effort is not None:
-        if effort_option is None or not isinstance(effort_option.get("id"), str):
-            raise AntigravityModelSelectionError(
-                f"Antigravity model {selected_model!r} does not advertise a 'thought_level' config option "
-                f"for requested effort {selected_effort!r}.",
-                reason="effort_option_unavailable",
-                config_options=latest_options,
-                model=selected_model,
-                default_effort=baseline_effort,
-            )
-        if allowed_efforts and selected_effort not in allowed_efforts:
-            raise AntigravityModelSelectionError(
-                f"Reasoning effort {selected_effort!r} is not supported for Antigravity model {selected_model!r} "
-                f"(available: {', '.join(sorted(allowed_efforts))}).",
-                reason="effort_unsupported",
-                config_options=latest_options,
-                model=selected_model,
-                default_effort=baseline_effort,
-            )
+    if effort_option is None or not allowed_efforts:
+        selected_effort = None
+    elif selected_effort is not None and selected_effort not in allowed_efforts:
+        from core.session_route_succession import _nearest_effort
 
+        offered = [value for value, _ in _extract_option_choices_ordered(effort_option)]
+        if baseline_effort in offered:
+            offered.remove(baseline_effort)
+            offered.insert(0, baseline_effort)
+        selected_effort = _nearest_effort(selected_effort, offered)
+
+    if selected_effort is not None and effort_option is not None:
         effort_option_id = str(effort_option["id"])
         server_effort = _option_current_value(effort_option)
         # Re-apply effort whenever model changed or effort differs from server/tracked state.

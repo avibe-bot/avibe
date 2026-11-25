@@ -208,11 +208,15 @@ async def test_model_and_dependent_effort_applied_in_order_and_fails_explicitly(
         assert (sess.current_model, sess.current_effort) == ("model-beta", "high") and next(o for o in sess.config_options if o["id"] == "thought_level")["currentValue"] == "high"
 
         prompts_before = len(h.rpcs("session/prompt"))
-        for model, effort, expected in (("nonexistent-model", None, "nonexistent-model"), ("model-beta", "ultra-invalid", "ultra-invalid")):
+        for model, effort, expected in (("nonexistent-model", None, "nonexistent-model"),):
             h.controller.emitted.clear()
             await h.agent.handle_message(make_request(message="hello", workdir=h.workdir, model=model, effort=effort))
             assert expected in h.controller.events("notify")[0][1] and h.controller.events("result")[0][2].get("is_error") is True
         assert len(h.rpcs("session/prompt")) == prompts_before
+        h.controller.emitted.clear()
+        await h.agent.handle_message(make_request(message="hello", workdir=h.workdir, model="model-beta", effort="ultra-invalid"))
+        assert not h.controller.events("result")[0][2].get("is_error")
+        assert "uses thinking level" in h.controller.events("notify")[0][1]
 
 
 @pytest.mark.asyncio
@@ -334,6 +338,8 @@ async def test_partial_selection_failure_without_notification_reapplies_model_an
                     if cid == "model":
                         peer["model"] = str(val)
                     elif cid == "thought_level":
+                        if peer["model"] == "model-beta":
+                            raise AcpRpcError(-32602, "native effort change rejected")
                         if mismatch_next:
                             mismatch_next = False
                             peer["thought_level"] = "low"
@@ -363,7 +369,7 @@ async def test_partial_selection_failure_without_notification_reapplies_model_an
 
         before = len(prompt_states)
         await _turn("t2", "model-beta", "ultra-invalid")
-        assert set_calls == [("model", "model-beta")] and peer["model"] == "model-beta" and len(prompt_states) == before
+        assert set_calls == [("model", "model-beta"), ("thought_level", "medium")] and peer["model"] == "model-beta" and len(prompt_states) == before
         assert h.controller.events("result")[0][2].get("is_error") is True and sess.current_model is None and sess.selection_dirty is True
 
         await _turn("t3", "model-alpha", None)
@@ -372,7 +378,7 @@ async def test_partial_selection_failure_without_notification_reapplies_model_an
         await _turn("t4", "model-alpha", "high")
         before = len(prompt_states)
         await _turn("t5", "model-beta", "ultra-invalid" if return_empty else "high")
-        assert set_calls == [("model", "model-beta")] and len(prompt_states) == before and sess.current_model is None and sess.current_effort == "high"
+        assert set_calls == [("model", "model-beta"), ("thought_level", "medium")] and len(prompt_states) == before and sess.current_model is None and sess.current_effort == "high"
 
         await _turn("t6", "model-alpha", None)
         assert set_calls == [("model", "model-alpha"), ("thought_level", "medium")] and prompt_states[-1] == ("model-alpha", "medium")
@@ -1276,3 +1282,17 @@ async def test_tool_activity_emits_one_row_with_command_output_and_readable_path
         assert len(rows[0][1]) < 1600
         assert "../" not in rows[1][1]
         assert str((h.workdir / "../outside.md").resolve()) in rows[1][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("efforts,expected", [(("low", "medium", "high"), "high"), ((), None)])
+async def test_model_effort_maps_to_offered_level_or_runs_without_thinking(efforts, expected):
+    options = [{"id": "model", "category": "model", "currentValue": "model-beta", "options": [{"value": "model-beta"}]}]
+    if efforts:
+        options.append({"id": "thought_level", "category": "thought_level", "currentValue": "medium", "options": [{"value": level} for level in efforts]})
+    class Peer:
+        async def session_set_config_option(self, sid, option_id, value):
+            assert option_id == "thought_level" and value == expected
+            return {}
+    applied = await apply_model_and_effort(Peer(), "sid", options, model="model-beta", effort="xhigh", current_model="model-beta", default_effort=None)
+    assert applied.effort == expected

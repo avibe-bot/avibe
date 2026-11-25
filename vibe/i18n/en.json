@@ -1957,5 +1957,9 @@
       "refreshTitle": "{name} requests a health data update",
       "notificationBody": "Open Avibe on iPhone to handle this request."
     }
+  },
+  "antigravityNotice": {
+      "effortAdjusted": "{model} uses thinking level {effort}.",
+      "noEffort": "{model} runs without a thinking level."
   }
 }
