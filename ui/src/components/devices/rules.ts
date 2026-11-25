@@ -5,7 +5,7 @@ import type { TFunction } from 'i18next';
 import type { TranslationKey } from '@/i18n/types';
 import { dayText, healthText } from './format';
 import { instanceUrl } from './paths';
-import type { AccountResult, Device, DeviceActivity, DeviceFunction, RenameDevice, SignedOutDevice, TunnelSetting } from './types';
+import type { Device, DeviceActivity, DeviceFunction, RenameDevice, TunnelSetting } from './types';
 
 /** The Avibe App's TestFlight invitation; TestFlight lists the App as 「Avibe OS」. */
 export const TESTFLIGHT_INVITE_URL = 'https://testflight.apple.com/join/HXqwMqeX';
@@ -102,34 +102,6 @@ export function activityText(t: TFunction, language: string, item: DeviceActivit
     case 'remoteAccessOff':
       return t('devices.activity.remoteAccessOff');
   }
-}
-
-const accountKeys = {
-  queued: 'devices.signedOut.queued',
-  retrying: 'devices.signedOut.retrying',
-  accepted: 'devices.signedOut.accepted',
-  sharedSignIn: 'devices.signedOut.sharedSignIn',
-  keeperUnknown: 'devices.signedOut.keeperUnknown',
-  refusedCredential: 'devices.signedOut.refusedCredential',
-  refused: 'devices.signedOut.refused',
-  unconfirmed: 'devices.signedOut.unconfirmed',
-  unknown: 'devices.signedOut.unknown',
-} as const satisfies Record<Exclude<AccountResult, 'localOnly'>, TranslationKey>;
-
-/**
- * What avibe.bot did about a signed-out device's account sign-in, one sentence per distinct
- * result. Never "ended": accepted is accepted. Where only this Avibe's sign-in ended, the advice
- * depends on whose device it was; where that is not known, both halves are said.
- */
-export function accountResultTexts(t: TFunction, device: Pick<SignedOutDevice, 'owner' | 'results'>, rebindOffered = true): string[] {
-  return [...new Set(device.results)].map((result) => {
-    // Where this instance has no way to bind again, the sentence does not send anyone there.
-    if (result === 'refusedCredential' && !rebindOffered) return t('devices.signedOut.refusedCredentialPlain');
-    if (result !== 'localOnly') return t(accountKeys[result]);
-    if (device.owner === 'mine') return t('devices.signedOut.localOnlyMine');
-    if (device.owner === 'others') return t('devices.signedOut.localOnlyOthers');
-    return t('devices.signedOut.localOnlyEither');
-  });
 }
 
 /** A tunnel setting's stored value, as its own control names it. */
