@@ -6,6 +6,8 @@
 import { createRoot } from 'react-dom/client';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
+import LanguageDetector from 'i18next-browser-languagedetector';
+import { I18N_OPTIONS } from '../../src/i18n/options';
 import en from '../../src/i18n/en.json';
 import zh from '../../src/i18n/zh.json';
 import '../../src/index.css';
@@ -27,10 +29,13 @@ import { CodexProviderConfig } from '../../src/components/settings/providers/Cod
 // show whether System-mode follow and preference preservation still work.
 const params = new URLSearchParams(location.search);
 const language = createInstance();
+// `lang=environment` starts the way the product does: the shipped detection
+// options decide from the browser's preferred languages (and a kept pick).
+const environment = params.get('lang') === 'environment';
+if (environment) language.use(LanguageDetector);
 await language.init({
-  lng: params.get('lang') ?? 'en',
+  ...(environment ? I18N_OPTIONS : { lng: params.get('lang') ?? 'en', interpolation: { escapeValue: false } }),
   resources: { en: { translation: en }, zh: { translation: zh } },
-  interpolation: { escapeValue: false },
 });
 
 createRoot(document.getElementById('root')!).render(
