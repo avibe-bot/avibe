@@ -6719,7 +6719,7 @@ def test_desktop_enrollment_recovery_and_relogin_closed_loop(desktop_host, monke
 
 
 def test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt(pairing_host, monkeypatch):
-    """Scenario: AUTH-SETUP-917"""
+    """Scenario: AUTH-SETUP-918"""
     import http.client
     from tests.ui_server_test_helpers import csrf_headers
     from vibe import binding_admission, desktop_local_instance, direct_certificates, remote_access, ui_server
