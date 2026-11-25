@@ -276,10 +276,25 @@ class SQLiteTranscriptStore:
             await self._write(session_id, publish)
         return snapshot
 
-    async def load_for_preview(self, session_id: str) -> RunTranscript:
-        """Same projected read snapshot, without publishing derived checkpoint metadata."""
+    async def load_for_preview(self, session_id: str, *, context_seq: int | None = None) -> RunTranscript:
+        """Project a current or historical snapshot without publishing checkpoint metadata."""
+        if context_seq is not None:
+            return await asyncio.to_thread(self._preview_cut, session_id, context_seq)
         runtime, _ = await asyncio.to_thread(self._load_runtime, session_id)
         return runtime
+
+    def _preview_cut(self, session_id: str, seq: int) -> RunTranscript:
+        from core.agent_core.harness.runtime import compact_runtime
+        from storage.carry_projection import read_projection
+
+        with self._engine.begin() as conn:
+            if not conn.connection.dbapi_connection.in_transaction:
+                conn.exec_driver_sql("BEGIN")
+            rows = _context_entries(conn, session_id)
+            if seq > (rows[-1].context_seq if rows else 0):
+                raise ValueError("context_seq is beyond the committed context")
+            mask = read_projection(conn, _ancestry(conn, session_id))
+            return compact_runtime(list(mask.apply(row for row in rows if row.context_seq <= seq)))
 
     def _load_runtime(self, session_id: str):
         from storage.agent_runtime_transcript import read_runtime

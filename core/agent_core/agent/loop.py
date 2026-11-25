@@ -534,24 +534,27 @@ class Agent:
         async with self._lock:
             if self._running:
                 raise RuntimeError("cannot preview an Agent with an active run")
-            if entries is None and context_seq is None:
-                runtime = await self.store.load_for_preview(self.session_id)
+            clocks = {}
+            stored_cut = entries is None and context_seq is not None
+            if entries is None:
+                runtime = (await self.store.load_for_preview(self.session_id) if context_seq is None else
+                           await self.store.load_for_preview(self.session_id, context_seq=context_seq))
                 entries = runtime.entries
+                clocks = dict(runtime.response_clocks)
                 epoch = runtime.carry_projection
-                preview_session = self.session_id
+                preview_session = self.session_id if context_seq is None else None
             else:
-                # A historical cut or injected row set does not certify the live parent's epoch.
                 epoch = ""
                 preview_session = None
-            rows = deepcopy(list(entries if entries is not None else await self.store.load(self.session_id)))
+            rows = deepcopy(list(entries))
             head = max((row.context_seq for row in rows), default=0)
-            if context_seq is not None and context_seq > head:
+            if not stored_cut and context_seq is not None and context_seq > head:
                 raise ValueError("context_seq is beyond the committed context")
             if context_seq is not None:
                 rows = [row for row in rows if row.context_seq <= context_seq]
             projection = _borrowed_context_view(rows)
             snapshot = Snapshot(
-                self.session_id, max((row.context_seq for row in rows), default=0), deepcopy(dict(projection.state))
+                self.session_id, context_seq if stored_cut else max((row.context_seq for row in rows), default=0), deepcopy(dict(projection.state))
             )
             if self.hooks or self.rehydrate is not None:
                 return RequestPreview(snapshot, "unsupported_hooks")
@@ -566,7 +569,7 @@ class Agent:
             preparing._run_tools = None
             preparing._turn_inputs = {seq for seq in turn_inputs if 0 < seq <= snapshot.context_seq}
             preparing._unproductive = 0
-            preparing._last_model_at = {}
+            preparing._last_model_at = clocks
             preparing._refusals = _Refusals(opaque=set(projection.opaque_refused))
             if preparing.context is not None:
                 now = preparing.context.clock()

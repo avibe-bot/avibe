@@ -220,6 +220,13 @@ def test_repeated_carry_suppresses_occurrences_not_matching_text_or_future_fork_
         assert read_projection(conn, [(sid, None)]).identity
     assert [r.row_id for r in asyncio.run(transcript.load_for_preview(sid)).entries] == [unrelated]
     assert [r.row_id for r in asyncio.run(transcript.load_for_preview("child_frozen")).entries] == [unrelated, report]
+    with engine.begin() as conn:
+        _session(conn, "child_after", scope, {"fork_source_session_id": sid, "fork_source_context_seq": 3,
+                 "fork_source_carry_mask": fork_mask(conn, sid, 3)})
+    # The old cut remains addressable even though both its final occurrences are suppressed.
+    for child, cut, expected in [("child_frozen", 2, [unrelated, report]), ("child_after", 3, [unrelated])]:
+        runtime = asyncio.run(transcript.load_for_preview(child, context_seq=cut))
+        assert [r.row_id for r in runtime.entries] == expected
 
 
 def test_new_carry_invalidates_only_usage_anchors_measured_on_a_different_prefix(managers):
