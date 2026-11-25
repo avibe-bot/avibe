@@ -324,8 +324,9 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
             if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
                 raise AccountSessionSignedOut('account_session_signed_out')
             # Used once: a sign-in that comes back with the same old cookie later is an ordinary one.
-            # Only a mark still in force, by the clock read after the lock; never for an account
-            # session a live session here still uses (the device a sign-out kept).
+            # Only a mark still in force, by the clock read after the lock. While a live, not
+            # signed-out session here is enrolled with this same account session (the device a
+            # sign-out kept, for one), nothing is queued and this sign-in is ordinary.
             if not enrolled_elsewhere(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now) \
                     and conn.execute(state_meta.delete().where(
                     state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + owner_signed_out["sid"],

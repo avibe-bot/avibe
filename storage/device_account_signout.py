@@ -40,8 +40,9 @@ def enroll(conn, *, sid, subject, binding, epoch, reference, expires_at):
 
 
 def enrolled_elsewhere(conn, *, epoch, subject, reference, now):
-    """Whether a live, not signed-out session here signed in with this same account session (as a
-    sign-out keeps the device that asked for it): then it is not ended later either."""
+    """Whether a live, not signed-out session here is enrolled with this same account session (the
+    device a sign-out kept, for one). Only what is live now: a kept device with no live row here is
+    not seen."""
     digest = hashlib.sha256(json.dumps([epoch, subject, reference]).encode()).hexdigest()
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
     signed_out = select(state_meta.c.key).where(

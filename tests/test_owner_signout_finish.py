@@ -318,7 +318,7 @@ def test_mark_pruning_reads_one_bounded_page_and_walks_on(issuer):
 
 
 @pytest.mark.parametrize("bulk", [False, True])
-def test_the_account_session_of_the_device_that_signed_it_out_is_never_ended(issuer, monkeypatch, quiet, bulk):
+def test_a_browser_back_on_an_account_session_still_in_use_here_signs_in_as_today(issuer, monkeypatch, quiet, bulk):
     cfg = issuer
     kept = "asr1_" + "k" * 43
     old = first_login(cfg)
@@ -330,7 +330,9 @@ def test_the_account_session_of_the_device_that_signed_it_out_is_never_ended(iss
         (device,) = [d for d in listing(keeper)["mine"] if d["kind"] != "host" and not d["current"]]
         assert sign_out(keeper, device["id"] + "/sign-out").status_code == 200
     assert mark(sid) is not None
-    # The old browser comes back on the very account session the kept device signed in with.
+    # The old browser comes back on the very account session the kept device signed in with. While
+    # that session is live here, no sign-out of it is queued: the old browser signs in as today
+    # (it gets a new cookie), and its mark stays.
     c = browser(old)
     answer = finish(c, monkeypatch, cfg, start(c), ref=kept)
     assert answer.status_code == 302 and issued(answer) and job_rows() == []
