@@ -262,10 +262,12 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
             or fenced(conn, binding, subject, sid, signed_in, now)
         ):
             return None
-        if fresh and _tombstoned(conn, sid, now):
-            raise SessionNotRegistered('session_not_registered')
         # The clock read after the lock: a deadline crossed while waiting counts.
-        old = _replaced(conn, binding, subject, previous, int(time.time())) if fresh else None
+        locked_now = int(time.time())
+        # A new session has an id of its own: never the one it replaces, never a signed-out one.
+        if fresh and ((previous and previous["sid"] == sid) or _tombstoned(conn, sid, locked_now)):
+            raise SessionNotRegistered('session_not_registered')
+        old = _replaced(conn, binding, subject, previous, locked_now) if fresh else None
         source = "session"
         key = device_key(binding, subject, source, sid)
         device = dict(device_id=key, identity_source=source)

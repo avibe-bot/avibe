@@ -2072,6 +2072,63 @@ def test_device_account_signout_from_verified_exchange(monkeypatch, tmp_path, ca
     assert b.get('/api/session', base_url=origin).get_json()['authenticated'] is True
 
 
+
+def test_the_same_browser_signing_in_again_keeps_one_device_row(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-917. The handshake, id_token verification, registry and routes are real."""
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from tests.test_device_relogin import set_authorization
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    cfg = _save_remote_session_authorization_config('personal')
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.issuer, cloud.token_endpoint, cloud.jwks_uri = 'https://issuer.invalid', 'https://issuer.invalid/token', 'https://issuer.invalid/keys'
+    cfg.save()
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(remote_access, 'PyJWKClient', lambda _: SimpleNamespace(
+        get_signing_key_from_jwt=lambda _: SimpleNamespace(key=key.public_key())))
+    published = []
+    monkeypatch.setattr(remote_access, 'publish_browser_session_revoked', published.append)
+    origin = cloud.public_url
+
+    def begin(client):
+        return httpx.URL(client.get('/auth/login?next=/inbox', base_url=origin).headers['Location'])
+
+    def complete(client, authorize):
+        claims = {**_REMOTE_SESSION_OWNER_CLAIMS, 'iss': cloud.issuer, 'aud': cloud.client_id, 'sub': 'owner-1',
+                  'email': 'owner@example.com', 'email_verified': True, 'nonce': authorize.params['nonce'],
+                  'exp': int(time.time()) + 300}
+        token = jwt.encode(claims, key, algorithm='RS256')
+        monkeypatch.setattr(remote_access.requests, 'post', lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {'id_token': token}))
+        response = client.get('/auth/callback', base_url=origin, params={'code': 'fixture', 'state': authorize.params['state']})
+        assert response.status_code == 302
+        return _remote_session_set_cookie(response)[0]
+
+    def rows(client):
+        return sorted(row['id'] for row in client.get('/api/devices', base_url=origin).get_json()['mine'] if row['kind'] != 'host')
+
+    def signed_in(cookie):
+        probe = app.test_client()
+        probe.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain=httpx.URL(origin).host)
+        return probe.get('/api/session', base_url=origin).get_json()['authenticated']
+
+    browser, laptop = app.test_client(), app.test_client()
+    old = complete(browser, begin(browser))
+    complete(laptop, begin(laptop))
+    before = rows(laptop)
+    assert len(before) == 2
+    # The browser's authorization stops being current, so /auth/login starts OAuth with its cookie on.
+    set_authorization(cfg, old, lapsed=True)
+    authorize = begin(browser)
+    set_authorization(cfg, old, lapsed=False)
+    new = complete(browser, authorize)
+    assert new != old and rows(laptop) == before and rows(browser) == before
+    assert signed_in(new) is True and signed_in(old) is False
+    assert published == [remote_access.parse_session_identity(cfg, old, allow_revoked=True)['browser_session_id']]
+
+
 def _remote_session_lifetime_scenario(monkeypatch, tmp_path, instance_kind, idle_seconds):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _save_remote_session_authorization_config(instance_kind)
