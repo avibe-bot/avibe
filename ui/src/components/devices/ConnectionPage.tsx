@@ -183,11 +183,17 @@ export function ConnectionPage() {
    *  `followed` re-runs that check when following begins, for an end already read before it. */
   const followingUnbind = useRef(false);
   const [followed, setFollowed] = useState(0);
+  /** Device reads in the order they began, and the latest one applied: an older answer arriving
+   *  after a newer one (a read begun before the press, answered after it) is set aside. */
+  const deviceReads = useRef(0);
+  const deviceReadApplied = useRef(0);
   const readDevices = useCallback(async () => {
     const startedAt = unbindPresses.current;
+    const order = ++deviceReads.current;
     try {
       const snapshot = await api.devices();
-      if (!alive.current) return;
+      if (!alive.current || order < deviceReadApplied.current) return;
+      deviceReadApplied.current = order;
       setDevices(snapshot.devices);
       setUnbindReport(snapshot.unbind);
       const pressedAt = unbindPressedAt.current;

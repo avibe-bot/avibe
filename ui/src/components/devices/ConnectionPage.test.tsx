@@ -714,6 +714,27 @@ describe('ConnectionPage · binding again', () => {
     vi.useRealTimers();
   });
 
+  it('sets aside a device read begun before the press that answers after a newer one', async () => {
+    vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const before = { devices: [], unlinkedHealth: [], signedOut: [], bulk: null };
+    let slow: (value: typeof before) => void = () => undefined;
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue(before);
+    vi.spyOn(devicesApi, 'unbindCommit').mockImplementation(async () => {
+      devices.mockResolvedValue({ ...before, unbind: { state: 'unbinding' } });
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    const dialog = await screen.findByRole('dialog');
+    // A read begun now (before the press) answers only after the press's own read.
+    devices.mockImplementationOnce(() => new Promise((resolve) => { slow = resolve; }));
+    window.dispatchEvent(new Event('focus'));
+    fireEvent.click(within(dialog).getByRole('button', { name: '解除绑定' }));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    await act(async () => { slow(before); });
+    expect(screen.getByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+  });
+
   it('goes back to 「解除绑定」 when a confirmation lost on its way began nothing', async () => {
     vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
     vi.spyOn(devicesApi, 'unbindCommit').mockRejectedValue(new LostAnswer());
