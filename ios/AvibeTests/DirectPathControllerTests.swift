@@ -295,6 +295,69 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testStrictLossClosesTheWaitingCONNECTWithoutBytesOrAPublicDial() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 30, rebindSeconds: 10,
+                                                           strictOpenSeconds: 1), test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let port = try harness.listenerPort(since: listening)
+        let bootstrap = LoopbackClient(port: port)
+        defer { bootstrap.close() }
+        let tunnel = try await establishPublic(bootstrap, harness: harness)
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        try await eventually { controller.isDirectOnlyLinked(forInstanceURL: url) }
+        XCTAssertTrue(tunnel.isCancelled)
+        let linked = LoopbackClient(port: port)
+        defer { linked.close() }
+        _ = try await establishDirect(linked, harness: harness)
+        harness.transport.report(.lost, for: target)
+        let waiting = LoopbackClient(port: port)
+        defer { waiting.close() }
+        let start = ContinuousClock.now
+        try await waiting.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        let bytes = try await waiting.receiveUntilClosed()
+        XCTAssertTrue(bytes.isEmpty)
+        let elapsed = start.duration(to: .now)
+        XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(700)) // A refusal or an immediate silent close is wrong.
+        XCTAssertLessThan(elapsed, .seconds(10)) // Not the client's 30 s watchdog.
+        try await eventually { controller.strictFailureCount(forInstanceURL: url) == 1 }
+        XCTAssertEqual(harness.publicOrigin.streams.attempts, 1, "Only the deliberate bootstrap dialled public")
+    }
+
+    @MainActor
+    func testStrictFirstRouteIgnoresTheAutomaticWaitAndRemainsRetryableOnFailure() async throws {
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        let slow = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 0, rebindSeconds: 10), test: self)
+        try await slow.signIn()
+        slow.controller.setDirectOnly(true, forInstanceURL: url)
+        try await slow.select("instance-1")
+        XCTAssertTrue(slow.controller.routeOwner.routes(one, store: slow.websiteDataStore.identifier))
+        XCTAssertEqual(slow.controller.loadGate(forInstanceURL: url), .open)
+
+        // A genuinely failed initial bind holds this host but leaves it eligible for Retry.
+        let failed = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 0, rebindSeconds: 10,
+                                                          foregroundSeconds: 0), test: self)
+        try await failed.signIn()
+        failed.controller.setDirectOnly(true, forInstanceURL: url)
+        try await failed.select("instance-1")
+        XCTAssertFalse(failed.controller.routeOwner.isExcluded(one, store: failed.websiteDataStore.identifier))
+        XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertNotNil(failed.controller.listenerRecovery)
+        let before = failed.controller.listenerFailures.count
+        failed.controller.retryListenerNow()
+        try await eventually { failed.controller.listenerFailures.count > before }
+        XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .held)
+        failed.controller.setDirectOnly(false, forInstanceURL: url)
+        XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .open)
+    }
+
+    @MainActor
     func testOnlyAnActualUnroutedLoadNeedsRelaunch() throws {
         let harness = try Harness(test: self)
         let first = try XCTUnwrap(URL(string: "https://\(one)"))
