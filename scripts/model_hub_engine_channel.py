@@ -191,6 +191,8 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
                 "the rollback target needs a newer Avibe than the withdrawn release, "
                 "so machines running the withdrawn release could not use it"
             )
+        releases = [_release_entry(item.manifest_bytes, item.min_avibe_version) for item in listed.values()
+                    if item.asset_release_tag != operation.asset_release_tag]
         revoked.append(
             {
                 "asset_release_tag": operation.asset_release_tag,
@@ -207,7 +209,7 @@ def plan_payload(current: ChannelPayload | None, operation: Operation, *, now: d
         "releases": releases,
         "revoked": revoked,
     }
-    raw = json.dumps(document, separators=(",", ":")).encode("ascii")
+    raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode("ascii")
     try:
         payload = channel.parse_payload(raw)
         if current is not None:

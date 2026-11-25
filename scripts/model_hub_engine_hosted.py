@@ -50,16 +50,6 @@ def file_at(repo, sha, path):
     return git(repo, "show", f"{sha}:{path}")
 
 
-def check_published(published, allocated, parent, roots, verifier):
-    if published is None:
-        if parent is not None:
-            raise Error("missing published predecessor")
-        return
-    envelope, _ = channel.authenticate(published, roots=roots, verifier=verifier)
-    if envelope.payload not in (allocated, parent):
-        raise Error("published object diverges from current allocation or its exact predecessor")
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("generate",))
