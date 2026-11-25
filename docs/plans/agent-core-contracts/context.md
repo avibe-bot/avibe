@@ -813,7 +813,7 @@ of each section and how, and gives the Mission a way out (§10); and the request
 (`{mind_sizes}`). Stored minds are not rewritten. A list without boxes takes them at its next checkpoint: in replays
 of such a mind, a model told only the rule folded the finished entries at once, which reads as live entries gone and
 cost the repair, so the request tells a mind with unboxed entries to box each and keep them that once
-(`MIND_UNBOXED`). The request grew by 234 tokens, and by about 75 to 115 more with a previous mind's sizes; the
+(`MIND_UNBOXED`). The request grew by 362 tokens, and by about 75 to 115 more with a previous mind's sizes; the
 framing is unchanged, and nothing an ordinary Turn sends changes: the request is read only in a checkpoint turn, and
 a stored checkpoint's `summary` is fixed when it is written (§7).
 
@@ -821,18 +821,31 @@ Before it merged, the chained replay of `checkpoint-v5.1`'s evaluation was run a
 Sessions, 49 points, three runs each through the shipped loop, the probe after every point, two blind judges. That
 evaluation's Gold had been deleted with its working files and was rebuilt from the raw record, so these figures
 compare the two versions and do not continue the earlier series. Retention of the live mission after the eighth
-checkpoint was 100% on both versions for one judge and 98.8% against 96.4% for the other (one of 14 points lower, 13
-equal; 97.6% against 96.4% in the probe answer), and no judge found a live mission lost at any point. After the eighth
-checkpoint Goals took 436 tokens instead of 1,290, and finished items 199 instead of 720: 44 in folded lines, the rest
-in entries marked at that checkpoint. Four of 147 minds were shown cut before, none after. In single-checkpoint
-replays of 30 stored minds that had been shown cut, 11 were cut again under `checkpoint-v5.1` and 8 under
-`checkpoint-v5.2`, three of those only by entries just marked, so 5 lost live text against 11; no turn lost a live
-Mission entry or needed the Mission repair. Two things were worse. Recall of the user's constraints in the stored
-memory fell for both judges (97.7% to 96.5%, 93.9% to 89.0%; in the probe answer unchanged for one, 81.7% to 79.3%
-for the other), a few specifics of constraints tied to one item. And one judge counted more attributions to the user
-that the record does not support (75 to 95 over three runs; the other 32 to 29), typically a status justified as the
-user's choice; a first wording had raised them further, and the request now says to write a status as what happened
-and to credit the user only where they decided it. The request:
+checkpoint was 100% on both versions for one judge and 98.8% against 94.6% for the other (11 of 14 points equal, 3
+lower, not significant: five half points instead of one, all on one Session's one mission; 97.6% against 97.0% in
+the probe answer), and no judge found a live mission lost at any point. After the eighth checkpoint Goals took 525
+tokens instead of 1,290, and finished items 252 instead of 720. Four of 147 minds were shown cut before, none after.
+Recall of the user's constraints in the stored memory was 97.7% against 97.2% for one judge and 93.9% against 95.0%
+for the other. In single-checkpoint replays of 30 stored minds that had been shown cut, 11 were cut again under
+`checkpoint-v5.1` and 8 under an earlier wording of `checkpoint-v5.2`, three of those only by entries just marked,
+so 5 lost live text against 11; no turn lost a live Mission entry or needed the Mission repair.
+
+Three sentences of the request come from that replay. A first wording justified statuses as the user's choice
+("skipped by the user"), so the request says to write a status as what happened and to credit the user only where
+they decided it. A second wording lost clauses of constraints that were attached to one finished item (constraint
+recall 93.9% to 89.0% for the stricter judge), so whatever in an entry still binds moves to Agreements or onto a live
+entry before the entry folds; that brought recall back. And in a replay of a Bot's own mind, an item whose report was
+delivered but whose answer the user still owed was marked finished, then, told that waiting is live, rewritten as
+"he did not answer, I stopped asking"; so the request says that only the answer, or the user dropping the matter,
+ends a wait.
+
+One thing is worse and is tracked separately (owner decision 2026-11-25): attributions to the user that the record
+does not support, counted by the judges over three runs, rose from 32 to 38 for one judge and from 75 to 108 for the
+other. They are not in Goals or Agreements but in the now, and two thirds are one pattern in one Session whose inputs
+are all Watch events: the Watch's standing instruction quoted as the user's words (52 before, 74 after). The other
+kind, the agent's own proposal or inference written as the user's, went from 9 to 15. The replay does not show why a
+change to Goals raises a count in the now; every wording of `checkpoint-v5.2` tried was above `checkpoint-v5.1`. The
+request:
 
 ```text
 <context-checkpoint-request>
