@@ -236,11 +236,13 @@ export function DevicesPage() {
   // An evaluation that is running, and a connector still starting or connecting, are followed until they end.
   const startingStill = justStarted && Boolean(status) && (!status?.paired || !hostOf(status) || !(status.running || status.pid_state === 'unknown'));
   const connecting = startingStill || (Boolean(status?.running) && tunnelFromStatus(status, now, justStarted).state === 'connecting');
+  // An unbinding the instance carries on with is followed too, until it settles.
+  const unbinding = snapshot.unbind?.state === 'unbinding';
   useEffect(() => {
-    if (!recovering && !connecting) return undefined;
+    if (!recovering && !connecting && !unbinding) return undefined;
     const timer = window.setInterval(() => { void load(); }, FOLLOW_MS);
     return () => window.clearInterval(timer);
-  }, [connecting, load, recovering]);
+  }, [connecting, load, recovering, unbinding]);
 
   const activity = feed.items;
   const nextCursor = feed.cursor;
@@ -491,6 +493,10 @@ export function DevicesPage() {
       signedOut={snapshot.signedOut}
       signOutNotice={notice}
       unrecognizedChange={unrecognizedChange}
+      // 「解除绑定」 as the instance reports it: running, or done (the name stays 30 days where the
+      // instance gives no day).
+      unbind={snapshot.unbind?.state === 'unbinding' ? { state: 'unbinding' }
+        : snapshot.unbind?.state === 'unbound' ? { state: 'done', holdDays: 30 } : undefined}
       proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}
       problem={problem}

@@ -587,10 +587,14 @@ describe('ConnectionPage · binding again', () => {
     expect(readClaimMarker()?.away).toBeUndefined();
   });
 
-  it('offers binding as a new computer only after a refusal that allows it, to the browser that started the attempt', async () => {
+  it('offers binding as a new computer only after a refusal that allows it, to the browser that started the attempt (an instance before deleting first)', async () => {
     vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' });
     vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'other_account' });
-    const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: true });
+    // This instance has no delete-first route: it answers 404, and the local-only reset is offered.
+    const preview = vi.spyOn(devicesApi, 'previewReset').mockImplementation(async (_id, action) => {
+      if (action === 'unbind') throw new DevicesApiError(404, 'not_found', {});
+      return { confirmationId: 'reset-1', healthConnected: true };
+    });
     const reset = vi.spyOn(devicesApi, 'reset').mockResolvedValue('unpaired');
     writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
     mount();
@@ -598,7 +602,7 @@ describe('ConnectionPage · binding again', () => {
     expect(await screen.findByText(said('属于另一个账号（m***@gmail.com）'))).toBeTruthy();
     fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1'));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1', 'legacy'));
     // Whose Avibe it is comes first, then what is discarded; the copied-data sentence is the reset's own.
     expect(dialog.textContent).toContain('这台电脑绑定的 Avibe 属于另一个账号（m***@gmail.com）。');
     expect(dialog.textContent).toContain('你授权过的人都会失去访问权限');
@@ -606,8 +610,59 @@ describe('ConnectionPage · binding again', () => {
     expect(dialog.textContent).toContain('还要在 avibe.bot 上删除原来的 Avibe：在那之前，拿到副本的人仍然可以用它。');
     expect(reset).not.toHaveBeenCalled();
     fireEvent.click(within(dialog).getByRole('button', { name: '作为一台新电脑重新绑定' }));
-    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1'));
+    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1', 'legacy'));
     expect(await screen.findByText(said('完成。这台电脑不再绑定任何 Avibe，电脑上的内容原样保留。'))).toBeTruthy();
+  });
+
+  it('binding as a new computer deletes the binding at avibe.bot first, saying so as unbinding does', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: false });
+    const reset = vi.spyOn(devicesApi, 'reset').mockResolvedValue('unbinding');
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1', 'unbind'));
+    expect(dialog.textContent).toContain(`会先在 avibe.bot 上删除 ${host}，和解除绑定一样。`);
+    expect(dialog.textContent).toContain('所有设备的远程访问马上结束');
+    expect(dialog.textContent).toContain('绑定到你接下来在 avibe.bot 登录的账号');
+    fireEvent.click(within(dialog).getByRole('button', { name: '作为一台新电脑重新绑定' }));
+    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1', 'unbind'));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    // The claim stays this tab's: a refusal after it is asked about here.
+    expect(readClaimMarker()).toMatchObject({ kind: 'rebind', id: 'rebind-1' });
+  });
+
+  it('unbinds from 连接方式: preview, one confirmation, then the instance carries on', async () => {
+    const preview = vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const commit = vi.spyOn(devicesApi, 'unbindCommit').mockResolvedValue();
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    await waitFor(() => expect(preview).toHaveBeenCalled());
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain(`解除 ${host} 的绑定？`);
+    expect(commit).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: '解除绑定' }));
+    await waitFor(() => expect(commit).toHaveBeenCalledWith('unbind-1'));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+  });
+
+  it('says what the instance reports about an unbinding: refused as not eligible, or left for this computer', async () => {
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'notUnbound', reason: 'ineligible' } });
+    const { unmount } = mount();
+    expect(await screen.findByText(said('没有解除绑定，什么都没变。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+    unmount();
+
+    devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'repair' } });
+    mount();
+    expect(await screen.findByText(said('这台电脑的绑定记录有问题，这一页处理不了。请在这台电脑的终端运行 vibe remote rebind。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
   });
 
   it('points to the terminal command for a binding record this page cannot handle', async () => {

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
 import {
   activityFromWire, addressFromWire, claimProblem, connectionFromWire, devicesFromWire, rebindFromWire, rebindRefusal, rebindUnavailable,
-  renameRefusal, signedOutFromWire, tunnelFromStatus,
+  renameRefusal, signedOutFromWire, tunnelFromStatus, unbindFromWire,
 } from './wire';
 
 // Contracts: docs/plans/instance-device-registry.md, device-functions-activity.md,
@@ -212,6 +212,20 @@ describe('tunnelFromStatus', () => {
     expect(read({ tunnel_quality: sample() }, NOW + 200_000).state).toBe('unknown');
     expect(read({ paired: false, running: false }).state).toBe('unknown');
     expect(tunnelFromStatus(null).state).toBe('unknown');
+  });
+});
+
+describe('unbindFromWire', () => {
+  it('reads what the instance reports about unbinding, and nothing it does not know', () => {
+    expect(unbindFromWire({ state: 'unbinding' })).toEqual({ state: 'unbinding' });
+    expect(unbindFromWire({ state: 'unbound' })).toEqual({ state: 'unbound' });
+    expect(unbindFromWire({ state: 'reset_repair_required' })).toEqual({ state: 'repair' });
+    expect(unbindFromWire({ state: 'not_unbound', reason_code: 'ineligible' })).toEqual({ state: 'notUnbound', reason: 'ineligible' });
+    expect(unbindFromWire({ state: 'not_unbound', reason_code: 'invalid_credential' })).toEqual({ state: 'notUnbound', reason: 'invalidCredential' });
+    expect(unbindFromWire({ state: 'not_unbound', reason_code: 'other' })).toBeUndefined();
+    expect(unbindFromWire({ state: 'later' })).toBeUndefined();
+    expect(unbindFromWire(undefined)).toBeUndefined();
+    expect(devicesFromWire({ mine: [], unbind: { state: 'unbinding' } }).unbind).toEqual({ state: 'unbinding' });
   });
 });
 
