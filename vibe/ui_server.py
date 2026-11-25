@@ -112,7 +112,7 @@ from vibe.service_logging import (
     configure_service_logging,
     shutdown_service_logging,
 )
-from vibe import instance_address, instance_address_responses, ui_asset_archive
+from vibe import desktop_claim_admission, instance_address, instance_address_responses, service_claim_binding, ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 if TYPE_CHECKING:
@@ -3405,7 +3405,7 @@ def prevent_desktop_enrollment_caching(response: Response) -> Response:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
-        "/api/desktop/local-instance", "/api/desktop/local-instance/prepare",
+        "/api/desktop/local-instance", "/api/desktop/local-instance/prepare", desktop_claim_admission.ADMISSION_ROUTE,
         "/api/remote-access/vibe-cloud/pair",
     }:
         response.headers["Cache-Control"] = "no-store"
@@ -3626,11 +3626,15 @@ def _wake_address_streams() -> None:
     broker.publish(instance_address.ADDRESS_CHANGED_EVENT, {})
 
 
-def _start_instance_address() -> None:
+def _start_instance_address(*, binding_changed: bool = False) -> bool:
     try:
-        instance_address.start(wake_pages=_wake_address_streams, close_connections=_close_address_connections)
+        instance_address.start(
+            wake_pages=_wake_address_streams, close_connections=_close_address_connections, binding_changed=binding_changed
+        )
+        return True
     except Exception:
         logger.warning("Failed to start the instance address worker", exc_info=True)
+        return False
 
 
 class _InstanceAddressRoleMiddleware:
@@ -9007,13 +9011,24 @@ def _save_config_and_runtime_decisions(
 _UI_RUNTIME_ACTIVE = False
 
 
-def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
+def _ensure_remote_access_monitoring(config: V2Config | None = None, *, binding_changed: bool = False) -> bool:
     if not _UI_RUNTIME_ACTIVE:
-        return
+        return False
     try:
-        _start_remote_monitors(config)
+        monitor_ready = _start_remote_monitors(config)
     finally:
-        _start_instance_address()
+        address_ready = _start_instance_address(binding_changed=binding_changed)
+    return bool(monitor_ready and address_ready)
+
+
+def _on_claim_bound() -> bool:
+    # Worker admission is separate from pairing success. This callback does not
+    # request a connector, retry a pairing, or supply a target to the address worker.
+    try:
+        return _ensure_remote_access_monitoring(binding_changed=True)
+    except Exception:
+        logger.warning("Could not activate workers for the published binding")
+        return False
 
 
 def _start_remote_monitors(config, *, startup=False):
@@ -9036,7 +9051,8 @@ def _start_remote_monitors(config, *, startup=False):
         try:
             connection_runtime.start()
         finally:
-            remote_access.start_runtime_monitoring(config)
+            monitor_ready = remote_access.start_runtime_monitoring(config)
+    return monitor_ready
 
 
 @app.route("/api/control", methods=["POST"])
@@ -9418,6 +9434,53 @@ def desktop_local_instance_prepare():
     ))
 
 
+# This versioned POST is made by the native local jar, not by a browser. No
+# forwarded/represented identity headers (even unfamiliar ones) are part of its protocol.
+_DESKTOP_ADMISSION_HEADERS = frozenset({
+    "host", "origin", "cookie", "x-vibe-csrf-token", "content-type", "content-length",
+    "accept", "accept-encoding", "user-agent", "connection",
+})
+
+
+@app.post(desktop_claim_admission.ADMISSION_ROUTE, include_in_schema=False)
+async def desktop_claim_acknowledge(starlette_request: FastAPIRequest):
+    async def handler():
+        headers = starlette_request.headers
+        origin = headers.get("origin")
+        peer = _request_peer_address()
+        auth = _request_authorization_context()
+        if (auth is None or not auth.is_instance_owner or auth.is_remote
+                or _is_mutation_guard_exempt() or _is_direct_ingress_request() or not _is_direct_loopback_connection()
+                or peer is None or not peer.is_loopback or request.query_string
+                or starlette_request.scope["scheme"] != "http" or not desktop_claim_admission.literal_origin(origin)
+                or origin != "http://" + request.host or not set(headers).issubset(_DESKTOP_ADMISSION_HEADERS)
+                or len(headers.raw) != len(set(headers))
+                or headers.get("cookie") != f"{CSRF_COOKIE_NAME}={headers.get(CSRF_HEADER_NAME, '')}"):
+            return Response(status_code=403)
+        # The shared mutation hook has already required the matching CSRF header and cookie.
+        if (headers.get("content-type") != "application/json"
+                or not re.fullmatch(r"[1-9][0-9]{0,2}", headers.get("content-length", ""))
+                or int(headers["content-length"]) > 256):
+            return Response(status_code=400)
+        body = bytearray()
+        async for chunk in starlette_request.stream():
+            if len(body) + len(chunk) > 256:
+                return Response(status_code=400)
+            body.extend(chunk)
+        if len(body) != int(headers["content-length"]):
+            return Response(status_code=400)
+        try:
+            pairs = json.loads(body, object_pairs_hook=tuple)
+        except (ValueError, RecursionError):
+            return Response(status_code=400)
+        if not isinstance(pairs, tuple) or len(pairs) != 1 or pairs[0][0] != "challenge":
+            return Response(status_code=400)
+        admitted = await asyncio.to_thread(desktop_claim_admission.acknowledge, origin, pairs[0][1])
+        return Response(status_code=204 if admitted else 409)
+
+    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
+
+
 def _direct_rebind_denial():
     from vibe.authorization import current_invocation_authority
 
@@ -9494,7 +9557,7 @@ def _start_redirect_claim(*, constrained):
         # Loopback or an admitted private setup host; any forwarding (proxy, tunnel) needs link mode.
         admitted = _is_local_request(_load_remote_access_config()) and not _has_forwarded_metadata()
         body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
-                                    on_bound=_ensure_remote_access_monitoring)
+                                    on_bound=_on_claim_bound if constrained else service_claim_binding.current())
         response = jsonify(body)
         response.set_cookie("avibe_rebind_browser" if constrained else "avibe_claim_browser", nonce,
                             httponly=True, samesite="lax", path="/remote/claim/callback",
@@ -9642,7 +9705,12 @@ def remote_access_vibe_cloud_pair():
         **desktop,
     )
     if result.get("ok"):
-        _ensure_remote_access_monitoring()
+        # A keyless local Resume can finish a sealed rebind after its claim worker
+        # stopped. Only the protected pairing result can identify this transition.
+        if result.get("binding_disposition") in ("existing", "new"):
+            _on_claim_bound()
+        else:
+            _ensure_remote_access_monitoring()
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
     if result.get("error") == "local_operator_required":
@@ -21946,7 +22014,8 @@ def run_ui_server(host: str, port: int) -> None:
                 with serving_listener():
                     _UI_RUNTIME_ACTIVE = True
                     try:
-                        _server.run(sockets=bound_sockets)
+                        with service_claim_binding.serving(_on_claim_bound):
+                            _server.run(sockets=bound_sockets)
                     finally:
                         _UI_RUNTIME_ACTIVE = False
                 break

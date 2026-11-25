@@ -36,7 +36,7 @@ from jwt import PyJWKClient
 from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import CONFIG_LOCK, V2Config, config_file_lock, config_recovery_refusal
-from vibe import api, cloudflare_network, runtime
+from vibe import api, cloudflare_network, desktop_redeem_evidence, runtime
 from vibe import instance_address, tunnel_quality
 from vibe.binding_admission import pairing_operation, publication_operation, run_pairing_operation
 from vibe.shutdown_diagnostics import register_shutdown_hook
@@ -205,6 +205,10 @@ class BackendRequestError(Exception):
         super().__init__(payload.get("detail") or payload.get("error") or f"HTTP {status}")
         self.status = status
         self.payload = payload
+
+
+class _CompletedInvalidBackendReply(RuntimeError):
+    """The pinned peer's whole response was read; its success body was not a JSON object."""
 
 
 class AuthorizationRevisionPairingChangedError(ValueError):
@@ -4771,11 +4775,11 @@ def _normalize_orphaned_recovery_state() -> None:
     _finish_reconciled_recovery("failed")
 
 
-def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECONDS) -> None:
+def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECONDS) -> bool:
     global _PREFERRED_PROTOCOL, _QUALITY_EVALUATOR, _QUALITY_MONITOR_STARTED, _QUALITY_CONTEXT
     with _QUALITY_MONITOR_LOCK:
         if _QUALITY_MONITOR_STARTED:
-            return
+            return True
         _QUALITY_EVALUATOR = tunnel_quality.QualityEvaluator()
         with _RECOVERY_LOCK:
             _RECOVERY_STATE.clear()
@@ -4819,19 +4823,21 @@ def start_tunnel_quality_monitor(interval_seconds: float = QUALITY_SAMPLE_SECOND
             thread.start()
         except Exception:
             _QUALITY_MONITOR_STARTED = False
-            return
+            return False
+        return True
 
 
-def start_runtime_monitoring(config: V2Config | None = None) -> None:
-    """Ensure all UI-owned remote-access workers are running."""
+def start_runtime_monitoring(config: V2Config | None = None) -> bool:
+    """Ensure UI-owned workers; report admission of the connector monitor, not connector health."""
 
-    start_tunnel_quality_monitor()
+    monitor_ready = start_tunnel_quality_monitor()
     start_status_heartbeat(config)
     start_authorization_revision_polling(config)
     from vibe.project_access_sync import start_project_access_sync
 
     start_project_access_sync(config)
     start_resource_acl_sync_polling(config)
+    return monitor_ready
 
 
 def _record_device_access_switch(config, enabled):
@@ -5292,11 +5298,11 @@ def _json_request_to_validated_backend(
             if response.status >= 400:
                 raise BackendRequestError(response.status, _backend_error_payload(response_body))
             try:
-                parsed_response = json.loads(response_body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise RuntimeError(str(exc)) from exc
+                parsed_response = json.loads(response_body.decode("utf-8"), object_pairs_hook=_unique_pairing_object)
+            except (UnicodeDecodeError, ValueError, RecursionError):
+                raise _CompletedInvalidBackendReply("backend returned invalid JSON") from None
             if not isinstance(parsed_response, dict):
-                raise RuntimeError("backend returned non-object JSON")
+                raise _CompletedInvalidBackendReply("backend returned non-object JSON")
             return parsed_response
         except BackendRequestError:
             raise
@@ -5423,10 +5429,19 @@ def _proxy_tunnel_headers(proxy: urllib.parse.SplitResult) -> dict[str, str]:
     return headers
 
 
+def _unique_pairing_object(pairs):
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("ambiguous pairing response")
+    return result
+
+
 def _backend_error_payload(response_body: bytes) -> dict[str, Any]:
     try:
-        parsed = json.loads(response_body.decode("utf-8")) if response_body else {}
-    except (UnicodeDecodeError, ValueError):
+        # Duplicate keys are not a definitive issuer error (in particular, not
+        # the exact expired/unconsumed proof used by a released Desktop).
+        parsed = json.loads(response_body.decode("utf-8"), object_pairs_hook=_unique_pairing_object) if response_body else {}
+    except (UnicodeDecodeError, ValueError, RecursionError):
         parsed = {}
     if not isinstance(parsed, dict):
         parsed = {}
@@ -5631,16 +5646,39 @@ class _PairingRevocationUnavailable(RuntimeError):
     """The pending pairing revocation fence could not be persisted."""
 
 
+# Only the admitted Desktop worker installs a guard. An ordinary CLI or service
+# replay owns its own admission; nothing from the caller or journal can set this.
+_pairing_worker = threading.local()
+
+
+@contextmanager
+def _with_pairing_home(check: Callable[[], None]):
+    previous = getattr(_pairing_worker, "check_home", None)
+    _pairing_worker.check_home = check
+    try:
+        yield
+    finally:
+        _pairing_worker.check_home = previous
+
+
+def _check_pairing_home() -> None:
+    check = getattr(_pairing_worker, "check_home", None)
+    if check is not None:
+        check()
+
+
 @contextmanager
 def _pairing_persist_lock():
     """Enter the existing config lock while preserving body exceptions."""
 
+    _check_pairing_home()
     lock = config_file_lock()
     try:
         lock.__enter__()
     except Exception as exc:
         raise _PairingLockUnavailable(str(exc)) from exc
     try:
+        _check_pairing_home()
         yield
     except BaseException as exc:
         if not lock.__exit__(type(exc), exc, exc.__traceback__):
@@ -5768,6 +5806,11 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         return None, f"pending pairing record is unreadable: {exc}"
+    return _validate_pending_pairing_record(payload)
+
+
+def _validate_pending_pairing_record(payload: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """The released reader's compatibility checks, independent of how bytes were read."""
     if not isinstance(payload, dict):
         return None, "pending pairing record must be an object"
     if payload.get("schema_version") != _PENDING_PAIRING_SCHEMA_VERSION:
@@ -5863,6 +5906,7 @@ def _read_pending_pairing_record() -> tuple[dict[str, Any] | None, str | None]:
 
 
 def _write_pending_pairing_record(record: Mapping[str, Any]) -> Path:
+    _check_pairing_home()
     path = _pending_pairing_path()
     _pending_pairing_dir(create=True)
     write_atomic(path, json.dumps(dict(record), ensure_ascii=False, indent=2, sort_keys=True))
@@ -5876,6 +5920,7 @@ def _retire_pending_pairing(*, operation_id: str) -> bool:
         return False
     if record is None or record.get("operation_id") != operation_id:
         return True
+    _check_pairing_home()
     path = _pending_pairing_path()
     try:
         path.unlink()
@@ -5928,37 +5973,41 @@ def _retire_prepared_pairing_claim(
         return False, False
 
 
+def _record_desktop_reply(
+    claim: Mapping[str, Any], result: dict[str, Any], kind: desktop_redeem_evidence.Disposition,
+    *, legacy_failure: str | None = None,
+) -> dict[str, Any]:
+    """Record only a completed reply to this prepared dispatch; never retire its reservation."""
+    try:
+        with _pairing_persist_lock():
+            current, error = _read_pending_pairing_record()
+            if error:
+                return {"ok": False, "error": "pairing_recovery_invalid"}
+            if (current is None or not desktop_redeem_evidence.same_request(current, claim)
+                    or not claim.get("desktop_dispatch") or (kind == "ended_unknown" and current != claim)):
+                return {"ok": False, "error": "pairing_superseded_after_redeem",
+                        "pairing": {"ok": False, "recoverable": False}}
+            # Exact expiry is a fact about this immutable key/request, even if
+            # a duplicate was sent meanwhile. Never attribute it to that sender.
+            saved = dict(current)
+            if legacy_failure is not None:
+                saved["desktop_failure"] = legacy_failure  # closed legacy display/renewal value only
+            saved["desktop_reply"] = desktop_redeem_evidence.receipt(saved, kind, claim["desktop_dispatch"])
+            _write_pending_pairing_record(saved)
+            return result
+    except (OSError, _PairingLockUnavailable):
+        return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"ok": False, "recoverable": True}}
+
+
 def _pairing_failure_after_claim(
     claim: Mapping[str, Any],
     result: dict[str, Any],
 ) -> dict[str, Any]:
-    """Return a definitive failure after retiring its prepared claim."""
-
-    # Desktop's installation reservation survives a failed grant. A later grant
-    # for this same operation must not cause another cloud instance to be made.
-    if claim.get("desktop_enrollment"):
-        try:
-            with _pairing_persist_lock():
-                record, error = _read_pending_pairing_record()
-                if (
-                    not error and record and _same_pairing_claim_request(record, claim)
-                    and record.get("desktop_enrollment") and record["phase"] == "prepared"
-                ):
-                    _write_pending_pairing_record({
-                        **record, "desktop_failure": str(result.get("error") or "pairing_failed"),
-                    })
-                    return result
-                # Never fall through to retirement after a stale Desktop result,
-                # including when the replacement request is still prepared.
-                return {
-                    "ok": False, "error": "pairing_superseded_after_redeem",
-                    "pairing": {"ok": False, "recoverable": False},
-                }
-        except (OSError, _PairingLockUnavailable):
-            return {
-                "ok": False, "error": "pairing_retirement_failed",
-                "pairing": {"ok": False, "recoverable": True},
-            }
+    """For non-Desktop pairing: retire the prepared claim after a definitive failure."""
+    if "desktop_enrollment" in claim:
+        # Even an unclassified legacy result must never reach generic retirement.
+        return {"ok": False, "error": "pairing_redeem_indeterminate",
+                "pairing": {"ok": False, "recoverable": True}}
     retired, marker_persisted = _retire_prepared_pairing_claim(
         claim=claim,
         cause=str(result.get("error") or "pairing_failed"),
@@ -6027,15 +6076,18 @@ def _pairing_local_write_preflight() -> str | None:
         pass  # fresh install: save_config seeds defaults
     except Exception as exc:
         return f"config load failed: {exc}"
+    _check_pairing_home()
     config_path = paths.get_config_path()
     try:
         _probe_atomic_parent(config_path.parent)
+        _check_pairing_home()
         _probe_atomic_parent(_pending_pairing_dir())
         pending_path = _pending_pairing_path()
         if pending_path.exists() and not pending_path.is_file():
             return f"pending pairing record is not a regular file: {pending_path}"
     except Exception as exc:
         return f"local pairing state is not writable: {exc}"
+    _check_pairing_home()
     try:
         with config_file_lock():
             pass  # the save itself takes this lock; prove it is acquirable now
@@ -6473,7 +6525,9 @@ def pair_personal_claim(*, key: str, backend_url: str, device: str, revision: st
     from vibe import desktop_local_instance as local
     from storage.importer import ensure_sqlite_state
 
+    _check_pairing_home()
     _run_pending_deferred_context_migration()
+    _check_pairing_home()
     ensure_sqlite_state()
     with _pairing_persist_lock():
         config, identity, pending = local._config(), local._installation_id(), local._pending()
@@ -6520,19 +6574,24 @@ def _pair_desktop(
         if claim["phase"] == "prepared":
             if config.remote_access.vibe_cloud.instance_id:
                 raise desktop_local_instance.LocalInstanceError("local_binding_changed")
-            replace_expired_grant = (
-                claim.get("desktop_failure") == "pairing_key_expired"
-                and pairing_key
-                and not _same_pairing_request(claim, backend.base_url, pairing_key)
-            )
+            if not desktop_redeem_evidence.prepared(claim):
+                raise desktop_local_instance.LocalInstanceError("local_enrollment_unavailable", 503)
+            different_key = bool(pairing_key) and not _same_pairing_request(claim, backend.base_url, pairing_key)
+            replace_expired_grant = different_key and desktop_redeem_evidence.disposition(claim) == "expired_unconsumed"
             if claim.get("redeem_request") and not replace_expired_grant:
-                if pairing_key and not _same_pairing_request(claim, backend.base_url, pairing_key):
+                if different_key and not (
+                    claim.get("desktop_failure") == "pairing_key_expired" and "desktop_reply" not in claim
+                ):
                     raise desktop_local_instance.LocalInstanceError("local_instance_conflict")
+                # A historical display string cannot prove expiry. Replay *only*
+                # its saved request; no new key is installed on this invocation.
             else:
                 if not pairing_key or not isinstance(device_name, str) or not device_name.strip():
                     raise desktop_local_instance.LocalInstanceError("invalid_request", 400)
                 claim = _with_redeem_request(claim, backend.base_url, device_name, pairing_key)
                 claim.pop("desktop_failure", None)
+                claim.pop("desktop_reply", None)
+                claim.pop("desktop_dispatch", None)
                 _write_pending_pairing_record(claim)
     if claim["phase"] in {"redeemed", "applied"}:
         return _persist_pairing(None, device_name=device_name, operation_id=claim["operation_id"])
@@ -6575,8 +6634,16 @@ def _retry_admitted_installation_pairing(claim):
             )) != claim["source_fingerprint"]
         ):
             return {"ok": False, "error": "local_binding_changed", "status": 409}
-    if _issuer_replay_refused(claim):
-        return {'ok': False, 'error': 'issuer_replay_refused', 'status': 409}
+        if _issuer_replay_refused(claim):
+            return {'ok': False, 'error': 'issuer_replay_refused', 'status': 409}
+        if claim.get("desktop_enrollment"):
+            # No wire change: keep the same redeem_request_id. Persist a new
+            # local dispatch generation *before* I/O, even for an exact replay.
+            # If resolution, transport or the process fails, there is no reply.
+            if not desktop_redeem_evidence.prepared(claim):
+                return {"ok": False, "error": "pairing_recovery_invalid"}
+            claim = desktop_redeem_evidence.begin(claim)
+            _write_pending_pairing_record(claim)
     backend, error = _normalize_pairing_backend_url(claim["backend_url"])
     if error or backend is None:
         return {"ok": False, "error": error or "invalid_pairing_backend_url"}
@@ -6588,6 +6655,7 @@ def _redeem_pairing_claim(
 ) -> dict[str, Any]:
     """Send only the exact request whose recovery inputs are already durable."""
     origin_service = request_payload["origin_service"]
+    _check_pairing_home()
     try:
         result = _json_request(
             f"{backend.base_url}/api/v1/pairing/redeem",
@@ -6595,6 +6663,7 @@ def _redeem_pairing_claim(
             connection_target=backend,
         )
     except BackendRequestError as exc:
+        _check_pairing_home()
         if claim.get("personal_claim"):
             # Recovery is also reachable from the existing pair route and CLI.
             # The raw upstream body/detail may contain the one-use key or credentials.
@@ -6603,7 +6672,7 @@ def _redeem_pairing_claim(
                 reason = "pairing_request_failed"
             failure = {"ok": False, "error": reason, "status": exc.status}
         else:
-            failure = {"ok": False, **exc.payload, "status": exc.status}
+            failure = {**exc.payload, "ok": False, "status": exc.status}
         retry_after = exc.payload.get("retry_after_seconds")
         if (
             claim.get("redeem_request") and exc.status == 409
@@ -6618,9 +6687,10 @@ def _redeem_pairing_claim(
         # This answer is about the exact constrained request. It says no
         # more replay, NOT that the issuer never committed or rolled back.
         code = exc.payload.get('error')
-        if exc.status == 400 and code == 'pairing_key_expired' and claim.get('redeem_request'):
-            # The issuer proves this key was never consumed. No ambiguous
-            # outcome to keep (Desktop still retains its enrollment reservation).
+        if (not claim.get('desktop_enrollment') and exc.status == 400 and code == 'pairing_key_expired'
+                and claim.get('redeem_request')):
+            # Non-Desktop: retire the unused key. Legacy Desktop instead seals
+            # dispatch-specific expiry below and retains its enrollment.
             return _pairing_failure_after_claim(claim, failure)
         if ((claim.get('personal_claim') or {}).get('binding_disposition') in ('existing', 'new')
                 and ((exc.status == 409 and code == 'registration_indeterminate') or
@@ -6635,24 +6705,37 @@ def _redeem_pairing_claim(
         # Legacy "invalid"/"used" errors collapse several histories. Only the
         # request-bound expired/unconsumed proof permits Desktop grant renewal.
         definitive = (
-            exc.status == 400 and exc.payload.get("error") == "pairing_key_expired"
+            (exc.status == 400 and exc.payload.get("error") == "pairing_key_expired"
+             and exc.payload.get("ok", False) is False)
             if claim.get("redeem_request")
             else _is_definitive_pairing_redeem_failure(exc)
         )
         if definitive:
+            if claim.get("desktop_enrollment"):
+                return _record_desktop_reply(claim, failure, "expired_unconsumed", legacy_failure="pairing_key_expired")
             return _pairing_failure_after_claim(claim, failure)
-        return {
+        outcome = {
             **failure,
             "error": "pairing_redeem_indeterminate",
             "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": failure.get("error")},
         }
+        if (claim.get("desktop_enrollment") and 300 <= exc.status < 500 and exc.status not in (408, 429)
+                and not (exc.status == 409 and exc.payload.get("error") == "pairing_redeem_pending")):
+            return _record_desktop_reply(claim, outcome, "ended_unknown")
+        return outcome
     except Exception as exc:
-        return {
+        outcome = {
             "ok": False,
             "error": "pairing_redeem_indeterminate",
             **({} if claim.get("personal_claim") else {"detail": str(exc)}),
             "pairing": {"ok": False, "recoverable": bool(claim.get("redeem_request")), "cause": "pairing_request_failed"},
         }
+        if claim.get("desktop_enrollment") and isinstance(exc, _CompletedInvalidBackendReply):
+            # Preserve the existing public recovery response. A completed body is
+            # distinct from a lost reply only in this protected record.
+            return _record_desktop_reply(claim, outcome, "ended_unknown")
+        return outcome
+    _check_pairing_home()
     personal = claim.get("personal_claim") or {}
     disposition = personal.get("binding_disposition")
     if disposition is not None and (not isinstance(result, Mapping) or result.get("binding_disposition") != disposition):
@@ -6664,11 +6747,10 @@ def _redeem_pairing_claim(
             or normalized_result["public_url"] != personal["public_url"]):
         return {"ok": False, "error": "pairing_redeem_indeterminate", "pairing": {"ok": False, "recoverable": True}}
     if response_error:
-        return _pairing_failure_after_claim(claim, {
-            "ok": False,
-            "error": "invalid_pairing_response",
-            "detail": response_error,
-        })
+        failure = {"ok": False, "error": "invalid_pairing_response", "detail": response_error}
+        if claim.get("desktop_enrollment"):
+            return _record_desktop_reply(claim, failure, "ended_unknown", legacy_failure="invalid_pairing_response")
+        return _pairing_failure_after_claim(claim, failure)
     assert normalized_result is not None
     personal = claim.get("personal_claim")
     if personal and (normalized_result["instance_id"] != personal["instance_id"]
@@ -6679,6 +6761,10 @@ def _redeem_pairing_claim(
     instance_kind = _normalized_instance_kind(result.get("instance_kind"))
     origin_update = result.get("tunnel_origin_update")
     if isinstance(origin_update, dict) and origin_update.get("ok") is False:
+        if claim.get("desktop_enrollment"):
+            # An origin sub-result is not a redemption expiry, whatever text it carries.
+            return _record_desktop_reply(claim, {"ok": False, "error": "tunnel_origin_update_failed"},
+                                         "ended_unknown", legacy_failure="tunnel_origin_update_failed")
         return _pairing_failure_after_claim(claim, {
             "ok": False,
             "error": "tunnel_origin_update_failed" if personal else str(origin_update.get("error") or "tunnel_origin_update_failed"),
@@ -6707,6 +6793,7 @@ def _persist_pairing_impl(
     """Claim, apply, and retire one pending pairing under the config lock."""
     from storage.importer import ensure_sqlite_state
 
+    _check_pairing_home()
     try:
         ensure_sqlite_state()
     except Exception as exc:
@@ -6719,6 +6806,7 @@ def _persist_pairing_impl(
             }
         return {"ok": False, "error": "pairing_recovery_unavailable", "detail": str(exc)}
 
+    _check_pairing_home()
     try:
         with config_file_lock():
             pass
@@ -6777,6 +6865,8 @@ def _persist_pairing_impl(
                 or record.get("operation_id") != operation_id
                 or record.get("phase") != "prepared"
                 or (expected_claim is not None and not _same_pairing_claim_request(record, expected_claim))
+                or (expected_claim is not None and expected_claim.get("desktop_enrollment")
+                    and not desktop_redeem_evidence.same_request(record, expected_claim))
             ):
                 return {
                     "ok": False,
@@ -6882,12 +6972,14 @@ def _persist_pairing_impl(
                     "detail": "a different local identity now owns the pending operation",
                     "pairing": {"ok": False, "recoverable": False},
                 }
+            _check_pairing_home()
             try:
                 from vibe.instance_address import cleanup_publication_lock
                 # Try, never wait in reverse lock order: a #4114 worker may
                 # own the lifecycle lock while reconciling an old connector.
                 # The receipt is already sealed; retry publication when it drains.
                 with _connector_lifecycle(timeout=0), cleanup_publication_lock():
+                    _check_pairing_home()
                     if current_identity.get("instance_id"):
                         from storage import device_registry
                         predecessor = device_binding(current_config)
@@ -6900,11 +6992,13 @@ def _persist_pairing_impl(
                         record = {**record, 'connection_file': version}
                         _write_pending_pairing_record(record)  # before the single config publication
                     if current_config.remote_access.vibe_cloud.public_relay_trial:
+                        _check_pairing_home()
                         cs.adopt_host_enrollment()  # legacy adoption belongs only to the old credential
                     payload = _config_for_pairing_record(record)
                     payload['remote_access']['vibe_cloud'].update(pins)
                     # #4114 can restore a previously saved outbound interface
                     # even while it is offline. This is not a new network edit.
+                    _check_pairing_home()
                     config = api.save_config(payload, validate_remote_access_network=False) if pins else api.save_config(payload)
             except Exception as exc:
                 logger.warning("pairing save failed after the redeem", exc_info=True)
@@ -6937,10 +7031,12 @@ def _persist_pairing_impl(
         if record.get('connection_file'):
             from vibe import connection_settings as cs
             try:
+                _check_pairing_home()
                 cs.journal.retire_version(record['connection_file'])
             except OSError:
                 return {'ok': False, 'error': 'pairing_retirement_failed', 'pairing': {'recoverable': True}}
         instance_kind = _normalized_instance_kind(record["pairing"].get("instance_kind"))
+        _check_pairing_home()
         try:
             transition = _transition_instance_binding(
                 instance_id=str(record["pairing"]["instance_id"]),
@@ -6987,6 +7083,7 @@ def _persist_pairing_impl(
             # this claim to this exact credential generation. A failed write is resumable.
             from vibe.personal_claim_client import ClaimError
             from vibe.personal_claims import record_bound
+            _check_pairing_home()
             try:
                 record_bound(personal["claim_id"], persisted_identity, **(
                     {"disposition": personal["binding_disposition"]} if "binding_disposition" in personal else {}
@@ -6994,6 +7091,7 @@ def _persist_pairing_impl(
             except (OSError, ClaimError):
                 return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         from vibe.binding_health import clear_after_publication
+        _check_pairing_home()
         try:
             clear_after_publication()
         except OSError:
@@ -7008,6 +7106,7 @@ def _persist_pairing_impl(
             }
 
     assert config is not None
+    _check_pairing_home()
     start_result = None
     if config.remote_access.vibe_cloud.enabled:
         # Older sealed records have no source credential flag: preserve their
@@ -7015,6 +7114,7 @@ def _persist_pairing_impl(
         was_bound = record.get('source_was_bound', bool(record['source_instance_id']))
         start_result = _continue_requested_after_pairing(config) if was_bound else start(config)
         if start_result is not None:
+            _check_pairing_home()
             _report_runtime_status_async(config, event="pair", last_error=start_result.get("error"))
     result = _pairing_result_status(config, start_result=start_result)
     if disposition := (record.get("personal_claim") or {}).get("binding_disposition"):

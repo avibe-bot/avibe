@@ -15,18 +15,24 @@ export type NativeDirectMode = 'automatic' | 'tunnel' | 'direct';
 /** This device's own path choice for this instance: automatic, the Cloudflare tunnel only, or
  *  direct and the relay only (`directPreference` 2). `reverted`: when the shell put a choice back
  *  to automatic by itself, and which (a shell before `from` only ever puts `tunnel` back). */
-export type NativeDirectChoice = { mode: NativeDirectMode; reverted: { at: number; from: 'tunnel' | 'direct' } | null };
+export type NativeDirectChoice = {
+  mode: NativeDirectMode;
+  reverted: { at: number; from: 'tunnel' | 'direct' } | null;
+  /** The App takes the choice only after it is opened again (never on Desktop). */
+  pendingRelaunch: boolean;
+};
 
 const DIRECT_CHOICE_EVENT = 'avibe:native:direct.preferenceChanged';
 
 function parseDirectChoice(value: unknown): NativeDirectChoice | null {
   if (!value || typeof value !== 'object') return null;
-  const { mode, reverted } = value as { mode?: unknown; reverted?: unknown };
+  const { mode, reverted, pendingRelaunch } = value as { mode?: unknown; reverted?: unknown; pendingRelaunch?: unknown };
   if (mode !== 'automatic' && mode !== 'tunnel' && mode !== 'direct') return null;
   const { at, from } = reverted && typeof reverted === 'object' ? reverted as { at?: unknown; from?: unknown } : {};
   return {
     mode,
     reverted: typeof at === 'number' && Number.isFinite(at) ? { at, from: from === 'direct' ? 'direct' : 'tunnel' } : null,
+    pendingRelaunch: pendingRelaunch === true,
   };
 }
 

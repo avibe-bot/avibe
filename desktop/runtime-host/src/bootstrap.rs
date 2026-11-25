@@ -163,6 +163,8 @@ pub struct RuntimeHost {
 /// What the last successful bootstrap run adopted: the monitor's baseline.
 #[derive(Clone)]
 struct Adoption {
+    origin: LoopbackOrigin,
+    claim_live: tokio::sync::watch::Sender<bool>,
     presence: Presence,
     launcher: Option<Arc<dyn ResolvedRuntimeLauncher>>,
 }
@@ -193,6 +195,9 @@ impl LaunchState {
         if self.stopping || self.epoch != epoch {
             return;
         }
+        if self.adoption.as_ref().is_some_and(|a| a.presence != *presence) {
+            self.retire_claim();
+        }
         match presence {
             Presence::Mine { .. } => {
                 self.owner = launcher.cloned();
@@ -207,9 +212,17 @@ impl LaunchState {
         self.attempt.as_ref().is_some_and(|attempt| attempt.watch.pending())
     }
 
+    // Revocation also reaches clones taken by an outstanding readiness probe.
+    fn retire_claim(&self) {
+        if let Some(adoption) = &self.adoption {
+            adoption.claim_live.send_replace(false);
+        }
+    }
+
     /// Starts a bootstrap run: the last adoption no longer stands, and no probe
     /// sent before now may record what it saw. Returns the run's epoch.
     fn begin_run(&mut self) -> u64 {
+        self.retire_claim();
         self.adoption = None;
         self.epoch += 1;
         self.epoch
@@ -219,6 +232,7 @@ impl LaunchState {
     /// the caller finishes, and the epoch is kept so no earlier probe can
     /// match it again.
     fn forget(&mut self) {
+        self.retire_claim();
         *self = LaunchState {
             stopping: self.stopping,
             epoch: self.epoch,
@@ -258,6 +272,27 @@ impl RuntimeHost {
         &self.settings
     }
 
+    /// A claim uses the executable and literal origin from one successful adoption.
+    /// This never resolves a command or probes a port, and override-only hosts have no channel.
+    pub(crate) fn claim_source(&self) -> Option<crate::instance_client::machine::ClaimSource> {
+        let adoption = {
+            let state = self.launched_runtime();
+            if state.stopping {
+                return None;
+            }
+            state.adoption.clone()?
+        };
+        let live = adoption.claim_live.subscribe();
+        if !*live.borrow() {
+            return None;
+        }
+        Some(crate::instance_client::machine::ClaimSource {
+            command: adoption.launcher?.claim_helper()?,
+            origin: adoption.origin,
+            live,
+        })
+    }
+
     /// Whether this host retains a launch attempt for launch deduplication.
     pub fn has_launched(&self) -> bool {
         self.launched_runtime().attempt.is_some()
@@ -290,6 +325,7 @@ impl RuntimeHost {
                     part: "launch_pending".to_owned(),
                 };
             }
+            state.retire_claim();
             state.stopping = true;
             (owner, runtime_id)
         };
@@ -338,6 +374,7 @@ impl RuntimeHost {
     /// stopping state or clears the liveness fence.
     pub fn release_after_readiness_loss(&self) {
         let mut state = self.launched_runtime();
+        state.retire_claim();
         if state.stopping {
             return;
         }
@@ -804,6 +841,8 @@ impl RuntimeHost {
                 return publish(sink, receipt_invalid(origin, attempt));
             }
             state.adoption = Some(Adoption {
+                origin: origin.clone(),
+                claim_live: tokio::sync::watch::channel(true).0,
                 presence,
                 launcher: launcher.cloned(),
             });
@@ -817,6 +856,7 @@ impl RuntimeHost {
         if state.stopping || state.launch_pending() {
             return false;
         }
+        state.retire_claim();
         state.stopping = true;
         true
     }

@@ -1,9 +1,13 @@
 //! Native HTTP with explicit authority and independently owned cookie stores.
-use super::protocol::ClientError;
+mod ceremony;
+#[cfg(test)]
+mod tests;
+use super::{account::CONTROL_PLANE, protocol::ClientError};
 use async_trait::async_trait;
+use ceremony::{Ceremony, Fields, Route};
 use cookie_store::CookieStore;
 use reqwest::{
-    header::{HeaderMap, HeaderValue, CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE},
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, COOKIE, HOST, ORIGIN, SET_COOKIE},
     Method,
 };
 use serde_json::Value;
@@ -60,20 +64,25 @@ pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub struct HttpTransport {
     client: reqwest::Client,
+    user_agent: String,
 }
 impl HttpTransport {
+    fn builder(user_agent: &str) -> reqwest::ClientBuilder {
+        reqwest::Client::builder()
+            .user_agent(user_agent)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(20))
+    }
     /// `app_version` is the Desktop app's package version. Every request,
     /// the instance's `/auth/callback` included, names the app as
     /// `AvibeDesktop/<version>`: the instance labels the sign-in it records
     /// from that (`vibe/device_metadata.py`). A label, never a credential.
     pub fn new(app_version: &str) -> Result<Self, ClientError> {
+        let user_agent = format!("AvibeDesktop/{app_version}");
         Ok(Self {
-            client: reqwest::Client::builder()
-                .user_agent(format!("AvibeDesktop/{app_version}"))
-                .no_proxy()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(20))
-                .build()?,
+            client: Self::builder(&user_agent).build()?,
+            user_agent,
         })
     }
 }
@@ -84,8 +93,14 @@ impl Transport for HttpTransport {
         // installer finishes (about a minute). Give it a long, finite limit
         // rather than the 20 s every other request has.
         let long_install = request.method == Method::POST && request.url.path() == "/api/upgrade";
-        let builder = self
-            .client
+        // Neither a one-use credential exchange nor a reviewed grant is replayable,
+        // including reqwest's protocol-NACK retries. Other traffic keeps its pool.
+        let client = if ceremony::one_shot(&request.method, &request.url) {
+            Self::builder(&self.user_agent).retry(reqwest::retry::never()).build()?
+        } else {
+            self.client.clone()
+        };
+        let builder = client
             .request(request.method, request.url)
             .headers(request.headers)
             .timeout(if long_install {
@@ -114,11 +129,28 @@ impl Transport for HttpTransport {
     }
 }
 
+// A programmatic import/old decoder must not splice a second named cookie
+// into the outgoing header via an innocent-looking name or value.
+fn pair_is_safe(name: &str, value: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+        && !value.bytes().any(|b| b.is_ascii_control() || matches!(b, b';' | b','))
+}
+
+/// In-memory comparison only; never log or serialize a request credential.
+#[derive(PartialEq, Eq)]
+pub(super) struct FactorCookies(Vec<String>);
+
 /// Cloned for each fenced transaction; a late response cannot mutate the owner.
 #[derive(Clone)]
 pub struct NativeSession {
     pub origin: Url,
     cookies: CookieStore,
+    // Never serialized, projected or imported. Generic (including issuer) jars
+    // cannot acquire this role just by naming the hosted authority.
+    ceremony: Option<Ceremony>,
     transport: Arc<dyn Transport>,
     epoch: Option<Epoch>,
 }
@@ -167,9 +199,43 @@ impl NativeSession {
         Self {
             origin,
             cookies: CookieStore::default(),
+            ceremony: None,
             transport,
             epoch: None,
         }
+    }
+    pub(super) fn account(transport: Arc<dyn Transport>) -> Self {
+        let mut session = Self::new(CONTROL_PLANE.parse().expect("fixed origin"), transport);
+        session.ceremony = Some(Ceremony::default());
+        session
+    }
+    pub(super) fn is_account(&self) -> bool {
+        self.ceremony.is_some() && self.origin.as_str() == CONTROL_PLANE
+    }
+    pub(super) fn has_discovery_credentials(&self) -> bool {
+        self.is_account()
+            && self
+                .origin
+                .join("/api/mobile/session")
+                .is_ok_and(|url| self.cookies.get_request_values(&url).any(|(_, v)| !v.is_empty()))
+    }
+    pub(super) fn account_attempt(&self, accepted: Option<&Self>) -> Result<Self, ClientError> {
+        self.check()?;
+        if !self.is_account()
+            || accepted.is_some_and(|jar| !jar.is_account() || !Arc::ptr_eq(&jar.transport, &self.transport))
+        {
+            return Err(ClientError::new("invalid_backend"));
+        }
+        let mut jar = accepted
+            .cloned()
+            .unwrap_or_else(|| Self::account(self.transport.clone()));
+        jar.epoch = self.epoch.clone();
+        Ok(jar)
+    }
+    pub(super) fn restore_account(transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
+        let mut session = Self::restore(CONTROL_PLANE.parse().expect("fixed origin"), transport, bytes)?;
+        session.ceremony = Some(Ceremony::default());
+        Ok(session)
     }
     pub fn restore(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
         let mut result = Self::decode_released_jar(origin, transport, bytes)?;
@@ -183,9 +249,10 @@ impl NativeSession {
     fn decode_released_jar(origin: Url, transport: Arc<dyn Transport>, bytes: &[u8]) -> Result<Self, ClientError> {
         let cookies =
             cookie_store::serde::json::load(bytes).map_err(|_| ClientError::new("credentials_unavailable"))?;
-        let result = Self {
+        let mut result = Self {
             origin,
             cookies,
+            ceremony: None,
             transport,
             epoch: None,
         };
@@ -195,6 +262,17 @@ impl NativeSession {
             cookie_store::CookieDomain::HostOnly(host) if Some(host.as_str()) == result.origin.host_str())
         }) {
             return Err(ClientError::new("credentials_unavailable"));
+        }
+        // Historical jars predate the separate slots. Keep their ordinary session;
+        // never promote a decoded entry to a ceremony (including path variants).
+        let historical: Vec<_> = result
+            .cookies
+            .iter_any()
+            .filter(|c| ceremony::reserved(c.name()))
+            .map(|c| (String::from(&c.domain), String::from(&c.path), c.name().to_owned()))
+            .collect();
+        for (domain, path, name) in historical {
+            result.cookies.remove(&domain, &path, &name);
         }
         Ok(result)
     }
@@ -218,10 +296,13 @@ impl NativeSession {
     /// Adopt cookies another store of this same origin holds (the selected
     /// instance's WebView). Each is narrowed to this exact host, as responses are.
     pub fn store_cookies(&mut self, cookies: Vec<cookie::Cookie<'static>>, url: &Url) {
-        if url.origin() != self.origin.origin() {
+        if self.ceremony.is_some() || url.origin() != self.origin.origin() {
             return;
         }
         for mut cookie in cookies {
+            if ceremony::reserved(cookie.name()) || !pair_is_safe(cookie.name(), cookie.value()) {
+                continue;
+            }
             if cookie
                 .domain()
                 .is_some_and(|domain| Some(domain.trim_start_matches('.')) != self.origin.host_str())
@@ -232,6 +313,19 @@ impl NativeSession {
             self.cookies.store_response_cookies(std::iter::once(cookie), url);
         }
     }
+    /// A response without its own account ID may use a separate session read as its
+    /// identity witness only when both fixed paths send the same credentials.
+    pub(super) fn same_request_cookies(&self, first: &str, second: &str) -> bool {
+        let (Ok(a), Ok(b)) = (self.origin.join(first), self.origin.join(second)) else {
+            return false;
+        };
+        a.origin() == self.origin.origin()
+            && b.origin() == a.origin()
+            && self
+                .cookies
+                .get_request_values(&a)
+                .eq(self.cookies.get_request_values(&b))
+    }
     pub fn cookie_value(&self, name: &str) -> Option<String> {
         self.cookies
             .get_request_values(&self.origin)
@@ -241,36 +335,132 @@ impl NativeSession {
     pub async fn request(&mut self, method: Method, path: &str, body: Option<Value>) -> Result<Response, ClientError> {
         self.request_with_headers(method, path, body, HeaderMap::new()).await
     }
+    pub(super) fn factor_cookies(&self) -> Option<FactorCookies> {
+        if !self.is_account() {
+            return None;
+        }
+        let url = self.origin.join("/api/mobile/session").ok()?;
+        let mut has_value = false;
+        let pairs = self
+            .cookies
+            .get_request_values(&url)
+            .map(|(k, v)| {
+                has_value |= !v.is_empty();
+                format!("{k}={v}")
+            })
+            .collect();
+        has_value.then_some(FactorCookies(pairs))
+    }
+    /// A qualified owner-conflict read must have sent the very same ordinary
+    /// credential as account discovery. Never use a cookie supplied by its reply.
+    pub(super) fn claim_read_cookies(&self) -> Option<FactorCookies> {
+        self.factor_cookies()
+            .filter(|_| self.same_request_cookies("/api/v1/claims/read", "/api/mobile/session"))
+    }
+    pub(super) async fn read_claim_ticket(
+        &mut self,
+        body: Value,
+        expected: Option<&FactorCookies>,
+    ) -> Result<Response, ClientError> {
+        if !self.is_account() {
+            return Err(ClientError::new("invalid_backend"));
+        }
+        self.send_checked(
+            Method::POST,
+            "/api/v1/claims/read",
+            Some(body),
+            HeaderMap::new(),
+            expected,
+        )
+        .await
+    }
+    /// Only a GET at the account origin, using the exact credentials frozen for discovery.
+    pub(super) async fn read_frozen_account(&mut self, expected: &FactorCookies) -> Result<Response, ClientError> {
+        if !self.is_account() {
+            return Err(ClientError::new("invalid_backend"));
+        }
+        self.send_checked(
+            Method::GET,
+            "/api/mobile/session",
+            None,
+            HeaderMap::new(),
+            Some(expected),
+        )
+        .await
+    }
+    pub(super) async fn factor_post(
+        &mut self,
+        path: &'static str,
+        body: Value,
+        expected: &FactorCookies,
+    ) -> Result<Response, ClientError> {
+        if !self.is_account()
+            || !matches!(
+                path,
+                "/api/two-factor/passkey-challenge"
+                    | "/api/two-factor/verify"
+                    | "/api/two-factor/totp/setup"
+                    | "/api/two-factor/totp"
+            )
+        {
+            return Err(ClientError::new("invalid_action"));
+        }
+        self.send_checked(Method::POST, path, Some(body), HeaderMap::new(), Some(expected))
+            .await
+    }
     pub async fn request_with_headers(
         &mut self,
         method: Method,
         path: &str,
         body: Option<Value>,
+        headers: HeaderMap,
+    ) -> Result<Response, ClientError> {
+        self.send_checked(method, path, body, headers, None).await
+    }
+    async fn send_checked(
+        &mut self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
         mut headers: HeaderMap,
+        expected: Option<&FactorCookies>,
     ) -> Result<Response, ClientError> {
         self.check()?;
         let url = self
             .origin
             .join(path)
             .map_err(|_| ClientError::new("invalid_request"))?;
-        if url.origin() != self.origin.origin()
+        if (self.ceremony.is_some() && (self.origin.as_str() != CONTROL_PLANE || headers.contains_key(AUTHORIZATION)))
+            || headers.contains_key(COOKIE)
+            || headers.contains_key(HOST)
+            || url.origin() != self.origin.origin()
             || !url.username().is_empty()
             || url.password().is_some()
             || url.fragment().is_some()
         {
             return Err(ClientError::new("invalid_request"));
         }
-        let cookie = self
-            .cookies
-            .get_request_values(&url)
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join("; ");
-        if !cookie.is_empty() {
-            headers.insert(
-                COOKIE,
-                HeaderValue::from_str(&cookie).map_err(|_| ClientError::new("invalid_cookie"))?,
-            );
+        let route = Route::request(&method, &url, body.as_ref());
+        let mut pairs = Vec::new();
+        for (name, value) in self.cookies.get_request_values(&url) {
+            if ceremony::reserved(name) || !pair_is_safe(name, value) {
+                return Err(ClientError::new("invalid_cookie"));
+            }
+            pairs.push(format!("{name}={value}"));
+        }
+        if let Some(ceremony) = self.ceremony.as_mut() {
+            if let Some(pair) = ceremony.outbound(route, body.as_ref())? {
+                pairs.push(pair);
+            }
+        }
+        if expected.is_some_and(|c| c.0 != pairs) {
+            return Err(ClientError::new("account_changed"));
+        }
+        if !pairs.is_empty() {
+            let mut cookie =
+                HeaderValue::from_str(&pairs.join("; ")).map_err(|_| ClientError::new("invalid_cookie"))?;
+            cookie.set_sensitive(true);
+            headers.insert(COOKIE, cookie);
         }
         if !matches!(method, Method::GET | Method::HEAD) {
             headers.insert(
@@ -280,7 +470,7 @@ impl NativeSession {
             );
             headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         }
-        let response = self
+        let mut response = self
             .transport
             .send(Request {
                 method,
@@ -290,9 +480,19 @@ impl NativeSession {
             })
             .await?;
         self.check()?;
+        let mut fields = Fields::default();
+        let mut ordinary = Vec::new();
         for header in response.headers.get_all(SET_COOKIE) {
             let raw = header.to_str().map_err(|_| ClientError::new("invalid_cookie"))?;
             let cookie = cookie::Cookie::parse(raw).map_err(|_| ClientError::new("invalid_cookie"))?;
+            if fields.capture(cookie.name(), raw) || (self.ceremony.is_some() && route == Route::Start) {
+                // A typed-code start creates a transaction, never an account
+                // session. Discovery must rely on cookies from completion.
+                continue;
+            }
+            if !pair_is_safe(cookie.name(), cookie.value()) {
+                return Err(ClientError::new("invalid_cookie"));
+            }
             if cookie
                 .domain()
                 .is_some_and(|domain| Some(domain.trim_start_matches('.')) != self.origin.host_str())
@@ -303,13 +503,28 @@ impl NativeSession {
             // names that same host. Account and instance stores never share.
             let mut cookie = cookie.into_owned();
             cookie.unset_domain();
+            ordinary.push((cookie, header.clone()));
+        }
+        if let Some(ceremony) = self.ceremony.as_mut() {
+            ceremony.receive(route, &response, fields);
+        }
+        response.headers.remove(SET_COOKIE);
+        for (cookie, header) in ordinary {
             self.cookies.store_response_cookies(std::iter::once(cookie), &url);
+            // Instance update callers use Set-Cookie presence; account callers
+            // never need the raw Set-Cookie (including ordinary session material).
+            if self.ceremony.is_none() {
+                response.headers.append(SET_COOKIE, header);
+            }
         }
         Ok(response)
     }
     /// Required Runtime cookies only. Host-only scope is retained in the jar;
     /// native platform APIs require the explicit exact host for projection.
     pub fn runtime_cookies(&self) -> Result<Vec<cookie::Cookie<'static>>, ClientError> {
+        if self.ceremony.is_some() {
+            return Err(ClientError::new("invalid_instance_origin"));
+        }
         let host = self
             .origin
             .host_str()

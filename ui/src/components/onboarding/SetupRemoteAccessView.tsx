@@ -4,9 +4,8 @@
 import { ArrowRight, LoaderCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
-import { ClaimFields } from '../devices/claim';
 import { claimProblemText } from '../devices/texts';
-import type { ClaimProblem, NameState } from '../devices/types';
+import type { ClaimProblem } from '../devices/types';
 import { Button } from '../ui/button';
 import { KeptTail } from '../ui/kept-tail';
 import { SetupHeader } from '../Wizard';
@@ -14,19 +13,16 @@ import { SetupHeader } from '../Wizard';
 export type SetupRemoteAccessViewProps = (
   /** A plain browser on a standalone Runtime: the first claim passes avibe.bot once. */
   | { surface: 'browser'; busy?: boolean; problem?: ClaimProblem; /** `vibe remote rebind` exists on this instance. */ terminal?: boolean }
-  /** The Desktop App: its own sign-in, then the name here (not wired to a page yet). */
-  | { surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
+  /** The Desktop App: one action, which asks the shell for its claim dialog (the App's own
+   *  sign-in if needed, then the name). `busy`: that request was just sent. */
+  | { surface: 'desktop'; busy?: boolean }
 ) & {
   onTurnOn?: () => void;
-  onSignIn?: () => void;
-  onNameChange?: (name: string) => void;
   onSkip?: () => void;
 };
 
 export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
   const { t } = useTranslation();
-  const claim = props.surface === 'desktop' && props.account !== null ? props : null;
-  const signIn = props.surface === 'desktop' && props.account === null;
   const browser = props.surface === 'browser' ? props : null;
   // An address that cannot start a claim has nothing to press here: the sentence, then go on.
   const noAction = browser?.problem?.code === 'link_required';
@@ -43,13 +39,9 @@ export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
                   <p>{t('devices.setup.lead')}</p>
                 </header>
                 <div className="mx-auto mb-10 w-full max-w-[560px] overflow-hidden rounded-xl border border-edge bg-surface text-left shadow-elevation-0">
-                  {claim ? (
-                    <ClaimFields account={claim.account ?? ''} name={claim.name} nameState={claim.nameState} onNameChange={props.onNameChange} />
-                  ) : (
-                    <p className="px-5 py-4 text-[13px] leading-relaxed text-muted">
-                      <KeptTail text={t(signIn ? 'devices.reach.signInHint' : 'devices.setup.browserHint')} />
-                    </p>
-                  )}
+                  <p className="px-5 py-4 text-[13px] leading-relaxed text-muted">
+                    <KeptTail text={t(browser ? 'devices.setup.browserHint' : 'devices.setup.desktopHint')} />
+                  </p>
                   {browser?.problem && (
                     <p role="alert" className={`border-t border-border px-5 py-3 text-[12px] leading-relaxed ${noAction ? 'text-foreground' : 'text-destructive-ink'}`}>
                       <KeptTail text={claimProblemText(t, browser.problem, browser.terminal ?? true)} />
@@ -65,10 +57,10 @@ export function SetupRemoteAccessView(props: SetupRemoteAccessViewProps) {
                 type="button"
                 variant="brand"
                 className="group onboarding-action-w onboarding-primary-action"
-                disabled={Boolean(claim && (claim.nameState === 'taken' || !claim.name)) || browser?.busy}
-                onClick={signIn ? props.onSignIn : props.onTurnOn}
+                disabled={props.busy}
+                onClick={props.onTurnOn}
               >
-                {t(signIn ? 'devices.reach.signInAndTurnOn' : 'devices.reach.turnOn')}
+                {t('devices.reach.turnOn')}
                 {browser?.busy ? <LoaderCircle size={16} className="motion-safe:animate-spin" /> : <ArrowRight size={16} />}
               </Button>
             )}

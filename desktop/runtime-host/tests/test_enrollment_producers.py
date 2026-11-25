@@ -257,7 +257,19 @@ def test_a3_actual_uncertainty_preserves_exact_runtime_request(chain, producer, 
         "ok": False, "error": "pairing_redeem_indeterminate", "status": 409,
         "pairing": {"ok": False, "recoverable": True, "cause": "registration_indeterminate"},
     }
-    assert remote_access._read_pending_pairing_record()[0] == saved
+    current, error = remote_access._read_pending_pairing_record()
+    assert not error and current is not None
+    if "desktop_dispatch" in saved:
+        # New Runtime records each local dispatch and the completed non-retryable
+        # reply privately. The operation, source and exact wire request stay put.
+        assert current["desktop_dispatch"] != saved["desktop_dispatch"]
+        assert "desktop_reply" not in saved and current["desktop_reply"]["kind"] == "ended_unknown"
+        assert current["desktop_reply"]["observed_dispatch"] == current["desktop_dispatch"]
+        assert {k: v for k, v in current.items() if k not in ("desktop_dispatch", "desktop_reply")} == {
+            k: v for k, v in saved.items() if k != "desktop_dispatch"
+        }
+    else:
+        assert current == saved  # released R1 has no local reply evidence
     refused = pair({**body, "pairing_key": "new-grant-is-not-authorized"})
     assert refused.get_json()["error"] == "local_instance_conflict"
     assert control(producer)["devices"] == before["devices"]

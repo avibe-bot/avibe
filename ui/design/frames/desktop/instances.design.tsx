@@ -6,8 +6,7 @@ import { DesktopAccountRowView } from '@/desktop/DesktopAccountRowView';
 import { InstanceSwitcherView } from '@/desktop/InstanceSwitcherView';
 import { AccountSecondFactorView } from '@/desktop/AccountSecondFactorView';
 import { AccountSignOutView } from '@/desktop/AccountSignOutView';
-import en from '@/i18n/en.json';
-import zh from '@/i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { AccountDetailsView } from '@/desktop/AccountDetailsView';
 import { AddInstanceView } from '@/desktop/AddInstanceView';
 import { frames } from '../../frame';
@@ -26,7 +25,7 @@ const designFrames = frames(desktopInstanceFrames.map(({ fixture, ...frame }) =>
       </Route>
     </Routes>,
   };
-  if (fixture.state === 'sign-out-error') return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><AccountSignOutView signingOut={false} errorMessage={(fixture.lang === 'en' ? en : zh).desktopClient.errors.request} onBack={() => {}} onRetry={() => {}} /></div> };
+  if (fixture.state === 'sign-out-error') return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><AccountSignOutView signingOut={false} errorMessage={(fixture.lang === 'en' ? en : zh).desktopAccount.errors.request} onBack={() => {}} onRetry={() => {}} /></div> };
   const profile = profileViewProps(fixture);
   if (profile) return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><AccountDetailsView {...profile} /></div> };
   if (fixture.state === 'add') return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><AddInstanceView onBack={() => {}} onRefresh={() => {}} busy={false} /></div> };

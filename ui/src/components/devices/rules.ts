@@ -9,8 +9,10 @@ import type { AccountResult, Device, DeviceActivity, DeviceFunction, RenameDevic
 
 /** The Avibe App's TestFlight invitation; TestFlight lists the App as 「Avibe OS」. */
 export const TESTFLIGHT_INVITE_URL = 'https://testflight.apple.com/join/HXqwMqeX';
-/** Every domain this Avibe can claim ends so. */
-export const DOMAIN_SUFFIX = '-app.avibe.bot';
+import { DOMAIN_SUFFIX } from '../DomainField';
+
+/** Every domain this Avibe can claim ends so (one source: DomainField). */
+export { DOMAIN_SUFFIX };
 /** The name part of a domain this Avibe can claim, or the host as it is. */
 export const prefixOf = (host: string) => (host.endsWith(DOMAIN_SUFFIX) ? host.slice(0, -DOMAIN_SUFFIX.length) : host);
 

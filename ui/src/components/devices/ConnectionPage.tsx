@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
+import { cleanDomainName } from '@/components/domainName';
 import type { RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkInterface } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { hasDesktopClient } from '@/desktop/bridge';
@@ -59,6 +60,7 @@ const storedValue = (connection: ConnectionState, setting: TunnelSetting): strin
 const preferenceOf = (choice: NativeDirectChoice): DirectPreference => ({
   mode: choice.mode,
   reverted: choice.reverted === null ? null : { at: new Date(choice.reverted.at).toISOString(), reason: 'unreachable', from: choice.reverted.from },
+  pendingRelaunch: choice.pendingRelaunch || undefined,
 });
 
 type Preview = RenamePreview & { name: string };
@@ -656,7 +658,7 @@ export function ConnectionPage() {
       onShowCleanup={(retired: RetiredName) => setStep({ step: 'cleanup', retired })}
       onRenameNameChange={(name) => {
         renameRun.current += 1;
-        setStep({ step: 'form', name: name.trim().toLowerCase() });
+        setStep({ step: 'form', name: cleanDomainName(name) });
       }}
       onRenameContinue={renameContinue}
       onRenameConfirm={renameConfirm}
