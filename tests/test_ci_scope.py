@@ -185,7 +185,9 @@ def workflow():
 
 def test_workflow_routes_match_the_contract_and_every_producer_has_a_required_gate():
     jobs = workflow()["jobs"]
-    assert set(jobs) == {"changes", "master-full-backstop"} | FAST | PR_TESTS | HEAVY | GATES.keys()
+    assert set(jobs) == {"engine-allocation-preflight", "changes", "master-full-backstop"} | FAST | PR_TESTS | HEAVY | GATES.keys()
+    assert jobs["changes"]["needs"] == "engine-allocation-preflight"
+    assert jobs["engine-allocation-preflight"]["permissions"] == {"contents": "read", "actions": "read"}
     leaves = {"ruff", "show-router-integration", "memory-insight-contract", "migration-release-guard", "npm-wrapper", "build-linux-artifacts"}
     for name in FAST | PR_TESTS | HEAVY:
         job = jobs[name]

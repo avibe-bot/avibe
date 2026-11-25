@@ -3,7 +3,12 @@ name: Publish signed Model Hub engine index
 on:
   push:
     branches: [master]
-    paths: ['patches/model-hub-engine-channel-ledger/**']
+  workflow_dispatch:
+    inputs:
+      landing:
+        description: Exact first-parent master commit to recover (no new allocation)
+        required: true
+        type: string
 
 permissions: {}
 env:
@@ -17,11 +22,12 @@ jobs:
     timeout-minutes: 90
     outputs:
       sequences: ${{ steps.proof.outputs.sequences }}
+      rejected: ${{ steps.proof.outputs.rejected }}
     steps:
       - &tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 97cae866c6c00864dfcf907546927ae8b91a3cc7
+          ref: 535cb105d66bac23a2058a107451e97d6c8a38b1
           path: tools
           persist-credentials: false
       - &ledger
@@ -44,6 +50,12 @@ jobs:
 
   sign:
     needs: prepare
+    if: needs.prepare.outputs.sequences != '[]'
+    env:
+      AUTHORIZED_SEQUENCES: ${{ needs.prepare.outputs.sequences }}
+    # Commission only with this environment restricted to the master branch;
+    # no manual reviewers. Do not provision a repo/org secret with the same name.
+    environment: model-hub-engine-channel-signer
     runs-on: ubuntu-latest
     permissions: {contents: read}
     timeout-minutes: 15
@@ -71,6 +83,10 @@ jobs:
 
   publish:
     needs: [prepare, sign]
+    # A later matrix member failing to sign/upload cannot discard an earlier artifact.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.sequences != '[]' && (needs.sign.result == 'success' || needs.sign.result == 'failure') }}
+    env:
+      AUTHORIZED_SEQUENCES: ${{ needs.prepare.outputs.sequences }}
     runs-on: ubuntu-latest
     permissions: {contents: read, actions: read}
     # One writer per landed push. The next allocation starts only after the
@@ -90,3 +106,6 @@ jobs:
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: python3 -I tools/scripts/model_hub_engine_index.py publish --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
+      - name: Report rejected suffix after delivering the authorized prefix
+        if: needs.prepare.outputs.rejected == 'true'
+        run: exit 1

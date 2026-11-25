@@ -184,6 +184,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
+          test "$GITHUB_RUN_ATTEMPT" = 1  # a failed-job rerun must not inherit the first attempt's approval
           python3 scripts/model_hub_engine_channel.py authorize \
             --environment model-hub-engine-channel-writer --operation "$OPERATION" --require-approval
 

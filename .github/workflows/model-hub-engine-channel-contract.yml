@@ -25,6 +25,10 @@ on:
       - "tests/test_model_hub_engine_merge.py"
       - ".github/workflows/model-hub-engine-index.yml"
       - "tests/test_model_hub_engine_hosted.py"
+      - "tests/test_model_hub_engine_index_recovery.py"
+      - "tests/test_model_hub_engine_emergency.py"
+      - "scripts/model_hub_engine_emergency.py"
+      - "scripts/model_hub_engine_recovery.py"
       - ".github/workflows/model-hub-engine-channel.yml"
       - "scripts/release_asset_download.py"
       - "tests/engine_channel_support.py"
@@ -48,6 +52,10 @@ on:
       - "tests/test_model_hub_engine_merge.py"
       - ".github/workflows/model-hub-engine-index.yml"
       - "tests/test_model_hub_engine_hosted.py"
+      - "tests/test_model_hub_engine_index_recovery.py"
+      - "tests/test_model_hub_engine_emergency.py"
+      - "scripts/model_hub_engine_emergency.py"
+      - "scripts/model_hub_engine_recovery.py"
       - ".github/workflows/model-hub-engine-channel.yml"
       - "scripts/release_asset_download.py"
       - "tests/engine_channel_support.py"
@@ -130,7 +138,8 @@ jobs:
           tar -xzf "$dir/generator.tgz" -C "$dir"
           export AVIBE_TEST_HOSTED_KEYGEN="$(find "$dir" -type f -name avault)"
           test -x "$AVIBE_TEST_HOSTED_KEYGEN"
-          python -m pytest tests/test_model_hub_engine_hosted.py tests/test_model_hub_engine_merge.py -q
+          AVIBE_TEST_ISOLATED_ENGINE_RACE=1 python -m pytest -q tests/test_model_hub_engine_hosted.py \
+            tests/test_model_hub_engine_merge.py tests/test_model_hub_engine_index_recovery.py tests/test_model_hub_engine_emergency.py
 
   smoke-harness:
     name: smoke-harness (${{ matrix.platform }})

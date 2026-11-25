@@ -1320,6 +1320,7 @@ def test_every_privileged_job_follows_authorization_and_proves_approval_before_i
         first_run = next(index for index, run in enumerate(runs) if run)
         if name == "release":
             assert f"--environment {environment}" in runs[first_run] and "--require-approval" in runs[first_run]
+            assert runs[first_run].index('test "$GITHUB_RUN_ATTEMPT" = 1') < runs[first_run].index("--require-approval")
         else:
             assert "--authorize-only" in runs[first_run] and "tools/scripts/model_hub_engine_hosted.py" in runs[first_run]
         # Nothing but the checkout precedes the approval check.
@@ -1331,10 +1332,12 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     text = index.read_text(encoding="utf-8")
     workflow = yaml.safe_load(text)
     jobs = workflow["jobs"]
-    assert workflow[True] == {"push": {"branches": ["master"], "paths": ["patches/model-hub-engine-channel-ledger/**"]}}
+    assert workflow[True]["push"] == {"branches": ["master"]}
     assert set(jobs) == {"prepare", "sign", "publish"}
     assert "concurrency" not in workflow and workflow["permissions"] == {}
-    assert all("environment" not in job for job in jobs.values())
+    assert {n: job["environment"] for n, job in jobs.items() if "environment" in job} == {
+        "sign": producer.SIGNER_ENVIRONMENT,
+    }
     assert "secrets." not in json.dumps(jobs["prepare"])
 
     def mentions(job: str, needle: str) -> bool:
@@ -1344,7 +1347,8 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     assert mentions("sign", "secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE") and not mentions("sign", "AWS_")
     for name in ("prepare", "publish"):
         assert not mentions(name, "HOSTED_SIGNING_BUNDLE")
-    upload = jobs["publish"]["steps"][-1]
+    upload, rejected = jobs["publish"]["steps"][-2:]
+    assert rejected["if"] == "needs.prepare.outputs.rejected == 'true'" and rejected["run"] == "exit 1"
     assert "model_hub_engine_index.py publish" in upload["run"]
     for variable, secret in (("AWS_ACCESS_KEY_ID", "R2_ACCESS_KEY_ID"), ("AWS_SECRET_ACCESS_KEY", "R2_SECRET_ACCESS_KEY"),
                              ("R2_ACCOUNT_ID", "R2_ACCOUNT_ID")):
@@ -1353,7 +1357,10 @@ def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither
     assert text.count("secrets.R2_") == 3 and "secrets.MODEL_HUB_ENGINE_CHANNEL_R2_" not in text
     assert jobs["sign"]["needs"] == "prepare" and jobs["publish"]["needs"] == ["prepare", "sign"]
     assert "strategy" not in jobs["publish"] and "matrix.sequence" not in json.dumps(jobs["publish"])
-    assert all("if" not in jobs[name] for name in ("sign", "publish"))
+    assert "needs.prepare.outputs.sequences != '[]'" in jobs["sign"]["if"]
+    assert "needs.prepare.result == 'success'" in jobs["publish"]["if"]
+    assert "needs.sign.result == 'failure'" in jobs["publish"]["if"]
+    assert all(jobs[name]["env"]["AUTHORIZED_SEQUENCES"] == "${{ needs.prepare.outputs.sequences }}" for name in ("sign", "publish"))
     for name in ("sign", "publish"):
         tools, data, *_ = jobs[name]["steps"]
         assert re.fullmatch("[a-f0-9]{40}", tools["with"]["ref"]) and tools["with"]["path"] == "tools"

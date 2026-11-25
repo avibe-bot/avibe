@@ -22,7 +22,32 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  engine-allocation-preflight:
+    runs-on: ubuntu-latest
+    permissions: {contents: read, actions: read}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          path: ledger
+          fetch-depth: 0
+          sparse-checkout: patches/model-hub-engine-channel-ledger
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        with:
+          path: tools
+          ref: 535cb105d66bac23a2058a107451e97d6c8a38b1
+          persist-credentials: false
+      - name: Check the proposed merge tree with pinned tools and no release credentials
+        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I tools/scripts/model_hub_engine_index.py preflight --data ledger
+
   changes:
+    needs: engine-allocation-preflight
     # Sole scope authority: preserve proven docs-only PRs; otherwise run cheap
     # checks and route heavy work. Queue combinations are thin, master is full.
     runs-on: ubuntu-latest

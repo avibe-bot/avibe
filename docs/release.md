@@ -363,7 +363,7 @@ from `untrusted_rehearsal` and no owner approval can be inferred from it.
 
 ### Operations
 
-Asset publication is independent. For the index, **promotion and withdrawal use the same allocation PR**. Merge adds one canonical payload at the next sequence; no index dispatch, approval dialog, receipt PR or renewal follows. A withdrawal names its fallback and a public reason. After a failed run, rerun **all jobs of the original push** (including signing), not a different commit. The allocation is unchanged; deterministic signing reproduces the identical envelope.
+Asset publication is independent. Promotion and withdrawal each take one allocation PR; normal delivery needs no second PR or approval. If signing or publication is interrupted, dispatch the index workflow on master with the original landing commit. It rechecks the merge authorization and uses the frozen allocation, not a later stable wheel or an expiring rehearsal artifact. It never assigns another payload to that sequence. If GitHub cannot prove the merge authorization, delivery stops.
 
 **What a client without the newest index does.** It keeps following the index
 it has. If that index lists a release that a later index withdrew, the client
@@ -399,9 +399,11 @@ restore pinned bytes but cannot promote a release or undo a withdrawal.
 
 The index workflow is disabled until commissioning. Add exactly one new file at
 `patches/model-hub-engine-channel-ledger/<16-digit-sequence>.payload.json`, starting at 1.
-Use the exact bytes returned by `plan_payload`, without an extra newline. For promotion,
-put `Engine-Rehearsal: <run-id>` in the reviewed **head commit message**. An editable PR
-body is not evidence. Existing allocations must not be modified, renamed or deleted.
+Use the exact bytes returned by `plan_payload`, without an extra newline. For a promotion,
+commit the reviewed rehearsal object and its payload/predecessor digests beside the allocation
+as described in the allocation PR template. Read-only preflight checks the successful attempt,
+assets, released wheels and baselines before merge. An editable PR body is not evidence.
+Existing allocations must not be modified, renamed or deleted.
 
 On a master push, the job without signing or bucket credentials binds each actual ledger
 addition to the corresponding merged PR, file blob, reviewed head and required CI. A
@@ -411,6 +413,10 @@ client signature and exact allocated payload. It waits for the exact predecessor
 uses its ETag for replacement, and verifies both bucket and public bytes. No global
 concurrency group coalesces withdrawals. A denied read, failed conditional write or
 superseding version is not authority to retry without the check.
+
+An emergency withdrawal may retire intervening unpublished allocations. Its reviewed declaration names the last verified effective parent, every retired sequence and its SHA-256, and the exact withdrawal payload. The conditional write publishes the withdrawal and retires those allocations together. If a promotion has already reached the origin, even if the public cache is behind, the old withdrawal cannot overwrite it: reconcile both reads and review a new withdrawal at a fresh sequence.
+
+If historical authorization is lost, a new recovery PR may add only a binding to the original landing, sequence, payload blob and parent. Its own final head must pass preflight, review and checks and land on master. A failed or running review, network error, or mismatched binding is not new authorization.
 
 **Trust boundary:** anyone who can change the master workflows is trusted with signing.
 These checks prevent accidental publication through the standard workflow; they cannot
@@ -431,7 +437,7 @@ The owner generates a dedicated fresh key using the reviewed hosted helper
 (`generate`, an explicit `--avault` executable and a new private `--output` file).
 The generator needs avault 0.1.11 or later; the CI exercise uses 0.1.11 and the
 hosted signer and oldest client verifier use the pinned 0.1.10 binary. Only the
-compressed public key is printed. The owner configures the signer credential without printing or transmitting it to an agent.
+compressed public key is printed. At commissioning, the owner must verify that signing material exists only in the signer environment, restricted to the master branch, with no same-name repository or organization fallback. No manual environment reviewer is required. Referencing an environment in YAML does not establish that these deployment settings are present.
 The private runbook holds the exact setup commands. Only the public key ID,
 compressed public key and genesis sequence floor belong in the root PR.
 

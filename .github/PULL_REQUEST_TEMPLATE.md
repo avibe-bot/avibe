@@ -25,6 +25,6 @@
 
 - Operation and full target release tag; minimum Avibe version (no maximum):
 - Promotion: six platform/archive SHA-256 digests and manifest digest:
-- Designated successful rehearsal (link and run ID); put `Engine-Rehearsal: <run-id>` on its own line in the allocation PR's **head commit message**:
+- Promotion: link the successful rehearsal **run and attempt**. Include its exact `untrusted_rehearsal.json` object under `rehearsal` in `patches/model-hub-engine-allocation-evidence/<16-digit-sequence>.json`; bind `payload_sha256` and `parent_sha256` (null for genesis) to the exact allocation bytes. A PR-body link or a mutable run ID is not evidence.
 - Withdrawal: affected full tag, permanent public reason, listed non-withdrawn fallback tag, and minimum-version compatibility:
 - Verify exactly one new canonical ledger blob, sequence and predecessor; never edit or delete an earlier allocation.
