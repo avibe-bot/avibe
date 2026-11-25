@@ -368,8 +368,12 @@ export type RebindDialog =
  *  remote access is as it was before. `needsRepair`: only this computer can sort it out. */
 export type UnbindState =
   | { state: 'ready' }
+  /** The instance says this Avibe cannot be unbound here: no entry, as for 「更改域名」. */
+  | { state: 'ineligible' }
   | { state: 'unbinding' }
-  | { state: 'notChanged'; reason: 'ineligible' | 'refused' }
+  /** avibe.bot refused it as not eligible: nothing changed, remote access's switch is as before.
+   *  (A key that no longer works is the page's existing binding-rejected state, not this.) */
+  | { state: 'notChanged' }
   | { state: 'needsRepair' };
 
 /** The confirmation, open. `remote`: pressed from a device away from the computer, which loses this
@@ -378,7 +382,7 @@ export type UnbindState =
 export type UnbindConfirmState = {
   remote: boolean;
   /** The computer's name as the Devices page lists it. Pressed from another device, the sentences
-   *  name the computer rather than say 「这台电脑」 / 「那台电脑」. */
+   *  name the computer rather than say 「这台电脑」 / 「那台电脑」; without a name, 「运行 Avibe 的那台电脑」. */
   computer?: string;
   healthConnected: boolean;
   releaseAt?: string;

@@ -336,6 +336,8 @@ export function ConnectionPageView({
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
   const unbindBusy = unbind?.state === 'unbinding' || unbind?.state === 'needsRepair';
+  // While an unbinding runs, the tunnel's own settings and 「优化线路」 have nothing to act on.
+  const unbinding = unbind?.state === 'unbinding';
   const shell = (children: ReactNode) => (
     <SettingsPageShell title={t('devices.connection.title')} subtitle={t('devices.connection.subtitle')} activeTab="remote-access">
       <BackToDevices onBack={actions.onBack} />
@@ -377,7 +379,7 @@ export function ConnectionPageView({
                 {t('devices.connection.changeDomain')}
               </Button>
             )}
-            {unbind && !unbindBusy && (
+            {(unbind?.state === 'ready' || unbind?.state === 'notChanged') && (
               <Button variant="ghost" size="compact" className="text-destructive-ink" onClick={actions.onUnbind}>
                 {t('devices.unbind.action')}
               </Button>
@@ -556,7 +558,7 @@ export function ConnectionPageView({
         )}
       </SettingsPanel>
 
-      <SettingsPanel title={t('devices.connection.tunnelSettings')} description={<KeptTail text={t('devices.connection.verifyNote')} />}>
+      {!unbinding && <SettingsPanel title={t('devices.connection.tunnelSettings')} description={<KeptTail text={t('devices.connection.verifyNote')} />}>
         <Row
           title={t('remoteAccess.protocol')}
           hint={settings.transport_protocol === 'auto'
@@ -593,10 +595,10 @@ export function ConnectionPageView({
           status={refused?.row === 'profile' ? <Refused refusal={refused} /> : null}
           control={<TunnelProfileControl value={settings.optimization_profile} onChange={(value) => set?.('profile', value)} disabled={sending === 'profile'} />}
         />
-      </SettingsPanel>
+      </SettingsPanel>}
 
       <SettingsPanel>
-        <OptimizeRow optimize={optimize} onOptimize={actions.onOptimizeRoute} />
+        {!unbinding && <OptimizeRow optimize={optimize} onOptimize={actions.onOptimizeRoute} />}
         <ActionRow icon={Stethoscope} label={t('devices.connection.diagnostics')} onClick={actions.onOpenDiagnostics} />
       </SettingsPanel>
 

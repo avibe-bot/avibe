@@ -8544,9 +8544,9 @@
     "unbind": {
       "action": "Unbind",
       "confirmTitle": "Unbind {{host}}?",
-      "confirmLead": "This takes effect at once and cannot be undone.",
+      "confirmLead": "This takes effect at once. What is lost below cannot be restored.",
       "lostRemote": "Remote access ends at once on every device, and signed-in devices are signed out.",
-      "lostAccess": "Other people's access to this Avibe, paired phones and notifications are removed and cannot be restored.",
+      "lostAccess": "Other people's access to this Avibe, paired phone connections and notifications are removed and cannot be restored.",
       "lostHealth": "Health data synced to this computer is cleared; reconnect Health on the iPhone afterwards.",
       "nameKept": "{{host}} stays with your account until {{date}}; until then you can take it back on this or another computer.",
       "nameKeptDays_one": "{{host}} stays with your account for {{count}} day; until then you can take it back on this or another computer.",
@@ -8554,7 +8554,6 @@
       "nameKeptPlain": "{{host}} stays with your account for a while; until then you can take it back on this or another computer.",
       "kept": "The workspaces and conversations on this computer stay.",
       "wayBack": "To use it again, press Turn on remote access.",
-      "wayBackRemote": "This device disconnects at once. To turn it on again, press Turn on remote access on that computer.",
       "lostHealthNamed": "Health data synced to {{computer}} is cleared; reconnect Health on the iPhone afterwards.",
       "nameKeptNamed": "{{host}} stays with your account until {{date}}; until then you can take it back on {{computer}} or another computer.",
       "nameKeptDaysNamed_one": "{{host}} stays with your account for {{count}} day; until then you can take it back on {{computer}} or another computer.",
@@ -8564,9 +8563,9 @@
       "wayBackRemoteNamed": "This device disconnects at once. To turn it on again, press Turn on remote access on {{computer}}.",
       "unbinding": "Unbinding. This continues by itself.",
       "done": "This computer is unbound",
-      "notChanged": "Not unbound. Nothing changed. {{reason}}",
-      "reasonIneligible": "avibe.bot does not allow unbinding this Avibe here; remote access is back as it was before.",
-      "reasonRefused": "avibe.bot did not accept it; remote access is back as it was before."
+      "notChanged": "Not unbound. Nothing changed. avibe.bot does not allow unbinding this Avibe here; the remote access switch is back as it was before.",
+      "needsRepair": "Unbinding did not finish, and this page cannot handle it. Run vibe remote reset in this computer's terminal.",
+      "thatComputer": "the computer running Avibe"
     }
   },
   "domainField": {

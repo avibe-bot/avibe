@@ -70,24 +70,25 @@ const designFrames = frames([
   frame('confirm-phone', '确认框 · 在这台电脑上按 · 390 宽', PHONE, { unbindConfirm: confirm(false) }),
   frame('confirm-remote', '确认框 · 从远程设备上按：电脑一律叫它的名字；多一句，这台设备会马上断开，要回到那台电脑上开启', WIDE, { ...away, unbindConfirm: confirm(true) }),
   frame('confirm-remote-phone', '确认框 · 从远程设备（iPhone App）上按 · 390 宽', PHONE, { ...away, unbindConfirm: confirm(true) }, { app: true }),
+  frame('confirm-remote-no-name', '确认框 · 从远程按、没拿到电脑的名字：说「运行 Avibe 的那台电脑」，不说「这台电脑」', WIDE, { ...away, unbindConfirm: confirm(true, { computer: undefined }) }),
   frame('confirm-no-health', '确认框 · 没有同步过健康数据：少一条', WIDE, { unbindConfirm: confirm(false, { healthConnected: false }) }),
   frame('confirm-no-date', '确认框 · 实例没给日子：说保留天数，不编日期', WIDE, { unbindConfirm: confirm(false, { releaseAt: undefined }) }),
-  frame('confirm-busy', '确认框 · 按了「解除绑定」，正在交给实例', WIDE, { unbindConfirm: confirm(false, { busy: true }) }),
+  frame('confirm-busy', '确认框 · 按了「解除绑定」，正在交给实例：取消、右上角关闭、点外面都不起作用', WIDE, { unbindConfirm: confirm(false, { busy: true }) }),
 
   // 3. Running: one sentence, no cancel.
-  frame('unbinding', '进行中 · 连接方式：一句「正在解除绑定，会自动继续。」，没有取消，没有别的按钮', PAGE, { unbind: { state: 'unbinding' } }),
-  devices('unbinding-devices', '进行中 · 设备页：同一句', WIDE, { reach: { state: 'unknown' }, unbind: { state: 'unbinding' } }),
+  frame('unbinding', '进行中 · 连接方式：一句「正在解除绑定，会自动继续。」，没有取消；隧道设置和「优化线路」收起', PAGE, { unbind: { state: 'unbinding' } }),
+  devices('unbinding-devices', '进行中 · 设备页：同一句，远程访问卡片收起', WIDE, { reach: { state: 'unknown' }, unbind: { state: 'unbinding' } }),
 
   // 4. Done: the Devices page as on a new install, with what happened and how long the name stays.
   devices('done', '完成 · 设备页回到没绑定的样子，带「开启远程访问」；说名字保留到哪天', WIDE, { unbind: { state: 'done', host, releaseAt: RELEASE } }),
   devices('done-phone', '完成 · 390 宽', PHONE, { unbind: { state: 'done', host, releaseAt: RELEASE } }),
 
   // 5. Nothing changed: the reason, and remote access is as it was before.
-  frame('not-changed', '什么都没变 · avibe.bot 没有同意：远程访问恢复到按下之前，可以再按', PAGE, { unbind: { state: 'notChanged', reason: 'refused' } }),
-  frame('not-changed-ineligible', '什么都没变 · 这个 Avibe 不能在这里解除绑定', PAGE, { unbind: { state: 'notChanged', reason: 'ineligible' } }),
+  frame('not-changed', '什么都没变 · avibe.bot 说不合资格：远程访问的开关恢复到按下之前（钥匙失效走已有的「绑定被拒」那一屏）', PAGE, { unbind: { state: 'notChanged' } }),
+  frame('ineligible', '实例说不能在这里解除绑定：没有入口，和「更改域名」一样', PAGE, { unbind: { state: 'ineligible' } }),
 
   // 6. Only this computer can sort it out: the page's existing sentence, no new one.
-  frame('needs-repair', '需要在这台电脑上处理 · 复用已有的那句，不加新句子；按钮都收起', PAGE, { unbind: { state: 'needsRepair' } }),
+  frame('needs-repair', '需要在这台电脑上处理 · 指向 vibe remote reset；按钮都收起', PAGE, { unbind: { state: 'needsRepair' } }),
 
   // 7. 「作为一台新电脑重新绑定」 now deletes the old binding at avibe.bot first; where avibe.bot does
   //    not accept that (its key no longer works), a separate confirmation clears this computer only.

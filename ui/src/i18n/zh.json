@@ -8544,9 +8544,9 @@
     "unbind": {
       "action": "解除绑定",
       "confirmTitle": "解除 {{host}} 的绑定？",
-      "confirmLead": "立即生效，不能撤销。",
+      "confirmLead": "立即生效。下面丢掉的这些不能复原。",
       "lostRemote": "所有设备的远程访问马上结束，已登录的设备都会退出。",
-      "lostAccess": "别人对这个 Avibe 的访问权限、已配对的手机和推送都会删掉，不能复原。",
+      "lostAccess": "别人对这个 Avibe 的访问权限、已配对的手机连接和推送都会删掉，不能复原。",
       "lostHealth": "这台电脑上已同步的健康数据会清掉，之后要在 iPhone 上重新连接健康。",
       "nameKept": "{{host}} 在你的账号下保留到 {{date}}，这期间可以在这台或别的电脑上领回。",
       "nameKeptDays_one": "{{host}} 在你的账号下保留 {{count}} 天，这期间可以在这台或别的电脑上领回。",
@@ -8554,7 +8554,6 @@
       "nameKeptPlain": "{{host}} 会在你的账号下保留一段时间，这期间可以在这台或别的电脑上领回。",
       "kept": "这台电脑上的工作区和对话都留着。",
       "wayBack": "以后要再用，按「开启远程访问」。",
-      "wayBackRemote": "你现在用的这台设备会马上断开。要再开启，得在那台电脑上按「开启远程访问」。",
       "lostHealthNamed": "{{computer}} 上已同步的健康数据会清掉，之后要在 iPhone 上重新连接健康。",
       "nameKeptNamed": "{{host}} 在你的账号下保留到 {{date}}，这期间可以在 {{computer}} 或别的电脑上领回。",
       "nameKeptDaysNamed_one": "{{host}} 在你的账号下保留 {{count}} 天，这期间可以在 {{computer}} 或别的电脑上领回。",
@@ -8564,9 +8563,9 @@
       "wayBackRemoteNamed": "你现在用的这台设备会马上断开。要再开启，得在 {{computer}} 上按「开启远程访问」。",
       "unbinding": "正在解除绑定，会自动继续。",
       "done": "这台电脑已解除绑定",
-      "notChanged": "没有解除绑定，什么都没变。{{reason}}",
-      "reasonIneligible": "avibe.bot 不允许在这里解除这个 Avibe 的绑定，远程访问已恢复到按下之前。",
-      "reasonRefused": "avibe.bot 没有同意，远程访问已恢复到按下之前。"
+      "notChanged": "没有解除绑定，什么都没变。avibe.bot 不允许在这里解除这个 Avibe 的绑定；远程访问的开关恢复到了按下之前。",
+      "needsRepair": "解除绑定没有做完，这一页处理不了。请在这台电脑的终端运行 vibe remote reset。",
+      "thatComputer": "运行 Avibe 的那台电脑"
     }
   },
   "domainField": {

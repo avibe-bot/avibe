@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 
-import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import i18n from '../../i18n';
 import { said } from './testText';
@@ -42,5 +42,24 @@ describe('UnbindConfirm', () => {
     const text = screen.getByRole('dialog').textContent ?? '';
     expect(text).not.toContain('健康');
     expect(text).toContain('max-app.avibe.bot 在你的账号下保留 30 天');
+  });
+
+  it('from another device without the computer\'s name says the computer running Avibe', () => {
+    render(<UnbindConfirm host={host} confirm={{ ...base, remote: true, computer: undefined }} />);
+    const text = screen.getByRole('dialog').textContent ?? '';
+    expect(text).toContain('运行 Avibe 的那台电脑上已同步的健康数据会清掉');
+    expect(text).toContain('运行 Avibe 的那台电脑上的工作区和对话都留着。');
+    expect(text).toContain('要再开启，得在运行 Avibe 的那台电脑上按「开启远程访问」。');
+    expect(text).toContain('这期间可以在运行 Avibe 的那台电脑或别的电脑上领回。');
+    expect(text).not.toContain('这台电脑');
+  });
+
+  it('once pressed, cannot be cancelled or closed', () => {
+    const onCancel = vi.fn();
+    render(<UnbindConfirm host={host} confirm={{ ...base, remote: false, busy: true }} onCancel={onCancel} />);
+    expect((screen.getByRole('button', { name: '取消' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+    expect(onCancel).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toBeTruthy();
   });
 });
