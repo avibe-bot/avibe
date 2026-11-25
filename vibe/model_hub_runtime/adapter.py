@@ -1442,7 +1442,7 @@ _SUBSCRIPTION_QUOTA_URLS: dict[str, tuple[str, ...]] = {
 # CLI chat proxy, at `helps.DefaultXAIFallbackClientVersion`
 # (`internal/runtime/executor/xai_executor_request.go`). `/api-call` sends the
 # headers it is given, so the read must name that identity itself.
-_ANTIGRAVITY_USER_AGENT = "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)"
+_ANTIGRAVITY_USER_AGENT = "antigravity/hub/2.34.0 (aidev_client; os_type=darwin; arch=arm64; cl=1026637980)"
 _GROK_CLI_VERSION = "1.0.46"
 _GROK_CLIENT_HEADERS = {
     "X-XAI-Token-Auth": "xai-grok-cli",
