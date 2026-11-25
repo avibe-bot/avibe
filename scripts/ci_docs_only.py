@@ -103,6 +103,7 @@ class Scope(NamedTuple):
     # A missing path set makes new heavy-job routes fail closed.
     paths: tuple[str, ...] = ()
     routable: bool = False
+    verified_paths: tuple[str, ...] = ()  # Complete event range, including both rename sides and executable files.
 
 
 def full(reason: str, windows_control_ipc: bool) -> Scope:
@@ -189,16 +190,16 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     if code is None:
         reason = f"all {len(paths)} changed paths are narrative documentation"
         return Scope(True, reason, False, SKIP, reason, SKIP, reason, tuple(paths), routable)
+    # For non-narrative diffs, evaluate added names independently of whether
+    # another path already selected platform checks.
+    added = next((p for status, _, _, p in entries if status == "A" and not portable_path(p)), None)
+    if added is not None:
+        return full(f"added name {json.dumps(added, ensure_ascii=True)} is not portable", windows_control_ipc)
     reason = f"not documentation only: {json.dumps(code, ensure_ascii=True)}"
     if not routable:
         return full(reason, windows_control_ipc)
     browser, browser_reason = route(paths, browser_independent, "browser lanes")
     platform, platform_reason = route(paths, platform_independent, "installed-package platform checks")
-    if platform == SKIP:
-        # No rename detection: a rename is a deletion plus this added path.
-        added = next((path for status, _, _, path in entries if status == "A" and not portable_path(path)), None)
-        if added is not None:
-            platform, platform_reason = RUN, f"added name {json.dumps(added, ensure_ascii=True)} is not portable"
     return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason,
                  tuple(paths), routable)
 
@@ -308,7 +309,8 @@ def classify(event_name: str, event: dict, sha: str, repo: Path) -> Scope:
                 raise ValueError("unexpected diff record")
             entries.append((meta[4], meta[0][1:], meta[1], name.decode("utf-8")))
         routable = event_name in {"pull_request", "merge_group"} and targets_default_branch(event_name, event)
-        return scope_of(entries, routable)
+        result = scope_of(entries, routable)
+        return result._replace(verified_paths=tuple(p for *_, p in entries) if routable else ())
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
         # Do not print Git stderr, event payloads or arbitrary commit data.
         # Conservatively select the Windows job when classification cannot prove

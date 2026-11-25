@@ -135,6 +135,10 @@ pub struct LocalState {
     #[serde(default)]
     pub remote_access_url: Option<String>,
     pub remote_access: RemoteAccessState,
+    /// This computer's Runtime is too old for this Desktop: it cannot describe
+    /// itself, or has no claim protocol. Cleared once it can.
+    #[serde(default)]
+    pub runtime_too_old: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DesktopState {
@@ -218,6 +222,7 @@ impl ClientState {
                 instance_id: None,
                 remote_access_url: None,
                 remote_access: RemoteAccessState::Off,
+                runtime_too_old: false,
             },
             desktop: DesktopState { version, update },
             instance_update: None,
@@ -312,6 +317,11 @@ pub enum ClientAction {
     UpdateInstall {
         target_version: String,
     },
+    /// Upgrades this computer's Runtime when it is too old for this Desktop
+    /// (`local_runtime_too_old`), as the Workbench's own update would, and waits
+    /// until this Desktop has the upgraded Runtime again. The shell answers it
+    /// (`Coordinator::upgrade_local_runtime`), with the Runtime host.
+    UpgradeLocalRuntime {},
     Cancel,
     ReturnLocal,
     SignOut {
@@ -349,6 +359,7 @@ impl std::fmt::Debug for ClientAction {
             Self::UpdateSetPrereleases { .. } => "UpdateSetPrereleases",
             Self::UpdateSetAutoUpdate { .. } => "UpdateSetAutoUpdate",
             Self::UpdateInstall { .. } => "UpdateInstall",
+            Self::UpgradeLocalRuntime {} => "UpgradeLocalRuntime",
             Self::Cancel => "Cancel",
             Self::ReturnLocal => "ReturnLocal",
             Self::SignOut { .. } => "SignOut",
@@ -471,6 +482,13 @@ pub enum DirectResult {
         method: TotpMethod,
         #[serde(rename = "recoveryCodes", skip_serializing_if = "Option::is_none")]
         recovery_codes: Option<Vec<String>>,
+    },
+    /// `upgrade_local_runtime`: `upgraded` (the Runtime answers a newer version,
+    /// this Desktop has it again, and it has the claim protocol: repeat the step
+    /// that needed it) or `desktop_update` (Desktop manages that Runtime: its
+    /// own update is the upgrade).
+    LocalRuntimeUpgrade {
+        state: String,
     },
 }
 impl DirectResult {

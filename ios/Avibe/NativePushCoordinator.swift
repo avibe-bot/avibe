@@ -40,19 +40,21 @@ protocol PushNotificationCentering: AnyObject {
     func removePendingNotificationRequests(withIdentifiers identifiers: [String])
 }
 
+/// The system's notification center, called on `NotificationCenterQueue`
+/// (never on the main thread), in the order of the calls.
 @MainActor
 final class SystemPushNotificationCenter: PushNotificationCentering {
-    private let center: UNUserNotificationCenter
+    private let queue: NotificationCenterQueue
 
-    init(center: UNUserNotificationCenter = .current()) {
-        self.center = center
+    init(queue: NotificationCenterQueue = .system) {
+        self.queue = queue
     }
 
     func deliveredNotifications() async -> [PushNotificationCenterEntry] {
-        await withCheckedContinuation { continuation in
-            center.getDeliveredNotifications { notifications in
-                continuation.resume(
-                    returning: notifications.map {
+        await queue.value { answer in
+            UNUserNotificationCenter.current().getDeliveredNotifications { notifications in
+                answer(
+                    notifications.map {
                         PushNotificationCenterEntry(
                             identifier: $0.request.identifier,
                             userInfo: $0.request.content.userInfo,
@@ -66,10 +68,10 @@ final class SystemPushNotificationCenter: PushNotificationCentering {
     }
 
     func pendingNotificationRequests() async -> [PushNotificationCenterEntry] {
-        await withCheckedContinuation { continuation in
-            center.getPendingNotificationRequests { requests in
-                continuation.resume(
-                    returning: requests.map {
+        await queue.value { answer in
+            UNUserNotificationCenter.current().getPendingNotificationRequests { requests in
+                answer(
+                    requests.map {
                         PushNotificationCenterEntry(
                             identifier: $0.identifier,
                             userInfo: $0.content.userInfo,
@@ -82,11 +84,15 @@ final class SystemPushNotificationCenter: PushNotificationCentering {
     }
 
     func removeDeliveredNotifications(withIdentifiers identifiers: [String]) {
-        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        queue.run {
+            UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: identifiers)
+        }
     }
 
     func removePendingNotificationRequests(withIdentifiers identifiers: [String]) {
-        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        queue.run {
+            UNUserNotificationCenter.current().removePendingNotificationRequests(withIdentifiers: identifiers)
+        }
     }
 }
 
@@ -203,9 +209,9 @@ final class NativePushCoordinator {
             )
         },
         notificationAuthorizationStatus: @escaping NotificationAuthorizationStatus = {
-            await withCheckedContinuation { continuation in
+            await NotificationCenterQueue.system.value { answer in
                 UNUserNotificationCenter.current().getNotificationSettings {
-                    continuation.resume(returning: $0.authorizationStatus)
+                    answer($0.authorizationStatus)
                 }
             }
         },

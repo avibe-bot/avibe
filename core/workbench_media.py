@@ -449,6 +449,7 @@ def resolve_attachment_specs(conn: Connection, *, session_id: str, attachments) 
         specs.append(
             {
                 "name": row.get("file_name"),
+                "token": token,
                 "mimetype": row.get("content_type"),
                 "path": row.get("local_path"),
                 "size": row.get("size_bytes"),
@@ -478,6 +479,7 @@ def file_attachments_from_specs(specs) -> list | None:
                 mimetype=spec.get("mimetype") or "application/octet-stream",
                 local_path=path,
                 size=spec.get("size"),
+                media_token=spec.get("token"),
             )
         )
     return files or None

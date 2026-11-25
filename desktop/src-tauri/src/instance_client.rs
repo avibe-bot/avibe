@@ -463,6 +463,7 @@ pub(crate) fn init(app: &AppHandle, bundle: &Url) -> Result<(), ClientError> {
         .map_err(failure)?
         .join("instance-client.json");
     let mut store = ConnectionStore::new(path);
+    crate::device_description::prepare(app);
     let device_name = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| app.package_info().name.clone());
@@ -498,7 +499,7 @@ pub(crate) fn init(app: &AppHandle, bundle: &Url) -> Result<(), ClientError> {
             store,
             local_origin: app.state::<Shell>().active_origin.clone(),
         },
-        Arc::new(HttpTransport::new()?),
+        Arc::new(HttpTransport::new(&app.package_info().version.to_string())?),
         credentials,
         Arc::new(crate::instance_passkeys::NativePasskeys::new(app.clone())),
     );
@@ -1251,7 +1252,13 @@ pub(crate) async fn desktop_claim_review(
     }
     // Only an admitted, qualified private reply can carry account-specific
     // errors or retry information. Admission failures carry no such facts.
-    let delivered = reply.deliver()?;
+    let delivered = reply.deliver().inspect_err(|error| {
+        if error.code == avibe_runtime_host::instance_client::machine::TOO_OLD {
+            // Published after this command lets go of the presentation locks.
+            let coordinator = client.coordinator.clone();
+            tauri::async_runtime::spawn(async move { coordinator.note_runtime_too_old() });
+        }
+    })?;
     if observe && account_view(&receipt.destination, &client.view.bundle) == Some("claim") {
         let role = views.account.as_mut().ok_or_else(deny)?;
         role.sheet_open
@@ -1430,6 +1437,31 @@ pub async fn desktop_client_request(
     }
     let coordinator = client.coordinator.clone();
     let receiver = window.url().map_err(|_| "untrusted_desktop_caller")?;
+    // This computer's Runtime, upgraded with the Runtime host: from the account
+    // document (Instances, Account) or its claim view, never the popup.
+    if matches!(request.action, ClientAction::UpgradeLocalRuntime {}) {
+        let shell = app.try_state::<Shell>().ok_or("desktop_client_unavailable")?;
+        let result = if request.version == 1 && request.expected_generation == coordinator.state().generation {
+            coordinator.upgrade_local_runtime(&shell.host).await
+        } else {
+            Err(ClientError::new("stale_generation"))
+        };
+        if !trusted_page(&client, &window) || window.url().ok().as_ref() != Some(&receiver) {
+            return Err("untrusted_desktop_caller".into());
+        }
+        let (result, error) = match result {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(error)),
+        };
+        return Ok(ClientReply {
+            version: 1,
+            request_id: request.request_id,
+            ok: error.is_none(),
+            state: coordinator.state(),
+            result,
+            error,
+        });
+    }
     if matches!(request.action, ClientAction::FinishTotpEnrollment { .. })
         && request.version == 1
         && !request.request_id.is_empty()
@@ -2814,6 +2846,30 @@ impl NativeView {
         crate::refresh_native_controls(&self.app, None);
     }
 }
+impl NativeView {
+    /// Tells the committed view of another computer's instance who this
+    /// computer is, while its document is at a Workbench route. A candidate,
+    /// a retired view, an account page, a Show page or any other document of
+    /// the instance is told nothing. A page mounted before the commit hears
+    /// it at the commit's publication; every later load, at its own.
+    fn describe_device(&self, view: &Webview) {
+        let remote = self.presentation.lock().expect("presentation").remote.clone();
+        let disposable = self
+            .views
+            .lock()
+            .expect("views")
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.label == view.label() && runtime.disposable);
+        let Ok(url) = view.url() else { return };
+        if !crate::device_description::admits(remote.as_ref(), disposable && is_current_runtime(view), &url) {
+            return;
+        }
+        if let Some(script) = crate::device_description::delivery(&self.app, &url) {
+            let _ = view.eval(script);
+        }
+    }
+}
 #[async_trait]
 impl ClientView for NativeView {
     /// The committed instance's WebView store, read back for exactly its origin.
@@ -2880,6 +2936,7 @@ impl ClientView for NativeView {
             if let Some(runtime) = runtime_webview(&self.app) {
                 // Runtime receives only the minimal projection even while retained.
                 let _ = runtime.eval(self.script(false, None));
+                self.describe_device(&runtime);
             }
             if let Some(account) = active_webview(&self.app) {
                 let client = self.app.state::<Client>();

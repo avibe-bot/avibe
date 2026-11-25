@@ -1,0 +1,341 @@
+diff --git a/internal/runtime/executor/claude_executor_fast_error_test.go b/internal/runtime/executor/claude_executor_fast_error_test.go
+index 7024147f2f559b4fb416243212d01d54f4f0b9ff..9fd6078908f6ae9c8421c6ad31c960d77b36dd30 100644
+--- a/internal/runtime/executor/claude_executor_fast_error_test.go
++++ b/internal/runtime/executor/claude_executor_fast_error_test.go
+@@ -5,8 +5,10 @@ import (
+ 	"compress/gzip"
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"io"
+ 	"net/http"
++	"reflect"
+ 	"strings"
+ 	"sync/atomic"
+ 	"testing"
+@@ -281,3 +283,53 @@ func TestClaudeExecutorNonFastErrorKeepsCredentialScopedBehavior(t *testing.T) {
+ 		t.Fatalf("upstream attempts = %d, want 1", got)
+ 	}
+ }
++
++func TestClaudeExecutorFastHTTPDecodeErrorKeepsRetryHeaders(t *testing.T) {
++	for _, stream := range []bool{false, true} {
++		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
++			transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
++				return &http.Response{
++					StatusCode: http.StatusTooManyRequests,
++					Header: http.Header{
++						"Content-Type":                       []string{"application/json"},
++						"Content-Encoding":                   []string{"gzip"},
++						"Retry-After":                        []string{"30"},
++						"Anthropic-Ratelimit-Unified-Status": []string{"rejected"},
++						"Anthropic-Organization-Id":          []string{"org-1"},
++					},
++					Body:    io.NopCloser(strings.NewReader("not-a-gzip-stream")),
++					Request: req,
++				}, nil
++			})
++			ctx := context.WithValue(t.Context(), "cliproxy.roundtripper", http.RoundTripper(transport))
++			auth := &cliproxyauth.Auth{
++				ID:         "fast-decode-error-headers",
++				Attributes: map[string]string{"api_key": "sk-ant-oat-fast-decode-error-headers"},
++				Metadata:   claudeOAuthTestMetadata(),
++			}
++			request := cliproxyexecutor.Request{
++				Model:   "claude-opus-5",
++				Payload: []byte(`{"model":"claude-opus-5","max_tokens":16,"speed":"fast","messages":[{"role":"user","content":"reply OK"}]}`),
++			}
++			opts := cliproxyexecutor.Options{Stream: stream, SourceFormat: sdktranslator.FormatClaude, ResponseFormat: sdktranslator.FormatClaude}
++			executor := NewClaudeExecutor(&config.Config{})
++			var errRun error
++			if stream {
++				_, errRun = executor.ExecuteStream(ctx, auth, request, opts)
++			} else {
++				_, errRun = executor.Execute(ctx, auth, request, opts)
++			}
++			var carrier interface{ Headers() http.Header }
++			if !errors.As(errRun, &carrier) {
++				t.Fatalf("Fast decode error %T does not carry headers", errRun)
++			}
++			want := http.Header{
++				"Retry-After":                        {"30"},
++				"Anthropic-Ratelimit-Unified-Status": {"rejected"},
++			}
++			if got := carrier.Headers(); !reflect.DeepEqual(got, want) {
++				t.Fatalf("Headers() = %v, want %v", got, want)
++			}
++		})
++	}
++}
+diff --git a/internal/runtime/executor/claude_executor_ratelimit_test.go b/internal/runtime/executor/claude_executor_ratelimit_test.go
+index 444a82654d035f165058f43e87f9ea06b991664e..6f368870ecb9f48533bb84d7ee87ea63b72be449 100644
+--- a/internal/runtime/executor/claude_executor_ratelimit_test.go
++++ b/internal/runtime/executor/claude_executor_ratelimit_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"net/http/httptest"
++	"reflect"
+ 	"strconv"
+ 	"strings"
+ 	"sync/atomic"
+@@ -792,3 +793,67 @@ func TestClaudeExecutor_AuthManager_MultiModelPoolStreamStopsProbingOn429(t *tes
+ 		t.Fatalf("attempts on cred2 = %d, want 1", got)
+ 	}
+ }
++
++func TestClaudeExecutor_ErrorCarriesRetryHeaders(t *testing.T) {
++	cases := []struct {
++		name   string
++		status int
++		stream bool
++	}{
++		{name: "execute 429", status: http.StatusTooManyRequests},
++		{name: "stream 429", status: http.StatusTooManyRequests, stream: true},
++		{name: "execute 529", status: 529},
++	}
++	for _, tc := range cases {
++		t.Run(tc.name, func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				w.Header().Set("Content-Type", "application/json")
++				w.Header().Set("Retry-After", "30")
++				w.Header().Set("Retry-After-Ms", "30000")
++				w.Header().Set("Anthropic-Ratelimit-Unified-Status", "rejected")
++				w.Header().Set("Anthropic-Ratelimit-Unified-5h-Status", "rejected")
++				w.Header().Set("Anthropic-Organization-Id", "org-1")
++				w.Header().Set("Request-Id", "req-1")
++				w.Header().Set("Set-Cookie", "session=1")
++				w.WriteHeader(tc.status)
++				_, _ = w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"limited"}}`))
++			}))
++			defer server.Close()
++
++			executor := NewClaudeExecutor(&config.Config{})
++			auth := &cliproxyauth.Auth{
++				ID:         "claude-auth-1",
++				Provider:   "claude",
++				Attributes: map[string]string{"api_key": "test-key", "base_url": server.URL},
++			}
++			req := cliproxyexecutor.Request{
++				Model:   "claude-3-5-sonnet-20241022",
++				Payload: []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}`),
++			}
++			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatClaude}
++			var err error
++			if tc.stream {
++				_, err = executor.ExecuteStream(context.Background(), auth, req, opts)
++			} else {
++				_, err = executor.Execute(context.Background(), auth, req, opts)
++			}
++			if err == nil {
++				t.Fatal("expected an error")
++			}
++
++			var carrier interface{ Headers() http.Header }
++			if !errors.As(err, &carrier) {
++				t.Fatalf("error %T does not carry headers", err)
++			}
++			want := http.Header{
++				"Retry-After":                           {"30"},
++				"Retry-After-Ms":                        {"30000"},
++				"Anthropic-Ratelimit-Unified-Status":    {"rejected"},
++				"Anthropic-Ratelimit-Unified-5h-Status": {"rejected"},
++			}
++			if got := carrier.Headers(); !reflect.DeepEqual(got, want) {
++				t.Fatalf("Headers() = %v, want %v", got, want)
++			}
++		})
++	}
++}
+diff --git a/internal/runtime/executor/claude_executor_request.go b/internal/runtime/executor/claude_executor_request.go
+index 5a11869a7da7bc69e29772b992219f4373e44b4b..c5b06a5ad581da847c5f63c3f902675249b9dc1d 100644
+--- a/internal/runtime/executor/claude_executor_request.go
++++ b/internal/runtime/executor/claude_executor_request.go
+@@ -891,7 +891,7 @@ func classifyClaudeUpstreamErrorWithCooling(statusCode int, headers http.Header,
+ 	if statusCode == http.StatusTooManyRequests || (statusCode >= 400 && statusCode < 600) {
+ 		retryAfter = helps.ParseClaudeRateLimitResetForError(headers, body, time.Now())
+ 	}
+-	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter}
++	err := statusErr{code: statusCode, msg: string(body), retryAfter: retryAfter, headers: helps.ClaudeRetryHeaders(headers)}
+ 	if statusCode == http.StatusTooManyRequests {
+ 		if !modelLevelCooling && helps.ClaudeHeadersIndicateUnifiedRateLimitRejection(headers) {
+ 			return claudeRateLimitError{statusErr: err, credentialScoped: true}
+diff --git a/internal/runtime/executor/helps/claude_ratelimit.go b/internal/runtime/executor/helps/claude_ratelimit.go
+index e4113de52c56fde556ed385479e794068a6d7e01..552978d0f78c8eee8a30a7e93936058c78a0efc9 100644
+--- a/internal/runtime/executor/helps/claude_ratelimit.go
++++ b/internal/runtime/executor/helps/claude_ratelimit.go
+@@ -22,6 +22,24 @@ const (
+ 	maxClaudeRateLimitWindow = 7*24*time.Hour + time.Hour
+ )
+ 
++// ClaudeRetryHeaders returns the upstream headers that tell a client when it may
++// retry: Retry-After, Retry-After-Ms and the Anthropic-Ratelimit-Unified-* family.
++// It returns nil when none are present.
++func ClaudeRetryHeaders(headers http.Header) http.Header {
++	var retry http.Header
++	for key, values := range headers {
++		name := http.CanonicalHeaderKey(key)
++		if name != "Retry-After" && name != "Retry-After-Ms" && !strings.HasPrefix(name, "Anthropic-Ratelimit-Unified-") {
++			continue
++		}
++		if retry == nil {
++			retry = make(http.Header)
++		}
++		retry[name] = append(retry[name], values...)
++	}
++	return retry
++}
++
+ // ClaudeHeadersIndicateUnifiedRateLimitRejection reports whether response headers explicitly
+ // declare an Anthropic shared 5h or 7d rate-limit rejection. An overage-only or Fable-only rejection
+ // remains model-scoped when shared subscription windows are not rejected (status "allowed", "allowed_warning",
+diff --git a/internal/runtime/executor/openai_compat_executor.go b/internal/runtime/executor/openai_compat_executor.go
+index 5c9e64c99694843bcf511787b7b7b4d8833fc201..01850ec376853050a0fcddcac702b4df4f73de99 100644
+--- a/internal/runtime/executor/openai_compat_executor.go
++++ b/internal/runtime/executor/openai_compat_executor.go
+@@ -1288,6 +1288,8 @@ type statusErr struct {
+ 	tosViolation       bool
+ 	tosAppealURL       string
+ 	tosAppealURLText   string
++	// Forwardable upstream headers, subject to the central passthrough filter.
++	headers http.Header
+ 	// diagnostic is a content-free detail for logs only; it never reaches clients.
+ 	diagnostic string
+ }
+@@ -1303,6 +1305,7 @@ func (e statusErr) StatusCode() int            { return e.code }
+ func (e statusErr) RetryAfter() *time.Duration { return e.retryAfter }
+ func (e statusErr) IsRequestScoped() bool      { return e.requestScoped }
+ func (e statusErr) IsCredentialScoped() bool   { return e.credentialScoped }
++func (e statusErr) Headers() http.Header       { return e.headers }
+ 
+ // LogDiagnostic lets upstream failure logs explain a sanitized client message.
+ func (e statusErr) LogDiagnostic() string { return e.diagnostic }
+diff --git a/sdk/api/handlers/handlers_error_response_test.go b/sdk/api/handlers/handlers_error_response_test.go
+index a34ace1ce2b9bf990a592bed72c4f0d16c86d173..4edd2dd9a65fc86835450c944d9b44f3ef946652 100644
+--- a/sdk/api/handlers/handlers_error_response_test.go
++++ b/sdk/api/handlers/handlers_error_response_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 	"context"
+ 	"errors"
++	"fmt"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"net/url"
+@@ -946,3 +947,70 @@ func TestWriteErrorResponse_ContextCanceledUses499(t *testing.T) {
+ 		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
+ 	}
+ }
++
++type upstreamHeaderError struct{ headers http.Header }
++
++func (e upstreamHeaderError) Error() string        { return "upstream rate limit" }
++func (e upstreamHeaderError) Headers() http.Header { return e.headers }
++
++func TestExecutionErrorMessageFindsUpstreamHeadersThroughWrappers(t *testing.T) {
++	upstream := upstreamHeaderError{headers: http.Header{"Retry-After": {"30"}}}
++	msg := executionErrorMessage(fmt.Errorf("retry round exhausted: %w", upstream))
++	if got := msg.Addon.Get("Retry-After"); got != "30" {
++		t.Fatalf("Addon Retry-After = %q, want 30 from the wrapped upstream error", got)
++	}
++}
++
++func TestExecutionErrorMessageKeepsCPARetryTimingForEveryConsumer(t *testing.T) {
++	// A CPA error with its own retry timing around an upstream error with its own.
++	upstream := upstreamHeaderError{headers: http.Header{
++		"Retry-After":                        {"30"},
++		"Retry-After-Ms":                     {"30000"},
++		"Anthropic-Ratelimit-Unified-Status": {"rejected"},
++	}}
++	msg := executionErrorMessage(errors.Join(coreauth.NewHomeConcurrencyBusyError("busy", 750*time.Millisecond), upstream))
++	msg.StatusCode = http.StatusTooManyRequests
++
++	check := func(consumer string, headers http.Header) {
++		t.Helper()
++		if got := headers.Values("Retry-After"); !reflect.DeepEqual(got, []string{"1"}) {
++			t.Fatalf("%s Retry-After = %#v, want CPA's own [1]", consumer, got)
++		}
++		if got := headers.Get("Retry-After-Ms"); got != "" {
++			t.Fatalf("%s Retry-After-Ms = %q, want none next to CPA's own Retry-After", consumer, got)
++		}
++		if got := headers.Get("Anthropic-Ratelimit-Unified-Status"); got != "rejected" {
++			t.Fatalf("%s Anthropic-Ratelimit-Unified-Status = %q, want rejected", consumer, got)
++		}
++	}
++	// The Responses WebSocket error event serializes Addon as is.
++	check("Addon", msg.Addon)
++	check("plugin stream error", modelExecutionStreamErrorFromMessage(msg).Headers)
++
++	gin.SetMode(gin.TestMode)
++	recorder := httptest.NewRecorder()
++	c, _ := gin.CreateTestContext(recorder)
++	c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
++	NewBaseAPIHandlers(&sdkconfig.SDKConfig{PassthroughHeaders: true}, nil).WriteErrorResponse(c, msg)
++	check("HTTP response", recorder.Header())
++}
++
++func TestExecutionErrorMessageFiltersUpstreamHeadersLikeSuccess(t *testing.T) {
++	// A stream that fails before its first payload carries the upstream's raw headers.
++	upstream := upstreamHeaderError{headers: http.Header{
++		"Retry-After":       {"30"},
++		"Set-Cookie":        {"session=1"},
++		"Transfer-Encoding": {"chunked"},
++		"Content-Encoding":  {"gzip"},
++	}}
++	msg := executionErrorMessage(fmt.Errorf("retry round exhausted: %w", upstream))
++
++	if got := msg.Addon.Get("Retry-After"); got != "30" {
++		t.Fatalf("Addon Retry-After = %q, want 30", got)
++	}
++	for _, name := range []string{"Set-Cookie", "Transfer-Encoding", "Content-Encoding"} {
++		if got := msg.Addon.Get(name); got != "" {
++			t.Fatalf("Addon %s = %q, want it filtered as on success responses", name, got)
++		}
++	}
++}
+diff --git a/sdk/api/handlers/handlers_execution.go b/sdk/api/handlers/handlers_execution.go
+index e368be0de10f5760535908e16e1910000259ae6e..fae66ecacf6d51c29906da8c86adead7c606581d 100644
+--- a/sdk/api/handlers/handlers_execution.go
++++ b/sdk/api/handlers/handlers_execution.go
+@@ -404,8 +404,17 @@ func executionErrorMessage(err error) *interfaces.ErrorMessage {
+ 	var addon http.Header
+ 	var he interface{ Headers() http.Header }
+ 	if errors.As(err, &he) && he != nil {
+-		if hdr := he.Headers(); hdr != nil {
+-			addon = hdr.Clone()
++		addon = FilterUpstreamHeaders(he.Headers())
++	}
++	if addon != nil {
++		if own := coreauth.SafeResponseHeaders(err).Values("Retry-After"); len(own) > 0 {
++			// The cooldown actually enforced by CPA wins over upstream retry timing.
++			for key := range addon {
++				if IsRetryTimingHeader(key) {
++					delete(addon, key)
++				}
++			}
++			addon["Retry-After"] = append([]string(nil), own...)
+ 		}
+ 	}
+ 	var terminated *coreexecutor.RequestTerminatedError
+diff --git a/sdk/api/handlers/header_filter.go b/sdk/api/handlers/header_filter.go
+index e72467459aae14972ee7f23037fbae91bbc169c3..e6e17ad63b8ba35239535725140deedb45e2b68e 100644
+--- a/sdk/api/handlers/header_filter.go
++++ b/sdk/api/handlers/header_filter.go
+@@ -52,6 +52,17 @@ func IsCPAReservedResponseHeader(name string) bool {
+ 	return reserved
+ }
+ 
++// IsRetryTimingHeader reports whether a response header tells the client when to retry.
++// CPA's own retry timing (a Home round delay or a local cooldown) takes precedence over
++// the upstream's.
++func IsRetryTimingHeader(name string) bool {
++	switch http.CanonicalHeaderKey(name) {
++	case "Retry-After", "Retry-After-Ms":
++		return true
++	}
++	return false
++}
++
+ // FilterUpstreamHeaders returns a copy of src with hop-by-hop and security-sensitive
+ // headers removed. Returns nil if src is nil or empty after filtering.
+ func FilterUpstreamHeaders(src http.Header) http.Header {

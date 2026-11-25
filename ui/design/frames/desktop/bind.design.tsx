@@ -43,7 +43,21 @@ const bind = (step: BindStep, { busy = false } = {}) => column(
 );
 
 const HELD = [{ prefix: 'maxlab', host: 'maxlab-app.avibe.bot' }, { prefix: 'maxhome', host: 'maxhome-app.avibe.bot' }];
-type State = { name: string; title: string; render: () => ReactNode; height?: number; both?: boolean };
+type State = { name: string; title: string; render: () => ReactNode; height?: number; width?: number; both?: boolean };
+
+// Why a name cannot be had, one reason at a time (product, 2026-11-25), at the desktop's width and
+// at 390, where no sentence may wrap.
+const REASONS: [string, string, string][] = [
+  ['characters', '用了不允许的字符', 'max well'],
+  ['short', '太短', 'm'],
+  ['long', '太长（47 个字符）', 'a'.repeat(47)],
+  ['hyphen-ends', '以连字符开头或结尾', 'max-'],
+  ['double-hyphen', '第 3、4 个字符都是连字符', 'ab--cd'],
+];
+const reasonStates: State[] = REASONS.flatMap(([key, title, name]) => [
+  { name: `name-invalid-${key}`, title: `弹窗 · 不合规则：${title}`, render: bind({ kind: 'name', name, check: 'invalid' }) },
+  { name: `name-invalid-${key}-390`, title: `弹窗 · 不合规则：${title} · 390 宽`, render: bind({ kind: 'name', name, check: 'invalid' }), width: 390, height: 844 },
+]);
 
 const states: State[] = [
   // The card answers only: can I use it, and what do I do.
@@ -64,7 +78,8 @@ const states: State[] = [
   { name: 'name-checking', title: '弹窗 · 正在查', render: bind({ kind: 'name', name: 'maxwell', check: 'checking' }) },
   { name: 'name-taken', title: '弹窗 · 已被占用：不加数字', render: bind({ kind: 'name', name: 'max', check: 'taken' }) },
   { name: 'name-reclaim', title: '弹窗 · 你用过的：只说这个词，小按钮只放其他保留着的名字', render: bind({ kind: 'name', name: 'maxlab', check: 'reclaim', held: HELD }) },
-  { name: 'name-invalid', title: '弹窗 · 不合规则：留在输入框里，不去查', render: bind({ kind: 'name', name: 'a', check: 'invalid' }) },
+  { name: 'name-empty', title: '弹窗 · 输入框空着：什么都不说，不能按', render: bind({ kind: 'name', name: '', check: 'invalid' }) },
+  ...reasonStates,
   { name: 'limit', title: '弹窗 · 名字到上限（数字来自服务器）', render: bind({ kind: 'limit', name: 'max', held: 10, earliest: inDays(11), eligible: HELD }) },
   { name: 'existing', title: '弹窗 · 这台电脑在账号里已有域名：只能确认', render: bind({ kind: 'existing', host: 'mac-7f3k-app.avibe.bot' }) },
   { name: 'binding', title: '弹窗 · 正在绑定', render: bind({ kind: 'name', name: 'max', check: 'free' }, { busy: true }) },
@@ -92,10 +107,10 @@ const states: State[] = [
   { name: 'setup-complete', title: '设置完成 · 登录不再自动登记本机', render: column(<SetupCompleteView onLocal={noop} onSignIn={noop} />) },
 ];
 
-const designFrames = frames(states.flatMap(({ name, title, render, height = 800, both }) => (['zh', 'en'] as const).map((lang): FrameSpec => ({
+const designFrames = frames(states.flatMap(({ name, title, render, height = 800, width = 1200, both }) => (['zh', 'en'] as const).map((lang): FrameSpec => ({
   name: `${name}-${lang}`,
   title: `${title} · ${lang}`,
-  width: 1200,
+  width,
   height,
   status: 'proposed',
   themes: both ? ['light', 'dark'] : ['light'],

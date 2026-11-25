@@ -87,37 +87,9 @@ export type DeviceActivity = {
 /** A Health connection no listed device can be proven to own. */
 export type UnlinkedHealth = { id: string; device: string; data: HealthData[]; lastSeenAt?: string };
 
-/** What avibe.bot did about a signed-out device's account sign-in (`status/reason` of the
- *  contract); anything this page does not know is `unknown`. */
-export type AccountResult =
-  | 'queued' | 'retrying' | 'accepted'
-  | 'localOnly' | 'sharedSignIn' | 'keeperUnknown'
-  | 'refusedCredential' | 'refused' | 'unconfirmed' | 'unknown';
-
-/** A device signed out lately: it is out of this Avibe; the account side is its own story. */
-export type SignedOutDevice = {
-  id: string;
-  deviceId?: string;
-  device: string | null;
-  kind: DeviceKind | null;
-  /** Whose device it was, where that is known without guessing; it decides which advice applies. */
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-};
-
-/** The answer of a sign-out just made. `healthCleanupPending`: a conditional clean-up of synced
- *  Health data is not confirmed yet (it does not say the device had any). */
-export type SignOutNotice = {
-  device: string | null;
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-  healthCleanupPending: boolean;
-  /** The signed-out row showed Health on this page. */
-  hadHealth: boolean;
-  /** The row listed what the device does and Health was not among it: nothing is said about
-   *  Health's clean-up, which cannot concern it. */
-  withoutHealth?: boolean;
-};
+/** A device a sign-out ended, as far as this page uses it: which row leaves at once, and its name
+ *  for the activity once it is no longer listed. The page lists no signed-out devices (owner, 2026-11-26). */
+export type SignedOutDevice = { deviceId?: string; device: string | null };
 
 /** Why a claim (turning remote access on) did not go through: the local outcome names of
  *  `personal-installation-claims-runtime.md`, and `unknown` with the raw code for the rest. */

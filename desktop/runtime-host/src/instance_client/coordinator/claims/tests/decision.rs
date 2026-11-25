@@ -1926,12 +1926,10 @@ async fn check_cut(cut: &'static str) {
             }
             if cut == "publication_drop" {
                 drop(reply);
+            } else if matches!(cut, "complete" | "monitor_confirm_live") {
+                assert_eq!(reply.deliver().unwrap().unwrap(), json!({"state":"bound"}));
             } else {
-                if matches!(cut, "complete" | "monitor_confirm_live") {
-                    assert_eq!(reply.deliver().unwrap().unwrap(), json!({"state":"bound"}));
-                } else {
-                    assert!(reply.deliver().is_err());
-                }
+                assert!(reply.deliver().is_err());
             }
         }
     }

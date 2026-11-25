@@ -1,4 +1,4 @@
-import { nativeDeviceDescribe, type NativeDeviceDescription } from './native';
+import { desktopDeviceDescription, nativeDeviceDescribe, type NativeDeviceDescription } from './native';
 
 /** What an older shell, or one that can't say, is called in push settings. */
 const FALLBACK_NATIVE_DEVICE_LABEL = 'iPhone App';
@@ -13,7 +13,7 @@ function parseNativeDeviceDescription(value: unknown): NativeDeviceDescription |
   if (!value || typeof value !== 'object') return null;
   const raw = value as Record<string, unknown>;
   if (
-    raw.kind !== 'iphone_app'
+    (raw.kind !== 'iphone_app' && raw.kind !== 'desktop_app')
     || !isText(raw.display_name, 120)
     || !isText(raw.app_version, 64)
     || !isText(raw.system_version, 64)
@@ -29,7 +29,7 @@ function parseNativeDeviceDescription(value: unknown): NativeDeviceDescription |
       : [];
   });
   return {
-    kind: 'iphone_app',
+    kind: raw.kind as NativeDeviceDescription['kind'],
     display_name: raw.display_name,
     ...(isText(raw.installation_id, 128) ? { installation_id: raw.installation_id } : {}),
     aliases,
@@ -39,7 +39,8 @@ function parseNativeDeviceDescription(value: unknown): NativeDeviceDescription |
 }
 
 /**
- * Per page: answers are kept for the shell's bridge object, which a new
+ * Per page: answers are kept for the shell's bridge object (the Desktop app's
+ * description, in its view of another computer's instance), which a new
  * document gets afresh. Only an answer is kept; a refusal (the App still
  * settling the account) is asked again next time.
  */
@@ -51,7 +52,10 @@ const pages = new WeakMap<object, PageState>();
 const NO_SHELL: PageState = {};
 
 function pageState(): PageState {
-  const native = typeof window === 'undefined' ? undefined : window.avibeNative;
+  const desktop = desktopDeviceDescription();
+  const native = typeof window === 'undefined'
+    ? undefined
+    : window.avibeNative ?? (desktop && typeof desktop === 'object' ? desktop : undefined);
   if (!native) return NO_SHELL;
   let state = pages.get(native);
   if (!state) {
@@ -95,6 +99,9 @@ async function describeForReport(state: PageState): Promise<{
   body: NativeDeviceDescription | null;
   ticket?: string;
 }> {
+  // The Desktop app describes itself up front, and binds no Health.
+  const desktop = parseNativeDeviceDescription(desktopDeviceDescription());
+  if (desktop) return { body: desktop };
   const answer = await nativeDeviceDescribe({ health_binding: true }).catch(() => null);
   const body = parseNativeDeviceDescription(answer);
   if (!body) return { body: await nativeDeviceDescription() };

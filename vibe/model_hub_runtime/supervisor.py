@@ -425,7 +425,7 @@ class EngineSupervisor:
     def _render_config_locked(self, port: int, sources: list[SourceRecord], generation: str) -> str:
         if self._instance is None:
             raise EngineUnavailableError("models.engine.start_failed", reason="engine_running_identity_unknown")
-        _managed, _binary, instance_dir, runtime_secrets = self._instance
+        managed, _binary, instance_dir, runtime_secrets = self._instance
         return render_engine_config(
             instance_dir / "config.yaml",
             host="127.0.0.1",
@@ -435,6 +435,7 @@ class EngineSupervisor:
             sources=sources,
             state_store=self.state_store,
             generation=generation,
+            engine_version=managed.get("version"),
         )
 
     def _prepare_instance_locked(self):
@@ -592,6 +593,7 @@ class EngineSupervisor:
             sources=self.state_store.list_sources(),
             state_store=self.state_store,
             generation=self._next_generation_locked(),
+            engine_version=managed.get("version"),
         )
         connection = EngineConnection(
             base_url=f"http://127.0.0.1:{port}",

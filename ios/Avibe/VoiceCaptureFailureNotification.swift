@@ -36,31 +36,60 @@ enum VoiceCaptureFailureNotification {
         return content
     }
 
+    /// What the notices need of the notification center. `system` is the
+    /// App's own; each call is made on `NotificationCenterQueue`.
+    struct Center: Sendable {
+        var add: @Sendable (UNNotificationRequest, _ failure: String) -> Void
+        /// Removes these identifiers, pending and shown.
+        var remove: @Sendable ([String]) -> Void
+
+        static let system = Center(
+            add: { request, failure in
+                UNUserNotificationCenter.current().add(request) { error in
+                    if let error { VoiceCaptureFailureNotification.logger.error("\(failure, privacy: .public): \(error, privacy: .public)") }
+                }
+            },
+            remove: { identifiers in
+                let center = UNUserNotificationCenter.current()
+                center.removePendingNotificationRequests(withIdentifiers: identifiers)
+                center.removeDeliveredNotifications(withIdentifiers: identifiers)
+            }
+        )
+    }
+
     /// Schedules the unsent notice for `date` (replacing one already
     /// scheduled), so the system shows it whether or not the App is running
     /// then; with nil removes it, pending or shown. Tapping it opens Avibe,
-    /// which then offers Retry.
-    static func scheduleUnsent(at date: Date?) {
-        let center = UNUserNotificationCenter.current()
+    /// which then offers Retry. Off the main thread, in call order: a removal
+    /// never overtakes the schedule it clears.
+    static func scheduleUnsent(
+        at date: Date?,
+        queue: NotificationCenterQueue = .system,
+        center: Center = .system
+    ) {
         guard let date else {
-            center.removePendingNotificationRequests(withIdentifiers: [unsentIdentifier])
-            center.removeDeliveredNotifications(withIdentifiers: [unsentIdentifier])
+            queue.run { center.remove([unsentIdentifier]) }
             return
         }
-        let request = UNNotificationRequest(
-            identifier: unsentIdentifier,
-            content: unsentContent(),
-            trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(date.timeIntervalSinceNow, 1), repeats: false)
-        )
-        center.add(request) { error in
-            if let error { logger.error("unsent notice not scheduled: \(error, privacy: .public)") }
+        let content = unsentContent()
+        queue.run {
+            // The interval counts from when the center gets it, so it is
+            // taken here: a wait in the queue does not move the notice later.
+            let request = UNNotificationRequest(
+                identifier: unsentIdentifier,
+                content: content,
+                trigger: UNTimeIntervalNotificationTrigger(timeInterval: max(date.timeIntervalSinceNow, 1), repeats: false)
+            )
+            center.add(request, "unsent notice not scheduled")
         }
     }
 
-    static func post(_ state: VoiceCaptureAttributes.ContentState) {
+    static func post(
+        _ state: VoiceCaptureAttributes.ContentState,
+        queue: NotificationCenterQueue = .system,
+        center: Center = .system
+    ) {
         let request = UNNotificationRequest(identifier: identifier, content: content(for: state), trigger: nil)
-        UNUserNotificationCenter.current().add(request) { error in
-            if let error { logger.error("failure notice not posted: \(error, privacy: .public)") }
-        }
+        queue.run { center.add(request, "failure notice not posted") }
     }
 }

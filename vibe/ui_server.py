@@ -272,6 +272,11 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   );
   // Safari installs the top-level document, never an embedded Workbench Show.
   if (window.top !== window.self || standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
+  const userAgent = navigator.userAgent || '';
+  const ios = /iP(hone|ad|od)/.test(userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // Mac users install through Safari or the share panel; never alter the Show body.
+  if (/Macintosh|Mac OS X/.test(userAgent) && !ios) return;
   const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
   const readPreference = () => {
     try {
@@ -372,24 +377,14 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   shadow.append(wrap);
   document.body.append(root);
 
-  const userAgent = navigator.userAgent || '';
-  const ios = /iP(hone|ad|od)/.test(userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
     !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
-  const mac = /Macintosh|Mac OS X/.test(userAgent) && !ios;
   if (ios) {
     button.textContent = copy.iosCta || copy.cta || 'Add to Home Screen';
-  } else if (mac) {
-    button.textContent = copy.macCta || copy.cta || 'Add to Dock';
   }
   if (ios && safari) {
     title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
     body.textContent = copy.iosBody || '';
-    steps.hidden = true;
-  } else if (mac && safari) {
-    title.textContent = copy.macTitle || copy.title || 'Add to Dock';
-    body.textContent = copy.macBody || '';
     steps.hidden = true;
   } else {
     title.textContent = copy.title || 'Add this Show Page';
@@ -9866,7 +9861,7 @@ def remote_access_login():
 
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
-    from storage.device_account_signout import AccountSessionSignedOut
+    from storage.device_account_signout import AccountSessionSignedOut, AccountSignInEnded
     from vibe import remote_access
 
     callback_started = int(time.time())
@@ -9954,7 +9949,19 @@ def remote_access_auth_callback():
             device_headers=request.headers,
             account_session_ref=verified_reference(claims),
             account_enroll_before=callback_started + remote_access.OAUTH_HANDSHAKE_TTL_SECONDS,
+            # The session this browser already holds, proved only by its own cookie on this request.
+            previous=remote_access.same_browser_session(
+                config, request.cookies.get(remote_access.SESSION_COOKIE_NAME), str(claims.get("sub", ""))),
+            # The signed-out session this browser's own cookie names: an owner sign-out to finish.
+            owner_signed_out=remote_access.signed_out_session(
+                config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)),
         )
+    except AccountSignInEnded:
+        # Committed here: avibe.bot's sign-out of this account session is queued (the worker may
+        # not have sent it yet, or will not for a refused pairing). The old cookie goes too.
+        response = _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
+        response.delete_cookie(remote_access.SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="Lax")
+        return response
     except AccountSessionSignedOut:
         return _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
     except Exception as exc:
@@ -10362,7 +10369,10 @@ def device_sign_out(device_id=None):
         delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
         ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
-                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope)
+                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope,
+                                      # Only the real owner's action (or this computer): never a
+                                      # maintenance admin's, which has the owner role but not the source.
+                                      by_owner=delegate)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
     if device_id is not None and not (ids or results):

@@ -125,7 +125,7 @@ async def test_unpredictable_steps_are_reported_without_invoking_them(blocker):
 
 
 @pytest.mark.parametrize("transition", ["checkpoint", "context_relief", "clear_tool_results"])
-async def test_context_effects_are_planned_not_applied(transition):
+async def test_context_effects_are_planned_not_applied(transition, monkeypatch):
     store = InMemoryTranscriptStore(clock=lambda: 1.0)
     selected = replace(SELECTION, capabilities=ModelCapabilities(
         context_window=64_000, input_limit=32_000, max_output_tokens=4096, supports_tools=True,
@@ -155,3 +155,12 @@ async def test_context_effects_are_planned_not_applied(transition):
     assert preview.transition == transition
     assert preview.request is not None and preview.wire is None
     assert provider.requests == [] and store.__dict__ == before
+    if transition == "clear_tool_results":
+        # The last use can live only in the checkpoint capsule, not in retained response rows.
+        runtime = await store.load_for_preview("session")
+        async def warm_window(_session_id):
+            return replace(runtime, response_clocks={(selected.endpoint.provider, selected.endpoint.model_id): 9_999.0})
+        monkeypatch.setattr(store, "load_for_preview", warm_window)
+        warm = await agent.dry_tick(selected=selected)
+        assert warm.transition != "clear_tool_results"
+        assert agent._last_model_at == {}  # the preview owns the restored clock map

@@ -998,7 +998,7 @@ async def test_adapter_reads_gemini_and_grok_quota_as_the_engine_itself_would():
         "header": {
             "Content-Type": "application/json",
             "Authorization": "Bearer $TOKEN$",
-            "User-Agent": "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)",
+            "User-Agent": "antigravity/hub/2.34.0 (aidev_client; os_type=darwin; arch=arm64; cl=1026637980)",
         },
         "data": json.dumps({"project": _PROJECT_ID}, separators=(",", ":")),
     }

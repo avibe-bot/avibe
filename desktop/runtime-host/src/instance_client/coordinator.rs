@@ -15,16 +15,19 @@ use super::{
     enrollment::EnrollmentFlow,
     loopback::CallbackCopy,
     protocol::*,
-    selection::Selection,
+    selection::{Recheck, Selection},
     storage::{ConnectionRecord, ConnectionStore, Credentials, InstanceRecency},
     transport::{Epoch, NativeSession, Transport},
 };
 mod claim_binding;
 pub use claim_binding::{AccountRecoveryRequest, RecoveryDelivery, RecoveryWork};
 pub mod claims;
+mod kept;
+mod local_upgrade;
 mod updates;
 use super::instance_update::InstanceUpdate;
 use crate::LoopbackOrigin;
+use kept::KeptSessions;
 use updates::CommittedUpdate;
 
 #[async_trait]
@@ -87,6 +90,9 @@ struct Inner {
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
     display_account: Option<String>,
+    /// A claim step found this computer's Runtime without the claim protocol
+    /// (`local_upgrade.rs`). Kept across descriptor refreshes, which cannot see it.
+    claim_protocol_missing: bool,
 }
 
 /// An ordinary transaction publishes a working copy, so it excludes both descriptor
@@ -124,6 +130,10 @@ pub struct Coordinator {
     /// shown. A read never waits on or for the account; only its own order counts.
     sign_in_reads: AtomicU64,
     sign_in_shown: AtomicU64,
+    /// One local Runtime upgrade at a time (`local_upgrade.rs`).
+    upgrading: AtomicBool,
+    /// Instance sessions opened in this run (`kept.rs`).
+    kept: Mutex<KeptSessions>,
     transport: Arc<dyn Transport>,
     credentials: Arc<dyn Credentials>,
     store: ConnectionStore,
@@ -175,6 +185,7 @@ impl Coordinator {
                 restore_allowed: true,
                 committed_view_generation: None,
                 display_account: None,
+                claim_protocol_missing: false,
             })),
             claims: Arc::new(Mutex::new(claims::Claims::default())),
             binding: Mutex::new(claim_binding::BindingSlot::default()),
@@ -190,6 +201,8 @@ impl Coordinator {
             restore_started: AtomicBool::new(false),
             sign_in_reads: AtomicU64::new(0),
             sign_in_shown: AtomicU64::new(0),
+            upgrading: AtomicBool::new(false),
+            kept: Mutex::default(),
             transport,
             credentials,
             store,
@@ -440,14 +453,19 @@ impl Coordinator {
             match result {
                 Ok(_) => {
                     current.state.local = sample.local;
+                    current.state.local.runtime_too_old = current.claim_protocol_missing;
                     if current.state.connection.committed.is_local() {
                         current.state.connection.committed = sample.connection.committed;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     current.state.local.remote_access = RemoteAccessState::Unavailable;
-                    current.state.local.instance_id = None;
                     current.state.local.remote_access_url = None;
+                    // Too old to describe itself: what it still says of its
+                    // binding (`EnrollmentFlow::read`) keeps this computer's row.
+                    let too_old = error.code == super::machine::TOO_OLD;
+                    current.state.local.runtime_too_old = too_old || current.claim_protocol_missing;
+                    current.state.local.instance_id = if too_old { sample.local.instance_id } else { None };
                 }
             }
             refresh_display(&mut current);
@@ -771,17 +789,27 @@ impl Coordinator {
                 if working.state.account.status != AccountStatus::SignedIn {
                     return Err(ClientError::new("authentication_required"));
                 }
-                working.selection = Some(
-                    Selection::begin(
-                        &mut working.account,
-                        &mut working.state,
-                        &instance_id,
-                        self.transport.clone(),
-                        epoch.clone(),
-                    )
-                    .await?,
-                );
-                self.authorize(working, epoch, "inspect").await?;
+                let (instance, origin) =
+                    Selection::find(&mut working.account, &mut working.state, &instance_id).await?;
+                if let Some(selection) = self.resume(working, &instance, &origin, epoch).await? {
+                    working.state.connection.status = ConnectionStatus::Switching;
+                    working.state.connection.pending = Some(selection.target()?);
+                    working.state.consent = None;
+                    working.selection = Some(selection);
+                    self.commit_selection(working, epoch).await?;
+                } else {
+                    working.selection = Some(
+                        Selection::begin(
+                            instance,
+                            origin,
+                            &mut working.state,
+                            self.transport.clone(),
+                            epoch.clone(),
+                        )
+                        .await?,
+                    );
+                    self.authorize(working, epoch, "inspect").await?;
+                }
             }
             ClientAction::DecideConsent { approve } => {
                 if working.state.consent.is_none() {
@@ -805,29 +833,112 @@ impl Coordinator {
             .authorize(&mut working.account, &mut working.state, decision)
             .await?;
         if ready {
-            let target = selection.target()?;
-            self.view
-                .commit(epoch.clone(), target.clone(), selection.session.runtime_cookies()?)
-                .await?;
-            epoch.check()?;
-            working.state.connection = ConnectionState {
-                status: ConnectionStatus::RemoteConnected,
-                committed: target,
-                pending: None,
-            };
-            working.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
-            working.committed_view_generation = Some(epoch.value);
-            working.state.current_instance = Some(selection.instance.clone());
-            working.state.instance_update = Some(InstanceUpdate::loading(selection.instance.id.clone()));
-            working.update_session = Some(Arc::new(CommittedUpdate::new(selection.session.clone())));
-            working.display_account = working
-                .state
-                .account
-                .identity
-                .as_ref()
-                .map(|account| account.id.clone());
-            working.selection = None;
+            self.commit_selection(working, epoch).await?;
         }
+        Ok(())
+    }
+
+    /// The session this run kept for `instance` at `origin` (`kept.rs`), once
+    /// the instance has said again that it is this account's there and may
+    /// be read. `None` when there is none, or the instance refuses it (signed
+    /// out, expired, another account's, bound again): a new sign-in follows.
+    /// When the instance gives no answer that says either, the session stays
+    /// kept and the opening fails, rather than signing in again.
+    async fn resume(
+        &self,
+        working: &Inner,
+        instance: &Instance,
+        origin: &url::Url,
+        epoch: &Epoch,
+    ) -> Result<Option<Selection>, ClientError> {
+        let Some(account) = working
+            .state
+            .account
+            .identity
+            .as_ref()
+            .map(|account| account.id.clone())
+        else {
+            return Ok(None);
+        };
+        let (kept, dropped) = self
+            .kept
+            .lock()
+            .expect("kept sessions")
+            .find(&account, &instance.id, origin);
+        sign_out_sessions(dropped);
+        let Some(kept) = kept else {
+            return Ok(None);
+        };
+        let mut asked_view = false;
+        loop {
+            let mut session = kept.session();
+            session.fence(epoch.clone());
+            let mut selection = Selection::resumed(instance.clone(), session);
+            match selection.recheck(&working.state).await {
+                Recheck::Ready => return Ok(Some(selection)),
+                Recheck::Unavailable(error) => return Err(error),
+                Recheck::Refused if !asked_view => {
+                    // The instance's page may hold a rotation this jar never
+                    // saw: take that page's cookies for this exact origin once.
+                    asked_view = true;
+                    let view = self.view.clone();
+                    let (checked, at) = (epoch.clone(), origin.clone());
+                    let cookies = tokio::task::spawn_blocking(move || view.instance_cookies(&checked, &at))
+                        .await
+                        .ok()
+                        .flatten();
+                    epoch.check()?;
+                    if cookies.is_some_and(|cookies| kept.adopt(cookies)) {
+                        continue;
+                    }
+                }
+                Recheck::Refused => {}
+            }
+            let refused = self.kept.lock().expect("kept sessions").forget(&kept);
+            sign_out_sessions(refused);
+            return Ok(None);
+        }
+    }
+
+    /// Shows the verified selection and makes it the committed instance.
+    async fn commit_selection(&self, working: &mut Inner, epoch: &Epoch) -> Result<(), ClientError> {
+        let selection = working
+            .selection
+            .as_mut()
+            .ok_or_else(|| ClientError::new("invalid_action"))?;
+        let target = selection.target()?;
+        self.view
+            .commit(epoch.clone(), target.clone(), selection.session.runtime_cookies()?)
+            .await?;
+        epoch.check()?;
+        working.state.connection = ConnectionState {
+            status: ConnectionStatus::RemoteConnected,
+            committed: target.clone(),
+            pending: None,
+        };
+        working.state.remote_auxiliary = RemoteAuxiliary::DisabledIncomplete;
+        working.committed_view_generation = Some(epoch.value);
+        working.state.current_instance = Some(selection.instance.clone());
+        working.state.instance_update = Some(InstanceUpdate::loading(selection.instance.id.clone()));
+        let session = Arc::new(CommittedUpdate::new(selection.session.clone()));
+        working.update_session = Some(session.clone());
+        working.display_account = working
+            .state
+            .account
+            .identity
+            .as_ref()
+            .map(|account| account.id.clone());
+        if let Some(account) = &working.display_account {
+            // Checked under this lock: a sign-out advances the generation
+            // before it takes every kept session, so none outlives it.
+            let dropped = {
+                let mut kept = self.kept.lock().expect("kept sessions");
+                epoch.check()?;
+                kept.keep(account, &target, session)
+            };
+            sign_out_sessions(dropped);
+        }
+        working.selection = None;
         Ok(())
     }
 
@@ -1100,7 +1211,7 @@ impl Coordinator {
     ) -> Result<(u64, Result<(), ClientError>), ClientError> {
         let signing_out = matches!(action, ClientAction::SignOut { .. });
         let signout_guard = SignoutGuard::acquire(&self.signing_out, signing_out)?;
-        let (epoch, target, record, mut old_session) = {
+        let (epoch, target, record, mut old_session, kept) = {
             let mut inner = self.inner.lock().expect("client state");
             // Acceptance and state mutation share one owner/critical section.
             // invalidate may call back or let a newer action run; it must not
@@ -1126,6 +1237,12 @@ impl Coordinator {
             inner.state.connection.pending = None;
             inner.account.clear_transient();
             let old_session = inner.account.session.clone();
+            // Under the same lock as acceptance: no opening can take one now.
+            let kept = if signing_out {
+                self.kept.lock().expect("kept sessions").take()
+            } else {
+                vec![]
+            };
             if signing_out {
                 inner.account = AccountFlow::new(self.transport.clone(), self.passkeys.supported());
                 inner.state.account = AccountState {
@@ -1171,7 +1288,7 @@ impl Coordinator {
             };
             inner.record.last_committed = target.clone();
             refresh_display(&mut inner);
-            (epoch, target, inner.record.clone(), old_session)
+            (epoch, target, inner.record.clone(), old_session, kept)
         };
         self.view.invalidate(epoch.value);
         self.view.changed(&self.state());
@@ -1232,6 +1349,9 @@ impl Coordinator {
                 tokio::spawn(async move {
                     let _ = old_session.request(Method::DELETE, "/api/mobile/session", None).await;
                 });
+                // So are the sign-ins this run opened on instances. Offline,
+                // nothing of them is left here; the instances let them lapse.
+                sign_out_sessions(kept);
             }
             let result = view_result.and(cleanup);
             if signing_out {
@@ -1479,5 +1599,13 @@ fn refresh_display(inner: &mut Inner) {
         inner.state.current_instance = matches(instance).then(|| instance.clone());
     } else if !inner.state.current_instance.as_ref().is_some_and(matches) {
         inner.state.current_instance = None;
+    }
+}
+
+/// Signs each session that left the kept list (`kept.rs`) out of its
+/// instance, as far as the instance can be reached. Nothing waits on it.
+fn sign_out_sessions(sessions: Vec<Arc<CommittedUpdate>>) {
+    for session in sessions {
+        tokio::spawn(async move { session.sign_out().await });
     }
 }

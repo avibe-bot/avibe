@@ -71,6 +71,40 @@ impl Transport for Wire {
         assert!(!r.headers.contains_key(AUTHORIZATION));
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         eprintln!("observation fixture: transport call {call}");
+        if matches!(self.case, "old_cli" | "exits") {
+            // The pipe ended before its first frame: the Runtime is asked
+            // whether it has the claim route at all (an owner POST, as a GET
+            // reaches the static catch-all), and nothing else.
+            if call == 0 {
+                assert_eq!(
+                    (r.method, r.url.as_str()),
+                    (Method::GET, "http://127.0.0.1:40123/api/csrf-token")
+                );
+                headers.insert(SET_COOKIE, "vibe_csrf_token=probe; Path=/".parse().unwrap());
+                return Ok(Response {
+                    status: 200,
+                    body: br#"{"csrf_token":"probe"}"#.to_vec(),
+                    headers,
+                });
+            }
+            assert_eq!(call, 1);
+            assert_eq!(
+                (r.method, r.url.as_str(), r.body),
+                (
+                    Method::POST,
+                    "http://127.0.0.1:40123/api/desktop/claim/v1/admit",
+                    Some(json!({}))
+                )
+            );
+            assert_eq!(r.headers["x-vibe-csrf-token"], "probe");
+            // Missing: the unknown-API answer. Present: the handler refuses the empty body.
+            let status = if self.case == "old_cli" { 404 } else { 400 };
+            return Ok(Response {
+                status,
+                body: vec![],
+                headers,
+            });
+        }
         let (status, body) = match call {
             0 => {
                 assert_eq!(
@@ -207,6 +241,21 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     }
     let pending = work.await;
     eprintln!("observation fixture: dispatch returned");
+    if matches!(case, "old_cli" | "exits") {
+        // Too old only when the Runtime has no claim route: a pipe that fails on
+        // a Runtime that has one keeps its own error.
+        let code = pending.unwrap().deliver().unwrap_err().code;
+        assert_eq!(
+            code,
+            if case == "old_cli" {
+                "local_runtime_too_old"
+            } else {
+                "invalid_machine_response"
+            }
+        );
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 2);
+        return;
+    }
     if case == "no_source" {
         assert!(pending.is_err());
         assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
@@ -280,6 +329,9 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     assert!(!caller.monitoring());
 }
 
+/// How long the Python peer may take to start, apart from each case's own budget.
+const PEER_START_LIMIT: Duration = Duration::from_secs(120);
+
 #[tokio::test]
 async fn current_binding_is_read_only_and_only_the_original_document_receives_its_result() {
     for case in [
@@ -297,12 +349,35 @@ async fn current_binding_is_read_only_and_only_the_original_document_receives_it
         "drop",
         "naming",
         "no_source",
+        "old_cli",
+        "exits",
     ] {
         let root = tempfile::tempdir().unwrap();
-        if tokio::time::timeout(Duration::from_secs(15), exercise(case, &root))
-            .await
-            .is_err()
-        {
+        let run = exercise(case, &root);
+        tokio::pin!(run);
+        // Starting the Python peer is not what is measured: a loaded runner can
+        // take longer than the whole case to start an interpreter. The case's
+        // own budget starts once the peer says it has started, or the case
+        // finishes without one (`naming`, `no_source`).
+        let finished = tokio::time::timeout(PEER_START_LIMIT, async {
+            loop {
+                if root.path().join("peer-started").is_file() {
+                    return false;
+                }
+                tokio::select! {
+                    _ = &mut run => return true,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "binding observation: the peer did not start, and the case did not end, within {} s: {case}",
+                PEER_START_LIMIT.as_secs()
+            )
+        });
+        if !finished && tokio::time::timeout(Duration::from_secs(15), &mut run).await.is_err() {
             // Peer-side progress only: no frame, URL, credential, nonce or child stderr.
             let phase = [
                 "inspect-finished",

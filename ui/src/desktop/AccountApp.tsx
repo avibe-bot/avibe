@@ -11,8 +11,8 @@ import { InstanceSwitcherView } from './InstanceSwitcherView';
 import { AccountSignOutView } from './AccountSignOutView';
 import { AccountDetailsView } from './AccountDetailsView';
 import { SetupCompleteView } from './SetupCompleteView';
-import { BindDialog, ComputerBindingCard } from './BindComputerView';
-import { useDesktopClaim } from './useDesktopClaim';
+import { BindDialog, ComputerBindingCard, LocalTooOldLine } from './BindComputerView';
+import { useDesktopClaim, type LocalUpgrade } from './useDesktopClaim';
 import { AddInstanceView } from './AddInstanceView';
 import { DESKTOP_CLAIM_VIEW, DESKTOP_PRESENT_EVENT, desktopLocale, hasDesktopClient, presentDesktopClient, isDesktopClientView, type DesktopClientAction, type DesktopClientDirectResult, type DesktopClientState, type DesktopClientView } from './bridge';
 import { useAccountClient } from './useAccountClient';
@@ -166,6 +166,8 @@ export function DesktopUpdatePanels(props: Parameters<typeof DesktopUpdatePanel>
 }
 
 const noop = () => undefined;
+/** Told on this computer's row, not as an error on the page. */
+const LOCAL_UPGRADE_CODES = new Set(['local_runtime_upgrade_failed', 'local_runtime_upgrade_timed_out', 'local_runtime_still_too_old', 'local_runtime_too_old']);
 
 // Document-local replay suppression. Native owns one-time admission and consumption.
 const attemptedSignOutIntents = new Set<string>();
@@ -193,6 +195,7 @@ export function AccountApp() {
   // The in-app authenticator setup's code; the sign-in steps keep their own (DesktopSignIn).
   const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
+  const [localUpgrade, setLocalUpgrade] = useState<'running' | 'failed' | undefined>();
   // When the last action was one sent to the selected instance's updater: the time of that click.
   const [instanceAction, setInstanceAction] = useState<number | null>(null);
   const [selection, setSelection] = useState<{ id: string; generation: number; error: string | null } | null>(null);
@@ -337,6 +340,23 @@ export function AccountApp() {
     if (recoveryProtection.current) return;
     setMaterial(null); setView('instances'); void act({ type: 'refresh_instances' });
   };
+  /** 升级并重试 from this computer's row (owner, 2026-11-25): native upgrades Avibe on this computer as
+   *  版本与更新 does; the row then reads as it does for any computer, from the state. A failure is
+   *  told on the row, not as an error on the page. */
+  const requestLocalUpgrade = async (): Promise<LocalUpgrade> => {
+    const reply = await send({ type: 'upgrade_local_runtime' });
+    if (!reply || !('ok' in reply) || !reply.ok) return 'failed';
+    const result = reply.result as { type?: unknown; state?: unknown } | undefined;
+    return result?.type === 'local_runtime_upgrade' && (result.state === 'upgraded' || result.state === 'desktop_update') ? result.state : 'failed';
+  };
+  const upgradeLocal = async () => {
+    if (localUpgrade === 'running') return;
+    setLocalUpgrade('running');
+    const answer = await requestLocalUpgrade();
+    if (answer === 'desktop_update') { setLocalUpgrade(undefined); setView('updates'); return; }
+    // Upgraded: native cleared runtime_too_old with the state it answered with; the row is as usual.
+    setLocalUpgrade(answer === 'upgraded' ? undefined : 'failed');
+  };
   const explainError = (error: string) => t(error === 'bridge_unavailable' || error === 'bridge_incompatible' ? 'desktopAccount.errors.bridge' : error === 'instance_upgrade_required' ? 'desktopAccount.errors.upgrade' : error === 'invalid_credentials' ? 'desktopAccount.errors.credentials' : error === 'rate_limited' ? 'desktopAccount.errors.rateLimit' : error === 'invalid_otp' || error === 'invalid_code' ? 'desktopAccount.errors.code' : 'desktopAccount.errors.request');
   // An install the instance refused or failed is told by its section (the shell's receipt says `failed`). Any
   // other failed action there, a check or a switch, has no such place, and keeps this page's notice.
@@ -345,11 +365,14 @@ export function AccountApp() {
   const toldBySection = instanceAction !== null && instanceRequest?.action === 'install' && instanceRequest.phase === 'failed'
     && Date.parse(instanceRequest.updated_at) >= instanceAction - 1000;
   // The update views, the popup included, are not where an enrollment failure is told.
-  const displayedError = (toldBySection ? null : error) ?? (popover || view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
+  const displayedError = (toldBySection || (error && LOCAL_UPGRADE_CODES.has(error)) ? null : error) ?? (popover || view === 'updates' || view === 'setup-complete' ? null : state?.enrollment.error_code);
   const errorMessage = displayedError ? explainError(displayedError) : null;
   const activeSelection = selection?.generation === state?.generation ? selection : null;
   const failedPending = activeSelection?.error && activeSelection.id === state?.connection.pending?.instance_id;
-  const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null}
+  // 升级并重试 on this computer's row, while Avibe on it is too old to say what it is bound to. When
+  // native could still read its instance from the older status, the row shows its domain already.
+  const thisComputer = (state?.local.runtime_too_old && !state.local.instance_id) || localUpgrade ? { line: <LocalTooOldLine phase={localUpgrade} onUpgrade={() => void upgradeLocal()} /> } : null;
+  const switcher = state && <InstanceSwitcherView state={state} localInstanceId={state.local.instance_id ?? null} thisComputer={thisComputer}
     busy={busy} pendingId={failedPending ? null : state.connection.status === 'switching' ? state.connection.pending?.instance_id ?? null : busy && activeSelection ? activeSelection.id : null}
     failure={activeSelection?.error ? { instanceId: activeSelection.id, message: explainError(activeSelection.error) } : null}
     onAccount={openAccount} onAdd={() => setView('add')} onSelect={(instance_id) => void act({ type: 'select_instance', instance_id })}
@@ -413,6 +436,7 @@ export function AccountApp() {
       onBeginSetup={() => void claim.beginSetup()} onSavedCodes={() => void claim.savedCodes()}
       onFactorStep={claim.factorStep} onPasskey={() => void claim.passkey()}
       onRestart={claim.restart} restartable={claim.restartable} holding={claim.held} onRecover={() => void claim.recoverSaving()} onUpdates={() => setView('updates')}
+      onUpgrade={() => void claim.upgradeLocal(requestLocalUpgrade, () => setView('updates'))}
       onCheckAgain={() => void claim.recheck()} onSignInOther={() => { setView('sign-out'); leave('sign_out'); }} onClose={exitClaim} />;
   // A binding in progress keeps its dialog, also while its new sign-in owes a second factor.
   } else if (state.account.status !== 'signed_in') {

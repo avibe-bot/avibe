@@ -11,6 +11,16 @@ use super::{
     transport::{Epoch, NativeSession, Transport},
 };
 
+/// What an instance says of a session this run kept (`Selection::recheck`).
+pub enum Recheck {
+    /// Still this account's there, and readable.
+    Ready,
+    /// Signed out, expired, another account's, or the instance bound again.
+    Refused,
+    /// No answer that says either: the session is kept and the opening fails.
+    Unavailable(ClientError),
+}
+
 #[derive(Clone)]
 pub struct Selection {
     pub instance: Instance,
@@ -20,13 +30,13 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub async fn begin(
+    /// The instance `id` as the account's current catalog lists it, and its
+    /// canonical origin. Every opening asks avibe.bot again.
+    pub async fn find(
         account: &mut AccountFlow,
         state: &mut ClientState,
         id: &str,
-        transport: Arc<dyn Transport>,
-        epoch: Epoch,
-    ) -> Result<Self, ClientError> {
+    ) -> Result<(Instance, Url), ClientError> {
         account.discover(state).await?;
         if state.account.status != AccountStatus::SignedIn {
             return Err(ClientError::new("authentication_required"));
@@ -39,6 +49,28 @@ impl Selection {
             .cloned()
             .ok_or_else(|| ClientError::new("instance_access_denied"))?;
         let origin = instance_origin(&instance)?;
+        Ok((instance, origin))
+    }
+
+    /// A session this run already holds for `instance`. Nothing is shown with
+    /// it until `readiness` has checked it with the instance again.
+    pub fn resumed(instance: Instance, session: NativeSession) -> Self {
+        Self {
+            instance,
+            session,
+            query: String::new(),
+            transaction_state: String::new(),
+        }
+    }
+
+    /// Starts a new sign-in to `instance` at `origin` (from `find`).
+    pub async fn begin(
+        instance: Instance,
+        origin: Url,
+        state: &mut ClientState,
+        transport: Arc<dyn Transport>,
+        epoch: Epoch,
+    ) -> Result<Self, ClientError> {
         let mut session = NativeSession::new(origin, transport);
         session.fence(epoch);
         let response = session.request(Method::GET, "/auth/login?next=/", None).await?;
@@ -181,17 +213,54 @@ impl Selection {
         if session.get("instance_id").is_none() {
             return Err(ClientError::new("instance_upgrade_required"));
         }
-        if session["remote"] != true
-            || session["authenticated"] != true
-            || session["authorization_state"] != "current"
-            || session["sub"].as_str() != state.account.identity.as_ref().map(|account| account.id.as_str())
-            || session["instance_id"] != self.instance.id
-            || session["capabilities"]["can_read_instance"] != true
-        {
+        if !self.identity_matches(&session, state) {
             return Err(ClientError::new("instance_identity_mismatch"));
         }
         self.session.runtime_cookies()?;
         Ok(())
+    }
+
+    /// `readiness` for a session this run kept: whether the instance still
+    /// takes it, refuses it, or could not say.
+    pub async fn recheck(&mut self, state: &ClientState) -> Recheck {
+        let response = match self.session.request(Method::GET, "/api/session", None).await {
+            Ok(response) => response,
+            Err(error) => return Recheck::Unavailable(error),
+        };
+        if matches!(response.status, 401 | 403) {
+            return Recheck::Refused;
+        }
+        if !response.success() {
+            return Recheck::Unavailable(response.error());
+        }
+        let Ok(session) = response.json() else {
+            return Recheck::Unavailable(ClientError::new("invalid_response"));
+        };
+        // `vibe/ui_server.py::api_session`: a signed-out, expired or revoked
+        // session says so; one the instance could not check with avibe.bot
+        // just now says `unavailable`; only a current one names the instance.
+        if session["authenticated"] == false || session["authorization_state"] == "revoked" {
+            return Recheck::Refused;
+        }
+        if session["authorization_state"] == "unavailable" {
+            return Recheck::Unavailable(ClientError::new("instance_authorization_unavailable"));
+        }
+        if session["authorization_state"] == "current" && session.get("instance_id").is_none() {
+            return Recheck::Unavailable(ClientError::new("instance_upgrade_required"));
+        }
+        if !self.identity_matches(&session, state) || self.session.runtime_cookies().is_err() {
+            return Recheck::Refused;
+        }
+        Recheck::Ready
+    }
+
+    fn identity_matches(&self, session: &serde_json::Value, state: &ClientState) -> bool {
+        session["remote"] == true
+            && session["authenticated"] == true
+            && session["authorization_state"] == "current"
+            && session["sub"].as_str() == state.account.identity.as_ref().map(|account| account.id.as_str())
+            && session["instance_id"] == self.instance.id
+            && session["capabilities"]["can_read_instance"] == true
     }
 }
 

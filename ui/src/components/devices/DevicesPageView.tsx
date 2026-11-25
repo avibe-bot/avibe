@@ -5,8 +5,8 @@
 // A view: props only. `DevicesPage` reads the APIs, maps them onto `./types`, and passes handlers.
 import { Fragment, type ReactNode } from 'react';
 import {
-  AlarmClock, Bell, Check, ChevronRight, Clock, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LoaderCircle,
-  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone, X,
+  AlarmClock, Bell, ChevronRight, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LoaderCircle,
+  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -22,17 +22,17 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
 import { OpenNewAddress } from './OpenNewAddress';
-import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
+import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, signedInText, timeParts, unrecognized, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
 import { SUPPORT_EMAIL } from '@/lib/support';
 import { claimProblemText } from './texts';
 import {
-  RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
+  RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, activityText, functionControl, instanceUrl, lockedOutCount,
   newestFirst, othersSignedIn, remoteDevices, signOutNeedsConfirm,
 } from './rules';
 import type {
-  AccountResult, AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, ProxyAccess, Reach, SignOutNotice,
-  SignedOutDevice, UnlinkedHealth,
+  AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, ProxyAccess, Reach,
+  UnlinkedHealth,
 } from './types';
 
 const functionKeys = {
@@ -101,10 +101,6 @@ export type DevicesPageViewProps = DevicesPageActions & {
    *  every remote device. Null: nothing to sign out in bulk. */
   bulk?: 'other_sessions' | 'all_remote' | null;
   unlinkedHealth?: UnlinkedHealth[];
-  /** Devices signed out lately, each with what avibe.bot did about its account sign-in. */
-  signedOut?: SignedOutDevice[];
-  /** The answer of a sign-out just made on this page. */
-  signOutNotice?: SignOutNotice;
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
   /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
@@ -333,8 +329,12 @@ function DeviceRow({ device, onOpen }: { device: Device; onOpen?: (id: string) =
   const Icon = deviceIcon[device.kind];
   const offered = device.functions.filter(functionOn).map((each) => t(functionKeys[each.kind]));
   // A device with no name of its own is already named by its kind: the line does not say it twice.
-  const client = device.name === null && !device.client.version && !device.client.platform ? null : clientText(t, device.client);
-  const second = joinParts(t, [device.person, client, device.pushOnly ? t('devices.list.pushOnly') : offered.join(t('devices.listSeparator'))]);
+  // An unknown kind ("设备") says nothing a name does not.
+  const bare = !device.client.version && !device.client.platform;
+  const client = bare && (device.name === null || device.client.kind === 'other') ? null : clientText(t, device.client);
+  // Rows with no name are told apart by when they signed in.
+  const signedIn = unrecognized(device) && device.signedInAt ? signedInText(t, device.signedInAt, i18n.language) : null;
+  const second = joinParts(t, [device.person, client, signedIn, device.pushOnly ? t('devices.list.pushOnly') : offered.join(t('devices.listSeparator'))]);
   // Where it is now: the path of a connection observed right now, or when it was last here. The
   // computer the page is open on says nothing: the page being open is the fact.
   const where = device.self && !device.online?.path ? null : device.online ? (
@@ -574,68 +574,9 @@ function UnlinkedHealthPanel({ items, onDisconnect }: { items: UnlinkedHealth[];
   );
 }
 
-const accountIcon = {
-  queued: Clock, retrying: LoaderCircle, accepted: Check, localOnly: LogOut, sharedSignIn: LogOut, keeperUnknown: LogOut,
-  refusedCredential: X, refused: X, unconfirmed: Clock, unknown: Clock,
-} as const satisfies Record<AccountResult, unknown>;
-const accountTone = (result: AccountResult) => (
-  result === 'accepted' ? 'text-mint-ink'
-    : result === 'refused' || result === 'refusedCredential' || result === 'unconfirmed' ? 'text-gold-ink' : 'text-muted'
-);
-/** The result that most needs the person's eye leads the row's icon. */
-const leading = (results: AccountResult[]): AccountResult => (
-  (['refusedCredential', 'refused', 'unconfirmed', 'localOnly', 'keeperUnknown', 'sharedSignIn', 'retrying', 'queued', 'unknown', 'accepted'] as const)
-    .find((each) => results.includes(each)) ?? 'unknown'
-);
-
-/** Devices signed out lately. Each is out of this Avibe; the lines say what avibe.bot did about
- *  the account sign-in, and never call an accepted request an ended sign-in. */
-function SignedOutPanel({ rows, rebindOffered }: { rows: SignedOutDevice[]; rebindOffered: boolean }) {
-  const { t } = useTranslation();
-  return (
-    <SettingsPanel title={t('devices.signedOut.title')}>
-      {rows.map((row) => {
-        const lead = leading(row.results);
-        const Icon = accountIcon[lead];
-        return (
-          <div key={row.id} className="flex items-start gap-3 border-b border-border px-5 py-3 last:border-b-0">
-            <Icon className={`mt-0.5 size-4 shrink-0 ${accountTone(lead)}`} />
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-baseline gap-x-2">
-                <span className="text-[13px] font-medium text-foreground">{row.device ?? t('devices.signedOut.unnamed')}</span>
-                <span className="text-[11px] text-muted">{t('devices.signedOut.here')}</span>
-              </div>
-              {accountResultTexts(t, row, rebindOffered).map((line) => (
-                <div key={line} className="mt-0.5 text-[12px] leading-relaxed text-foreground"><KeptTail text={line} /></div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
-    </SettingsPanel>
-  );
-}
-
-/** Right after a sign-out: what avibe.bot was asked or not asked, and Health only here, because
- *  only this answer says anything about it. */
-function SignOutNoticeCard({ notice, rebindOffered, onDismiss }: { notice: SignOutNotice; rebindOffered: boolean; onDismiss?: () => void }) {
-  const { t } = useTranslation();
-  return (
-    <Notice tone="plain" action={<Button variant="ghost" size="xs" onClick={onDismiss}>{t('devices.notice.dismiss')}</Button>}>
-      <div className="font-medium">
-        {notice.device ? t('devices.signedOut.justNow', { device: notice.device }) : t('devices.signedOut.justNowMany')}
-      </div>
-      {accountResultTexts(t, notice, rebindOffered).map((line) => <div key={line}><KeptTail text={line} /></div>)}
-      {notice.healthCleanupPending && !notice.withoutHealth && (
-        <div className="text-muted"><KeptTail text={t(notice.hadHealth ? 'devices.signedOut.healthPending' : 'devices.signedOut.healthPendingIfAny')} /></div>
-      )}
-    </Notice>
-  );
-}
-
 export function DevicesPageView({
-  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
-  signOutNotice, unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
+  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [],
+  unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
   // The notice about an address changed elsewhere sends the owner to binding again (and then
@@ -744,7 +685,6 @@ export function DevicesPageView({
           more, whatever was last read: the card and its 「开启远程访问」 are not offered. */}
       {owner && problem !== 'restrictedFromAfar' && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
-      {signOutNotice && <SignOutNoticeCard notice={signOutNotice} rebindOffered={rebindOffered} onDismiss={actions.onDismissNotice} />}
       {problem && (
         <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('devices.notice.dismiss')}</Button>}>
           <KeptTail text={t(problemKeys[problem])} />
@@ -827,7 +767,6 @@ export function DevicesPageView({
       )}
 
       {unlinkedHealth.length > 0 && <UnlinkedHealthPanel items={unlinkedHealth} onDisconnect={actions.onDisconnectHealth} />}
-      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} rebindOffered={rebindOffered} />}
 
       {owner && latest.length > 0 && (
         <SettingsPanel
