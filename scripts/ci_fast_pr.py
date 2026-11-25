@@ -1,68 +1,75 @@
-"""Fast PR checks. Only positively identified leaf inputs take the one-runner route."""
+"""Fixed Linux PR portfolio plus the union of path-specific native/contract proofs."""
 from __future__ import annotations
 
-import json
-import os
-from pathlib import Path
-import subprocess
-import sys
-from tempfile import TemporaryDirectory
-import xml.etree.ElementTree as ET
+import re
 
-from scripts.ci_docs_only import Scope
-from scripts.ci_scope import presentation_only
+from scripts.ci_docs_only import Scope, WINDOWS_CONTROL_IPC_PATHS
 
-# No directory-wide exemption for runtime, tests, or UI components: an unknown
-# consumer (especially auth/IPC, signing, migration or installer) keeps real CI.
-PY_CASES = {
-    'core/citations.py': ('tests/test_citations.py', 'tests/test_citation_consumers.py'),
-    'tests/test_citations.py': ('tests/test_citations.py',),
-    'tests/test_citation_consumers.py': ('tests/test_citation_consumers.py',),
+LINUX = frozenset(('ruff', 'unit-test-shards', 'ui-checks', 'ui-tests', 'show-router-integration',
+                   'memory-insight-contract', 'npm-wrapper', 'migration-release-guard', 'build-linux-artifacts'))
+PROOFS = {
+    'identity': {'ui-browser-checks', 'windows-control-ipc'},
+    'vault': {'ui-browser-checks', 'windows-control-ipc'},
+    'install': {'install-upgrade-shards', 'windows-install-smoke-runners'},
+    'migration': {'install-upgrade-shards'},  # Linux floor already exercises the previous published reader/writer.
+    'desktop': {'desktop-shell'},
+    'ios': {'ios-shell'},
+    'shared': {'manifest-consistency'},  # The Linux floor also builds the wheel and UIs.
 }
-UI_CASES = {
-    'ui/src/lib/citations.ts': 'src/lib/citations.test.ts',
-    'ui/src/lib/citations.test.ts': 'src/lib/citations.test.ts',
-    'ui/src/components/SidebarResizer.tsx': 'src/components/SidebarResizer.test.tsx',
-    'ui/src/components/SidebarResizer.test.tsx': 'src/components/SidebarResizer.test.tsx',
-}
-# Command examples and repository/installer guidance are executable inputs.
-DOC_CONTRACTS = {'docs/CLI.md', 'docs/CLI_ZH.md', 'docs/COMMANDS.md', 'docs/COMMANDS_ZH.md', 'AGENTS.md', 'docs/testing/ios-direct-interop.md', '.github/PULL_REQUEST_TEMPLATE.md'}
+EXTRA = frozenset().union(*PROOFS.values())
+IDENTITY = re.compile(r'auth|sign.?in|log.?in|log.?out|sign.?out|admission|onboard|pairing|binding|passkey|credential|remote.?access|device.?(?:claim|trust)|access.?token', re.I)
+SHARED = re.compile(r'(^|/)([^/]*\.lock|package-lock\.json|pnpm-lock\.yaml|requirements[^/]*\.txt|pyproject\.toml|package\.json|cargo\.toml|go\.mod|go\.sum|package\.resolved|tsconfig[^/]*\.json|vite\.config\.[^/]+|conftest\.py|\.pre-commit-config\.yaml|dockerfile[^/]*)$', re.I)
 
 
-def ordinary(scope: Scope) -> bool:
-    return bool(scope.fast_eligible and scope.routable and scope.paths) and all(
-        p in PY_CASES or p in UI_CASES or (presentation_only(p) and p not in DOC_CONTRACTS)
-        for p in scope.paths
-    )
+def path_groups(path: str) -> set[str]:
+    p = path.lower()
+    groups = set()
+    if IDENTITY.search(p) or p in WINDOWS_CONTROL_IPC_PATHS:
+        groups.add('identity')
+    if any(s in p for s in ('vault', 'sandbox')):
+        groups.add('vault')
+    if any(s in p for s in ('install', 'upgrade', 'bootstrap', 'distribution')) or p.startswith(('packaging/', 'npm/')):
+        groups.add('install')
+    if 'alembic' in p or 'migrat' in p:
+        groups.add('migration')
+    if p.startswith('desktop/') or any(s in p for s in ('updater', 'auto_update', 'signing', 'codesign', 'notariz')):
+        groups.add('desktop')
+    if p.startswith(('ios/', 'ui/src/mobile/', 'ui/src/lib/native', 'ui/src/lib/usenative')) or p.endswith('.swift'):
+        groups.add('ios')
+    if SHARED.search(p) or p.startswith(('.github/', 'patches/', 'scripts/ci_')) or 'release' in p or p in ('hatch_build.py', 'hatch_exact_peer.py'):
+        groups.add('shared')
+    return groups
 
 
-def check_python_file(case: str) -> None:
-    # A green floor file cannot vouch for another file collecting zero items
-    # or skipping all of them. Each invocation and fresh report is for one file.
-    with TemporaryDirectory() as directory:
-        report = Path(directory) / 'result.xml'
-        subprocess.run([sys.executable, '-m', 'pytest', '-q', f'--junitxml={report}', case], check=True)
-        if not any(all(node.find(kind) is None for kind in ('skipped', 'error', 'failure'))
-                   for node in ET.parse(report).iter('testcase')):
-            raise RuntimeError(f'No passing test executed in {case}')
+def selected(scope: Scope) -> tuple[set[str], set[str]]:
+    paths = scope.verified_paths or (scope.paths if scope.routable else ())
+    if not paths:
+        raise ValueError('No verified PR change range; cannot select sensitive proofs')
+    groups = set().union(*(path_groups(p) for p in paths))
+    return groups, set(LINUX).union(*(PROOFS[g] for g in groups))
 
 
-def run(paths: list[str]) -> None:
-    subprocess.run(['ruff', 'check', '.'], check=True)
-    cases = {'tests/test_repository_guidance.py', 'tests/test_ci_unit_test_shards.py'}
-    for path in paths:
-        cases.update(PY_CASES.get(path, ()))
-    for case in sorted(cases):
-        check_python_file(case)
-    if any(p.startswith('ui/') for p in paths):
-        for cmd in (['npm', 'run', 'lint'], ['node_modules/.bin/tsc', '-p', 'tsconfig.app.json', '--noEmit'],
-                    ['npm', 'run', 'typecheck:tests']):
-            subprocess.run(cmd, cwd='ui', check=True)
-        if any(p.startswith('ui/design/') for p in paths):
-            subprocess.run(['npm', 'run', 'typecheck:design'], cwd='ui', check=True)
-        ui_cases = {UI_CASES[p] for p in paths if p in UI_CASES} or {'src/lib/citations.test.ts'}
-        subprocess.run(['npm', 'test', '--', *sorted(ui_cases)], cwd='ui', check=True)
+def verify(gate: str, needs: dict) -> None:
+    import json
 
-
-if __name__ == '__main__':
-    run(json.loads(Path(os.environ['RUNNER_TEMP'], 'fast-pr-paths.json').read_text()))
+    changes = needs['changes']
+    if changes['result'] != 'success':
+        raise ValueError('Classification did not succeed')
+    outputs = changes['outputs']
+    if outputs['portfolio'] not in ('true', 'false'):
+        raise ValueError('Missing portfolio disposition')
+    routed = json.loads(outputs['dispatch_jobs'])
+    jobs = LINUX if gate == 'fast-gate' else EXTRA
+    legacy = {'unit-tests', 'install-upgrade-regression', 'windows-install-smoke'} if gate == 'sensitive-proof' else set()
+    if set(needs) != {'changes', *jobs, *legacy}:
+        raise ValueError('Missing or unexpected gate dependencies')
+    for job in legacy:
+        expected = 'skipped' if outputs['portfolio'] == 'true' else 'success'
+        if needs[job]['result'] != expected:
+            raise ValueError(f'{job} must be {expected}')
+    for job in sorted(jobs):
+        expected = {'run': 'success', 'skip': 'skipped'}[routed[job]]
+        if gate == 'fast-gate' and outputs['portfolio'] == 'true' and expected != 'success':
+            raise ValueError(f'Linux floor producer {job} was not selected')
+        if needs[job]['result'] != expected:
+            raise ValueError(f"{job}: {needs[job]['result']} (expected {expected})")

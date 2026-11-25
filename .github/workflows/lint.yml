@@ -14,8 +14,8 @@ permissions:
   contents: read
 
 concurrency:
-  # Each merge gets its own full certificate; only stale PR heads coalesce.
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  # Batch pending full master runs; an RC still needs its exact SHA green.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'push' || github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -25,14 +25,16 @@ jobs:
   changes:
     # Sole scope authority: preserve proven docs-only PRs; otherwise run cheap
     # checks and route heavy work. Queue combinations are thin, master is full.
-    name: ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') && 'fast-gate' || 'changes' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 3
     permissions:
       contents: read
     outputs:
       advisory_ios: ${{ steps.scope.outputs.advisory_ios }}
-      fast_only: ${{ steps.scope.outputs.fast_only }}
+      portfolio: ${{ steps.scope.outputs.portfolio }}
+      sensitive: ${{ steps.scope.outputs.sensitive }}
+      unit_shards: ${{ steps.scope.outputs.unit_shards }}
+      unit_total: ${{ steps.scope.outputs.unit_total }}
       dispatch_jobs: ${{ steps.scope.outputs.dispatch_jobs }}
       unit_python: ${{ steps.scope.outputs.unit_python }}
       mode: ${{ steps.scope.outputs.mode }}
@@ -47,21 +49,6 @@ jobs:
         env:
           FAST_PR_ENABLED: ${{ vars.FAST_PR_ENABLED }}
         run: python3 scripts/ci_scope.py
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
-        if: github.event_name == 'pull_request'
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v6.1.0
-        if: github.event_name == 'pull_request' && steps.scope.outputs.fast_ui == 'true'
-        with:
-          node-version: '26.13.1'
-      - name: Run fast PR checks on this runner
-        if: github.event_name == 'pull_request'
-        run: |
-          python -m pip install --disable-pip-version-check uv==0.13.7 ruff==0.4.9
-          uv sync --locked --no-install-project --python "$(command -v python)"
-          if [ "${{ steps.scope.outputs.fast_ui }}" = true ]; then (cd ui && npm ci); fi
-          PATH="$PWD/.venv/bin:$PATH" bash scripts/ci_loopback_only.sh python -m scripts.ci_fast_pr
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.scope.outputs.docs_only == 'true'
         with:
@@ -162,15 +149,25 @@ jobs:
       - name: Collect Python tests without running the unit suite
         run: bash scripts/ci_loopback_only.sh .venv/bin/python -m pytest --collect-only -q -m 'not integration' --ignore=tests/e2e tests
 
-  sensitive-proof:
-    needs: [changes, unit-tests, install-upgrade-regression, windows-install-smoke]
-    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.fast_only != 'true'
+  fast-gate:
+    needs: [changes, ruff, unit-test-shards, ui-checks, ui-tests, show-router-integration, memory-insight-contract, npm-wrapper, migration-release-guard, build-linux-artifacts]
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     runs-on: ubuntu-latest
     steps:
-      - name: Require every sensitive aggregate to have succeeded
-        env:
-          RESULTS: ${{ toJSON(needs) }}
-        run: jq -e 'length == 4 and all(.[]; .result == "success")' <<< "$RESULTS"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py --portfolio-gate fast-gate
+
+  sensitive-proof:
+    needs: [changes, ui-browser-checks, windows-control-ipc, install-upgrade-shards, windows-install-smoke-runners, desktop-shell, ios-shell, manifest-consistency, unit-tests, install-upgrade-regression, windows-install-smoke]
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.portfolio != 'true' || needs.changes.outputs.sensitive == 'true')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: python3 scripts/ci_scope.py --portfolio-gate sensitive-proof
 
   master-full-backstop:
     runs-on: ubuntu-latest
@@ -565,8 +562,8 @@ jobs:
         # two per runner, under the same 20-minute job deadline.
         # Forward compatibility runs on the full master backstop, not on PRs.
         python: ${{ fromJSON(needs.changes.outputs.unit_python) }}
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
-        shard-total: [8]
+        shard: ${{ fromJSON(needs.changes.outputs.unit_shards) }}
+        shard-total: ${{ fromJSON(needs.changes.outputs.unit_total) }}
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
     env:
       AVIBE_CI_JUNIT_DIR: ${{ github.workspace }}/ci-junit
@@ -785,7 +782,7 @@ jobs:
   unit-tests:
     runs-on: ubuntu-latest
     needs: [changes, unit-test-shards, scenario-evidence, ui-checks, ui-tests, ui-browser-checks, model-hub-hosted-wire, model-hub-lifecycle-native, manifest-consistency, python-smoke, ios-shell, desktop-shell, ruff, memory-insight-contract, show-router-integration, build-linux-artifacts, migration-release-guard, npm-wrapper]
-    if: always() && needs.changes.outputs.fast_only != 'true'
+    if: always() && needs.changes.outputs.portfolio != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Require exactly the results declared by this CI mode
@@ -1050,7 +1047,7 @@ jobs:
   install-upgrade-regression:
     runs-on: ubuntu-latest
     needs: [changes, install-upgrade-shards]
-    if: always() && needs.changes.outputs.fast_only != 'true'
+    if: always() && needs.changes.outputs.portfolio != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Require exactly the results declared by this CI mode
@@ -1266,7 +1263,7 @@ jobs:
   windows-install-smoke:
     runs-on: ubuntu-latest
     needs: [changes, windows-install-smoke-runners, web-fetch-runtime, web-fetch-macos, windows-agent, windows-model-hub, windows-control-ipc]
-    if: always() && needs.changes.outputs.fast_only != 'true'
+    if: always() && needs.changes.outputs.portfolio != 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Require exactly the results declared by this CI mode

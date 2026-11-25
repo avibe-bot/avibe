@@ -1034,7 +1034,7 @@ def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
         "changes", "windows-install-smoke-runners", "web-fetch-runtime", "web-fetch-macos",
         "windows-agent", "windows-model-hub", "windows-control-ipc",
     ]
-    assert jobs["windows-install-smoke"]["if"] == "always() && needs.changes.outputs.fast_only != 'true'"
+    assert jobs["windows-install-smoke"]["if"] == "always() && needs.changes.outputs.portfolio != 'true'"
 
 
 def test_install_suites_run_independently_without_losing_checks() -> None:
@@ -1136,7 +1136,7 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
         "changes", "windows-install-smoke-runners", "web-fetch-runtime", "web-fetch-macos",
         "windows-agent", "windows-model-hub", "windows-control-ipc",
     ]
-    assert jobs["windows-install-smoke"]["if"] == "always() && needs.changes.outputs.fast_only != 'true'"
+    assert jobs["windows-install-smoke"]["if"] == "always() && needs.changes.outputs.portfolio != 'true'"
 
 
 @pytest.mark.parametrize(("pytest_exit", "summary"), [(0, "21 passed"), (1, "1 failed"), (0, "14 passed, 7 skipped")])

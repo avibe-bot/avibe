@@ -177,6 +177,10 @@ def validate_plan(plan: object) -> dict:
     return plan
 
 
+def unit_shards(portfolio: bool = False) -> list[int]:
+    return list(range(16 if portfolio else 8))
+
+
 def unit_python_versions(mode: str) -> list[str]:
     if mode not in MODES:
         raise ValueError(f"Unsupported matrix mode: {mode}")
@@ -234,11 +238,16 @@ def check_gate(gate: str, needs: dict, *, event_name: str, ref: str) -> list[str
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_mutually_exclusive_group()
+    commands.add_argument('--portfolio-gate', choices=['fast-gate', 'sensitive-proof'])
     commands.add_argument("--gate", choices=[*GATES, "master-full-backstop"])
     commands.add_argument("--optional-ios", action="store_true", help="Route the standalone advisory PR iOS check")
     args = parser.parse_args()
     event_name, ref = os.environ.get("GITHUB_EVENT_NAME", ""), os.environ.get("GITHUB_REF", "")
     try:
+        if args.portfolio_gate:
+            from scripts.ci_fast_pr import verify
+            verify(args.portfolio_gate, json.loads(os.environ['NEEDS_JSON']))
+            return 0
         if args.gate:
             needs = json.loads(os.environ.get("NEEDS_JSON", ""))
             problems = check_gate(args.gate, needs, event_name=event_name, ref=ref)
@@ -265,31 +274,26 @@ def main() -> int:
             print(f"Advisory PR iOS: {route}. {scope.reason}")
             return 0
         plan = make_plan(mode, scope)
-        fast_only = False
+        portfolio = mode == 'PR' and os.environ.get('FAST_PR_ENABLED') == 'true'
         advisory_ios = heavy_routes(scope)['ios-shell'] if mode == 'PR' else 'skip'
-        if mode == 'PR' and os.environ.get('RUNNER_TEMP'):
-            Path(os.environ['RUNNER_TEMP'], 'fast-pr-paths.json').write_text(json.dumps(scope.paths))
-        if mode == 'PR' and os.environ.get('FAST_PR_ENABLED') == 'true':
-            from scripts.ci_fast_pr import ordinary
-
-            fast_only = ordinary(scope)
-            if fast_only:
-                advisory_ios = 'skip'
-            else:
-                # Keep the existing PR simulator advisory on affected/unknown inputs;
-                # it is always a required producer on the full master backstop.
-                plan = {**plan, 'docs_only': False, 'jobs': dict.fromkeys(PRODUCERS, 'run')}
-                plan['jobs']['ios-shell'] = 'skip'
-        dispatch = dict.fromkeys(PRODUCERS, 'skip') if fast_only else plan['jobs']
+        dispatch = plan['jobs']
+        groups = set()
+        if portfolio:
+            from scripts.ci_fast_pr import selected
+            groups, chosen = selected(scope)
+            dispatch = {job: 'run' if job in chosen else 'skip' for job in PRODUCERS}
+            advisory_ios = 'skip'  # selected native PR paths call the real required job instead
+        shards = unit_shards(portfolio)
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a", encoding="utf-8") as stream:
                 stream.write(f"advisory_ios={advisory_ios}\n")
-                stream.write(f"fast_only={str(fast_only).lower()}\ndispatch_jobs={json.dumps(dispatch)}\n")
-                stream.write(f"fast_ui={str(bool(scope and any(p.startswith('ui/') for p in scope.paths))).lower()}\n")
+                stream.write(f"portfolio={str(portfolio).lower()}\nsensitive={str(bool(groups)).lower()}\n")
+                stream.write(f"unit_shards={json.dumps(shards)}\nunit_total=[{len(shards)}]\n")
+                stream.write(f"dispatch_jobs={json.dumps(dispatch)}\n")
                 stream.write(f"unit_python={json.dumps(unit_python_versions(mode))}\n")
                 stream.write(f"mode={mode}\ndocs_only={str(plan['docs_only']).lower()}\nplan={serialized}\n")
-        summary = f"## CI scope: {mode}\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in plan["jobs"].items()) + "\n"
+        summary = f"## CI scope: {mode} ({', '.join(sorted(groups)) or ('ordinary' if portfolio else 'legacy')})\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in dispatch.items()) + "\n"
         if scope:
             summary += f"\n{scope.reason}\n"
         print(summary)
