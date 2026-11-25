@@ -27,12 +27,13 @@ import { KeptTail } from '../ui/kept-tail';
 import { deviceTime, longDay, timeParts } from './format';
 import { ActionRow, BackToDevices, Notice, OptimizeRow } from './parts';
 import { RebindDialogs, RebindRow, type RebindActions } from './RebindViews';
+import { UnbindConfirm, UnbindLine } from './UnbindViews';
 import { RenameDialogs, type RenameActions } from './RenameDialogs';
 import { settingName, settingValueText } from './rules';
 import { renameRefusalText } from './texts';
 import type {
   AddressState, ConnectionSetting, ConnectionState, DeviceUsing, DirectPreference, DirectState, OptimizeState, RebindDialog, RebindState,
-  RelayState, RenameDevice, RenameStep, RetiredName, SwitchRefusal, TunnelChange, TunnelSetting, TunnelStatus,
+  RelayState, RenameDevice, RenameStep, RetiredName, SwitchRefusal, TunnelChange, TunnelSetting, TunnelStatus, UnbindConfirmState, UnbindState,
 } from './types';
 
 export type ConnectionPageActions = RenameActions & RebindActions & {
@@ -48,6 +49,10 @@ export type ConnectionPageActions = RenameActions & RebindActions & {
   /** 「测速」 in the diagnostics. */
   onMeasure?: () => void;
   onChangeDomain?: () => void;
+  /** 「解除绑定」: open its confirmation, confirm it, or close it. */
+  onUnbind?: () => void;
+  onUnbindConfirm?: () => void;
+  onUnbindCancel?: () => void;
   onShowCleanup?: (retired: RetiredName) => void;
 };
 
@@ -66,6 +71,10 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   /** This device's own choice of path (the Avibe App, a Desktop window of another computer's
    *  instance); absent where the shell offers none. */
   preference?: DirectPreference;
+  /** 「解除绑定」, the owner's: where it stands. Absent on a build without it. */
+  unbind?: UnbindState;
+  /** Its confirmation, open. */
+  unbindConfirm?: UnbindConfirmState;
   /** Which shell is choosing: the App goes back to automatic from either choice that cannot
    *  connect, Avibe Desktop only from 「仅直连和中继」. */
   choiceShell?: 'app' | 'desktop';
@@ -322,10 +331,11 @@ function RelayRow({ relay, direct, inUse, refused, busy, onChange }: {
 }
 
 export function ConnectionPageView({
-  load, connection, tunnel, remote, via, path, preference, choiceShell, directOnly, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
+  load, connection, tunnel, remote, via, path, preference, unbind, unbindConfirm, choiceShell, directOnly, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
   rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindOpen, rebindBusy, ...actions
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
+  const unbindBusy = unbind?.state === 'unbinding' || unbind?.state === 'needsRepair';
   const shell = (children: ReactNode) => (
     <SettingsPageShell title={t('devices.connection.title')} subtitle={t('devices.connection.subtitle')} activeTab="remote-access">
       <BackToDevices onBack={actions.onBack} />
@@ -357,12 +367,22 @@ export function ConnectionPageView({
                 />
               </div>
             )}
+            {unbind && <UnbindLine state={unbind} />}
           </div>
-          {address?.eligible && (
-            <Button variant="ghost" size="compact" className="shrink-0 text-destructive-ink" onClick={actions.onChangeDomain}>
-              {t('devices.connection.changeDomain')}
-            </Button>
-          )}
+          {/* 「更改域名」 and 「解除绑定」: the same place and the same weight, the owner's. Neither while
+              an unbinding runs or this computer has to sort its binding out. */}
+          <div className="flex shrink-0 flex-wrap justify-end gap-1">
+            {address?.eligible && !unbindBusy && (
+              <Button variant="ghost" size="compact" className="text-destructive-ink" onClick={actions.onChangeDomain}>
+                {t('devices.connection.changeDomain')}
+              </Button>
+            )}
+            {unbind && !unbindBusy && (
+              <Button variant="ghost" size="compact" className="text-destructive-ink" onClick={actions.onUnbind}>
+                {t('devices.unbind.action')}
+              </Button>
+            )}
+          </div>
         </div>
       )}
       {/* Names given up and still kept for this account, each with its real day. */}
@@ -377,11 +397,13 @@ export function ConnectionPageView({
           <Button variant="ghost" size="compact" className="shrink-0" onClick={() => actions.onShowCleanup?.(each)}>{t('devices.rename.showCleanup')}</Button>
         </div>
       ))}
-      {rebind && <RebindRow state={rebind} canReset={canReset} needsBrowser={rebindNeedsBrowser} open={rebindOpen} actions={actions} />}
+      {/* Binding again waits while an unbinding runs or this computer has to sort it out. */}
+      {rebind && !unbindBusy && <RebindRow state={rebind} canReset={canReset} needsBrowser={rebindNeedsBrowser} open={rebindOpen} actions={actions} />}
     </SettingsPanel>
   ) : null;
   const dialogs = (
     <>
+      {unbindConfirm && host && <UnbindConfirm host={host} confirm={unbindConfirm} onConfirm={actions.onUnbindConfirm} onCancel={actions.onUnbindCancel} />}
       {rename && host && address && <RenameDialogs host={host} rename={rename} address={address} devices={renameDevices} rebindOffered={Boolean(rebind)} actions={actions} />}
       {rebindDialog && rebind && <RebindDialogs dialog={rebindDialog} state={rebind} host={host} busy={rebindBusy} actions={actions} />}
     </>

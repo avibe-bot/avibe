@@ -113,3 +113,10 @@ export function optimizeNote(t: TFunction, optimize: OptimizeState | undefined):
   if (wait?.kind === 'automatic') return t('remoteAccess.automaticRetryAt', { time: wait.time });
   return wait?.kind === 'due' ? t('remoteAccess.automaticRetryDue') : undefined;
 }
+
+/** How long a name given up by unbinding stays the account's, and where it can be taken back. */
+export function unbindNameKeptText(t: TFunction, host: string, date?: string, holdDays?: number): string {
+  if (date) return t('devices.unbind.nameKept', { host, date });
+  if (typeof holdDays === 'number') return t('devices.unbind.nameKeptDays', { host, count: holdDays });
+  return t('devices.unbind.nameKeptPlain', { host });
+}

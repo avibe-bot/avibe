@@ -22,10 +22,10 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
 import { OpenNewAddress } from './OpenNewAddress';
-import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
+import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, longDay, timeParts, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
 import { SUPPORT_EMAIL } from '@/lib/support';
-import { claimProblemText } from './texts';
+import { claimProblemText, unbindNameKeptText } from './texts';
 import {
   RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
   newestFirst, othersSignedIn, remoteDevices, signOutNeedsConfirm,
@@ -107,6 +107,9 @@ export type DevicesPageViewProps = DevicesPageActions & {
   signOutNotice?: SignOutNotice;
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
+  /** 「解除绑定」 as the Devices page says it: running (it continues by itself), or just done, with
+   *  the name it had and how long that stays the account's. */
+  unbind?: { state: 'unbinding' } | { state: 'done'; host?: string; releaseAt?: string; holdDays?: number };
   /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
    *  before it, no sentence points there. */
   rebindOffered?: boolean;
@@ -635,9 +638,9 @@ function SignOutNoticeCard({ notice, rebindOffered, onDismiss }: { notice: SignO
 
 export function DevicesPageView({
   reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
-  signOutNotice, unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
+  signOutNotice, unrecognizedChange, unbind, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   // The notice about an address changed elsewhere sends the owner to binding again (and then
   // 「更改域名」) only where this instance has binding again.
   const outsideWayOut = rebindOffered;
@@ -719,6 +722,22 @@ export function DevicesPageView({
       subtitle={owner ? t('devices.subtitle') : t('devices.subtitleMemberPlain')}
       activeTab="remote-access"
     >
+      {owner && unbind?.state === 'unbinding' && (
+        <Notice tone="plain">
+          <div className="flex items-center gap-2 text-[13px] text-foreground">
+            <LoaderCircle className="size-4 shrink-0 text-muted motion-safe:animate-spin" />
+            {t('devices.unbind.unbinding')}
+          </div>
+        </Notice>
+      )}
+      {owner && unbind?.state === 'done' && (
+        <Notice tone="plain">
+          <div className="text-balance text-[14px] font-semibold">{t('devices.unbind.done')}</div>
+          {unbind.host && (
+            <p className="mt-1"><KeptTail text={unbindNameKeptText(t, unbind.host, unbind.releaseAt ? longDay(unbind.releaseAt, i18n.language) : undefined, unbind.holdDays)} /></p>
+          )}
+        </Notice>
+      )}
       {owner && unrecognizedChange && (outsideWayOut ? (
         <Notice tone="danger" action={<Button variant="destructive" size="sm" onClick={actions.onOpenRebind}>{t('devices.outsideChange.action')}</Button>}>
           <div className="text-balance text-[14px] font-semibold">{t('devices.outsideChange.title')}</div>

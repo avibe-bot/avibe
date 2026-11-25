@@ -356,4 +356,26 @@ export type RebindDialog =
   /** Bound again. */
   | { kind: 'bound'; disposition: 'existing' | 'new' | 'unknown'; host?: string };
 
+// ── 解除绑定 (docs: the instance's unbind states) ───────────────────────────────────────────────
+
+/** What 连接方式 says about unbinding this computer. `ready`: the entry is offered. `unbinding`: the
+ *  instance is doing it and continues by itself. `notChanged`: avibe.bot did not accept it and
+ *  remote access is as it was before. `needsRepair`: only this computer can sort it out. */
+export type UnbindState =
+  | { state: 'ready' }
+  | { state: 'unbinding' }
+  | { state: 'notChanged'; reason: 'ineligible' | 'refused' }
+  | { state: 'needsRepair' };
+
+/** The confirmation, open. `remote`: pressed from a device away from the computer, which loses this
+ *  page at once. `releaseAt` / `holdDays`: how long the name stays the account's, as the instance
+ *  says. */
+export type UnbindConfirmState = {
+  remote: boolean;
+  healthConnected: boolean;
+  releaseAt?: string;
+  holdDays?: number;
+  busy?: boolean;
+};
+
 export type { DeviceUsing };
