@@ -293,6 +293,45 @@ impl RuntimeHost {
         })
     }
 
+    /// Arms the claim channel of the current adoption again after a presence
+    /// change retired it, once a fresh probe of the same origin sees the
+    /// presence it was adopted with. A Runtime restart shorter than the
+    /// shell's readiness-loss threshold (such as an upgrade's) retires the
+    /// channel on its first missed probe, and no recovery bootstrap follows.
+    /// Claims retired with the old channel stay retired. The claim pipe's own
+    /// admission, not this adoption, establishes which root answers the port.
+    pub(crate) async fn rearm_claim(&self) -> bool {
+        let (adoption, epoch) = {
+            let state = self.launched_runtime();
+            let Some(adoption) = state.adoption.clone().filter(|_| !state.stopping) else {
+                return false;
+            };
+            if *adoption.claim_live.borrow() {
+                return true;
+            }
+            (adoption, state.epoch)
+        };
+        let presence = self
+            .observe_presence(epoch, &adoption.origin, adoption.launcher.as_ref())
+            .await;
+        if presence != adoption.presence {
+            return false;
+        }
+        let mut state = self.launched_runtime();
+        if state.stopping || state.epoch != epoch {
+            return false;
+        }
+        match state.adoption.as_mut() {
+            Some(current) if current.origin == adoption.origin && current.presence == presence => {
+                if !*current.claim_live.borrow() {
+                    current.claim_live = tokio::sync::watch::channel(true).0;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this host retains a launch attempt for launch deduplication.
     pub fn has_launched(&self) -> bool {
         self.launched_runtime().attempt.is_some()

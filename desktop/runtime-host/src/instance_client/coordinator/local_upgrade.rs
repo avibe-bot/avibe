@@ -115,6 +115,11 @@ impl Coordinator {
             }
             // The new Runtime answers. It must also be this Desktop's again (an
             // adoption the claim pipe can use), and have the claim protocol.
+            // A restart too short for the shell's recovery leaves the adoption
+            // with a retired claim channel; arm it again for the same Runtime.
+            if host.claim_source().is_none() && !host.rearm_claim().await {
+                continue;
+            }
             let Some(source) = host.claim_source() else {
                 continue;
             };
