@@ -327,6 +327,15 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(elapsed, .milliseconds(700)) // A refusal or an immediate silent close is wrong.
         XCTAssertLessThan(elapsed, .seconds(10)) // Not the client's 30 s watchdog.
         try await eventually { controller.strictFailureCount(forInstanceURL: url) == 1 }
+        // A fresh WebKit reconnect after the failure notification is not a
+        // deliberate bootstrap. It still gets no public candidate or HTTP answer.
+        let again = LoopbackClient(port: port)
+        defer { again.close() }
+        harness.transport.report(.lost, for: target)
+        try await again.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        let nextBytes = try await again.receiveUntilClosed()
+        XCTAssertTrue(nextBytes.isEmpty)
+        XCTAssertEqual(controller.strictFailureCount(forInstanceURL: url), 1)
         XCTAssertEqual(harness.publicOrigin.streams.attempts, 1, "Only the deliberate bootstrap dialled public")
     }
 
@@ -345,7 +354,12 @@ final class DirectPathControllerTests: XCTestCase {
                                                           foregroundSeconds: 0), test: self)
         try await failed.signIn()
         failed.controller.setDirectOnly(true, forInstanceURL: url)
-        try await failed.select("instance-1")
+        // Mirror AppModel.settleOpen: select and prepare, but do NOT call
+        // runtimeDidOpen while the first-load gate is held.
+        _ = try failed.coordinator.selectInstance(id: "instance-1")
+        let pending = try XCTUnwrap(failed.lastOpened)
+        await failed.controller.prepareRoute(for: pending) { failed.coordinator.isCurrentRuntime(pending) }
+        XCTAssertTrue(failed.transport.selections.isEmpty)
         XCTAssertFalse(failed.controller.routeOwner.isExcluded(one, store: failed.websiteDataStore.identifier))
         XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .held)
         XCTAssertNotNil(failed.controller.listenerRecovery)

@@ -1084,6 +1084,9 @@ final class DirectPathController {
     /// Every relay of both backends closes; nothing of the old account is
     /// kept. Not a closure: its documents are gone.
     func accountWillChange() {
+        firstRouteRetry?.cancel()
+        firstRouteRetry = nil
+        firstRouteWait = nil
         runtime = nil
         settleHeldReplies()
         deselect()
@@ -1239,8 +1242,11 @@ final class DirectPathController {
             lossWake = Task { [weak self] in
                 do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
                 guard let self, self.target == target, !self.isUsable,
-                      self.armed.remove(host) != nil else { return }
-                self.lossWake = nil
+                      self.armed.contains(host) else { return }
+                // Leave the completed wake in place: another loss report in this
+                // outage is not a new episode. Only recovery, a deliberate new
+                // selection, or disabling the choice can reset it. In particular,
+                // an ordinary browser reconnect must not acquire a public opener.
                 self.strictFailures[host, default: 0] &+= 1
                 self.onAvailabilityChanged()
             }
@@ -1794,7 +1800,7 @@ final class DirectPathController {
     /// `lastFailure` is `nil`. Every change of it is announced through
     /// `onAvailabilityChanged`.
     var listenerRecovery: DirectListenerRecovery? {
-        if let waiting = firstRouteWait, !isInBackground, waiting.runtime == runtime,
+        if let waiting = firstRouteWait, !isInBackground, isCurrentRuntime(waiting.runtime),
            waiting.store == websiteDataStore.identifier,
            let host = DirectAuthority(instanceURL: waiting.runtime.instance.url)?.host,
            needsListener(host), !routeOwner.routes(host, store: waiting.store) {
@@ -1832,14 +1838,15 @@ final class DirectPathController {
     }
 
     private func retryFirstRouteIfNeeded() {
-        guard let waiting = firstRouteWait, waiting.runtime == runtime, !isInBackground,
+        guard let waiting = firstRouteWait, isCurrentRuntime(waiting.runtime), !isInBackground,
               waiting.store == websiteDataStore.identifier, firstRouteRetry == nil,
               let host = DirectAuthority(instanceURL: waiting.runtime.instance.url)?.host,
               needsListener(host), !routeOwner.routes(host, store: waiting.store) else { return }
         firstRouteRetry = Task { [weak self] in
             guard let self else { return }
             await self.prepareRoute(for: waiting.runtime) {
-                !Task.isCancelled && self.runtime == waiting.runtime && !self.isInBackground &&
+                !Task.isCancelled && self.firstRouteWait?.runtime == waiting.runtime &&
+                    self.isCurrentRuntime(waiting.runtime) && !self.isInBackground &&
                     self.websiteDataStore.identifier == waiting.store && self.needsListener(host)
             }
             guard !Task.isCancelled else { return }
