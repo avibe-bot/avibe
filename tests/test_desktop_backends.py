@@ -1441,3 +1441,74 @@ def test_non_desktop_antigravity_refuses_pinned_version(monkeypatch, tmp_path, m
     assert result["ok"] is False
     assert result["code"] == "pinned_version_unsupported"
     assert executed == []
+
+
+def test_antigravity_windows_repair_source_matches_native_vendor_install_target(monkeypatch, tmp_path):
+    """Windows agy repair recognition and native install target share the same %LOCALAPPDATA% path contract."""
+    from types import SimpleNamespace
+
+    from vibe import api, cli_repair
+    from vibe.cli_repair import RepairSource, identify_repair_source, native_vendor_install_target
+
+    monkeypatch.setattr(
+        cli_repair,
+        "os",
+        SimpleNamespace(name="nt", environ=os.environ, pathsep=os.pathsep, curdir=os.curdir),
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+    local_app_data = tmp_path / "LocalAppData"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    expected = local_app_data / "agy" / "bin" / "agy.exe"
+    expected.parent.mkdir(parents=True)
+    expected.write_text("", encoding="utf-8")
+
+    assert native_vendor_install_target("antigravity", home=tmp_path) == expected
+    assert api._native_vendor_install_target("antigravity") == str(expected)
+    assert identify_repair_source("antigravity", str(expected), home=tmp_path) == RepairSource(
+        kind="native",
+        destination=str(expected),
+    )
+
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    fallback = tmp_path / ".local" / "bin" / "agy.exe"
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text("", encoding="utf-8")
+
+    assert native_vendor_install_target("antigravity", home=tmp_path) == fallback
+    assert api._native_vendor_install_target("antigravity") == str(fallback)
+    assert identify_repair_source("antigravity", str(fallback), home=tmp_path) == RepairSource(
+        kind="native",
+        destination=str(fallback),
+    )
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_antigravity_get_backend_runtime_reports_auto_update_capability_by_install_source(
+    monkeypatch, tmp_path, managed
+):
+    """System-installed agy reports auto_update_supported=False and auto_update=None; desktop-managed enables it."""
+    from config.v2_config import V2Config
+    from vibe import api
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    agy_path = str(tmp_path / "bin" / "agy")
+    cfg = V2Config.default()
+    cfg.agents.antigravity.enabled = True
+    cfg.agents.antigravity.auto_update = True
+    cfg.agents.antigravity.cli_path = agy_path
+    cfg.save()
+
+    async def fake_detect_cli_async(_path, _backend):
+        return {"found": True, "path": agy_path, "status": "ok", "version": "0.4.0", "reason": None}
+
+    monkeypatch.setattr(api, "detect_cli_async", fake_detect_cli_async)
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda path: managed and path == agy_path)
+    monkeypatch.setattr(api, "_cached_latest", lambda _name: "0.5.0")
+
+    runtime = api.get_backend_runtime("antigravity")
+
+    assert runtime["ok"] is True
+    assert runtime["managed_by"] == ("desktop" if managed else None)
+    assert runtime["auto_update_supported"] is managed
+    assert runtime["auto_update"] is (True if managed else None)

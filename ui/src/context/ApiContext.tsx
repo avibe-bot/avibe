@@ -2482,7 +2482,8 @@ export type BackendRuntimeInfo = {
   ok: boolean;
   name?: string;
   enabled?: boolean;
-  auto_update?: boolean;
+  auto_update?: boolean | null;
+  auto_update_supported?: boolean;
   cli_path?: string;
   resolved_path?: string | null;
   installed?: boolean;

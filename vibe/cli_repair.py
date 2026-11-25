@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,7 +38,35 @@ class RepairSource:
     cask: bool = False
 
 
-def identify_repair_source(backend: str, selected: str, *, home: Path | None = None) -> RepairSource | None:
+def native_vendor_install_target(
+    backend: str,
+    *,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Path | None:
+    resolved_home = home or Path.home()
+    if backend == "opencode":
+        return resolved_home / ".opencode" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode")
+    if backend == "claude":
+        return resolved_home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude")
+    if backend == "antigravity":
+        if os.name == "nt":
+            source_env = os.environ if env is None else env
+            local_app_data = source_env.get("LOCALAPPDATA")
+            if local_app_data:
+                return Path(local_app_data) / "agy" / "bin" / "agy.exe"
+            return resolved_home / ".local" / "bin" / "agy.exe"
+        return resolved_home / ".local" / "bin" / "agy"
+    return None
+
+
+def identify_repair_source(
+    backend: str,
+    selected: str,
+    *,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> RepairSource | None:
     if backend not in PACKAGES:
         return None
     home = home or Path.home()
@@ -82,18 +111,16 @@ def identify_repair_source(backend: str, selected: str, *, home: Path | None = N
                 if relative.parts[0] != brew_name:
                     return None
                 return RepairSource("brew", str(original), brew_name, root.parent, root.name == "Caskroom")
-        if backend == "claude":
-            native = home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude")
-            versions = home / ".local" / "share" / "claude" / "versions"
-            if original == native and (not original.is_symlink() or target.is_relative_to(versions)):
-                return RepairSource("native", str(native))
-        if backend == "opencode" and original == home / ".opencode" / "bin" / "opencode":
-            if not original.is_symlink() or target.parent == original.parent:
-                return RepairSource("native", str(original))
-        if backend == "antigravity":
-            native = home / ".local" / "bin" / ("agy.exe" if os.name == "nt" else "agy")
-            if original == native and (not original.is_symlink() or target.parent == original.parent):
-                return RepairSource("native", str(native))
+        native = native_vendor_install_target(backend, home=home, env=env)
+        if native is not None:
+            native = native.expanduser().absolute()
+            if backend == "claude":
+                versions = home / ".local" / "share" / "claude" / "versions"
+                if original == native and (not original.is_symlink() or target.is_relative_to(versions)):
+                    return RepairSource("native", str(native))
+            elif backend in {"opencode", "antigravity"}:
+                if original == native and (not original.is_symlink() or target.parent == original.parent):
+                    return RepairSource("native", str(native))
     except (OSError, ValueError, TypeError, AttributeError):
         return None
     return None

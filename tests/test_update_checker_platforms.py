@@ -1443,3 +1443,50 @@ def test_restore_backend_fails_when_readback_version_or_status_mismatches(
 
     assert install_calls == [("antigravity", "0.4.0")]
     assert outcome == "failed"
+
+
+@pytest.mark.parametrize(
+    "antigravity_runtime",
+    [
+        {"auto_update_supported": False, "auto_update": None},
+        {"auto_update_supported": False, "auto_update": True},
+    ],
+)
+def test_backend_auto_update_skips_antigravity_when_auto_update_unsupported(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, antigravity_runtime
+):
+    """UpdateChecker must not attempt installs or record retry attempts when auto_update_supported is False."""
+    admissions = []
+    install_calls = []
+
+    class _Coordinator:
+        async def run_when_idle(self, backend, operation):
+            admissions.append(backend)
+            return await operation()
+
+    def install(name, **kwargs):
+        install_calls.append((name, kwargs))
+        return {"ok": False, "code": "pinned_version_unsupported"}
+
+    runtimes = {
+        "codex": {"auto_update": False, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
+        "claude": {"auto_update": False, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
+        "opencode": {"auto_update": False, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
+        "antigravity": {
+            "has_update": True,
+            "current_version": "0.4.0",
+            "latest_version": "0.5.0",
+            "status": "ok",
+            **antigravity_runtime,
+        },
+    }
+    checker = _backend_auto_update_checker(
+        monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
+    )
+    _settled(checker, antigravity="0.5.0")
+
+    asyncio.run(checker._reconcile_backend_auto_updates())
+
+    assert admissions == []
+    assert install_calls == []
+    assert checker.state.backend_auto_update_attempts == {}

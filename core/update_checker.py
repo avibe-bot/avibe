@@ -571,6 +571,7 @@ class UpdateChecker:
                 if not (
                     runtime.get("ok")
                     and runtime.get("enabled")
+                    and runtime.get("auto_update_supported", True)
                     and runtime.get("auto_update")
                     and runtime.get("installed")
                     and (broken or runtime.get("has_update"))
