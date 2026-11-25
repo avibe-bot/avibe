@@ -124,6 +124,8 @@ jobs:
             build-for-testing
 
       - name: Run XCTest on iPhone Simulator
+        # A normal run takes 47-49 minutes.
+        timeout-minutes: 70
         run: |
           set -euo pipefail
           xcodebuild \
@@ -133,6 +135,9 @@ jobs:
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 600 \
+            -maximum-test-execution-time-allowance 600 \
             CODE_SIGNING_ALLOWED=NO \
             test
 
