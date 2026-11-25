@@ -280,6 +280,9 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     assert!(!caller.monitoring());
 }
 
+/// How long the Python peer may take to start, apart from each case's own budget.
+const PEER_START_LIMIT: Duration = Duration::from_secs(120);
+
 #[tokio::test]
 async fn current_binding_is_read_only_and_only_the_original_document_receives_its_result() {
     for case in [
@@ -299,10 +302,31 @@ async fn current_binding_is_read_only_and_only_the_original_document_receives_it
         "no_source",
     ] {
         let root = tempfile::tempdir().unwrap();
-        if tokio::time::timeout(Duration::from_secs(15), exercise(case, &root))
-            .await
-            .is_err()
-        {
+        let run = exercise(case, &root);
+        tokio::pin!(run);
+        // Starting the Python peer is not what is measured: a loaded runner can
+        // take longer than the whole case to start an interpreter. The case's
+        // own budget starts once the peer says it has started, or the case
+        // finishes without one (`naming`, `no_source`).
+        let finished = tokio::time::timeout(PEER_START_LIMIT, async {
+            loop {
+                if root.path().join("peer-started").is_file() {
+                    return false;
+                }
+                tokio::select! {
+                    _ = &mut run => return true,
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "binding observation: the peer did not start, and the case did not end, within {} s: {case}",
+                PEER_START_LIMIT.as_secs()
+            )
+        });
+        if !finished && tokio::time::timeout(Duration::from_secs(15), &mut run).await.is_err() {
             // Peer-side progress only: no frame, URL, credential, nonce or child stderr.
             let phase = [
                 "inspect-finished",
