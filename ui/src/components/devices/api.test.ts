@@ -82,4 +82,15 @@ describe('devicesApi', () => {
     expect(page).toEqual({ items: [{ id: 'e1', deviceId: 'd1', at: '2026-11-21T01:00:00.000Z', device: 'Chrome', event: { kind: 'signedIn' } }], nextCursor: 'c/2 ' });
     expect(fetched.mock.calls[0][0]).toBe('/api/devices/activity?limit=50&cursor=c%201');
   });
+
+  it('reads a gateway status as a lost answer only when no error or code of the instance\'s is in it', async () => {
+    // The instance's own claim routes answer {state: 'error', code} with a gateway status: a refusal.
+    fetched.mockResolvedValue(answer(503, { state: 'error', code: 'control_plane_unreachable' }));
+    await expect(devicesApi.startClaim('zh')).rejects.toMatchObject({ name: 'DevicesApiError', status: 503, code: 'control_plane_unreachable' });
+    // Cloudflare's problem details: a numeric error_code and an error_name, nothing of the instance's.
+    fetched.mockResolvedValue(answer(502, { title: 'Bad gateway', status: 502, error_code: 1033, error_name: 'masked' }));
+    await expect(devicesApi.unbindCommit('unbind-1')).rejects.toBeInstanceOf(LostAnswer);
+    fetched.mockResolvedValue(answer(530, { error: 'remote_access_busy' }));
+    await expect(devicesApi.unbindCommit('unbind-1')).rejects.toBeInstanceOf(DevicesApiError);
+  });
 });
