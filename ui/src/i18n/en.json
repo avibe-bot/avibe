@@ -8520,6 +8520,10 @@
     "taken": "Taken",
     "reclaim": "Yours from before",
     "checking": "Checking…",
-    "invalid": "Lowercase letters, digits and hyphens only"
+    "invalid": "Lowercase letters, digits and hyphens only",
+    "short": "At least 2 characters",
+    "long": "At most 46 characters",
+    "hyphenEnds": "Can’t start or end with a hyphen",
+    "doubleHyphen": "The 3rd and 4th characters can’t both be hyphens"
   }
 }
