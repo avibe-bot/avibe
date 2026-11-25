@@ -9134,10 +9134,22 @@ _DESKTOP_BACKEND_ERROR_I18N_KEYS = {
     "invalid_package": "desktopBackendInstall.invalidInstall",
     "native_executable_missing": "desktopBackendInstall.invalidInstall",
     "invalid_executable": "desktopBackendInstall.invalidInstall",
+    "version_mismatch": "desktopBackendInstall.invalidInstall",
+    "invalid_version": "desktopBackendInstall.invalidInstall",
     "unsupported_platform": "desktopBackendInstall.unsupportedPlatform",
     "install_timeout": "desktopBackendInstall.timedOut",
     "executable_probe_failed": "desktopBackendInstall.probeFailed",
 }
+
+
+def _antigravity_pinned_version_unsupported() -> dict:
+    return {
+        "ok": False,
+        "code": "pinned_version_unsupported",
+        "message": "Antigravity CLI self-update and script installers do not support pinned versions.",
+        "output": None,
+        "path": None,
+    }
 
 
 def _configured_backend_language() -> str:
@@ -9156,12 +9168,12 @@ def _desktop_backend_install_message(name: str, code: str) -> str:
     )
 
 
-def _run_desktop_backend_install(name: str, truncate_output) -> dict:
+def _run_desktop_backend_install(name: str, truncate_output, *, version: str | None = None) -> dict:
     def _activate(installed_path: str) -> None:
         _persist_agent_cli_path(name, installed_path, required=True)
 
     try:
-        result = install_desktop_backend(name, activate=_activate)
+        result = install_desktop_backend(name, activate=_activate, version=version)
     except DesktopBackendError as exc:
         return {
             "ok": False,
@@ -9176,6 +9188,15 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
         return {"ok": False, "code": "cli_readback_failed",
                 "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
                 "path": result.path, "output": None, "detection": health}
+    if version is not None and (health.get("version") or "").strip().lstrip("vV") != version.strip().lstrip("vV"):
+        return {
+            "ok": False,
+            "code": "version_mismatch",
+            "message": _desktop_backend_install_message(name, "version_mismatch"),
+            "path": result.path,
+            "output": None,
+            "detection": health,
+        }
     return {
         "ok": True,
         "message": backend_t(
@@ -9279,6 +9300,8 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
                 return _cli_repair_refusal(name)
             cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://claude.ai/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
     elif name == "antigravity":
+        if version is not None:
+            return _antigravity_pinned_version_unsupported()
         command_env = {**native_bootstrap_env(command_env), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
         if os.name == "nt":
             powershell = resolve_cli_path("powershell")
@@ -9380,12 +9403,12 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
         return None
 
     if _owned_path(is_desktop_backend_path) is not None:
-        return _run_desktop_backend_install(name, _truncate_output)
+        return _run_desktop_backend_install(name, _truncate_output, version=version)
     if name == "codex":
         private_runtime_path = _owned_path(is_private_desktop_runtime_path)
         if private_runtime_path is not None:
             if desktop_backend_toolchain() is not None:
-                return _run_desktop_backend_install(name, _truncate_output)
+                return _run_desktop_backend_install(name, _truncate_output, version=version)
             return {
                 "ok": False,
                 "code": "desktop_managed_backend",
@@ -9398,7 +9421,7 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # Preserve the app-private ownership boundary before any global probe or
     # repair planner can discover a non-executable user installation.
     if existing_path is None and is_desktop_managed_runtime():
-        return _run_desktop_backend_install(name, _truncate_output)
+        return _run_desktop_backend_install(name, _truncate_output, version=version)
     health = detect_cli(configured_path, name)
     default_cli = default_cli_for_backend(name) or name
     if health["status"] in {"broken", "unknown"} or (
@@ -9432,6 +9455,8 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
                 return upgrade
             cmd, command_env = upgrade
         elif name == "antigravity":
+            if version is not None:
+                return _antigravity_pinned_version_unsupported()
             cmd = [existing_path, "update"]
             command_env = {**_command_env_for(existing_path), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
         else:
@@ -9455,7 +9480,7 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # run the legacy global installers and mutate user/system state from a
     # desktop Runtime that promises app-private backend ownership.
     if is_desktop_managed_runtime():
-        return _run_desktop_backend_install(name, _truncate_output)
+        return _run_desktop_backend_install(name, _truncate_output, version=version)
 
     command_env: dict[str, str] | None = None
     expected_path: str | None = None
@@ -9515,6 +9540,8 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
                 "output": None,
             }
     elif name == "antigravity":
+        if version is not None:
+            return _antigravity_pinned_version_unsupported()
         command_env = {**os.environ, "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
         if system == "windows":
             error = _check_binary("powershell")
@@ -14304,7 +14331,7 @@ async def get_antigravity_auth_async() -> dict:
     if auth_mode == "gemini-api-key":
         credentials_present = bool(api_key)
     elif auth_mode == "agent-platform":
-        credentials_present = bool(adc["present"])
+        credentials_present = bool(adc["present"]) or authenticated
     else:
         credentials_present = authenticated
 
