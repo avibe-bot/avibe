@@ -84,8 +84,10 @@ export function afterDeadline(deadline: number, due: () => void, now: () => numb
 }
 /** When a 429's wait ends: native refuses an earlier try, so the step stays locked until then. */
 const until = (reply: Reply) => Date.now() + 1000 * (!reply.ok && reply.retryAfter ? reply.retryAfter : 60);
-const problemFor = (code: string): BindStep => code === 'local_runtime_upgrade_required'
-  ? { kind: 'upgrade' } : { kind: 'problem', problem: PROBLEMS[code] ?? 'unknown' };
+/** Avibe on this computer has no claim protocol yet: 升级并重试 here (native, 2026-11-25). */
+const TOO_OLD = 'local_runtime_too_old';
+const problemFor = (code: string): BindStep => code === TOO_OLD ? { kind: 'tooOld' }
+  : code === 'local_runtime_upgrade_required' ? { kind: 'upgrade' } : { kind: 'problem', problem: PROBLEMS[code] ?? 'unknown' };
 /** avibe.bot said this exact code is wrong or expired: the person may type it again, in place. */
 const WRONG_CODE = new Set(['invalid_or_expired', 'invalid_code', 'invalid_otp', 'verification_invalid']);
 /** An authenticator being added keeps its setup only for a wrong code, not an expired one. */
@@ -139,6 +141,7 @@ function observedStep(binding: ComputerBinding, settled: boolean): BindStep {
     case 'bound': return { kind: 'bound', host: binding.host ?? '' };
     case 'otherAccount': case 'unknown': case 'repair': case 'pending': return { kind: 'notHere', reason: binding.state };
     case 'upgrade': return { kind: 'upgrade' };
+    case 'tooOld': return { kind: 'tooOld' };
     case 'unavailable': return { kind: 'problem', problem: 'unavailable' };
     // Unbound and nothing open once the opening settled: the review ended without a step to show.
     case 'unbound': return settled ? { kind: 'problem', problem: 'unknown' } : { kind: 'opening' };
@@ -238,7 +241,7 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
         quiet.current = window.setTimeout(() => { quiet.current = null; void observe(true); }, QUIET_RETRY_MS);
         return 'bound';
       }
-      const failed = reply.code === 'local_runtime_upgrade_required' ? 'upgrade' : 'unknown';
+      const failed = reply.code === TOO_OLD ? 'tooOld' : reply.code === 'local_runtime_upgrade_required' ? 'upgrade' : 'unknown';
       setBinding({ state: failed });
       return failed;
     }
@@ -447,6 +450,27 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
       setSettled(true);
     }
   }, [inspect, observe, start]);
+  /** 升级并重试: native upgrades Avibe on this computer (as 版本与更新 does) and answers when it is
+   *  back; then the step is done again from the start, observing first. A failure, or an upgrade
+   *  that left it still too old, says one sentence with the same button. A Desktop-managed Avibe
+   *  is upgraded by updating the App itself. */
+  const [upgraded, setUpgraded] = useState(false);
+  const upgradeLocal = useCallback((openUpdates: () => void) => run(async () => {
+    setStep({ kind: 'tooOld', phase: 'running' });
+    const reply = await call('desktop_claim_review', { type: 'upgrade_local_runtime' });
+    if (!reply) return;
+    const state = reply.ok ? str(reply.value?.state) : null;
+    if (state === 'desktop_update') { setStep({ kind: 'tooOld' }); openUpdates(); return; }
+    // local_runtime_upgrade_failed, _timed_out, _still_too_old, or anything else: one sentence.
+    if (state !== 'upgraded') { setStep({ kind: 'tooOld', phase: 'failed' }); return; }
+    setUpgraded(true);
+    reset();
+    // The flow it was in has ended (the ref follows the step only after the next render).
+    flowOpen.current = false;
+    setOpened(false);
+    await begin();
+  }), [run, call, reset, begin, setStep]);
+
   // Once per document, the first time it is signed in: never again on a re-show, a reconnect, a
   // changed generation or a state event. The shell opens a new document for each request.
   const begun = useRef(false);
@@ -771,7 +795,10 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
   const shown: BindStep | null = !claimView ? step
     : step ?? (state && state.account.status !== 'signed_in' ? { kind: 'signIn' } : observedStep(current, settled));
   return {
-    binding: current, step: shown, busy, recheck: begin,
+    binding: current,
+    // Still too old after an upgrade: the same face, saying it did not finish.
+    step: upgraded && shown?.kind === 'tooOld' && !shown.phase ? { kind: 'tooOld', phase: 'failed' } as BindStep : shown,
+    busy, recheck: begin, upgradeLocal,
     /** Nothing may leave: recovery codes shown, or the setup that returns them on its way. */
     held: step?.kind === 'codes' || finalizing === generation,
     /** Whether 「重新开始」 can do anything: the claim view's one review not yet sent. */
