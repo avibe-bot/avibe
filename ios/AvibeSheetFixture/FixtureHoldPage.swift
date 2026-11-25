@@ -280,7 +280,7 @@ final class FixtureHoldViewController: UIViewController {
         tap(focusFacts());
         setTimeout(() => tap("later:" + focusFacts()), 1500);
       });
-      input.addEventListener("pointermove", (event) => {
+      const moved = (event) => {
         if (!press || event.pointerId !== press.id) return;
         if (!press.recognised && !press.own) {
           if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > SLOP) drop();
@@ -289,10 +289,11 @@ final class FixtureHoldViewController: UIViewController {
         const up = press.y - event.clientY;
         if (!press.armed && up > CANCEL) { press.armed = true; state("armed"); }
         else if (press.armed && up <= UNCANCEL) { press.armed = false; state(press.failed ? "own-failed" : "recording"); }
-      });
-      // As the composer's gesture, the window hears the press's release and cancel too: WebKit can
-      // lose the capture during a slide without a lost-capture, and the release then goes to
-      // where the finger lifted. The first to end the press clears it; the other does nothing.
+      };
+      // As the composer's gesture, the window hears the press's moves, release and cancel too:
+      // WebKit can lose the capture during a slide without a lost-capture, and they then go to
+      // wherever the finger is. A move changes nothing twice; the first to end the press clears
+      // it, so the other path does nothing.
       const released = (event) => {
         if (!press || event.pointerId !== press.id) return;
         pressed("up");
@@ -311,6 +312,8 @@ final class FixtureHoldViewController: UIViewController {
         if (press.recognised || press.own) end("system");
         else drop();
       };
+      input.addEventListener("pointermove", moved);
+      window.addEventListener("pointermove", moved, true);
       input.addEventListener("pointerup", released);
       input.addEventListener("pointercancel", cancelled);
       window.addEventListener("pointerup", released, true);

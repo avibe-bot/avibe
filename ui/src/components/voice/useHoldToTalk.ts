@@ -144,7 +144,7 @@ type Press = {
   frame: number;
   /** Stops the window following a press the element has not captured (a mouse before `holdMs`). */
   unfollow: (() => void) | null;
-  /** Stops the window hearing a finger's release and cancel, which it does for the whole press. */
+  /** Stops the window hearing a finger's moves, release and cancel, which it does for the whole press. */
   ends: (() => void) | null;
   /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
    *  `holdMs` before the page recognises the hold itself. */
@@ -1010,13 +1010,17 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       } catch {
         // Without capture the hold still works while the pointer stays on the element.
       }
-      // The window hears a finger's release and cancel too: WebKit can lose the capture during
-      // a slide without saying so, and the release then goes to where the finger lifted (seen
-      // in the iOS hold smoke: pointer-up on the body, no lost-capture), which the element never
-      // hears. The first to end the press clears it, so the other path does nothing.
+      // The window hears a finger's moves, release and cancel too: WebKit can lose the capture
+      // during a slide without saying so, and from then on they go to wherever the finger is
+      // (seen in the iOS hold smoke: pointer-up on the body, no lost-capture), which the element
+      // never hears. A slide up to cancel is judged by those moves, so they count as well. Both
+      // paths are safe to run for one event: a move changes nothing it already changed, and the
+      // first to end the press clears it, so the other does nothing.
+      window.addEventListener('pointermove', onPointerMove, true);
       window.addEventListener('pointerup', onPointerUp, true);
       window.addEventListener('pointercancel', onPointerCancel, true);
       ends = () => {
+        window.removeEventListener('pointermove', onPointerMove, true);
         window.removeEventListener('pointerup', onPointerUp, true);
         window.removeEventListener('pointercancel', onPointerCancel, true);
       };

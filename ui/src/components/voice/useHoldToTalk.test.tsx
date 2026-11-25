@@ -473,6 +473,32 @@ describe('useHoldToTalk', () => {
     expect(hold.phase).toBe('idle');
   });
 
+  // Once the capture is lost, the moves go where the finger is too: a slide up to cancel is still
+  // a cancel, and a press that moved off before the hold is still given back to the page.
+  it("judges a finger's slide by the moves only the window hears", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('不要了');
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 500 - 81 });
+    expect(hold.phase).toBe('armed');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 400 });
+    await flush();
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.outcome).toBe('cancelled');
+    // Into the cancel position once, for a move both paths heard: one rigid.
+    move(el, 500 - 90);
+    expect(native.impact.mock.calls.map(([style]) => style)).toEqual(['medium', 'rigid']);
+
+    down(el);
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 470 });
+    await elapse(400);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 470 });
+    expect(onTap).not.toHaveBeenCalled();
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
   it('ends a hold once when both the element and the window hear its release', async () => {
     const el = await mount();
     await holdFor(el);
@@ -514,18 +540,18 @@ describe('useHoldToTalk', () => {
     const added = vi.spyOn(window, 'addEventListener');
     const removed = vi.spyOn(window, 'removeEventListener');
     const ends = (spy: typeof added) => spy.mock.calls
-      .filter(([type, , options]) => (type === 'pointerup' || type === 'pointercancel') && options === true)
+      .filter(([type, , options]) => ['pointermove', 'pointerup', 'pointercancel'].includes(type) && options === true)
       .map(([type, listener]) => [type, listener]);
     const el = await mount();
     down(el);
     await elapse(100);
     up(el);
-    expect(ends(added)).toHaveLength(2);
+    expect(ends(added)).toHaveLength(3);
     expect(ends(removed)).toEqual(ends(added));
 
     // Unmounted mid-hold.
     await holdFor(el);
-    expect(ends(added)).toHaveLength(4);
+    expect(ends(added)).toHaveLength(6);
     cleanup();
     expect(ends(removed)).toEqual(ends(added));
     added.mockRestore();
