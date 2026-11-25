@@ -318,13 +318,16 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
         if fresh and ((previous and previous["sid"] == sid) or _tombstoned(conn, sid, locked_now)):
             raise SessionNotRegistered('session_not_registered')
         if fresh and owner_signed_out and reference and epoch and owner_signed_out["valid_until"] > locked_now:
-            from storage.device_account_signout import AccountSessionSignedOut, OWNER_SIGNED_OUT_PREFIX, revoke_late
+            from storage.device_account_signout import (
+                AccountSessionSignedOut, OWNER_SIGNED_OUT_PREFIX, enrolled_elsewhere, revoke_late)
             # The existing refusal comes first, unchanged.
             if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
                 raise AccountSessionSignedOut('account_session_signed_out')
             # Used once: a sign-in that comes back with the same old cookie later is an ordinary one.
-            # Only a mark still in force, by the clock read after the lock.
-            if conn.execute(state_meta.delete().where(
+            # Only a mark still in force, by the clock read after the lock; never for an account
+            # session a live session here still uses (the device a sign-out kept).
+            if not enrolled_elsewhere(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now) \
+                    and conn.execute(state_meta.delete().where(
                     state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + owner_signed_out["sid"],
                     cast(state_meta.c.value_json, Integer) > locked_now)).rowcount == 1:
                 revoke_late(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now)

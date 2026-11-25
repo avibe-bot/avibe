@@ -39,6 +39,17 @@ def enroll(conn, *, sid, subject, binding, epoch, reference, expires_at):
     conn.execute(refs.insert().values(sid=sid, cookie_binding=binding, epoch=epoch, digest=digest, reference=reference, expires_at=expires_at))
 
 
+def enrolled_elsewhere(conn, *, epoch, subject, reference, now):
+    """Whether a live, not signed-out session here signed in with this same account session (as a
+    sign-out keeps the device that asked for it): then it is not ended later either."""
+    digest = hashlib.sha256(json.dumps([epoch, subject, reference]).encode()).hexdigest()
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+    signed_out = select(state_meta.c.key).where(
+        state_meta.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id).exists()
+    return conn.scalar(select(refs.c.sid).select_from(refs.join(sessions, sessions.c.session_id == refs.c.sid)).where(
+        refs.c.digest == digest, sessions.c.cookie_exp > now, sessions.c.expires_at > now, ~signed_out).limit(1)) is not None
+
+
 def revoke_late(conn, *, epoch, subject, reference, now):
     """Queue avibe.bot's sign-out of one exact account session, met at a later sign-in.
 

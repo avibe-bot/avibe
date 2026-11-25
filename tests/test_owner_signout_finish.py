@@ -21,7 +21,7 @@ from storage.models import (
     state_meta,
 )
 from tests.test_device_relogin import (  # noqa: F401
-    CHROME, ORIGIN, browser, finish, first_login, held, install, issuer, listing, quiet, sid_of, sign_out, start, tombstone,
+    CHROME, ORIGIN, authenticated, browser, finish, first_login, held, install, issuer, listing, quiet, sid_of, sign_out, start, tombstone,
 )
 from vibe import account_session_revoke, remote_access
 
@@ -315,3 +315,23 @@ def test_mark_pruning_reads_one_bounded_page_and_walks_on(issuer):
     with get_cached_sqlite_engine().begin() as conn:
         device_registry._prune_owner_marks(conn, now)  # the cursor walks on to it
     assert all(mark(sid) is not None for sid in live) and mark("zz-orphan") is None
+
+
+@pytest.mark.parametrize("bulk", [False, True])
+def test_the_account_session_of_the_device_that_signed_it_out_is_never_ended(issuer, monkeypatch, quiet, bulk):
+    cfg = issuer
+    kept = "asr1_" + "k" * 43
+    old = first_login(cfg)
+    sid = sid_of(cfg, old)
+    keeper = browser(first_login(cfg, "owner", "owner", ref=kept))
+    if bulk:
+        assert sign_out(keeper, "sign-out-others").status_code == 200
+    else:
+        (device,) = [d for d in listing(keeper)["mine"] if d["kind"] != "host" and not d["current"]]
+        assert sign_out(keeper, device["id"] + "/sign-out").status_code == 200
+    assert mark(sid) is not None
+    # The old browser comes back on the very account session the kept device signed in with.
+    c = browser(old)
+    answer = finish(c, monkeypatch, cfg, start(c), ref=kept)
+    assert answer.status_code == 302 and issued(answer) and job_rows() == []
+    assert mark(sid) is not None and authenticated(held(keeper))
