@@ -413,18 +413,21 @@ removed. A published release must retain its identity or be explicitly withdrawn
 permanent tombstone. Temporary unlisting is unsupported: omission rejects the snapshot;
 it does not cause an installed client to roll back.
 
-The writer first inspects the authenticated origin. Matching sequence and payload need
-only origin/public readback, not signing or uploading again. Otherwise a pinned isolated
-signer signs the reviewed bytes and the writer independently authenticates the envelope,
-checks current master, conditionally creates or replaces the origin object, and verifies
-origin and public bytes. A denied read, stale sequence, conflicting payload, failed CAS
+Before signing, a job without release credentials checks both download sources again for
+all installable assets, including fallbacks. The pinned, isolated signer may sign the
+same canonical payload again; this produces the same envelope bytes. Only the master
+writer upload step holds the mirror credential. It authenticates the artifact and origin.
+An identical payload at the origin skips the PUT. Otherwise the writer rejects a stale
+or conflicting sequence, validates published identities and permanent withdrawals,
+rechecks installable assets and current master, then creates or replaces with an ETag
+condition. The public URL is used only for final readback. A denied read, stale sequence, conflicting payload, failed CAS
 or pending public readback is not a successful publication. Dispatch again on master;
 there is no historical replay or recovery PR.
 
 **Trust boundary:** anyone who can change the master workflows is trusted with signing.
 These checks prevent accidental publication through the standard workflow; they cannot
 isolate its authors. A compromised signing key requires replacing the client trust root.
-Only the writer’s inspection and upload steps use the existing mirror repository credentials. Those
+Only the writer upload step uses the existing mirror repository credentials. Those
 credentials have bucket-wide write access: leakage can damage other releases, including
 the application update index and wheels, but cannot forge an engine signature. The
 exact object key is a client restriction, not a server-side permission. The ordinary
@@ -440,7 +443,7 @@ The owner generates a dedicated fresh key using the reviewed hosted helper
 (`generate`, an explicit `--avault` executable and a new private `--output` file).
 The generator needs avault 0.1.11 or later; the CI exercise uses 0.1.11 and the
 hosted signer and oldest client verifier use the pinned 0.1.10 binary. Only the
-compressed public key is printed. At commissioning, the owner must verify that signing material exists only in the signer environment, restricted to the master branch, with no same-name repository or organization fallback. No manual environment reviewer is required. Referencing an environment in YAML does not establish that these deployment settings are present.
+compressed public key is printed. At commissioning, the owner must verify that signing material exists only in the signer environment, restricted to the master branch, with no same-name repository or organization fallback. No manual environment reviewer is required for index publication. Restrict the separate index writer environment to master; do not weaken the asset-release writer's existing approval policy. The index uses the existing mirror credential and requires no new read token. Referencing an environment in YAML does not establish that these deployment settings are present.
 The private runbook holds the exact setup commands. Only the public key ID,
 compressed public key and genesis sequence floor belong in the root PR.
 

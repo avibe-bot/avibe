@@ -82,32 +82,28 @@ class Bucket:
         self.writes += 1
 
 
-def test_retry_latest_snapshot_and_readback_without_another_signature_or_write():
+def test_origin_four_public_two_retries_never_rewrite_origin(monkeypatch):
+    monkeypatch.setattr(index.qualification, 'require_listed_assets', lambda _: None)
     signer = Signer()
-    roots, verifier = signer.roots(), LocalVerifier()
-    origin = envelope_bytes(signer, payload(2, [1, 2]).raw)
-    bucket = Bucket(origin)
-    current = payload(4, [1], [tombstone(B, A)])  # 3 never published
-    calls = []
-    served = [origin]
-    def artifact():
-        calls.append(current.sequence)
-        return envelope_bytes(signer, current.raw)
-    def run(role):
-        return index.writer(role, current, roots=roots, verifier=verifier, bucket=bucket, artifact=artifact,
+    previous = envelope_bytes(signer, payload(2, [1, 2]).raw)
+    bucket = Bucket(previous)
+    current = payload(4, [1], [tombstone(B, A)])  # never replay the unpublished 3
+    envelope = envelope_bytes(signer, current.raw)
+    served = [previous]
+    def upload():
+        return index.writer(current, roots=signer.roots(), verifier=LocalVerifier(), bucket=bucket, envelope=envelope,
                             current_head=lambda: None, fetch_public=lambda: served[0])
-    assert run('inspect') == 'sign' and not calls
     with pytest.raises(hosted.Error, match='pending'):
-        run('publish')
+        upload()
+    assert bucket.initial == envelope and bucket.writes == 1
     with pytest.raises(hosted.Error, match='pending'):
-        run('inspect')
-    served[0] = bucket.initial
-    assert run('inspect') == run('publish') == 'readback'
-    assert calls == [4] and bucket.writes == 1
+        upload()
+    served[0] = envelope
+    assert upload() == 'readback' and bucket.writes == 1
 
 
 @pytest.mark.parametrize('bad', ['older', 'same/different', 'omit B', 'retag', 'minimum', 'drop tombstone', 'tampered origin', 'incompatible fallback'])
-def test_writer_refusals_preserve_authenticated_state_and_never_request_signature(bad):
+def test_writer_refusals_preserve_authenticated_state_without_upload(bad):
     signer = Signer()
     current = payload(2, [1, 2])
     desired = payload(4, [1], [tombstone(B, A)])
@@ -132,12 +128,13 @@ def test_writer_refusals_preserve_authenticated_state_and_never_request_signatur
     raw = envelope_bytes(Signer() if bad == 'tampered origin' else signer, current.raw)
     bucket = Bucket(raw)
     with pytest.raises((hosted.Error, channel.ChannelError)):
-        index.writer('inspect', desired, roots=signer.roots(), verifier=LocalVerifier(), bucket=bucket,
-                     artifact=lambda: pytest.fail('artifact read'), current_head=lambda: None, fetch_public=lambda: raw)
+        index.writer(desired, roots=signer.roots(), verifier=LocalVerifier(), bucket=bucket,
+                     envelope=envelope_bytes(signer, desired.raw), current_head=lambda: None, fetch_public=lambda: raw)
     assert bucket.read()[0] == raw and bucket.writes == 0
 
 
-def test_losing_writer_cannot_overwrite_newer_origin():
+def test_losing_writer_cannot_overwrite_newer_origin(monkeypatch):
+    monkeypatch.setattr(index.qualification, 'require_listed_assets', lambda _: None)
     signer = Signer()
     current = payload(2, [1])
     raw = envelope_bytes(signer, current.raw)
@@ -147,8 +144,8 @@ def test_losing_writer_cannot_overwrite_newer_origin():
     def race():
         bucket.initial = newer
     with pytest.raises(hosted.Error, match='conditional'):
-        index.writer('publish', desired, bucket=bucket, roots=signer.roots(), verifier=LocalVerifier(),
-                     current_head=race, artifact=lambda: envelope_bytes(signer, desired.raw), fetch_public=lambda: raw)
+        index.writer(desired, bucket=bucket, roots=signer.roots(), verifier=LocalVerifier(),
+                     current_head=race, envelope=envelope_bytes(signer, desired.raw), fetch_public=lambda: raw)
     assert bucket.initial == newer and bucket.writes == 0
 
 
@@ -202,10 +199,77 @@ def test_preflight_checks_exact_active_archives_from_both_sources(tmp_path, monk
         mirror[url.replace(guard.OWNED_RELEASE_ROOT, gate.qualification.MIRROR_RELEASE_ROOT)] = b'wrong archive'
     monkeypatch.setattr(guard, '_download', _fake_download({**remote, **mirror}))
     if bad == 'ok':
-        gate.check_available(release)
+        gate.qualification.require_listed_assets(release)
     else:
         with pytest.raises(gate.qualification.QualificationError):
-            gate.check_available(release)
+            gate.qualification.require_listed_assets(release)
+
+
+@pytest.mark.parametrize('loss', ['before sign', 'before put', 'withdrawn only'])
+def test_withdrawal_rechecks_fallback_after_preflight_but_never_fetches_bad_archive(tmp_path, monkeypatch, loss):
+    from scripts import model_hub_engine_release_guard as guard
+    from tests.test_model_hub_engine_release_guard import _manifest, _fake_download
+
+    manifest, release_assets, _ = _manifest(tmp_path)
+    fallback = release_entry(manifest.read_bytes())
+    tag = json.loads(manifest.read_bytes())['asset_release_tag']
+    # No endpoint for B exists at any point, including during preflight.
+    mirror_assets = {url.replace(guard.OWNED_RELEASE_ROOT, gate.qualification.MIRROR_RELEASE_ROOT): data
+                     for url, data in release_assets.items()}
+    available = {**release_assets, **mirror_assets}
+    monkeypatch.setattr(guard, '_download', _fake_download(available))
+    def make(seq, entries, revoked):
+        return channel.parse_payload(json.dumps(payload_document(seq, releases=entries, revoked=revoked),
+                                                sort_keys=True, separators=(',', ':')).encode())
+    old = make(2, [fallback, release_entry(manifest_bytes(build=2))], [])
+    desired = make(4, [fallback], [tombstone(B, tag)])
+    repo = tmp_path / 'ledger'; repo.mkdir(); hosted.git(repo, 'init', '-q')
+    before = commit(repo, old.raw)
+    head = commit(repo, desired.raw)
+    gate.preflight(repo, before, head, published=lambda: old, api=None, token=None)
+
+    signer = Signer()
+    raw = envelope_bytes(signer, old.raw)
+    bucket = Bucket(raw)
+    signatures = []
+    def upload():
+        return index.writer(desired, bucket=bucket, roots=signer.roots(), verifier=LocalVerifier(),
+                            current_head=lambda: None, fetch_public=lambda: bucket.initial, envelope=signatures[-1])
+    prepare_env = {'GITHUB_REPOSITORY': index.producer.REPOSITORY, 'GITHUB_REF': 'refs/heads/master',
+                   'GITHUB_WORKFLOW_REF': f'{index.producer.REPOSITORY}/{index.INDEX_WORKFLOW}@refs/heads/master',
+                   'GITHUB_EVENT_NAME': 'workflow_dispatch', 'GITHUB_RUN_ID': '1', 'GITHUB_TOKEN': 'fixture',
+                   'HOSTED_COMMISSIONED': 'true', 'GITHUB_OUTPUT': str(tmp_path / 'output')}
+    for key, value in prepare_env.items():
+        monkeypatch.setenv(key, value)
+    root = repo / hosted.ROOT
+    root.parent.mkdir(parents=True)
+    root.write_text(json.dumps({'schema_version': 1, 'roots': [{'key_id': 'fixture', 'public_key': signer.public_key}],
+                                'sequence_floor': 1}))
+    master = commit(repo, desired.raw)
+    def ref(path, **_):
+        assert path == f'/repos/{index.producer.REPOSITORY}/git/ref/heads/master'
+        return {'object': {'sha': master}}
+    monkeypatch.setattr(index.producer, 'github_api', ref)
+    def prepare():
+        index.main(['prepare', '--data', str(repo), '--avault', 'unused-by-prepare'])
+    archive = next(url for url in mirror_assets if url.endswith('.tar.gz'))
+    if loss == 'before sign':
+        del available[archive]
+        with pytest.raises(gate.qualification.QualificationError, match='not fully published'):
+            prepare()
+        assert not (tmp_path / 'output').exists() and not signatures and bucket.writes == 0
+        return
+    prepare()
+    assert (tmp_path / 'output').read_text().splitlines() == [f'revision={master}']
+    signatures.append(envelope_bytes(signer, desired.raw))
+    if loss == 'before put':
+        available[archive] = b'wrong bytes'
+        with pytest.raises(gate.qualification.QualificationError, match='not fully published'):
+            upload()
+        assert bucket.writes == 0 and bucket.initial == raw
+    else:
+        assert upload() == 'readback' and bucket.writes == 1
+        assert channel.authenticate(bucket.initial, roots=signer.roots(), verifier=LocalVerifier())[1].raw == desired.raw
 
 
 @pytest.mark.parametrize('bad', ['ok', 'payload', 'parent', 'attempt', 'missing'])
@@ -244,7 +308,7 @@ def test_promotion_requires_evidence_bound_to_exact_merge_tree(tmp_path, monkeyp
     monkeypatch.setattr(gate.qualification, 'harness_digest', lambda: HARNESS)
     visited = []
     monkeypatch.setattr(gate.qualification, 'build_evidence', lambda *_: visited.append('archives'))
-    monkeypatch.setattr(gate, 'check_available', lambda *_: visited.append('published'))
+    monkeypatch.setattr(gate.qualification, 'require_listed_assets', lambda *_: visited.append('published'))
     if bad == 'ok':
         gate.preflight(tmp_path, before, head, published=lambda: None, api=api, token='fixture')
         assert visited == ['archives', 'published']
@@ -266,6 +330,13 @@ def test_disposable_bundle_signs_exact_snapshot(tmp_path, monkeypatch):
     def sign():
         monkeypatch.setenv('HOSTED_SIGNING_BUNDLE', credential.read_text())
         return index.sign(desired, roots, verifier, binary)
-    a = sign()
-    assert a == sign()
+    a, repeated = sign(), sign()
+    assert a == repeated
     assert channel.authenticate(a, roots=roots, verifier=verifier)[1].raw == desired.raw
+    bucket = Bucket(a)
+    def retry(public):
+        return index.writer(desired, bucket=bucket, roots=roots, verifier=verifier, envelope=repeated,
+                            current_head=lambda: None, fetch_public=lambda: public)
+    with pytest.raises(hosted.Error, match='pending'):
+        retry(None)
+    assert retry(a) == 'readback' and bucket.writes == 0

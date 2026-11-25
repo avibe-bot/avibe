@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions: {contents: read}
-# One writer (including origin inspection) at a time. Coalescing pending
+# One publication at a time. Coalescing pending
 # pushes is intentional: never replay snapshots on the way to current master.
 concurrency:
   group: hosted-model-hub-engine-index
@@ -16,18 +16,17 @@ env:
   HOSTED_COMMISSIONED: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED }}
 
 jobs:
-  inspect:
+  prepare:
     if: github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master' && vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED == 'true'
     runs-on: ubuntu-latest
     outputs:
-      action: ${{ steps.origin.outputs.action }}
-      revision: ${{ steps.origin.outputs.revision }}
-      attempt: ${{ steps.origin.outputs.attempt }}
+      revision: ${{ steps.prepare.outputs.revision }}
+      attempt: ${{ steps.prepare.outputs.attempt }}
     steps:
       - &tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 9e3b178cf957ec83c50aa2923f381564a49a3927
+          ref: 05028716204d260063d14a81a91565e039c045a7
           path: tools
           persist-credentials: false
       - uses: &checkout actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -41,23 +40,17 @@ jobs:
       - &verifier
         name: Fetch pinned verifier
         run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/verifier"
-      - name: Writer inspects authenticated origin; identical payload only needs readback
-        id: origin
-        env: &writer
+      - name: Verify the assets still offered by current master
+        id: prepare
+        env:
           GITHUB_TOKEN: ${{ github.token }}
-          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: |
-          python3 -I tools/scripts/model_hub_engine_index.py inspect --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
+          python3 -I tools/scripts/model_hub_engine_index.py prepare --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
           echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
 
   sign:
-    needs: inspect
-    if: needs.inspect.outputs.action == 'sign'
+    needs: prepare
+    if: needs.prepare.outputs.revision != ''
     runs-on: ubuntu-latest
     environment: model-hub-engine-channel-signer
     steps:
@@ -65,20 +58,20 @@ jobs:
       - &revision
         uses: *checkout
         with:
-          ref: ${{ needs.inspect.outputs.revision }}
+          ref: ${{ needs.prepare.outputs.revision }}
           path: ledger
           fetch-depth: 0
           sparse-checkout: vibe/model_hub_runtime/engine_channel_roots.json
           sparse-checkout-cone-mode: false
           persist-credentials: false
       - *verifier
-      - name: Sign only the inspected snapshot, in the same attempt
+      - name: Sign only the prepared snapshot, in the same attempt
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          INSPECTED_ATTEMPT: ${{ needs.inspect.outputs.attempt }}
+          PREPARED_ATTEMPT: ${{ needs.prepare.outputs.attempt }}
           HOSTED_SIGNING_BUNDLE: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE }}
         run: |
-          test "$GITHUB_RUN_ATTEMPT" = "$INSPECTED_ATTEMPT"
+          test "$GITHUB_RUN_ATTEMPT" = "$PREPARED_ATTEMPT"
           python3 -I tools/scripts/model_hub_engine_index.py sign --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
@@ -88,7 +81,9 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: [inspect, sign]
+    needs: [prepare, sign]
+    # Master-only deployment policy, separate from owner approval for asset releases.
+    environment: model-hub-engine-index-writer
     runs-on: ubuntu-latest
     steps:
       - *tools
@@ -99,7 +94,14 @@ jobs:
           name: engine-index-${{ github.run_attempt }}
           path: ${{ runner.temp }}/signed
       - name: Verify the signed bytes, conditionally write, and recheck both reads
-        env: *writer
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
         run: |
           mv "$RUNNER_TEMP/signed/model-hub-engine.json" "$RUNNER_TEMP/model-hub-engine.json"
           python3 -I tools/scripts/model_hub_engine_index.py publish --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"

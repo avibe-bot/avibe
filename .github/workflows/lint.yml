@@ -38,7 +38,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: tools
-          ref: 9e3b178cf957ec83c50aa2923f381564a49a3927
+          ref: 05028716204d260063d14a81a91565e039c045a7
           persist-credentials: false
       - name: Check the proposed merge tree with pinned tools and no release credentials
         id: preflight

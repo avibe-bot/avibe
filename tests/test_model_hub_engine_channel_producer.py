@@ -1330,22 +1330,22 @@ def test_every_privileged_job_follows_authorization_and_proves_approval_before_i
 def test_snapshot_workflow_separates_signer_from_origin_and_uses_only_pinned_tools():
     workflow = yaml.safe_load(WORKFLOW.with_name("model-hub-engine-index.yml").read_text())
     jobs = workflow['jobs']
-    assert set(jobs) == {'inspect', 'sign', 'publish'}
+    assert set(jobs) == {'prepare', 'sign', 'publish'}
     assert workflow['concurrency']['cancel-in-progress'] is False
-    assert "HOSTED_ENABLED == 'true'" in jobs['inspect']['if']
-    assert jobs['sign']['if'] == "needs.inspect.outputs.action == 'sign'"
-    assert jobs['sign']['needs'] == 'inspect' and jobs['publish']['needs'] == ['inspect', 'sign']
+    assert "HOSTED_ENABLED == 'true'" in jobs['prepare']['if']
+    assert jobs['sign']['if'] == "needs.prepare.outputs.revision != ''"
+    assert jobs['sign']['needs'] == 'prepare' and jobs['publish']['needs'] == ['prepare', 'sign']
     for name, job in jobs.items():
         tools, data, *_ = job['steps']
         assert re.fullmatch('[0-9a-f]{40}', tools['with']['ref']) and tools['with']['path'] == 'tools'
         assert data['with']['path'] == 'ledger' and data['with']['fetch-depth'] == 0
-        assert data['with']['ref'] == ('master' if name == 'inspect' else '${{ needs.inspect.outputs.revision }}')
+        assert data['with']['ref'] == ('master' if name == 'prepare' else '${{ needs.prepare.outputs.revision }}')
         assert 'python3 ledger/' not in json.dumps(job)
         secret_steps = [step for step in job['steps'] if 'secrets.' in json.dumps(step)]
-        assert len(secret_steps) == 1
-        assert job.get('environment') == (producer.SIGNER_ENVIRONMENT if name == 'sign' else None)
+        assert len(secret_steps) == (0 if name == 'prepare' else 1)
+        assert job.get('environment') == {'sign': producer.SIGNER_ENVIRONMENT, 'publish': 'model-hub-engine-index-writer'}.get(name)
         assert ('secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE' in json.dumps(secret_steps)) == (name == 'sign')
-        assert ('secrets.R2_SECRET_ACCESS_KEY' in json.dumps(secret_steps)) == (name != 'sign')
+        assert ('secrets.R2_SECRET_ACCESS_KEY' in json.dumps(secret_steps)) == (name == 'publish')
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:
