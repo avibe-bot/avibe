@@ -30,6 +30,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      unit_python: ${{ steps.scope.outputs.unit_python }}
       mode: ${{ steps.scope.outputs.mode }}
       plan: ${{ steps.scope.outputs.plan }}
     steps:
@@ -526,7 +527,8 @@ jobs:
       matrix:
         # Each Python version runs the full suite over 16 timing-balanced lanes,
         # two per runner, under the same 20-minute job deadline.
-        python: ['3.12', '3.15']
+        # Forward compatibility runs on the full master backstop, not on PRs.
+        python: ${{ fromJSON(needs.changes.outputs.unit_python) }}
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         shard-total: [8]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
