@@ -541,6 +541,45 @@ describe('the correlated entry gate', () => {
     fireEvent.click(await setup()); await screen.findByTestId('destination');
     expect(mock.api.mutateConfig).toHaveBeenCalledOnce();
   });
+
+  it('admits healthy Direct-only Antigravity as the sole configured assistant without a Hub supply or running Hub engine', async () => {
+    serveConfig(baseConfig({
+      agents: {
+        claude: { enabled: false },
+        codex: { enabled: false },
+        opencode: { enabled: false },
+        antigravity: { enabled: true, cli_path: 'agy' },
+      },
+    }));
+    const antigravityAgent = {
+      id: 'ag-1', name: 'antigravity', display_name: 'Antigravity', description: null,
+      backend: 'antigravity', model: 'gemini-4-neon', reasoning_effort: null,
+      enabled: true, archived: false, archived_at: null, source: 'builtin', updated_at: '',
+    };
+    listing = { ok: true, default_agent_name: null, agents: [antigravityAgent] };
+    mock.api.listVibeAgents.mockImplementation(async () => listing);
+    mock.api.getVibeAgent.mockImplementation(async (name: string) => name === 'antigravity'
+      ? { ok: true, default_agent_name: listing.default_agent_name, agent: { ...antigravityAgent, system_prompt: null, created_at: '', metadata: { builtin_default: true } } }
+      : { ok: false, agent: null, default_agent_name: listing.default_agent_name });
+    mock.api.detectCli.mockImplementation(async (binary: string, backend: string) => ({
+      found: backend === 'antigravity',
+      status: backend === 'antigravity' ? 'ok' as const : 'missing' as const,
+      path: binary,
+    }));
+    mock.api.getBackendConnection.mockImplementation(async (backend: string) => backend === 'antigravity'
+      ? { ok: true, backend, enabled: true, installed: true, auth: 'subscription', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct' }
+      : { ok: true, backend, enabled: false, installed: false, auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub' });
+    mock.models.listAgents.mockResolvedValue([]);
+
+    const enter = await setup();
+    // Even if Hub runtime and supply IPC fail at completion time, Direct-only Antigravity still enters.
+    mock.models.getRuntimeStatus.mockRejectedValue(new Error('engine_down'));
+    mock.models.refreshAgentPresence.mockRejectedValue(new Error('engine_down'));
+    fireEvent.click(enter);
+    expect(await screen.findByTestId('destination')).toBeTruthy();
+    expect(mock.api.setDefaultVibeAgent).toHaveBeenCalledExactlyOnceWith('antigravity');
+    expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
+  });
 });
 
 /** A saved platform whose required credential is gone: the shape that used to stop
