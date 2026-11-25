@@ -7,6 +7,7 @@ import { ChatHeaderBar } from '@/components/workbench/ChatPage';
 import type { SessionActionDescriptor } from '@/components/workbench/sessionActions';
 import type { AnnotationState } from '@/components/workbench/useShowPageAnnotation';
 
+import { IOS_APP_CAPABILITIES } from '../../shell/fixtures';
 import { frames } from '../../frame';
 import { demoAgents } from '../agents/fixtures';
 import { chatFixtures, chatSession, withChatProviders } from './fixtures';
@@ -57,7 +58,7 @@ const designFrames = frames([
     width: 390,
     height: 56,
     status: 'shipped',
-    fixtures: chatFixtures(),
+    fixtures: { ...chatFixtures(), nativeShell: IOS_APP_CAPABILITIES },
     render: header({ title: '移动端交互设计' }),
   },
   {
@@ -113,7 +114,7 @@ const designFrames = frames([
     width: 390,
     height: 56,
     status: 'shipped',
-    fixtures: chatFixtures(),
+    fixtures: { ...chatFixtures(), nativeShell: IOS_APP_CAPABILITIES },
     render: header({ showPageMode: true, annotation: off }),
   },
   {
@@ -122,7 +123,7 @@ const designFrames = frames([
     width: 390,
     height: 300,
     status: 'shipped',
-    fixtures: chatFixtures(),
+    fixtures: { ...chatFixtures(), nativeShell: IOS_APP_CAPABILITIES },
     click: ['role=button[name="{t:chat.showPage.annotate.toggle}"]'],
     render: header({ showPageMode: true, annotation: smart }),
   },
@@ -132,7 +133,7 @@ const designFrames = frames([
     width: 390,
     height: 56,
     status: 'shipped',
-    fixtures: chatFixtures(),
+    fixtures: { ...chatFixtures(), nativeShell: IOS_APP_CAPABILITIES },
     render: header({ showPageMode: true, annotation: smart }),
   },
 ]);
