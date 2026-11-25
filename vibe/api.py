@@ -9178,7 +9178,8 @@ def _run_desktop_backend_install(name: str, truncate_output, *, version: str | N
         _persist_agent_cli_path(name, installed_path, required=True)
 
     try:
-        result = install_desktop_backend(name, activate=_activate, version=version)
+        version_kw = {"version": version} if version is not None else {}
+        result = install_desktop_backend(name, activate=_activate, **version_kw)
     except DesktopBackendError as exc:
         return {
             "ok": False,
@@ -9396,13 +9397,14 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
             return existing_path
         return None
 
+    desktop_version_kw = {"version": version} if version is not None else {}
     if _owned_path(is_desktop_backend_path) is not None:
-        return _run_desktop_backend_install(name, _truncate_output, version=version)
+        return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
     if name == "codex":
         private_runtime_path = _owned_path(is_private_desktop_runtime_path)
         if private_runtime_path is not None:
             if desktop_backend_toolchain() is not None:
-                return _run_desktop_backend_install(name, _truncate_output, version=version)
+                return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
             return {
                 "ok": False,
                 "code": "desktop_managed_backend",
@@ -9415,7 +9417,7 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # Preserve the app-private ownership boundary before any global probe or
     # repair planner can discover a non-executable user installation.
     if existing_path is None and is_desktop_managed_runtime():
-        return _run_desktop_backend_install(name, _truncate_output, version=version)
+        return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
     health = detect_cli(configured_path, name)
     default_cli = default_cli_for_backend(name) or name
     if health["status"] in {"broken", "unknown"} or (
@@ -9474,7 +9476,7 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # run the legacy global installers and mutate user/system state from a
     # desktop Runtime that promises app-private backend ownership.
     if is_desktop_managed_runtime():
-        return _run_desktop_backend_install(name, _truncate_output, version=version)
+        return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
 
     command_env: dict[str, str] | None = None
     expected_path: str | None = None
