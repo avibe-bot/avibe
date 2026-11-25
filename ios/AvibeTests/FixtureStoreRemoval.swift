@@ -138,7 +138,7 @@ enum FixtureStoreRemoval {
     /// `removalAnswer`. Its completion comes only once a web process of its
     /// own for the store has exited; on CI that took up to eight minutes,
     /// in the teardown of tests that had passed.
-    static let removalAnswer: Duration = .seconds(10)
+    nonisolated static let removalAnswer: Duration = .seconds(10)
 
     private struct RemovalAnswer {
         let error: Error?
