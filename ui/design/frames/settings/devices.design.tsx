@@ -9,7 +9,7 @@ import { IOS_APP_CAPABILITIES, IPHONE_17_PRO } from '../../shell/fixtures';
 import { DESIGN_NOW } from '../../shell/clock';
 import { frames, type FrameSpec } from '../../frame';
 import { DevicesPageView, type DevicesPageViewProps } from '@/components/devices/DevicesPageView';
-import type { AccountResult, Device, DeviceActivity, DeviceFunction, Reach, SignedOutDevice } from '@/components/devices/types';
+import type { Device, DeviceActivity, DeviceFunction, Reach } from '@/components/devices/types';
 import { tunnelFromStatus } from '@/components/devices/wire';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
 import en from '@/i18n/en.json';
@@ -153,20 +153,6 @@ const memberDevices: Device[] = [
   { ...saraPhone, group: 'mine', person: undefined, functions: [{ kind: 'notifications', on: true, canChange: true }, { kind: 'schedule', on: true, canChange: true }] },
 ];
 
-const signedOutRow = (id: string, device: string | null, results: AccountResult[], owner: SignedOutDevice['owner'] = 'unknown'): SignedOutDevice => (
-  { id, device, kind: 'browser', owner, results }
-);
-/** The list says the names only, whatever avibe.bot did (owner, 2026-11-25). */
-const signedOut: SignedOutDevice[] = [
-  signedOutRow('s1', 'iPhone 14', ['queued'], 'mine'),
-  signedOutRow('s2', 'Firefox · Linux', ['retrying'], 'mine'),
-  signedOutRow('s3', 'Chrome · Windows', ['accepted'], 'mine'),
-  signedOutRow('s4', 'Safari · iPad', ['localOnly'], 'mine'),
-  signedOutRow('s5', 'Chrome · macOS', ['localOnly'], 'others'),
-  signedOutRow('s6', null, ['accepted']),
-  signedOutRow('s7', 'Edge · Windows', ['sharedSignIn'], 'mine'),
-  signedOutRow('s8', 'iPhone 13', ['unconfirmed'], 'mine'),
-];
 
 /** Avibe Desktop on another Mac, viewing this instance: it describes itself (`device.describe`), so every
  *  sign-in it makes here is one row, under the computer's own name. */
@@ -392,12 +378,9 @@ const designFrames = frames([
     const remaining = all('host').filter((each) => each.id !== 'chrome');
     const values = { device: 'Chrome · Windows' };
     const toast = { fixtures: fixtures({ ...copy, toasts: [{ key: 'devices.signedOut.toast', values }] }) };
-    const list = { fixtures: fixtures(copy) };
     return [
       frame(`sign-out-toast-${lang}`, `刚退出（无论 avibe.bot 那边怎样）：一个提示条，那一行马上不见，提示条自己消失 · ${lang}`, at(900), { reach: on, devices: remaining, activity }, toast),
       frame(`sign-out-toast-390-${lang}`, `刚退出 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining, activity }, toast),
-      frame(`signed-out-list-${lang}`, `最近退出的设备：只显示名字 · ${lang}`, at(1500), { reach: on, devices: onlyHost, signedOut }, list),
-      frame(`signed-out-list-390-${lang}`, `最近退出的设备 · 390 宽 · ${lang}`, { width: 390, height: 2000 }, { reach: on, devices: onlyHost, signedOut }, list),
     ];
   }),
 
