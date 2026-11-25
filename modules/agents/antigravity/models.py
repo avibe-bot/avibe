@@ -671,7 +671,7 @@ def extract_live_model_catalog_entries(
             order.append(cleaned_id)
         if label and label != cleaned_id and (not existing.get("label") or existing["label"] == cleaned_id):
             existing["label"] = label
-        if reasoning_efforts:
+        if reasoning_efforts is not None:
             existing["reasoning_efforts"] = list(reasoning_efforts)
 
     config_options: tuple[dict[str, Any], ...] = ()
@@ -699,10 +699,9 @@ def extract_live_model_catalog_entries(
         categories=_EFFORT_CATEGORIES,
         ids=("thought_level",),
     )
-    if effort_option is not None and current_model in entries_by_id:
-        efforts = [val for val, _ in _extract_option_choices_ordered(effort_option)]
-        if efforts:
-            _upsert(current_model, reasoning_efforts=efforts)
+    if current_model in entries_by_id:
+        efforts = [val for val, _ in _extract_option_choices_ordered(effort_option)] if effort_option else []
+        _upsert(current_model, reasoning_efforts=efforts)
 
     return [entries_by_id[model_id] for model_id in order]
 
@@ -731,8 +730,7 @@ def _normalize_cached_model_entry(item: Any) -> dict[str, Any] | None:
                 if cleaned and cleaned not in seen:
                     seen.add(cleaned)
                     efforts.append(cleaned)
-        if efforts:
-            entry["reasoning_efforts"] = efforts
+        entry["reasoning_efforts"] = efforts
     return entry
 
 
@@ -782,7 +780,7 @@ def record_antigravity_live_models(
                     if prev is not None:
                         if not merged.get("label") and prev.get("label"):
                             merged["label"] = prev["label"]
-                        if not merged.get("reasoning_efforts") and prev.get("reasoning_efforts"):
+                        if "reasoning_efforts" not in merged and "reasoning_efforts" in prev:
                             merged["reasoning_efforts"] = list(prev["reasoning_efforts"])
                     merged_models.append(merged)
             elif existing_models:
@@ -797,7 +795,7 @@ def record_antigravity_live_models(
                         continue
                     if entry.get("label") and entry["label"] != model_id:
                         current["label"] = entry["label"]
-                    if entry.get("reasoning_efforts"):
+                    if "reasoning_efforts" in entry:
                         current["reasoning_efforts"] = list(entry["reasoning_efforts"])
                 merged_models = [merged_by_id[mid] for mid in order]
             else:

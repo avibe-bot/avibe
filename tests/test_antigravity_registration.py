@@ -433,3 +433,31 @@ def test_legacy_model_cache_is_ignored_and_replaced(tmp_path, monkeypatch, agy_s
             "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
             "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
         ]
+
+
+def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, monkeypatch):
+    from modules.agents.antigravity.models import record_antigravity_live_models, read_antigravity_live_models
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+    cfg = V2Config.default()
+    cfg.save()
+    model_option = {"id": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}, {"value": "live-only"}]}
+    record_antigravity_live_models(cfg, {"configOptions": [model_option]})
+    entries = read_antigravity_live_models(cfg)
+    assert entries[0].get("reasoning_efforts") == []
+    snapshot = backend_model_snapshot("antigravity", schedule_refresh=False)
+    assert all(row["value"] == "__default__" for row in snapshot["reasoning_options"]["gemini-4-neon"])
+    assert all(row["value"] == "__default__" for row in snapshot["reasoning_options"]["live-only"])
+
+
+def test_bundled_antigravity_menu_matches_agy_1_5_17():
+    bundle = json.loads((Path(__file__).parents[1] / "vibe/data/backend_models.json").read_text())["backends"]["antigravity"]["models"]
+    expected = {
+        "gemini-4-neon": ["low", "medium", "high", "xhigh"],
+        "gemini-4-carbon": ["low", "medium", "high"],
+        "gemini-4-argon": ["low", "medium", "high"],
+        "gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+        "gemini-pro-orchestrator-neon": [], "gemini-pro-orchestrator": [], "gemini-pro-orchestrator-argon": [],
+        "gemini-3.8-flash": ["low", "medium", "high"], "claude-opus-5-5": ["low", "medium", "high"],
+        "claude-sonnet-5-5": ["low", "medium", "high"], "gpt-oss-120b-medium": [],
+    }
+    assert {entry["id"]: entry.get("reasoning_efforts") for entry in bundle} == expected

@@ -51,14 +51,17 @@
     },
     "antigravity": {
       "models": [
-        {"id": "gemini-4-neon", "label": "Gemini 4 Neon", "priority": 1, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
-        {"id": "gemini-4-carbon", "label": "Gemini 4 Carbon", "priority": 2, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "gemini-4-hydrogen", "label": "Gemini 4 Hydrogen", "priority": 3, "visibility": "list", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
-        {"id": "gemini-4-argon", "label": "Gemini 4 Argon", "priority": 4, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "gemini-3.8-flash", "label": "Gemini 3.8 Flash", "priority": 5, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "gemini-3.7-flash", "label": "Gemini 3.7 Flash", "priority": 6, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "gemini-3.6-flash", "label": "Gemini 3.6 Flash", "priority": 7, "visibility": "list", "reasoning_efforts": ["low", "medium", "high"]},
-        {"id": "gemini-3.1-pro", "label": "Gemini 3.1 Pro", "priority": 8, "visibility": "list", "reasoning_efforts": ["low", "high"]}
+        {"id": "gemini-4-neon", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-carbon", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-4-argon", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-4-hydrogen", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-pro-orchestrator-neon", "reasoning_efforts": []},
+        {"id": "gemini-pro-orchestrator", "reasoning_efforts": []},
+        {"id": "gemini-pro-orchestrator-argon", "reasoning_efforts": []},
+        {"id": "gemini-3.8-flash", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "claude-opus-5-5", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "claude-sonnet-5-5", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gpt-oss-120b-medium", "reasoning_efforts": []}
       ]
     }
   },

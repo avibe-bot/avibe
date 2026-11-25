@@ -62,7 +62,7 @@ _SUPPORTED_VISIBILITIES = {*_VISIBLE_VISIBILITIES, *_HIDDEN_VISIBILITIES}
 _DEFAULT_REASONING_EFFORTS = {
     "claude": ["low", "medium", "high"],
     "codex": ["minimal", "low", "medium", "high", "xhigh"],
-    "antigravity": ["low", "medium", "high"],
+    "antigravity": [],
 }
 REASONING_EFFORT_VOCABULARY: Final[tuple[str, ...]] = (
     "none",
@@ -1806,7 +1806,7 @@ def _antigravity_sources(
                     or merged_entry["label"] == entry["id"]
                 ) and meta.get("label"):
                     merged_entry["label"] = meta["label"]
-                if not merged_entry.get("reasoning_efforts") and meta.get("reasoning_efforts"):
+                if "reasoning_efforts" not in merged_entry and "reasoning_efforts" in meta:
                     merged_entry["reasoning_efforts"] = list(meta["reasoning_efforts"])
             enriched_live.append(merged_entry)
         return [("local", enriched_live)]
