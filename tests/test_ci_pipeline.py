@@ -56,6 +56,16 @@ def _run_isolated_unit_files(
     )
 
 
+@pytest.mark.parametrize('planner', ['raise SystemExit(7)', 'pass', "print('tests/a.py\\t15\\t1'); raise SystemExit(2)"])
+def test_unit_file_planner_errors_cannot_turn_into_empty_green(tmp_path: Path, planner: str) -> None:
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts/ci_unit_test_shards.py').write_text(planner)
+    result = subprocess.run(['bash', str(ROOT / 'scripts/ci_unit_tests.sh'), '0', '32'],
+                            cwd=tmp_path, env={**os.environ, 'PYTHON': sys.executable}, capture_output=True, text=True)
+    assert result.returncode != 0 and 'All unit test files passed' not in result.stdout
+    assert 'Starting tests/' not in result.stdout
+
+
 def test_unit_shard_has_an_outer_deadline_without_weakening_failure_propagation() -> None:
     shard = _jobs()["unit-test-shards"]
     assert shard["timeout-minutes"] == 20
@@ -453,10 +463,10 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     assert build_commands.count("npm run build") == 1
     assert "npm ci" in build_commands
     for name, job in (("ui-checks", checks), ("build-linux-artifacts", build)):
-        assert job["if"] == f"fromJSON(needs.changes.outputs.plan).jobs['{name}'] == 'run'"
+        assert job["if"] == f"fromJSON(needs.changes.outputs.dispatch_jobs)['{name}'] == 'run'"
         assert not job.get("continue-on-error")
         assert all(not step.get("if") and not step.get("continue-on-error") for step in job["steps"])
-    assert browsers["if"] == "fromJSON(needs.changes.outputs.plan).jobs['ui-browser-checks'] == 'run'"
+    assert browsers["if"] == "fromJSON(needs.changes.outputs.dispatch_jobs)['ui-browser-checks'] == 'run'"
     assert not browsers.get("continue-on-error")
     assert all(not step.get("continue-on-error") for step in browsers["steps"])
     browser_artifacts = [
@@ -566,7 +576,7 @@ def test_ios_shell_builds_the_mobile_bundle_before_every_app_build() -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ios-shell.yml").read_text(encoding="utf-8")
     )
-    assert workflow[True] == {"workflow_call": None, "pull_request": None}
+    assert workflow[True] == {"workflow_call": None}  # PR routing lives in lint's existing runner
 
     steps = workflow["jobs"]["simulator"]["steps"]
     setup_node, = [
@@ -1003,9 +1013,9 @@ def test_browser_matrix_runs_complete_disjoint_commands_and_propagates_each_fail
 def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
     jobs = _jobs()
     assert jobs["windows-model-hub"]["needs"] == ["changes", "build-linux-artifacts"]
-    assert jobs["windows-model-hub"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-model-hub'] == 'run'"
+    assert jobs["windows-model-hub"]["if"] == "fromJSON(needs.changes.outputs.dispatch_jobs)['windows-model-hub'] == 'run'"
     assert jobs["windows-control-ipc"]["needs"] == ["changes", "build-linux-artifacts"]
-    assert jobs["windows-control-ipc"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-control-ipc'] == 'run'"
+    assert jobs["windows-control-ipc"]["if"] == "fromJSON(needs.changes.outputs.dispatch_jobs)['windows-control-ipc'] == 'run'"
     skill_step = next(
         step for step in jobs["windows-control-ipc"]["steps"]
         if step.get("name") == "Verify Skill discovery keeps real directory identities"
@@ -1024,7 +1034,7 @@ def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
     assert node["with"]["node-version"] == "26.13.1"
     install = next(step for step in ipc_steps if step.get("name") == "Install package and focused test dependency")
     assert "pytest-asyncio" in install["run"]
-    assert jobs["windows-agent"]["if"] == "fromJSON(needs.changes.outputs.plan).jobs['windows-agent'] == 'run'"
+    assert jobs["windows-agent"]["if"] == "fromJSON(needs.changes.outputs.dispatch_jobs)['windows-agent'] == 'run'"
 
     smoke = jobs["windows-install-smoke-runners"]
     assert smoke["strategy"]["matrix"]["runner"] == ["windows-latest", "windows-11-arm"]
@@ -1034,7 +1044,7 @@ def test_windows_platform_checks_route_prs_and_always_run_on_master() -> None:
         "changes", "windows-install-smoke-runners", "web-fetch-runtime", "web-fetch-macos",
         "windows-agent", "windows-model-hub", "windows-control-ipc",
     ]
-    assert jobs["windows-install-smoke"]["if"] == "always()"
+    assert jobs["windows-install-smoke"]["if"] == "always() && needs.changes.outputs.portfolio != 'true'"
 
 
 def test_install_suites_run_independently_without_losing_checks() -> None:
@@ -1043,7 +1053,7 @@ def test_install_suites_run_independently_without_losing_checks() -> None:
     assert shards["strategy"]["fail-fast"] is False
     suites = shards["strategy"]["matrix"]["suite"]
     assert len(suites) == len(set(suites)) == 1
-    assert shards["if"] == "fromJSON(needs.changes.outputs.plan).jobs['install-upgrade-shards'] == 'run'"
+    assert shards["if"] == "fromJSON(needs.changes.outputs.dispatch_jobs)['install-upgrade-shards'] == 'run'"
     assert not shards.get("continue-on-error")
     assert all(not step.get("continue-on-error") for step in shards["steps"])
     steps = {step["name"]: step for step in shards["steps"] if "name" in step}
@@ -1136,7 +1146,7 @@ def test_distribution_contracts_consume_same_run_artifacts_without_fencing_other
         "changes", "windows-install-smoke-runners", "web-fetch-runtime", "web-fetch-macos",
         "windows-agent", "windows-model-hub", "windows-control-ipc",
     ]
-    assert jobs["windows-install-smoke"]["if"] == "always()"
+    assert jobs["windows-install-smoke"]["if"] == "always() && needs.changes.outputs.portfolio != 'true'"
 
 
 @pytest.mark.parametrize(("pytest_exit", "summary"), [(0, "21 passed"), (1, "1 failed"), (0, "14 passed, 7 skipped")])
