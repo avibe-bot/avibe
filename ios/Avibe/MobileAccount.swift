@@ -394,6 +394,8 @@ final class AccountWebsiteDataStore {
     private(set) var identifier: UUID
     private(set) var dataStore: WKWebsiteDataStore
     private(set) var ownedIdentifiers: Set<UUID>
+    /// The sweep running now, or the last one; each new sweep starts after it.
+    private var sweep: Task<Void, Never>?
     /// Runs first in `rotate()`, while the store that is going away is still
     /// `dataStore`: an account transition. The direct path controller closes
     /// every relay here. It writes no route: the old store keeps its route
@@ -430,10 +432,16 @@ final class AccountWebsiteDataStore {
         dataStore = operations.makeDataStore(resolvedIdentifier)
     }
 
+    /// Moves to a new store. The stores left behind are removed by a sweep
+    /// that runs behind it, not waited for: WebKit answers a removal only
+    /// once the store's own web process has exited, which has taken minutes
+    /// (a sign-out must not wait for that). The sweep is returned for whoever
+    /// does want to wait.
+    @discardableResult
     func rotate(
         sweepOwnedStores: Bool = true,
         canSweep: @escaping @MainActor () -> Bool = { true }
-    ) async {
+    ) async -> Task<Void, Never>? {
         onWillRotate?()
         let newIdentifier = UUID()
         ownedIdentifiers.insert(newIdentifier)
@@ -443,20 +451,46 @@ final class AccountWebsiteDataStore {
         dataStore = operations.makeDataStore(newIdentifier)
 
         await Task.yield()
-        if sweepOwnedStores, canSweep() {
-            await sweepOrphans(canSweep: canSweep)
+        guard sweepOwnedStores, canSweep() else {
+            return nil
         }
+        return startSweep(canSweep: canSweep)
     }
 
-    /// Removes every store this ledger owns except the current one. A store
-    /// leaves the ledger only once WebKit no longer lists it, not when its
-    /// removal reports success: a store whose network session is still
-    /// closing (one released at sign-out) gets its directory back right after
-    /// a removal WebKit reported as done. So the sweep that removes a store
-    /// keeps it, and a later sweep (the next launch or account change) removes
-    /// it again if it came back, or forgets it once it is gone.
+    /// Starts a sweep after the one running now, without waiting for it.
+    @discardableResult
+    func startSweep(
+        canSweep: @escaping @MainActor () -> Bool = { true }
+    ) -> Task<Void, Never> {
+        let previous = sweep
+        let next = Task { @MainActor [weak self] in
+            await previous?.value
+            await self?.sweepNow(canSweep: canSweep)
+        }
+        sweep = next
+        return next
+    }
+
+    /// Removes every store this ledger owns except the current one, after
+    /// any sweep already running, and returns when done. A store leaves the
+    /// ledger only once WebKit no longer lists it, not when its removal
+    /// reports success: a store whose network session is still closing (one
+    /// released at sign-out) gets its directory back right after a removal
+    /// WebKit reported as done. So the sweep that removes a store keeps it,
+    /// and a later sweep (the next launch or account change) removes it
+    /// again if it came back, or forgets it once it is gone.
     func sweepOrphans(
         canSweep: @escaping @MainActor () -> Bool = { true }
+    ) async {
+        await startSweep(canSweep: canSweep).value
+    }
+
+    /// A removal that takes longer than this is reported
+    /// (`SlowStoreRemovals`).
+    static let slowRemoval: Duration = .seconds(1)
+
+    private func sweepNow(
+        canSweep: @escaping @MainActor () -> Bool
     ) async {
         let candidates = ownedIdentifiers.subtracting([identifier])
         guard !candidates.isEmpty else {
@@ -472,11 +506,21 @@ final class AccountWebsiteDataStore {
             // records another retained view. Never use an entry-time decision
             // to remove a store after either ownership condition has changed.
             guard canSweep() else { break }
+            // The store in use now is never removed, whatever rotated
+            // meanwhile.
+            guard candidate != identifier else { continue }
             guard listed.contains(candidate) else {
                 ownedIdentifiers.remove(candidate)
                 continue
             }
-            if let error = await operations.removeIdentifier(candidate) {
+            let clock = ContinuousClock()
+            let started = clock.now
+            let error = await operations.removeIdentifier(candidate)
+            let took = started.duration(to: clock.now)
+            if took > Self.slowRemoval {
+                SlowStoreRemovals.shared.record(took)
+            }
+            if let error {
                 Self.logger.error(
                     "Named WebKit store cleanup failed for \(candidate.uuidString, privacy: .public): \(String(describing: error), privacy: .public)"
                 )
@@ -2471,5 +2515,40 @@ enum MobileExternalURLPolicy {
             else { return false }
             return url.host == "static.crates.io" || url.host == "github.com"
         })
+    }
+}
+
+/// Removals of this App's WebKit stores that took longer than
+/// `AccountWebsiteDataStore.slowRemoval`, in milliseconds, kept until an
+/// answered rendezvous request has carried them
+/// (`DirectRendezvous.requestBody`), so the instance's log says how often a
+/// removal waits on a phone. Numbers only; at most `limit`, the newest.
+@MainActor
+final class SlowStoreRemovals {
+    static let shared = SlowStoreRemovals()
+    nonisolated static let limit = 5
+
+    struct Entry: Equatable {
+        let id: Int
+        let milliseconds: Int
+    }
+
+    private(set) var pending: [Entry] = []
+    private var nextID = 0
+
+    func record(_ took: Duration) {
+        let (seconds, attoseconds) = took.components
+        let milliseconds = Int(clamping: seconds) &* 1_000 &+ Int(attoseconds / 1_000_000_000_000_000)
+        pending.append(Entry(id: nextID, milliseconds: max(0, milliseconds)))
+        nextID &+= 1
+        if pending.count > Self.limit {
+            pending.removeFirst(pending.count - Self.limit)
+        }
+    }
+
+    /// A request that carried `sent` was answered.
+    func answered(_ sent: [Entry]) {
+        let ids = Set(sent.map(\.id))
+        pending.removeAll { ids.contains($0.id) }
     }
 }

@@ -546,6 +546,30 @@ final class DirectRendezvousTests: XCTestCase {
     /// address, port or identifier; and no field at all when there is
     /// nothing to report. (The instance ignores the whole list for one
     /// entry it does not accept: `vibe/direct_rendezvous.py`.)
+    /// The App's slow store removals ride on the same request, as at most
+    /// five non-negative integers the instance accepts (milliseconds), and
+    /// no field when there are none.
+    func testTheRequestReportsSlowStoreRemovalsWithinTheInstancesLimits() throws {
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], slowStoreRemovalsMs: []),
+            head + "}"
+        )
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], slowStoreRemovalsMs: [1_200, 485_000]),
+            head + ",\"slow_store_removals_ms\":[1200,485000]}"
+        )
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(
+                clientEndpointID: client,
+                listenerFaults: [failure(.deadline)],
+                slowStoreRemovalsMs: [-5, 1, 2, 3, 4, Int.max]
+            ),
+            head + ",\"listener_faults\":[{\"step\":\"deadline\",\"code\":0,\"background_seconds\":0}]"
+                + ",\"slow_store_removals_ms\":[1,2,3,4,\(Int32.max)]}"
+        )
+    }
+
     func testTheRequestReportsTheListenersLastFailuresWithinTheInstancesLimits() throws {
         let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
         XCTAssertEqual(

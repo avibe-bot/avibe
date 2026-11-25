@@ -75,6 +75,20 @@ def log_listener_faults(faults: Any) -> None:
         )
 
 
+def log_slow_store_removals(durations: Any) -> None:
+    """Log how long the iPhone App's slow WebKit store removals took.
+
+    ``slow_store_removals_ms`` is at most five non-negative integers, in
+    milliseconds. Anything else is ignored in full and changes nothing.
+    """
+    if not isinstance(durations, list) or not 0 < len(durations) <= 5:
+        return
+    if any(type(value) is not int or not 0 <= value < 2**31 for value in durations):
+        return
+    for value in durations:
+        logger.info("direct rendezvous slow_store_removal ms=%d", value)
+
+
 def is_endpoint_id(value: Any) -> bool:
     return isinstance(value, str) and _ENDPOINT_ID_RE.fullmatch(value) is not None
 

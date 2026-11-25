@@ -5789,7 +5789,7 @@ final class MobileOnboardingTests: XCTestCase {
         let oldIdentifier = store.identifier
         registry.failingIdentifiers.insert(oldIdentifier)
 
-        await store.rotate()
+        await store.rotate()?.value
 
         XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
         XCTAssertTrue(registry.identifiers.contains(store.identifier))
@@ -5826,7 +5826,7 @@ final class MobileOnboardingTests: XCTestCase {
         // back while its network session finishes closing (#3418).
         registry.returningIdentifiers.insert(oldIdentifier)
 
-        await store.rotate()
+        await store.rotate()?.value
 
         XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
         XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
@@ -5860,6 +5860,104 @@ final class MobileOnboardingTests: XCTestCase {
             ).ownedIdentifiers,
             [gone.identifier]
         )
+    }
+
+    /// WebKit answers a removal only once the store's own web process has
+    /// exited, which can take minutes. A sign-out moves to the new store
+    /// and is done without waiting for that; the removal goes on behind it,
+    /// and the store is gone once WebKit answers.
+    func testASignOutDoesNotWaitForAStoreRemovalWebKitHasNotAnswered() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let old = store.identifier
+        registry.unansweredRemovals.insert(old)
+        let coordinator = makeCoordinator(
+            defaults: defaults, websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.logout()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNotEqual(store.identifier, old)
+        try await registry.removalAsked(for: old)
+        XCTAssertTrue(registry.identifiers.contains(old), "WebKit has not answered yet")
+
+        registry.answerRemoval(of: old)
+        // A sweep asked for now runs after the one still going.
+        await store.sweepOrphans()
+        XCTAssertFalse(registry.identifiers.contains(old))
+        XCTAssertFalse(store.ownedIdentifiers.contains(old))
+    }
+
+    /// The launch's sweep is started, not waited for, and a later sweep
+    /// runs after it.
+    func testALaunchSweepIsStartedWithoutWaiting() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let orphan = UUID()
+        registry.identifiers.insert(orphan)
+        defaults.set([orphan.uuidString], forKey: "avibe.mobile.ownedWebsiteDataStoreIdentifiers")
+        registry.unansweredRemovals.insert(orphan)
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+
+        let sweep = store.startSweep()
+        try await registry.removalAsked(for: orphan)
+        XCTAssertTrue(registry.identifiers.contains(orphan))
+        registry.answerRemoval(of: orphan)
+        await sweep.value
+        XCTAssertFalse(registry.identifiers.contains(orphan))
+        XCTAssertTrue(registry.identifiers.contains(store.identifier))
+    }
+
+    /// A rotation while an earlier sweep still waits on WebKit: the store in
+    /// use after it is never removed, and the stores before it are.
+    func testARotationDuringABackgroundSweepNeverRemovesTheNewCurrentStore() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let first = store.identifier
+        registry.unansweredRemovals.insert(first)
+
+        let firstSweep = await store.rotate()
+        try await registry.removalAsked(for: first)
+        let second = store.identifier
+        let secondSweep = await store.rotate()
+        let current = store.identifier
+
+        registry.answerRemoval(of: first)
+        await firstSweep?.value
+        await secondSweep?.value
+        XCTAssertFalse(registry.removalAttempts.contains(current))
+        XCTAssertTrue(registry.identifiers.contains(current))
+        XCTAssertFalse(registry.identifiers.contains(first))
+        XCTAssertFalse(registry.identifiers.contains(second))
+    }
+
+    /// A removal that took over a second is kept, in milliseconds, for the
+    /// next rendezvous request; one an answered request carried goes.
+    func testASlowStoreRemovalIsKeptForTheNextRendezvous() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let old = store.identifier
+        registry.unansweredRemovals.insert(old)
+        let recorded = SlowStoreRemovals.shared.pending.count
+
+        let sweep = await store.rotate()
+        try await registry.removalAsked(for: old)
+        // Longer than `slowRemoval`: the time it takes is what is measured.
+        try await Task.sleep(for: .milliseconds(1_200))
+        registry.answerRemoval(of: old)
+        await sweep?.value
+
+        let pending = SlowStoreRemovals.shared.pending
+        XCTAssertEqual(pending.count, min(recorded + 1, SlowStoreRemovals.limit))
+        let newest = try XCTUnwrap(pending.last)
+        XCTAssertGreaterThanOrEqual(newest.milliseconds, 1_000)
+        SlowStoreRemovals.shared.answered(pending)
+        XCTAssertTrue(SlowStoreRemovals.shared.pending.isEmpty)
     }
 
     func testLaunchSweepIgnoresUnownedStoresAndPreservesTheCurrentStore() async {
@@ -6737,7 +6835,31 @@ private final class FakeNamedDataStoreRegistry {
     /// comes straight back), as WebKit's do while their session closes.
     var returningIdentifiers = Set<UUID>()
     var removalAttempts: [UUID] = []
+    /// Stores whose removal WebKit does not answer until `answerRemoval`,
+    /// as WebKit does while the store's web process has not exited.
+    var unansweredRemovals = Set<UUID>()
+    private var waitingRemovals: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     var beforeRemoval: ((UUID) -> Void)?
+
+    func answerRemoval(of identifier: UUID) {
+        unansweredRemovals.remove(identifier)
+        for waiting in waitingRemovals.removeValue(forKey: identifier) ?? [] {
+            waiting.resume()
+        }
+    }
+
+    /// Until a removal of `identifier` has been asked for.
+    func removalAsked(for identifier: UUID) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while !removalAttempts.contains(identifier) {
+            guard clock.now < deadline else {
+                XCTFail("No removal of \(identifier) was asked for")
+                throw CancellationError()
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
     var listIdentifiersHandler: (() async -> Void)?
 
     var operations: AccountWebsiteDataStoreOperations {
@@ -6749,6 +6871,11 @@ private final class FakeNamedDataStoreRegistry {
             removeIdentifier: { [self] identifier in
                 beforeRemoval?(identifier)
                 removalAttempts.append(identifier)
+                if unansweredRemovals.contains(identifier) {
+                    await withCheckedContinuation { continuation in
+                        waitingRemovals[identifier, default: []].append(continuation)
+                    }
+                }
                 guard !failingIdentifiers.contains(identifier) else {
                     return NSError(
                         domain: "FakeNamedDataStoreRegistry",

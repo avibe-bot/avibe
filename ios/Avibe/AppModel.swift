@@ -1552,7 +1552,10 @@ final class AppModel: ObservableObject {
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
         // Retire earlier-build cards locally before any account cleanup can send.
         if !turnActivities.deviceEnabled { await turnActivities.endAllLocally() }
-        await websiteDataStore.sweepOrphans()
+        // Started, not waited for: WebKit answers a removal only once the
+        // store's own web process has exited, and the open below (open-first
+        // included) must not wait on that. Sweeps run one after another.
+        websiteDataStore.startSweep()
         // Open first: with the last session avibe.bot confirmed and its
         // selected instance on this device, open that instance now and check
         // the session behind it. The check's answer decides as a refresh

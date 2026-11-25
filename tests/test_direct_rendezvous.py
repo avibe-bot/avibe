@@ -439,6 +439,33 @@ def test_invalid_listener_fault_batches_are_ignored_in_full(instance, caplog):
     assert not any("listener_fault" in line for line in caplog.messages)
 
 
+def test_slow_store_removals_are_logged_in_milliseconds_without_changing_the_offer(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    response = _post(client, {**_body(), "slow_store_removals_ms": [1200, 485000]})
+    assert response.status_code == 200 and response.get_json() == baseline
+    assert [r.getMessage() for r in caplog.records if r.name == "vibe.direct_rendezvous"] == [
+        "direct rendezvous slow_store_removal ms=1200",
+        "direct rendezvous slow_store_removal ms=485000",
+    ]
+
+
+def test_invalid_slow_store_removal_batches_are_ignored_in_full(instance, caplog):
+    config, rv = instance
+    rv.publish(DirectEndpoint(INSTANCE_ENDPOINT, ("192.168.1.20:51234",)))
+    client = _signed_in(config)
+    baseline = _post(client, _body()).get_json()
+    caplog.set_level("INFO", logger="vibe.direct_rendezvous")
+    for durations in (None, [], 1200, [1200] * 6, [1200, None], [1200, -1], [1200, 2**31],
+                      [1200, 1.5], [1200, True], [1200, "1"]):
+        response = _post(client, {**_body(), "slow_store_removals_ms": durations})
+        assert response.status_code == 200 and response.get_json() == baseline
+    assert not any("slow_store_removal" in line for line in caplog.messages)
+
+
 def test_before_a_transport_exists_the_answer_is_unavailable(instance):
     config, _rendezvous = instance
 
