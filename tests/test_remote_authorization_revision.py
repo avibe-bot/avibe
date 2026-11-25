@@ -1342,14 +1342,67 @@ def test_remote_login_forces_revoked_authorization_revalidation(monkeypatch, tmp
     assert refresh_flags.count(True) == 1
 
 
-def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path):
+def test_pending_pairing_keeps_remote_organization_session_current(tmp_path, monkeypatch):
+    from vibe import binding_health
+    config = _paired_config(tmp_path)
+    cookie = _organization_cookie(config)
+    identity = remote_access.parse_session_identity(config, cookie)
+    assert remote_access.resolve_current_authorization(config, identity).current
+    remote_access._pending_pairing_path().write_text('{')
+    now = time.time() + 90  # beyond the freshness limit of the old watermark
+    monkeypatch.setattr(time, 'time', lambda: now)
+    calls = []
+    def live(_cfg, method, suffix, **kw):
+        calls.append((method, suffix))
+        return {'authorization_revision': 41}
+    monkeypatch.setattr(remote_access, '_device_json_request', live)
+    monkeypatch.setattr(binding_health, 'read_revision', lambda *_: pytest.fail('detector ran during recovery'))
+    class TickFinished(Exception):
+        pass
+    def sleep(_delay):
+        raise TickFinished
+    monkeypatch.setattr(remote_access.time, 'sleep', sleep)
+    workers = []
+    class Worker:
+        def __init__(self, *, target, **_):
+            workers.append(target)
+        def start(self):
+            pass
+    with monkeypatch.context() as patch:
+        patch.setattr(remote_access, '_AUTHORIZATION_REVISION_POLL_STARTED', False)
+        patch.setattr(remote_access.threading, 'Thread', Worker)
+        remote_access.start_authorization_revision_polling()
+    with pytest.raises(TickFinished):
+        workers[0]()
+    assert calls == [('GET', 'authorization-revision')]
+    assert remote_access.resolve_current_authorization(config, identity).current
+    assert remote_access._pending_pairing_path().read_text() == '{'
+
+
+@pytest.mark.parametrize('boundary', ['logout', 'retire-binding', 'reset-fence'])
+def test_browser_logout_invalidates_http_sse_and_websocket(monkeypatch, tmp_path, boundary):
     config = _paired_config(tmp_path)
     cookie = _organization_cookie(config)
     identity = remote_access.parse_session_identity(config, cookie)
     payload = remote_access.parse_session_cookie(config, cookie)
     assert identity is not None
     assert payload is not None
-    assert remote_access.revoke_browser_session(identity) is True
+    if boundary == 'logout':
+        assert remote_access.revoke_browser_session(identity) is True
+    elif boundary == 'retire-binding':
+        # A valid pre-registry cookie and an already accepted stream. Simulate
+        # the interval after predecessor retirement but before config publication.
+        from storage import device_registry
+        from storage.db import get_cached_sqlite_engine
+        from storage.models import remote_device_sessions
+        with get_cached_sqlite_engine().begin() as conn:
+            conn.execute(remote_device_sessions.delete().where(remote_device_sessions.c.session_id == identity['browser_session_id']))
+        assert remote_access.session_identity_is_current(identity)
+        device_registry.retire_binding(remote_access.device_binding(config), now=int(time.time()))
+    else:
+        from vibe.binding_admission import reset_intent_path
+        reset_intent_path().write_text('{')  # even a damaged marker keeps old consumers out
+    assert not remote_access.session_identity_is_current(identity)
 
     client = app.test_client()
     client.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain="alex.avibe.bot")

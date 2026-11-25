@@ -1,12 +1,14 @@
 use super::{
     bridge::{self, Ledger, Message, Method, Request, Told},
-    choices::Mode,
+    choices::{Mode, Reason, Reverted},
     AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath,
 };
 use serde_json::{json, Value};
 use url::Url;
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+/// A document's mark, as its bridge makes one.
+const DOCUMENT: &str = "5f0c2a3e-8a57-4d0b-9b0e-2f1d6c7a9e11";
 
 fn client(preferred: PreferredPath, closure: u64) -> PathStatus {
     PathStatus {
@@ -14,6 +16,7 @@ fn client(preferred: PreferredPath, closure: u64) -> PathStatus {
         // The client's own order of events is not the page's.
         sequence: 1,
         closure,
+        strict_failures: 0,
     }
 }
 
@@ -123,12 +126,35 @@ fn a_hand_over_is_answered_in_the_phones_words() {
         json!({ "closed": 0, "kept": 0, "skipped": "other_documents" })
     );
     assert_eq!(
-        bridge::preference(Mode::Tunnel),
-        json!({ "mode": "tunnel", "reverted": null })
+        bridge::preference(Mode::Tunnel, None),
+        json!({ "mode": "tunnel", "pendingRelaunch": false, "reverted": null })
     );
     assert_eq!(
-        bridge::preference(Mode::Automatic),
-        json!({ "mode": "automatic", "reverted": null })
+        bridge::preference(Mode::Automatic, None),
+        json!({ "mode": "automatic", "pendingRelaunch": false, "reverted": null })
+    );
+    // "The direct path and the relay only": the choice's own word, which is
+    // not the status's `preferred`.
+    assert_eq!(
+        bridge::preference(Mode::Direct, None),
+        json!({ "mode": "direct", "pendingRelaunch": false, "reverted": null })
+    );
+    // Set back by the app itself: when, why, and from which choice, as the
+    // phone App says it.
+    assert_eq!(
+        bridge::preference(
+            Mode::Automatic,
+            Some(Reverted {
+                at: 1_795_000_000_000,
+                reason: Reason::Unreachable,
+                from: Mode::Direct,
+            })
+        ),
+        json!({
+            "mode": "automatic",
+            "pendingRelaunch": false,
+            "reverted": { "at": 1_795_000_000_000u64, "reason": "unreachable", "from": "direct" },
+        })
     );
 }
 
@@ -136,12 +162,16 @@ fn a_hand_over_is_answered_in_the_phones_words() {
 fn a_request_is_read_only_with_the_windows_token() {
     let request = |method: &str, params: Value| {
         Request::parse(
-            &ask(json!({ "token": TOKEN, "id": "7c1e-a", "method": method, "params": params })),
+            &ask(json!({ "token": TOKEN, "id": "7c1e-a", "document": DOCUMENT, "method": method, "params": params })),
             TOKEN,
         )
         .map(|request| request.method)
     };
     assert_eq!(request("direct.handover", json!({})), Some(Method::Handover));
+    assert_eq!(request("direct.measure", json!({})), Some(Method::Measure));
+    // A measurement takes nothing: least of all a host or an address.
+    assert_eq!(request("direct.measure", json!({ "mode": "tunnel" })), None);
+    assert_eq!(request("direct.measure", json!({ "host": "one-app.avibe.bot" })), None);
     assert_eq!(request("direct.preference", json!({})), Some(Method::Preference));
     assert_eq!(
         request("direct.setPreference", json!({ "mode": "tunnel" })),
@@ -153,15 +183,37 @@ fn a_request_is_read_only_with_the_windows_token() {
     );
     // Not a choice the app has, a method it does not answer, or a
     // parameter a method does not take.
-    assert_eq!(request("direct.setPreference", json!({ "mode": "direct" })), None);
+    assert_eq!(
+        request("direct.setPreference", json!({ "mode": "direct" })),
+        Some(Method::SetPreference(Mode::Direct))
+    );
+    assert_eq!(request("direct.setPreference", json!({ "mode": "relay" })), None);
     assert_eq!(request("direct.setPreference", json!({})), None);
     assert_eq!(request("direct.handover", json!({ "mode": "tunnel" })), None);
     assert_eq!(request("direct.status", json!({})), None);
     assert_eq!(request("push.status", json!({})), None);
     assert_eq!(request("direct.handover", json!({ "host": "one-app.avibe.bot" })), None);
 
-    let valid = json!({ "token": TOKEN, "id": "7c1e-a", "method": "direct.handover", "params": {} });
-    assert!(Request::parse(&ask(valid.clone()), TOKEN).is_some());
+    let valid =
+        json!({ "token": TOKEN, "id": "7c1e-a", "document": DOCUMENT, "method": "direct.handover", "params": {} });
+    assert_eq!(
+        Request::parse(&ask(valid.clone()), TOKEN),
+        Some(Request {
+            id: "7c1e-a".to_owned(),
+            document: DOCUMENT.to_owned(),
+            method: Method::Handover
+        })
+    );
+    // A request says which document asked, in a word its answer can be
+    // written back with.
+    let mut unmarked = valid.clone();
+    unmarked.as_object_mut().unwrap().remove("document");
+    assert_eq!(Request::parse(&ask(unmarked), TOKEN), None);
+    for document in ["", "a\"b", "a b", &"a".repeat(65)] {
+        let mut other = valid.clone();
+        other["document"] = json!(document);
+        assert_eq!(Request::parse(&ask(other), TOKEN), None, "{document:?}");
+    }
     // Another window's token, a prefix of this one's, or none: a frame
     // inside the page can follow a link, and knows no token.
     for token in ["fedcba9876543210fedcba9876543210", &TOKEN[..31], ""] {
@@ -202,27 +254,61 @@ fn a_request_is_read_only_with_the_windows_token() {
 }
 
 #[test]
-fn a_delivery_runs_only_in_the_instances_own_top_document() {
+fn a_delivery_runs_only_in_the_instances_own_top_document_and_an_answer_only_in_the_one_that_asked() {
+    // What the script does with these is run for real in
+    // `ui/src/lib/native.direct.desktop.test.ts`; here, what it is given.
+    let given = |message: &Message| {
+        let script = bridge::delivery("https://one-app.avibe.bot", message);
+        script
+            .strip_prefix("((origin, asker, message, keep) => {")
+            .and_then(|rest| rest.rsplit_once(")("))
+            .map(|(_, arguments)| arguments.to_owned())
+            .unwrap_or_else(|| panic!("{script}"))
+    };
+    // A state is for whatever document of the instance is there, and waits
+    // for a bridge that has not started.
     let state = Message::State {
         status: Ledger::default().status(),
-        choice: Told::new(Mode::Automatic, 4),
+        choice: Told::new(Mode::Automatic, None, 4),
     };
-    let script = bridge::delivery("https://one-app.avibe.bot", &state);
-    assert!(script.starts_with(
-        "(()=>{if(window.self!==window.top||window.location.origin!==\"https://one-app.avibe.bot\")return;"
-    ));
-    // A state that arrives before the bridge waits for it; an answer does not.
-    assert!(script.contains("else window.__AVIBE_DIRECT_EARLY__=m;"));
+    let call = given(&state);
+    assert!(call.starts_with(r#""https://one-app.avibe.bot",null,{"#), "{call}");
+    assert!(call.ends_with(",true);"), "{call}");
+    // An answer is for the document that asked, and waits for no one.
     let reply = Message::Reply {
         id: "7c1e-a".to_owned(),
+        document: DOCUMENT.to_owned(),
         result: bridge::handover(&HandoverResult::NotUsable),
         choice: None,
     };
-    let script = bridge::delivery("https://one-app.avibe.bot", &reply);
-    assert!(!script.contains("__AVIBE_DIRECT_EARLY__"));
-    assert!(
-        script.contains(r#"const m={"reply":{"id":"7c1e-a","result":{"closed":0,"kept":0,"skipped":"not_usable"}}};"#)
+    assert_eq!(
+        given(&reply),
+        format!(
+            r#""https://one-app.avibe.bot","{DOCUMENT}",{{"reply":{{"id":"7c1e-a","result":{{"closed":0,"kept":0,"skipped":"not_usable"}}}}}},false);"#
+        )
     );
+    // A refusal likewise, with its reason as a word and no result.
+    let refusal = Message::Refusal {
+        id: "7c1e-a".to_owned(),
+        document: DOCUMENT.to_owned(),
+        code: "busy",
+    };
+    assert_eq!(
+        given(&refusal),
+        format!(
+            r#""https://one-app.avibe.bot","{DOCUMENT}",{{"reply":{{"error":{{"code":"busy"}},"id":"7c1e-a"}}}},false);"#
+        )
+    );
+    // The script itself: the two checks come before anything is handed on.
+    let script = bridge::delivery("https://one-app.avibe.bot", &reply);
+    let origin = script
+        .find("window.location.origin !== origin")
+        .expect("the origin check");
+    let asker = script
+        .find("window.__AVIBE_DIRECT_DOCUMENT__ !== asker")
+        .expect("the document check");
+    let handed = script.find("deliver(message)").expect("the hand-over");
+    assert!(origin < asker && asker < handed, "{script}");
 }
 
 #[test]
@@ -231,25 +317,32 @@ fn the_choice_of_path_is_delivered_with_its_order() {
     // keeps the newest by `preferenceOrder`, whichever arrives first.
     let state = Message::State {
         status: Ledger::default().status(),
-        choice: Told::new(Mode::Tunnel, 4),
+        choice: Told::new(Mode::Tunnel, None, 4),
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &state);
     assert!(
-        script.contains(r#""preference":{"mode":"tunnel","reverted":null},"preferenceOrder":4"#),
+        script
+            .contains(r#""preference":{"mode":"tunnel","pendingRelaunch":false,"reverted":null},"preferenceOrder":4"#),
         "{script}"
     );
     let reply = Message::Reply {
         id: "7c1e-a".to_owned(),
-        result: bridge::preference(Mode::Automatic),
-        choice: Some(Told::new(Mode::Automatic, 5)),
+        document: DOCUMENT.to_owned(),
+        result: bridge::preference(Mode::Automatic, None),
+        choice: Some(Told::new(Mode::Automatic, None, 5)),
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &reply);
     assert!(
-        script.contains(r#""preference":{"mode":"automatic","reverted":null},"preferenceOrder":5"#),
+        script.contains(
+            r#""preference":{"mode":"automatic","pendingRelaunch":false,"reverted":null},"preferenceOrder":5"#
+        ),
         "{script}"
     );
     // The order is beside the choice, never inside what `direct.preference()` answers.
-    assert_eq!(Told::new(Mode::Tunnel, 9).preference, bridge::preference(Mode::Tunnel));
+    assert_eq!(
+        Told::new(Mode::Tunnel, None, 9).preference,
+        bridge::preference(Mode::Tunnel, None)
+    );
 }
 
 #[test]
@@ -262,6 +355,6 @@ fn the_bridge_script_is_given_the_token_and_the_version_as_data() {
     for word in ["127.0.0.1", "password", "Proxy-Authorization", "__TAURI"] {
         assert!(!script.contains(word), "{word}");
     }
-    assert!(script.contains("capabilities: Object.freeze({ direct: 3, directPreference: 1 })"));
+    assert!(script.contains("capabilities: Object.freeze({ direct: 3, directPreference: 2, directMeasure: 1 })"));
     assert!(script.contains("platform: 'desktop'"));
 }

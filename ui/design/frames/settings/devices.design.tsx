@@ -12,7 +12,9 @@ import { DevicesPageView, type DevicesPageViewProps } from '@/components/devices
 import type { AccountResult, Device, DeviceActivity, DeviceFunction, Reach, SignedOutDevice } from '@/components/devices/types';
 import { tunnelFromStatus } from '@/components/devices/wire';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
+import en from '@/i18n/en.json';
 import { MovedPage, SignInNotFinishedPage } from '../../kit/devices-pages';
+import { copyFor } from '../desktop/instances-fixtures';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access';
@@ -48,8 +50,11 @@ const iphone = (extra: Partial<Device> = {}): Device => ({
   ...extra,
 });
 
+/** Avibe Desktop as it reports itself (`device.describe`): the computer's name, then the app's own
+ *  version (from its release tag, `gh-v3.2.9rc1` → `3.2.9-rc.1`) and the system's. */
+const DESKTOP_VERSION = '3.2.9-rc.1';
 const macMini: Device = {
-  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', account, client: { kind: 'desktop', version: '3.2.8', platform: 'macOS' },
+  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', account, client: { kind: 'desktop', version: DESKTOP_VERSION, platform: 'macOS 26.1' },
   online: { path: 'tunnel', ms: 120 }, signedInAt: ago(379), functions: [],
 };
 const chrome: Device = {
@@ -151,21 +156,37 @@ const memberDevices: Device[] = [
 const signedOutRow = (id: string, device: string | null, results: AccountResult[], owner: SignedOutDevice['owner'] = 'unknown'): SignedOutDevice => (
   { id, device, kind: 'browser', owner, results }
 );
-/** One row per distinct thing the instance can say about the account sign-in. */
+/** The list says the names only, whatever avibe.bot did (owner, 2026-11-25). */
 const signedOut: SignedOutDevice[] = [
   signedOutRow('s1', 'iPhone 14', ['queued'], 'mine'),
   signedOutRow('s2', 'Firefox · Linux', ['retrying'], 'mine'),
   signedOutRow('s3', 'Chrome · Windows', ['accepted'], 'mine'),
   signedOutRow('s4', 'Safari · iPad', ['localOnly'], 'mine'),
   signedOutRow('s5', 'Chrome · macOS', ['localOnly'], 'others'),
-  signedOutRow('s6', null, ['localOnly']),
+  signedOutRow('s6', null, ['accepted']),
   signedOutRow('s7', 'Edge · Windows', ['sharedSignIn'], 'mine'),
-  signedOutRow('s8', 'Arc · macOS', ['keeperUnknown'], 'mine'),
-  signedOutRow('s9', 'iPad Air', ['refusedCredential'], 'mine'),
-  signedOutRow('s10', 'Pixel 8', ['refused'], 'mine'),
-  signedOutRow('s11', 'Galaxy S24', ['unconfirmed'], 'mine'),
-  signedOutRow('s12', 'Vivaldi · Linux', ['unknown']),
-  signedOutRow('s13', 'Mac mini（客厅）', ['accepted', 'localOnly'], 'mine'),
+  signedOutRow('s8', 'iPhone 13', ['unconfirmed'], 'mine'),
+];
+
+/** Avibe Desktop on another Mac, viewing this instance: it describes itself (`device.describe`), so every
+ *  sign-in it makes here is one row, under the computer's own name. */
+const desktopApp: Device = {
+  id: 'desktop-app', group: 'mine', kind: 'desktop', name: 'Max 的 MacBook Air', account, client: { kind: 'desktop', version: DESKTOP_VERSION, platform: 'macOS 26.1' },
+  online: { path: 'tunnel', ms: 95 }, signedInAt: ago(2 * DAY), self: true, functions: [],
+};
+/** A browser that signed in twice: each sign-in is its own row, as a browser reports nothing of itself. */
+const chromeMac = (id: string, lastActive: number, signedIn: number): Device => ({
+  id, group: 'mine', kind: 'browser', name: 'Chrome · macOS', account, client: { kind: 'browser' },
+  lastActiveAt: ago(lastActive), signedInAt: ago(signedIn), functions: [],
+});
+const safariMac: Device = {
+  id: 'safari-mac', group: 'mine', kind: 'browser', name: 'Safari · macOS', account, client: { kind: 'browser' },
+  lastActiveAt: ago(5 * DAY), signedInAt: ago(12 * DAY), functions: [],
+};
+const ownerSet: Device[] = [macbook(), desktopApp, iphone(), chromeMac('chrome-1', 40, 3 * DAY), chromeMac('chrome-2', 2 * DAY, 9 * DAY), safariMac];
+const ownerActivity: DeviceActivity[] = [
+  { id: 'o1', deviceId: 'desktop-app', at: ago(2 * DAY), device: 'Max 的 MacBook Air', event: { kind: 'signedIn' } },
+  ...activity.filter((each) => each.deviceId === 'iphone'),
 ];
 
 const at = (height: number) => ({ width: 1440, height });
@@ -193,10 +214,46 @@ function frame(
   };
 }
 
+/** The list after one browser signed in again: it keeps its row, only the sign-in is new. */
+const webkit: Device = {
+  id: 'webkit', group: 'mine', kind: 'other', name: 'WebKit · macOS', account, client: { kind: 'other' },
+  lastActiveAt: ago(2 * DAY), signedInAt: ago(9 * DAY), functions: [],
+};
+/** Rows that never reported a name, told apart by when each signed in. */
+const unrecognizedRows: Device[] = [
+  { ...unnamed, id: 'u1', lastActiveAt: ago(35), signedInAt: ago(140) },
+  { ...unnamed, id: 'u2', kind: 'other', client: { kind: 'other' }, lastActiveAt: ago(DAY + 200), signedInAt: ago(DAY + 260) },
+  { ...unnamed, id: 'u3', lastActiveAt: ago(6 * DAY), signedInAt: ago(20 * DAY) },
+];
+const named = [macbook({ self: true }), iphone(), macMini, chrome, safari, webkit];
+const signedInAgain = [macbook({ self: true }), iphone(), macMini, { ...chrome, online: { path: 'tunnel' as const, ms: 120 }, lastActiveAt: undefined, signedInAt: ago(2) }];
+const signedInAgainActivity: DeviceActivity[] = [
+  { id: 'again', deviceId: 'chrome', at: ago(2), device: 'Chrome · Windows', event: { kind: 'signedIn' } },
+  ...activity,
+];
+const PHONE_390 = { width: 390, height: 1100 };
+
 const designFrames = frames([
   // 1. Remote access off: one action, no key.
   frame('off', '未开启 · 浏览器：一个动作，去 avibe.bot 起名后自动回来', at(700),
     { reach: { state: 'off', surface: 'browser' }, devices: onlyHost }),
+  frame('off-network-open', '未绑定 · 监听地址是网络地址：本机那一行下面一句，和「只允许这台电脑」（在这台电脑上看）', at(700),
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true, networkOpen: true })] }),
+  frame('off-this-computer-only', '同上 · 在这台电脑上按下之后（不问，直接生效）：这一行只说事实，只有这台电脑能打开，没有按钮', at(700),
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true, networkOpen: false })] }),
+  frame('off-this-computer-only-phone', '同上 · 375 宽', PHONE,
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ self: true, networkOpen: false })] }),
+  frame('off-network-open-from-afar', '同上 · 从同一网络上的另一台设备看（这一行不是「本设备」）', at(700),
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })] }),
+  frame('off-network-open-phone', '同上 · 375 宽', PHONE,
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })] }),
+  frame('off-network-open-confirm', '从另一台设备上按「只允许这台电脑」：先问一句', at(700),
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })], confirm: 'this-computer-only' }),
+  frame('off-network-open-confirm-phone', '同上 · 375 宽', PHONE,
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })], confirm: 'this-computer-only' }),
+  frame('off-restricted-from-afar', '确认并得到回答以后：这台设备已经打不开，页面说明，不再提供那个按钮', at(700),
+    // What was last read (not bound, open to the network) is still in hand, and is not offered.
+    { reach: { state: 'off', surface: 'browser' }, devices: [macbook({ networkOpen: true })], problem: 'restrictedFromAfar' }),
   frame('off-organization', '未开启 · 这台电脑自己的记录说它是组织的 Avibe：不提供个人的开启，一句话', at(700),
     { reach: { state: 'off', surface: 'browser', problem: { code: 'organization' } }, devices: onlyHost }),
   frame('off-phone', '未开启 · 375 宽', PHONE, { reach: { state: 'off', surface: 'browser' }, devices: onlyHost }),
@@ -216,8 +273,8 @@ const designFrames = frames([
     { reach: { state: 'off', surface: 'browser', problem: { code: 'unknown', raw: 'local_claim_unavailable' } }, devices: onlyHost }),
   frame('off-unreachable', '未开启 · 点了开启，但连不上 avibe.bot', at(700),
     { reach: { state: 'off', surface: 'browser', problem: { code: 'unreachable' } }, devices: onlyHost }),
-  frame('off-desktop', '未开启 · 在 Avibe Desktop 里：走 App 自己的账号登录', at(700),
-    { reach: { state: 'off', surface: 'desktop', account: null, name: '' }, devices: onlyHost }),
+  frame('off-desktop', '未开启 · 在 Avibe Desktop 里：一个动作，请壳打开认领弹窗（App 自己的登录、起名）', at(700),
+    { reach: { state: 'off', surface: 'desktop' }, devices: onlyHost }),
   frame('waiting', '请求已发出，avibe.bot 上还没有确认：可以取消', at(640),
     { reach: { state: 'starting', waiting: true }, devices: onlyHost }),
   frame('retrying', '请求还开着，实例暂时连不上 avibe.bot、在重试：不说「等待确认」', at(640),
@@ -239,6 +296,12 @@ const designFrames = frames([
   // the page from a signed-in device, and not at the computer itself, which has no sign-in.
   frame('on', '已开启 · 在运行 Avibe 的电脑上看（这里没有登录账号，所以域名下面不显示账号）：主机、iPhone（打洞直连）、另一台电脑（Cloudflare 隧道）、两个浏览器', TALL,
     { reach: on, devices: all('host'), activity, bulk: 'all_remote' }, { themes: ['light', 'dark'] }),
+  frame('on-proxy-declared', '已开启 · 这台电脑声明了自有反向代理：经它进来的浏览器不登录、不在名单里，「我的设备」最后一行平实地说明', TALL,
+    { reach: on, devices: all('host'), activity, bulk: 'all_remote', proxyAccess: { origins: ['https://avibe.example.com'], peerScope: 'single_address' } }),
+  frame('on-proxy-declared-range', '同上 · 受信任的代理写的是一段地址：多一句，只有这一句用警告色', TALL,
+    { reach: on, devices: all('host'), activity, bulk: 'all_remote', proxyAccess: { origins: ['https://avibe.example.com', 'https://home.example.net:8443'], peerScope: 'range' } }),
+  frame('on-proxy-declared-phone', '同上 · 375 宽', { ...PHONE, height: 1100 },
+    { reach: on, devices: all('host'), activity, bulk: 'all_remote', proxyAccess: { origins: ['https://avibe.example.com'], peerScope: 'range' } }),
   frame('on-phone', '已开启 · 所有者在 iPhone App 里看（已登录，所以域名下面是这次登录的账号）', { ...IPHONE_17_PRO, height: 1240 },
     { ...remote, devices: all('iphone'), activity, bulk: 'other_sessions' }, { app: true }),
   frame('on-remote', '已开启 · 从另一台电脑远程看：可以退出我的其他设备', TALL,
@@ -247,6 +310,19 @@ const designFrames = frames([
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
   frame('on-shared-phone', '三组设备 · 375 宽', { width: 375, height: 1900 },
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
+  // Device list fixes (11-25): every row has a name, an unnamed one says when it signed in, and a
+  // browser that signs in again keeps its one row.
+  frame('list-named', '设备的名字：浏览器、主屏 App、认不出浏览器的 WebKit（叫「WebKit · macOS」）、Avibe Desktop', TALL,
+    { reach: on, devices: named, activity, bulk: 'all_remote' }),
+  frame('list-named-phone', '同上 · 390 宽', PHONE_390, { reach: on, devices: named, activity, bulk: 'all_remote' }),
+  frame('list-unrecognized', '没有名字的行：「未识别的客户端」，第二行写什么时候登录的，几行之间分得开', TALL,
+    { reach: on, devices: [macbook({ self: true }), iphone(), ...unrecognizedRows], activity, bulk: 'all_remote' }),
+  frame('list-unrecognized-phone', '同上 · 390 宽', PHONE_390,
+    { reach: on, devices: [macbook({ self: true }), iphone(), ...unrecognizedRows], activity, bulk: 'all_remote' }),
+  frame('list-signed-in-again', '同一个浏览器再登录一次：还是原来那一行，最近活动多一条「登录」', TALL,
+    { reach: on, devices: signedInAgain, activity: signedInAgainActivity, bulk: 'all_remote' }),
+  frame('list-signed-in-again-phone', '同上 · 390 宽', PHONE_390,
+    { reach: on, devices: signedInAgain, activity: signedInAgainActivity, bulk: 'all_remote' }),
   frame('member-operate', '能管理这个 Avibe 的成员：自己的设备，加上远程访问的开关和「优化线路」；绑定、域名、连接方式、别人的设备都没有', at(760),
     { reach: onForMember, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
   frame('member-operate-phone', '能管理的成员 · 375 宽', PHONE,
@@ -309,20 +385,21 @@ const designFrames = frames([
   frame('confirm-sign-out-all-remote', '在运行 Avibe 的电脑上退出所有远程设备：包括别人的', at(860),
     { reach: on, devices: [...all('host'), sara], activity, bulk: 'all_remote', confirm: 'remove-all-remote' }),
 
-  // 6. Signing out: what avibe.bot did about the account sign-in. Never 「已结束」.
-  frame('sign-out-queued', '刚退出 · 已排队；这一行显示过健康，所以健康清理说「尚未确认」', TALL,
-    { reach: on, devices: all('host'), activity, signOutNotice: { device: 'iPhone 14', owner: 'mine', results: ['queued'], healthCleanupPending: true, hadHealth: true } }),
-  frame('sign-out-local-mine', '刚退出我自己的一台 · 只在这个 Avibe 上退出了：只说对自己设备成立的那一半', TALL,
-    { reach: on, devices: all('host'), activity, signOutNotice: { device: 'Safari · iPad', owner: 'mine', results: ['localOnly'], healthCleanupPending: true, hadHealth: false } }),
-  frame('sign-out-local-others', '刚退出别人的一台 · 只说对别人设备成立的那一半', TALL,
-    { reach: on, devices: [...all('host'), sara], activity, signOutNotice: { device: 'Chrome · macOS', owner: 'others', results: ['localOnly'], healthCleanupPending: false, hadHealth: false } }),
-  frame('sign-out-many', '刚退出所有远程设备 · 几种结果各一句，不知道是谁的就两半都说', at(1100),
-    { reach: on, devices: onlyHost, activity, signOutNotice: { device: null, owner: 'unknown', results: ['accepted', 'localOnly', 'retrying'], healthCleanupPending: false, hadHealth: false } }),
-  frame('sign-out-many-phone', '刚退出所有远程设备 · 375 宽', { width: 375, height: 1300 },
-    { reach: on, devices: onlyHost, activity, signOutNotice: { device: null, owner: 'unknown', results: ['accepted', 'localOnly', 'retrying'], healthCleanupPending: false, hadHealth: false } }),
-  frame('signed-out', '最近退出的设备：接口能说出的每一种结果各一行', at(2100),
-    { reach: on, devices: all('host'), signedOut }),
-  frame('signed-out-phone', '最近退出的设备 · 375 宽', { width: 375, height: 3300 }, { reach: on, devices: onlyHost, signedOut }),
+  // 6. Signing out (owner, 2026-11-25): one toast, 已退出「…」, where the App shows toasts; it leaves
+  //    by itself and the row leaves at once. Nothing else, whatever avibe.bot did.
+  ...(['zh', 'en'] as const).flatMap((lang) => {
+    const copy = lang === 'en' ? { copy: copyFor(en) } : {};
+    const remaining = all('host').filter((each) => each.id !== 'chrome');
+    const values = { device: 'Chrome · Windows' };
+    const toast = { fixtures: fixtures({ ...copy, toasts: [{ key: 'devices.signedOut.toast', values }] }) };
+    const list = { fixtures: fixtures(copy) };
+    return [
+      frame(`sign-out-toast-${lang}`, `刚退出（无论 avibe.bot 那边怎样）：一个提示条，那一行马上不见，提示条自己消失 · ${lang}`, at(900), { reach: on, devices: remaining, activity }, toast),
+      frame(`sign-out-toast-390-${lang}`, `刚退出 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining, activity }, toast),
+      frame(`signed-out-list-${lang}`, `最近退出的设备：只显示名字 · ${lang}`, at(1500), { reach: on, devices: onlyHost, signedOut }, list),
+      frame(`signed-out-list-390-${lang}`, `最近退出的设备 · 390 宽 · ${lang}`, { width: 390, height: 2000 }, { reach: on, devices: onlyHost, signedOut }, list),
+    ];
+  }),
 
   // 7. Health connections no listed device is proven to own; things that did not happen.
   frame('unlinked-health', '未对应到设备的健康连接：各自一行，按自己的编号断开', at(1100),
@@ -346,12 +423,14 @@ const designFrames = frames([
     { reach: { state: 'unknown' }, viewerAccount: account, devices: afterOff, problem: 'closedFromAfar' }),
   frame('unknown-kind', '一种这一页还不认识的设备：照样列出来，叫「设备」', at(760),
     { reach: on, devices: [...all('host'), { id: 'watch', group: 'mine', kind: 'other', name: null, client: { kind: 'other' }, lastActiveAt: ago(90), functions: [] }] }),
-  // While 「更改域名」 and binding again are not in the release (features.ts), the notice says the fact
-  // and sends the owner to support; once both are, it says rebind and take the name back.
-  frame('outside-change', '地址在这台 Avibe 之外被改了：醒目提示，说事实，请联系 support@avibe.bot（重新绑定和更改域名上线后换回原来那句）', at(1100),
-    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
-  frame('outside-change-phone', '地址在别处被改了 · 375 宽', { width: 375, height: 1500 },
-    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' } }),
+  // Without binding again on the instance (before #4133) the notice says the fact and sends the
+  // owner to support; with it, it says to bind again and take the name back.
+  frame('outside-change', '地址在这台 Avibe 之外被改了 · 实例还没有重新绑定（#4133 之前）：说事实，请联系 support@avibe.bot', at(1100),
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: false }),
+  frame('outside-change-phone', '地址在别处被改了 · 实例还没有重新绑定 · 375 宽', { width: 375, height: 1500 },
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: false }),
+  frame('outside-change-rebind', '地址在别处被改了 · 实例有重新绑定：原来那句，加「去重新绑定」', at(1100),
+    { reach: { ...on, host: 'sam-app.avibe.bot' }, devices: all('host'), activity, unrecognizedChange: { hostname: 'sam-app.avibe.bot' }, rebindOffered: true }),
 
   // 8. Adding a device.
   frame('empty', '刚开启，只有主机：「添加设备」直接摆在列表里（iPhone）', at(760), { reach: on, devices: onlyHost }),
@@ -369,7 +448,13 @@ const designFrames = frames([
   frame('activity-phone', '活动 · 375 宽', { width: 375, height: 1100 }, { reach: on, devices: all('host'), activity: fullActivity, view: 'activity' }),
   frame('activity-empty', '活动：还没有', at(500), { reach: on, devices: all('host'), activity: [], view: 'activity' }),
 
-  // 10. Whole pages the instance itself answers with (plain HTML from the Runtime): the design record.
+  // 10. Avibe Desktop names itself: one row for the computer, however often it opened this instance.
+  frame('desktop-described', '我的设备 · 在 Avibe Desktop 里看：这台 Mac 一行（电脑名 · Avibe Desktop 版本 · macOS 版本），iPhone App 一行，浏览器每次登录各一行', TALL,
+    { ...remote, devices: ownerSet, activity: ownerActivity, bulk: 'other_sessions' }),
+  frame('desktop-described-phone', '同上 · 390 宽', { width: 390, height: 1300 },
+    { ...remote, devices: ownerSet, activity: ownerActivity, bulk: 'other_sessions' }),
+
+  // 11. Whole pages the instance itself answers with (plain HTML from the Runtime): the design record.
   { name: 'page-moved', title: '旧地址 · 等待期内打开：清掉本机数据后，一句话加 avibe.bot 的链接（实例直接返回的页面）', width: 1440, height: 800, status: 'proposed', themes: ['light'],
     fixtures: fixtures(), render: () => <MovedPage /> },
   { name: 'page-signed-out', title: '被退出的设备在撤销完成前回来：「这台设备已被退出」（实例直接返回的页面）', width: 1440, height: 800, status: 'proposed', themes: ['light'],

@@ -7,7 +7,7 @@ the adapter supplies a ``ContextHost`` for what only it knows.
 
 The cut rule and cumulative file lists follow Pi (MIT, Copyright (c) 2025
 Mario Zechner, ``packages/coding-agent/src/core/compaction/`` at ``7fbbd5f``);
-the checkpoint request is the prompt ``checkpoint-v5.1``: a consolidation into a mind the turn revises in its scratch
+the checkpoint request is the prompt ``checkpoint-v5.2``: a consolidation into a mind the turn revises in its scratch
 file with ``edit``, a memo of the user's own messages it chooses by checkbox, and a now in one ``<checkpoint>`` block,
 in a request that says it is the harness's, not the user's (sections 6, 7, 10, and 11).
 """
@@ -20,6 +20,7 @@ import re
 import time
 import unicodedata
 from copy import deepcopy
+from collections import Counter
 from itertools import accumulate
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Collection, Literal, Mapping, Optional, Protocol, Sequence
@@ -131,7 +132,7 @@ MAX_OVERFLOWS = 4
 UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
-PROMPT_VERSION = "checkpoint-v5.1"
+PROMPT_VERSION = "checkpoint-v5.2"
 
 #: The checkpoint turn's two scratch files (sections 6 and 7): the mind, which only ``edit`` may revise, and the memo,
 #: whose checkboxes choose which of the user's own messages the next context carries.
@@ -148,6 +149,8 @@ MIND_SECTIONS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
 )
 MIND_HEADINGS: tuple[str, ...] = tuple(line for top, _, subs in MIND_SECTIONS for line in (top, *subs))
 MIND_MISSION = "## Mission"
+#: The headings whose entries carry a box (section 7): "- [ ]" a live entry, "- [x]" a finished one.
+MIND_BOXED: tuple[str, ...] = ("## Mission", "## Workstreams")
 MIND_EMPTY = "(none)"
 
 
@@ -205,7 +208,7 @@ Your scratch directory is {scratch}. It holds two files, and you already have bo
 1. Look back
 Go through what happened since the previous checkpoint, in order; at your first consolidation, go through the whole conversation. For each layer, ask yourself:
 - Where I stand: does my understanding of whom I do this for and why, of what I own, and of how the user and I work together still hold? Can I point to where the user said or accepted each agreement? One I cannot is my own view, and it belongs in Lessons.
-- Goals: has the end result the user wants changed? Where does each workstream stand, and what comes next in it?
+- Goals: has the end result the user wants changed? Which goals and workstreams finished? Where does each live one stand, and what comes next in it?
 - Key decisions: what was newly decided, and was any earlier decision overturned?
 - Lessons: what proved to work or not to work? Has anything recurred that can be distilled into a principle?
 Do the looking back in your thinking, or as text outside the <checkpoint> block; text outside the block does not enter the context.
@@ -213,9 +216,10 @@ Do the looking back in your thinking, or as text outside the <checkpoint> block;
 2. Revise your mind (mind.md)
 - Change only what the looking back found changed; leave everything else, its wording included, as it is. Put all the changes in one edit call. At your first consolidation, replace each section's placeholder line, such as "(none yet: mission)", with its content; a section with nothing yet keeps its placeholder.
 - Make small changes for small shifts. If your understanding at some layer has changed at its root (for example, you realize the user really wants something other than what you thought), rewrite that section, and write one sentence outside the block: I used to think ..., now I think ..., because ....
-- Memory keeps condensing: fold each finished workstream into one line; merge recurring concrete lessons into a more general principle; fold overturned decisions into the decision that replaced them; let go of details you no longer need. The original conversation stays stored, so a detail you let go can be looked up again.
-- Never delete an entry under Mission: when it is done, withdrawn by the user, or replaced, mark its status on the entry itself. The mission changes only when the user explicitly changes it.
-- Keep every heading line exactly as it is. Each section's length limit: Where I stand {limit_1:,}, Goals {limit_2:,}, Key decisions {limit_3:,}, Lessons {limit_4:,} tokens.
+- Memory keeps condensing: merge recurring concrete lessons into a more general principle; fold overturned decisions into the decision that replaced them; let go of details you no longer need. The original conversation stays stored, so a detail you let go can be looked up again.
+- In Goals, every entry under Mission and Workstreams starts with a box: "- [ ]" while it is live (in progress, waiting, or owed), "- [x]" once it is finished (done, withdrawn, or replaced). Waiting is live: an entry whose work is done but whose answer, approval, or confirmation is still owed, by the user or by anyone, stays "- [ ]" (a proposal delivered and still awaiting the user's choice is live). Only the answer itself, or the user dropping the matter, ends a wait; deciding to stop waiting does not. Write an entry's status as what happened, and say the user decided it only where they did. Never delete or merge a live entry. The mission changes only when the user explicitly changes it.
+- An entry leaves Goals in two steps. First it is marked: give a box to each entry that has none, and check "- [x]" on each one that has finished; an entry you mark in this consolidation stays where it stands, whole, even when Goals is over its limit (what the next context shows of an over-limit section leaves finished entries out first). Then, at a later consolidation, it is folded: the entries that already show "- [x]" in the mind.md you were given are history. Before you fold one, move whatever in it still binds (an agreement, a condition the user set, an obligation with a date) to Agreements or onto a live entry; only the outcome folds. Merge the outcomes into one short line under their heading, for example "- [x] Earlier: the importer shipped; the audit was withdrawn; the first migration plan was replaced", and let the oldest drop off that line as it grows.
+- Keep every heading line exactly as it is. Each section's length limit: Where I stand {limit_1:,}, Goals {limit_2:,}, Key decisions {limit_3:,}, Lessons {limit_4:,} tokens.{mind_sizes}
 
 3. Check the memo (memo.md)
 The memo carries the user's own words, verbatim, into the next context. Each line of the list is one message the user typed: [x] is one carried from last time, [ ] is a new one that has just left the context.
@@ -238,9 +242,9 @@ What I am responsible for seeing through, and where that ends.
 What the user and I have actually agreed, written as principles: how they want me to report and work, when to ask, what I may decide on my own, and the scope of what they authorized, including proposals of mine they accepted. Only what the user said or accepted belongs here; it holds until they change it. Keep my identity from the system prompt and Session id from the environment; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
-In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.
+In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower. Where it holds several goals, one boxed entry for each.
 ## Workstreams
-Each workstream that serves the mission: its status (in progress, waiting, or done) and when it is done; where it has a queue, the queue and its cursor (how far it got, what is next).
+One boxed entry for each workstream that serves the mission: its status (in progress, waiting, or done) and when it is done; where it has a queue, the queue and its cursor (how far it got, what is next).
 # 3. Key decisions
 decision: reason (and which workstream it belongs to).
 # 4. Lessons
@@ -270,6 +274,22 @@ CHECKPOINT_REQUEST_END = "</context-checkpoint-request>"
 #: when the checkpoint above shows it cut), or the template at a first v5 checkpoint.
 MIND_FILE_PREVIOUS = "Its exact current content is at the end of this request."
 MIND_CURRENT = "Current mind.md (exactly what the file holds now, word for word):"
+#: What the request says of the previous mind's sizes, after the limits (section 11): each section's tokens, and for
+#: Goals how many of them are finished entries. The model cannot count tokens, and a section it cannot measure it
+#: learns to be past its limit only from the repair.
+MIND_SIZES = (
+    " They hold now: {sizes}. A section over its limit has to come back under it, not counting Goals entries you "
+    "mark this time, and one near its limit has to shrink by as much as you add to it."
+)
+MIND_SIZES_FINISHED = "{finished:,} of them finished entries"
+MIND_SIZES_OVER = "over its limit by about {excess:,}"
+#: What the request adds for a mind whose Goals hold entries without a box, as every mind stored before
+#: ``checkpoint-v5.2`` does (section 11): in three replays of such a mind a model folded its finished entries at once,
+#: which reads as live entries gone and costs the repair.
+MIND_UNBOXED = (
+    " {count} entries under Mission and Workstreams have no box yet: this time give each one its box and keep every "
+    "one of them; the finished ones can be folded from the next consolidation on."
+)
 MIND_FILE_FIRST = f"This is your first consolidation, so it is this empty template, word for word:\n{MIND_TEMPLATE}"
 #: What the request says of memo.md (section 11): the list, given whole at its end (``MEMO_CURRENT``); or, with no
 #: candidate, that the file is empty and not to be edited, and no list at all: nothing to check, nothing to match.
@@ -301,8 +321,8 @@ MEMO_HEADING = "# 5. The user's words"
 #: A memo message the checkpoint shows cut short says where its whole text is (section 7).
 MEMO_CUT = "[cut short; the whole message is #{seq} in the earlier record]"
 #: A mind section the checkpoint shows cut short says where the whole mind is (section 10).
-MIND_CUT = "[This section continues; the whole of it is in {path}.]"
-MIND_CUT_UNSTORED = "[This section is cut short here.]"
+MIND_CUT = "[Part of this section is left out: finished entries first, then its end. The whole of it is in {path}.]"
+MIND_CUT_UNSTORED = "[Part of this section is left out: finished entries first, then its end.]"
 #: A carried skill cut to its share says how to read all of it (section 7).
 SKILL_CUT = "[Skill cut short here; run `vibe skill load {name}` for the whole of it.]"
 SKILLS_LEAD_CARRIED = (
@@ -505,6 +525,9 @@ def _valid_usage(message: Optional[Message]) -> bool:
     return (
         isinstance(message, AssistantMessage)
         and message.stop_reason not in {"error", "aborted"}
+        # A provider-executed call can bill more than one pass over the same context.
+        and message.hosted_summary is None
+        and not message.hosted_call_unretained
         and message.usage is not None
         and usage_total(message.usage) > 0
     )
@@ -920,7 +943,8 @@ def checkpoint_request(
     the previous checkpoint's mind whole, given at the end so every edit can match it exactly; empty at a first v5
     checkpoint, whose template the request gives in place. ``scratch`` is the absolute path of the Session's
     scratch directory, where the two files are (``SCRATCH_UNAVAILABLE`` without one). The limits it states are those of
-    a route of ``window`` tokens (``mind_limits``, ``memo_budget``)."""
+    a route of ``window`` tokens (``mind_limits``, ``memo_budget``), and with a previous mind it states what each
+    section holds now (``mind_sizes``)."""
     limits = {f"limit_{index}": limit for index, limit in enumerate(mind_limits(window), start=1)}
     body = CHECKPOINT_REQUEST.format(
         scratch=scratch or SCRATCH_UNAVAILABLE,
@@ -928,6 +952,7 @@ def checkpoint_request(
         memo_file=MEMO_FILE_LISTED if memo else MEMO_FILE_EMPTY,
         memo_list=f"\n\n{MEMO_CURRENT}\n" + "\n".join(memo) if memo else "",
         mind_current=f"\n\n{MIND_CURRENT}\n{mind}" if mind else "",
+        mind_sizes=mind_sizes(mind, window),
         memo_budget=memo_budget(window),
         **limits,
     )
@@ -1109,12 +1134,100 @@ def mind_blocks(text: str) -> tuple[Optional[tuple[str, tuple[MindBlock, ...]]],
 
 #: A top-level list entry: a bullet or a numbered item, not indented.
 _ENTRY = re.compile(r"(?:[-*+]|\d+[.)])\s")
+#: A finished entry: one whose box is checked, "- [x]" (section 7). An entry with an empty box, or with none, is live.
+_FINISHED = re.compile(r"(?:[-*+]|\d+[.)])\s+\[[xX]\](?:\s|$)")
+_BOX = re.compile(r"(?:[-*+]|\d+[.)])\s+\[[ xX]\](?:\s|$)")
 
 
-def mission_entries(blocks: Sequence[MindBlock]) -> int:
-    """How many entries the Mission lists: its top-level bullets and numbered items."""
+def mission_entries(blocks: Sequence[MindBlock]) -> tuple[int, tuple[str, ...]]:
+    """The Mission's entries, its top-level bullets and numbered items: how many are live, and the line of each
+    finished one (section 10). Only the box is read, never the entry's words."""
     body = next(body for name, body in blocks if name == MIND_MISSION)
-    return sum(1 for line in body if _ENTRY.match(line))
+    entries = [line.strip() for line in body if _ENTRY.match(line)]
+    finished = tuple(line for line in entries if _FINISHED.match(line))
+    return len(entries) - len(finished), finished
+
+
+def _finished_spans(body: Sequence[str]) -> list[tuple[int, int]]:
+    """Each finished entry of ``body`` as a line range: its own line and the indented lines under it, with the blank
+    lines between them. The next line that is not indented ends it."""
+    spans = []
+    for start, line in enumerate(body):
+        if not _FINISHED.match(line):
+            continue
+        end = start + 1
+        for index in range(start + 1, len(body)):
+            if not body[index].strip():
+                continue  # a blank line belongs to the entry only when an indented line follows it
+            if body[index][0] not in " \t":
+                break
+            end = index + 1
+        spans.append((start, end))
+    return spans
+
+
+def _finished(blocks: Sequence[MindBlock], before: Optional[Sequence[MindBlock]] = None) -> dict[str, list[tuple[int, int]]]:
+    """The finished entries under Mission and Workstreams, by heading, each as a line range of its block; with
+    ``before``, the mind the turn started from, only those that mind did not already hold as finished under the same
+    heading: the ones this turn marked. An entry is the one ``before`` held when its lines are the same, or else its
+    own line is, each held entry standing for one; a single new entry beside held ones that are gone is their fold,
+    not a mark."""
+    spans = {name: _finished_spans(body) for name, body in blocks if name in MIND_BOXED}
+    if before is None:
+        return spans
+    marked: dict[str, list[tuple[int, int]]] = {}
+    was = dict(before)
+    for name, body in blocks:
+        if name not in MIND_BOXED:
+            continue
+        old = was.get(name, ())
+        whole = Counter(tuple(line.rstrip() for line in old[start:end]) for start, end in _finished_spans(old))
+        heads = Counter(old[start].strip() for start, _ in _finished_spans(old))
+        pending = []
+        for start, end in spans[name]:  # unchanged entries first, so a changed one cannot take their place
+            key = tuple(line.rstrip() for line in body[start:end])
+            if whole[key] and heads[body[start].strip()]:
+                whole[key] -= 1
+                heads[body[start].strip()] -= 1
+            else:
+                pending.append((start, end))
+        marked[name] = []
+        for start, end in pending:
+            if heads[body[start].strip()]:
+                heads[body[start].strip()] -= 1
+            else:
+                marked[name].append((start, end))
+        # With held entries gone or reworded, one new finished line is their fold (``review_mind``). When it is the
+        # only new one, nothing under this heading was marked; among several it cannot be told apart, and all count
+        # as marked.
+        if len(marked[name]) == 1 and +heads:
+            marked[name] = []
+    return marked
+
+
+def _without(blocks: Sequence[MindBlock], spans: Mapping[str, Sequence[tuple[int, int]]]) -> list[MindBlock]:
+    """``blocks`` without the line ranges ``spans`` names under each heading."""
+    kept: list[MindBlock] = []
+    for name, body in blocks:
+        gone = {index for start, end in spans.get(name, ()) for index in range(start, end)}
+        kept.append((name, tuple(line for index, line in enumerate(body) if index not in gone)))
+    return kept
+
+
+def _span_tokens(blocks: Sequence[MindBlock], spans: Mapping[str, Sequence[tuple[int, int]]]) -> int:
+    lines = [line for name, body in blocks for start, end in spans.get(name, ()) for line in body[start:end]]
+    return text_tokens("\n".join(lines)) if lines else 0
+
+
+def _unboxed(blocks: Sequence[MindBlock]) -> int:
+    """How many entries under Mission and Workstreams carry no box, as minds stored before ``checkpoint-v5.2`` do."""
+    return sum(
+        1
+        for name, body in blocks
+        if name in MIND_BOXED
+        for line in body
+        if _ENTRY.match(line) and not _BOX.match(line)
+    )
 
 
 def _section_title(top: str) -> str:
@@ -1184,31 +1297,58 @@ def _normalized(text: str) -> list[str]:
     return [line.strip() for line in _lines(text) if line.strip()]
 
 
+#: What the repair asks of a mind that lost a heading line, and of one that lost a live Mission entry (section 10).
+HEADINGS_ADVICE = "keep every heading line of it exactly as it is, in order"
+MISSION_ADVICE = (
+    'put back, whole, each entry that is not finished (one that still waits on an answer is not), and mark each '
+    'finished one "- [x]" where it stands: an entry leaves the Mission only at a later consolidation, after one has '
+    'kept it as "- [x]", and the line that folds earlier "- [x]" entries does not count as one marked now'
+)
+#: How the repair says to condense each section past its limit (section 10), by the section's title.
+CONDENSE_ADVICE: Mapping[str, str] = {
+    "Where I stand": "in Where I stand, merge agreements that overlap and drop those the user has since replaced",
+    "Goals": (
+        'in Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or '
+        "drop them{finished}, keeping what in them still binds, then move finished detail out of live entries"
+    ),
+    "Key decisions": "in Key decisions, fold overturned decisions into the ones that replaced them",
+    "Lessons": "in Lessons, merge recurring lessons into principles",
+}
+
+
 @dataclass(frozen=True)
 class MindReview:
     """What the validator found in a mind (section 10): ``structure`` says why it lost the template's structure or a
-    Mission entry, ``over`` each section past its limit (its title, tokens, limit); ``tokens`` is the whole mind's.
-    ``empty``: it is still the template, which keeps no mind and asks no repair."""
+    live Mission entry, and ``advice`` what to do about it; ``over`` is each section past its limit (its title,
+    tokens, limit); ``foldable`` is the tokens of Goals' finished entries the mind already held when the turn began;
+    ``waived`` says Goals is past its limit only by entries this turn marked as finished, which have to stay this
+    once; ``tokens`` is the whole mind's. ``empty``: it is still the template, which keeps no mind and asks no
+    repair."""
 
     structure: Optional[str] = None
     empty: bool = False
     over: tuple[tuple[str, int, int], ...] = ()
     tokens: int = 0
+    advice: str = HEADINGS_ADVICE
+    foldable: int = 0
+    waived: bool = False
 
     def problems(self) -> list[str]:
         found = []
         if self.structure is not None:
-            found.append(
-                f"mind.md lost its structure: {self.structure}; keep every heading line of it exactly as it is, in "
-                "order, and mark a Mission entry's status instead of deleting it"
+            found.append(f"mind.md lost its structure: {self.structure}; {self.advice}")
+        # A waived Goals asks nothing: what the checkpoint shows leaves its finished entries out first (``fit_mind``).
+        over = [(title, size, limit) for title, size, limit in self.over if title != "Goals" or not self.waived]
+        if over:
+            # The amount asked for aims a twentieth of the limit under it: a model that takes out just the excess, by
+            # its own count, lands a few tokens past the limit again.
+            sections = ", ".join(
+                f"{title} is about {size:,} tokens, at most {limit:,} (take about {size - limit + max(1, limit // 20):,} out)"
+                for title, size, limit in over
             )
-        if self.over:
-            sections = ", ".join(f"{title} is about {size:,} tokens, at most {limit:,}" for title, size, limit in self.over)
-            found.append(
-                f"mind.md is over its length limits: {sections}; condense it: fold finished workstreams into one "
-                "line, merge recurring lessons into principles, and fold overturned decisions into the ones that "
-                "replaced them"
-            )
+            finished = f" (about {self.foldable:,} tokens of it)" if self.foldable else ""
+            advice = "; ".join(CONDENSE_ADVICE[title].format(finished=finished) for title, _, _ in over)
+            found.append(f"mind.md is over its length limits: {sections}; condense it: {advice}")
         return found
 
 
@@ -1222,17 +1362,93 @@ def review_mind(text: Optional[str], previous: str, window: Optional[int] = None
         return MindReview(structure=problem, tokens=text_tokens(text))
     preamble, blocks = parsed
     before = mind_blocks(previous)[0]
-    if before is not None and mission_entries(blocks) < (had := mission_entries(before[1])):
-        return MindReview(
-            structure=f"its Mission lists {mission_entries(blocks)} entries, fewer than the {had} it had",
-            tokens=text_tokens(text),
-        )
+    lost = None
+    if before is not None:
+        # A live entry stays, or is finished where it stands: only one a mind already kept as finished may leave.
+        had, was_finished = mission_entries(before[1])
+        live, finished = mission_entries(blocks)
+        since = sum((Counter(finished) - Counter(was_finished)).values())
+        # When finished entries the mind held are gone or reworded, one new finished line is their fold, not a live
+        # entry just marked: it must not stand in for a live entry that left in the same turn.
+        if since and Counter(was_finished) - Counter(finished):
+            since -= 1
+        if live + since < had:
+            lost = f'its Mission started with {had} live entries and now has {live}, with {since} more newly marked "- [x]"'
+    sections = _sections(preamble, blocks, window)
     over = tuple(
-        (_section_title(top), size, limit)
-        for top, limit, own in _sections(preamble, blocks, window)
-        if (size := _section_tokens(own)) > limit
+        (_section_title(top), size, limit) for top, limit, own in sections if (size := _section_tokens(own)) > limit
     )
-    return MindReview(empty=_normalized(text) == _normalized(MIND_TEMPLATE), over=over, tokens=text_tokens(text))
+    tokens = text_tokens(text)
+    foldable, waived = 0, False
+    if any(title == "Goals" for title, _, _ in over):
+        _, limit, own = next(section for section in sections if _section_title(section[0]) == "Goals")
+        marked = _finished(own, before[1]) if before is not None else {}
+        new = {(name, span) for name, spans in marked.items() for span in spans}
+        held = {name: [span for span in spans if (name, span) not in new] for name, spans in _finished(own).items()}
+        foldable = _span_tokens(own, held)
+        # Entries this turn marked have to stay this once, so a Goals that fits without them asks no repair: what is
+        # shown of it leaves finished entries out and cuts nothing else (``_without_finished``). Not so
+        # for a mind past ``mind_revert``: the loop keeps the previous mind instead of it, and the turn must hear of
+        # it while it can still condense.
+        waived = _section_tokens(_without(own, marked)) <= limit and tokens <= mind_revert(window)
+    # The one repair names both: a mind that lost a live entry may be past a limit as well.
+    return MindReview(
+        structure=lost,
+        advice=MISSION_ADVICE if lost else HEADINGS_ADVICE,
+        empty=lost is None and _normalized(text) == _normalized(MIND_TEMPLATE),
+        over=over,
+        tokens=tokens,
+        foldable=foldable,
+        waived=waived,
+    )
+
+
+def mind_sizes(mind: str, window: Optional[int] = None) -> str:
+    """What the checkpoint request says each section of the previous mind holds now (``MIND_SIZES``, section 11): its
+    tokens as its limit counts them, whether that is past its limit on a route of ``window`` tokens, and for Goals how
+    many of them are finished entries. Empty with no mind, or one that lost its structure."""
+    parsed = mind_blocks(mind)[0] if mind else None
+    if parsed is None:
+        return ""
+    preamble, blocks = parsed
+    finished = _span_tokens(blocks, _finished(blocks))
+    sizes = []
+    for top, limit, own in _sections(preamble, blocks, window):
+        title, size = _section_title(top), _section_tokens(own)
+        notes = [
+            *([MIND_SIZES_OVER.format(excess=size - limit)] if size > limit else []),
+            *([MIND_SIZES_FINISHED.format(finished=finished)] if title == "Goals" and finished else []),
+        ]
+        sizes.append(f"{title} about {size:,}" + (f" ({', '.join(notes)})" if notes else ""))
+    unboxed = _unboxed(blocks)
+    return MIND_SIZES.format(sizes=", ".join(sizes)) + (MIND_UNBOXED.format(count=unboxed) if unboxed else "")
+
+
+def _without_finished(own: Sequence[MindBlock], marker: str, limit: int) -> tuple[list[MindBlock], bool]:
+    """``own`` with the fewest finished entries of Mission and Workstreams left out, from the top, for the section to
+    be within ``limit`` as it is shown, ``marker`` its last line, and as a section is counted (``_section_tokens``);
+    with all of them out when even that does not fit (section 10). Whether it is shown so, with nothing more cut,
+    comes second: it is when it fits, and also when only ``marker`` takes it past the limit, since text that is
+    within its limit is never cut to make room for the harness's own line."""
+    spans = [(name, span) for name, found in _finished(own).items() for span in found]
+
+    def shown(count: int) -> list[MindBlock]:
+        out: dict[str, list[tuple[int, int]]] = {}
+        for name, span in spans[:count]:
+            out.setdefault(name, []).append(span)
+        return _without(own, out)
+
+    def fits(count: int) -> bool:
+        *above, (name, body) = shown(count)
+        return _section_tokens([*above, (name, (*body, marker))]) <= limit
+
+    low, high = 0, len(spans)
+    if not fits(high):
+        return shown(high), _section_tokens(shown(high)) <= limit
+    while low < high:  # the fewest: leaving out one more never makes the section longer
+        middle = (low + high) // 2
+        low, high = (low, middle) if fits(middle) else (middle + 1, high)
+    return shown(low), True
 
 
 def _head_lines(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
@@ -1251,10 +1467,12 @@ def _head_lines(lines: Sequence[str], room: int) -> tuple[list[str], bool]:
 
 def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str, list[str]]:
     """``text`` (a mind with its structure intact) with each section past its limit cut to it (section 10): every
-    heading line kept, the head of what is under each one kept until the section's room runs out, and ``marker`` once,
-    ending the section. The fixed part, the heading lines and the one marker, is all a section shows when its limit
-    leaves no more room (a small route's, section 7). The cut sections' whole text, for the next checkpoint request
-    (section 11), comes second."""
+    heading line kept; finished entries of Mission and Workstreams left out first, from the top, while the section is
+    past its room; then, unless what is left is within the limit but for ``marker``, the head of what is under each
+    heading kept until the room runs out; and ``marker`` once, ending the section. When a head cut is still needed
+    and the limit leaves no more room (a small route's, section 7), the fixed part, the heading lines and the one
+    marker, is all the section shows. The cut sections' whole text, for the next checkpoint request (section 11),
+    comes second."""
     parsed, problem = mind_blocks(text)
     if parsed is None:
         raise ValueError(f"not a mind: {problem}")
@@ -1268,6 +1486,10 @@ def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str,
             out.append(whole)
             continue
         cut_sections.append(whole)
+        own, whole = _without_finished(own, marker, limit)
+        if whole:
+            out.append("\n".join([_block_text(own), marker]))
+            continue
         room = 4 * limit - note - sum(_utf8(name) + 1 for name, _ in own if name)
         lines: list[str] = []
         for name, body in own:

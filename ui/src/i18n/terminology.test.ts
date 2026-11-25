@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { desktopZh as zh } from './desktop';
 
-import zh from './zh.json';
 
 describe('Chinese product terminology', () => {
   it('uses the localized app bar name throughout user-visible copy', () => {

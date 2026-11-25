@@ -71,3 +71,35 @@ describe('dependency inspection transport', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+describe('Model Hub engine update requests', () => {
+  const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+
+  it('starts a check or an update with an empty body and reads a receipt by its id', async () => {
+    apiFetch.mockImplementation(async () => json({ ok: true, job_id: 'engine-1', status: 'running' }, 202));
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    await result.current.engineOperationRequest('check');
+    await result.current.engineOperationRequest('update');
+    await result.current.engineOperationRequest({ job: 'engine-1' });
+    expect(apiFetch.mock.calls.map(([path, init]) => `${(init as RequestInit | undefined)?.method ?? 'GET'} ${path}`)).toEqual([
+      'POST /api/dependencies/model-hub-engine/check',
+      'POST /api/dependencies/model-hub-engine/update',
+      'GET /api/dependencies/model-hub-engine/install/engine-1',
+    ]);
+    expect(apiFetch.mock.calls[0][1].body).toBe('{}');
+  });
+
+  it('answers a refusal with its body, not a thrown error', async () => {
+    apiFetch.mockImplementation(async () => json({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' }, 503));
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    expect(await result.current.engineOperationRequest('update')).toEqual({ ok: false, error: 'controller_unavailable', update_state: 'waiting_for_controller' });
+  });
+
+  it('sends the automatic-update switch as one boolean', async () => {
+    apiFetch.mockImplementation(async () => json({ ok: true, auto_update: false }));
+    const { result } = renderHook(useApi, { wrapper: ApiProvider });
+    expect(await result.current.setEngineAutoUpdate(false)).toEqual({ ok: true, auto_update: false });
+    expect(apiFetch.mock.calls[0][0]).toBe('/api/dependencies/model-hub-engine/auto-update');
+    expect(apiFetch.mock.calls[0][1].body).toBe('{"enabled":false}');
+  });
+});

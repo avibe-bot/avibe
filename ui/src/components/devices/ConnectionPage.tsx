@@ -6,23 +6,25 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
+import { cleanDomainName } from '@/components/domainName';
 import type { RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkInterface } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { hasDesktopClient } from '@/desktop/bridge';
 import { liveStreamVia, subscribeLiveStreamVia } from '@/lib/liveStreamVia';
 import { nativeDirectAvailable, nativeDirectPathReported } from '@/lib/native';
 import {
-  nativeDirectChoiceAvailable, onNativeDirectChoiceChanged, readNativeDirectChoice, setNativeDirectChoice,
+  nativeDirectChoiceAvailable, nativeDirectChoiceShell, nativeDirectOnlyAvailable, onNativeDirectChoiceChanged,
+  readNativeDirectChoice, setNativeDirectChoice,
   type NativeDirectChoice,
 } from '@/lib/nativeDirectChoice';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
-import { deviceUsing, directCertificateDate, lastConnectionLegs } from '@/lib/remoteAccessDirect';
+import { measureNativeDirect, nativeDirectMeasureAvailable, type DirectMeasurement } from '@/lib/nativeDirectMeasure';
+import { deviceUsing, directCertificateDate } from '@/lib/remoteAccessDirect';
 import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview } from './api';
 import { clearClaimMarker, returnRefusal } from './claimFlow';
 import { ConnectionPageView } from './ConnectionPageView';
-import { RENAME_ENTRY_ENABLED } from './features';
 import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_PATH } from './paths';
 import { renameDevices } from './rules';
 import type {
@@ -58,7 +60,8 @@ const storedValue = (connection: ConnectionState, setting: TunnelSetting): strin
 
 const preferenceOf = (choice: NativeDirectChoice): DirectPreference => ({
   mode: choice.mode,
-  reverted: choice.revertedAt === null ? null : { at: new Date(choice.revertedAt).toISOString(), reason: 'unreachable' },
+  reverted: choice.reverted === null ? null : { at: new Date(choice.reverted.at).toISOString(), reason: 'unreachable', from: choice.reverted.from },
+  pendingRelaunch: choice.pendingRelaunch || undefined,
 });
 
 type Preview = RenamePreview & { name: string };
@@ -86,6 +89,8 @@ export function ConnectionPage() {
   const [refused, setRefused] = useState<SwitchRefusal | undefined>();
   const [sending, setSending] = useState<ConnectionSetting | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  // 「测速」: this device's shell measures; the result lives only in this page.
+  const [measurement, setMeasurement] = useState<{ running?: boolean; result?: DirectMeasurement; error?: 'busy' | 'failed' }>({});
   const [diagnostics, setDiagnostics] = useState<TunnelConnectivityDiagnostics | null>(null);
   const [diagnosing, setDiagnosing] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | undefined>();
@@ -238,18 +243,25 @@ export function ConnectionPage() {
   }, [readAddress, readRebind, readStatus]);
   const flow = useClaimFlow({ kind: 'rebind', locale: i18n.language, onEnd: onRebindEnd, returned });
 
-  // ── the Avibe App's own path and choice ──
+  // ── the shell's own path and choice (the Avibe App, a Desktop window) ──
   const pageVia = useSyncExternalStore(subscribeLiveStreamVia, liveStreamVia, () => null);
   const nativePath = useNativeDirectPath(pageVia);
   const [preference, setPreference] = useState<DirectPreference | undefined>();
   useEffect(() => {
     if (!nativeDirectChoiceAvailable()) return undefined;
     let current = true;
-    void readNativeDirectChoice().then((choice) => { if (current && choice) setPreference(preferenceOf(choice)); });
+    const read = () => { void readNativeDirectChoice().then((choice) => { if (current && choice) setPreference(preferenceOf(choice)); }); };
+    read();
     const stop = onNativeDirectChoiceChanged((choice) => setPreference(preferenceOf(choice)));
+    // A Desktop shell before `directPreference` 2 sends no event when its own menu changes the
+    // choice: coming back to the page reads it again, and so does the page's own refresh.
+    const stopReactivated = onPageReactivated(read);
+    const timer = window.setInterval(() => { if (document.visibilityState === 'visible') read(); }, REFRESH_MS);
     return () => {
       current = false;
       stop();
+      stopReactivated();
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -394,6 +406,14 @@ export function ConnectionPage() {
     })();
   };
 
+  const runMeasure = () => {
+    setMeasurement((current) => ({ result: current.result, running: true }));
+    void measureNativeDirect().then((answer) => {
+      if (!alive.current) return;
+      setMeasurement((current) => (typeof answer === 'string' ? { result: current.result, error: answer } : { result: answer }));
+    });
+  };
+
   const runDiagnostics = () => {
     setDiagnosing(true);
     setDiagnosticsError(undefined);
@@ -423,7 +443,7 @@ export function ConnectionPage() {
     }
     if (step) return step;
     // Where this Avibe's name cannot be changed here there is no dialog, whatever the address says.
-    if (!addressOpen || !address || !address.eligible || !RENAME_ENTRY_ENABLED) return undefined;
+    if (!addressOpen || !address || !address.eligible) return undefined;
     // Reopened: a change that was refused meanwhile is said first.
     return operation?.state === 'failed'
       ? { step: 'form', name: '', refusal: operation.error ?? { code: 'unknown', raw: 'unknown' }, earlier: true }
@@ -431,7 +451,7 @@ export function ConnectionPage() {
   }, [address, addressOpen, operation, step]);
 
   // The rename's own address on an Avibe whose name cannot be changed here is the connection page.
-  const noRename = addressOpen && address !== undefined && address !== null && (!address.eligible || !RENAME_ENTRY_ENABLED) && !operation && !step;
+  const noRename = addressOpen && address !== undefined && address !== null && !address.eligible && !operation && !step;
   useEffect(() => {
     if (noRename) navigate(CONNECTION_PATH, { replace: true, state: location.state });
   }, [location.state, navigate, noRename]);
@@ -606,10 +626,13 @@ export function ConnectionPage() {
       tunnel={tunnel}
       remote={remote}
       via={pageVia === 'direct' ? 'direct' : pageVia === 'other' && remote ? 'tunnel' : null}
-      // The shell's own path: the Avibe App, and a Desktop window of another computer's instance
-      // (which has no choice to offer here yet). A browser has none, and the page says so.
+      // The shell's own path: the Avibe App, and a Desktop window of another computer's instance.
+      // A browser has none, and the page says so.
       path={preference || nativeDirectAvailable() ? deviceUsing(nativePath, pageVia, nativeDirectPathReported()) : undefined}
       preference={preference}
+      choiceShell={nativeDirectChoiceShell() ?? undefined}
+      // 「仅直连和中继」 where the shell takes it and this instance has direct turned on.
+      directOnly={nativeDirectOnlyAvailable() && connection !== null && connection.direct !== 'off' && connection.direct !== 'unknown'}
       refused={refused}
       // A switch the instance has accepted and not written yet waits like one being sent.
       sending={sending ?? connection?.switching?.setting}
@@ -617,9 +640,8 @@ export function ConnectionPage() {
       diagnostics={diagnosticsOpen ? {
         status, diagnostics, running: diagnosing, error: diagnosticsError, now,
         // Direct's own details only while direct is on.
-        direct: status?.direct?.enabled
-          ? { certificate: directCertificateDate(status.direct.certificate_not_after, now), lastConnection: lastConnectionLegs(nativePath) }
-          : undefined,
+        direct: status?.direct?.enabled ? { certificate: directCertificateDate(status.direct.certificate_not_after, now) } : undefined,
+        measure: nativeDirectMeasureAvailable() ? measurement : undefined,
       } : undefined}
       host={owner ? host : undefined}
       // A change still being followed with its dialog closed is said in the domain's row even
@@ -642,12 +664,12 @@ export function ConnectionPage() {
       onOpenDiagnostics={() => setDiagnosticsOpen(true)}
       onCloseDiagnostics={() => setDiagnosticsOpen(false)}
       onRunDiagnostics={runDiagnostics}
-      renameEntry={RENAME_ENTRY_ENABLED}
+      onMeasure={runMeasure}
       onChangeDomain={() => go(CONNECTION_ADDRESS_PATH)}
       onShowCleanup={(retired: RetiredName) => setStep({ step: 'cleanup', retired })}
       onRenameNameChange={(name) => {
         renameRun.current += 1;
-        setStep({ step: 'form', name: name.trim().toLowerCase() });
+        setStep({ step: 'form', name: cleanDomainName(name) });
       }}
       onRenameContinue={renameContinue}
       onRenameConfirm={renameConfirm}

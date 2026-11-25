@@ -37,7 +37,7 @@ async fn failed_refresh_keeps_existing_and_new_public_connects_until_detach() {
         let mut c = Client::new("desk-app.avibe.bot", "one".into()).await.unwrap();
         // Substitute only the public dial target before publishing the route.
         // Use the production accept, authorization, selection and TCP relay.
-        c.listener = Listener::bind_via(c.host.clone(), c.links.subscribe(), |_| {
+        c.listener = Listener::bind_via(c.host.clone(), c.links.subscribe(), c.status.clone(), |_| {
             super::handover_tests::echo_socket()
         })
         .await

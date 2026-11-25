@@ -565,6 +565,42 @@ scenarios:
     backend: shared
     scope: same_service_instance
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_same_service_instance_native_login_conflict_is_localized
+  - id: AUTH-SETUP-212
+    name: A bound computer is reset at the terminal only on a typed yes, then bound only after the account and domain shown are accepted
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account
+    reason: The command as typed, through the real parser, admission, reset, link claim, guarded redemption and publication, read back with `vibe remote status`. Only avibe.bot and the connector are peers; the terminal's answers are scripted.
+    supporting_tests:
+      - tests/test_remote_rebind_cli.py
+      - tests/test_binding_reset.py
+      - tests/test_binding_recovery.py
+  - id: AUTH-SETUP-213
+    name: A bound computer publishes the replacement accepted through its constrained browser return
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_rebind_publishes_replacement
+    reason: Follow the predecessor-bound claim through the initiating browser callback, issuer redemption and durable local publication; read the binding back and verify that Off stays Off.
+  - id: AUTH-SETUP-214
+    name: A qualifying constrained refusal leaves the old binding intact until the initiating browser confirms reset
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_refusal_then_confirmed_reset
+    reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, and read back unpaired without redeeming a new key.
+  - id: AUTH-SETUP-215
+    name: Cancelled on avibe.bot, the initiating browser comes back to a declined bind-again attempt
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cancel_at_avibe_bot_returns_the_initiating_browser_to_a_declined_rebind
+    reason: avibe.bot declines and sends the initiating browser back with the same state proof and outcome=declined; the claim reads declined, nothing more is sent or redeemed, and the existing binding and its Off choice are unchanged.
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
@@ -1209,7 +1245,12 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
+    reason: >-
+      Native password and typed-code adapters are separate: only the hosted
+      first-party endpoint verifies a typed code. The runtime-host fixtures
+      exercise discovery-only recovery after an accepted code and reject a
+      different subject after MFA even when the email matches. Live issuer,
+      private claim-owner integration, and installed acceptance remain gates.
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success
@@ -1513,6 +1554,46 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_device_account_signout_from_verified_exchange
     reason: Two signed exchanges, real callbacks, local sign-out, pending fence and receipt; fake issuer wire response, not evidence of provider deletion.
+  - id: AUTH-SETUP-917
+    name: The same browser signing in again keeps its one device row and signs its old session out
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_the_same_browser_signing_in_again_keeps_one_device_row
+    supporting_tests:
+      - tests/test_device_relogin.py::test_signing_in_again_keeps_one_row_and_signs_the_old_session_out
+      - tests/test_device_relogin.py::test_another_accounts_cookie_is_left_alone
+      - tests/test_device_relogin.py::test_a_new_session_that_cannot_be_issued_replaces_nothing
+      - tests/test_device_relogin.py::test_signing_the_device_out_while_the_login_waits
+      - tests/test_device_relogin.py::test_two_callbacks_with_the_same_old_cookie_replace_it_once
+    reason: >-
+      Real handshake, signed id_token, callback, registry and routes; only the
+      issuer's token endpoint and keys are fixtures. Only the session the
+      callback request's own cookie proves (same instance, current, same
+      account) is replaced; another browser of the same account keeps its row.
+      Push, Health, settings and lock-order cases are in tests/test_device_relogin.py.
+  - id: AUTH-SETUP-918
+    name: An owner sign-out of a session with no account reference is finished at that browser's next owner sign-in
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_an_owner_sign_out_without_a_reference_is_finished_at_the_next_owner_sign_in
+    supporting_tests:
+      - tests/test_owner_signout_finish.py::test_the_owners_signed_out_browser_coming_back_is_refused_once_and_its_sign_in_ended
+      - tests/test_owner_signout_finish.py::test_after_that_the_same_cookie_is_an_ordinary_sign_in
+      - tests/test_owner_signout_finish.py::test_a_member_coming_back_with_a_cookie_the_owner_signed_out_signs_in_as_today
+      - tests/test_owner_signout_finish.py::test_two_callbacks_with_the_same_cookie_use_the_mark_once
+    reason: >-
+      Real handshake, signed id_token, callback, registry, sign-out route and
+      account sign-out worker; the issuer's token endpoint, keys and revoke
+      endpoint are fixtures. A session signed in before references were
+      recorded (everything from 3.2.7) is signed out by its owner; when that
+      browser comes back and avibe.bot signs the owner in silently, the
+      instance refuses once, clears the old cookie and queues the sign-out of
+      that exact account session. The mark is used once; a later sign-in with
+      a new account session is ordinary.
   - id: AUTH-SETUP-916
     name: Setup offers remote access once, after completion, and neither skipping nor using it re-enters setup
     status: covered

@@ -3,10 +3,10 @@
 // reached (set once), the devices (one row each, a detail with its functions and one way out), and
 // recent activity. No pairing key anywhere: remote access uses the sign-in at avibe.bot.
 // A view: props only. `DevicesPage` reads the APIs, maps them onto `./types`, and passes handlers.
-import type { ReactNode } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import {
-  AlarmClock, Bell, Check, ChevronRight, Clock, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LoaderCircle,
-  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone, X,
+  AlarmClock, Bell, ChevronRight, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LoaderCircle,
+  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -21,18 +21,17 @@ import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
-import { ClaimFields } from './claim';
 import { OpenNewAddress } from './OpenNewAddress';
-import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
+import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, signedInText, timeParts, unrecognized, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
-import { RENAME_ENTRY_ENABLED, SUPPORT_EMAIL } from './features';
+import { SUPPORT_EMAIL } from '@/lib/support';
 import { claimProblemText } from './texts';
 import {
-  RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
+  RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, activityText, functionControl, instanceUrl, lockedOutCount,
   newestFirst, othersSignedIn, remoteDevices, signOutNeedsConfirm,
 } from './rules';
 import type {
-  AccountResult, AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, Reach, SignOutNotice,
+  AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, ProxyAccess, Reach,
   SignedOutDevice, UnlinkedHealth,
 } from './types';
 
@@ -49,8 +48,6 @@ export type DevicesPageActions = {
   onTurnOn?: () => void;
   /** Cancel the open claim: this page's own, or by its id the one another tab of this computer left. */
   onCancelClaim?: (claimId?: string) => void;
-  onSignIn?: () => void;
-  onNameChange?: (name: string) => void;
   onRemoteAccessChange?: (on: boolean) => void;
   onRetry?: () => void;
   onCopyAddress?: () => void;
@@ -59,6 +56,8 @@ export type DevicesPageActions = {
   onOptimizeRoute?: () => void;
   /** To the bind-again row of the connection page. */
   onOpenRebind?: () => void;
+  /** 「只允许这台电脑」 under the computer's row: asked first when pressed from another device. */
+  onThisComputerOnly?: () => void;
   onOpenDevice?: (id: string) => void;
   onCloseDevice?: () => void;
   onFunctionChange?: (deviceId: string, kind: FunctionKind, on: boolean) => void;
@@ -105,7 +104,6 @@ export type DevicesPageViewProps = DevicesPageActions & {
   /** Devices signed out lately, each with what avibe.bot did about its account sign-in. */
   signedOut?: SignedOutDevice[];
   /** The answer of a sign-out just made on this page. */
-  signOutNotice?: SignOutNotice;
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
   /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
@@ -114,7 +112,9 @@ export type DevicesPageViewProps = DevicesPageActions & {
   /** Something this page asked for did not happen, or its answer never arrived. `offFromAfar`:
    *  remote access was turned off from this remote device and no answer came back, which is what
    *  turning it off does. */
-  problem?: 'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar';
+  problem?: 'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar' | 'restrictedFromAfar';
+  /** The Owner only: origins an operator's declared reverse proxy lets in without a sign-in. */
+  proxyAccess?: ProxyAccess;
   /** The device whose detail is open. */
   detail?: string;
   /** A way out was pressed and something would be lost: the confirmation. */
@@ -136,6 +136,7 @@ const problemKeys = {
   lost: 'devices.problem.lost',
   offFromAfar: 'devices.problem.offFromAfar',
   closedFromAfar: 'devices.problem.closedFromAfar',
+  restrictedFromAfar: 'devices.problem.restrictedFromAfar',
 } as const satisfies Record<NonNullable<DevicesPageViewProps['problem']>, TranslationKey>;
 
 const healthSyncedKeys = {
@@ -223,21 +224,11 @@ function ReachCard({ reach, operate = false, optimize, terminal = true, actions 
   if (reach.state === 'off') {
     return (
       <SettingsPanel title={t('devices.reach.title')} description={t('devices.reach.lead')} actions={offBadge}>
-        {reach.account !== null ? (
-          <>
-            <ClaimFields account={reach.account} name={reach.name} nameState={reach.nameState} onNameChange={actions.onNameChange} />
-            <div className="border-t border-border px-5 py-4">
-              <Button variant="brand" disabled={reach.nameState === 'taken' || !reach.name} onClick={actions.onTurnOn}>
-                {t('devices.reach.turnOn')}
-              </Button>
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center">
-            <Button variant="brand" onClick={actions.onSignIn}>{t('devices.reach.signInAndTurnOn')}</Button>
-            <p className="text-[12px] leading-relaxed text-muted">{t('devices.reach.signInHint')}</p>
-          </div>
-        )}
+        {/* ui/design: desktop/bind-home/devices-off. The dialog is the shell's own (sign-in, name). */}
+        <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center">
+          <Button variant="brand" disabled={reach.busy} onClick={actions.onTurnOn}>{t('devices.reach.turnOn')}</Button>
+          <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.reach.desktopHint')} /></p>
+        </div>
       </SettingsPanel>
     );
   }
@@ -341,8 +332,12 @@ function DeviceRow({ device, onOpen }: { device: Device; onOpen?: (id: string) =
   const Icon = deviceIcon[device.kind];
   const offered = device.functions.filter(functionOn).map((each) => t(functionKeys[each.kind]));
   // A device with no name of its own is already named by its kind: the line does not say it twice.
-  const client = device.name === null && !device.client.version && !device.client.platform ? null : clientText(t, device.client);
-  const second = joinParts(t, [device.person, client, device.pushOnly ? t('devices.list.pushOnly') : offered.join(t('devices.listSeparator'))]);
+  // An unknown kind ("设备") says nothing a name does not.
+  const bare = !device.client.version && !device.client.platform;
+  const client = bare && (device.name === null || device.client.kind === 'other') ? null : clientText(t, device.client);
+  // Rows with no name are told apart by when they signed in.
+  const signedIn = unrecognized(device) && device.signedInAt ? signedInText(t, device.signedInAt, i18n.language) : null;
+  const second = joinParts(t, [device.person, client, signedIn, device.pushOnly ? t('devices.list.pushOnly') : offered.join(t('devices.listSeparator'))]);
   // Where it is now: the path of a connection observed right now, or when it was last here. The
   // computer the page is open on says nothing: the page being open is the fact.
   const where = device.self && !device.online?.path ? null : device.online ? (
@@ -582,73 +577,29 @@ function UnlinkedHealthPanel({ items, onDisconnect }: { items: UnlinkedHealth[];
   );
 }
 
-const accountIcon = {
-  queued: Clock, retrying: LoaderCircle, accepted: Check, localOnly: LogOut, sharedSignIn: LogOut, keeperUnknown: LogOut,
-  refusedCredential: X, refused: X, unconfirmed: Clock, unknown: Clock,
-} as const satisfies Record<AccountResult, unknown>;
-const accountTone = (result: AccountResult) => (
-  result === 'accepted' ? 'text-mint-ink'
-    : result === 'refused' || result === 'refusedCredential' || result === 'unconfirmed' ? 'text-gold-ink' : 'text-muted'
-);
-/** The result that most needs the person's eye leads the row's icon. */
-const leading = (results: AccountResult[]): AccountResult => (
-  (['refusedCredential', 'refused', 'unconfirmed', 'localOnly', 'keeperUnknown', 'sharedSignIn', 'retrying', 'queued', 'unknown', 'accepted'] as const)
-    .find((each) => results.includes(each)) ?? 'unknown'
-);
-
-/** Devices signed out lately. Each is out of this Avibe; the lines say what avibe.bot did about
- *  the account sign-in, and never call an accepted request an ended sign-in. */
-function SignedOutPanel({ rows, rebindOffered }: { rows: SignedOutDevice[]; rebindOffered: boolean }) {
+/** Devices signed out lately: their names, and nothing more (owner, 2026-11-25). */
+function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
   const { t } = useTranslation();
   return (
     <SettingsPanel title={t('devices.signedOut.title')}>
-      {rows.map((row) => {
-        const lead = leading(row.results);
-        const Icon = accountIcon[lead];
-        return (
-          <div key={row.id} className="flex items-start gap-3 border-b border-border px-5 py-3 last:border-b-0">
-            <Icon className={`mt-0.5 size-4 shrink-0 ${accountTone(lead)}`} />
-            <div className="min-w-0 flex-1">
-              <div className="flex flex-wrap items-baseline gap-x-2">
-                <span className="text-[13px] font-medium text-foreground">{row.device ?? t('devices.signedOut.unnamed')}</span>
-                <span className="text-[11px] text-muted">{t('devices.signedOut.here')}</span>
-              </div>
-              {accountResultTexts(t, row, rebindOffered).map((line) => (
-                <div key={line} className="mt-0.5 text-[12px] leading-relaxed text-foreground"><KeptTail text={line} /></div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      {rows.map((row) => (
+        <div key={row.id} className="flex items-center gap-3 border-b border-border px-5 py-3 last:border-b-0">
+          <LogOut className="size-4 shrink-0 text-muted" />
+          <div className="min-w-0 flex-1 text-[13px] font-medium text-foreground">{row.device ?? t('devices.kindName.unrecognized')}</div>
+        </div>
+      ))}
     </SettingsPanel>
-  );
-}
-
-/** Right after a sign-out: what avibe.bot was asked or not asked, and Health only here, because
- *  only this answer says anything about it. */
-function SignOutNoticeCard({ notice, rebindOffered, onDismiss }: { notice: SignOutNotice; rebindOffered: boolean; onDismiss?: () => void }) {
-  const { t } = useTranslation();
-  return (
-    <Notice tone="plain" action={<Button variant="ghost" size="xs" onClick={onDismiss}>{t('devices.notice.dismiss')}</Button>}>
-      <div className="font-medium">
-        {notice.device ? t('devices.signedOut.justNow', { device: notice.device }) : t('devices.signedOut.justNowMany')}
-      </div>
-      {accountResultTexts(t, notice, rebindOffered).map((line) => <div key={line}><KeptTail text={line} /></div>)}
-      {notice.healthCleanupPending && !notice.withoutHealth && (
-        <div className="text-muted"><KeptTail text={t(notice.hadHealth ? 'devices.signedOut.healthPending' : 'devices.signedOut.healthPendingIfAny')} /></div>
-      )}
-    </Notice>
   );
 }
 
 export function DevicesPageView({
   reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
-  signOutNotice, unrecognizedChange, rebindOffered = true, problem, detail, confirm, busy, view = 'page', add, ...actions
+  unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
-  // The notice about an address changed elsewhere sends the owner to 「更改域名」 and binding again
-  // only where both exist in this release.
-  const outsideWayOut = RENAME_ENTRY_ENABLED && rebindOffered;
+  // The notice about an address changed elsewhere sends the owner to binding again (and then
+  // 「更改域名」) only where this instance has binding again.
+  const outsideWayOut = rebindOffered;
   // Each device says which list it belongs to; nothing is inferred from an absent account.
   const mine = devices.filter((each) => each.group === 'mine');
   const others = devices.filter((each) => each.group === 'others');
@@ -747,10 +698,11 @@ export function DevicesPageView({
         </Notice>
       ))}
       {/* After turning remote access off from afar, not reading its state is the expected result:
-          the notice below says so, and the card does not add "cannot be read" to it. */}
-      {owner && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
+          the notice below says so, and the card does not add "cannot be read" to it. After this
+          device shut itself out with 「只允许这台电脑」 nothing here can be asked of the instance any
+          more, whatever was last read: the card and its 「开启远程访问」 are not offered. */}
+      {owner && problem !== 'restrictedFromAfar' && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
-      {signOutNotice && <SignOutNoticeCard notice={signOutNotice} rebindOffered={rebindOffered} onDismiss={actions.onDismissNotice} />}
       {problem && (
         <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('devices.notice.dismiss')}</Button>}>
           <KeptTail text={t(problemKeys[problem])} />
@@ -763,7 +715,29 @@ export function DevicesPageView({
           ? <Button variant="text" size="compact" onClick={actions.onAddDevice}><Plus />{t('devices.list.add')}</Button>
           : undefined}
       >
-        {mine.map((each) => <DeviceRow key={each.id} device={each} onOpen={actions.onOpenDevice} />)}
+        {mine.map((each) => (
+          <Fragment key={each.id}>
+            <DeviceRow device={each} onOpen={actions.onOpenDevice} />
+            {/* Not bound, and the instance says other devices on its network get in without signing
+                in: one line under the computer's own row, with the way back to this computer only. */}
+            {owner && each.kind === 'host' && each.networkOpen === true && problem !== 'restrictedFromAfar' && (
+              <div className="flex flex-col gap-2.5 border-b border-border px-5 py-3 last:border-b-0 md:flex-row md:items-center md:justify-between md:gap-4">
+                <p className="text-[12px] leading-relaxed text-foreground"><KeptTail text={t('devices.networkOpen.body')} /></p>
+                <Button variant="secondary" size="xs" className="shrink-0 self-start md:self-auto" disabled={busy} onClick={actions.onThisComputerOnly}>
+                  {t('devices.networkOpen.action')}
+                </Button>
+              </div>
+            )}
+            {/* The other position, said on the computer itself: the fact, and nothing to press. The
+                one way to let other devices in that this page offers is remote access; whoever
+                opened the Avibe to its network changes that where they did, in Settings · Service. */}
+            {owner && each.kind === 'host' && each.self && each.networkOpen === false && (
+              <p className="border-b border-border px-5 py-3 text-[12px] leading-relaxed text-muted last:border-b-0">
+                <KeptTail text={t('devices.networkOpen.closedBody')} />
+              </p>
+            )}
+          </Fragment>
+        ))}
         {mine.length === 0 && (list === 'unknown' ? (
           <div role="alert" className="flex flex-col gap-3 px-5 py-3 md:flex-row md:items-center md:justify-between">
             <p className="text-[12px] leading-relaxed text-foreground">{t('devices.list.unknown')}</p>
@@ -779,6 +753,15 @@ export function DevicesPageView({
           <div className={mine.length > 0 ? 'border-t border-border' : undefined}>
             <div className="px-5 pb-2 pt-4 text-[13px] font-semibold text-foreground">{t('devices.list.add')}</div>
             <AddDevice inline kind={add ?? 'iphone'} host={reach.host} account={account} actions={actions} />
+          </div>
+        )}
+        {/* Who else can get in, where the card asks about devices nobody recognises. Plain: the
+            operator set this up on purpose. Only the range sentence is a warning. */}
+        {owner && proxyAccess && (
+          <div className="border-b border-border px-5 py-3 text-[12px] leading-relaxed text-foreground last:border-b-0">
+            <p><KeptTail text={t('devices.proxyAccess.body', { hosts: proxyAccess.origins.join(t('devices.listSeparator')) })} /></p>
+            {proxyAccess.peerScope === 'range' && <p className="mt-1 text-gold-ink"><KeptTail text={t('devices.proxyAccess.range')} /></p>}
+            <p className="mt-1 text-[11px] text-muted"><KeptTail text={t('devices.proxyAccess.where')} /></p>
           </div>
         )}
         {bulkRow && (
@@ -802,7 +785,7 @@ export function DevicesPageView({
       )}
 
       {unlinkedHealth.length > 0 && <UnlinkedHealthPanel items={unlinkedHealth} onDisconnect={actions.onDisconnectHealth} />}
-      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} rebindOffered={rebindOffered} />}
+      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} />}
 
       {owner && latest.length > 0 && (
         <SettingsPanel
@@ -829,6 +812,9 @@ export function DevicesPageView({
       )}
       {confirm === 'turn-off' && (
         <Confirm title={t('devices.confirm.turnOffTitle')} body={turnOffBody} action={t('devices.confirm.turnOffAction')} {...confirmProps} />
+      )}
+      {confirm === 'this-computer-only' && (
+        <Confirm title={t('devices.networkOpen.confirmTitle')} body={t('devices.networkOpen.confirmBody')} action={t('devices.networkOpen.action')} {...confirmProps} />
       )}
       {confirm === 'remove-others' && (
         <Confirm

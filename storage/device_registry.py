@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 
 from sqlalchemy import Integer, String, cast, func, literal, or_, select
 from sqlalchemy.dialects.sqlite import insert
@@ -22,10 +23,50 @@ def _cutoff_key(binding, subject):
     return "cutoff:" + hashlib.sha256(json.dumps([binding, subject]).encode()).hexdigest()
 
 
+def binding_retired(conn, binding):
+    return bool(binding and conn.scalar(select(state_meta.c.key).where(
+        state_meta.c.key == 'remote_access.retired_registry.v1:' + binding)))
+
+
+def retire_binding(binding, *, now):
+    """Before config publication: freeze the old registry and stop its remote deliveries.
+
+    No account sign-out and no Health unpair. Snapshot unattributed remote endpoints
+    in this same write transaction, while the new binding cannot yet register.
+    A replay after publication must never select endpoints a second time.
+    """
+    from storage.models import device_session_extensions as ext, web_push_subscriptions as push
+    from storage.models import live_activity_trackings as tracks
+    from storage import web_push_service
+
+    with get_cached_sqlite_engine().begin() as conn:
+        conn.exec_driver_sql('BEGIN IMMEDIATE')
+        if binding_retired(conn, binding):
+            return
+        conn.execute(insert(state_meta).values(key='remote_access.retired_registry.v1:' + binding,
+                                               value_json='true', updated_at=str(now)))
+        web_push_service.record_binding_retirement(conn, binding, now)
+        # A rotated phone token may revive a token_gone row, but never across
+        # retirement, even if the phone enrolls the same endpoint again.
+        revivable = (tracks.c.status == 'stopped') & (tracks.c.stop_reason == 'token_gone')
+        conn.execute(tracks.update().where(tracks.c.owner_user_key.like('remote:%'),
+                                           (tracks.c.status == 'tracking') | revivable)
+                     .values(status='stopped', stop_reason='registration_unavailable', confirmed_at=now,
+                             pending_state=None, updated_at=now))
+        old_sids = select(sessions.c.session_id).where(sessions.c.binding == binding)
+        for endpoint, user_key in conn.execute(select(push.c.endpoint, push.c.user_key).where(
+                push.c.user_key.like('remote:%'))).all():
+            web_push_service.disable_subscription(conn, endpoint=endpoint, user_key=user_key)
+        conn.execute(links.delete().where(links.c.binding == binding))
+        conn.execute(account_refs.delete().where(account_refs.c.cookie_binding == binding))
+        conn.execute(ext.delete().where(ext.c.session_id.in_(old_sids)))
+        conn.execute(sessions.delete().where(sessions.c.binding == binding))
+
+
 def fenced(conn, binding, subject, sid, signed_in, now):
     # Registered sessions at the cutoff have individual tombstones. A fresh
     # login after commit is allowed even in the very same wall-clock second.
-    return (
+    return binding_retired(conn, binding) or (
         conn.execute(
             select(deadlines.c.key)
             .where(
@@ -51,6 +92,43 @@ def _deadline(conn, key, now, expiry):
             },
         )
     )
+
+
+def _prune_owner_marks(conn, now):
+    """One bounded page of owner sign-out marks, walked by a durable cursor like the tombstones:
+    at most 32 candidates are read each time; those past their time, or whose tombstone is gone
+    (one an older version pruned alone), are removed."""
+    from storage.device_account_signout import OWNER_SIGNED_OUT_PREFIX
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+
+    cursor_key = "remote_access.owner_mark_gc_cursor.v1"
+    cursor = conn.scalar(select(state_meta.c.value_json).where(state_meta.c.key == cursor_key))
+    lower = json.loads(cursor) if cursor else OWNER_SIGNED_OUT_PREFIX
+    end = OWNER_SIGNED_OUT_PREFIX[:-1] + chr(ord(OWNER_SIGNED_OUT_PREFIX[-1]) + 1)
+    page = conn.execute(
+        select(state_meta.c.key, state_meta.c.value_json)
+        .where(state_meta.c.key > lower, state_meta.c.key >= OWNER_SIGNED_OUT_PREFIX, state_meta.c.key < end)
+        .order_by(state_meta.c.key)
+        .limit(32)
+    ).all()
+    stones = {REVOKED_BROWSER_SESSION_KEY_PREFIX + key[len(OWNER_SIGNED_OUT_PREFIX):]: key for key, _ in page}
+    present = set(conn.scalars(select(state_meta.c.key).where(state_meta.c.key.in_(list(stones))))) if stones else set()
+    gone = []
+    for key, raw in page:
+        try:
+            value = json.loads(raw)
+        except (ValueError, TypeError):
+            value = None
+        if type(value) is not int or value <= now or REVOKED_BROWSER_SESSION_KEY_PREFIX + key[len(OWNER_SIGNED_OUT_PREFIX):] not in present:
+            gone.append(key)
+    if gone:
+        conn.execute(state_meta.delete().where(state_meta.c.key.in_(gone)))
+    if len(page) == 32:
+        marker = insert(state_meta).values(key=cursor_key, value_json=json.dumps(page[-1].key), updated_at=str(now))
+        conn.execute(marker.on_conflict_do_update(
+            index_elements=["key"], set_={"value_json": marker.excluded.value_json, "updated_at": marker.excluded.updated_at}))
+    elif cursor:
+        conn.execute(state_meta.delete().where(state_meta.c.key == cursor_key))
 
 
 def prune(conn, now):
@@ -87,6 +165,7 @@ def prune(conn, now):
             expired.append(key)
     if expired:
         conn.execute(state_meta.delete().where(state_meta.c.key.in_(expired)))
+    _prune_owner_marks(conn, now)
     if len(page) == 32:
         marker = insert(state_meta).values(key=cursor_key, value_json=json.dumps(page[-1].key), updated_at=str(now))
         conn.execute(
@@ -108,8 +187,110 @@ def prune(conn, now):
     conn.execute(sessions.delete().where(sessions.c.session_id.in_(expired_sessions)))
 
 
+class SessionNotRegistered(RuntimeError):
+    """A fresh session could not be recorded under its own new id: it must not be issued."""
+
+
+# What `record_session` returns when, instead of recording a session, it finished an owner's
+# sign-out of the browser's old session.
+ENDED = "ended"
+
+
+def _tombstoned(conn, sid, now):
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+
+    raw = conn.scalar(select(state_meta.c.value_json).where(state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + sid))
+    if raw is None:
+        return False
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return True  # fail closed, as the request check does
+    return type(value) is not int or value > now
+
+
+def _tombstone(conn, sid, expiry, now):
+    """Write or raise a session's tombstone; never shorten one."""
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+
+    stmt = insert(state_meta).values(key=REVOKED_BROWSER_SESSION_KEY_PREFIX + sid, value_json=str(expiry), updated_at=str(now))
+    conn.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["key"],
+            set_={"value_json": str(expiry), "updated_at": str(now)},
+            where=cast(state_meta.c.value_json, Integer) < expiry,
+        )
+    )
+
+
+# What a new session takes over from the session of the same browser it replaces. Everything
+# else (role, email, sign-in time, lifetime, account reference) is this login's own.
+_DEVICE_FIELDS = ("device_id", "identity_source", "push_id", "described_at", "health_alias_hash", "schedule_alias")
+_REPORTED_FIELDS = ("kind", "display_name", "app_version", "system_version")
+
+
+def _replaced(conn, binding, subject, previous, now):
+    """The live row of the session this browser proved it holds, or None. Under the write lock."""
+    if not previous or previous["binding"] != binding or previous["subject"] != subject:
+        return None
+    sid = previous["sid"]
+    # The cookie's own deadline, as the request check computes it, not the row's cookie_exp (which
+    # another, renewed copy of the cookie may have raised).
+    if previous["valid_until"] <= now or _tombstoned(conn, sid, now):
+        return None
+    row = conn.execute(select(sessions).where(
+        sessions.c.session_id == sid, sessions.c.binding == binding, sessions.c.subject == subject,
+        sessions.c.cookie_exp > now, sessions.c.expires_at > now,
+    )).mappings().first()
+    if row is None or fenced(conn, binding, subject, sid, previous["auth_time"], now):
+        return None
+    return row
+
+
+def _hand_over(conn, binding, subject, old, new_sid, identity, role, cap, now):
+    """Session-level sign-out of `old`, keeping its device row for `new_sid`. No push stop, no
+    Health unpair, no settings change, no account sign-out, no signedOut activity."""
+    from storage.models import device_session_extensions as ext, web_push_subscriptions as push
+
+    old_sid, device = old["session_id"], old["device_id"]
+    # Push: only the old session's own links whose subscription still proves this person's
+    # ownership. Never another session's, never an unproven one, no endpoint or state change.
+    proven = select(push.c.id).where(
+        push.c.id == links.c.subscription_id,
+        push.c.user_key == literal("remote:") + links.c.subject,
+        push.c.device_id.is_not_distinct_from(links.c.push_id),
+    ).exists()
+    conn.execute(links.update().where(
+        links.c.session_id == old_sid, links.c.binding == binding, links.c.subject == subject,
+        links.c.device_id == device, proven,
+    ).values(session_id=new_sid, email=identity["email"], login_role=role))
+    # Health ticket rate counters move; the schedule principal (old role and groups) does not.
+    counters = conn.execute(select(ext.c.ticket_window, ext.c.ticket_attempts)
+                            .where(ext.c.session_id == old_sid)).first()
+    if counters and (counters.ticket_window is not None or counters.ticket_attempts is not None):
+        conn.execute(insert(ext).values(session_id=new_sid, ticket_window=counters.ticket_window,
+                                        ticket_attempts=counters.ticket_attempts))
+    # Unused pairing codes stay with the session that issued them and are cleared with it.
+    pending = device_health_registry.queue_disconnect(conn, binding, subject, device, sids=[old_sid],
+                                                      remove_pairing=False, codes_only=True)
+    _tombstone(conn, old_sid, cap, now)
+    conn.execute(account_refs.delete().where(account_refs.c.sid == old_sid))
+    conn.execute(ext.delete().where(ext.c.session_id == old_sid))
+    conn.execute(sessions.delete().where(sessions.c.session_id == old_sid))
+    return pending
+
+
 def record_session(binding, identity, role, metadata, *, expires_at, now, fresh, epoch=None, reference=None,
-                   account_enroll_before=None):
+                   account_enroll_before=None, previous=None, owner_signed_out=None):
+    """Record a session. A fresh one may replace `previous`, the same browser's own live session
+    (proved by its cookie on this very request), and returns ``(old sid, Health cleanup)`` then.
+
+    `owner_signed_out` is the signed-out session this request's own cookie names (its ``sid`` and
+    the cookie's own ``valid_until``). If
+    the owner's "sign out this device" ended it and that has not been finished yet, and this
+    sign-in is the owner's (``reference`` is only ever the owner's), no session is recorded: the
+    mark is used up, avibe.bot's sign-out of this exact account session is queued, and ``ENDED``
+    is returned. The old tombstone stays as it is."""
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
     sid, subject = identity["browser_session_id"], identity["sub"]
@@ -118,18 +299,49 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
     if not fresh:
         with engine.connect() as conn:
             if conn.execute(select(sessions.c.session_id).where(sessions.c.session_id == sid)).first():
-                return
+                return None
+    replaced = None
     with engine.begin() as conn:
         conn.exec_driver_sql("BEGIN IMMEDIATE")
+        if binding_retired(conn, binding):
+            raise PermissionError('session_revoked')
         if not fresh and (
             conn.execute(
                 select(state_meta.c.key).where(state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + sid)
             ).first()
             or fenced(conn, binding, subject, sid, signed_in, now)
         ):
-            return
+            return None
+        # The clock read after the lock: a deadline crossed while waiting counts.
+        locked_now = int(time.time())
+        # A new session has an id of its own: never the one it replaces, never a signed-out one.
+        if fresh and ((previous and previous["sid"] == sid) or _tombstoned(conn, sid, locked_now)):
+            raise SessionNotRegistered('session_not_registered')
+        if fresh and owner_signed_out and reference and epoch and owner_signed_out["valid_until"] > locked_now:
+            from storage.device_account_signout import (
+                AccountSessionSignedOut, OWNER_SIGNED_OUT_PREFIX, enrolled_elsewhere, revoke_late)
+            # The existing refusal comes first, unchanged.
+            if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
+                raise AccountSessionSignedOut('account_session_signed_out')
+            # Used once: a sign-in that comes back with the same old cookie later is an ordinary one.
+            # Only a mark still in force, by the clock read after the lock. While a live, not
+            # signed-out session here is enrolled with this same account session (the device a
+            # sign-out kept, for one), nothing is queued and this sign-in is ordinary.
+            if not enrolled_elsewhere(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now) \
+                    and conn.execute(state_meta.delete().where(
+                    state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + owner_signed_out["sid"],
+                    cast(state_meta.c.value_json, Integer) > locked_now)).rowcount == 1:
+                revoke_late(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now)
+                return ENDED
+        old = _replaced(conn, binding, subject, previous, locked_now) if fresh else None
         source = "session"
         key = device_key(binding, subject, source, sid)
+        device = dict(device_id=key, identity_source=source)
+        reported = {k: metadata.get(k) for k in _REPORTED_FIELDS}
+        if old is not None:
+            device = {k: old[k] for k in _DEVICE_FIELDS}
+            if old["identity_source"] == "installation":
+                reported = {k: old[k] for k in _REPORTED_FIELDS}
         prune(conn, now)
         written = conn.execute(
             insert(sessions)
@@ -139,24 +351,30 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
                 subject=subject,
                 email=identity["email"],
                 login_role=role,
-                device_id=key,
-                identity_source=source,
                 signed_in_at=signed_in,
                 last_active_at=now,
                 cookie_exp=identity["exp"],
                 expires_at=expires_at,
-                **{k: metadata.get(k) for k in ("kind", "display_name", "app_version", "system_version")},
+                **device,
+                **reported,
             )
             .on_conflict_do_nothing(index_elements=["session_id"])
         )
+        if fresh and written.rowcount != 1:
+            # Not recorded under its own id: issuing it would hand out an unlisted session.
+            raise SessionNotRegistered('session_not_registered')
         if fresh and reference:
             from storage.device_account_signout import AccountSessionSignedOut, enroll
-            import time
             if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
                 raise AccountSessionSignedOut('account_session_signed_out')
             enroll(conn, sid=sid, subject=subject, binding=binding, epoch=epoch, reference=reference, expires_at=expires_at)
         if fresh and written.rowcount:
-            device_activity.record(conn,kind='signedIn',binding=binding,subject=subject,device=key,now=now)
+            device_activity.record(conn, kind='signedIn', binding=binding, subject=subject,
+                                   device=device["device_id"], now=now)
+        if old is not None:
+            replaced = old["session_id"], _hand_over(conn, binding, subject, old, sid, identity, role,
+                                                     previous["cap"], now)
+    return replaced
 
 
 def describe_self(binding, subject, sid, report, now):
@@ -319,20 +537,7 @@ def _end_functions(conn,binding,subject,device,now,sids,keep,actor,actor_subject
 
 
 def revoke_sid(conn, sid, expiry, now):
-    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
-
-    key = REVOKED_BROWSER_SESSION_KEY_PREFIX + sid
-    stmt = insert(state_meta).values(key=key, value_json=str(expiry), updated_at=str(now))
-    conn.execute(
-        stmt.on_conflict_do_update(
-            index_elements=["key"],
-            set_={
-                "value_json": str(expiry),
-                "updated_at": str(now),
-            },
-            where=cast(state_meta.c.value_json, Integer) < expiry,
-        )
-    )
+    _tombstone(conn, sid, expiry, now)
     pending = []
     row = conn.execute(select(sessions).where(sessions.c.session_id==sid)).mappings().first()
     if row:
@@ -351,7 +556,7 @@ def revoke_sid(conn, sid, expiry, now):
 
 
 def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False, receipt_scope=None,
-             prepare=None):
+             prepare=None, by_owner=False):
     """One atomic selection + revocation; None device means the caller's bulk scope.
 
     ``prepare(conn)`` runs first inside the same transaction, while the rows this
@@ -446,6 +651,17 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_
                     where=cast(state_meta.c.value_json, Integer) < cast(tombstones.excluded.value_json, Integer),
                 )
             )
+            if by_owner:
+                # The owner's own "sign out this device" of a session with no account reference, whose
+                # avibe.bot sign-in it could not end: one later owner sign-in from this browser may
+                # finish it (`record_session`). Lives as long as the tombstone.
+                from storage.device_account_signout import OWNER_SIGNED_OUT_PREFIX
+                mark = literal(OWNER_SIGNED_OUT_PREFIX) + sessions.c.session_id
+                unreferenced = ~select(account_refs.c.sid).where(account_refs.c.sid == sessions.c.session_id).exists()
+                conn.execute(insert(state_meta).from_select(
+                    ["key", "value_json", "updated_at"],
+                    stmt.with_only_columns(mark, cast(expiry, String), literal(str(now))).where(unreferenced),
+                ).on_conflict_do_nothing(index_elements=["key"]))
             from storage.models import device_session_extensions as ext
             selected_ids = stmt.with_only_columns(sessions.c.session_id)
             conn.execute(account_refs.delete().where(account_refs.c.sid.in_(selected_ids)))

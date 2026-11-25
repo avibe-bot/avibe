@@ -169,30 +169,28 @@ def reuse_ui(repository: str, run_id: str, attempt: int, sha: str, destination: 
     return True
 
 
-def wait_build(repository: str, run_id: str, attempt: int, sha: str, destination: Path, *, timeout: float = 1800) -> None:
-    deadline = time.monotonic() + timeout
-    while True:
+def fetch_build(repository: str, run_id: str, attempt: int, sha: str, destination: Path) -> None:
+    # The scheduler has already observed build-assets complete. Retry transient
+    # reads only; a missing/unfinished/inherited producer is not a reason to wait.
+    for retry in range(3):
         try:
             run = check_run(repository, run_id, attempt, sha, ".github/workflows/release_ai.yml", completed=False)
             job = successful_job(repository, run_id, attempt, "build-assets", run_started_at=run.get("run_started_at"))
+            break
         except (subprocess.SubprocessError, json.JSONDecodeError):
-            # Transport failures mean unknown, never success. Retry polling
-            # within the same budget; identity/failure verdicts still fail now.
-            print("Actions status temporarily unavailable; waiting for proof.", flush=True)
-            job = None
-        if job:
-            artifact = artifact_for_job(repository, run_id, sha, f"release-dist-{attempt}", job)
-            download_verified(repository, artifact, destination)
-            check_run(repository, run_id, attempt, sha, ".github/workflows/release_ai.yml", completed=False)
-            return
-        if time.monotonic() >= deadline:
-            raise ArtifactError("Timed out waiting for this attempt's build-assets job")
-        time.sleep(15)
+            if retry == 2:
+                raise
+            time.sleep(2 ** retry)
+    if job is None:
+        raise ArtifactError("No completed build-assets job for this attempt")
+    artifact = artifact_for_job(repository, run_id, sha, f"release-dist-{attempt}", job)
+    download_verified(repository, artifact, destination)
+    check_run(repository, run_id, attempt, sha, ".github/workflows/release_ai.yml", completed=False)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("reuse-ui", "wait-build"))
+    parser.add_argument("command", choices=("reuse-ui", "fetch-build"))
     parser.add_argument("--repository", required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--attempt", type=int, default=0)
@@ -205,7 +203,7 @@ def main() -> int:
             with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
                 output.write(f"reused={str(reused).lower()}\n")
         else:
-            wait_build(args.repository, args.run_id, args.attempt, args.sha, args.destination)
+            fetch_build(args.repository, args.run_id, args.attempt, args.sha, args.destination)
     except (ArtifactError, OSError, ValueError, KeyError, subprocess.SubprocessError, zipfile.BadZipFile) as exc:
         if args.command == "reuse-ui":
             # Do not log credential-bearing subprocess stderr or signed URLs.

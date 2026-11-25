@@ -8,19 +8,20 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import type { RemoteAccessStatus } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import { desktopLocale, hasDesktopClient, presentDesktopClient } from '@/desktop/bridge';
+import { hasDesktopClient } from '@/desktop/bridge';
+import { useDesktopClaimRequest } from '@/desktop/useDesktopClaimRequest';
 import { useToast } from '@/context/ToastContext';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
 import { copyTextToClipboard } from '@/lib/utils';
-import { DevicesApiError, LostAnswer, devicesApi as api, type SignOutAnswer } from './api';
+import { DevicesApiError, LostAnswer, devicesApi as api } from './api';
 import { awayOnClaim, returnRefusal } from './claimFlow';
 import { DevicesPageView } from './DevicesPageView';
 import { deviceName } from './format';
 import { AVIBE_DOWNLOAD_URL, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_ACTIVITY_PATH, DEVICES_PATH, instanceUrl } from './paths';
 import { functionOffNeedsConfirm, signOutNeedsConfirm, turnOffNeedsConfirm } from './rules';
 import type {
-  AccountResult, AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach, SignOutNotice,
+  AddKind, ClaimProblem, Device, DeviceActivity, DevicesConfirm, FunctionKind, Reach,
 } from './types';
 import { useClaimFlow, type ClaimEnd } from './useClaimFlow';
 import { useNow } from './useNow';
@@ -58,25 +59,6 @@ function joinNewest(current: ActivityFeed, page: { items: DeviceActivity[]; next
   return { items: [...page.items, ...current.items.filter((each) => !fresh.has(each.id))], cursor: current.cursor, extended: true };
 }
 
-/** What a sign-out's answer says about whose devices they were: the instance's word when it
- *  gives one, else what the page itself knows without guessing. */
-/** The row listed what the device does, and Health was not among it (Product, 2026-11-23). */
-const listedWithoutHealth = (device: Device) => device.functions.length > 0 && !device.functions.some((each) => each.kind === 'health');
-
-function noticeFrom(answer: SignOutAnswer, known: { device: string | null; owner: SignOutNotice['owner']; hadHealth: boolean; withoutHealth: boolean }): SignOutNotice {
-  const owners = new Set(answer.signedOut.map((each) => each.owner));
-  const said = owners.size === 1 ? [...owners][0] : 'unknown';
-  const results = [...new Set(answer.signedOut.flatMap((each) => each.results))] as AccountResult[];
-  return {
-    device: known.device,
-    owner: said !== 'unknown' ? said : known.owner,
-    results,
-    healthCleanupPending: answer.healthCleanupPending,
-    hadHealth: known.hadHealth,
-    withoutHealth: known.withoutHealth || undefined,
-  };
-}
-
 export function DevicesPage() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
@@ -112,7 +94,7 @@ export function DevicesPage() {
   const [add, setAdd] = useState<AddKind | undefined>();
   const [busy, setBusy] = useState(false);
   const [switching, setSwitching] = useState(false);
-  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar' | undefined>();
+  const [problem, setProblem] = useState<'functionNeedsDevice' | 'failed' | 'gone' | 'lost' | 'offFromAfar' | 'closedFromAfar' | 'restrictedFromAfar' | undefined>();
   // The callback's own refusal arrives as one allowlisted word in the address, read once here.
   const [returned] = useState(() => returnRefusal(location.search));
   // A bind-again started from the connection page comes back here (the claim's return is one
@@ -122,12 +104,13 @@ export function DevicesPage() {
   // page has been shown).
   const [rebindReturn] = useState(() => awayOnClaim('rebind'));
   const [claimIssue, setClaimIssue] = useState<ClaimProblem | undefined>(() => (returned && !rebindReturn ? claimProblem(returned) : undefined));
-  const [notice, setNotice] = useState<SignOutNotice | undefined>();
   const alive = useRef(true);
   const readCount = useRef(0);
   /** A turn-off from this remote device is waiting for its answer: a read that fails meanwhile is
    *  the tunnel going, not a state that cannot be read, and is not said as such. */
   const closingFromAfar = useRef(false);
+  /** 「只允许这台电脑」 pressed from another device is waiting for its answer: the same holds. */
+  const restrictingFromAfar = useRef(false);
 
   const go = useCallback((to: string, replace = false) => navigate(to, { state: location.state, replace }), [location.state, navigate]);
 
@@ -153,7 +136,7 @@ export function DevicesPage() {
         // Read again through a tunnel that was supposed to be gone: it was not turned off after
         // all. What is known is only that the answer was lost.
         if (remote.value.running) setProblem((current) => (current === 'offFromAfar' || current === 'closedFromAfar' ? 'lost' : current));
-      } else if (!closingFromAfar.current) {
+      } else if (!closingFromAfar.current && !restrictingFromAfar.current) {
         setStatusRead('unknown');
       }
     }
@@ -182,11 +165,14 @@ export function DevicesPage() {
       if (end.state === 'bound') setStartedAt(Date.now());
       setClaimIssue(undefined);
     } else {
-      setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, { claimId: end.claimId, seconds: end.seconds }));
+      setClaimIssue(claimProblem(end.code === 'no_answer' ? undefined : end.code, {
+        claimId: end.claimId, seconds: end.seconds, confirmingEmail: end.claim?.confirmingEmail,
+      }));
     }
     void load();
   }, [load]);
   const flow = useClaimFlow({ kind: 'claim', locale: i18n.language, onEnd, returned });
+  const claimRequest = useDesktopClaimRequest();
 
   // One navigation settles the address this page was opened at: on to the connection page for a
   // bind-again, else the callback's word is removed. Never both, or the second undoes the first.
@@ -285,7 +271,7 @@ export function DevicesPage() {
   // An Avibe this computer's own record calls an organization's is not bound by a person's claim,
   // from here or from the App: the page says so and offers nothing.
   else if ((!status.paired || !host) && instanceKind === 'organization') reach = { state: 'off', surface: 'browser', problem: { code: 'organization' } };
-  else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', account: null, name: '' };
+  else if ((!status.paired || !host) && hasDesktopClient()) reach = { state: 'off', surface: 'desktop', busy: claimRequest.requested };
   else if (!status.paired || !host) reach = { state: 'off', surface: 'browser', busy: flow.phase === 'sending', problem: claimIssue };
   else if (status.running || status.pid_state === 'unknown') {
     const tunnel = tunnelFromStatus(status, now, justStarted);
@@ -371,36 +357,66 @@ export function DevicesPage() {
     await load();
   }, [failed, load, remote]);
 
+  // 「只允许这台电脑」: one request, with no address in it, then the row is read again here. It ends
+  // no sign-in and stops no notification; it only closes opening Avibe from the network.
+  const restrictToThisComputer = useCallback(async (fromAfar: boolean) => {
+    if (!fromAfar) return act(async () => { await api.restrictToThisComputer(); });
+    // From another device this is the last thing it can do here: once the change is in force
+    // nothing is answered to it any more. The answer says whether it was made; reading again
+    // says whether this device was shut out.
+    setBusy(true);
+    setProblem(undefined);
+    restrictingFromAfar.current = true;
+    let outcome: 'done' | 'refused' | 'none' = 'none';
+    let refusal: unknown;
+    try {
+      await api.restrictToThisComputer();
+      outcome = 'done';
+    } catch (error) {
+      if (!(error instanceof LostAnswer)) {
+        outcome = 'refused';
+        refusal = error;
+      }
+    }
+    const read = await load();
+    restrictingFromAfar.current = false;
+    if (!alive.current) return undefined;
+    setBusy(false);
+    setConfirm(undefined);
+    if (outcome === 'refused') failed(refusal);
+    else if (outcome === 'none') failed(new LostAnswer());
+    // Answered, and this device can no longer read anything: that is the change in force.
+    else if (!read.readable) setProblem('restrictedFromAfar');
+    return undefined;
+  }, [act, failed, load]);
+
   const signOut = useCallback((device: Device) => act(async () => {
-    const answer = await api.signOut(device.id);
+    await api.signOut(device.id);
     // Only its own panel is closed: another device opened meanwhile stays open.
     setDetail((current) => (current === device.id ? undefined : current));
-    setNotice(noticeFrom(answer, {
-      device: deviceName(t, device),
-      // The row the page just acted on says whose it was: no guess.
-      owner: device.group === 'mine' ? 'mine' : device.group === 'others' ? 'others' : 'unknown',
-      hadHealth: signOutNeedsConfirm(device),
-      withoutHealth: listedWithoutHealth(device),
-    }));
-  }), [act, t]);
+    // Out of the list at once; the reload that follows confirms it.
+    setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.id !== device.id) }));
+    // One line where the App says such things, gone by itself (owner, 2026-11-25).
+    showToast(t('devices.signedOut.toast', { device: deviceName(t, device) }), 'success');
+  }), [act, t, showToast]);
 
   const confirmed = () => {
     if (confirm === 'turn-off') return void switchRemoteAccess(false);
+    if (confirm === 'this-computer-only') return void restrictToThisComputer(true);
     if (confirm === 'remove' && opened) return void signOut(opened);
     if (confirm === 'health-off' && opened) {
       return void act(async () => { await api.revokeHealth(opened.id); });
     }
     if (confirm === 'remove-others' || confirm === 'remove-all-remote') {
-      const all = confirm === 'remove-all-remote';
       return void act(async () => {
         const answer = await api.signOutOthers();
-        setNotice(noticeFrom(answer, {
-          device: null,
-          // "My other devices" are the viewer's own; every remote device may be anyone's.
-          owner: all ? 'unknown' : 'mine',
-          hadHealth: devices.some((each) => !each.self && each.kind !== 'host' && signOutNeedsConfirm(each)),
-          withoutHealth: ((left) => left.length > 0 && left.every(listedWithoutHealth))(devices.filter((each) => !each.self && each.kind !== 'host')),
-        }));
+        // Only the devices the instance says it signed out leave at once: from afar that is the
+        // viewer's own other devices, never someone else's, and never this one.
+        const gone = new Set(answer.signedOut.flatMap((each) => (each.deviceId ? [each.deviceId] : [])));
+        // The device in use stays even when a sibling sign-in on it was ended, and the computer itself too.
+        setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.self || each.kind === 'host' || !gone.has(each.id)) }));
+        // One line; a device among them left signed in to the account says so in 「最近退出的设备」.
+        showToast(t('devices.signedOut.toastOthers'), 'success');
       });
     }
     if (typeof confirm === 'object') {
@@ -449,8 +465,8 @@ export function DevicesPage() {
       bulk={snapshot.bulk}
       unlinkedHealth={snapshot.unlinkedHealth}
       signedOut={snapshot.signedOut}
-      signOutNotice={notice}
       unrecognizedChange={unrecognizedChange}
+      proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}
       problem={problem}
       detail={detail}
@@ -458,8 +474,11 @@ export function DevicesPage() {
       busy={busy || switching}
       add={add}
       view={location.pathname.replace(/\/+$/, '') === DEVICES_ACTIVITY_PATH ? 'activity' : 'page'}
-      onTurnOn={() => { setClaimIssue(undefined); void flow.start(); }}
-      onSignIn={() => { presentDesktopClient('account', undefined, desktopLocale(i18n.resolvedLanguage ?? i18n.language)); }}
+      onTurnOn={() => {
+        // The Desktop binds in the shell's own claim dialog; this page reads the result when shown again.
+        if (hasDesktopClient()) { claimRequest.request(); return; }
+        setClaimIssue(undefined); void flow.start();
+      }}
       onCancelClaim={(id) => { setClaimIssue(undefined); void flow.cancel(id); }}
       onRemoteAccessChange={(on) => {
         if (!on && turnOffNeedsConfirm(devices)) setConfirm('turn-off');
@@ -474,6 +493,11 @@ export function DevicesPage() {
       onOpenAddress={() => { if (host) openLinkInNewContext(instanceUrl(host), 'noopener,noreferrer'); }}
       onOpenConnection={() => go(CONNECTION_PATH)}
       onOpenRebind={() => go(`${CONNECTION_PATH}${CONNECTION_REBIND_HASH}`)}
+      onThisComputerOnly={() => {
+        // On the computer itself nothing is lost by it; from another device, that device is shut out.
+        if (devices.find((each) => each.kind === 'host')?.self) void restrictToThisComputer(false);
+        else setConfirm('this-computer-only');
+      }}
       onOpenDevice={(id) => setDetail(id)}
       onCloseDevice={() => setDetail(undefined)}
       onFunctionChange={changeFunction}
@@ -488,7 +512,7 @@ export function DevicesPage() {
       onDisconnectHealth={(id) => setConfirm({ unlinkedHealth: id })}
       onConfirm={confirmed}
       onCancelConfirm={() => setConfirm(undefined)}
-      onDismissNotice={() => { setNotice(undefined); setProblem(undefined); }}
+      onDismissNotice={() => { setProblem(undefined); }}
       onShowActivity={() => go(DEVICES_ACTIVITY_PATH)}
       moreActivity={nextCursor ? (loadingOlder ? 'loading' : 'available') : undefined}
       onMoreActivity={() => { void loadOlder(); }}

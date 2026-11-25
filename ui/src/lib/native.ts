@@ -77,12 +77,12 @@ export type NativeAppInfo = {
 };
 
 /**
- * `device.describe`: who this iPhone is, as the page reports it to the
- * instance's device list (`POST /api/devices/self`). Display and grouping
+ * `device.describe`: who this iPhone or computer is, as the page reports it to
+ * the instance's device list (`POST /api/devices/self`). Display and grouping
  * only. `installation_id` is derived per instance by the App.
  */
 export type NativeDeviceDescription = {
-  kind: 'iphone_app';
+  kind: 'iphone_app' | 'desktop_app';
   display_name: string;
   installation_id?: string;
   aliases: Array<{ source: 'health' | 'schedule'; id: string }>;
@@ -359,6 +359,19 @@ export async function nativeAppInfo(): Promise<NativeAppInfo | null> {
 
 export async function nativeDeviceDescribe(params: { health_binding?: true } = {}): Promise<unknown> {
   return callNative<unknown>('device', 'device.describe', params);
+}
+
+/** Announces that the Desktop app has given this document its description (below). */
+export const DESKTOP_DEVICE_EVENT = 'avibe:desktop-device';
+
+/**
+ * The Desktop app's `device.describe`, given to the Workbench document of its committed view of
+ * another computer's instance when the view is published or the document loads
+ * (desktop/src-tauri/src/device_description.rs); undefined anywhere else, and until then. Unchecked.
+ */
+export function desktopDeviceDescription(): unknown {
+  if (typeof window === 'undefined') return undefined;
+  return (window as unknown as { __AVIBE_DESKTOP_DEVICE__?: unknown }).__AVIBE_DESKTOP_DEVICE__;
 }
 
 /** Establishes a connection only; request completion comes from the instance API. */
@@ -1075,6 +1088,12 @@ function directTrackerFor(native: AvibeNative): DirectTracker {
 function directBridge(): AvibeNative | null {
   const native = bridgeOn([...PHONE_PLATFORMS, 'desktop']);
   return native && (native.capabilities.direct ?? 0) >= 1 ? native : null;
+}
+
+/** The shell that answers `direct` (the phone App, or a Desktop window of another computer's
+ *  instance), for the path choice on 「连接方式」 (src/lib/nativeDirectChoice.ts). */
+export function nativeDirectShell(): AvibeNative | null {
+  return directBridge();
 }
 
 function directVersion(): number {

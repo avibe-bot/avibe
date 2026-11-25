@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import i18n from '../i18n';
-import { deviceUsingText, directCertificateDate, lastConnectionLegs, type DeviceUsing } from './remoteAccessDirect';
+import { deviceUsingText, directCertificateDate, type DeviceUsing } from './remoteAccessDirect';
 
 // ui/design: settings/devices-connection/app*
 describe('deviceUsingText', () => {
@@ -40,10 +40,4 @@ describe('direct details', () => {
     expect(directCertificateDate(null, now)).toBeNull();
   });
 
-  it('reads the last connection\'s race from the App, and nothing where none was recorded', () => {
-    const snapshot = { preferred: 'direct' as const, path: 'ipv6' as const, scope: 'global' as const, rttMs: 38 };
-    expect(lastConnectionLegs({ ...snapshot, lastConnection: { direct: 38, public: 'cancelled', winner: 'direct' } })).toEqual({ direct: 38, public: 'cancelled' });
-    expect(lastConnectionLegs({ ...snapshot, lastConnection: null })).toBeNull();
-    expect(lastConnectionLegs(null)).toBeNull();
-  });
 });

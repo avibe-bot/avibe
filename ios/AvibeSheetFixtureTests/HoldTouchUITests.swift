@@ -217,8 +217,18 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(label(beginning: "state="), "state=idle", facts())
         // The page named no surface while the sheet was up: the App followed nothing.
         XCTAssertEqual(kept(), "none")
-        web.buttons["Close sheet"].tap()
-        XCTAssertTrue(waitFor("surfaces=input+plain"), facts())
+        // Right after the long press a tap can reach no element at all (a loaded runner, 11-25: the
+        // page recorded no pointer or touch end for it, and the sheet stayed open): tap again while
+        // the sheet is still there, until the page names the input again.
+        var closed = false
+        for attempt in 0..<3 where !closed {
+            let close = web.buttons["Close sheet"]
+            // A tap the page never heard is the App's to explain one day: keep each in the log.
+            if attempt > 0 { print("[hold smoke] Close sheet tapped again (try \(attempt + 1)): \(facts())") }
+            if close.exists { close.tap() }
+            closed = waitFor("surfaces=input+plain", timeout: 4)
+        }
+        XCTAssertTrue(closed, facts())
     }
 
     // MARK: A hold
@@ -313,8 +323,15 @@ final class HoldTouchUITests: XCTestCase {
         input.tap()
         XCTAssertTrue(waitFor("focus=yes"), facts())
         XCTAssertTrue(waitFor("surfaces=plain"), facts())
-        web.buttons["Hide keyboard"].tap()
-        XCTAssertTrue(waitFor("focus=no"), facts())
+        // The page may still be scrolling for the keyboard, and a tap then can land beside the
+        // button (a loaded runner, 11-24: it came up over the Control box): tap again until the
+        // page says the input lost its focus.
+        var blurred = false
+        for _ in 0..<3 where !blurred {
+            web.buttons["Hide keyboard"].tap()
+            blurred = waitFor("focus=no", timeout: 4)
+        }
+        XCTAssertTrue(blurred, facts())
         // Named again, where it now is.
         XCTAssertTrue(waitFor("surfaces=input+plain"), facts())
         holdTheInputAndRequireACleanEnd(count: 1)
@@ -451,7 +468,7 @@ final class HoldTouchUITests: XCTestCase {
 
     /// Everything the page says of itself, for a failure's message.
     private func facts() -> String {
-        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap="]
+        let names = ["surfaces=", "state=", "events=", "holds=", "focus=", "typed=", "send=", "sheet=", "scrolled=", "press=", "drag=", "tap=", "ends="]
         return "page: " + names.compactMap { label(beginning: $0) }.joined(separator: " ")
             + "; App: " + evidence()
     }

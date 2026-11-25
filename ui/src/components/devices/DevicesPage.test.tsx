@@ -12,13 +12,14 @@ import { DevicesApiError, LostAnswer, devicesApi, type ClaimForm } from './api';
 import { awayOnClaim, readClaimMarker, writeClaimMarker } from './claimFlow';
 import { DevicesPage } from './DevicesPage';
 import { DevicesPageView } from './DevicesPageView';
-import { accountResultTexts, functionControl, lockedOutCount } from './rules';
+import { functionControl, lockedOutCount } from './rules';
 import { said } from './testText';
-import type { Device, Reach } from './types';
+import type { Device, Reach, SignedOutDevice } from './types';
 import type { DevicesSnapshot } from './wire';
 
 // ui/design: settings/devices/*
-vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+const toasts = vi.hoisted(() => ({ show: vi.fn() }));
+vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: toasts.show }) }));
 
 const host = 'max-app.avibe.bot';
 const account = 'max@example.test';
@@ -89,6 +90,30 @@ afterEach(() => {
 });
 
 describe('DevicesPage · turning remote access on', () => {
+  it('in the Desktop App asks the shell for its claim dialog once, and starts no claim here', async () => {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, assign });
+    const start = vi.spyOn(devicesApi, 'startClaim');
+    try {
+      mount();
+      const turnOn = await screen.findByRole('button', { name: '开启远程访问' });
+      // One action: no sign-in button, no name field on this page (ui/design: desktop/bind-home/devices-off).
+      expect(screen.queryByRole('textbox')).toBeNull();
+      expect(document.body.textContent).toContain(i18n.t('devices.reach.desktopHint'));
+      fireEvent.click(turnOn);
+      expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/claim?locale=zh');
+      // Off after the press, so requests never stack.
+      await waitFor(() => expect((turnOn as HTMLButtonElement).disabled).toBe(true));
+      fireEvent.click(turnOn);
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(start).not.toHaveBeenCalled();
+      expect(submitted).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('has no pairing-key field, and takes the user code and state only from the local API\'s answer', async () => {
     const form: ClaimForm = {
       claimId: 'claim-1', action: 'https://avibe.bot/api/v1/claims/redirect-entry', method: 'POST',
@@ -165,6 +190,19 @@ describe('DevicesPage · turning remote access on', () => {
     await waitFor(() => expect(api.cancelClaim).toHaveBeenCalledWith('claim-1'));
     expect(await screen.findByText(said('avibe.bot 没有完成这次请求，什么都没有绑定。（代码：local_claim_unavailable）'), {}, { timeout: 4000 })).toBeTruthy();
     expect(readClaimMarker()).toBeNull();
+  });
+
+  it.each([
+    ['b@example.test', '这台电脑原来的 Avibe 不在 b@example.test 这个账号下。请用拥有它的账号登录 avibe.bot，再试一次。'],
+    [undefined, 'avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。'],
+    ['b@example.test\u202e', 'avibe.bot 拒绝了这次请求，没有给出原因。什么都没有绑定。'],
+  ])('names only the account that confirmed another account\'s refusal (%s), and offers no new binding', async (email, sentence) => {
+    writeClaimMarker({ kind: 'claim', id: 'claim-1', at: Date.now() });
+    vi.spyOn(devicesApi, 'claim').mockResolvedValue({ state: 'error', code: 'other_account', confirmingEmail: email });
+    mount();
+
+    expect(await screen.findByText(said(sentence))).toBeTruthy();
+    expect(screen.queryByText(/新电脑/)).toBeNull();
   });
 
   it('hands a bind-again that comes back here to the connection page, that once and not on any later visit', async () => {
@@ -278,38 +316,76 @@ describe('DevicesPage · devices', () => {
     vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
   });
 
-  it('signs a plain browser out at once and says what avibe.bot was told, never that the sign-in ended', async () => {
-    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
-    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-      signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'unknown', results: ['accepted'] }], healthCleanupPending: true,
-    });
+  it('signs a device out with one toast, its name only, and takes the row away at once', async () => {
+    toasts.show.mockClear();
+    let signedOut = false;
+    vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot([macbook, chrome]))));
+    vi.spyOn(devicesApi, 'signOut').mockImplementation(async () => { signedOut = true; return {
+      signedOut: [{ id: 'o1', device: 'Chrome · Windows', kind: 'browser', owner: 'mine', results: ['queued'] }], healthCleanupPending: true,
+    }; });
     mount();
 
     fireEvent.click(await screen.findByText('Chrome'));
     fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
     await waitFor(() => expect(api.signOut).toHaveBeenCalledWith('chrome'));
-    const notice = await screen.findByRole('status');
-    expect(within(notice).getByText('已在这个 Avibe 上退出 Chrome')).toBeTruthy();
-    expect(within(notice).getByText(said('已通知 avibe.bot 结束它的账号登录。'))).toBeTruthy();
-    // Pending clean-up is conditional: the row showed no Health, so it is not claimed to have had any.
-    expect(within(notice).getByText(said('如果它同步过健康数据，清理尚未确认。'))).toBeTruthy();
-    expect(document.body.textContent).not.toContain('已结束');
+    // One line where the App says such things; nothing about avibe.bot, a queue or Health.
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「Chrome」', 'success'));
+    // Gone from the list before the reload answers.
+    await waitFor(() => expect(screen.queryByText('Chrome')).toBeNull());
+    expect(screen.queryByRole('status')).toBeNull();
+    for (const word of ['通知到 avibe.bot', '排队', '休眠', '健康', '在这个 Avibe 上退出']) expect(document.body.textContent).not.toContain(word);
   });
 
-  it('says nothing about Health after signing out a device whose functions are listed without it', async () => {
-    const browser: Device = { ...chrome, functions: [{ kind: 'notifications', on: false, canChange: false }] };
-    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, browser]));
+  it('signing out my other devices takes away only the ones the instance signed out, never someone else\'s', async () => {
+    toasts.show.mockClear();
+    const mine = [{ ...macbook, self: undefined }, { ...iphone, self: true }, chrome, { ...chrome, id: 'safari', name: 'Safari' }, sara];
+    let signedOut = false;
+    // The reload after the sign-out does not answer: what the list shows is the page's own removal.
+    vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot(mine, { bulk: 'other_sessions' }))));
+    vi.spyOn(devicesApi, 'signOutOthers').mockImplementation(async () => { signedOut = true; return {
+      signedOut: [{ id: 'o1', deviceId: 'chrome', device: 'Chrome', kind: 'browser', owner: 'mine', results: ['accepted'] },
+        { id: 'o2', deviceId: 'safari', device: 'Safari', kind: 'browser', owner: 'mine', results: ['accepted'] },
+        // A sibling sign-in on the device in use: the row of the device in use stays.
+        { id: 'o3', deviceId: 'iphone', device: 'iPhone', kind: 'iphone', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
+    }; });
+    mount();
+    await screen.findByText('Sara Chrome');
+    fireEvent.click(screen.getByRole('button', { name: '退出其他所有设备' }));
+    fireEvent.click(await screen.findByRole('button', { name: '全部退出' }));
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出其他设备', 'success'));
+    await waitFor(() => expect(screen.queryByText('Chrome')).toBeNull());
+    expect(screen.queryByText('Safari')).toBeNull();
+    expect(screen.getByText('Sara Chrome')).toBeTruthy();
+    expect(screen.getByText('本设备')).toBeTruthy();
+  });
+
+  it('names a device with no name of its own as an unrecognized client', async () => {
+    toasts.show.mockClear();
+    const nameless: Device = { ...chrome, id: 'nameless', name: null, client: { kind: 'browser' } };
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, nameless]));
     vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
-      signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'mine', results: ['queued'] }], healthCleanupPending: true,
+      signedOut: [{ id: 'o1', device: null, kind: 'browser', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
     });
     mount();
-    fireEvent.click(await screen.findByText('Chrome'));
+    fireEvent.click(await screen.findByText('未识别的客户端'));
     fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
-    const notice = await screen.findByRole('status');
-    expect(within(notice).getByText('已在这个 Avibe 上退出 Chrome')).toBeTruthy();
-    expect(notice.textContent).not.toContain('健康');
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「未识别的客户端」', 'success'));
   });
 
+  it.each(['queued', 'accepted', 'localOnly', 'refused', 'unconfirmed', 'sharedSignIn', 'keeperUnknown'] as const)(
+    'says only 已退出 whatever avibe.bot did (%s), and the toast leaves by itself', async (result) => {
+      toasts.show.mockClear();
+      vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, chrome]));
+      vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
+        signedOut: [{ id: 'o1', device: 'Chrome', kind: 'browser', owner: 'mine', results: [result] }], healthCleanupPending: true,
+      });
+      mount();
+      fireEvent.click(await screen.findByText('Chrome'));
+      fireEvent.click(await screen.findByRole('button', { name: '退出这台设备' }));
+      // A plain toast: no action, nothing that keeps it on screen, no card above the list.
+      await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「Chrome」', 'success'));
+      expect(screen.queryByRole('status')).toBeNull();
+    });
   it('names a device signed out lately in the activity as its sign-out receipt does', async () => {
     const receipt = { id: 'o1', deviceId: 'gone', device: 'Chrome · macOS', kind: 'browser' as const, owner: 'mine' as const, results: ['accepted' as const] };
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook], { signedOut: [receipt] }));
@@ -324,7 +400,7 @@ describe('DevicesPage · devices', () => {
     expect(document.body.textContent).not.toContain('一台已不在列表里的设备');
   });
 
-  it('asks before signing out a device that synced Health, and names the local-only half for whose device it was', async () => {
+  it('asks before signing out a device that synced Health, then says only 已退出', async () => {
     vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone, sara]));
     const signOut = vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
       signedOut: [{ id: 'o1', device: 'iPhone', kind: 'iphone', owner: 'unknown', results: ['localOnly'] }], healthCleanupPending: true,
@@ -340,13 +416,10 @@ describe('DevicesPage · devices', () => {
     const asked = screen.getByRole('dialog');
     expect(asked.textContent).toContain('这台设备同步过来的健康数据，会在确认这个 Avibe 的所有者之后删除；确认不了就不会删，之后可以在这里单独断开健康。');
     expect(within(asked).queryByRole('button', { name: '退出并删除健康数据' })).toBeNull();
-    // (The notice afterwards keeps its Health line: this device listed Health.)
+    toasts.show.mockClear();
     fireEvent.click(within(asked).getByRole('button', { name: '退出' }));
     await waitFor(() => expect(signOut).toHaveBeenCalledWith('iphone'));
-    // The row the page acted on was one of the viewer's own: only that half is said.
-    expect(await screen.findByText(said('在那台设备上退出 avibe.bot；设备不在手边'))).toBeTruthy();
-    expect(screen.queryByText(said('就在「访问」里移除对方'))).toBeNull();
-    expect(screen.getByText(said('它同步过的健康数据，清理尚未确认。'))).toBeTruthy();
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出「iPhone」', 'success'));
   });
 
   it('says from another device that signing out deletes the Health data', async () => {
@@ -648,13 +721,13 @@ describe('DevicesPage · devices', () => {
     vi.useRealTimers();
   });
 
-  it('says an address changed somewhere else with a way out that exists in this release', async () => {
+  it('says an address changed somewhere else with a way out that exists on an instance without binding again', async () => {
     vi.spyOn(devicesApi, 'address').mockResolvedValue({
       hostname: 'sam-app.avibe.bot', eligible: true, retired: [], healthConnected: false,
       unrecognizedChange: { previousHostname: host, hostname: 'sam-app.avibe.bot' },
     });
-    // Even where binding again exists: 「更改域名」 does not in this release.
-    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(true);
+    // An instance without binding again (before #4133): the fact and support, no button.
+    vi.spyOn(devicesApi, 'rebindOffered').mockResolvedValue(false);
     mount();
 
     expect(await screen.findByText('这个 Avibe 的地址在别处被改了')).toBeTruthy();
@@ -695,14 +768,16 @@ describe('DevicesPage · an instance without binding again', () => {
     expect(await screen.findByText(said('服务器上没有浏览器的话，在它的终端运行 vibe remote rebind。'))).toBeTruthy();
   });
 
-  it('says a refused credential without pointing to binding again, in the list and in the notice', () => {
-    const row = { id: 'o1', device: 'Chrome', kind: 'browser' as const, owner: 'mine' as const, results: ['refusedCredential' as const] };
-    const without = render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[row]} rebindOffered={false} />);
-    expect(screen.getByText(said('avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。'))).toBeTruthy();
-    expect(document.body.textContent).not.toContain('重新绑定');
-    without.unmount();
-    render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[row]} />);
-    expect(screen.getByText(said('avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。先重新绑定远程访问。'))).toBeTruthy();
+  it('lists signed-out devices by name only, whatever avibe.bot did', () => {
+    const row = (id: string, results: SignedOutDevice['results'], extra: Partial<SignedOutDevice> = {}): SignedOutDevice =>
+      ({ id, device: id, kind: 'browser', owner: 'mine', results, ...extra });
+    render(<DevicesPageView reach={on} devices={[macbook]} signedOut={[
+      row('Queued', ['queued']), row('Accepted', ['accepted']), row('Old', ['localOnly']), row('Refused', ['refusedCredential']),
+      row('Nameless', ['unconfirmed'], { device: null }),
+    ]} />);
+    const panel = screen.getByText('最近退出的设备').closest('section') ?? document.body;
+    expect(panel.textContent).toBe('最近退出的设备QueuedAcceptedOldRefused未识别的客户端');
+    expect(screen.queryByRole('link')).toBeNull();
   });
 });
 
@@ -731,22 +806,178 @@ describe('DevicesPageView', () => {
     expect(functionControl({ kind: 'computerUse', status: 'ready' })).toBe('state');
   });
 
-  it('says both halves of the local-only advice only when whose device it was is not known', () => {
-    const t = i18n.t.bind(i18n);
-    const [mine] = accountResultTexts(t, { owner: 'mine', results: ['localOnly'] });
-    const [others] = accountResultTexts(t, { owner: 'others', results: ['localOnly'] });
-    const [either] = accountResultTexts(t, { owner: 'unknown', results: ['localOnly', 'localOnly'] });
-    expect(mine).toContain('在那台设备上退出 avibe.bot');
-    expect(mine).not.toContain('移除对方');
-    expect(others).toContain('在「访问」里移除对方');
-    expect(others).not.toContain('账号安全');
-    expect(either).toContain('是你自己的设备的话');
-    expect(either).toContain('是别人的设备的话');
-    expect(accountResultTexts(t, { owner: 'mine', results: ['queued'] })).toEqual(['已排队，还没有通知到 avibe.bot。远程访问关着或这台电脑休眠时会一直等着。']);
-  });
-
   it('counts who is locked out without counting notification-only rows', () => {
     const push: Device = { ...chrome, id: 'push', pushOnly: true };
     expect(lockedOutCount([{ ...macbook, self: undefined }, { ...iphone, self: true }, chrome, push])).toBe(1);
+  });
+});
+
+describe('DevicesPage · 只允许这台电脑 (an Avibe that is not bound, open to its network)', () => {
+  const zh = { body: '同一网络上的设备现在不用登录就能打开这个 Avibe。开启远程访问后，它们要先登录。', action: '只允许这台电脑' };
+  const closed = { body: '只有这台电脑能打开这个 Avibe。' };
+  const openHost: Device = { ...macbook, networkOpen: true };
+  const closedHost: Device = { ...macbook, networkOpen: false };
+  const fromPhone: Device = { ...openHost, self: undefined };
+  const lan = () => mount('/settings/remote-access', 'owner', false);
+
+  it.each([
+    ['says nothing of it (not known, not Avibe\'s to close, or loopback only)', macbook],
+    ['says nothing of it on a row that is not the computer', { ...iphone, networkOpen: true } as Device],
+  ])('%s', async (_label, device) => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([device]));
+    mount();
+    await screen.findByText(device.name!);
+    expect(screen.queryByText(said(zh.body))).toBeNull();
+    expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
+  });
+
+  it('on the computer itself: one press, one request, and the row is read again', async () => {
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([openHost]));
+    const restrict = vi.spyOn(devicesApi, 'restrictToThisComputer').mockImplementation(async () => {
+      devices.mockResolvedValue(snapshot([closedHost]));
+    });
+    mount();
+    expect(await screen.findByText(said(zh.body))).toBeTruthy();
+    const reads = devices.mock.calls.length;
+
+    fireEvent.click(screen.getByRole('button', { name: zh.action }));
+
+    // Nothing is lost on the computer itself, so nothing is asked.
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await waitFor(() => expect(restrict).toHaveBeenCalledOnce());
+    expect(restrict).toHaveBeenCalledWith();
+    // The row now says the other position, and no longer offers the button.
+    expect(await screen.findByText(said(closed.body))).toBeTruthy();
+    expect(screen.queryByText(said(zh.body))).toBeNull();
+    expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
+    expect(devices.mock.calls.length).toBeGreaterThan(reads);
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('on the computer itself, closed: says the fact and offers nothing to press under the row', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([closedHost]));
+    mount();
+    const line = (await screen.findByText(said(closed.body))).closest('p')!;
+    // One way to let other devices in is offered on this page, remote access: no second one here.
+    expect(line.textContent).toBe(closed.body);
+    expect(line.querySelector('button, a')).toBeNull();
+    expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
+    // The buttons the page has are the ones it had: turning remote access on, and the row itself.
+    expect(screen.getAllByRole('button').map((each) => each.textContent)).toEqual(
+      expect.arrayContaining([i18n.t('devices.reach.turnOn')]),
+    );
+    expect(screen.queryByRole('button', { name: /服务|Service/ })).toBeNull();
+  });
+
+  it.each([
+    ['the instance does not say (null, or bound)', macbook],
+    ['the row is not the device the page is open on', { ...closedHost, self: undefined } as Device],
+  ])('says nothing about "only this computer" when %s', async (_label, device) => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([device]));
+    mount();
+    await screen.findByText(device.name!);
+    expect(screen.queryByText(said(closed.body))).toBeNull();
+  });
+
+  it('from another device: asks first, and cancelling changes nothing', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([fromPhone]));
+    const restrict = vi.spyOn(devicesApi, 'restrictToThisComputer').mockResolvedValue();
+    lan();
+    fireEvent.click(await screen.findByRole('button', { name: zh.action }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('只允许这台电脑？')).toBeTruthy();
+    expect(within(dialog).getByText(said('改了之后，这台设备也打不开了，要到那台电脑上才能再改回来。'))).toBeTruthy();
+    expect(restrict).not.toHaveBeenCalled();
+
+    fireEvent.click(within(dialog).getByRole('button', { name: i18n.t('common.cancel') }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(restrict).not.toHaveBeenCalled();
+    expect(screen.getByText(said(zh.body))).toBeTruthy();
+  });
+
+  it('from another device: once confirmed and answered, this device is shut out, and the page says so', async () => {
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([fromPhone]));
+    const status = vi.spyOn(devicesApi, 'status');
+    vi.spyOn(devicesApi, 'restrictToThisComputer').mockImplementation(async () => {
+      // In force: this device is answered nothing any more.
+      devices.mockRejectedValue(new DevicesApiError(503, 'remote_access_host_mismatch', {}));
+      status.mockRejectedValue(new DevicesApiError(503, 'remote_access_host_mismatch', {}));
+    });
+    lan();
+    // Before the change the page offers to turn remote access on, as on any Avibe that is not bound.
+    expect(await screen.findByRole('button', { name: i18n.t('devices.reach.turnOn') })).toBeTruthy();
+    fireEvent.click(await screen.findByRole('button', { name: zh.action }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: zh.action }));
+
+    expect(await screen.findByText(said('已经改了。这台设备打不开这个 Avibe 了，要到那台电脑上才能再改回来。'))).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    // The offer is gone, and the page does not add "cannot read remote access" to what it just said.
+    expect(screen.queryByRole('button', { name: zh.action })).toBeNull();
+    expect(screen.queryByText(said(i18n.t('devices.reach.unknown')))).toBeNull();
+    // Nor does it keep offering what was last read: turning remote access on would ask an
+    // instance that no longer answers this device.
+    expect(screen.queryByRole('button', { name: i18n.t('devices.reach.turnOn') })).toBeNull();
+  });
+
+  it.each([
+    ['refused by the instance', new DevicesApiError(409, 'network_access_proxy_managed', {}), 'devices.problem.failed'],
+    ['never answered', new LostAnswer(), 'devices.problem.lost'],
+  ] as const)('from another device, %s: says that, never that it was changed', async (_label, error, key) => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([fromPhone]));
+    vi.spyOn(devicesApi, 'restrictToThisComputer').mockRejectedValue(error);
+    lan();
+    fireEvent.click(await screen.findByRole('button', { name: zh.action }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: zh.action }));
+
+    expect(await screen.findByText(said(i18n.t(key)))).toBeTruthy();
+    expect(screen.queryByText(said('已经改了。'))).toBeNull();
+    // Still readable, still open: the offer stays.
+    expect(screen.getByRole('button', { name: zh.action })).toBeTruthy();
+  });
+
+  it('on the computer itself, a refusal is said and the offer stays', async () => {
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([openHost]));
+    vi.spyOn(devicesApi, 'restrictToThisComputer').mockRejectedValue(new DevicesApiError(503, 'network_access_listener_unavailable', {}));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: zh.action }));
+
+    expect(await screen.findByText(said(i18n.t('devices.problem.failed')))).toBeTruthy();
+    expect(screen.getByRole('button', { name: zh.action })).toBeTruthy();
+  });
+});
+
+describe('DevicesPage · a declared reverse proxy', () => {
+  const proxy = { origins: ['https://avibe.example.com'], peerScope: 'single_address' as const };
+  const body = '经 https://avibe.example.com 打开的浏览器不用登录，就是这个 Avibe 的所有者；它们不在这张名单里，也不能在这里退出。';
+  const range = '受信任的代理写的是一段地址，这段地址里的每一台机器都能这样进来。';
+
+  it('names the origins to the owner, as text, and adds the range sentence only for a range', async () => {
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone], { proxyAccess: proxy }));
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    const view = mount();
+    expect(await screen.findByText(said(body))).toBeTruthy();
+    expect(screen.queryByText(said(range))).toBeNull();
+    expect(screen.queryByRole('link', { name: /avibe\.example\.com/ })).toBeNull();
+    view.unmount();
+
+    devices.mockResolvedValue(snapshot([macbook, iphone], { proxyAccess: { origins: ['https://a.example.test', 'https://b.example.test'], peerScope: 'range' } }));
+    mount();
+    expect(await screen.findByText(said('经 https://a.example.test、https://b.example.test 打开的浏览器'))).toBeTruthy();
+    expect(screen.getByText(said(range))).toBeTruthy();
+  });
+
+  it('says nothing without the fact, and nothing to a member', async () => {
+    vi.spyOn(devicesApi, 'status').mockResolvedValue(paired as never);
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([macbook, iphone]));
+    const view = mount();
+    await screen.findByText('iPhone');
+    expect(screen.queryByText(said('不用登录，就是这个 Avibe 的所有者'))).toBeNull();
+    view.unmount();
+
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue(snapshot([iphone], { proxyAccess: proxy }));
+    mount('/settings/remote-access', 'member');
+    await screen.findByText('iPhone');
+    expect(screen.queryByText(said('不用登录，就是这个 Avibe 的所有者'))).toBeNull();
   });
 });

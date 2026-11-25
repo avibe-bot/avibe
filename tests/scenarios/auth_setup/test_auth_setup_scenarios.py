@@ -57,8 +57,11 @@ from tests.scenario_harness.auth_setup import AuthSetupScenarioHarness, CliComma
 from tests.scenario_harness.core import ScenarioExpect, ScenarioRunner, ScenarioStep
 from tests.ui_server_test_helpers import _save_config, csrf_headers, remote_session_cookie
 from tests.test_desktop_local_instance import desktop_host as desktop_host
-from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser
+from tests.test_personal_claims import claim_peer as claim_peer, owner_browser as owner_browser, service_adoptions as service_adoptions
 from tests.test_pairing_recovery import pairing_host as pairing_host
+from tests.test_claim_wire_rebind import issuer as issuer
+from tests.test_rebind_routes import machine as rebind_machine
+from tests.test_remote_rebind_cli import bound_terminal as bound_terminal, terminal as terminal
 from storage import remote_access_authorization_service
 from tests.scenario_harness.model_hub_native_oauth import (
     CustodiedNativeOAuthScenarioHarness,
@@ -111,7 +114,7 @@ def _guard_native_auth_boundaries(monkeypatch, _isolate_vibe_remote_home):
     CliCommandObservations().bind(monkeypatch)
 
 
-def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_browser, monkeypatch):
+def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_browser, service_adoptions):
     """AUTH-SETUP-914: browser return, subject acceptance, key redemption and local publication.
 
     The owner's browser may be on this machine or another computer on an admitted home network."""
@@ -119,11 +122,9 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
     import base64
     import time
     from tests.test_personal_claims import _assert_bad_return, _start, callback_proof
-    from vibe import remote_access, ui_server
+    from vibe import remote_access
     from config.v2_config import V2Config
 
-    monitored = []
-    monkeypatch.setattr(ui_server, "_ensure_remote_access_monitoring", lambda: monitored.append(V2Config.load().remote_access.vibe_cloud.instance_id))
     origin, environ = owner_browser
     client = app.test_client()
     start = _start(client, origin, environ)
@@ -160,7 +161,7 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
         assert 'Location' not in replay.headers
     else:
         _assert_bad_return(replay)
-    assert monitored == ["inst_A"]
+    assert service_adoptions == ["inst_A"]
     assert outcome["account"] == {"email": "actual@fixture.test"} and outcome["hostname"] == "fixture.avibe.bot"
     assert claim_peer.decisions == ["owner-id"]
     cloud = V2Config.load().remote_access.vibe_cloud
@@ -168,6 +169,152 @@ def test_personal_claim_redirect_through_pairing_journal(claim_peer, owner_brows
     assert cloud.session_secret and cloud.tunnel_token and cloud.instance_secret
     assert remote_access._read_pending_pairing_record() == (None, None)
     assert all(s not in str(outcome) for s in (state, claim_peer.key, claim_peer.calls[-1][1]["code_verifier"], cloud.session_secret))
+
+
+def _constrained_browser_return(peer):
+    from tests.test_personal_claims import callback_proof
+    from tests.test_rebind_routes import ROOT as claims_path, ORIGIN
+
+    client = app.test_client()
+    headers = csrf_headers(client, base_url=ORIGIN)
+    start = client.post(claims_path, base_url=ORIGIN, headers=headers, json={})
+    assert start.status_code == 201
+    body = start.get_json()
+    assert peer.calls[0][1]['predecessor']['instance_id'] == 'inst_A'
+    returned = client.get('/remote/claim/callback', base_url=ORIGIN, params={
+        'claim_id': body['claim_id'], 'state': callback_proof(body), 'callback_token': 'A' * 43})
+    assert returned.status_code == 303 and returned.headers['Location'] == '/settings/remote-access'
+    path = claims_path + '/' + body['claim_id']
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        response = client.get(path, base_url=ORIGIN)
+        assert response.status_code == 200
+        view = response.get_json()
+        if view['state'] in ('error', 'bound'):
+            return client, headers, path, view
+        time.sleep(.02)
+    pytest.fail('constrained claim did not reach a terminal state')
+
+
+def test_constrained_browser_rebind_publishes_replacement(rebind_machine):
+    """AUTH-SETUP-213: the initiating local browser completes a predecessor-constrained rebind."""
+    peer, redeems = rebind_machine
+    before = V2Config.load().remote_access.vibe_cloud
+    client, _, _, outcome = _constrained_browser_return(peer)
+    assert outcome['state'] == 'bound' and outcome['binding_disposition'] == 'existing'
+    after = V2Config.load().remote_access.vibe_cloud
+    assert after.instance_id == before.instance_id and after.instance_secret != before.instance_secret
+    assert not before.enabled and not after.enabled
+    assert len(redeems) == 1 and redeems[0]['redeem_request_id']
+    assert client.get('/api/remote-access/rebind').get_json()['binding_state'] == 'bound'
+    assert remote_access._read_pending_pairing_record() == (None, None)
+
+
+def test_constrained_browser_refusal_then_confirmed_reset(rebind_machine, monkeypatch):
+    """AUTH-SETUP-214: a qualified refusal offers reset; preview alone never detaches the machine."""
+    from tests.test_rebind_routes import ORIGIN
+    from vibe import binding_admission, desktop_local_instance, direct_certificates
+
+    peer, redeems = rebind_machine
+    before = V2Config.load().remote_access.vibe_cloud
+    peer.outcomes.append((409, {'error': 'installation_unverified', 'recovery': 'reset_as_new',
+                                'reason': 'predecessor_unrecoverable'}, None))
+    monkeypatch.setattr(remote_access, 'stop', lambda _: {'ok': True})
+    monkeypatch.setattr(remote_access, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
+    monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    client, headers, path, outcome = _constrained_browser_return(peer)
+    assert outcome['state'] == 'error' and outcome['reason_code'] == 'predecessor_unrecoverable'
+    status = '/api/remote-access/rebind'
+    assert client.get(status, base_url=ORIGIN).get_json()['next_action'] == 'confirm_as_new'
+    reset = path + '/reset'
+    preview = client.post(reset + '/preview', base_url=ORIGIN, headers=headers, json={})
+    assert preview.status_code == 200
+    assert V2Config.load().remote_access.vibe_cloud == before and desktop_local_instance._installation_id()
+    assert not binding_admission.reset_in_progress()
+    proof = {'confirmation_id': preview.get_json()['confirmation_id']}
+    response = client.post(reset, base_url=ORIGIN, headers=headers, json=proof)
+    assert response.status_code == 200 and response.get_json() == {'state': 'unpaired'}
+    assert client.get(status, base_url=ORIGIN).get_json()['binding_state'] == 'unpaired'
+    assert not desktop_local_instance._installation_id() and not V2Config.load().remote_access.vibe_cloud.instance_secret
+    assert client.post(reset, base_url=ORIGIN, headers=headers, json=proof).status_code == 409
+    assert not redeems and not binding_admission.reset_in_progress()
+
+
+def test_cancel_at_avibe_bot_returns_the_initiating_browser_to_a_declined_rebind(rebind_machine):
+    """AUTH-SETUP-215: cancelled on avibe.bot, the initiating browser comes back to a declined attempt."""
+    from tests.test_personal_claims import callback_proof
+    from tests.test_rebind_routes import ROOT as claims_path, ORIGIN
+
+    peer, redeems = rebind_machine
+    before = V2Config.load().remote_access.vibe_cloud
+    client = app.test_client()
+    headers = csrf_headers(client, base_url=ORIGIN)
+    body = client.post(claims_path, base_url=ORIGIN, headers=headers, json={}).get_json()
+    sent = len(peer.calls)
+    back = client.get('/remote/claim/callback', base_url=ORIGIN, params={
+        'claim_id': body['claim_id'], 'state': callback_proof(body), 'outcome': 'declined'})
+    assert back.status_code == 303 and back.headers['Location'] == '/settings/remote-access'
+    path = claims_path + '/' + body['claim_id']
+    deadline = time.monotonic() + 5
+    while (view := client.get(path, base_url=ORIGIN).get_json())['state'] not in ('declined', 'error', 'bound'):
+        assert time.monotonic() < deadline
+        time.sleep(.02)
+    assert (view['state'], view['code']) == ('declined', 'declined')
+    # Declined there already: nothing more asked of avibe.bot, nothing redeemed, the binding untouched.
+    assert len(peer.calls) == sent and not redeems
+    assert V2Config.load().remote_access.vibe_cloud == before
+    status = client.get('/api/remote-access/rebind', base_url=ORIGIN).get_json()
+    assert status['binding_state'] == 'bound' and status['can_start']
+    assert remote_access._read_pending_pairing_record() == (None, None)
+
+
+def test_terminal_rebind_resets_on_a_typed_yes_then_binds_the_accepted_account(bound_terminal, monkeypatch, capsys):
+    """AUTH-SETUP-212: the command as typed, through the parser, admission and dispatch.
+
+    Real reset, link claim, guarded redemption and publication in an isolated data
+    root; only avibe.bot and the connector are peers. Two answers are typed: the
+    word that discards the binding, then the acceptance of the account and domain
+    avibe.bot reported. Read back through `vibe remote status`."""
+    from config.v2_config import V2Config
+    from vibe import binding_admission, cli, desktop_local_instance, remote_access
+
+    def vibe(*argv):
+        monkeypatch.setattr(sys, "argv", ["vibe", *argv])
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+        return stopped.value.code, capsys.readouterr()
+
+    before = V2Config.load().remote_access.vibe_cloud
+    old_identity, old_session = desktop_local_instance._installation_id(), before.session_secret
+    code, shown = vibe("remote", "status")
+    assert code == 0 and "Paired: yes" in shown.out and "Binding:" not in shown.out
+
+    # Declining first: the same command, nothing discarded, no request to avibe.bot.
+    bound_terminal.answers = [""]
+    code, shown = vibe("remote", "rebind")
+    assert code == 0 and shown.out.rstrip().endswith("This computer's binding is as it was.")
+    assert desktop_local_instance._installation_id() == old_identity and not bound_terminal.peer.calls
+
+    bound_terminal.answers = ["yes", "y"]
+    code, shown = vibe("remote", "rebind")
+    assert code == 0 and not shown.err
+    out = shown.out
+    assert out.index("You lose:") < out.index("Type yes to bind as a new computer.") < out.index("no longer bound to any Avibe")
+    assert out.index("https://avibe.bot/connect/ABCD234567") < out.index("Account: actual@fixture.test") < out.index("Bound.")
+    assert [prompt[:8] for prompt in bound_terminal.prompts] == ["Type yes", "Type yes", "Bind thi"]
+    assert bound_terminal.peer.decisions == ["owner-id"]
+
+    # A new computer to avibe.bot: a new identity and new session authority, the same workspace root.
+    cloud = V2Config.load().remote_access.vibe_cloud
+    assert cloud.instance_id == "inst_A" and cloud.is_runtime_paired() and cloud.session_secret != old_session
+    new_identity = desktop_local_instance._installation_id()
+    assert new_identity and new_identity != old_identity
+    assert bound_terminal.peer.calls[0][1]["installation_id"] == new_identity
+    assert remote_access._read_pending_pairing_record() == (None, None) and not binding_admission.reset_in_progress()
+    code, shown = vibe("remote", "status", "--json")
+    assert code == 0 and json.loads(shown.out)["paired"] is True and "binding_state" not in shown.out
+    assert all(secret not in out for secret in (old_identity, new_identity, cloud.session_secret, cloud.instance_secret,
+                                                 bound_terminal.peer.key, bound_terminal.peer.calls[-1][1]["code_verifier"]))
 
 
 @pytest.mark.parametrize("instance_kind", ["personal", "organization"])
@@ -1951,6 +2098,118 @@ def test_device_account_signout_from_verified_exchange(monkeypatch, tmp_path, ca
     history, = view()['recent_sign_outs']
     assert history['operation_id'] == receipt['operation_id'] and history['account_results'][0]['status'] == 'accepted'
     assert b.get('/api/session', base_url=origin).get_json()['authenticated'] is True
+
+
+
+def test_the_same_browser_signing_in_again_keeps_one_device_row(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-917. The handshake, id_token verification, registry and routes are real."""
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from tests.test_device_relogin import set_authorization
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    cfg = _save_remote_session_authorization_config('personal')
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.issuer, cloud.token_endpoint, cloud.jwks_uri = 'https://issuer.invalid', 'https://issuer.invalid/token', 'https://issuer.invalid/keys'
+    cfg.save()
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(remote_access, 'PyJWKClient', lambda _: SimpleNamespace(
+        get_signing_key_from_jwt=lambda _: SimpleNamespace(key=key.public_key())))
+    published = []
+    monkeypatch.setattr(remote_access, 'publish_browser_session_revoked', published.append)
+    origin = cloud.public_url
+
+    def begin(client):
+        return httpx.URL(client.get('/auth/login?next=/inbox', base_url=origin).headers['Location'])
+
+    def complete(client, authorize):
+        claims = {**_REMOTE_SESSION_OWNER_CLAIMS, 'iss': cloud.issuer, 'aud': cloud.client_id, 'sub': 'owner-1',
+                  'email': 'owner@example.com', 'email_verified': True, 'nonce': authorize.params['nonce'],
+                  'exp': int(time.time()) + 300}
+        token = jwt.encode(claims, key, algorithm='RS256')
+        monkeypatch.setattr(remote_access.requests, 'post', lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {'id_token': token}))
+        response = client.get('/auth/callback', base_url=origin, params={'code': 'fixture', 'state': authorize.params['state']})
+        assert response.status_code == 302
+        return _remote_session_set_cookie(response)[0]
+
+    def rows(client):
+        return sorted(row['id'] for row in client.get('/api/devices', base_url=origin).get_json()['mine'] if row['kind'] != 'host')
+
+    def signed_in(cookie):
+        probe = app.test_client()
+        probe.set_cookie(remote_access.SESSION_COOKIE_NAME, cookie, domain=httpx.URL(origin).host)
+        return probe.get('/api/session', base_url=origin).get_json()['authenticated']
+
+    browser, laptop = app.test_client(), app.test_client()
+    old = complete(browser, begin(browser))
+    complete(laptop, begin(laptop))
+    before = rows(laptop)
+    assert len(before) == 2
+    # The browser's authorization stops being current, so /auth/login starts OAuth with its cookie on.
+    set_authorization(cfg, old, lapsed=True)
+    authorize = begin(browser)
+    set_authorization(cfg, old, lapsed=False)
+    new = complete(browser, authorize)
+    assert new != old and rows(laptop) == before and rows(browser) == before
+    assert signed_in(new) is True and signed_in(old) is False
+    assert published == [remote_access.parse_session_identity(cfg, old, allow_revoked=True)['browser_session_id']]
+
+
+
+def test_an_owner_sign_out_without_a_reference_is_finished_at_the_next_owner_sign_in(monkeypatch, tmp_path):
+    """Scenario: AUTH-SETUP-918. The handshake, id_token verification, registry, routes and worker are real;
+    only avibe.bot's token endpoint, keys and revoke endpoint are fixtures."""
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from tests.test_device_account_signout import fake_issuer
+    from vibe import account_signout_worker
+    monkeypatch.setenv('AVIBE_HOME', str(tmp_path))
+    cfg = _save_remote_session_authorization_config('personal')
+    cloud = cfg.remote_access.vibe_cloud
+    cloud.issuer, cloud.token_endpoint, cloud.jwks_uri = 'https://issuer.invalid', 'https://issuer.invalid/token', 'https://issuer.invalid/keys'
+    cfg.save()
+    with ui_server._auth_ratelimit_lock:
+        ui_server._auth_ratelimit.clear()
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    monkeypatch.setattr(remote_access, 'PyJWKClient', lambda _: SimpleNamespace(
+        get_signing_key_from_jwt=lambda _: SimpleNamespace(key=key.public_key())))
+    monkeypatch.setattr(remote_access, 'publish_browser_session_revoked', lambda _sid: None)
+    origin = cloud.public_url
+    old_ref, kept_ref, new_ref = 'asr1_' + 'o' * 43, 'asr1_' + 'k' * 43, 'asr1_' + 'n' * 43
+
+    def callback(client, ref):
+        authorize = httpx.URL(client.get('/auth/login?next=/inbox', base_url=origin).headers['Location'])
+        claims = {**_REMOTE_SESSION_OWNER_CLAIMS, 'iss': cloud.issuer, 'aud': cloud.client_id, 'sub': 'owner-1',
+                  'email': 'owner@example.com', 'email_verified': True, 'nonce': authorize.params['nonce'],
+                  'exp': int(time.time()) + 300, **({'avibe_account_session_ref': ref} if ref else {})}
+        token = jwt.encode(claims, key, algorithm='RS256')
+        monkeypatch.setattr(remote_access.requests, 'post', lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None, json=lambda: {'id_token': token}))
+        return client.get('/auth/callback', base_url=origin, params={'code': 'fixture', 'state': authorize.params['state']})
+
+    old_browser, laptop = app.test_client(), app.test_client()
+    # Signed in before this instance recorded account references (as from 3.2.7): no reference.
+    assert callback(old_browser, None).status_code == 302
+    assert callback(laptop, kept_ref).status_code == 302
+    target = next(row['id'] for row in laptop.get('/api/devices', base_url=origin).get_json()['mine']
+                  if row['kind'] != 'host' and not row['current'])
+    result = laptop.post('/api/devices/' + target + '/sign-out', base_url=origin,
+                         headers=csrf_headers(laptop, origin), json={}).get_json()
+    assert result['sign_out_results'][0]['account_results'][0]['reason'] == 'no_reference'
+    # The signed-out browser comes back; avibe.bot signs its account session in silently.
+    ended = callback(old_browser, old_ref)
+    # Refused, and the old cookie is cleared: no session is issued.
+    assert ended.status_code == 403 and _remote_session_set_cookie(ended) == ('', 0)
+    calls = fake_issuer(monkeypatch, 204)
+    assert account_signout_worker.run_once(V2Config.load)
+    assert [call[2] for call in calls] == [{'account_session_ref': old_ref}]
+    # That account session is refused here from now on; a new one (signed in again) is not ended.
+    assert callback(old_browser, old_ref).status_code == 403
+    assert callback(old_browser, new_ref).status_code == 302
+    assert not account_signout_worker.run_once(V2Config.load) and len(calls) == 1
+    assert laptop.get('/api/session', base_url=origin).get_json()['authenticated'] is True
 
 
 def _remote_session_lifetime_scenario(monkeypatch, tmp_path, instance_kind, idle_seconds):

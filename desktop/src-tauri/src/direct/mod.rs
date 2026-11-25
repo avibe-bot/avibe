@@ -12,6 +12,10 @@ mod connect;
 #[path = "../../tests/direct/windows_credentials.rs"]
 mod credential_tests;
 mod credentials;
+mod dead_end;
+#[cfg(test)]
+#[path = "../../tests/direct/dead_end.rs"]
+mod dead_end_tests;
 pub use credentials::WindowRegistration;
 pub use quiet::PublicCensus;
 #[cfg(test)]
@@ -31,6 +35,8 @@ mod interop;
 #[path = "../../tests/direct/lifecycle.rs"]
 mod lifecycle_tests;
 mod listener;
+mod measure;
+pub use measure::{measure, MeasureBusy, MeasureResult};
 mod quiet;
 pub use handover::{Handover, HandoverResult, PathStatus, PreferredPath};
 mod offer;
@@ -50,7 +56,14 @@ pub mod rendezvous;
 mod rendezvous_tests;
 mod selection;
 pub(crate) mod shell;
+mod strict;
+#[cfg(test)]
+#[path = "../../tests/direct/strict.rs"]
+mod strict_tests;
 // muda builds macOS menus only on the main thread, which a test never runs on.
+#[cfg(test)]
+#[path = "../../tests/direct/direct_only.rs"]
+mod direct_only_tests;
 #[cfg(all(test, windows))]
 #[path = "../../tests/direct/menu.rs"]
 mod menu_tests;
@@ -135,7 +148,8 @@ impl Client {
             return None;
         }
         let (links, rx) = watch::channel(None);
-        let listener = Listener::bind(host.clone(), rx).await?;
+        let status = watch::channel(PathStatus::default()).0;
+        let listener = Listener::bind(host.clone(), rx, status.clone()).await?;
         Some(Self {
             clock: Clock::default(),
             host,
@@ -144,7 +158,7 @@ impl Client {
             links,
             listener,
             status_writer: Default::default(),
-            status: watch::channel(PathStatus::default()).0,
+            status,
             monitor: None,
         })
     }
@@ -250,6 +264,7 @@ impl Client {
             links: self.links.subscribe(),
             health: self.listener.health(),
             listener: Arc::downgrade(&self.listener.access),
+            port: self.listener.port,
         }
     }
 

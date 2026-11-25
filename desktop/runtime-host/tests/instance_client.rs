@@ -323,7 +323,7 @@ async fn native_cookie_jar_rejects_cross_authority_and_preserves_private_host_co
 }
 
 #[tokio::test]
-async fn proof_and_inflight_ceremony_are_memory_only_on_save_and_restore() {
+async fn ordinary_instance_cookies_cannot_import_ceremony_credentials_or_restore_historical_ones() {
     let transport = Arc::new(Responses {
         cookie: Mutex::new(None),
         received: Mutex::new(vec![]),
@@ -344,13 +344,21 @@ async fn proof_and_inflight_ceremony_are_memory_only_on_save_and_restore() {
     let saved = session.persist().unwrap();
     let text = std::str::from_utf8(&saved).unwrap();
     assert!(!text.contains("proof-canary") && !text.contains("start-canary"));
-    assert!(session.cookie_value("__Host-avibe-sign-in-proof").is_some());
-    assert!(session.cookie_value("__Host-avibe-sign-in-start").is_some());
+    // This is an ordinary instance GET, not a native account ceremony. Even
+    // before saving, neither reserved name may enter the ordinary jar or wire.
+    assert_eq!(session.cookie_value("account").as_deref(), Some("ordinary"));
+    assert!(session.cookie_value("__Host-avibe-sign-in-proof").is_none());
+    assert!(session.cookie_value("__Host-avibe-sign-in-start").is_none());
+    session.request(Method::GET, "/", None).await.unwrap();
+    assert_eq!(
+        transport.received.lock().unwrap().last().unwrap().headers[reqwest::header::COOKIE],
+        "account=ordinary"
+    );
     let mut legacy = vec![];
     cookie_store::serde::json::save_incl_expired_and_nonpersistent(&old_store, &mut legacy).unwrap();
     for bytes in [saved, legacy] {
         let restarted = NativeSession::restore(origin.clone(), transport.clone(), &bytes).unwrap();
-        assert!(restarted.cookie_value("account").as_deref() == Some("ordinary"));
+        assert_eq!(restarted.cookie_value("account").as_deref(), Some("ordinary"));
         assert!(restarted.cookie_value("__Host-avibe-sign-in-proof").is_none());
         assert!(restarted.cookie_value("__Host-avibe-sign-in-start").is_none());
     }

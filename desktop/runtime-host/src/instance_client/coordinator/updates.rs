@@ -53,7 +53,27 @@ impl CommittedUpdate {
     fn origin(&self) -> Url {
         self.jar.lock().expect("instance jar").1.origin.clone()
     }
-    fn adopt(&self, cookies: Vec<cookie::Cookie<'static>>) -> bool {
+    /// The jar as it is now, for a new opening of its instance to check.
+    pub(super) fn session(&self) -> NativeSession {
+        self.jar.lock().expect("instance jar").1.clone()
+    }
+    /// Signs this session out of its instance, as its own page would, as far
+    /// as the instance can be reached. Nothing waits on it.
+    pub(super) async fn sign_out(&self) {
+        let mut session = self.session();
+        session.unfenced();
+        let mut headers = HeaderMap::new();
+        if let Some(token) = session
+            .cookie_value("vibe_csrf_token")
+            .and_then(|token| HeaderValue::from_str(&token).ok())
+        {
+            headers.insert("x-vibe-csrf-token", token);
+        }
+        let _ = session
+            .request_with_headers(Method::POST, "/auth/logout", Some(json!({})), headers)
+            .await;
+    }
+    pub(super) fn adopt(&self, cookies: Vec<cookie::Cookie<'static>>) -> bool {
         let mut jar = self.jar.lock().expect("instance jar");
         let origin = jar.1.origin.clone();
         let cookies: Vec<_> = cookies

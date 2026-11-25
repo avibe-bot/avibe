@@ -141,6 +141,12 @@ fn shows(webview: &WKWebView, origin: &str) -> bool {
 ///
 /// So the shell installs it before an instance view's first load whenever
 /// it can (`wiring.rs`).
+///
+/// `failover`: whether the store may go to the host's own address when the
+/// listener cannot be reached or refuses (`true`: every route but a
+/// direct-only instance's). With `false` such a request fails; the probe
+/// (`examples/direct_webview_probe.rs`) holds WebKit to that for a listener
+/// that is gone and for one that answers 502.
 pub fn install_route(
     webview: &WKWebView,
     _mtm: MainThreadMarker,
@@ -148,6 +154,7 @@ pub fn install_route(
     proxy: SocketAddrV4,
     username: &str,
     password: &str,
+    failover: bool,
 ) -> bool {
     let Some(network) = Network::load() else { return false };
     let (Ok(host), Ok(address), Ok(port), Ok(username), Ok(password)) = (
@@ -176,7 +183,7 @@ pub fn install_route(
         let raw = Retained::as_ptr(&config).cast_mut();
         (network.add_match_domain)(raw, host.as_ptr());
         (network.set_username_and_password)(raw, username.as_ptr(), password.as_ptr());
-        (network.set_failover_allowed)(raw, true);
+        (network.set_failover_allowed)(raw, failover);
         config
     };
     set_proxy_configurations(webview, &NSArray::from_retained_slice(&[config]))

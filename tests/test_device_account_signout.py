@@ -143,8 +143,14 @@ def test_repair_drops_old_authority_and_never_dispatches_to_replacement(paired, 
     target = enroll('A', A)
     enroll('B', B)
     stop(target)
-    cfg.remote_access.vibe_cloud.instance_secret = 'replacement-pairing'
+    from vibe.binding_admission import reset_intent_path
+    marker = reset_intent_path()
+    marker.write_text('{')
     calls = fake_issuer(monkeypatch, 204)
+    assert not worker.run_once(lambda: cfg) and not calls
+    assert read()[0]['account_results'][0]['status'] == 'pending'
+    cfg.remote_access.vibe_cloud.instance_secret = 'replacement-pairing'
+    marker.unlink()
     assert not worker.run_once(lambda: cfg) and not calls
     assert read()[0]['account_results'][0]['reason'] == 'binding_changed'
     with get_cached_sqlite_engine().connect() as conn:
@@ -246,6 +252,17 @@ def test_a_recorded_role_leaves_with_its_receipt(paired, monkeypatch):
         assert conn.execute(select(roles.c.receipt, roles.c.login_role)).all() == [(result['operation_id'], 'owner')]
         # Roles whose receipts an earlier version already removed.
         conn.execute(roles.insert(), [dict(receipt=f'left-{n}', login_role='member') for n in range(5)])
+    # Even orphan-only maintenance is deferred while reset owns the store.
+    from vibe.binding_admission import reset_intent_path
+    marker = reset_intent_path()
+    marker.write_text('{}')
+    try:
+        assert worker.run_once(lambda: pytest.fail('worker passed the reset fence')) is False
+        assert worker._roles_checked_to == ''
+        with get_cached_sqlite_engine().connect() as conn:
+            assert len(conn.execute(select(roles.c.receipt)).all()) == 6
+    finally:
+        marker.unlink()
     fake_issuer(monkeypatch, 204)
     engine, statements = get_cached_sqlite_engine(), []
 

@@ -8,7 +8,9 @@ side of it is the real code, config file and SQLite state.
 import json
 import re
 import sqlite3
+import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 from alembic import command
@@ -148,7 +150,7 @@ def address(monkeypatch):
     for name, value in (
         ("_authority", None), ("_quiet", set()), ("_quiet_loaded_for", None), ("_inflight", {}),
         ("_last_read_started", None), ("_retired_at_flip", {}), ("_confirmations", {}),
-        ("_BINDING_CACHE", None), ("_receipt_key_cache", None), ("_hooks", {}),
+        ("_BINDING_CACHE", None), ("_hooks", {}),
         ("_last_read_failed", None), ("_known_cleanup", None), ("_binding_failure_logged", None),
         ("_read_refused", False), ("_standing_refusal", None), ("_read_refusal", None), ("_endpoint_absent", None), ("_held_checked_at", None),
     ):
@@ -156,7 +158,7 @@ def address(monkeypatch):
     instance_address._worker_read_requested.clear()
     for name, value in ():
         monkeypatch.setattr(instance_address, name, value)
-    monkeypatch.setattr(ui_server, "_start_instance_address", lambda: None)
+    monkeypatch.setattr(ui_server, "_start_instance_address", lambda **_: True)
     return plane, clocks
 
 
@@ -1607,6 +1609,28 @@ def test_b1_a_journal_is_not_left_idle_while_the_pairing_is_unreadable(address):
     assert binding().active_host == NEW
 
 
+def test_rejected_committed_rename_retires_reconciliation_not_cloud_change(address, monkeypatch):
+    from vibe import binding_health
+
+    plane, _ = address
+    phone = health_pairing()
+    rename_to('new')
+    before_commit = plane.state()
+    monkeypatch.setattr(plane, 'state', lambda: before_commit)
+    assert instance_address._advance_operation() > 0
+    committed = instance_address._journal(binding())
+    assert committed['phase'] == 'committed' and plane.active == NEW
+    binding_health._set(settings_service.load_config(), rejected=True)
+    assert binding_health.rejected_at(settings_service.load_config()) is not None
+    calls = len(plane.calls)
+    assert instance_address._advance_operation() == 0
+    assert instance_address._journal(binding()) is None
+    last = instance_address._load_state(binding().instance_id)['last_operation']
+    assert last['state'] == 'interrupted' and last['operation_id'] == committed['operation_id']
+    assert binding().active_host == OLD and plane.active == NEW and len(plane.calls) == calls
+    assert phone and active_health_devices()
+
+
 def test_b5_the_state_from_before_our_own_commit_does_not_end_the_journal(address):
     plane, _ = address
     phone = health_pairing()
@@ -1720,6 +1744,70 @@ def test_b4_a_definitive_refusal_of_the_state_read_is_told_apart_from_a_fault(ad
     assert instance_address._read_when_asked() is False and instance_address._read_refused is False
     plane.fail = remote_access.BackendRequestError(503, {})
     assert instance_address._read_when_asked() is False and instance_address._read_refused is False
+
+
+def test_service_retries_worker_start_and_wakes_an_already_running_address_reader(monkeypatch):
+    # Service-side sink only: no real connector, address daemon, service restart or HTTP.
+    events = []
+
+    class Worker:
+        def __init__(self, *, name, target, daemon):
+            assert name == "instance-address" and target is instance_address._worker_loop and daemon
+
+        def start(self):
+            events.append("start")
+            if events.count("start") == 1:
+                raise RuntimeError("fixture thread unavailable")
+
+    owed, wake = threading.Event(), threading.Event()
+    monkeypatch.setattr(instance_address, "threading", SimpleNamespace(Thread=Worker))
+    monkeypatch.setattr(instance_address, "_worker_started", False)
+    monkeypatch.setattr(instance_address, "_worker_read_requested", owed)
+    monkeypatch.setattr(instance_address, "_worker_wake", wake)
+    monkeypatch.setattr(instance_address, "_hooks", {})
+    def monitor(config):
+        events.append("monitors")
+        return True
+
+    monkeypatch.setattr(ui_server, "_start_remote_monitors", monitor)
+    monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", False)
+    assert not ui_server._on_claim_bound() and not events
+    monkeypatch.setattr(ui_server, "_UI_RUNTIME_ACTIVE", True)
+    assert not ui_server._on_claim_bound() and not owed.is_set()
+    assert ui_server._on_claim_bound() and owed.is_set() and wake.is_set()
+    owed.clear()
+    wake.clear()
+    assert ui_server._ensure_remote_access_monitoring() and not wake.is_set() and not owed.is_set()
+    assert ui_server._on_claim_bound() and wake.is_set() and owed.is_set()
+    assert events == ["monitors", "start", "monitors", "start", "monitors", "monitors"]
+    monkeypatch.setattr(ui_server, "_start_remote_monitors", lambda config: False)
+    assert not ui_server._on_claim_bound()  # monitor startup refusal cannot acknowledge both workers
+
+
+@pytest.mark.parametrize("old_read", ["unpaired", "finished"])
+def test_publication_during_an_older_address_read_is_still_owed(address, monkeypatch, old_read):
+    plane, _ = address
+
+    def overlapping():
+        instance_address._wake_worker(read_state=True)  # the newly committed binding became visible
+        return None
+
+    with monkeypatch.context() as old:
+        if old_read == "unpaired":
+            old.setattr(instance_address, "current_binding", overlapping)
+        else:
+            def completed(*, force):
+                assert force
+                instance_address._wake_worker(read_state=True)
+                return True
+            old.setattr(instance_address, "refresh_state", completed)
+        instance_address._wake_worker(read_state=True)
+        assert instance_address._read_when_asked()
+    assert instance_address._worker_read_requested.is_set()
+    plane.calls.clear()
+    assert instance_address._read_when_asked()
+    assert not instance_address._worker_read_requested.is_set()
+    assert plane.calls == [("POST", "hostname-state", {})]
 
 
 def test_b4_a_read_that_is_owed_survives_a_failed_request(address):
@@ -1921,6 +2009,65 @@ def test_b2_a_read_disowned_by_a_401_cannot_grant_cleaning_or_move_the_address(a
     assert is_cleaning(get(NEW))  # only a read made after the refusal grants it again
 
 
+def test_rename_intent_blocks_pairing_before_redeem_and_releases_after_apply(address, monkeypatch):
+    rename_to("new")
+    calls = []
+    monkeypatch.setattr(remote_access, "_normalize_pairing_backend_url", lambda value: calls.append(value) or (None, "test_boundary"))
+    assert remote_access.pair("fixture-key", "https://issuer.invalid")["error"] == "operation_in_progress"
+    assert not calls
+    run()
+    assert binding().active_host == NEW
+    assert remote_access.pair("fixture-key", "https://issuer.invalid")["error"] == "test_boundary"
+    assert calls == ["https://issuer.invalid"]
+
+
+def test_prepared_pairing_blocks_rename_without_consuming_confirmation(address):
+    from config.v2_config import V2Config
+
+    plane, _ = address
+    confirmation = instance_address.preview("new", ("loopback",))["confirmation_id"]
+    record = remote_access._new_pairing_claim(V2Config.load(), "https://issuer.invalid", "fixture", pairing_key="fixture-key")
+    remote_access._write_pending_pairing_record(record)
+    before = list(plane.calls)
+    with pytest.raises(instance_address.AddressError) as caught:
+        instance_address.change(confirmation, ("loopback",))
+    assert caught.value.code == "operation_in_progress" and plane.calls == before
+    assert remote_access._read_pending_pairing_record() == (record, None)
+    assert remote_access._retire_pending_pairing(operation_id=record["operation_id"])
+    assert instance_address.change(confirmation, ("loopback",))[0] == 202
+
+
+def test_rename_worker_retries_unreadable_binding_without_another_hint(address, monkeypatch):
+    plane, _ = address
+    rename_to("new")
+    read_binding = instance_address.current_binding
+    interrupted = False
+
+    def intermittent_read():
+        nonlocal interrupted
+        if plane.operations and not interrupted:
+            interrupted = True  # first guard after the issuer committed
+            return None
+        return read_binding()
+
+    monkeypatch.setattr(instance_address, "current_binding", intermittent_read)
+    waits = []
+
+    def wait(timeout):
+        if waits and timeout is None:
+            raise StopIteration  # no external wake arrives: worker would now stay idle
+        assert len(waits) < 10, "rename did not finish"
+        waits.append(timeout)
+
+    monkeypatch.setattr(instance_address._worker_wake, "wait", wait)
+    with pytest.raises(StopIteration):
+        instance_address._worker_loop()
+    assert interrupted and len(waits) > 1
+    assert binding().active_host == NEW
+    requests = [payload["operation_id"] for _, suffix, payload in plane.calls if suffix == "hostname-renames"]
+    assert len(requests) == 2 and requests[0] == requests[1]
+
+
 def test_e7_the_last_check_before_the_headers_never_waits_for_the_role_lock(address):
     import threading
 
@@ -1979,12 +2126,13 @@ def test_b8_a_settings_save_cannot_write_the_address_and_a_new_pairing_inherits_
         with pytest.raises(ValueError, match="not by a settings save"):
             api.save_config({"remote_access": {"vibe_cloud": {field: value}}}, generic_remote_access=True)
     assert binding().active_host == NEW
-    # Clearing a field and then setting it in a second save is the same write in two steps.
-    api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
+    # AV-13 supersedes B8's empty-value exception: Off is not an unpair.
+    with pytest.raises(ValueError, match="binding is not changed by saving settings"):
+        api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": ""}}}, generic_remote_access=True)
     with pytest.raises(ValueError, match="not by a settings save"):
         api.save_config({"remote_access": {"vibe_cloud": {"redirect_uri": f"https://{OLD}/auth/callback"}}},
                         generic_remote_access=True)
-    update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "redirect_uri", f"https://{NEW}/auth/callback"))
+    assert settings_service.load_config().remote_access.vibe_cloud.redirect_uri == f"https://{NEW}/auth/callback"
     # Turning remote access off through the same save still works.
     api.save_config({"remote_access": {"vibe_cloud": {"enabled": False}}}, generic_remote_access=True)
     assert settings_service.load_config().remote_access.vibe_cloud.enabled is False
@@ -2236,3 +2384,40 @@ def test_clearing_list_migration_round_trip_keeps_the_registry(tmp_path):
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT session_id FROM remote_device_sessions").fetchall() == [("old",)]
         assert db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'instance_address%'").fetchall() == []
+
+
+@pytest.mark.parametrize("hint,delay", [(48, 5.0), (2, 2.0), (None, 5.0)])
+def test_an_accepted_rename_says_applying_at_once_and_is_asked_again_within_seconds(address, monkeypatch, hint, delay):
+    plane, _ = address
+    monkeypatch.setattr(instance_address, "_FIRST_ANSWER_WAIT_SECONDS", 12.0)
+    answer = plane.rename
+    pending = [True]
+
+    def accepted_first(body):
+        if pending.pop() if pending else False:
+            return {"status": "pending", "operation_id": body["operation_id"],
+                    **({"retry_after_seconds": hint} if hint is not None else {})}
+        return answer(body)
+
+    plane.rename = accepted_first
+    confirmation = instance_address.preview("new", ("loopback",))["confirmation_id"]
+    steps = []
+
+    def one_worker_step(timeout=None):
+        # The worker sends once; the route must not wait for avibe.bot's commit.
+        steps.append(instance_address._advance_operation())
+
+    monkeypatch.setattr(instance_address._first_answer, "wait", one_worker_step)
+    status, body = instance_address.change(confirmation, ("loopback",))
+    assert (status, body) == (202, {"ok": True, "state": "applying"})
+    assert steps == [delay]  # answered after the first reply, not after 12 seconds
+    journal = instance_address._journal(binding())
+    assert journal["phase"] == "intent" and journal["accepted"] and journal["may_have_landed"]
+    assert instance_address.describe()["operation"] == {"state": "applying", "hostname": NEW, "error": None}
+    # A restart keeps the operation: the same request is sent again and its receipt applied.
+    monkeypatch.setattr(instance_address, "_BINDING_CACHE", None)
+    monkeypatch.setattr(instance_address, "_confirmations", {})
+    run()
+    sent = [call[2]["operation_id"] for call in plane.calls if call[1] == "hostname-renames"]
+    assert sent == [journal["operation_id"]] * 2
+    assert binding().active_host == NEW and instance_address._journal(binding()) is None

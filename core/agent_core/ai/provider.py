@@ -184,6 +184,7 @@ class ThreadObservation:
     ordinary_retry: bool = False
     # A provider can propose a measured optimization; only a committed conversation response accepts it.
     after_commit: Callable[[], Awaitable[None]] | None = None
+    carry_projection: str = ""
 
 
 @dataclass(frozen=True)

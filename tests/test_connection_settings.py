@@ -362,7 +362,11 @@ def test_unknown_pin_replica_owner_defers_cleanup_not_runtime_monitoring(rig, mo
     def quality_thread(*, target, args, kwargs, **unused):
         assert target is ra._quality_monitor_loop
         pending.append(kwargs['orphan_candidate_pending'])
-        return SimpleNamespace(start=lambda: workers.append('quality'))
+        def launch():
+            if len(pending) == 1:
+                raise RuntimeError('fixture thread refused')
+            workers.append('quality')
+        return SimpleNamespace(start=launch)
     monkeypatch.setattr(ra, 'threading', SimpleNamespace(Thread=quality_thread, local=__import__('threading').local,
                                                         get_ident=__import__('threading').get_ident))
     for module, name in ((ra, 'start_status_heartbeat'), (ra, 'start_authorization_revision_polling'),
@@ -373,10 +377,13 @@ def test_unknown_pin_replica_owner_defers_cleanup_not_runtime_monitoring(rig, mo
     monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *a, **kw: pytest.fail('ownership unknown'))
     cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
     cs.journal.path.write_text('unreadable fixture')
-    ra.start_runtime_monitoring(rig.cfg)
-    assert workers == ['quality', 'start_status_heartbeat', 'start_authorization_revision_polling',
-                       'start_project_access_sync', 'start_resource_acl_sync_polling']
-    assert pending == [True] and not ra._reconcile_orphan_candidate_when_free()
+    policy_workers = ['start_status_heartbeat', 'start_authorization_revision_polling',
+                      'start_project_access_sync', 'start_resource_acl_sync_polling']
+    assert not ra.start_runtime_monitoring(rig.cfg) and workers == policy_workers
+    workers.clear()
+    assert ra.start_runtime_monitoring(rig.cfg) and workers == ['quality', *policy_workers]
+    assert ra.start_tunnel_quality_monitor()  # acknowledgement of the same worker, not a second launch
+    assert pending == [True, True] and not ra._reconcile_orphan_candidate_when_free()
     assert caplog.text.count('Connection settings journal unavailable') == 1
     assert cs.journal.path.read_text() == 'unreadable fixture' and slots['active'] == rig.active
     # A subsequent tick can distinguish a previous worker from one still running.
@@ -1094,6 +1101,34 @@ def queue_outage(rig, clock):
         cr.observe_pins(window, rig.cfg, active=rig.active, pid_state='cloudflared',
                         sample=SimpleNamespace(registered_connections=0), interval_seconds=15)
         clock.sleep(15)
+
+
+def test_repaired_binding_can_recover_retained_pin_without_prior_journal(rig, monkeypatch, connector_clock, pin_fleet):
+    import ipaddress
+    import time
+    from tests.test_pairing_recovery import _response
+
+    rig.cfg.remote_access.vibe_cloud.edge_ip_version = '4'
+    rig.cfg.save()
+    cs.journal.path.write_text('{')
+    with monkeypatch.context() as pairing:
+        pairing.setattr(ra, 'time', time)
+        pairing.setattr(ra, '_resolve_pairing_backend_addresses', lambda *_: (ipaddress.ip_address('93.184.216.34'),))
+        pairing.setattr(ra, '_json_request', lambda *_a, **_kw: _response('new-instance'))
+        pairing.setattr(ra, '_continue_requested_after_pairing', lambda *_: None)
+        pairing.setattr(ra, '_stop_direct_lifecycle_before_pairing_discard', lambda *_: None)
+        pairing.setattr(ra, 'status', lambda *_: {'ok': True})
+        assert ra.pair('fixture', 'https://backend.test')['ok']
+    rig.cfg = V2Config.load()
+    assert rig.cfg.remote_access.vibe_cloud.instance_id == 'new-instance'
+    assert cs.value(rig.cfg, 'ipFamily') == '4' and not cs.journal.path.exists()
+    monkeypatch.setattr(ra, '_PREFERRED_PROTOCOL', 'http2')
+    queue_outage(rig, connector_clock)
+    assert cs.journal.load(rig.cfg)['pinAttempt']['pins'] == {'ipFamily': '4'}
+    pin_fleet.sample = lambda record, elapsed: int(record['ipFamily'] == 'auto' and elapsed >= 8.030)
+    cr._consume_pin_attempt()
+    assert cs.value(V2Config.load(), 'ipFamily') == 'auto'
+    assert cs.journal.inspect(rig.cfg)['returnedToAutomatic']['changes']
 
 
 def test_surviving_connection_does_not_prove_new_connections_work(rig, monkeypatch, connector_clock, pin_fleet):

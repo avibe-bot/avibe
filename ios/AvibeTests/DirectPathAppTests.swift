@@ -7201,29 +7201,6 @@ final class DirectPathAppTests: XCTestCase {
     /// Whether an App or a runtime controller this test made is still
     /// alive: either keeps its store (a controller through its WebViews).
     private var fixtureOwnerIsAlive: [@MainActor () -> Bool] = []
-    /// Stores WebKit alone still held when their test ended, and since
-    /// when. Later teardowns try them again; see `removeTrackedStores`.
-    @MainActor private static var storesWebKitStillHolds: [UUID: Date] = [:]
-
-    /// The class is done: one more try for what WebKit still held. What it
-    /// still holds now is printed, with for how long, and is not a failure.
-    override class func tearDown() {
-        MainActor.assumeIsolated {
-            guard !DirectPathAppTests.storesWebKitStillHolds.isEmpty else { return }
-            let finished = XCTestExpectation(description: "final store sweep")
-            Task { @MainActor in
-                await DirectPathAppTests.retryStoresWebKitStillHolds()
-                finished.fulfill()
-            }
-            _ = XCTWaiter.wait(for: [finished], timeout: 10)
-            for (identifier, since) in DirectPathAppTests.storesWebKitStillHolds {
-                print("[iOS fixture] stage=class end, identifier=\(identifier), "
-                    + "WebKit still holds it after \(Int(Date().timeIntervalSince(since))) s")
-            }
-            DirectPathAppTests.storesWebKitStillHolds.removeAll()
-        }
-        super.tearDown()
-    }
     private func scheduleParams(
         requestID: String,
         operationID: String,
@@ -7449,6 +7426,13 @@ final class DirectPathAppTests: XCTestCase {
     /// returns at once and the test waits for the open itself.
     /// `notifications` is the device's push state. `whenTheAppExists` runs
     /// right after the `AppModel` is made, before its bootstrap runs.
+    ///
+    /// One bootstrap outcome builds the App a second time, once: the stall
+    /// after a web content launch (`FixtureBootstrap.stalledAfterWebContentLaunch`).
+    /// The returned App is then the second one, `whenTheAppExists` has run
+    /// for both, and the log has one line beginning
+    /// `[iOS fixture] stage=bootstrap stalled after its web content launch`.
+    /// Only here: a stall in another suite, or a second one here, fails.
     @MainActor
     private func makeApp(
         directTransport: DirectTransporting?,
@@ -7577,13 +7561,35 @@ final class DirectPathAppTests: XCTestCase {
         try beforeTheAppExists()
 
         let controlPlane = MobileControlPlaneConfiguration(testBaseURL: baseURL)
-        let app: AppModel
-        if let directTransport {
-            app = AppModel(
+        let timing = runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming()
+        // One App of this fixture. Made a second time only by the rebuild
+        // below, on the same preferences, control plane and stores.
+        func makeModel() -> AppModel {
+            if let directTransport {
+                return AppModel(
+                    defaults: defaults,
+                    controlPlane: controlPlane,
+                    directTransport: directTransport,
+                    listenerRecoveryPatience: listenerRecoveryPatience,
+                    pushKeychain: notifications?.keychain
+                        ?? pushKeychain ?? InMemoryPushKeychainStore(),
+                    pushGenerationStore: notifications?.generationStore
+                        ?? InMemoryPushGenerationStore(),
+                    pushInstallationMarker: notifications?.marker
+                        ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
+                    pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
+                    systemSchedulePlatform: systemSchedulePlatform,
+                    systemScheduleStore: scheduleStore,
+                    systemScheduleNow: systemScheduleNow,
+                    runtimeOpenTiming: timing,
+                    runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
+                    badgeCenter: SilentBadgeCenter(),
+                    networkPath: networkPath
+                )
+            }
+            return AppModel(
                 defaults: defaults,
                 controlPlane: controlPlane,
-                directTransport: directTransport,
-                listenerRecoveryPatience: listenerRecoveryPatience,
                 pushKeychain: notifications?.keychain
                     ?? pushKeychain ?? InMemoryPushKeychainStore(),
                 pushGenerationStore: notifications?.generationStore
@@ -7594,52 +7600,89 @@ final class DirectPathAppTests: XCTestCase {
                 systemSchedulePlatform: systemSchedulePlatform,
                 systemScheduleStore: scheduleStore,
                 systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
-                runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
-                badgeCenter: SilentBadgeCenter(),
-                networkPath: networkPath
-            )
-        } else {
-            app = AppModel(
-                defaults: defaults,
-                controlPlane: controlPlane,
-                pushKeychain: notifications?.keychain
-                    ?? pushKeychain ?? InMemoryPushKeychainStore(),
-                pushGenerationStore: notifications?.generationStore
-                    ?? InMemoryPushGenerationStore(),
-                pushInstallationMarker: notifications?.marker
-                    ?? pushInstallationMarker ?? InMemoryPushInstallationMarkerStore(),
-                pushNotificationCenter: pushNotificationCenter ?? SilentPushNotificationCenter(),
-                systemSchedulePlatform: systemSchedulePlatform,
-                systemScheduleStore: scheduleStore,
-                systemScheduleNow: systemScheduleNow,
-                runtimeOpenTiming: runtimeOpenTiming ?? LaunchTolerantRuntimeOpenTiming(),
+                runtimeOpenTiming: timing,
                 runtimeOpenNotificationCenter: runtimeOpenNotificationCenter,
                 badgeCenter: SilentBadgeCenter(),
                 networkPath: networkPath
             )
         }
-        notifications?.app = app
-        whenTheAppExists(app)
-        trackStore(of: app)
-        releaseFixtureApps.append { [weak app] in
-            app?.showInstancePicker()
-            app?.mobileSessionCoordinator.deactivateAccountSurface()
+        // What every App of this fixture is given before it is waited for.
+        func adopt(_ app: AppModel) {
+            notifications?.app = app
+            whenTheAppExists(app)
+            trackStore(of: app)
+            releaseFixtureApps.append { [weak app] in
+                app?.showInstancePicker()
+                app?.mobileSessionCoordinator.deactivateAccountSurface()
+            }
         }
+        let app = makeModel()
+        adopt(app)
         addTeardownBlock { @MainActor [self] in
             server.requests.attach(to: self, name: "direct App bootstrap requests")
         }
         if launchesWithInstanceOneSelected || reusingDefaults != nil {
             return app
         }
-        try await WebKitReadiness.waitForSignedInFixture(
-            app,
-            accountID: "account-1",
-            instanceIDs: ["instance-1", "instance-2"],
-            requests: server.requests,
-            budget: WebKitReadiness.launchedTransportOperation
-        )
-        return app
+        func signedIn(_ app: AppModel, since: Int = 0, recordsFailure: Bool) async throws {
+            try await WebKitReadiness.waitForSignedInFixture(
+                app,
+                accountID: "account-1",
+                instanceIDs: ["instance-1", "instance-2"],
+                requests: server.requests,
+                requestsSince: since,
+                budget: WebKitReadiness.launchedTransportOperation,
+                recordsFailure: recordsFailure
+            )
+        }
+        let readiness = Duration.milliseconds(timing.accountTransportDeadlines.readinessMilliseconds)
+        do {
+            try await signedIn(app, recordsFailure: false)
+            return app
+        } catch let error as FixtureReadinessError
+            where error.bootstrap?.stalledAfterWebContentLaunch(readiness: readiness) == true
+        {
+            // The one state this fixture builds its App again for, once
+            // (`FixtureBootstrap.stalledAfterWebContentLaunch` has what it
+            // is and where it was seen): its web content process came up
+            // late and then never finished its first document. Counted in
+            // the logs by this line.
+            print(
+                "[iOS fixture] stage=bootstrap stalled after its web content launch, App rebuilt once; "
+                    + (error.bootstrap?.stallEvidence(readiness: readiness) ?? "")
+            )
+        } catch {
+            // Every other outcome fails as it did, recorded here instead of
+            // in the wait, which was asked not to record the one above.
+            throw recordThrown("The signed-in fixture did not bootstrap", error)
+        }
+        // The stalled App keeps its account page until the new App has
+        // settled, and lets go of it then: the page that never answered
+        // stays where it is while the new App launches its own. (Whether a
+        // page let go first would have been handed on was not measured.)
+        defer {
+            app.showInstancePicker()
+            app.mobileSessionCoordinator.deactivateAccountSurface()
+        }
+        // The log already has the stalled App's requests: the new App is
+        // judged, and its line written, by its own, those from here on.
+        let before = server.requests.count
+        let rebuilt = makeModel()
+        adopt(rebuilt)
+        do {
+            try await signedIn(rebuilt, since: before, recordsFailure: true)
+        } catch let error as FixtureReadinessError
+            where error.bootstrap?.stalledAfterWebContentLaunch(readiness: readiness) == true
+        {
+            // A second stall is a finding of its own, not a reason to
+            // build a third App.
+            print(
+                "[iOS fixture] stage=bootstrap stalled again in the rebuilt App; "
+                    + (error.bootstrap?.stallEvidence(readiness: readiness) ?? "")
+            )
+            throw error
+        }
+        return rebuilt
     }
 
     @MainActor
@@ -7860,52 +7903,10 @@ final class DirectPathAppTests: XCTestCase {
         fixtureOwnerIsAlive.append { [weak app] in app != nil }
     }
 
-    @MainActor
-    private static func registeredStores() async -> Set<UUID> {
-        await withCheckedContinuation { continuation in
-            WKWebsiteDataStore.fetchAllDataStoreIdentifiers {
-                continuation.resume(returning: Set($0))
-            }
-        }
-    }
-
-    /// WebKit's answer for a store none of our pages uses any more, while a
-    /// web process of its own for that store has not shut down yet (iOS 27).
-    /// A store one of our pages still uses is "Data store is in use".
-    private static func isHeldByWebKitAlone(_ error: Error?) -> Bool {
-        error?.localizedDescription == "Data store is in use (by network process)"
-    }
-
-    /// One try for each store WebKit still held at an earlier teardown.
-    @MainActor
-    private static func retryStoresWebKitStillHolds() async {
-        for (identifier, since) in storesWebKitStillHolds {
-            let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
-            if await !registeredStores().contains(identifier) {
-                storesWebKitStillHolds[identifier] = nil
-                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
-                    + "\(Int(Date().timeIntervalSince(since))) s after its test")
-            } else if !isHeldByWebKitAlone(error) {
-                storesWebKitStillHolds[identifier] = nil
-                XCTFail("Fixture store still registered: \(identifier); error=\(String(describing: error))")
-            }
-        }
-    }
-
-    /// Removes the stores this test's Apps used.
-    ///
-    /// What the test owns is asserted here: its Apps and runtime controllers
-    /// are released and no page of theirs uses a store, within the same 5 s
-    /// as before.
-    ///
-    /// On iOS 27 WebKit keeps a store while a web process of its own for it
-    /// has not shut down, and answers every removal "in use (by network
-    /// process)" until then. That process waits for the web content to
-    /// answer what WebKit last asked it: 11 ms at the median on CI, but over
-    /// 30 s for 3 of 683 processes in one run of this class, and five
-    /// minutes for one that never answered. No wait covers that, so such a
-    /// store, once nothing of the test that holds it is alive, is left to
-    /// later teardowns (one try each) and to the class's own.
+    /// Removes the stores this test's Apps used (`FixtureStoreRemoval`):
+    /// its Apps and runtime controllers are released and no page of theirs
+    /// uses a store, or the test fails; a store WebKit alone still holds is
+    /// left to later removals.
     @MainActor
     private func removeTrackedStores() async {
         // Release every App's runtime/account views before removing any
@@ -7914,32 +7915,12 @@ final class DirectPathAppTests: XCTestCase {
         for release in releaseFixtureApps { release() }
         releaseFixtureApps.removeAll()
         print("[iOS fixture] stage=App views invalidated before store removal")
-        await Self.retryStoresWebKitStillHolds()
+        let owners = fixtureOwnerIsAlive
         for identifier in storeIdentifiers {
-            var removed = false
-            var lastError: Error?
-            for _ in 0..<50 {
-                lastError = await AccountWebsiteDataStoreOperations.live
-                    .removeIdentifier(identifier)
-                if await !Self.registeredStores().contains(identifier) {
-                    removed = true
-                    break
-                }
-                try? await Task.sleep(for: .milliseconds(100))
+            let failure = await FixtureStoreRemoval.remove(identifier) {
+                owners.contains { $0() }
             }
-            let ownerAlive = fixtureOwnerIsAlive.contains { $0() }
-            if !removed, !ownerAlive, Self.isHeldByWebKitAlone(lastError) {
-                Self.storesWebKitStillHolds[identifier] = Date()
-                print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
-                    + "WebKit still holds it: left to a later teardown")
-                continue
-            }
-            XCTAssertTrue(
-                removed,
-                "Fixture store still registered: \(identifier); an App or controller of this test is still alive: \(ownerAlive); "
-                    + "error=\(String(describing: lastError))"
-            )
-            print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=\(removed)")
+            XCTAssertNil(failure, String(describing: failure))
         }
         storeIdentifiers.removeAll()
     }

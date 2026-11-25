@@ -48,6 +48,9 @@ const base: ConnectionPageViewProps = {
   host, address: address(), renameDevices: devices, rebind: { state: 'ready' },
 };
 
+/** The field as the person types in it (an input that scrolls), not read-only text. */
+const typing = () => undefined;
+
 const WIDE = { width: 1440, height: 1380 };
 const MID = { width: 1440, height: 1000 };
 const PHONE = { width: 375, height: 900 };
@@ -56,12 +59,8 @@ const CONNECTION = '/settings/remote-access/connection';
 /** The rename's frames sit at its own address; the rest at the connection page's. */
 function frame(name: string, title: string, size: { width: number; height: number }, props: Partial<ConnectionPageViewProps>, extra: Partial<FrameSpec> = {}): FrameSpec {
   const route = typeof extra.route === 'string' ? extra.route : `${CONNECTION}/address`;
-  // 「更改域名」 ships turned off in this release (features.ts): its dialogs, and a page that draws
-  // its entry, are the next one's.
-  const shown = { ...base, ...props };
-  const nextRelease = Boolean(shown.rename) || (shown.renameEntry !== false && Boolean(shown.address?.eligible));
   return {
-    name, title: nextRelease ? `${title}（更改域名：下一版）` : title, ...size, status: 'shipped', themes: ['light'],
+    name, title, ...size, status: 'shipped', themes: ['light'],
     fixtures: settingsFixtures({}),
     ...extra,
     route,
@@ -77,6 +76,18 @@ const designFrames = frames([
   frame('form', '更改域名 · 表单：后果、清不到的那一处、每台设备怎么先退出', WIDE, { rename: { step: 'form', name: 'maxwell' } }, { themes: ['light', 'dark'] }),
   frame('form-phone', '更改域名 · 表单 · 375 宽', { width: 375, height: 1500 }, { rename: { step: 'form', name: 'maxwell' } }),
   frame('form-empty', '更改域名 · 还没填名字', WIDE, { rename: { step: 'form', name: '' } }),
+  // Why a name cannot be had, one reason at a time, the same sentences as claiming (product,
+  // 2026-11-25); at 390 no sentence may wrap.
+  ...([
+    ['characters', '用了不允许的字符', 'max well'],
+    ['short', '太短', 'm'],
+    ['long', '太长（47 个字符）', 'a'.repeat(47)],
+    ['hyphen-ends', '以连字符开头或结尾', 'max-'],
+    ['double-hyphen', '第 3、4 个字符都是连字符', 'ab--cd'],
+  ] as const).flatMap(([key, title, name]) => [
+    frame(`form-invalid-${key}`, `更改域名 · 不合规则：${title}`, MID, { rename: { step: 'form', name }, onRenameNameChange: typing }),
+    frame(`form-invalid-${key}-390`, `更改域名 · 不合规则：${title} · 390 宽`, { width: 390, height: 900 }, { rename: { step: 'form', name }, onRenameNameChange: typing }),
+  ]),
   frame('form-no-date', '更改域名 · avibe.bot 没给放出日期：说 30 天，不编日期', WIDE,
     { address: address({ releaseAtIfChangedNow: undefined }), rename: { step: 'form', name: 'maxwell' } }),
   frame('form-no-health', '更改域名 · 没有设备连着健康：后果清单少一条', WIDE,

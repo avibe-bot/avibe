@@ -10,6 +10,7 @@ import { frames, type FrameSpec } from '../../frame';
 import { ConnectionPageView, type ConnectionPageViewProps } from '@/components/devices/ConnectionPageView';
 import type { AddressState, ConnectionState, RebindState, TunnelChange } from '@/components/devices/types';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
+import type { DirectMeasurement } from '@/lib/nativeDirectMeasure';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access/connection';
@@ -56,15 +57,20 @@ const status: RemoteAccessStatus = {
 } as unknown as RemoteAccessStatus;
 
 const WIDE = { width: 1440, height: 1300 };
+/** A finished 「测速」 on a punched IPv6 path, with what a frame changes. */
+const measured = (extra: Partial<DirectMeasurement> = {}): DirectMeasurement => ({
+  measuredAt: DESIGN_NOW - 2 * 60_000, samples: 5,
+  current: { kind: 'ipv6', scope: 'global', relayRegion: null, ok: 5, medianMs: 38, maxMs: 61, error: null },
+  tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 5, medianMs: 212, maxMs: 340, error: null },
+  ...extra,
+});
 const PHONE = { width: 375, height: 2000 };
+const APP_390 = { ...IPHONE_17_PRO, width: 390, height: 2400 };
 
 function frame(name: string, title: string, size: { width: number; height: number; safeArea?: { top: number; bottom: number } }, props: Partial<ConnectionPageViewProps>, extra: Partial<FrameSpec> & { app?: boolean } = {}): FrameSpec {
   const { app, ...spec } = extra;
-  // 「更改域名」 ships turned off in this release (features.ts): a frame that draws it is the next one's.
-  const shown = { ...base, ...props };
-  const nextRelease = shown.renameEntry !== false && Boolean(shown.address?.eligible);
   return {
-    name, title: nextRelease ? `${title}（更改域名入口：下一版）` : title, ...size, status: 'shipped', themes: ['light'], route,
+    name, title, ...size, status: 'shipped', themes: ['light'], route,
     fixtures: settingsFixtures({}, app ? { nativeShell: IOS_APP_CAPABILITIES } : {}),
     render: settingsPage('remote-access/connection', <ConnectionPageView {...base} {...props} />),
     ...spec,
@@ -81,14 +87,31 @@ const designFrames = frames([
   frame('remote-domain-only', '连接方式 · 同一个版本从远处看：也只有域名一行，不提重新绑定', WIDE,
     { ...remote, address: { ...address, eligible: false, ineligibleReason: 'address_state_unknown' }, rebind: undefined }),
   frame('remote-browser', '连接方式 · 浏览器远程打开：走的是 Cloudflare 隧道；重新绑定要回到那台电脑上做', WIDE, remote),
-  frame('desktop-window', '连接方式 · Avibe Desktop 里打开另一台电脑的实例的窗口：说这台设备走的路径，这里还没有选择可改', WIDE,
-    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null } }),
+  frame('desktop-window', '连接方式 · Avibe Desktop 里打开另一台电脑的实例的窗口：说这台设备走的路径，选择和 App 一样', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null }, preference: { mode: 'automatic', reverted: null }, choiceShell: 'desktop', directOnly: true }),
+  frame('desktop-window-v1', '连接方式 · Avibe Desktop 窗口，外壳还在 directPreference 1：只有「自动 / 仅 Cloudflare 隧道」两项，提示只说只管这台设备', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null }, preference: { mode: 'automatic', reverted: null }, choiceShell: 'desktop', directOnly: false }),
+  frame('desktop-window-direct-only', '连接方式 · Avibe Desktop 窗口选了「仅直连和中继」：「这台设备」照旧说实际走的路线', WIDE,
+    { ...remote, via: 'direct', path: { kind: 'lan', family: 'ipv4', rttMs: null }, preference: { mode: 'direct', reverted: null }, choiceShell: 'desktop', directOnly: true }),
+  frame('desktop-window-direct-reverted', '连接方式 · Avibe Desktop 选「仅直连和中继」连不上，自己改回了「自动」（Desktop 只会从这一项改回）', WIDE,
+    { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'direct' } }, choiceShell: 'desktop', directOnly: true }),
+  frame('desktop-window-no-direct', '连接方式 · Avibe Desktop 窗口，实例没开直连：不出现「仅直连和中继」，提示只说只管这台设备', WIDE,
+    { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: null }, choiceShell: 'desktop', connection: connection({ direct: 'off' }) }),
   frame('app', '连接方式 · Avibe App：「这台设备」只有 自动 / 仅 Cloudflare 隧道，自动在前', { ...IPHONE_17_PRO, height: 2300 },
     { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null } }, { app: true }),
   frame('app-tunnel-only', '连接方式 · Avibe App 选了「仅 Cloudflare 隧道」', { ...IPHONE_17_PRO, height: 2300 },
     { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'tunnel', reverted: null } }, { app: true }),
   frame('app-reverted', '连接方式 · App 连不上后自己改回了「自动」：只带时间，不带秒数', { ...IPHONE_17_PRO, height: 2300 },
-    { ...remote, path: null, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable' } } }, { app: true }),
+    { ...remote, path: null, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'tunnel' } } }, { app: true }),
+  // 「仅直连和中继」: only where the shell takes it (`directPreference` 2) and this instance has direct on.
+  frame('app-direct-offered', '连接方式 · Avibe App，实例开了直连：第三项「仅直连和中继」 · 390 宽', APP_390,
+    { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'automatic', reverted: null }, directOnly: true }, { app: true }),
+  frame('app-direct-only', '连接方式 · Avibe App 选了「仅直连和中继」：「这台设备」照旧说实际走的路线（这里是中继） · 390 宽', APP_390,
+    { ...remote, via: 'direct', path: { kind: 'relay', rttMs: 85 }, preference: { mode: 'direct', reverted: null }, directOnly: true }, { app: true }),
+  frame('app-direct-relaunch', '连接方式 · Avibe App 选了「仅直连和中继」，要重新打开 App 才生效：选项下面一句 · 390 宽', APP_390,
+    { ...remote, via: 'direct', path: { kind: 'punched', family: 'ipv6', rttMs: 38 }, preference: { mode: 'direct', reverted: null, pendingRelaunch: true }, directOnly: true }, { app: true }),
+  frame('app-direct-reverted', '连接方式 · App 选「仅直连和中继」连不上，自己改回了「自动」：同样的句式 · 390 宽', APP_390,
+    { ...remote, path: { kind: 'tunnel', relayUp: false }, preference: { mode: 'automatic', reverted: { at: ago(95), reason: 'unreachable', from: 'direct' } }, directOnly: true }, { app: true }),
   frame('loading', '连接方式 · 第一次读', { width: 1440, height: 700 }, { load: 'loading', connection: null }),
   frame('unavailable', '连接方式 · 现在读不准状态：不显示这些设置，可以重试', { width: 1440, height: 700 }, { load: 'unavailable', connection: null }),
 
@@ -144,12 +167,28 @@ const designFrames = frames([
   frame('optimize-started', '优化线路 · 已开始', WIDE, { optimize: { started: true } }),
   frame('diagnostics', '连接诊断与网络路径 · 诊断跑完；直连关着，没有直连那两行', WIDE,
     { diagnostics: { status, now: DESIGN_NOW, diagnostics: { ok: true, sampled_at: ago(0), effective_protocol: 'quic', dns: { status: 'available' }, quic: { status: 'available', source: 'probe' }, http2: { status: 'unknown', source: 'probe' }, cloudflared_version: '2026.10.1' } } }),
-  frame('diagnostics-direct', '连接诊断与网络路径 · 直连开着：多两行，证书到期日和最近一次连接两条路各用了多久（App 里才有记录）', WIDE,
-    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z'), lastConnection: { direct: 38, public: 212 } } } }),
-  frame('diagnostics-direct-browser', '连接诊断与网络路径 · 直连开着，在浏览器里看：证书照常，最近一次连接没有记录', WIDE,
-    { diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z'), lastConnection: null } } }),
-  frame('diagnostics-direct-phone', '直连的两行 · 375 宽', { width: 375, height: 900 },
-    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: null, lastConnection: { direct: 'timeout', public: 180 } } } }),
+  frame('diagnostics-direct', '连接诊断与网络路径 · 直连开着：证书到期日；「线路测速」在测之前只有说明和按钮', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: {} } }),
+  frame('diagnostics-direct-browser', '连接诊断与网络路径 · 直连开着，在浏览器里看：证书照常，浏览器测不了速，没有「线路测速」', WIDE,
+    { diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') } } }),
+  frame('diagnostics-measured', '线路测速 · 测完：每条线路的中位和最慢，带线路名（打洞直连 · IPv6）', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { result: measured() } } }),
+  frame('diagnostics-measured-relay', '线路测速 · 走中继：带中继的区域；隧道有几次没完成', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { result: measured({
+      current: { kind: 'relay', scope: null, relayRegion: 'euw1', ok: 5, medianMs: 85, maxMs: 140, error: null },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 3, medianMs: 212, maxMs: 1430, error: 'timeout' },
+    }) } } }),
+  frame('diagnostics-measured-tunnel-only', '线路测速 · 现在没在用直连或中继（例如选了「仅 Cloudflare 隧道」）：只有隧道的数', WIDE,
+    { ...remote, diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { result: measured({ current: null }) } } }),
+  frame('diagnostics-measuring', '线路测速 · 正在测（上一次的结果留着）', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { running: true, result: measured() } } }),
+  frame('diagnostics-measure-busy', '线路测速 · 另一次还在测：一句话，可以稍后再试', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { error: 'busy' } } }),
+  frame('diagnostics-direct-phone', '直连和线路测速 · 375 宽：两条都没测全，最长的样子', { width: 375, height: 1100 },
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: null }, measure: { result: measured({
+      current: { kind: 'relay', scope: null, relayRegion: 'euw1', ok: 3, medianMs: 85, maxMs: 1430, error: 'timeout' },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 2, medianMs: 212, maxMs: 2600, error: 'failed' },
+    }) } } }),
   frame('diagnostics-phone', '连接诊断与网络路径 · 375 宽', { width: 375, height: 900 }, { diagnostics: { status, now: DESIGN_NOW, diagnostics: null } }),
 ]);
 

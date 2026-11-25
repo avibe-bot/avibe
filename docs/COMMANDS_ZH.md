@@ -674,6 +674,12 @@ vibe remote stop
 vibe remote pair vrp_abc123
 ```
 
+重新绑定一台电脑，在那台电脑的终端里手动运行：
+
+```bash
+vibe remote rebind
+```
+
 ### `vibe screenshot`
 
 ```bash

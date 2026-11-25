@@ -115,11 +115,18 @@ _RETAINED_OWNER_ROUTES = {
     # An unbound setup Owner may restrict which devices can open this host.
     ("POST", "/api/devices/host/network-access"),
     ("POST", "/api/remote-access/vibe-cloud/pair"),
+    ("GET", "/api/remote-access/rebind"),
+    ("POST", "/api/remote-access/rebind/claims"),
+    ("GET", "/api/remote-access/rebind/claims/{claim_id}"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/cancel"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
+    ("POST", "/api/desktop/claim/v1/admit"),
     ("GET", "/api/devices/connection"),
     ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
@@ -206,9 +213,11 @@ def test_complete_registered_api_management_inventory():
     # + 8 device function, activity and Health ticket methods.
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
+    # + 1 private Desktop claim acknowledgement (Owner and direct-loopback-only).
+    # + 6 constrained local rebind/reset methods (Owner and local operator).
     # + 1 host network restriction (Owner, separately limited to unbound installations).
     # Three independent engine channel controls are owner-only, including metadata refresh.
-    assert len(endpoints) == 378
+    assert len(endpoints) == 385
     for action in ("check", "update", "auto-update"):
         path = f"/api/dependencies/model-hub-engine/{action}"
         assert ("POST", path) in endpoints
@@ -230,6 +239,7 @@ def test_complete_registered_api_management_inventory():
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
+        ("POST", "/api/desktop/claim/v1/admit"),
     ):
         assert (method, path) in endpoints
         policy = http_authorization_policy(method, path)
@@ -329,6 +339,7 @@ def test_desktop_local_enrollment_refuses_every_remote_role(management_http, rol
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
+        ("POST", "/api/desktop/claim/v1/admit"),
     ):
         response = request_http(method, path, payload={} if method == "POST" else None)
         assert response.status_code == 403

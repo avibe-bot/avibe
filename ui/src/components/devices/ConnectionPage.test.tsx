@@ -15,9 +15,7 @@ import { said } from './testText';
 import type { AddressState, ConnectionState, TunnelChange } from './types';
 
 // ui/design: settings/devices-connection/*, settings/devices-rename/*
-// The rename's own behaviour is tested with its entry turned on; this release ships it off
-// (features.ts, ConnectionPage.renameOff.test.tsx).
-vi.mock('./features', () => ({ RENAME_ENTRY_ENABLED: true }));
+// Where the entry is offered at all: ConnectionPage.renameEntry.test.tsx.
 const host = 'max-app.avibe.bot';
 const settings = { transport_protocol: 'auto', auto_recovery: true, optimization_profile: 'balanced', edge_ip_version: 'auto', edge_bind_address: '' } as const;
 const connection = (extra: Partial<ConnectionState> = {}): ConnectionState => ({ settings: { ...settings }, interfaces: [], direct: 'ready', ...extra });
@@ -318,15 +316,16 @@ describe('ConnectionPage · 连接诊断与网络路径', () => {
     return screen.findByRole('dialog');
   };
 
-  it('carries the direct certificate\'s expiry and the last connection\'s timing while direct is on', async () => {
+  it('carries the direct certificate\'s expiry while direct is on, and never the last connection\'s race', async () => {
     vi.spyOn(devicesApi, 'status').mockResolvedValue({ ...status, direct: { enabled: true, state: 'running', reason: '', certificate_not_after: '2099-02-14T00:00:00Z' } } as never);
     const dialog = await open();
     const rows = await within(dialog).findByTestId('direct-details');
     expect(rows.textContent).toContain('直连证书');
     expect(rows.textContent).toContain('有效期至 2099年2月14日');
-    // Only the Avibe App on this device records the race; a browser says so instead of a number.
-    expect(rows.textContent).toContain('最近一次连接');
-    expect(rows.textContent).toContain('这台设备没有记录');
+    // Its two numbers measured different things: 「测速」 replaces it.
+    expect(dialog.textContent).not.toContain('最近一次连接');
+    // In a browser the shell cannot measure: no 「测速」.
+    expect(within(dialog).queryByTestId('direct-measure')).toBeNull();
   });
 
   it('direct off: rows absent', async () => {
@@ -340,6 +339,35 @@ describe('ConnectionPage · 连接诊断与网络路径', () => {
 });
 
 describe('ConnectionPage · the domain', () => {
+  it('names the domain with the claim page\'s field and clean-up: lowercase, trimmed, and a name avibe.bot cannot take is never sent', async () => {
+    const preview = vi.spyOn(devicesApi, 'previewRename');
+    mount('/settings/remote-access/connection/address');
+    const input = await screen.findByRole('textbox', { name: '新名称' });
+    // The shared field: the prefix in place, then the suffix.
+    expect(input.closest('[data-domain-field]')).toBeTruthy();
+    fireEvent.change(input, { target: { value: '  Max Well ' } });
+    expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('max well');
+    expect(screen.getByText(i18n.t('domainField.invalid'))).toBeTruthy();
+    // One reason at a time, the same sentences as claiming.
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: 'm' } });
+    expect(screen.getByText(i18n.t('domainField.short'))).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: 'max-' } });
+    expect(screen.getByText(i18n.t('domainField.hyphenEnds'))).toBeTruthy();
+    // Emptied: nothing said, nothing to press.
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: '' } });
+    expect(document.querySelector('[data-domain-field] [role="status"]')?.textContent).toBe('');
+    expect(screen.getByRole('button', { name: '继续' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: '  Max Well ' } });
+    const next = screen.getByRole('button', { name: '继续' });
+    expect(next.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(next);
+    expect(preview).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: ' MaxWell ' } });
+    expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('maxwell');
+    expect(screen.queryByText(i18n.t('domainField.invalid'))).toBeNull();
+    expect(screen.getByRole('button', { name: '继续' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('goes back to the form with the one sentence when the name cannot be taken', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.spyOn(devicesApi, 'previewRename').mockResolvedValue({ confirmationId: 'conf-1', hostname: 'maxwell-app.avibe.bot', isReturn: false, holdDays: 30, releaseAt: '2026-12-23T00:00:00.000Z', healthConnected: false, devices: [] });
@@ -398,6 +426,26 @@ describe('ConnectionPage · the domain', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
     expect(await screen.findByText(`域名已改为 ${newHost}`)).toBeTruthy();
     expect(screen.getAllByText(newHost).length).toBeGreaterThan(0);
+    // The name given up is kept for this account, until the day the instance reports.
+    expect(screen.getByRole('dialog').textContent).toContain(`12月23日之前只有你的账号能拿回 ${host}；之后别人可以领取。`);
+  });
+
+  it('says first, under the title, that the old name is kept, with its day or without one', () => {
+    const newHost = 'maxwell-app.avibe.bot';
+    const retired = { hostname: host, releaseAt: '2026-12-23T00:00:00.000Z', devices: [] };
+    const { unmount } = view({ host: newHost, address: address({ hostname: newHost, retired: [retired] }), rename: { step: 'done', hostname: newHost, previous: host, retired } });
+    const dated = screen.getByRole('dialog').textContent ?? '';
+    const kept = dated.indexOf(`12月23日之前只有你的账号能拿回 ${host}；之后别人可以领取。`);
+    expect(kept).toBeGreaterThan(dated.indexOf(`域名已改为 ${newHost}`));
+    expect(kept).toBeLessThan(dated.indexOf('设备再打开旧地址时会自己清理'));
+    unmount();
+
+    // The instance reports no day (the list could not be read): kept, without a day, in the same place.
+    view({ host: newHost, address: address({ hostname: newHost }), rename: { step: 'done', hostname: newHost, previous: host, retired: null } });
+    const plain = screen.getByRole('dialog').textContent ?? '';
+    const keptPlain = plain.indexOf('放弃的名字会先为你的账号保留一段时间，之后别人可以领取。');
+    expect(keptPlain).toBeGreaterThan(-1);
+    expect(keptPlain).toBeLessThan(plain.indexOf('设备再打开旧地址时会自己清理'));
   });
 
   it('shows a device clearing its old-address data while the clean-up dialog is open', async () => {
@@ -512,7 +560,7 @@ describe('ConnectionPage · binding again', () => {
     const dialog = await screen.findByRole('dialog');
     expect(within(dialog).getByText(said('如果这台电脑上的 Avibe 数据可能被人整个复制走过，请在 avibe.bot 上删除这个 Avibe，重新绑定后再把名字拿回来。'))).toBeTruthy();
     // The key is retired when it is done, not before; neither the account nor the address is promised.
-    expect(dialog.textContent).toContain('完成后，旧的设备密钥作废，所有远程设备都会退出、要重新登录');
+    expect(dialog.textContent).toContain('完成后，旧的设备密钥作废；这台电脑上的页面不受影响。重新绑定后，已登录的设备会自动重新连上。');
     expect(dialog.textContent).toContain('地址通常不变；如果变了，完成后这里会显示新地址');
     expect(dialog.textContent).not.toContain('立即作废');
     expect(start).not.toHaveBeenCalled();
@@ -687,11 +735,44 @@ describe('ConnectionPageView', () => {
     expect(inUse()).toEqual([]);
   });
 
-  it('says how the last connection\'s two paths raced where the App recorded it, and an expired certificate has no date', () => {
-    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), direct: { certificate: null, lastConnection: { direct: 'timeout', public: 212 } } } });
+  it('shows the certificate without a date when it is expired, and no last-connection race', () => {
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), direct: { certificate: null } } });
     const rows = screen.getByTestId('direct-details');
-    expect(rows.textContent).toContain('直连 超时 / Cloudflare 212 ms');
     expect(rows.textContent).toContain('没有有效的证书');
+    expect(rows.textContent).not.toContain('最近一次连接');
+  });
+
+  it('shows nothing measured until 「测速」 has run, then the median and worst per path with its route', () => {
+    const onMeasure = vi.fn();
+    const { unmount } = view({ onMeasure, diagnostics: { status: null, diagnostics: null, now: Date.now(), measure: {} } });
+    const section = screen.getByTestId('direct-measure');
+    expect(section.querySelector('dl')).toBeNull();
+    fireEvent.click(within(section).getByRole('button', { name: /测速/ }));
+    expect(onMeasure).toHaveBeenCalled();
+    unmount();
+
+    const leg = (extra: object) => ({ scope: null, relayRegion: null, ok: 5, medianMs: 38, maxMs: 52, error: null, ...extra });
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), measure: { result: {
+      measuredAt: Date.now(), samples: 5,
+      current: leg({ kind: 'relay', relayRegion: 'euw1', medianMs: 85, maxMs: 140 }) as never,
+      tunnel: leg({ kind: 'tunnel', ok: 3, medianMs: 212, maxMs: 1430, error: 'timeout' }) as never,
+    } } } });
+    const rows = screen.getByTestId('direct-measure').textContent;
+    expect(rows).toContain('中继 · euw1');
+    expect(rows).toContain('中位 85 ms · 最慢 140 ms');
+    expect(rows).toContain('中位 212 ms · 最慢 1.4 s（5 次中 3 次完成）');
+    expect(rows).toMatch(/今天 \d{2}:\d{2} 测得/);
+  });
+
+  it('says a path not in use, one that never completed, and a measurement already running', () => {
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), measure: { error: 'busy', result: {
+      measuredAt: Date.now(), samples: 5, current: null,
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 0, medianMs: null, maxMs: null, error: 'failed' },
+    } } } });
+    const rows = screen.getByTestId('direct-measure').textContent;
+    expect(rows).toContain('直连或中继现在没有在用');
+    expect(rows).toContain('没有完成：连接失败');
+    expect(rows).toContain('另一次测速还在进行，请稍后再试。');
   });
 
   it('shows the relay only on an instance enrolled in the trial', () => {
@@ -715,11 +796,49 @@ describe('ConnectionPageView', () => {
     expect(screen.getByText(said('隧道现在临时用 HTTP/2 连着，没有按固定的边缘网络 IP；保存的设置没有变。'))).toBeTruthy();
   });
 
-  it('offers this device 「自动」 and 「仅 Cloudflare 隧道」 only, and never a number of seconds', () => {
-    view({ remote: true, preference: { mode: 'tunnel', reverted: { at: '2026-11-21T01:00:00.000Z', reason: 'unreachable' } } });
+  it('offers this device 「自动」 and 「仅 Cloudflare 隧道」 only where 「仅直连和中继」 is not offered, and never a number of seconds', () => {
+    view({ remote: true, preference: { mode: 'tunnel', reverted: { at: '2026-11-21T01:00:00.000Z', reason: 'unreachable', from: 'tunnel' } } });
     const choice = screen.getByRole('radiogroup', { name: '这台设备' });
     expect(within(choice).getAllByRole('radio').map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ']);
+    expect(document.body.textContent).not.toContain('仅直连和中继');
     expect(document.body.textContent).not.toMatch(/\d+\s*秒/);
+  });
+
+  it('offers 「仅直连和中继」 third where it is offered, and keeps it listed while it is the choice', () => {
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: null } });
+    const choice = screen.getByRole('radiogroup', { name: '这台设备' });
+    const radios = within(choice).getAllByRole('radio');
+    expect(radios.map((each) => each.textContent?.slice(0, 2))).toEqual(['自动', '仅 ', '仅直']);
+    expect(radios[2].textContent).toContain('建立连接时经过一次 Cloudflare 隧道，之后只走直连和中继。');
+    unmount();
+
+    // Chosen, then direct turned off on the instance: the choice made is still the one shown.
+    view({ remote: true, directOnly: false, preference: { mode: 'direct', reverted: null } });
+    expect(screen.getByRole('radio', { name: /^仅直连和中继/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('says under 「仅直连和中继」 when the App takes it only after it is opened again', () => {
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null, pendingRelaunch: true } });
+    const option = screen.getByRole('radio', { name: /^仅直连和中继/ });
+    expect(option.textContent).toContain('重新打开 App 后生效。');
+    unmount();
+    const unset = view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null } });
+    expect(document.body.textContent).not.toContain('重新打开 App 后生效');
+    unset.unmount();
+    // Never under the option while another one is chosen, whatever the shell sends.
+    view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: null, pendingRelaunch: true } });
+    expect(document.body.textContent).not.toContain('重新打开 App 后生效');
+  });
+
+  it('says which choice went back to automatic, and by which shell', () => {
+    const at = '2026-11-21T01:00:00.000Z';
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });
+    expect(document.body.textContent).toMatch(/「仅直连和中继」.*连不上，App 已自己改回「自动」。/);
+    unmount();
+
+    view({ remote: true, directOnly: true, choiceShell: 'desktop', preference: { mode: 'automatic', reverted: { at, reason: 'unreachable', from: 'direct' } } });
+    expect(document.body.textContent).toMatch(/「仅直连和中继」.*连不上，Avibe Desktop 已自己改回「自动」。/);
+    expect(document.body.textContent).toContain('选「仅直连和中继」后连不上，Avibe Desktop 会自己改回「自动」。');
   });
 
   it('shows names still kept for the account with their real days, and never calls the list clean', () => {

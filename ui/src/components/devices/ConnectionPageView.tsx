@@ -45,6 +45,8 @@ export type ConnectionPageActions = RenameActions & RebindActions & {
   onOpenDiagnostics?: () => void;
   onCloseDiagnostics?: () => void;
   onRunDiagnostics?: () => void;
+  /** 「测速」 in the diagnostics. */
+  onMeasure?: () => void;
   onChangeDomain?: () => void;
   onShowCleanup?: (retired: RetiredName) => void;
 };
@@ -61,10 +63,15 @@ export type ConnectionPageViewProps = ConnectionPageActions & {
   /** The path this device uses, where its shell has one of its own (the Avibe App, a Desktop
    *  window of another computer's instance). Null: none reported yet. Absent in a browser. */
   path?: DeviceUsing | null;
-  /** The Avibe App's own choice of path; absent where the shell offers none. */
+  /** This device's own choice of path (the Avibe App, a Desktop window of another computer's
+   *  instance); absent where the shell offers none. */
   preference?: DirectPreference;
-  /** 「更改域名」 is offered in this release (features.ts). The frames draw it; the page passes the switch. */
-  renameEntry?: boolean;
+  /** Which shell is choosing: the App goes back to automatic from either choice that cannot
+   *  connect, Avibe Desktop only from 「仅直连和中继」. */
+  choiceShell?: 'app' | 'desktop';
+  /** 「仅直连和中继」 is offered: the shell takes it and this instance has direct turned on. Not
+   *  offered, it is not shown at all, unless it is the choice already made. */
+  directOnly?: boolean;
   refused?: SwitchRefusal;
   /** A switch whose change is on its way: it waits. */
   sending?: ConnectionSetting;
@@ -108,11 +115,28 @@ const directWhyKeys = {
   'not-running': 'devices.connection.whyNotRunning',
 } as const satisfies Partial<Record<DirectState, TranslationKey>>;
 
+/** What went back to automatic, said by which choice and which shell. Avibe Desktop never puts
+ *  「仅 Cloudflare 隧道」 back. */
 const revertedKeys = {
-  today: 'devices.connection.choiceRevertedToday',
-  yesterday: 'devices.connection.choiceRevertedYesterday',
-  other: 'devices.connection.choiceRevertedDated',
-} as const satisfies Record<NonNullable<ReturnType<typeof timeParts>>['day'], TranslationKey>;
+  tunnel: {
+    undated: 'devices.connection.choiceRevertedUndated',
+    today: 'devices.connection.choiceRevertedToday',
+    yesterday: 'devices.connection.choiceRevertedYesterday',
+    other: 'devices.connection.choiceRevertedDated',
+  },
+  direct: {
+    undated: 'devices.connection.choiceRevertedDirectUndated',
+    today: 'devices.connection.choiceRevertedDirectToday',
+    yesterday: 'devices.connection.choiceRevertedDirectYesterday',
+    other: 'devices.connection.choiceRevertedDirectDated',
+  },
+  directDesktop: {
+    undated: 'devices.connection.choiceRevertedDirectDesktopUndated',
+    today: 'devices.connection.choiceRevertedDirectDesktopToday',
+    yesterday: 'devices.connection.choiceRevertedDirectDesktopYesterday',
+    other: 'devices.connection.choiceRevertedDirectDesktopDated',
+  },
+} as const satisfies Record<string, Record<NonNullable<ReturnType<typeof timeParts>>['day'] | 'undated', TranslationKey>>;
 
 const failedKeys = {
   saved_restored_runtime_pending: 'devices.connection.change.failedRuntimePending',
@@ -200,16 +224,25 @@ function Refused({ refusal }: { refusal: SwitchRefusal }) {
   );
 }
 
-/** The Avibe App's own choice: automatic first, or the Cloudflare tunnel only. */
-function PreferenceGroup({ path, preference, onChange }: {
-  path?: DeviceUsing | null; preference: DirectPreference; onChange?: (mode: DirectPreference['mode']) => void;
+/** This device's own choice: automatic first, the Cloudflare tunnel only, and, where the shell
+ *  takes it and this instance has direct on, direct and the relay only. */
+function PreferenceGroup({ path, preference, shell = 'app', directOnly, onChange }: {
+  path?: DeviceUsing | null; preference: DirectPreference; shell?: 'app' | 'desktop'; directOnly?: boolean;
+  onChange?: (mode: DirectPreference['mode']) => void;
 }) {
   const { t, i18n } = useTranslation();
+  // A choice already made stays listed, so the list never shows none chosen.
+  const direct = directOnly || preference.mode === 'direct';
   const options = [
     ['automatic', t('devices.connection.automatic'), t('devices.connection.automaticHint')],
     ['tunnel', t('devices.connection.tunnelOnly'), t('devices.connection.tunnelOnlyHint')],
+    ...(direct ? [['direct', t('devices.connection.directOnly'), t('devices.connection.directOnlyHint')] as const] : []),
   ] as const;
   const reverted = preference.reverted ? timeParts(preference.reverted.at, i18n.language) : null;
+  const revertedFrom = preference.reverted?.from === 'direct' ? (shell === 'desktop' ? 'directDesktop' : 'direct') : 'tunnel';
+  const hint = shell === 'desktop'
+    ? t(direct ? 'devices.connection.choiceHintDesktop' : 'devices.connection.choiceHintDesktopPlain')
+    : t('devices.connection.choiceHint');
   return (
     <SettingsPanel
       title={t('devices.connection.thisDevice')}
@@ -232,16 +265,19 @@ function PreferenceGroup({ path, preference, onChange }: {
               </span>
               <span className="min-w-0">
                 <span className="block text-[13px] font-medium text-foreground">{label}</span>
-                <span className="block text-[11px] leading-relaxed text-muted">{text}</span>
+                <span className="block text-[11px] leading-relaxed text-muted"><KeptTail fill text={text} /></span>
+                {id === 'direct' && preference.mode === 'direct' && preference.pendingRelaunch && (
+                  <span role="status" className="mt-0.5 block text-[11px] leading-relaxed text-gold-ink">{t('devices.connection.directOnlyRelaunch')}</span>
+                )}
               </span>
             </button>
           );
         })}
       </div>
-      <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted"><KeptTail text={t('devices.connection.choiceHint')} /></p>
+      <p className="border-t border-border px-5 py-2.5 text-[11px] leading-relaxed text-muted"><KeptTail fill text={hint} /></p>
       {preference.reverted && (
         <p role="status" className="border-t border-border bg-gold/10 px-5 py-2.5 text-[11px] leading-relaxed text-foreground">
-          <KeptTail text={reverted ? t(revertedKeys[reverted.day], { date: reverted.date, time: reverted.time }) : t('devices.connection.choiceRevertedUndated')} />
+          <KeptTail fill text={t(revertedKeys[revertedFrom][reverted ? reverted.day : 'undated'], { date: reverted?.date, time: reverted?.time })} />
         </p>
       )}
     </SettingsPanel>
@@ -286,7 +322,7 @@ function RelayRow({ relay, direct, inUse, refused, busy, onChange }: {
 }
 
 export function ConnectionPageView({
-  load, connection, tunnel, remote, via, path, preference, renameEntry = true, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
+  load, connection, tunnel, remote, via, path, preference, choiceShell, directOnly, refused, sending, optimize, diagnostics, host, address, renameDevices = [],
   rename, rebind, rebindDialog, canReset, rebindNeedsBrowser, rebindOpen, rebindBusy, ...actions
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
@@ -322,7 +358,7 @@ export function ConnectionPageView({
               </div>
             )}
           </div>
-          {renameEntry && address?.eligible && (
+          {address?.eligible && (
             <Button variant="ghost" size="compact" className="shrink-0 text-destructive-ink" onClick={actions.onChangeDomain}>
               {t('devices.connection.changeDomain')}
             </Button>
@@ -423,7 +459,7 @@ export function ConnectionPageView({
         </Notice>
       )}
 
-      {preference && <PreferenceGroup path={path} preference={preference} onChange={actions.onPreferenceChange} />}
+      {preference && <PreferenceGroup path={path} preference={preference} shell={choiceShell} directOnly={directOnly} onChange={actions.onPreferenceChange} />}
       {/* A shell with a path of its own and no choice to offer: what this device uses, and no more. */}
       {!preference && path !== undefined && (
         <SettingsPanel title={t('devices.connection.thisDevice')} description={path ? deviceUsingText(t, path) : t('devices.connection.noPath')} />
@@ -551,7 +587,7 @@ export function ConnectionPageView({
             <DialogHeader>
               <DialogTitle>{t('devices.connection.diagnostics')}</DialogTitle>
             </DialogHeader>
-            <TunnelDetails {...diagnostics} onRun={actions.onRunDiagnostics} />
+            <TunnelDetails {...diagnostics} onRun={actions.onRunDiagnostics} onMeasure={actions.onMeasure} />
           </DialogContent>
         </Dialog>
       )}

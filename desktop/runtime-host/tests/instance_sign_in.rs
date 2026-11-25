@@ -708,14 +708,14 @@ async fn an_accepted_passkey_whose_session_read_failed_is_read_again() {
         vec![
             ("/api/passkey-primary/options", primary_options()),
             ("/api/passkey-primary/verify", primary_verified()),
-            ("/api/mobile/session", reply(503, json!({"error":"unavailable"}), None)),
+            ("/api/mobile/session", reply(503, json!({"error":"signed_out"}), None)),
             ("/api/mobile/session", reply(200, signed_in(), None)),
         ],
         None,
         keys.clone(),
     );
     let failed = act(&f.client, ClientAction::SignInWithPasskey).await;
-    assert!(!failed.ok);
+    assert_eq!(failed.error.unwrap().code, "request_failed");
     assert_eq!(failed.state.account.status, AccountStatus::SignedOut);
     let again = act(&f.client, ClientAction::SignInWithPasskey).await;
     assert!(again.ok, "{:?}", again.error);
@@ -747,7 +747,7 @@ async fn an_accepted_passkey_whose_session_read_failed_is_read_again() {
 #[tokio::test]
 async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
     let keys = passkeys(Ok(json!({"id":"cred","rawId":"cred","type":"public-key"})));
-    let f = fixture(
+    let f = restored_owing_a_second_factor_with_keys(
         vec![
             ("/api/passkey-primary/options", primary_options()),
             ("/api/passkey-primary/verify", primary_verified()),
@@ -757,18 +757,17 @@ async fn an_answered_read_or_another_first_factor_ends_an_accepted_passkey() {
             ("/api/passkey-primary/verify", primary_verified()),
             ("/api/mobile/session", reply(200, signed_in(), None)),
         ],
-        None,
         keys.clone(),
-    );
+    )
+    .await;
+    let saved = f.private.read("account-a").unwrap().unwrap();
     assert!(!act(&f.client, ClientAction::SignInWithPasskey).await.ok);
-    assert_eq!(
-        act(&f.client, ClientAction::SignInWithPasskey)
-            .await
-            .error
-            .unwrap()
-            .code,
-        "signed_out"
-    );
+    let denied = act(&f.client, ClientAction::SignInWithPasskey).await;
+    assert_eq!(denied.error.unwrap().code, "signed_out");
+    assert_eq!(denied.state.account.status, AccountStatus::SecondFactorRequired);
+    assert_eq!(denied.state.account.email.as_deref(), Some("a@example.test"));
+    assert_eq!(saved_account(&f.path).as_deref(), Some("account-a"));
+    assert_eq!(f.private.read("account-a").unwrap(), Some(saved));
     let outcome = act(&f.client, ClientAction::SignInWithPasskey).await;
     assert!(outcome.ok, "{:?}", outcome.error);
     assert_eq!(keys.options.lock().unwrap().len(), 2);
@@ -820,14 +819,152 @@ fn code_sent() -> Vec<(&'static str, Response)> {
         ("/auth/v1/otp", reply(200, json!({}), None)),
     ]
 }
-fn code_verified() -> Vec<(&'static str, Response)> {
+fn code_verified(mailbox: &str) -> Vec<(&'static str, Response)> {
+    let mut projection = signed_in();
+    projection["account"]["email"] = json!(mailbox);
     vec![
-        ("/auth/v1/verify", tokens()),
         (
-            "/api/desktop/session",
-            reply(200, signed_in(), Some("account=fixture; Path=/; Secure; HttpOnly")),
+            "/api/auth/first-party/start",
+            reply(
+                200,
+                json!({"transaction":"t".repeat(43)}),
+                Some("__Host-avibe-sign-in-start=fixture; Secure; HttpOnly; Path=/; SameSite=Lax; Max-Age=600"),
+            ),
         ),
+        (
+            "/api/auth/first-party/email-code",
+            reply(
+                200,
+                json!({"bound":true}),
+                Some("account=fixture; Path=/; Secure; HttpOnly"),
+            ),
+        ),
+        ("/api/mobile/session", reply(200, projection, None)),
     ]
+}
+
+/// AUTH-SETUP-182: a lost read after bound:true retries discovery, never the one-use code.
+#[tokio::test]
+async fn accepted_email_code_discovers_only_and_persists_the_ordinary_session() {
+    let mailbox = "owner@example.test";
+    let mut replies = code_sent();
+    let mut verified = code_verified(mailbox);
+    verified.insert(
+        2,
+        (
+            "/api/mobile/session",
+            reply(503, json!({"error":"private_canary"}), None),
+        ),
+    );
+    replies.extend(verified);
+    let f = fixture(replies, None, passkeys(Err("unused")));
+    assert!(act(&f.client, email_code("  Owner@example.test  ")).await.ok);
+    let verify = || ClientAction::VerifyOtp { code: "123456".into() };
+    assert_eq!(act(&f.client, verify()).await.error.unwrap().code, "request_failed");
+    assert!(act(&f.client, verify()).await.ok);
+    let seen = f.http.seen.lock().unwrap();
+    assert_eq!(
+        seen.iter().map(|s| s.path.as_str()).collect::<Vec<_>>(),
+        [
+            "/api/config/auth",
+            "/auth/v1/otp",
+            "/api/auth/first-party/start",
+            "/api/auth/first-party/email-code",
+            "/api/mobile/session",
+            "/api/mobile/session"
+        ]
+    );
+    assert_eq!(seen[1].body, Some(json!({"email":mailbox,"create_user":true})));
+    assert_eq!(seen[2].body, Some(json!({"email":mailbox,"kind":"email_code"})));
+    assert_eq!(
+        seen[3].body,
+        Some(json!({"transaction":"t".repeat(43),"email":mailbox,"code":"123456"}))
+    );
+    assert!(seen[2..]
+        .iter()
+        .all(|s| !s.headers.contains_key("authorization") && !s.headers.contains_key("apikey")));
+    assert!(seen[2..4].iter().all(|s| s.headers["origin"] == "https://avibe.bot"));
+    assert!(seen[3].headers["cookie"] == "__Host-avibe-sign-in-start=fixture");
+    assert!(seen[4..].iter().all(|s| s.headers["cookie"] == "account=fixture"));
+    let saved = f.private.read("account-xiaoming").unwrap().unwrap();
+    let text = String::from_utf8(saved).unwrap();
+    assert!(text.contains("account=fixture") && !text.contains("sign-in-start"));
+}
+
+#[tokio::test]
+async fn ambiguous_completion_blocks_another_submission_and_unforwarded_requires_an_explicit_one() {
+    for (status, body, first, next) in [
+        (
+            503,
+            json!({"error":"unavailable"}),
+            "code_delivery_unknown",
+            "fresh_code_required",
+        ),
+        (
+            503,
+            json!({"error":"unavailable","code_delivery":"unknown"}),
+            "code_delivery_unknown",
+            "fresh_code_required",
+        ),
+        (
+            200,
+            json!({"bound":false}),
+            "code_delivery_unknown",
+            "fresh_code_required",
+        ),
+        (429, json!({"error":"private_canary"}), "rate_limited", "rate_limited"),
+        (
+            429,
+            json!({"error":"rate_limited","code_delivery":"not_forwarded"}),
+            "rate_limited",
+            "rate_limited",
+        ),
+        (
+            503,
+            json!({"error":"unavailable","code_delivery":"not_forwarded"}),
+            "provider_unavailable",
+            "ok",
+        ),
+        (403, json!({"error":"verification_invalid"}), "invalid_or_expired", "ok"),
+    ] {
+        let mut replies = code_sent();
+        let mut typed = code_verified("owner@example.test");
+        let mut refused = reply(status, body, None);
+        refused.headers.insert("retry-after", "420".parse().unwrap());
+        replies.push(typed.remove(0));
+        replies.push(("/api/auth/first-party/email-code", refused));
+        if next == "ok" {
+            replies.extend(code_verified("owner@example.test"));
+        }
+        let f = fixture(replies, None, passkeys(Err("unused")));
+        assert!(act(&f.client, email_code("owner@example.test")).await.ok);
+        for bad in ["12345", "１２３４５６"] {
+            assert_eq!(
+                act(&f.client, ClientAction::VerifyOtp { code: bad.into() })
+                    .await
+                    .error
+                    .unwrap()
+                    .code,
+                "invalid_or_expired"
+            );
+        }
+        let verify = || ClientAction::VerifyOtp { code: "123456".into() };
+        let error = act(&f.client, verify()).await.error.unwrap();
+        assert_eq!(error.code, first);
+        if status == 429 {
+            assert_eq!(error.retry_after_seconds, Some(420));
+            assert_eq!(serde_json::to_value(&error).unwrap()["retry_after_seconds"], 420);
+        }
+        assert_eq!(f.http.seen.lock().unwrap().len(), 4);
+        let next_reply = act(&f.client, verify()).await;
+        if next == "ok" {
+            assert!(next_reply.ok);
+        } else {
+            assert_eq!(next_reply.error.unwrap().code, next);
+            assert_eq!(f.http.seen.lock().unwrap().len(), 4);
+            assert!(f.private.0.lock().unwrap().is_empty());
+        }
+    }
 }
 
 /// AUTH-SETUP-184/183: after an email code was sent, a passkey sign-in or a provider sign-in that
@@ -841,7 +978,7 @@ async fn a_failed_passkey_or_provider_after_a_code_keeps_that_code() {
         ("/api/passkey-primary/options", primary_options()),
         ("/api/passkey-primary/cancel", reply(200, json!({"ok":true}), None)),
     ]);
-    replies.extend(code_verified());
+    replies.extend(code_verified("old@example.test"));
     let f = fixture(replies, None, passkeys(Err("passkey_cancelled")));
     assert!(act(&f.client, email_code("old@example.test")).await.ok);
     let cancelled = act(&f.client, ClientAction::SignInWithPasskey).await;
@@ -853,7 +990,7 @@ async fn a_failed_passkey_or_provider_after_a_code_keeps_that_code() {
 
     let mut replies = code_sent();
     replies.push(("/api/config/auth", config(true)));
-    replies.extend(code_verified());
+    replies.extend(code_verified("old@example.test"));
     let f = fixture(
         replies,
         Some(browser(Browsing::Error("error=access_denied&error_description=x"))),
@@ -877,7 +1014,7 @@ async fn the_later_first_factor_wins_over_one_still_waiting() {
     let browser = browser(Browsing::Nothing);
     let mut replies = vec![("/api/config/auth", config(true))];
     replies.extend(code_sent());
-    replies.extend(code_verified());
+    replies.extend(code_verified("new@example.test"));
     let f = fixture(replies, Some(browser.clone()), passkeys(Err("x")));
     let client = f.client.clone();
     let waiting = tokio::spawn(async move { act(&client, google()).await });
@@ -1422,6 +1559,12 @@ struct Restored {
     _root: tempfile::TempDir,
 }
 async fn restored_owing_a_second_factor(after: Vec<(&'static str, Response)>) -> Restored {
+    restored_owing_a_second_factor_with_keys(after, passkeys(Err("x"))).await
+}
+async fn restored_owing_a_second_factor_with_keys(
+    after: Vec<(&'static str, Response)>,
+    keys: Arc<FakePasskeys>,
+) -> Restored {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("connection.json");
     let store = ConnectionStore::new(path.clone());
@@ -1442,7 +1585,7 @@ async fn restored_owing_a_second_factor(after: Vec<(&'static str, Response)>) ->
         store,
         http.clone(),
         private.clone(),
-        passkeys(Err("x")),
+        keys,
         Arc::new(View),
     ));
     client.restore_account().await.unwrap();

@@ -65,6 +65,10 @@ enum WebKitReadiness {
     final class LaunchTolerantTiming: RuntimeOpenTiming {
         private let clock = ContinuousRuntimeOpenTiming()
 
+        init() {
+            MainThreadWatchdog.start()
+        }
+
         var now: Duration { clock.now }
 
         var accountTransportDeadlines: MobileAuthTransportDeadlines {
@@ -101,6 +105,7 @@ enum WebKitReadiness {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
+        MainThreadWatchdog.start()
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: webContentLaunch)
         while clock.now < deadline {
@@ -125,12 +130,22 @@ enum WebKitReadiness {
     /// A picker route is also the App's bootstrap error fallback. Require
     /// the account and instance snapshot before exercising a signed-in flow.
     /// This observes one bootstrap; it never retries or extends its deadlines.
+    ///
+    /// When the bootstrap settled on another state, the error carries what
+    /// it left (`FixtureReadinessError.bootstrap`). A caller may build its
+    /// App once more for exactly one such state, a bootstrap that stalled
+    /// after its web content launch (`FixtureBootstrap.stalledAfterWebContentLaunch`),
+    /// and for no other: `DirectPathAppTests.makeApp` does. `requestsSince`
+    /// is the log's count when this App was made, for a log that an earlier
+    /// App wrote to: what the bootstrap left is then this App's requests
+    /// only.
     @MainActor
     static func waitForSignedInFixture(
         _ app: AppModel,
         accountID: String,
         instanceIDs: Set<String>,
         requests: FixtureRequestLog,
+        requestsSince: Int = 0,
         budget: Duration = standardTransportOperation,
         recordsFailure: Bool = true,
         file: StaticString = #filePath,
@@ -141,8 +156,10 @@ enum WebKitReadiness {
         func thrown(_ what: String, _ error: FixtureReadinessError) -> Error {
             recordsFailure ? recordThrown(what, error, file: file, line: line) : error
         }
+        MainThreadWatchdog.start()
         let clock = ContinuousClock()
         let started = clock.now
+        let began = requests.elapsed
         let deadline = started.advanced(by: budget)
         while case .loading = app.route {
             guard clock.now < deadline else {
@@ -156,6 +173,7 @@ enum WebKitReadiness {
             }
             try await Task.sleep(for: .milliseconds(50))
         }
+        let settled = started.duration(to: clock.now)
         let evidence = fixtureEvidence(
             app, stage: "bootstrap settled", started: started, requests: requests
         )
@@ -166,8 +184,15 @@ enum WebKitReadiness {
         else {
             throw thrown(
                 "The signed-in fixture settled on another state",
-                FixtureReadinessError(description:
-                    "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())"
+                FixtureReadinessError(
+                    description:
+                        "\(evidence); expected account=\(accountID), instances=\(instanceIDs.sorted())",
+                    bootstrap: FixtureBootstrap(
+                        elapsed: settled,
+                        signedIn: app.mobileSessionCoordinator.currentAccount != nil,
+                        began: began,
+                        served: requests.served(since: requestsSince)
+                    )
                 )
             )
         }
@@ -191,21 +216,47 @@ enum WebKitReadiness {
 /// Only fixture metadata, never request bodies, headers, query strings or
 /// provider error text (the password test deliberately puts secrets in those).
 final class FixtureRequestLog: @unchecked Sendable {
+    /// One request the fixture answered: when, from the log's start, and
+    /// with what.
+    struct Entry: Equatable, CustomStringConvertible {
+        let at: Duration
+        let method: String
+        let path: String
+        let status: Int
+
+        var description: String {
+            "\(at) \(method) \(path) -> \(status)"
+        }
+    }
+
     private let lock = NSLock()
     private let started = ContinuousClock.now
-    private var entries: [String] = []
+    private var entries: [Entry] = []
 
     var count: Int { lock.withLock { entries.count } }
 
+    /// The log's own time now: what an entry recorded now would have as
+    /// its `at`.
+    var elapsed: Duration { started.duration(to: .now) }
+
+    /// The requests answered so far, in order, from the `index`-th on: an
+    /// App made when the log's `count` was `index` has these and no
+    /// earlier App's.
+    func served(since index: Int = 0) -> [Entry] {
+        lock.withLock { Array(entries.dropFirst(index)) }
+    }
+
     func record(_ request: LocalHTTPRequest, status: Int) {
         lock.withLock {
-            entries.append("\(started.duration(to: .now)) \(request.method) \(request.path) -> \(status)")
+            entries.append(
+                Entry(at: started.duration(to: .now), method: request.method, path: request.path, status: status)
+            )
         }
     }
 
     func summary(since index: Int = 0) -> String {
         lock.withLock {
-            "requests=[" + entries.dropFirst(index).joined(separator: "; ") + "]"
+            "requests=[" + entries.dropFirst(index).map(\.description).joined(separator: "; ") + "]"
         }
     }
 
@@ -238,8 +289,156 @@ func recordThrown(
 
 struct FixtureReadinessError: Error, CustomStringConvertible {
     let description: String
+    /// What the bootstrap left, when it settled on another state than the
+    /// signed-in one.
+    var bootstrap: FixtureBootstrap? = nil
+}
+
+/// A fixture App's bootstrap that settled without the signed-in state, as
+/// far as the one rebuild rule needs it.
+struct FixtureBootstrap: Equatable {
+    /// How long the App took to settle, from when the wait for it began.
+    let elapsed: Duration
+    /// The App has an account.
+    let signedIn: Bool
+    /// The request log's time when the wait began, which `elapsed` counts
+    /// from; the entries' times are the log's.
+    let began: Duration
+    /// What the fixture's control plane answered this App, in order: not
+    /// what it answered an App made before it on the same log.
+    let served: [FixtureRequestLog.Entry]
+
+    /// Whether this is the one stall a caller may rebuild its App for, once.
+    ///
+    /// Seen on the CI simulator (runs 45318053323 and 45005744290): the
+    /// account transport's web content process took 35 to 37 s to launch
+    /// and then never finished its first document. The fixture answered
+    /// that document's request, `GET /api/config/auth`, the moment the
+    /// process came up; nothing followed; and the App gave up at its own
+    /// readiness deadline, signed out. Why such a process stays silent is
+    /// not known. A longer wait does not help: it had been silent for more
+    /// than 80 s. A new App makes a new WebView; that this is enough has
+    /// not been seen yet, and the rebuild's two printed lines are how it
+    /// will be.
+    ///
+    /// Exactly that, and nothing near it:
+    /// - the App is signed out;
+    /// - it settled at its readiness deadline (`readiness`, to within a
+    ///   second: the wait begins a moment after the App does), not sooner.
+    ///   An App that settled sooner was told something;
+    /// - `/api/config/auth` was answered with `200`;
+    /// - the session was never asked for. A session request that was
+    ///   answered, refused or failed is the bootstrap's own result.
+    func stalledAfterWebContentLaunch(readiness: Duration) -> Bool {
+        !signedIn
+            && elapsed + .seconds(1) >= readiness
+            && served.contains { $0.method == "GET" && $0.path == Self.documentPath && $0.status == 200 }
+            && !served.contains { $0.path == Self.sessionPath }
+    }
+
+    /// The stall in one line, for the log: when the document's request was
+    /// answered (the launch, counted like `settled` from when the wait
+    /// began), what was served, and what never was.
+    func stallEvidence(readiness: Duration) -> String {
+        let launched = served.first { $0.path == Self.documentPath }.map { "\($0.at - began)" } ?? "never"
+        let answered = served.map { "\($0.method) \($0.path) -> \($0.status)" }.joined(separator: "; ")
+        return "launch=\(launched), settled=\(elapsed), readiness=\(readiness), "
+            + "served=[\(answered)], missing=[GET \(Self.sessionPath)], account=nil"
+    }
+
+    static let documentPath = "/api/config/auth"
+    static let sessionPath = "/api/mobile/session"
 }
 
 enum WebKitReadinessError: Error {
     case documentNotLoaded
+}
+
+/// Prints every time the main thread does not answer for over a second, with
+/// the test running when it stopped answering: `[main-thread watchdog] held
+/// over 1 s in <test>` at once, again every 10 s while it lasts, and
+/// `[main-thread watchdog] blocked 2.4 s, from <test> to <test>` when it
+/// ends. A hold that never ends is still in the log.
+///
+/// Every App fixture's WebView callbacks, timers and deadlines run on the
+/// main thread, so a hold there looks like a page that never loads (the
+/// 120 s bootstrap stall of run 45564932372). This shows any hold in the run
+/// log. It starts with the first App fixture (`LaunchTolerantTiming`,
+/// `waitForSignedInFixture`, `waitForDocument`) and runs for the rest of the
+/// bundle. It only reports; it fails nothing.
+final class MainThreadWatchdog: NSObject, XCTestObservation, @unchecked Sendable {
+    static let threshold: TimeInterval = 1
+
+    private static let shared = MainThreadWatchdog()
+    private let lock = NSLock()
+    private var started = false
+    private var currentTest = "(before the first test)"
+
+    /// Idempotent; call from the main thread.
+    @MainActor
+    static func start() {
+        shared.startOnce()
+    }
+
+    @MainActor
+    private func startOnce() {
+        lock.lock()
+        let first = !started
+        started = true
+        lock.unlock()
+        guard first else {
+            return
+        }
+        // Started from inside a test, whose start was already announced.
+        setTest("(the test that started the watchdog)")
+        XCTestObservationCenter.shared.addTestObserver(self)
+        let thread = Thread { [self] in self.watch() }
+        thread.name = "main-thread watchdog"
+        thread.qualityOfService = .userInitiated
+        thread.start()
+    }
+
+    func testCaseWillStart(_ testCase: XCTestCase) {
+        setTest(testCase.name)
+    }
+
+    func testCaseDidFinish(_ testCase: XCTestCase) {
+        setTest("(after \(testCase.name))")
+    }
+
+    private func setTest(_ name: String) {
+        lock.lock()
+        currentTest = name
+        lock.unlock()
+    }
+
+    private func test() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentTest
+    }
+
+    private func watch() {
+        while true {
+            let sent = Date()
+            let answered = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async { answered.signal() }
+            if answered.wait(timeout: .now() + Self.threshold) == .timedOut {
+                let from = test()
+                print("[main-thread watchdog] held over 1 s in \(from)")
+                while answered.wait(timeout: .now() + 10) == .timedOut {
+                    print(
+                        "[main-thread watchdog] still held after "
+                            + "\(Int(Date().timeIntervalSince(sent))) s, now in \(test())"
+                    )
+                }
+                let seconds = Date().timeIntervalSince(sent)
+                print(
+                    "[main-thread watchdog] blocked \(String(format: "%.1f", seconds)) s, "
+                        + "from \(from) to \(test())"
+                )
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
 }

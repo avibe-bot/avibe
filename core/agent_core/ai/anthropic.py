@@ -527,6 +527,10 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield terminal
                                 return
                             continue
+                        # Either half is execution evidence. A result can arrive in a later HTTP response
+                        # without a new server_tool_use block, a search counter, or a replayable Source.
+                        if kind == "server_tool_use" or kind.endswith("_tool_result"):
+                            assembler.observe_hosted_call()
                         if kind == "server_tool_use":
                             hosted_call = block.get("name") in hosted and isinstance(block.get("id"), str) and block["id"]
                             if hosted_call and assembler.source_id is not None:
@@ -953,6 +957,7 @@ class AnthropicAdapter(ProviderAdapter):
                         gateway=self._gateway,
                         session=None if continuations else session,
                         parent=parent,
+                        carry_projection=observation.carry_projection,
                         repair=observation.ordinary_retry or bool(prepared.hosted_render_omitted),
                         ordinary=replay,
                     )
@@ -1124,6 +1129,7 @@ class AnthropicAdapter(ProviderAdapter):
                                         next_trial,
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
+                                        observation.carry_projection,
                                     ),
                                 )
                         else:

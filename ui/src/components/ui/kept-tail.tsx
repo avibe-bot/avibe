@@ -28,7 +28,13 @@ const widthOf = (text: string): number => Array.from(text).reduce((sum, char) =>
  * Which rule applies follows the page's language, not the text (a Chinese device name in English
  * copy).
  */
-export function KeptTail({ text }: { text: string }) {
+export function KeptTail({ text, fill = false }: {
+  text: string;
+  /** Fill each line as a body paragraph does, whatever the length: for a line in a full-width row
+   *  (a choice's hint, a card's footnote), where a short line's long tail would leave a third of
+   *  the row empty on a phone. */
+  fill?: boolean;
+}) {
   const { i18n } = useTranslation();
   const chinese = i18n.language.startsWith('zh');
   const addresses = Array.from(text.matchAll(ADDRESS), (match) => [match.index, match.index + match[0].length] as const);
@@ -45,7 +51,7 @@ export function KeptTail({ text }: { text: string }) {
   };
   // Without a word segmenter (older browsers), the text wraps as it always did.
   if (typeof Intl.Segmenter !== 'function') return <>{keepAddresses(text, 0)}</>;
-  const body = widthOf(text) > SHORT;
+  const body = fill || widthOf(text) > SHORT;
   const characters = body ? 4 : 8;
   const enough = body ? 2 : 3;
   const segments = Array.from(new Intl.Segmenter(chinese ? 'zh' : 'en', { granularity: 'word' }).segment(text));

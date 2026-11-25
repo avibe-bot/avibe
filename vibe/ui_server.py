@@ -112,7 +112,7 @@ from vibe.service_logging import (
     configure_service_logging,
     shutdown_service_logging,
 )
-from vibe import instance_address, instance_address_responses, ui_asset_archive
+from vibe import desktop_claim_admission, instance_address, instance_address_responses, service_claim_binding, ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 if TYPE_CHECKING:
@@ -3396,11 +3396,11 @@ def protect_mutating_ui_requests():
 
 @app.after_request
 def prevent_desktop_enrollment_caching(response: Response) -> Response:
-    if request.path == "/remote/claim/callback" or request.path.startswith("/api/remote-access/claims"):
+    if request.path == "/remote/claim/callback" or request.path.startswith(("/api/remote-access/claims", "/api/remote-access/rebind")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     if request.path in {
-        "/api/desktop/local-instance", "/api/desktop/local-instance/prepare",
+        "/api/desktop/local-instance", "/api/desktop/local-instance/prepare", desktop_claim_admission.ADMISSION_ROUTE,
         "/api/remote-access/vibe-cloud/pair",
     }:
         response.headers["Cache-Control"] = "no-store"
@@ -3621,11 +3621,15 @@ def _wake_address_streams() -> None:
     broker.publish(instance_address.ADDRESS_CHANGED_EVENT, {})
 
 
-def _start_instance_address() -> None:
+def _start_instance_address(*, binding_changed: bool = False) -> bool:
     try:
-        instance_address.start(wake_pages=_wake_address_streams, close_connections=_close_address_connections)
+        instance_address.start(
+            wake_pages=_wake_address_streams, close_connections=_close_address_connections, binding_changed=binding_changed
+        )
+        return True
     except Exception:
         logger.warning("Failed to start the instance address worker", exc_info=True)
+        return False
 
 
 class _InstanceAddressRoleMiddleware:
@@ -8609,7 +8613,7 @@ def web_push_test():
             send_web_push(subscription=subscription, payload=notification)
             with engine.begin() as conn:
                 web_push_service.mark_send_success(
-                    conn,
+                    conn, subscription=subscription,
                     endpoint=subscription["endpoint"],
                     badge_count=badge_count,
                 )
@@ -8619,7 +8623,7 @@ def web_push_test():
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
             with engine.begin() as conn:
                 web_push_service.mark_send_failure(
-                    conn,
+                    conn, subscription=subscription,
                     endpoint=subscription["endpoint"],
                     disable=status_code in {404, 410},
                 )
@@ -9002,13 +9006,24 @@ def _save_config_and_runtime_decisions(
 _UI_RUNTIME_ACTIVE = False
 
 
-def _ensure_remote_access_monitoring(config: V2Config | None = None) -> None:
+def _ensure_remote_access_monitoring(config: V2Config | None = None, *, binding_changed: bool = False) -> bool:
     if not _UI_RUNTIME_ACTIVE:
-        return
+        return False
     try:
-        _start_remote_monitors(config)
+        monitor_ready = _start_remote_monitors(config)
     finally:
-        _start_instance_address()
+        address_ready = _start_instance_address(binding_changed=binding_changed)
+    return bool(monitor_ready and address_ready)
+
+
+def _on_claim_bound() -> bool:
+    # Worker admission is separate from pairing success. This callback does not
+    # request a connector, retry a pairing, or supply a target to the address worker.
+    try:
+        return _ensure_remote_access_monitoring(binding_changed=True)
+    except Exception:
+        logger.warning("Could not activate workers for the published binding")
+        return False
 
 
 def _start_remote_monitors(config, *, startup=False):
@@ -9031,7 +9046,8 @@ def _start_remote_monitors(config, *, startup=False):
         try:
             connection_runtime.start()
         finally:
-            remote_access.start_runtime_monitoring(config)
+            monitor_ready = remote_access.start_runtime_monitoring(config)
+    return monitor_ready
 
 
 @app.route("/api/control", methods=["POST"])
@@ -9413,16 +9429,86 @@ def desktop_local_instance_prepare():
     ))
 
 
-def _claim_route(operation):
+# This versioned POST is made by the native local jar, not by a browser. No
+# forwarded/represented identity headers (even unfamiliar ones) are part of its protocol.
+_DESKTOP_ADMISSION_HEADERS = frozenset({
+    "host", "origin", "cookie", "x-vibe-csrf-token", "content-type", "content-length",
+    "accept", "accept-encoding", "user-agent", "connection",
+})
+
+
+@app.post(desktop_claim_admission.ADMISSION_ROUTE, include_in_schema=False)
+async def desktop_claim_acknowledge(starlette_request: FastAPIRequest):
+    async def handler():
+        headers = starlette_request.headers
+        origin = headers.get("origin")
+        peer = _request_peer_address()
+        auth = _request_authorization_context()
+        if (auth is None or not auth.is_instance_owner or auth.is_remote
+                or _is_mutation_guard_exempt() or _is_direct_ingress_request() or not _is_direct_loopback_connection()
+                or peer is None or not peer.is_loopback or request.query_string
+                or starlette_request.scope["scheme"] != "http" or not desktop_claim_admission.literal_origin(origin)
+                or origin != "http://" + request.host or not set(headers).issubset(_DESKTOP_ADMISSION_HEADERS)
+                or len(headers.raw) != len(set(headers))
+                or headers.get("cookie") != f"{CSRF_COOKIE_NAME}={headers.get(CSRF_HEADER_NAME, '')}"):
+            return Response(status_code=403)
+        # The shared mutation hook has already required the matching CSRF header and cookie.
+        if (headers.get("content-type") != "application/json"
+                or not re.fullmatch(r"[1-9][0-9]{0,2}", headers.get("content-length", ""))
+                or int(headers["content-length"]) > 256):
+            return Response(status_code=400)
+        body = bytearray()
+        async for chunk in starlette_request.stream():
+            if len(body) + len(chunk) > 256:
+                return Response(status_code=400)
+            body.extend(chunk)
+        if len(body) != int(headers["content-length"]):
+            return Response(status_code=400)
+        try:
+            pairs = json.loads(body, object_pairs_hook=tuple)
+        except (ValueError, RecursionError):
+            return Response(status_code=400)
+        if not isinstance(pairs, tuple) or len(pairs) != 1 or pairs[0][0] != "challenge":
+            return Response(status_code=400)
+        admitted = await asyncio.to_thread(desktop_claim_admission.acknowledge, origin, pairs[0][1])
+        return Response(status_code=204 if admitted else 409)
+
+    return await app.dispatch_native_request(starlette_request, handler, parse_json=False)
+
+
+def _direct_rebind_denial():
+    from vibe.authorization import current_invocation_authority
+
+    if _is_direct_ingress_request() or not _is_direct_loopback_connection():
+        return "direct_loopback_required"
+    if (getattr(_request_authorization_context(), "is_remote", False) or current_invocation_authority() is not None
+            or "X-Avibe-Delegated-Caller" in request.headers):
+        return "local_operator_required"
+    return None
+
+
+def _claim_route(operation, *, constrained=False):
     from vibe.desktop_local_instance import LocalInstanceError
     from vibe.personal_claim_client import ClaimError
-    from vibe.personal_claims import redirect_claims
+    from vibe.personal_claims import rebind_claims, redirect_claims
 
+    if constrained:
+        reason = _direct_rebind_denial()
+        if reason:
+            return jsonify({"state": "error", "code": reason}), 403
+        if request.method == "POST":
+            if request.headers.get("Origin") != request.host_url.rstrip("/"):
+                return jsonify({"state": "error", "code": "invalid_origin"}), 403
+            if request.headers.get("Content-Type", "").partition(";")[0].strip().lower() != "application/json":
+                return jsonify({"state": "error", "code": "invalid_request"}), 400
+            cookie, token = request.cookies.get(CSRF_COOKIE_NAME, ""), request.headers.get(CSRF_HEADER_NAME, "")
+            if not token or not token.isascii() or not cookie.isascii() or not hmac.compare_digest(token, cookie):
+                return jsonify({"state": "error", "code": "invalid_csrf"}), 403
     denied = _access_administration_forbidden()
     if denied is not None:
         return denied
     try:
-        return operation(redirect_claims)
+        return operation(rebind_claims if constrained else redirect_claims)
     except LocalInstanceError as exc:
         return jsonify({"state": "error", "code": exc.code}), exc.status
     except ClaimError as exc:
@@ -9441,6 +9527,20 @@ def _claim_route(operation):
 
 @app.route("/api/remote-access/claims", methods=["POST"])
 def personal_claim_start():
+    return _start_redirect_claim(constrained=False)
+
+
+@app.route("/api/remote-access/rebind", methods=["GET"])
+def rebind_status():
+    return _claim_route(lambda service: jsonify(service.overview()), constrained=True)
+
+
+@app.route("/api/remote-access/rebind/claims", methods=["POST"])
+def rebind_claim_start():
+    return _start_redirect_claim(constrained=True)
+
+
+def _start_redirect_claim(*, constrained):
     from vibe.personal_claim_client import ClaimError
 
     def start(service):
@@ -9452,13 +9552,20 @@ def personal_claim_start():
         # Loopback or an admitted private setup host; any forwarding (proxy, tunnel) needs link mode.
         admitted = _is_local_request(_load_remote_access_config()) and not _has_forwarded_metadata()
         body, nonce = service.start(origin, request.json.get("locale", "en"), admitted_owner=admitted,
-                                    on_bound=_ensure_remote_access_monitoring)
+                                    on_bound=_on_claim_bound if constrained else service_claim_binding.current())
         response = jsonify(body)
-        response.set_cookie("avibe_claim_browser", nonce, httponly=True, samesite="lax", path="/remote/claim/callback",
+        response.set_cookie("avibe_rebind_browser" if constrained else "avibe_claim_browser", nonce,
+                            httponly=True, samesite="lax", path="/remote/claim/callback",
                             expires=datetime.fromisoformat(body["expires_at"].replace("Z", "+00:00")))
+        if constrained:
+            from vibe.personal_claims import reset_browser_token
+            response.set_cookie('avibe_rebind_initiator', reset_browser_token(nonce), httponly=True, samesite='strict',
+                                path='/api/remote-access/rebind/claims/' + body['claim_id'] + '/reset',
+                                secure=request.is_secure,
+                                expires=datetime.fromisoformat(body['expires_at'].replace('Z', '+00:00')))
         return response, 201
 
-    return _claim_route(start)
+    return _claim_route(start, constrained=constrained)
 
 
 @app.route("/api/remote-access/claims/<claim_id>", methods=["GET"])
@@ -9466,8 +9573,50 @@ def personal_claim_state(claim_id):
     return _claim_route(lambda service: jsonify(service.state(claim_id)))
 
 
+@app.route("/api/remote-access/rebind/claims/<claim_id>", methods=["GET"])
+def rebind_claim_state(claim_id):
+    return _claim_route(lambda service: jsonify(service.state(claim_id)), constrained=True)
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset/preview', methods=['POST'])
+def rebind_reset_preview(claim_id):
+    return _rebind_reset_route(claim_id, preview=True)
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset', methods=['POST'])
+def rebind_reset_confirm(claim_id):
+    return _rebind_reset_route(claim_id, preview=False)
+
+
+def _rebind_reset_route(claim_id, *, preview):
+    from vibe.personal_claim_client import ClaimError
+
+    def reset(service):
+        body = request.json
+        if (not isinstance(body, dict) or (body != {} if preview else
+                set(body) != {'confirmation_id'} or not isinstance(body['confirmation_id'], str) or not body['confirmation_id'])):
+            raise ClaimError('invalid_request')
+        tokens = [value for line in request.headers.getlist('cookie') for item in line.split(';')
+                  for name, _, value in [item.strip().partition('=')] if name == 'avibe_rebind_initiator']
+        if len(tokens) != 1:
+            raise ClaimError('reset_not_eligible')
+        result = service.reset_request(claim_id, request.host_url.rstrip('/'), tokens[0], confirmation=body.get('confirmation_id'))
+        return jsonify(result), 202 if result.get('state') == 'resetting' else 200
+
+    return _claim_route(reset, constrained=True)
+
+
+@app.route("/api/remote-access/rebind/claims/<claim_id>/cancel", methods=["POST"])
+def rebind_claim_cancel(claim_id):
+    return _cancel_redirect_claim(claim_id, constrained=True)
+
+
 @app.route("/api/remote-access/claims/<claim_id>/cancel", methods=["POST"])
 def personal_claim_cancel(claim_id):
+    return _cancel_redirect_claim(claim_id, constrained=False)
+
+
+def _cancel_redirect_claim(claim_id, *, constrained):
     from vibe.personal_claim_client import ClaimError
 
     def cancel(service):
@@ -9475,27 +9624,36 @@ def personal_claim_cancel(claim_id):
             raise ClaimError("invalid_request")
         return jsonify(service.cancel(claim_id))
 
-    return _claim_route(cancel)
+    return _claim_route(cancel, constrained=constrained)
 
 
 @app.route("/remote/claim/callback", methods=["GET"])
 def personal_claim_callback():
     from vibe.personal_claim_client import ClaimError
 
-    def callback(service):
-        fields = request.args.multi_items()
-        cookies = [v.strip().partition("=")[2] for line in request.headers.getlist("cookie")
-                   for v in line.split(";") if v.strip().partition("=")[0] == "avibe_claim_browser"]
+    from vibe.personal_claims import callback_service
+
+    def callback(_service):
+        fields = list(request.args.multi_items())
+        cookies = [(name, value) for line in request.headers.getlist("cookie")
+                   for item in line.split(";") for name, _, value in [item.strip().partition("=")]]
         try:
-            if len(fields) != 2 or set(request.args) != {"claim_id", "state"} or len(cookies) != 1:
+            ids = [value for name, value in fields if name == "claim_id"]
+            if len(ids) != 1:
                 raise ClaimError("invalid_return")
-            service.callback(request.args["claim_id"], request.host_url.rstrip("/"), cookies[0], request.args["state"])
+            service = callback_service(ids[0])
+            cookie_name = service.callback_fields(
+                ids[0], fields, cookies, request.host_url.rstrip("/"), direct=_direct_rebind_denial() is None,
+            )
         except ClaimError as exc:
             # Never echo browser inputs or clear the real initiator's nonce on a bad navigation.
             code = "claim_unavailable" if exc.code == "claim_unavailable" else "invalid_return"
-            return redirect("/settings/remote-access?claim_error=" + code, code=303)
-        response = redirect("/settings/remote-access", code=303)
-        response.delete_cookie("avibe_claim_browser", path="/remote/claim/callback")
+            response = redirect("/settings/remote-access?claim_error=" + code, code=303)
+        else:
+            response = redirect("/settings/remote-access", code=303)
+            response.delete_cookie(cookie_name, path="/remote/claim/callback")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
     return _claim_route(callback)
@@ -9511,9 +9669,10 @@ def remote_access_vibe_cloud_pair():
     payload = request.json or {}
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "invalid_request"}), 400
+    local_pair = not _is_direct_ingress_request() and _is_direct_loopback_connection()
     desktop = {}
     if "desktop_enrollment" in payload:
-        if not _is_direct_loopback_connection() or not _same_origin(
+        if not local_pair or not _same_origin(
             _request_origin(request.headers.get("Origin")) or "", request.host_url.rstrip("/")
         ):
             return jsonify({"ok": False, "error": "direct_loopback_required"}), 403
@@ -9525,6 +9684,15 @@ def remote_access_vibe_cloud_pair():
         ):
             return jsonify({"ok": False, "error": "invalid_request"}), 400
         desktop["desktop_enrollment"] = payload["desktop_enrollment"]
+    elif not local_pair:
+        from vibe import desktop_local_instance as local
+        try:
+            if remote_access._bound_http_pair_forbidden(local._config(), local._pending()):
+                return jsonify({"ok": False, "error": "local_operator_required"}), 403
+        except (OSError, local.LocalInstanceError):
+            return jsonify({"ok": False, "error": "pairing_recovery_unavailable"}), 503
+        # Check again under the writer lock, before any one-time redeem or keyless replay.
+        desktop["unbound_only"] = True
     result = remote_access.pair(
         payload.get("pairing_key", ""),
         payload.get("backend_url", "https://avibe.bot"),
@@ -9532,9 +9700,16 @@ def remote_access_vibe_cloud_pair():
         **desktop,
     )
     if result.get("ok"):
-        _ensure_remote_access_monitoring()
+        # A keyless local Resume can finish a sealed rebind after its claim worker
+        # stopped. Only the protected pairing result can identify this transition.
+        if result.get("binding_disposition") in ("existing", "new"):
+            _on_claim_bound()
+        else:
+            _ensure_remote_access_monitoring()
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
+    if result.get("error") == "local_operator_required":
+        return response, 403
     conflict = result.get("error") in {"local_binding_changed", "local_instance_conflict"}
     return response, 200 if result.get("ok") else (409 if conflict else 400)
 
@@ -9648,7 +9823,7 @@ def remote_access_login():
 
 @app.route("/auth/callback", methods=["GET"])
 def remote_access_auth_callback():
-    from storage.device_account_signout import AccountSessionSignedOut
+    from storage.device_account_signout import AccountSessionSignedOut, AccountSignInEnded
     from vibe import remote_access
 
     callback_started = int(time.time())
@@ -9736,7 +9911,19 @@ def remote_access_auth_callback():
             device_headers=request.headers,
             account_session_ref=verified_reference(claims),
             account_enroll_before=callback_started + remote_access.OAUTH_HANDSHAKE_TTL_SECONDS,
+            # The session this browser already holds, proved only by its own cookie on this request.
+            previous=remote_access.same_browser_session(
+                config, request.cookies.get(remote_access.SESSION_COOKIE_NAME), str(claims.get("sub", ""))),
+            # The signed-out session this browser's own cookie names: an owner sign-out to finish.
+            owner_signed_out=remote_access.signed_out_session(
+                config, request.cookies.get(remote_access.SESSION_COOKIE_NAME)),
         )
+    except AccountSignInEnded:
+        # Committed here: avibe.bot's sign-out of this account session is queued (the worker may
+        # not have sent it yet, or will not for a refused pairing). The old cookie goes too.
+        response = _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
+        response.delete_cookie(remote_access.SESSION_COOKIE_NAME, path="/", secure=True, httponly=True, samesite="Lax")
+        return response
     except AccountSessionSignedOut:
         return _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)
     except Exception as exc:
@@ -10137,7 +10324,10 @@ def device_sign_out(device_id=None):
         delegate = bool(binding and owner and (not caller or context.instance_access_source == 'owner'))
         ids, count, results, deferred = device_registry.sign_out(binding, subject, owner=owner, caller=caller, device_id=device_id,
                                       now=int(time.time()), lifetime=remote_access.SESSION_ABSOLUTE_TTL_SECONDS,
-                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope)
+                                      delegate=delegate, host_epoch=host_epoch, receipt_scope=issuer_scope,
+                                      # Only the real owner's action (or this computer): never a
+                                      # maintenance admin's, which has the owner role but not the source.
+                                      by_owner=delegate)
     except PermissionError:
         return jsonify({'error': 'session_revoked'}), 403
     if device_id is not None and not (ids or results):
@@ -21834,7 +22024,8 @@ def run_ui_server(host: str, port: int) -> None:
                 with serving_listener():
                     _UI_RUNTIME_ACTIVE = True
                     try:
-                        _server.run(sockets=bound_sockets)
+                        with service_claim_binding.serving(_on_claim_bound):
+                            _server.run(sockets=bound_sockets)
                     finally:
                         _UI_RUNTIME_ACTIVE = False
                 break

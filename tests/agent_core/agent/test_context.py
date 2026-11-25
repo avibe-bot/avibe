@@ -31,6 +31,7 @@ from core.agent_core.harness.context import (
     MEMO_HEADING,
     MEMO_ITEM,
     MIND_CUT,
+    MIND_CUT_UNSTORED,
     MIND_EMPTY,
     MIND_HEADINGS,
     MIND_PLACEHOLDERS,
@@ -51,6 +52,7 @@ from core.agent_core.harness.context import (
     fit_memo,
     MIND_SECTIONS,
     mind_limits,
+    mind_revert,
     fit_mind,
     memo_item,
     memo_problems,
@@ -365,6 +367,46 @@ def _edit_of(entry):
         "replacement": {"text": CLEARED_PLACEHOLDER},
         "reason": "clear_old_tool_result",
     }
+
+
+@pytest.mark.parametrize(
+    ("searches", "reported"),
+    [
+        (0, Usage(2, 463, 490_572, 2_252, 203)),
+        (1, Usage(4, 20_655, 986_120, 9_317, 15_262)),
+        (2, Usage(6, 865, 914_820, 13_843, 640)),
+        (3, Usage(6, 6_528, 773_893, 387_655, 4_585)),
+    ],
+)
+def test_hosted_response_counts_once_in_growth_not_as_a_billed_usage_anchor(searches, reported):
+    # Recorded Claude usage counters; small replay payloads stand in for the search results. Offered tools
+    # are the same in every request. Only a response that actually ran a provider tool should be skipped.
+    rows = Rows()
+    rows.input("ask")
+    tools = (hosted_tool_spec("web_search"),)
+
+    def request():
+        return make_request(context_view(rows.rows).messages, tools=tools)
+
+    def record(reply):
+        rows.add("response", reply, payload={"request": request_facts(request())})
+
+    record(AssistantMessage((text("ok"),), ORIGIN, "stop", usage=_usage(490_000)))
+    rows.input("more")  # one token since the prior response
+    payload = {"type": "web_search_tool_result", "encrypted_content": "x" * 450}  # 508 bytes on replay
+    calls = tuple(
+        HostedToolBlock(f"s{i}", "web_search", HostedAction("search", queries=("q",)),
+                        HostedRecord(status="completed"), HostedNative("src_served00001", (payload,)))
+        for i in range(searches)
+    )
+    reply = AssistantMessage((ANTHROPIC_THINKING, *calls), ORIGIN, "stop", usage=reported,
+                             hosted_summary=HostedSummary() if calls else None)
+    record(reply)
+    rows.input("next")
+    if searches:
+        assert _est(rows, request()) == 490_000 + 2 + reported.reasoning_tokens + 127 * searches
+    else:
+        assert _est(rows, request()) == 493_289 + 1  # this single-pass response becomes the new anchor
 
 
 def test_the_anchor_holds_while_the_transcript_up_to_its_response_is_unchanged():
@@ -1153,6 +1195,29 @@ def test_the_checkpoint_request_and_its_repair_are_the_contract_text_verbatim():
     assert MIND_FILE_PREVIOUS in later and MIND_FILE_FIRST not in later and later.endswith(
         f"Current memo.md:\n- [x] (#3) the goal\n\n{MIND_CURRENT}\n# 1. Where I stand\n- a\n</context-checkpoint-request>"
     )
+    # With a previous mind the request says what each section holds now, after the limits, and how much of Goals is
+    # finished entries: the model cannot count tokens, and otherwise learns of a full section only from the repair.
+    assert "tokens.\n\n3. Check the memo" in first and "They hold now" not in first
+    held = _mind(**{"## Mission": "- [x] ship the importer: shipped\n- [ ] audit the export", "# 4. Lessons": "l" * 400})
+    assert (
+        "Lessons 1,500 tokens. They hold now: Where I stand about 17, Goals about 23 (8 of them finished entries), Key "
+        "decisions about 5, Lessons about 104. A section over its limit has to come back under it, not counting Goals "
+        "entries you mark this time, and one near its limit has to shrink by as much as you add to it.\n\n3. Check the memo"
+    ) in checkpoint_request(mind=held).content[0].text
+    assert "of them finished entries" not in checkpoint_request(mind=held.replace("[x]", "[ ]")).content[0].text
+    # A mind whose Goals hold entries without a box (every one stored before checkpoint-v5.2) is told to box them all
+    # and keep them this once; one with a box on every entry is not.
+    assert "have no box yet" not in checkpoint_request(mind=held).content[0].text
+    legacy = _mind(**{"## Mission": "Lead the product.\n- release 1: done\n- [ ] release 2", "## Workstreams": "1. the relay: waiting"})
+    assert checkpoint_request(mind=legacy).content[0].text.count(
+        "shrink by as much as you add to it. 2 entries under Mission and Workstreams have no box yet: this time give "
+        "each one its box and keep every one of them; the finished ones can be folded from the next consolidation on."
+        "\n\n3. Check the memo"
+    ) == 1
+    # A section already past its limit, on this route's limits, is named as such.
+    small = checkpoint_request(mind=held, window=8_000).content[0].text
+    assert "Goals about 23 (8 of them finished entries), Key decisions about 5, Lessons about 104 (over its limit by about 42)." in small
+    assert "They hold now" not in later  # a mind that lost its structure is not measured
     # With no candidate, memo.md is empty: the request says so and not to edit it, and shows no list, so it never
     # presents text the file does not hold.
     empty = checkpoint_request((), mind="# 1. Where I stand\n- a").content[0].text
@@ -1229,7 +1294,7 @@ def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mis
     # Any content under the fixed headings, sub-headings of the model's own, and text before the first heading.
     kept = "Notes to self\n" + previous.replace(MIND_PLACEHOLDERS["## Workstreams"], "### Queue\n- #2704 next")
     assert review_mind(kept, previous) == MindReview(tokens=text_tokens(kept))
-    assert mission_entries(mind_blocks(kept)[0][1]) == 2
+    assert mission_entries(mind_blocks(kept)[0][1]) == (2, ())  # no box: both live
     broken = {
         previous.replace("## Mission\n", "## Missions\n"): 'the heading line "## Mission" is missing',
         previous + "\n# 3. Key decisions\n- again": 'the heading line "# 3. Key decisions" appears 2 times',
@@ -1237,12 +1302,20 @@ def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mis
             "# 3. Key decisions", "# 4. Lessons\n(none)\n# 3. Key decisions"
         ):
             "its heading lines are out of order",
-        previous.replace("\n- keep CI green", ""): "its Mission lists 1 entries, fewer than the 2 it had",
     }
     for text, structure in broken.items():
         review = review_mind(text, previous)
         assert review.structure == structure, text
-        assert review.problems()[0].startswith(f"mind.md lost its structure: {structure};")
+        assert review.problems() == [
+            f"mind.md lost its structure: {structure}; keep every heading line of it exactly as it is, in order"
+        ]
+    lost = review_mind(previous.replace("\n- keep CI green", ""), previous)
+    assert lost.problems() == [
+        "mind.md lost its structure: its Mission started with 2 live entries and now has 1, with 0 more newly marked "
+        '"- [x]"; put back, whole, each entry that is not finished (one that still waits on an answer is not), and mark each finished one "- [x]" where it stands: '
+        'an entry leaves the Mission only at a later consolidation, after one has kept it as "- [x]", and the line '
+        'that folds earlier "- [x]" entries does not count as one marked now'
+    ]
     assert review_mind(None, previous).structure == "it is not a readable file"
     # Text before the first heading counts toward the first section: it cannot grow the mind past its limits.
     lead = "x" * 4 * 1_200 + "\n"
@@ -1257,17 +1330,234 @@ def test_a_mind_keeps_its_heading_lines_once_each_in_order_and_never_loses_a_mis
     assert review_mind(MIND_TEMPLATE, MIND_TEMPLATE) == MindReview(empty=True, tokens=text_tokens(MIND_TEMPLATE))
 
 
+def _mission(*entries: str) -> str:
+    return _mind(**{"## Mission": "\n".join(entries)})
+
+
+def test_a_live_mission_entry_stays_and_a_finished_one_leaves_only_after_a_mind_kept_it_as_finished():
+    # Section 10: only the box is read. A live entry ("- [ ]", or no box) stays or is finished where it stands; one a
+    # mind already kept as "- [x]" is history and may be folded or dropped.
+    first = _mission("- [ ] ship the importer", "- [ ] audit the billing export", "1. [ ] migrate the old reports")
+    assert mission_entries(mind_blocks(first)[0][1]) == (3, ())
+    # Finished where it stands, its words changed with its box; another kept live with its status rewritten.
+    second = _mission(
+        "- [x] ship the importer: shipped in 2.4", "- [ ] audit the billing export (waiting on finance)",
+        "1. [X] migrate the old reports: withdrawn by the user",
+    )
+    assert review_mind(second, first).problems() == []
+    assert mission_entries(mind_blocks(second)[0][1]) == (
+        1, ("- [x] ship the importer: shipped in 2.4", "1. [X] migrate the old reports: withdrawn by the user"),
+    )
+    # The next consolidation folds the two it started with as finished into one line, or drops them; a new goal joins.
+    folded = _mission("- [x] Earlier: the importer shipped; the report migration was withdrawn",
+                      "- [ ] audit the billing export (waiting on finance)", "- [ ] publish the changelog")
+    assert review_mind(folded, second).problems() == []
+    assert review_mind(_mission("- [ ] audit the billing export (waiting on finance)"), second).problems() == []
+    # A live entry gone with no finished line in its place: nothing ever kept it as finished.
+    gone = _mission("- [ ] audit the billing export")
+    review = review_mind(gone, first)
+    assert review.structure == 'its Mission started with 3 live entries and now has 1, with 0 more newly marked "- [x]"'
+    assert review.problems()[0].endswith("does not count as one marked now") and review.over == () and not review.empty
+    # The one repair names every problem: a mind that lost a live entry and is past a limit hears of both.
+    both = review_mind(gone.replace(MIND_PLACEHOLDERS["# 4. Lessons"], "l" * 8_000), first)
+    assert [problem.split(":")[0] for problem in both.problems()] == [
+        "mind.md lost its structure", "mind.md is over its length limits"
+    ] and both.structure == review.structure
+    # Two live entries merged into one, or a live one dropped while a finished one is kept as it was: both lose one.
+    merged = _mission("- [x] ship the importer: shipped in 2.4", "- [ ] audit the export and publish the changelog")
+    assert review_mind(merged, folded.replace("- [x] Earlier: the importer shipped; the report migration was withdrawn",
+                                              "- [x] ship the importer: shipped in 2.4")).structure is not None
+    kept_old = _mission("- [x] ship the importer: shipped in 2.4", "1. [X] migrate the old reports: withdrawn by the user")
+    assert review_mind(kept_old, second).structure is not None
+    # The line that folds earlier finished entries is new, but it is their fold, not a live entry just marked: it
+    # cannot stand in for a live entry that left in the same turn. With it, a live entry marked in that turn still counts.
+    held = _mission("- [x] ship the importer: shipped in 2.4", "- [ ] audit the billing export (waiting on finance)")
+    assert review_mind(_mission("- [x] Earlier: the importer shipped"), held).structure == (
+        'its Mission started with 1 live entries and now has 0, with 0 more newly marked "- [x]"'
+    )
+    assert review_mind(_mission("- [x] ship the importer: shipped", "- [ ] publish the changelog"), held).problems() == []
+    assert review_mind(_mission("- [x] ship the importer: shipped"), held).structure is not None  # reworded, one live gone
+    assert review_mind(
+        _mission("- [x] Earlier: the importer shipped", "- [x] audit the billing export: done, finance signed off"), held
+    ).problems() == []
+    # The price: history dropped in the very turn a live entry is marked reads the same, and gets the repair. So does
+    # a fold in the turn a live entry is marked in the very words of a finished one the mind held.
+    assert review_mind(_mission("- [x] audit the billing export: done"), held).structure is not None
+    same = _mission("- [x] audit", "- [x] ship", "- [ ] audit")
+    assert review_mind(_mission("- [x] Earlier: audit completed; release shipped", "- [x] audit"), same).structure is not None
+    assert review_mind(_mission("- [x] Earlier: audit completed; release shipped", "- [x] audit: done again"), same).problems() == []
+    # Entries are counted, each line as often as it stands: a live entry finished into the words of one already
+    # finished is newly finished all the same.
+    twice = _mission("- [x] ship", "- [ ] ship", "- [ ] audit")
+    assert review_mind(_mission("- [ ] audit", "- [x] ship", "- [x] ship"), twice).problems() == []
+    assert review_mind(_mission("- [ ] audit", "- [x] ship"), twice).structure is not None
+    # A box is a box only at the head of a top-level entry: one in the words, or on an indented line, finishes nothing.
+    nested = _mission("- [ ] ship the importer", "  - [x] its parser", "- the audit [x] of billing", "- [x]")
+    assert mission_entries(mind_blocks(nested)[0][1]) == (2, ("- [x]",))
+
+
+def test_minds_stored_by_released_versions_load_and_compact_under_the_new_rules():
+    # The shapes the released prompts (checkpoint-v5, checkpoint-v5.1) left in stored minds; none is rewritten: each
+    # is the previous mind of its next checkpoint as it is.
+    listed = _mission("- Take over the release work: done (11-08).", "- Release 3.2.5: released (11-10).",
+                      "- Release 3.2.6: in progress; RC 4 is out.", "- Put the app on the store: waiting on review.")
+    paragraph = _mission("Keep the dependency updates reviewed and merged; each batch is closed when its PRs land.",
+                         "First batch (done): verified to 7524a6c.", "Second batch (done): verified to 317377e.",
+                         "Third batch: in progress, two PRs open.")
+    mixed = _mission("Lead the product: direction, experience, coordination. Ongoing.",
+                     "- Release 3.2.7: released (11-19).", "- Release 3.2.8: in progress.")
+    for stored in (listed, paragraph, mixed):
+        assert with_placeholders(stored) == stored  # nothing to migrate
+        assert review_mind(stored, stored).problems() == [] and fit_mind(stored, "[cut]") == (stored, [])
+    # A list without boxes: every entry is live, so none may leave yet. Boxes go on first; folding is the next step.
+    assert mission_entries(mind_blocks(listed)[0][1]) == (4, ())
+    boxed = _mission("- [x] Take over the release work: done (11-08).", "- [x] Release 3.2.5: released (11-10).",
+                     "- [ ] Release 3.2.6: in progress; RC 5 is out.", "- [ ] Put the app on the store: waiting on review.")
+    assert review_mind(boxed, listed).problems() == []
+    assert review_mind(_mission(*boxed.split("## Mission\n")[1].split("\n")[2:4]), listed).structure is not None
+    folded = _mission("- [x] Earlier: release work taken over; 3.2.5 released.",
+                      "- [ ] Release 3.2.6: in progress; RC 5 is out.", "- [ ] Put the app on the store: waiting on review.")
+    assert review_mind(folded, boxed).problems() == []
+    # A Mission written as lines or as a paragraph lists no entry: nothing is counted, as before, and it may be
+    # rewritten as boxed entries (which are counted from then on) in one step, its finished lines folded at once.
+    assert mission_entries(mind_blocks(paragraph)[0][1]) == (0, ())
+    rewritten = _mission("Keep the dependency updates reviewed and merged; each batch is closed when its PRs land.",
+                         "- [x] Earlier: the first two batches, verified.", "- [ ] Third batch: in progress, two PRs open.")
+    assert review_mind(rewritten, paragraph).problems() == []
+    assert review_mind(paragraph, paragraph).problems() == []  # or left as it is
+    # A paragraph above the list is not an entry; its entries are counted like any list's.
+    assert mission_entries(mind_blocks(mixed)[0][1]) == (2, ())
+    assert review_mind(mixed.replace("\n- Release 3.2.7: released (11-19).", ""), mixed).structure is not None
+    # One past its limit with no box anywhere is shown as the released versions showed it: the head kept.
+    old = "\n".join(f"- Release 3.2.{index}: released. " + "r" * 200 for index in range(40))
+    over = _mind(**{"## Mission": old, "## Workstreams": "- Release 3.3.0: in progress"})
+    assert [title for title, _, _ in review_mind(over, over).over] == ["Goals"] and review_mind(over, over).foldable == 0
+    shown, cut = fit_mind(over, "[cut]")
+    goals = shown[shown.index("# 2. Goals") : shown.index("# 3. Key decisions")]
+    assert "- Release 3.2.0: released." in goals and "- Release 3.2.39: released." not in goals and len(cut) == 1
+
+
+def _goals(shown: str) -> list[str]:
+    """The Goals section's lines as shown, blank ones aside."""
+    return [line for line in shown[shown.index("# 2. Goals") : shown.index("# 3. Key decisions")].split("\n") if line]
+
+
+def test_a_goals_section_past_its_limit_is_shown_without_its_finished_entries_first():
+    # On an 8,000-token route Goals has 83 tokens (section 7), 332 bytes with its headings and the marker.
+    assert mind_limits(8_000)[1] == 83
+    # Finished entries leave from the top, Mission's then Workstreams', only until the section as shown fits: with the
+    # first out it is exactly 83 tokens, so the second stays and so does the one under Workstreams; every live entry
+    # is whole.
+    live = "- [ ] " + "l" * 198
+    mind = _mind(**{"## Mission": "- [x] " + "a" * 100 + "\n- [x] B", "## Workstreams": "- [x] W\n" + live})
+    shown, cut = fit_mind(mind, MIND_CUT_UNSTORED, 8_000)
+    assert _goals(shown) == ["# 2. Goals", "## Mission", "- [x] B", "## Workstreams", "- [x] W", live, MIND_CUT_UNSTORED]
+    section = shown[shown.index("# 2. Goals") : shown.index("# 3. Key decisions")].rstrip("\n")
+    assert len(section.encode()) == 332 and len(cut) == 1 and "- [x] " + "a" * 100 in cut[0]
+    # A placeholder counts for nothing here either: the section that fits without the first finished entry keeps the second.
+    mind = _mind(**{"## Workstreams": "- [x] " + "a" * 200 + "\n- [x] B\n- [ ] " + "l" * 206})
+    assert _goals(fit_mind(mind, MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "(none yet: mission)", "## Workstreams", "- [x] B", "- [ ] " + "l" * 206, MIND_CUT_UNSTORED,
+    ]
+    # But the marker is the last line under Workstreams, so a placeholder there is no longer alone and counts: the same
+    # entries under Mission do not fit with it, and both finished ones go. What is left is within the limit but for
+    # the marker, so nothing of it is cut: the harness's own line never costs a live entry its text.
+    mind = _mind(**{"## Mission": "- [x] " + "a" * 200 + "\n- [x] B\n- [ ] " + "l" * 206})
+    assert _goals(fit_mind(mind, MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "- [ ] " + "l" * 206, "## Workstreams", "(none yet: workstreams)", MIND_CUT_UNSTORED,
+    ]
+    # A finished entry goes with the indented lines under it, blank lines between them included, so its notes cannot
+    # take the room of the live entries after it; the purpose line above the list stays.
+    noted = _mind(**{"## Mission": "Lead the product.\n- [x] done\n\n  " + "r" * 320 + "\n  - its sub-entry\n- [ ] LIVE",
+                     "## Workstreams": "- [ ] QUEUE"})
+    assert _goals(fit_mind(noted, MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "Lead the product.", "- [ ] LIVE", "## Workstreams", "- [ ] QUEUE", MIND_CUT_UNSTORED,
+    ]
+    # With every finished entry out and the section still past its limit, its end is cut as before.
+    crowded = _mind(**{"## Mission": "- [x] old\n- [ ] LIVE", "## Workstreams": "- [x] older\n- [ ] first\n- [ ] " + "w" * 400})
+    assert _goals(fit_mind(crowded, MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "- [ ] LIVE", "## Workstreams", "- [ ] first", MIND_CUT_UNSTORED,
+    ]
+    # Boxes are Goals' alone: a checked line elsewhere is text like any other.
+    lessons = "\n".join(["- [x] verified: the cache key", *(f"- lesson {index}: " + "l" * 200 for index in range(40))])
+    shown = fit_mind(_mind(**{"## Mission": "- [ ] the mission", "# 4. Lessons": lessons}), "[cut]")[0]
+    assert "- [x] verified: the cache key" in shown and "- lesson 39" not in shown
+
+
+def test_goals_past_its_limit_only_by_entries_the_turn_marked_asks_no_repair():
+    # Entries a turn marks as finished have to stay that once (section 10). What the repair says of Goals counts only
+    # what may be folded: the finished entries the mind already held.
+    started = _mind(**{"## Mission": "- [x] old: " + "o" * 300 + "\n- [ ] audit\n  " + "q" * 400, "## Workstreams": "- [ ] next"})
+    marked = started.replace("- [ ] audit", "- [x] audit")
+    review = review_mind(marked, started, 8_000)
+    # Its 774 bytes are 194 tokens, 90 without the entry just marked; the old entry's 311 bytes are 78. The amount
+    # asked for is the excess and a twentieth of the limit more, so the result lands under it.
+    assert review.over == (("Goals", 194, 83),) and review.problems() == [
+        "mind.md is over its length limits: Goals is about 194 tokens, at most 83 (take about 115 out); condense it: in "
+        'Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or drop '
+        "them (about 78 tokens of it), keeping what in them still binds, then move finished detail out of live entries"
+    ]
+    # Without the old one it fits but for the entry just marked: nothing to repair, and the cut shows the live ones.
+    old = "- [x] old: " + "o" * 300 + "\n"
+    fresh = review_mind(marked.replace(old, ""), started.replace(old, ""), 8_000)
+    assert [title for title, _, _ in fresh.over] == ["Goals"] and fresh.problems() == []
+    assert review_mind(marked, marked, 8_000).problems() != []  # at the next consolidation it may be folded, and is asked
+    # The remainder is measured as a section is, on both sides of its limit: 83 of 83 asks nothing, 84 does.
+    carry = {"## Workstreams": "- carry"}
+    exact = _mind(**{"## Mission": "- [ ] QA\n- [ ] " + "l" * 280, **carry})
+    assert review_mind(exact.replace("- [ ] QA", "- [x] QA"), exact, 8_000).problems() == []
+    # A waived Goals is shown with every live entry whole, its marker past the limit: 83 tokens of it plus the line.
+    assert _goals(fit_mind(exact.replace("- [ ] QA", "- [x] QA"), MIND_CUT_UNSTORED, 8_000)[0]) == [
+        "# 2. Goals", "## Mission", "- [ ] " + "l" * 280, "## Workstreams", "- carry", MIND_CUT_UNSTORED,
+    ]
+    past = _mind(**{"## Mission": "- [ ] ship\n- [ ] " + "l" * 281, **carry})
+    assert "Goals is about 86 tokens, at most 83" in review_mind(past.replace("- [ ] ship", "- [x] ship"), past, 8_000).problems()[0]
+    # An entry is the one already held only under its own heading: the same words finished under Workstreams do not
+    # stand for the Mission entry this turn marked.
+    twin = _mind(**{"## Mission": "- [ ] audit\n  " + "q" * 180, "## Workstreams": "- [x] audit\n- [ ] next " + "r" * 210})
+    assert review_mind(twin.replace("- [ ] audit", "- [x] audit", 1), twin, 8_000).problems() == []
+    # Nor does the first line alone say which entry was held: an unchanged entry is itself, so the long one above it,
+    # just marked under the same heading and in the same first words, is the one that has to stay.
+    pair = _mind(**{"## Mission": "- [ ] audit\n  " + "q" * 400 + "\n- [x] audit", "## Workstreams": "- [ ] next"})
+    assert review_mind(pair.replace("- [ ] audit", "- [x] audit"), pair, 8_000).problems() == []
+    # The line that folds held entries is not one the turn marked: an oversized fold is asked to shrink at once, and
+    # the repair counts it among what may be folded.
+    shipped = _mind(**{"## Mission": "- [x] ship\n- [ ] audit"})
+    (problem,) = review_mind(shipped.replace("- [x] ship", "- [x] Earlier: shipped\n  " + "n" * 400), shipped, 8_000).problems()
+    # 474 bytes of Goals are 119 tokens; the fold's 425 bytes are 107.
+    assert "Goals is about 119 tokens, at most 83" in problem and "(about 107 tokens of it)" in problem
+    # A mind past twice its limits' sum is not kept at all (the previous one stays), so there the turn is told while
+    # it can still condense: no waiver.
+    assert mind_revert(8_000) == 496
+    big = _mind(**{"## Mission": "- audit\n  " + "r" * 1_650})
+    lesson = "Use the staged billing data for the next audit. " + "L" * 36
+    piled = big.replace("- audit", "- [x] audit").replace(MIND_PLACEHOLDERS["# 4. Lessons"], lesson)
+    review = review_mind(piled, big, 8_000)
+    assert review.tokens == 504 and "Goals is about" in review.problems()[0]
+    assert review_mind(big.replace("- audit", "- [x] audit"), big, 8_000).problems() == []  # 486 tokens: kept, waived
+
+
 def test_a_mind_past_a_section_limit_is_shown_cut_per_section_with_every_heading_kept():
     workstreams = "\n".join(f"- workstream {index}: " + "w" * 200 for index in range(60))  # ~3,100 tokens
     lessons = "\n".join(f"- lesson {index}: " + "l" * 100 for index in range(10))
     mind = _mind(**{"## Mission": "- the mission", "## Workstreams": workstreams, "# 4. Lessons": lessons})
     review = review_mind(mind, mind)
-    assert [(title, limit) for title, _, limit in review.over] == [("Goals", 2_000)] and review.structure is None
+    assert review.over == (("Goals", 3_281, 2_000),) and review.structure is None
     assert review.problems() == [
-        f"mind.md is over its length limits: Goals is about {review.over[0][1]:,} tokens, at most 2,000; condense it: "
-        "fold finished workstreams into one line, merge recurring lessons into principles, and fold overturned "
-        "decisions into the ones that replaced them"
+        "mind.md is over its length limits: Goals is about 3,281 tokens, at most 2,000 (take about 1,381 out); "
+        "condense it: "
+        'in Goals, fold the entries that already were "- [x]" when this consolidation began into one short line or '
+        "drop them, keeping what in them still binds, then move finished detail out of live entries"
     ]
+    # Each section past its limit is told its own way to condense.
+    every = _mind(**{"## Agreements": lessons * 8, "## Mission": "- the mission", "# 3. Key decisions": lessons * 8,
+                     "# 4. Lessons": lessons * 8})
+    (problem,) = review_mind(every, every).problems()
+    assert problem.endswith(
+        "condense it: in Where I stand, merge agreements that overlap and drop those the user has since replaced; in "
+        "Key decisions, fold overturned decisions into the ones that replaced them; in Lessons, merge recurring "
+        "lessons into principles"
+    )
     marker = MIND_CUT.format(path="/state/checkpoints/s/mind-x.md")
     shown, cut = fit_mind(mind, marker)
     blocks = mind_blocks(shown)[0][1]  # still a mind: every heading line, once, in order

@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Final, Iterable
 
 import yaml
+from packaging.version import InvalidVersion, Version
 
 from config.atomic_io import write_atomic
 from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
@@ -33,6 +34,7 @@ def write_engine_config(
     sources: Iterable[SourceRecord],
     state_store: EngineStateStore,
     generation: str = "0",
+    engine_version: str | None = None,
 ) -> None:
     _secure_write_text(
         path,
@@ -45,6 +47,7 @@ def write_engine_config(
             sources=sources,
             state_store=state_store,
             generation=generation,
+            engine_version=engine_version,
         ),
     )
 
@@ -59,6 +62,7 @@ def render_engine_config(
     sources: Iterable[SourceRecord],
     state_store: EngineStateStore,
     generation: str = "0",
+    engine_version: str | None = None,
 ) -> str:
     """Render the engine YAML that ``path`` holds, for a start or a hot reload.
 
@@ -116,6 +120,13 @@ def render_engine_config(
         "routing": {"strategy": "fill-first", "session-affinity": False},
         "ws-auth": True,
     }
+    # A server section triggers a layout migration on the previous engine pin.
+    try:
+        supports_server_id = Version(engine_version or "") >= Version("8.1.2")
+    except InvalidVersion:
+        supports_server_id = False
+    if supports_server_id:
+        payload["server"] = {"server-id": runtime_secrets.server_id}
     for source in sources:
         _append_source(payload, source, state_store, generation)
     return yaml.safe_dump(payload, sort_keys=False, default_flow_style=False)
@@ -209,6 +220,9 @@ def _append_source(
             # A Gemini Source names a model as Google lists it (``models/<id>``); the executor puts its name in the
             # upstream path itself, so the name is the bare id and the listed one is the alias it is routed by.
             entry["models"] = [{**model, "name": model["name"].removeprefix("models/")} for model in models]
+        else:
+            # CPA substitutes its native Gemini catalog for an empty models list.
+            entry["excluded-models"] = ["*"]
         payload.setdefault("gemini-api-key", []).append(entry)
         if images:
             # The engine's images endpoints serve an image model only from an OpenAI-compatible entry that flags it
@@ -245,6 +259,10 @@ def _append_source(
         }
         if models:
             entry["models"] = models
+        else:
+            # Keep the credential for discovery, not the built-in Claude catalog:
+            # otherwise a just-removed route can stay registered through reload.
+            entry["excluded-models"] = ["*"]
         payload.setdefault("claude-api-key", []).append(entry)
         return
     if source.protocol == "openai_responses":

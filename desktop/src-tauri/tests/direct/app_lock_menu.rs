@@ -4,10 +4,12 @@ use super::*;
 pub(crate) fn run(app: &AppHandle, click: Option<&str>) -> tauri::Result<serde_json::Value> {
     if direct(app).is_none() {
         let menu = ConnectionMenu::build(app)?.expect("product menu copy");
-        menu.show(Some(Mode::Automatic));
+        menu.show(Some((Mode::Automatic, false)));
         app.manage(Arc::new(Direct {
             wiring: Mutex::new(Wiring::new(Routing::Unsupported, false, Choices::unsaved())),
             stops: Mutex::default(),
+            asks: Mutex::default(),
+            returns: Mutex::default(),
             shown: Mutex::new(Some(Published {
                 target: Target {
                     account: "fixture-account".into(),
@@ -21,6 +23,7 @@ pub(crate) fn run(app: &AppHandle, click: Option<&str>) -> tauri::Result<serde_j
             menu: Mutex::new(Some(menu)),
             pages: Mutex::default(),
             available: true,
+            dead_end: OnceLock::new(),
         }));
     }
     let state = direct(app).expect("test owner");
@@ -38,7 +41,7 @@ pub(crate) fn run(app: &AppHandle, click: Option<&str>) -> tauri::Result<serde_j
         }
         crate::handle_menu(app, id);
     }
-    let saved = chosen(lock(&state.shown).as_ref(), &lock(&state.wiring));
+    let saved = chosen(lock(&state.shown).as_ref(), &lock(&state.wiring)).map(|(mode, _)| mode);
     let menu = lock(&state.menu);
     let menu = menu.as_ref().unwrap();
     Ok(serde_json::json!({

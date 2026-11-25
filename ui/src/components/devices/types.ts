@@ -56,6 +56,12 @@ export type Device = {
   person?: string;
   /** No sign-in left on it, only a notification registration: signing it out stops those. */
   pushOnly?: boolean;
+  /** Only on the computer that runs Avibe, and only the instance's outright answer about an Avibe
+   *  that is not bound (`network_open` of its row). `true`: other devices on its network open it
+   *  without signing in, through a listener Avibe itself can close. `false`: only this computer
+   *  opens it. Absent when the instance does not say, says null (not known, or not Avibe's to
+   *  close), or is bound: never filled in from a missing answer. */
+  networkOpen?: boolean;
   recent?: DeviceActivity[];
 };
 
@@ -99,20 +105,6 @@ export type SignedOutDevice = {
   results: AccountResult[];
 };
 
-/** The answer of a sign-out just made. `healthCleanupPending`: a conditional clean-up of synced
- *  Health data is not confirmed yet (it does not say the device had any). */
-export type SignOutNotice = {
-  device: string | null;
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-  healthCleanupPending: boolean;
-  /** The signed-out row showed Health on this page. */
-  hadHealth: boolean;
-  /** The row listed what the device does and Health was not among it: nothing is said about
-   *  Health's clean-up, which cannot concern it. */
-  withoutHealth?: boolean;
-};
-
 /** Why a claim (turning remote access on) did not go through: the local outcome names of
  *  `personal-installation-claims-runtime.md`, and `unknown` with the raw code for the rest. */
 export type ClaimProblem =
@@ -120,6 +112,8 @@ export type ClaimProblem =
       | 'pairing_recovery_required' | 'fresh_claim_required' | 'name_taken' | 'binding_unavailable'
       | 'paired_installation_loopback_required' | 'active_pairing_recent' | 'local_binding_changed' }
   | { code: 'claim_in_progress'; claimId?: string }
+  /** Refused at avibe.bot by another account: `email` is the account that confirmed it, never the Owner. */
+  | { code: 'other_account'; email: string }
   | { code: 'rate_limited'; seconds?: number }
   | { code: 'unknown'; raw: string };
 
@@ -127,8 +121,9 @@ export type ClaimProblem =
 export type Reach =
   /** Not bound, in a browser: one action, the name is chosen at avibe.bot. */
   | { state: 'off'; surface: 'browser'; busy?: boolean; problem?: ClaimProblem }
-  /** The Desktop App on this computer: its own account sign-in is the sign-in. */
-  | { state: 'off'; surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
+  /** The Desktop App on this computer: one action, which asks the shell for its claim dialog (the
+   *  App's own sign-in if needed, then the name). `busy`: that request was just sent. */
+  | { state: 'off'; surface: 'desktop'; busy?: boolean }
   /** Turning on. `waiting`: the request is open and not approved at avibe.bot yet; it can be
    *  cancelled. `retrying`: open, and the instance is trying avibe.bot again after it could not be
    *  reached or asked to wait. Otherwise avibe.bot approved and this computer is binding. */
@@ -144,22 +139,28 @@ export type Reach =
   /** The state could not be read. */
   | { state: 'unknown' };
 
-/** Whether the name typed for the domain is free. `taken` never suggests another name. */
-export type NameState = 'free' | 'taken';
 
 export type AddKind = 'iphone' | 'android' | 'computer';
 /** `remove`: sign the open device out. `health-off`: turn the open device's Health off.
  *  `remove-all-remote`: at the computer itself, every remote device. */
-export type DevicesConfirm = 'remove' | 'health-off' | 'turn-off' | 'remove-others' | 'remove-all-remote' | { unlinkedHealth: string };
+export type DevicesConfirm = 'remove' | 'health-off' | 'turn-off' | 'remove-others' | 'remove-all-remote' | 'this-computer-only' | { unlinkedHealth: string };
+
+/** Addresses an operator's own reverse proxy serves, whose visitors this Avibe lets in without
+ *  signing in (`unauthenticated_proxy_access` of `/api/devices`, the Owner only). `range`: the
+ *  trusted proxy is declared as more than one address. */
+export type ProxyAccess = { origins: string[]; peerScope: 'single_address' | 'range' };
 
 /** The instance's direct state (`GET /api/devices/connection`). */
 export type DirectState = 'ready' | 'off' | 'awaiting-permission' | 'denied' | 'awaiting-certificate' | 'not-running' | 'unknown';
 
-/** The Avibe App's own path choice (`direct.preference()`, capability `directPreference` 1). */
+/** This device's own path choice, in the Avibe App or a Desktop window of another computer's
+ *  instance (`direct.preference()`, capability `directPreference`). */
 export type DirectPreference = {
-  mode: 'automatic' | 'tunnel';
-  /** The App put `tunnel` back to `automatic` by itself because it could not connect. */
-  reverted: null | { at: string; reason: 'unreachable' };
+  mode: 'automatic' | 'tunnel' | 'direct';
+  /** The shell put `from` back to `automatic` by itself because it could not connect. */
+  reverted: null | { at: string; reason: 'unreachable'; from: 'tunnel' | 'direct' };
+  /** The App takes the choice only after it is opened again. */
+  pendingRelaunch?: boolean;
 };
 
 export type TunnelSetting = 'protocol' | 'ipFamily' | 'outbound';
