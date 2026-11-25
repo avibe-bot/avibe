@@ -53,6 +53,21 @@ def test_attempt_scoped_producers(monkeypatch, change, present):
     assert (JOB["name"] in actual) == present
 
 
+def test_release_notes_use_workflow_sources_for_an_older_tag():
+    import yaml
+    from pathlib import Path
+
+    jobs = yaml.safe_load((Path(__file__).resolve().parents[1] / '.github/workflows/release_ai.yml').read_text())['jobs']
+    steps = jobs['release']['steps']
+    checkout = next(step for step in steps if step.get('name') == 'Checkout release wait tooling')
+    notes = next(step for step in steps if step.get('name', '').startswith('Record or preserve'))
+    assert steps.index(checkout) < steps.index(notes)
+    assert checkout['with']['ref'] == '${{ github.sha }}'
+    assert checkout['with']['sparse-checkout'] == 'scripts'
+    assert notes['working-directory'] == checkout['with']['path']
+    assert "Path('../release.md')" in notes['run']
+
+
 def test_notes_regeneration_keeps_only_recorded_waivers():
     old = policy.exception_note("job | no runner | go for rc19")
     forged = policy.exception_note("wrong | generated | no")

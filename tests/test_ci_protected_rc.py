@@ -107,4 +107,6 @@ def test_range_records_reverted_and_renamed_files(monkeypatch, tmp_path):
     mac = 'install-upgrade-regression (installer, macos-15)'
     assert not policy.inputs_changed(mac, {'ios/AvibeTests/Foo.swift', 'ios/Avibe.xcodeproj/project.pbxproj'})
     assert policy.inputs_changed(mac, {'ios/AvibeTests/Foo.swift', 'scripts/check.py'})
+    assert policy.required_jobs({'storage/lock.py'}) >= policy.NATIVE
+    assert all(policy.inputs_changed(native, {'storage/lock.py'}) for native in policy.NATIVE)
     assert policy.required_jobs({"new-build-input"}) == policy.ALL

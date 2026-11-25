@@ -53,7 +53,9 @@ def required_jobs(paths: set[str]) -> set[str]:
         if narrative_path(path):
             continue
         if path.startswith("storage/"):
-            jobs.update(MIGRATIONS | INSTALL | IDENTITY)
+            # MigrationFileLock is used by the real native Model Hub installer.
+            # Storage is shared: do not infer unaffected producers from its directory.
+            jobs.update(ALL)
         elif path.startswith("desktop/"):
             jobs.update(DESKTOP | FETCH | INSTALL | IDENTITY)
         elif path.startswith(("core/handlers/model_hub/", "vibe/model_hub_runtime/")):

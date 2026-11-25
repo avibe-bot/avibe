@@ -715,8 +715,17 @@ jobs:
             printf "\n\nFull Changelog: %s\n" "$COMPARE_URL" >> release.md
           fi
 
+      - name: Checkout release wait tooling
+        if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-wait
+          sparse-checkout: scripts
+
       - name: Record or preserve the approved runner exception in the RC notes
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
+        working-directory: release-wait
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
@@ -728,7 +737,7 @@ jobs:
           from scripts.github_release import get_release
           from scripts.ci_protected_rc import preserve_exception_notes
           existing = get_release(os.environ['GITHUB_REPOSITORY'], os.environ['RELEASE_TAG'])
-          notes = Path('release.md')
+          notes = Path('../release.md')
           notes.write_text(preserve_exception_notes(notes.read_text(), existing.body if existing else '', os.environ['RC_RUNNER_EXCEPTION']))
           PY
 
@@ -800,15 +809,6 @@ jobs:
           if ! grep -qF "$READY_MARKER" release.md; then
             printf '\n\n%s\n' "$READY_MARKER" >> release.md
           fi
-
-      - name: Checkout release wait tooling
-        if: startsWith(steps.tag.outputs.tag, 'gh-v')
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          path: release-wait
-          sparse-checkout: scripts/release_workflow_artifacts.py
-          sparse-checkout-cone-mode: false
 
       - name: Download release artifacts
         if: startsWith(steps.tag.outputs.tag, 'gh-v')
