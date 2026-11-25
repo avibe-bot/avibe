@@ -174,6 +174,8 @@ export type DirectPreference = {
   mode: 'automatic' | 'tunnel' | 'direct';
   /** The shell put `from` back to `automatic` by itself because it could not connect. */
   reverted: null | { at: string; reason: 'unreachable'; from: 'tunnel' | 'direct' };
+  /** The App takes the choice only after it is opened again. */
+  pendingRelaunch?: boolean;
 };
 
 export type TunnelSetting = 'protocol' | 'ipFamily' | 'outbound';

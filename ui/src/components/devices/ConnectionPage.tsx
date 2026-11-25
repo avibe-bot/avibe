@@ -60,6 +60,7 @@ const storedValue = (connection: ConnectionState, setting: TunnelSetting): strin
 const preferenceOf = (choice: NativeDirectChoice): DirectPreference => ({
   mode: choice.mode,
   reverted: choice.reverted === null ? null : { at: new Date(choice.reverted.at).toISOString(), reason: 'unreachable', from: choice.reverted.from },
+  pendingRelaunch: choice.pendingRelaunch || undefined,
 });
 
 type Preview = RenamePreview & { name: string };
