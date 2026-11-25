@@ -34,12 +34,16 @@ This is the gate for every release tag, stable `v*` and GitHub-only
 `gh-vX.Y.ZrcN` alike, in Stage 1, Stage 2 and `Publish to PyPI`. An RC is cut
 only from a SHA whose own full `lint` run on `master` (a push run, or a manual
 full run at that exact SHA) completed green. A parent's or a later SHA's green
-run does not count. If the SHA's run is missing, red or cancelled, there is no
-release until that run is rerun or fixed.
+run does not count. If the SHA's run is red or cancelled, rerun that same run or
+fix forward; if it never started (coalesced away) and `master` has moved on, a
+run dispatched now would prove a different SHA, so select another candidate
+whose own full run is green instead.
 
 Ordinary pull requests no longer run the native and browser legs, so a green
 pull request is not full proof and the pipeline does not accept one for an RC.
-Check the candidate before pushing the tag:
+A tag-push run uses the workflow files at the tagged commit, so a tag on a
+commit from before this rule would still run the older, PR-gate Stage 1. The
+pre-tag check below is therefore mandatory for every tag, not a convenience:
 
 ```bash
 GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
@@ -139,7 +143,7 @@ request; missing, expired or mismatched bytes use the normal local UI build.
 A partial CI rerun that inherits an earlier attempt's successful UI build or
 certificate also falls back: the producer job must have actually started in the
 proven attempt, not merely carry its relabelled attempt number.
-This optional optimization never makes the full backstop an RC gate again.
+This optional optimization only reuses a build; the full backstop at the exact SHA remains the gate.
 
 The final wheel/sdist are still built with the release version and activated
 predecessor compatibility. All distribution assertions remain: the three fresh
