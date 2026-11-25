@@ -28,12 +28,12 @@ def test_recovery_range_and_each_role_use_same_proven_withdrawal_prefix(tmp_path
         if row[4].sequence != 3:
             raise index.hosted.Error('qualification mismatch')
     def rows():
-        return index.iter_records(repo, before, last)
-    accepted, rejected = index.qualified_prefix(rows(), prove)
+        return index.candidates(repo, before, last)
+    accepted, rejected = index.delivery_plan(rows(), prove)
     assert rejected and [r[5] for r in accepted] == [revoke]
-    assert index.authorized_rows(rows(), [3]) == accepted
+    assert index.selected_records(rows(), [3]) == accepted
     with pytest.raises(index.hosted.Error):
-        index.authorized_rows(rows(), [4])
+        index.selected_records(rows(), [5])
     replay = index.landing_range(repo, 'workflow_dispatch', {'inputs': {'landing': landing}}, last)
     assert index.records(repo, *replay) == accepted
     index.preflight(repo, before, landing, api=None, token=None, single=True)
@@ -55,3 +55,40 @@ def test_rehearsal_attempt_is_checked_before_artifact_or_release_io(tmp_path):
             return {'id': 11, 'run_attempt': 3, 'status': 'completed', 'conclusion': 'success'}
     with pytest.raises(index.hosted.Error, match='attempt'):
         index.qualify_promotion(repo, sha, op, None, payload, api=WrongAttempt(), token=None)
+
+
+@pytest.mark.parametrize('mutation', ['none', 'payload', 'parent', 'sequence', 'blob'])
+def test_exceptional_binding_reopens_only_the_original_bytes(tmp_path, mutation):
+    repo, before, landed, _, _, _ = fixture(tmp_path)
+    row, = index.iter_records(repo, before, landed)
+    doc = index.recovery.binding(row)
+    if mutation != 'none':
+        key = {'payload': 'payload_sha256'}.get(mutation, mutation)
+        doc[key] = {'payload': '0' * 64, 'parent': {}, 'sequence': 2, 'blob': '0' * 40}[mutation]
+    path = f'{index.recovery.DIRECTORY}/0000000000000001.json'
+    request = repo / path
+    request.parent.mkdir()
+    request.write_text(json.dumps(doc))
+    end = commit(repo)
+    if mutation == 'none':
+        original, name, oid = index.recovery.read_request(repo, landed, end, index.iter_records)
+        assert original == row and name == path and oid == index.hosted.git(repo, 'rev-parse', end + ':' + path).decode().strip()
+    else:
+        with pytest.raises(index.hosted.Error):
+            index.recovery.read_request(repo, landed, end, index.iter_records)
+
+
+@pytest.mark.parametrize('outcome', ['missing', 'timeout', 'failed', 'green'])
+def test_only_missing_history_can_use_exceptional_path(monkeypatch, outcome):
+    gate = index.gate
+    def proof(*args, **kwargs):
+        if outcome == 'missing': raise gate.MissingHistoricalEvidence('absent')
+        if outcome == 'timeout': raise TimeoutError('temporarily unavailable')
+        if outcome == 'failed': raise index.hosted.Error('failed')
+        return 1, 'a' * 40
+    monkeypatch.setattr(gate, 'prove_landing', proof)
+    if outcome == 'missing':
+        index.recovery.require_missing(None, ('commit', 'path', 'blob'))
+    else:
+        with pytest.raises(TimeoutError if outcome == 'timeout' else index.hosted.Error):
+            index.recovery.require_missing(None, ('commit', 'path', 'blob'))

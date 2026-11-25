@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import itertools
 import json
 import os
 import re
@@ -15,6 +14,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import model_hub_engine_artifact as artifacts  # noqa: E402
+from scripts import model_hub_engine_emergency as emergency  # noqa: E402
+from scripts import model_hub_engine_recovery as recovery  # noqa: E402
 from scripts import model_hub_engine_merge as gate  # noqa: E402
 from scripts import model_hub_engine_qualification as qualification  # noqa: E402
 from scripts import model_hub_engine_hosted as hosted  # noqa: E402
@@ -23,8 +24,8 @@ producer, channel = hosted.producer, hosted.channel
 INDEX_WORKFLOW = ".github/workflows/model-hub-engine-index.yml"
 
 
-def iter_records(repo, before, after, *, proposed=False):
-    """Validate the proposed merge tree or walk actual first-parent landings."""
+def candidates(repo, before, after, *, proposed=False):
+    """Yield independent, lazy row readers, preserving earlier results on a bad suffix."""
     changes = (gate.added_blobs(repo, before, after) if proposed
                else gate.iter_push_additions(repo, before=before, after=after))
     # Examine the parent tree, not just the last record found in a path-limited log.
@@ -37,40 +38,80 @@ def iter_records(repo, before, after, *, proposed=False):
                          "--format=", "--name-status", before, "--", hosted.LEDGER).decode().splitlines()
     if [line for line in history if line] != ["A\t" + path for path in names]:
         raise hosted.Error("predecessor ledger has a rewrite, deletion or out-of-order allocation")
-    parent = None if not names else channel.parse_payload(hosted.file_at(repo, before, names[-1]))
-    if parent and parent.sequence != len(names):
-        raise hosted.Error("predecessor sequence disagrees with allocation")
     for seq, (commit, path, blob) in enumerate(changes, start=len(names) + 1):
-        raw = hosted.file_at(repo, commit, path)
-        payload = channel.parse_payload(raw)
-        if path != f"{hosted.LEDGER}/{seq:016}.payload.json" or payload.sequence != seq:
-            raise hosted.Error("allocation sequence disagrees with push")
-        ops = [producer.Promote(r.manifest_bytes, r.min_avibe_version) for r in payload.releases
-               if not parent or not parent.release(r.asset_release_tag)]
-        ops += [producer.Revoke(r.asset_release_tag, r.rollback_to, r.reason) for r in payload.revoked
-                if not parent or not parent.tombstone(r.asset_release_tag)]
-        if len(ops) != 1 or producer.plan_payload(parent, ops[0], sequence=seq, now=payload.issued_at) != raw:
-            raise hosted.Error("allocation must be exactly one canonical promotion or withdrawal")
-        yield commit, path, blob, parent, payload, ops[0]
-        parent = payload
+        if path != emergency.ledger_path(seq):
+            raise hosted.Error('allocation path disagrees with sequence')
+        yield seq, (lambda n=seq, c=commit, p=path, b=blob: allocation(repo, n, c, p, b))
 
 
-def records(repo, before, after):
-    return list(iter_records(repo, before, after))
+def allocation(repo, seq, commit, path, blob):
+    raw = hosted.file_at(repo, commit, path)
+    payload = channel.parse_payload(raw)
+    if payload.sequence != seq:
+        raise hosted.Error('allocation sequence disagrees with landing')
+    declared = emergency.declaration(repo, commit, payload)
+    parent = declared[0] if declared else (None if seq == 1 else channel.parse_payload(
+        hosted.file_at(repo, commit, emergency.ledger_path(seq - 1))))
+    if parent and not declared and parent.sequence != seq - 1:
+        raise hosted.Error('predecessor sequence disagrees with allocation')
+    ops = [producer.Promote(r.manifest_bytes, r.min_avibe_version) for r in payload.releases
+           if not parent or not parent.release(r.asset_release_tag)]
+    ops += [producer.Revoke(r.asset_release_tag, r.rollback_to, r.reason) for r in payload.revoked
+            if not parent or not parent.tombstone(r.asset_release_tag)]
+    if (len(ops) != 1 or (declared and not isinstance(ops[0], producer.Revoke))
+            or producer.plan_payload(parent, ops[0], sequence=seq, now=payload.issued_at) != raw):
+        raise hosted.Error('allocation must be exactly one canonical promotion or withdrawal')
+    return commit, path, blob, parent, payload, ops[0]
 
 
-def qualified_prefix(rows, prove):
-    """A rejected suffix is reported, not signed. Keep already-proven predecessors."""
+def iter_records(repo, before, after, *, proposed=False):
+    for _, read in candidates(repo, before, after, proposed=proposed):
+        yield read()
+
+
+def delivery_plan(readers, prove):
     accepted = []
+    blocked_at = None
     try:
-        for row in rows:
-            prove(row)
-            accepted.append(row)
+        for seq, read in readers:
+            try:
+                row = read()
+                parent = row[3]
+                supersedes = parent and parent.sequence < seq - 1
+                if blocked_at is not None and not (supersedes and parent.sequence < blocked_at):
+                    continue
+                prove(row)
+                if supersedes:
+                    accepted = [r for r in accepted if r[4].sequence <= parent.sequence]
+                    blocked_at = None
+                accepted.append(row)
+            except Exception:
+                if blocked_at is None:
+                    blocked_at = seq
     except Exception:
         if not accepted:
             raise
         return accepted, True
-    return accepted, False
+    if blocked_at is not None and not accepted:
+        raise hosted.Error(f'no authorized allocation before rejected sequence {blocked_at}')
+    return accepted, blocked_at is not None
+
+
+def selected_records(readers, sequences):
+    if (not isinstance(sequences, list) or not sequences or any(type(n) is not int or n <= 0 for n in sequences)
+            or sequences != sorted(set(sequences))):
+        raise hosted.Error('invalid authorized sequence selection')
+    chosen = []
+    for seq, read in readers:
+        if seq == sequences[len(chosen)]:
+            chosen.append(read())
+            if len(chosen) == len(sequences):
+                return chosen
+    raise hosted.Error('authorized selection missing from landing')
+
+
+def records(repo, before, after):
+    return list(iter_records(repo, before, after))
 
 
 def evidence_path(sequence):
@@ -165,29 +206,33 @@ def publish_batch(entries, *, bucket, roots, verifier, envelope_for, fetch_publi
         envelope = envelope_for(payload)
         if producer.authenticate(envelope, roots=roots, verifier=verifier).raw != payload.raw:
             raise hosted.Error("signed envelope differs from landed bytes")
-        producer.publish(envelope, bucket=bucket, roots=roots, verifier=verifier, fetch_public=fetch_public,
-                         guard=lambda stored, raw=payload.raw, prev=previous: hosted.check_published(
-                             stored, raw, prev.raw if prev else None, roots, verifier))
-
-
-def authorized_rows(rows, sequences):
-    if (not isinstance(sequences, list) or not sequences
-            or any(type(n) is not int or n <= 0 for n in sequences)):
-        raise hosted.Error("invalid prepared allocations")
-    entries = list(itertools.islice(rows, len(sequences)))
-    if [row[4].sequence for row in entries] != sequences:
-        raise hosted.Error("prepared allocations disagree with immutable landing")
-    return entries
+        def guard(stored, raw=payload.raw, prev=previous, seq=payload.sequence):
+            hosted.check_published(stored, raw, prev.raw if prev else None, roots, verifier)
+            if prev and prev.sequence < seq - 1 and stored != envelope:
+                # The authenticated origin AND public object must still be this
+                # reviewed parent. A racing PUT after this read loses the ETag CAS.
+                served = fetch_public()
+                if served != stored or producer.authenticate(served, roots=roots, verifier=verifier).raw != prev.raw:
+                    raise hosted.Error('emergency withdrawal effective parent is not the verified public state')
+        producer.publish(envelope, bucket=bucket, roots=roots, verifier=verifier, fetch_public=fetch_public, guard=guard)
 
 
 def preflight(repo, before, after, *, api, token, single=False):
     """Read the synthetic PR/queue merge as Git data; never import its code."""
+    request = recovery.read_request(repo, before, after, iter_records)
+    if request:
+        row, request_path, _ = request
+        if single and hosted.git(repo, 'diff', '--name-status', '--no-renames', before, after).decode().splitlines() != ['A\t' + request_path]:
+            raise hosted.Error('a recovery PR must add only its exact binding')
+        recovery.require_missing(api, row)
     rows = list(iter_records(repo, before, after, proposed=True))
     if single and rows:
         if len(rows) != 1:
             raise hosted.Error("one allocation per PR")
-        _, path, _, _, payload, op = rows[0]
+        _, path, _, parent, payload, op = rows[0]
         allowed = {path} | ({evidence_path(payload.sequence)} if isinstance(op, producer.Promote) else set())
+        if parent and parent.sequence < payload.sequence - 1:
+            allowed.add(emergency.path(payload.sequence))
         changes = hosted.git(repo, "diff", "--name-status", "--no-renames", before, after).decode().splitlines()
         if sorted(changes) != sorted("A\t" + name for name in allowed):
             raise hosted.Error("allocation PR may add only its payload and required evidence")
@@ -229,23 +274,38 @@ def main(argv=None):
         raise hosted.Error("not the commissioned master index workflow")
     gate.ci._require_on_master(api, sha)
     before, landing = landing_range(args.data, event_name, event, sha)
-    rows = iter_records(args.data, before, landing)
+    request = recovery.read_request(args.data, before, landing, iter_records)
+    readers = candidates(args.data, before, landing)
+    if request:
+        row, request_path, request_blob = request
+        if list(readers):
+            raise hosted.Error('mixed allocation and recovery range: retry the individual landings')
+        readers = [(row[4].sequence, lambda: row)]
     if args.role == "prepare":
         def prove(row):
             commit, path, blob, parent, payload, op = row
-            _, head = gate.prove_landing(api, commit=commit, path=path, blob=blob)
+            if request:
+                recovery.require_missing(api, row)
+                gate.prove_landing(api, commit=landing, path=request_path, blob=request_blob, recovery=True)
+                _, head, _ = gate.merged_identity(api, commit=commit, path=path, blob=blob)
+            else:
+                _, head = gate.prove_landing(api, commit=commit, path=path, blob=blob)
             if isinstance(op, producer.Promote):
                 _, receipt_blob = load_receipt(args.data, commit, payload, parent)
                 evidence = api.get("contents/" + evidence_path(payload.sequence), query={"ref": head})
                 if evidence.get("type") != "file" or evidence.get("sha") != receipt_blob:
                     raise hosted.Error("landed evidence differs from preflighted head")
-        entries, rejected = qualified_prefix(rows, prove)
+            if parent and parent.sequence < payload.sequence - 1:
+                _, bound = emergency.declaration(args.data, commit, payload)
+                if api.get('contents/' + emergency.path(payload.sequence), query={'ref': head}).get('sha') != bound:
+                    raise hosted.Error('effective parent declaration differs from reviewed bytes')
+        entries, rejected = delivery_plan(readers, prove)
         if not entries:
             with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fp:
                 print("sequences=[]", file=fp)
             return
     else:
-        entries = authorized_rows(rows, json.loads(os.environ["AUTHORIZED_SEQUENCES"]))
+        entries = selected_records(readers, json.loads(os.environ["AUTHORIZED_SEQUENCES"]))
     roots = channel.parse_trust_roots(hosted.file_at(args.data, sha, hosted.ROOT))
     current_root = api.get("contents/" + hosted.ROOT, query={"ref": "master"})["sha"]
     if (len(roots.roots) != 1 or entries[0][4].sequence < roots.sequence_floor
