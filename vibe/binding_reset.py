@@ -51,8 +51,10 @@ def _read():
                   and record['phase'] in _PHASES and isinstance(record['operation'], str)
                   and re.fullmatch('[0-9a-f]{32}', record['operation']))
         hosted_fields = common | {'root', 'accepted', 'was_requested'}
-        hosted = (type(schema) is int and schema == 2 and fields in (hosted_fields, hosted_fields | {'dispatched'})
+        hosted = (type(schema) is int and schema == 2
+                  and hosted_fields <= fields <= hosted_fields | {'dispatched', 'host', 'release_at'}
                   and type(record.get('dispatched', False)) is bool
+                  and unbind.valid_host(record.get('host')) and unbind.valid_release(record.get('release_at'))
                   and record['phase'] in _CLOUD_PHASES + _PHASES and unbind.valid_operation(record['operation'])
                   and type(record['accepted']) is bool and type(record['was_requested']) is bool
                   and isinstance(record['root'], str) and re.fullmatch('[0-9a-f]{64}', record['root']))
@@ -139,8 +141,10 @@ def seal_unbind(expected):
             current = _unbind_candidate(local._config())
             if current != expected:
                 raise ClaimError('local_binding_changed')
+            from vibe import binding_unbind
             record = {**current, 'schema': 2, 'operation': str(uuid4()), 'phase': 'cloud',
                       'accepted': False, 'dispatched': False,
+                      'host': binding_unbind.host_of(local._config()),
                       'was_requested': remote._connector_requested_path().is_file()}
             _save(record)
             return record['operation']
@@ -280,7 +284,8 @@ def _advance(record):
     elif phase == 'done':
         if record['schema'] == 2:
             from vibe import binding_unbind
-            binding_unbind.save_result(record['target'], 'unbound')
+            binding_unbind.save_result(record['target'], 'unbound', host=record.get('host'),
+                                       release_at=record.get('release_at'))
         gate.reset_intent_path().unlink()
         return False
     else:
@@ -444,7 +449,8 @@ def _resume_cloud(record):
                 raise ClaimError('local_binding_changed')
             record['dispatched'] = True  # Before the first byte: from now on it may have been sent.
             _save(record)
-    outcome = binding_unbind.send_original(cfg, record['operation'], accepted=record['accepted'])
+    result = binding_unbind.send_original(cfg, record['operation'], accepted=record['accepted'])
+    outcome, release_at = result if isinstance(result, tuple) else (result, None)
     with config_file_lock():
         if _read() != record:
             raise ClaimError('local_binding_changed')
@@ -456,6 +462,8 @@ def _resume_cloud(record):
                 record['accepted'] = True
                 _save(record)
             return {'state': 'unbinding'}
+        if outcome == 'unbound':
+            record['release_at'] = release_at  # Frozen with the receipt; a replay returns the same value.
         record['phase'] = {'unbound': 'retire', 'ineligible': 'ineligible',
                            'invalid_credential': 'invalid_credential'}.get(outcome, 'repair')
         _save(record)

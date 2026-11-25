@@ -242,7 +242,7 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
     second = unbind.device_state(V2Config.load())['state']
     if reply != 'wrong_op_200':
         assert second == 'unbound' and len(posts) == 2 and posts[0] == posts[1]
-        assert unbind.last_result(V2Config.load()) == {'state': 'unbound'}
+        assert unbind.last_result(V2Config.load()) == {'state': 'unbound', 'host': 'fixture.avibe.bot', 'release_at': None}
         assert unbind.last_result(cfg) is None
     else:
         assert second == 'reset_repair_required' and len(posts) == 1 and gate.reset_in_progress()

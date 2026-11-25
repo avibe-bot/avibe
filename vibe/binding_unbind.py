@@ -20,6 +20,26 @@ def root_stamp() -> str:
     return hashlib.sha256(json.dumps(identities).encode()).hexdigest()
 
 
+def valid_host(value) -> bool:
+    return value is None or (isinstance(value, str) and 0 < len(value) <= 253 and value.isascii()
+                             and all(label and label.replace('-', '').isalnum() for label in value.split('.')))
+
+
+def valid_release(value) -> bool:
+    from vibe.instance_address import _parse_instant
+    return value is None or (isinstance(value, str) and len(value) <= 64 and _parse_instant(value) is not None)
+
+
+def host_of(config) -> str | None:
+    """The domain this binding was reached at, for the completion message only."""
+    from urllib.parse import urlsplit
+    try:
+        host = urlsplit(str(config.remote_access.vibe_cloud.public_url or '')).hostname
+    except ValueError:
+        return None
+    return host if valid_host(host) else None
+
+
 def valid_operation(operation) -> bool:
     try:
         value = UUID(operation)
@@ -39,6 +59,13 @@ def _unique_object(pairs):
             raise _DuplicateField()
         result[key] = value
     return result
+
+
+def _completed(data, operation) -> bool:
+    # v2.2 adds a required, nullable release_at; the v2.1 two-field receipt still means the same.
+    return (data.get('status') == 'unbound' and data.get('operation_id') == operation
+            and (set(data) == {'status', 'operation_id'}
+                 or set(data) == {'status', 'operation_id', 'release_at'} and valid_release(data['release_at'])))
 
 
 def classify_receipt(status: int, body: bytes, operation: str, *, accepted: bool) -> str:
@@ -66,7 +93,7 @@ def classify_receipt(status: int, body: bytes, operation: str, *, accepted: bool
     if status == 503 and data == {'error': 'unbind_unavailable'}:
         return 'retry'
     # From here on the issuer answered with a JSON object; outside the contract it needs local attention.
-    if status == 200 and data == {'status': 'unbound', 'operation_id': operation}:
+    if status == 200 and _completed(data, operation):
         return 'unbound'
     if status == 202 and data == {'status': 'pending', 'operation_id': operation}:
         return 'pending'
@@ -86,10 +113,11 @@ def clear_result() -> None:
     _result_path().unlink(missing_ok=True)
 
 
-def save_result(generation: str, state: str, reason: str | None = None, *, operation: str | None = None) -> None:
+def save_result(generation: str, state: str, reason: str | None = None, *, operation: str | None = None,
+                host: str | None = None, release_at: str | None = None) -> None:
     from config.atomic_io import write_atomic
     write_atomic(_result_path(), json.dumps({'generation': generation, 'state': state, 'reason': reason,
-                                            'operation': operation}))
+                                            'operation': operation, 'host': host, 'release_at': release_at}))
 
 
 def device_state(config) -> dict | None:
@@ -125,7 +153,10 @@ def last_result(config, *, operation: str | None = None) -> dict | None:
     if operation is not None and (not valid_operation(operation) or data.get('operation') != operation):
         return None
     if data.get('state') == 'unbound' and data.get('reason') is None:
-        return {'state': 'unbound'}
+        # Display only: the old domain and when avibe.bot said it frees the name (null: unknown).
+        return {'state': 'unbound',
+                'host': data.get('host') if valid_host(data.get('host')) else None,
+                'release_at': data.get('release_at') if valid_release(data.get('release_at')) else None}
     if data.get('state') == 'not_unbound' and data.get('reason') in ('invalid_credential', 'ineligible'):
         return {'state': 'not_unbound', 'reason_code': data['reason']}
     return None
@@ -161,7 +192,11 @@ def send_original(config, operation: str, *, accepted: bool) -> str:
                 if ((response.getheader('Content-Type') or '').partition(';')[0].strip().lower() != 'application/json'
                         or (response.getheader('Age') or '0').strip() != '0'):
                     return 'retry'  # An intermediary or a cache answered, not the issuer.
-                return classify_receipt(response.status, response.read(4097), operation, accepted=accepted)
+                raw = response.read(4097)
+                outcome = classify_receipt(response.status, raw, operation, accepted=accepted)
+                if outcome == 'unbound':
+                    return outcome, json.loads(raw).get('release_at')
+                return outcome
             finally:
                 conn.close()
     except (OSError, http.client.HTTPException):

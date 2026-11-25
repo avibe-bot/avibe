@@ -13,6 +13,10 @@ OTHER = '41d8da35-78cd-43e9-b016-f29971164963'
 @pytest.mark.parametrize('status,body,accepted,expected', [
     (200, f'{{"status":"unbound","operation_id":"{OP}"}}', False, 'unbound'),
     (200, f'{{"status":"unbound","operation_id":"{OTHER}"}}', False, 'repair'),
+    (200, f'{{"status":"unbound","operation_id":"{OP}","release_at":"2026-12-25T00:00:00Z"}}', False, 'unbound'),
+    (200, f'{{"status":"unbound","operation_id":"{OP}","release_at":null}}', False, 'unbound'),
+    (200, f'{{"status":"unbound","operation_id":"{OP}","release_at":"soon"}}', False, 'repair'),
+    (200, f'{{"status":"unbound","operation_id":"{OP}","hostname":"x.avibe.bot"}}', False, 'repair'),
     (200, f'{{"status":"pending","status":"unbound","operation_id":"{OP}"}}', False, 'repair'),
     (202, f'{{"status":"pending","operation_id":"{OP}"}}', True, 'pending'),
     (401, '{"error":"unbind_not_applied"}', True, 'repair'),

@@ -6758,7 +6758,7 @@ def test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt(pair
         def getresponse(self):
             if len(posts) == 1:
                 raise http.client.RemoteDisconnected()
-            data = {"status": "unbound", **json.loads(posts[-1][2])}
+            data = {"status": "unbound", **json.loads(posts[-1][2]), "release_at": "2026-12-25T00:00:00Z"}
             return SimpleNamespace(status=200, read=lambda size: json.dumps(data).encode(),
                                    getheader=lambda key: {"Content-Type": "application/json"}.get(key))
 
@@ -6782,4 +6782,6 @@ def test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt(pair
     assert not binding_admission.reset_in_progress()
     assert not V2Config.load().remote_access.vibe_cloud.instance_id
     assert desktop_local_instance._installation_id() is None and workspace.read_text() == "keep"
-    assert browser.get("/api/devices").get_json()["unbind"] == {"state": "unbound"}
+    # The completion names the old domain and the date avibe.bot froze with its receipt.
+    assert browser.get("/api/devices").get_json()["unbind"] == {
+        "state": "unbound", "host": "fixture.avibe.bot", "release_at": "2026-12-25T00:00:00Z"}
