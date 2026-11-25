@@ -279,6 +279,16 @@ struct Presentation {
     remote: Option<Url>,
     locale: Option<String>,
 }
+impl Presentation {
+    /// Whether bootstrap may navigate the main window: only while it shows this
+    /// computer's Workbench. An account document (its account, instances or
+    /// claim view), another computer's instance, or a commit in progress keeps
+    /// the window through a Runtime restart; recovery only unbinds and binds
+    /// the local origin under it.
+    fn bootstrap_owns_window(&self) -> bool {
+        !self.account && self.remote.is_none() && !self.staging && self.pending_commit.is_none()
+    }
+}
 struct NativeView {
     app: AppHandle,
     bundle: Url,
@@ -405,7 +415,7 @@ pub(crate) fn bootstrap_navigation(app: &AppHandle) -> Option<tokio::sync::Owned
     let client = app.try_state::<Client>()?;
     let guard = client.view.windows.clone().try_lock_owned().ok()?;
     let state = client.view.presentation.lock().expect("presentation");
-    (!state.account && state.remote.is_none() && !state.staging && state.pending_commit.is_none()).then_some(guard)
+    state.bootstrap_owns_window().then_some(guard)
 }
 pub(crate) fn epoch(app: &AppHandle) -> Option<u64> {
     app.try_state::<Client>()
@@ -3718,6 +3728,34 @@ mod tests {
         view.staging = false;
         view.remote = Some(Url::parse("https://other.avibe.bot").unwrap());
         assert!(!allows(&view, Some(7)));
+    }
+
+    /// "Upgrade and try again" restarts this computer's Runtime under the
+    /// account document; neither the shell losing the Runtime nor binding it
+    /// again may navigate that window. Only this computer's Workbench in front
+    /// hands the window to bootstrap.
+    #[test]
+    fn a_runtime_restart_under_the_account_document_does_not_navigate_it() {
+        let mut p = Presentation {
+            locale: None,
+            state: ClientState::new("fixture".into(), "1".into(), serde_json::json!({})),
+            account: false,
+            staging: false,
+            pending_commit: None,
+            remote: None,
+        };
+        assert!(p.bootstrap_owns_window());
+        p.account = true;
+        assert!(!p.bootstrap_owns_window());
+        p.account = false;
+        p.remote = Some(Url::parse("https://other.avibe.bot").unwrap());
+        assert!(!p.bootstrap_owns_window());
+        p.remote = None;
+        p.pending_commit = Some(3);
+        assert!(!p.bootstrap_owns_window());
+        p.pending_commit = None;
+        p.staging = true;
+        assert!(!p.bootstrap_owns_window());
     }
 
     #[test]

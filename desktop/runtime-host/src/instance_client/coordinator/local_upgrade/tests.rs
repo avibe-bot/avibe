@@ -205,7 +205,17 @@ impl ClientView for Quiet {
     }
 }
 
-async fn setup(runtime: Runtime, desktop: &str) -> (Arc<Coordinator>, Arc<Runtime>, RuntimeHost, tempfile::TempDir) {
+async fn setup(
+    runtime: Runtime,
+    desktop: &str,
+) -> (Arc<Coordinator>, Arc<Runtime>, Arc<RuntimeHost>, tempfile::TempDir) {
+    setup_probed(runtime, desktop, Arc::new(Adopted)).await
+}
+async fn setup_probed(
+    runtime: Runtime,
+    desktop: &str,
+    probe: Arc<dyn HealthProbe>,
+) -> (Arc<Coordinator>, Arc<Runtime>, Arc<RuntimeHost>, tempfile::TempDir) {
     let root = tempfile::tempdir().unwrap();
     let store = ConnectionStore::new(root.path().join("connection.json"));
     let record = store.load("Studio").unwrap();
@@ -219,7 +229,11 @@ async fn setup(runtime: Runtime, desktop: &str) -> (Arc<Coordinator>, Arc<Runtim
         Arc::new(Quiet),
         Arc::new(Quiet),
     ));
-    let host = RuntimeHost::new(Arc::new(Adopted), Arc::new(Adopted), RuntimeHostSettings::default());
+    let host = Arc::new(RuntimeHost::new(
+        probe,
+        Arc::new(Adopted),
+        RuntimeHostSettings::default(),
+    ));
     assert_eq!(
         host.bootstrap(&DiscardStatus, BootstrapTrigger::Recovery).await.phase,
         BootstrapPhase::Ready
@@ -416,4 +430,84 @@ async fn a_runtime_too_old_to_describe_itself_still_names_its_binding() {
         assert!(local.runtime_too_old);
         assert_eq!(local.instance_id.as_deref(), expected);
     }
+}
+
+/// A restart long enough for the shell's monitor to lose the Runtime: the
+/// shell unbinds it (`local_origin(None)`) and binds it again after the
+/// recovery adopts it. `upgraded` comes only after that rebinding, so the
+/// generation the page repeats its step in is not retired behind it.
+#[tokio::test(start_paused = true)]
+async fn an_upgrade_answers_only_once_the_shell_has_bound_the_runtime_again() {
+    let runtime = Runtime {
+        describes: true,
+        stable_update: true,
+        ..Default::default()
+    };
+    let (c, runtime, host, _root) = setup(runtime, "3.2.9").await;
+    let shell = {
+        let (c, runtime) = (c.clone(), runtime.clone());
+        tokio::spawn(async move {
+            while upgrades(&runtime) == 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            c.local_origin(None);
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            c.local_origin(Some(LoopbackOrigin::parse(ORIGIN).unwrap()));
+            c.state().generation
+        })
+    };
+    let started = tokio::time::Instant::now();
+    assert_eq!(state(c.upgrade_local_runtime(&host).await), "upgraded");
+    let answered = c.state().generation;
+    assert!(started.elapsed() >= Duration::from_secs(20));
+    assert_eq!(shell.await.unwrap(), answered);
+    assert!(!c.state().local.runtime_too_old);
+}
+
+/// A probe that sees nothing at the origin while the Runtime restarts.
+#[derive(Clone)]
+struct Restarting(Arc<std::sync::atomic::AtomicBool>);
+#[async_trait::async_trait]
+impl HealthProbe for Restarting {
+    async fn presence(&self, _: &LoopbackOrigin, _: Option<&str>) -> Presence {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Presence::Absent
+        } else {
+            Presence::Unmanaged
+        }
+    }
+}
+
+/// An upgrade restart shorter than the shell's readiness-loss threshold: the
+/// monitor misses the Runtime once, which retires the claim channel, and then
+/// sees it again, so no recovery bootstrap re-adopts it. The upgrade arms the
+/// channel again for the same Runtime instead of waiting out its five minutes.
+#[tokio::test(start_paused = true)]
+async fn a_restart_too_short_for_recovery_still_ends_upgraded() {
+    let down = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let runtime = Runtime {
+        describes: true,
+        stable_update: true,
+        ..Default::default()
+    };
+    let (c, runtime, host, _root) = setup_probed(runtime, "3.2.9", Arc::new(Restarting(down.clone()))).await;
+    let origin = LoopbackOrigin::parse(ORIGIN).unwrap();
+    let monitor = {
+        let (runtime, host) = (runtime.clone(), host.clone());
+        tokio::spawn(async move {
+            while upgrades(&runtime) == 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            down.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert!(!host.is_serving(&origin).await);
+            assert!(host.claim_source().is_none());
+            down.store(false, std::sync::atomic::Ordering::SeqCst);
+            assert!(host.is_serving(&origin).await);
+        })
+    };
+    let started = tokio::time::Instant::now();
+    assert_eq!(state(c.upgrade_local_runtime(&host).await), "upgraded");
+    monitor.await.unwrap();
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(host.claim_source().is_some());
 }
