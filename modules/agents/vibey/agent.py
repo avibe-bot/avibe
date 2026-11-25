@@ -1908,6 +1908,7 @@ class VibeyAgent(BaseAgent):
         """
         images = []
         listed = []
+        outcomes = []
         for attachment in files or ():
             if not attachment.local_path:
                 continue
@@ -1919,12 +1920,16 @@ class VibeyAgent(BaseAgent):
                             attachment.local_path, mime, session_id=session_id, name=attachment.name or None
                         )
                     )
+                    if attachment.media_token:
+                        outcomes.append((attachment.media_token, len(images) - 1))
                     continue
                 except OSError:
                     # Unreadable now: listed by path, as the native backends pass every attachment.
                     logger.warning("Vibey lists an image it could not snapshot: %s", attachment.local_path)
             size = f", {attachment.size} bytes" if attachment.size else ""
             listed.append(f"- File: {attachment.local_path} ({attachment.mimetype}{size})")
+            if attachment.media_token:
+                outcomes.append((attachment.media_token, listed[-1]))
         body = message or ""
         if listed:
             body = "\n".join([body, "", "[User Attachments]", *listed]) if body.strip() else "\n".join(
@@ -1932,6 +1937,11 @@ class VibeyAgent(BaseAgent):
             )
         rendered = self.render_input(body, metadata)
         content = ([text_block(rendered)] if rendered or not images else []) + images
+        if outcomes or (metadata and metadata.harness_source):
+            from storage.carry_members import RenderedInput
+
+            return RenderedInput(tuple(content), header=rendered.removesuffix(body),
+                                 body_text_block=bool(rendered or not images), files=tuple(outcomes))
         return UserMessage(content=tuple(content))
 
     def _display_source(

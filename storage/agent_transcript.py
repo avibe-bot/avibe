@@ -329,6 +329,11 @@ class SQLiteTranscriptStore:
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         if not isinstance(message, UserMessage):
             raise TypeError("consume_input takes a UserMessage")
+        from storage.carry_members import RenderedInput
+
+        rendered = message if isinstance(message, RenderedInput) else None
+        if rendered is not None:
+            message = UserMessage(rendered.content)
         model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "input")
 
         def work(conn: Connection) -> ContextEntry:
@@ -338,6 +343,7 @@ class SQLiteTranscriptStore:
                     messages.c.type,
                     messages.c.context_seq,
                     messages.c.content_json,
+                    messages.c.metadata_json,
                     messages.c.created_at,
                 ).where(messages.c.id == message_id)
             ).mappings().first()
@@ -347,7 +353,21 @@ class SQLiteTranscriptStore:
                 raise TranscriptError(f"message {message_id} of type {row['type']!r} is not an input")
             content = _json_object(row["content_json"], message_id)
             seq = row["context_seq"]
+            if (
+                rendered is not None
+                and row["type"] == "harness"
+                and _json_object(row["metadata_json"], message_id).get("merged_delivery_ids")
+            ):
+                model["carry_render"] = {
+                    "header": rendered.header,
+                    "body_text_block": rendered.body_text_block,
+                    "files": [list(item) for item in rendered.files],
+                }
             if seq is not None:
+                # A replay may supply the decoded canonical message, without transient render bookkeeping.
+                committed = content.get("model") or {}
+                if "carry_render" in committed:
+                    model.setdefault("carry_render", committed["carry_render"])
                 # A retried commit of the same input is the committed entry; anything
                 # else would rewrite a context row after commit.
                 if content.get("model") != model:
