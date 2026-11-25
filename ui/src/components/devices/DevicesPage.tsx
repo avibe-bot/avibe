@@ -430,8 +430,11 @@ export function DevicesPage() {
     }
     if (confirm === 'remove-others' || confirm === 'remove-all-remote') {
       return void act(async () => {
-        await api.signOutOthers();
-        setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.self || each.kind === 'host') }));
+        const answer = await api.signOutOthers();
+        // Only the devices the instance says it signed out leave at once: from afar that is the
+        // viewer's own other devices, never someone else's.
+        const gone = new Set(answer.signedOut.flatMap((each) => (each.deviceId ? [each.deviceId] : [])));
+        setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => !gone.has(each.id)) }));
         // One line; a device among them left signed in to the account says so in 「最近退出的设备」.
         showToast(t('devices.signedOut.toastOthers'), 'success');
       });

@@ -32,8 +32,12 @@ const DEDUPE_WINDOW_MS = 4000;
 const ACTION_TOAST_MS = 6000;
 const PLAIN_TOAST_MS = 3000;
 
-export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [toasts, setToasts] = useState<Toast[]>([]);
+/** A toast already on screen when the provider mounts: a design frame's toast state. It stays until closed. */
+export type InitialToast = { message: string; type?: ToastType; action?: ToastAction };
+
+export const ToastProvider: React.FC<{ children: React.ReactNode; initial?: InitialToast[] }> = ({ children, initial }) => {
+  const [toasts, setToasts] = useState<Toast[]>(() => (initial ?? []).map((each) => (
+    { id: ++toastId, message: each.message, type: each.type ?? 'success', repeats: 0, action: each.action })));
   // Ref so dedupe lookups don't rerender. Maps message -> {id, expiresAt}
   // for currently-visible toasts; we evict on auto-dismiss.
   const recentRef = useRef<Map<string, RecentToast>>(new Map());

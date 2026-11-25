@@ -10,6 +10,7 @@ import { AskTurnOffStateOverride, type AskTurnOffState } from '@/lib/useAskTurnO
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
 import { StatusContext, type RuntimeStatus } from '@/context/StatusContext';
 import { ThemeContext } from '@/context/ThemeContext';
+import { useTranslation } from 'react-i18next';
 import { ToastProvider } from '@/context/ToastProvider';
 import { UnsavedChangesContext } from '@/context/unsavedChangesContext';
 import { WindowManagerContext, type WindowManagerValue } from '@/context/WindowManagerContext';
@@ -131,7 +132,12 @@ export function DesignShell({
   theme?: DesignTheme;
   children: ReactNode;
 }) {
+  const { t } = useTranslation();
   const inbox = useMemo(() => inboxValue(fixtures), [fixtures]);
+  const initialToasts = useMemo(() => fixtures.toasts?.map((each) => ({
+    message: t(each.key, each.values), type: each.type,
+    action: each.action ? { label: t(each.action), onClick: () => {} } : undefined,
+  })), [fixtures, t]);
   const pendingVaultRequests = useMemo(() => pendingVaultRequestsValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
   const status = useMemo(() => statusValue(fixtures), [fixtures]);
@@ -149,7 +155,7 @@ export function DesignShell({
   return (
     <MemoryRouter initialEntries={[route]}>
       <FixturesContext.Provider value={fixtures}>
-      <ToastProvider>
+      <ToastProvider initial={initialToasts}>
         <ApiProvider>
           <InstanceAuthorizationContext.Provider value={authorization}>
           <AskTurnOffStateOverride.Provider value={fixtures.askTurnOff ?? UNAVAILABLE}>

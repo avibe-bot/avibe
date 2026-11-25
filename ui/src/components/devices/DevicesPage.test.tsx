@@ -318,10 +318,11 @@ describe('DevicesPage · devices', () => {
 
   it('signs a device out with one toast, its name only, and takes the row away at once', async () => {
     toasts.show.mockClear();
-    vi.spyOn(devicesApi, 'devices').mockResolvedValueOnce(snapshot([macbook, chrome])).mockReturnValue(new Promise(() => {}));
-    vi.spyOn(devicesApi, 'signOut').mockResolvedValue({
+    let signedOut = false;
+    vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot([macbook, chrome]))));
+    vi.spyOn(devicesApi, 'signOut').mockImplementation(async () => { signedOut = true; return {
       signedOut: [{ id: 'o1', device: 'Chrome · Windows', kind: 'browser', owner: 'mine', results: ['queued'] }], healthCleanupPending: true,
-    });
+    }; });
     mount();
 
     fireEvent.click(await screen.findByText('Chrome'));
@@ -333,6 +334,26 @@ describe('DevicesPage · devices', () => {
     await waitFor(() => expect(screen.queryByText('Chrome')).toBeNull());
     expect(screen.queryByRole('status')).toBeNull();
     for (const word of ['通知到 avibe.bot', '排队', '休眠', '健康', '在这个 Avibe 上退出']) expect(document.body.textContent).not.toContain(word);
+  });
+
+  it('signing out my other devices takes away only the ones the instance signed out, never someone else\'s', async () => {
+    toasts.show.mockClear();
+    const mine = [{ ...macbook, self: undefined }, { ...iphone, self: true }, chrome, { ...chrome, id: 'safari', name: 'Safari' }, sara];
+    let signedOut = false;
+    // The reload after the sign-out does not answer: what the list shows is the page's own removal.
+    vi.spyOn(devicesApi, 'devices').mockImplementation(() => (signedOut ? new Promise(() => {}) : Promise.resolve(snapshot(mine, { bulk: 'other_sessions' }))));
+    vi.spyOn(devicesApi, 'signOutOthers').mockImplementation(async () => { signedOut = true; return {
+      signedOut: [{ id: 'o1', deviceId: 'chrome', device: 'Chrome', kind: 'browser', owner: 'mine', results: ['accepted'] },
+        { id: 'o2', deviceId: 'safari', device: 'Safari', kind: 'browser', owner: 'mine', results: ['accepted'] }], healthCleanupPending: false,
+    }; });
+    mount();
+    await screen.findByText('Sara Chrome');
+    fireEvent.click(screen.getByRole('button', { name: '退出其他所有设备' }));
+    fireEvent.click(await screen.findByRole('button', { name: '全部退出' }));
+    await waitFor(() => expect(toasts.show).toHaveBeenCalledExactlyOnceWith('已退出其他设备', 'success'));
+    await waitFor(() => expect(screen.queryByText('Chrome')).toBeNull());
+    expect(screen.queryByText('Safari')).toBeNull();
+    expect(screen.getByText('Sara Chrome')).toBeTruthy();
   });
 
   it('names a device with no name of its own as an unrecognized client', async () => {

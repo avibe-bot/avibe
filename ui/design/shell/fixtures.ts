@@ -1,4 +1,5 @@
 import type { AskTurnOffState } from '@/lib/useAskTurnOff';
+import type { TranslationKey } from '@/i18n/types';
 import type { InboxSession, InstanceCapabilities, WorkbenchMessage, WorkbenchProject, WorkbenchSession } from '@/context/ApiContext';
 import type { BotRuntimeStatus } from '@/context/BotsContext';
 import type { RuntimeStatus } from '@/context/StatusContext';
@@ -88,6 +89,9 @@ export interface WorkbenchFixtures {
   sockets?: Record<string, DesignSocketMessage[]>;
   /** Events the page's event stream delivers, each `after` ms once the page opens it (a reply arriving, a turn ending). */
   stream?: DesignStreamEvent[];
+  /** Toasts on screen when the frame opens, as the App's toast draws them, by locale key: what the page
+   *  just said (「已退出…」). Each stays; `action` names its one action's label. */
+  toasts?: { key: TranslationKey; values?: Record<string, string>; type?: 'success' | 'error' | 'warning'; action?: TranslationKey }[];
 }
 
 /** Everything the frame's providers fetch, as the network stub serves it. */
