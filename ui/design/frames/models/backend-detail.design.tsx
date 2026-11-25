@@ -271,7 +271,7 @@ const designFrames = frames([
   },
   {
     name: 'antigravity',
-    title: '后端 · Antigravity · 直连、Google 账号',
+    title: '后端 · Antigravity · Google 账号',
     width: 1440,
     height: 1050,
     status: 'shipped',

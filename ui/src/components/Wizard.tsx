@@ -37,7 +37,8 @@ import { useStatus } from '../context/StatusContext';
 import { setConfigField } from '../lib/configMutations';
 import { APP_LANGUAGES, type AppLanguage } from '../i18n/options';
 import { languageChoice } from '../lib/useLanguageSelection';
-import { ASSISTANT_ORDER, SETUP_LINEUP } from './onboarding/collaborationTimeline';
+import { SETUP_LINEUP } from './onboarding/collaborationTimeline';
+import { BACKEND_ORDER } from './settings/models/migrationGrouping';
 import { createAgentCollectionReadAuthority } from './settings/models/collectionReadAuthority';
 import { admitEntry, chooseEntryDefault, readEntryEvidence, type EntryGateDeps, type EntryRefusal } from './onboarding/entryGate';
 
@@ -425,7 +426,7 @@ export function Wizard() {
       try {
         const runtime = bootstrapped.current
           ? await readRuntimeObservation(bootstrapDeps)
-          : (await bootstrapGateway(bootstrapDeps, ASSISTANT_ORDER[0])).runtime;
+          : (await bootstrapGateway(bootstrapDeps, BACKEND_ORDER[0])).runtime;
         if (generation !== runtimeGeneration.current) return;
         bootstrapped.current = true;
         setRuntimeRead(readyRegion(runtime));

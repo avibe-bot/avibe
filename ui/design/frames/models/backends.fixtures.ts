@@ -125,12 +125,11 @@ const modelCatalog = (models: string[]) => ({
   reasoning_options: Object.fromEntries(models.map((model) => [model, ['low', 'medium', 'high'].map((value) => ({ value, label: value }))])),
 });
 
-/** Claude Code and Antigravity sign in natively; Codex and OpenCode take their models from the gateway. */
+/** Claude Code signs in natively; Codex and OpenCode take their models from the gateway. */
 const agents: AgentSpec[] = [
   { backend: 'claude', mode: 'direct' },
   { backend: 'codex', order: [chatgptPro, relayGpt], routes: { 'gpt-6-astra': { hops: [[chatgptPro, 'gpt-6-astra'], [relayGpt, 'gpt-6-astra']] }, 'gpt-5.6-sol': { hops: [[relayGpt, 'gpt-5.6-sol']] } } },
   { backend: 'opencode', order: [deepseek, relayClaude], routes: { 'deepseek-v4': { hops: [[deepseek, 'deepseek-v4']] }, 'claude-sonnet-5': { hops: [[relayClaude, 'claude-sonnet-5']] } } },
-  { backend: 'antigravity', mode: 'direct' },
 ];
 
 /** A different state for some backends: its runtime projection, whether it is switched on, its other reads. */

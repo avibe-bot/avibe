@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, CheckCircle2, ExternalLink, Eye, EyeOff, Info, KeyRound, LoaderCircle, Pencil, Terminal } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ExternalLink, Eye, EyeOff, KeyRound, LoaderCircle, Pencil, Terminal } from 'lucide-react';
 import { useApi, type AntigravityAuthMode, type AntigravityAuthState, type OAuthWebMutationResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
-import { getBackendUiMeta } from '@/lib/agentBackends';
 import { errorMessage } from '@/lib/errorMessage';
 import { Button } from '@/components/ui/button';
 import { CopyButton } from '@/components/ui/copy-button';
@@ -400,7 +399,14 @@ export function AntigravityConnectionForm({
     oauth.callbackKind === 'code' || oauth.callbackKind === 'redirect' || (!oauth.callbackKind && Boolean(oauth.url) && !oauth.deviceCode)
   );
   const adcCommand = auth?.adc_command?.trim() || '';
-  const enterpriseTerminalCommand = oauth.terminalCommand?.trim() || getBackendUiMeta('antigravity').defaultCli || '';
+  const enterpriseTerminalCommand = oauth.terminalCommand?.trim() || '';
+  const enterpriseTerminalInstructions = oauth.instructions?.trim() || '';
+  const showEnterpriseTerminal =
+    method === 'oauth-business' &&
+    oauth.state !== 'idle' &&
+    oauth.state !== 'success' &&
+    oauth.state !== 'cancelled' &&
+    Boolean(enterpriseTerminalCommand || enterpriseTerminalInstructions);
   const waitingKey = oauth.state === 'starting'
     ? 'settings.backends.oauthStarting'
     : oauth.state === 'verifying'
@@ -414,13 +420,6 @@ export function AntigravityConnectionForm({
   );
   if (status.loading && !compact) return loadingView;
 
-  const personalAutomationNotice = (
-    <div className="flex items-start gap-2.5 rounded-lg border border-gold/40 bg-gold/[0.08] px-3.5 py-2.5 text-[12px] leading-relaxed text-foreground" role="note">
-      <Info className="mt-0.5 size-4 shrink-0 text-gold-ink" />
-      <p className="text-[12px] leading-relaxed text-foreground">{t('settings.backends.antigravityPersonalAutomationNotice')}</p>
-    </div>
-  );
-
   const enterpriseTerminalBlock = (
     <div className="flex flex-col gap-2 rounded-lg border border-edge bg-surface px-3.5 py-3 shadow-elevation-0">
       <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
@@ -428,12 +427,14 @@ export function AntigravityConnectionForm({
         <span>{t('settings.backends.antigravityEnterpriseTerminalTitle')}</span>
       </div>
       <p className="text-[12px] leading-relaxed text-muted">
-        {oauth.instructions || t('settings.backends.antigravityEnterpriseTerminalHint')}
+        {enterpriseTerminalInstructions || t('settings.backends.antigravityEnterpriseTerminalHint')}
       </p>
-      <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">
-        <code className="font-mono text-[12px] text-foreground">{enterpriseTerminalCommand}</code>
-        <CopyButton value={enterpriseTerminalCommand} />
-      </div>
+      {enterpriseTerminalCommand && (
+        <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">
+          <code className="font-mono text-[12px] text-foreground">{enterpriseTerminalCommand}</code>
+          <CopyButton value={enterpriseTerminalCommand} />
+        </div>
+      )}
     </div>
   );
 
@@ -472,21 +473,16 @@ export function AntigravityConnectionForm({
             )}
 
             {isOAuthMethod && (!compact ? (
-              <div className="flex flex-col gap-3">
-                <BackendOAuthPanel
-                  key={oauthAuthMode} backend="antigravity" authMode={oauthAuthMode}
-                  signedIn={oauthSignedIn} canRemoveAuth={canRemoveOAuth}
-                  title={t(oauthMeta.title)} subtitle={t(oauthMeta.subtitle)}
-                  notice={method === 'oauth-personal' ? personalAutomationNotice : undefined}
-                  startButtonLabel={t(oauthMeta.signIn)} signedInLabel={t(oauthMeta.signedIn)}
-                  onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure}
-                  onCancel={handleOAuthCancel} onActiveChange={changeOAuthActive}
-                />
-                {method === 'oauth-business' && enterpriseTerminalBlock}
-              </div>
+              <BackendOAuthPanel
+                key={oauthAuthMode} backend="antigravity" authMode={oauthAuthMode}
+                signedIn={oauthSignedIn} canRemoveAuth={canRemoveOAuth}
+                title={t(oauthMeta.title)} subtitle={t(oauthMeta.subtitle)}
+                startButtonLabel={t(oauthMeta.signIn)} signedInLabel={t(oauthMeta.signedIn)}
+                onSuccess={confirmOAuth} onRemoved={removed} onFailure={observeOAuthFailure}
+                onCancel={handleOAuthCancel} onActiveChange={changeOAuthActive}
+              />
             ) : (
               <>
-                {method === 'oauth-personal' && personalAutomationNotice}
                 {oauth.error && oauth.error !== status.error && <p className="connection-error" role="alert">{oauth.error}</p>}
                 {!oauth.isActive ? (
                   <div className="connection-account">
@@ -521,7 +517,7 @@ export function AntigravityConnectionForm({
                     </p>
                   </div>
                 )}
-                {method === 'oauth-business' && enterpriseTerminalBlock}
+                {showEnterpriseTerminal && enterpriseTerminalBlock}
               </>
             ))}
 
@@ -594,7 +590,7 @@ export function AntigravityConnectionForm({
                     {auth?.adc_present ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
                     <span>{t(auth?.adc_present ? 'settings.backends.antigravityAdcPresent' : 'settings.backends.antigravityAdcMissing')}</span>
                   </div>
-                  {adcCommand && (
+                  {!auth?.adc_present && adcCommand && (
                     <>
                       <p className="text-[12px] leading-relaxed text-muted">{t('settings.backends.antigravityAdcCommandHint')}</p>
                       <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">

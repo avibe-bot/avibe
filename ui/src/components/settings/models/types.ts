@@ -176,9 +176,10 @@ export type Source = {
 // per-backend subset, carried by `AgentSupply.sources` below.
 
 // ── agent-supply.schema.json ────────────────────────────────────────────
-import type { AgentBackendId, NativeCliBackend } from '@/lib/agentBackends';
-export type { NativeCliBackend } from '@/lib/agentBackends';
-export type AgentBackend = AgentBackendId;
+import type { AgentBackendId, NativeCliBackend as AllNativeCliBackend } from '@/lib/agentBackends';
+export type AgentBackend = Exclude<AgentBackendId, 'antigravity'>;
+export type NativeCliBackend = Exclude<AllNativeCliBackend, 'antigravity'>;
+export const isModelHubBackend = (backend: AgentBackendId): backend is AgentBackend => backend !== 'antigravity';
 export type AgentMode = 'hub' | 'direct';
 export type MenuKind = 'fixed' | 'open';
 

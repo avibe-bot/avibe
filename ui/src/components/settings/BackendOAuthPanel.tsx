@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useBackendOAuth } from './oauth/useBackendOAuth';
 import { useTranslation } from 'react-i18next';
-import { AlertTriangle, CheckCircle2, LogIn, Trash2, X } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, LogIn, Terminal, Trash2, X } from 'lucide-react';
 
 import { Button } from '../ui/button';
+import { CopyButton } from '../ui/copy-button';
 import { Label } from '../ui/label';
 import { OAuthDeviceCodeRow, OAuthLinkRow, OAuthSubmitRow } from './oauth/OAuthFlowParts';
 import { useApi, type OAuthWebMutationResult } from '@/context/ApiContext';
@@ -25,8 +26,6 @@ export type BackendOAuthPanelProps = {
   /** Optional auth mode forwarded to ``startOAuthWeb`` (e.g. Antigravity
    *  ``oauth-personal`` vs ``oauth-business``). */
   authMode?: string;
-  /** Optional notice rendered above the sign-in button and authorization link. */
-  notice?: React.ReactNode;
   /** Optional override for the sign-in button label when not signed in. */
   startButtonLabel?: string;
   /** Optional override for the signed-in status banner sentence. */
@@ -82,7 +81,6 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   backend,
   opencodeProviderId,
   authMode,
-  notice,
   startButtonLabel,
   signedInLabel,
   signedIn,
@@ -101,7 +99,7 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   const api = useApi();
   const { showToast } = useToast();
 
-  const { state, authorizationCompleted, url, deviceCode, callbackKind, code, setCode, submitting, starting, error, setError,
+  const { state, authorizationCompleted, url, deviceCode, callbackKind, terminalCommand, instructions, code, setCode, submitting, starting, error, setError,
     startFlow, cancelFlow, submitCallback, resetToIdle, isActive, hubOwnedAuth } =
     useBackendOAuth({ backend, opencodeProviderId, authMode, onSuccess, onFailure, onCancel, onActiveChange });
   const [removing, setRemoving] = useState(false);
@@ -195,6 +193,10 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
   // affordance. Browser-redirect flows (gitlab, poe, openai browser)
   // don't surface a code — only the URL.
   const showDeviceBlock = backend !== 'claude' && state === 'awaiting_code' && Boolean(url && deviceCode);
+  const trimmedTerminalCommand = terminalCommand?.trim() || '';
+  const trimmedInstructions = instructions?.trim() || '';
+  const showTerminalBlock =
+    state !== 'idle' && state !== 'success' && state !== 'cancelled' && Boolean(trimmedTerminalCommand || trimmedInstructions);
 
   const startLabel = signedIn
     ? t('settings.backends.oauthReauthenticate')
@@ -216,8 +218,6 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
         <p className="text-[13px] font-semibold text-foreground">{title}</p>
         <p className="text-[12px] leading-relaxed text-muted">{subtitle}</p>
       </div>
-
-      {notice}
 
       {backend !== 'claude' && signedIn && state === 'idle' && (
         <div className="flex items-start gap-2 rounded-md border border-mint/30 bg-mint-soft/40 px-3 py-2">
@@ -344,6 +344,24 @@ export const BackendOAuthPanel: React.FC<BackendOAuthPanelProps> = ({
           <p className="text-[12px] leading-relaxed text-muted">
             {t(callbackKind === 'code' ? 'onboarding.connection.manualCodeHint' : 'settings.backends.opencodeCallbackUrlHint')}
           </p>
+        </div>
+      )}
+
+      {showTerminalBlock && (
+        <div className="flex flex-col gap-2 rounded-md border border-edge bg-surface px-3 py-2.5 shadow-elevation-0">
+          <div className="flex items-center gap-2 text-[12px] font-semibold text-foreground">
+            <Terminal className="size-3.5 shrink-0 text-muted" />
+            <span>{t('settings.backends.antigravityEnterpriseTerminalTitle')}</span>
+          </div>
+          <p className="text-[12px] leading-relaxed text-muted">
+            {trimmedInstructions || t('settings.backends.antigravityEnterpriseTerminalHint')}
+          </p>
+          {trimmedTerminalCommand && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">
+              <code className="font-mono text-[12px] text-foreground">{trimmedTerminalCommand}</code>
+              <CopyButton value={trimmedTerminalCommand} />
+            </div>
+          )}
         </div>
       )}
 

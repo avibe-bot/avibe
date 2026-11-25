@@ -79,7 +79,7 @@ import { resumeGatewayAdoption } from './gatewayAdoption';
 import { groupMigrationCandidates } from './migrationGrouping';
 import { SUBSCRIPTION_MENU_ROWS } from './subscriptionOptions';
 import { VendorGlyph } from './vendorGlyph';
-import { USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
+import { isModelHubBackend, USAGE_DEFAULT_WINDOW, type AgentBackend, type AgentMode, type AgentSupply, type ResolutionEvent, type QuotaSummary, type RuntimeDependency, type Source, type UsageReport, type UsageWindowKey } from './types';
 import { AGENT_BACKENDS, getBackendUiMeta } from '@/lib/agentBackends';
 
 const CHAIN_READ_CONCURRENCY = 6;
@@ -1162,7 +1162,7 @@ export const SettingsModelsPage: React.FC = () => {
     ? failRegionRead(supplyRead)
     : supplyRead;
   const installedAgents = agents.filter(
-    (agent) => !getBackendUiMeta(agent.backend).capabilities.supports_cli || agent.cli_present,
+    (agent) => isModelHubBackend(agent.backend) && (!getBackendUiMeta(agent.backend).capabilities.supports_cli || agent.cli_present),
   );
   // Installed but switched off in Settings · Backends: still part of the page,
   // drawn as a folded off row with no routes, wires or "in use" attribution.
@@ -1173,7 +1173,7 @@ export const SettingsModelsPage: React.FC = () => {
     supplyRead.kind === 'ready',
     hubBackends,
     new Set(switchedOffAgents.map((agent) => agent.backend)),
-    AGENT_BACKENDS.map((backend) => backend.id),
+    AGENT_BACKENDS.map((backend) => backend.id).filter(isModelHubBackend),
   );
   // Before the first model provider (a search service supplies none), the Providers
   // card's add button is the page's one way forward.
