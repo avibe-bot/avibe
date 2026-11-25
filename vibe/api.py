@@ -76,7 +76,12 @@ from vibe.desktop_backends import (
 from vibe.desktop_runtime import is_private_desktop_runtime_path
 from vibe.desktop_update_status import desktop_update_snapshot
 from vibe.cli_health import CliHealth, probe_cli, probe_cli_sync
-from vibe.cli_repair import REPAIR_PATH_CONFLICT, identify_repair_source, native_bootstrap_env
+from vibe.cli_repair import (
+    REPAIR_PATH_CONFLICT,
+    identify_repair_source,
+    native_bootstrap_env,
+    native_vendor_install_target,
+)
 from vibe.cli_paths import (
     _candidate_cli_paths,
     _command_env_for,
@@ -9319,19 +9324,8 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
 
 
 def _native_vendor_install_target(name: str) -> str | None:
-    home = Path.home()
-    if name == "opencode":
-        return str(home / ".opencode" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode"))
-    if name == "claude":
-        return str(home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude"))
-    if name == "antigravity":
-        if os.name == "nt":
-            local_app_data = os.environ.get("LOCALAPPDATA")
-            if local_app_data:
-                return str(Path(local_app_data) / "agy" / "bin" / "agy.exe")
-            return str(home / ".local" / "bin" / "agy.exe")
-        return str(home / ".local" / "bin" / "agy")
-    return None
+    target = native_vendor_install_target(name)
+    return str(target) if target is not None else None
 
 
 def _install_agent(name: str, *, version: str | None = None) -> dict:
@@ -12907,6 +12901,7 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
         if private_backend or legacy_bundled_codex
         else None
     )
+    auto_update_supported = (managed_by == "desktop") if name == "antigravity" else True
 
     current_version = health["version"]
     latest_version = None if legacy_bundled_codex else await asyncio.to_thread(_cached_latest, name)
@@ -12925,7 +12920,8 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
         "ok": True,
         "name": name,
         "enabled": enabled,
-        "auto_update": bool(getattr(backend_cfg, "auto_update", True)),
+        "auto_update_supported": auto_update_supported,
+        "auto_update": bool(getattr(backend_cfg, "auto_update", True)) if auto_update_supported else None,
         "cli_path": configured_path,
         "resolved_path": resolved_path,
         "installed": installed,
