@@ -1081,11 +1081,8 @@ async def test_verification_required_reply_fails_turn_and_normal_verification_pr
 ) -> None:
     from core.agent_auth_service import classify_auth_error
 
-    verification_banner = (
-        "⚠ Verification Required\n"
-        "Please verify your Google account at https://accounts.google.com/verify before continuing."
-    )
-    normal_prose = "Verification required in OAuth flows means the client validates the returned token."
+    verification_banner = "\n⚠ Verification Required\n"
+    normal_prose = "Verification required: run the tests before merging the google branch"
     title_backfills: list[str] = []
 
     async with make_agent_harness(tmp_path, language=language, name=f"verify-req-{language}") as h:

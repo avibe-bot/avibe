@@ -54,25 +54,7 @@ _AUTH_ERROR_NEEDLES = (
     "re-authenticate", "application default credentials",
     "could not find default credentials", "oauth", "verification required",
 )
-_VERIFICATION_REQUIRED_BANNER_RE = re.compile(
-    r"^(?:\*{1,2}\s*)?⚠\ufe0f?\s*verification\s+required\b",
-    re.IGNORECASE,
-)
-_VERIFICATION_REQUIRED_PLAIN_RE = re.compile(
-    r"^(?:\*{1,2}\s*)?verification\s+required(?:\s*(?:\*{1,2})?\s*(?:[:\-\n]|$))",
-    re.IGNORECASE,
-)
-_VERIFICATION_REQUIRED_CUES = (
-    "verify",
-    "google",
-    "account",
-    "agy",
-    "http://",
-    "https://",
-    "eligibility",
-    "sign in",
-    "log in",
-)
+_VERIFICATION_REQUIRED_BANNER_RE = re.compile(r"⚠\ufe0f? Verification Required", re.IGNORECASE)
 
 
 _ANTIGRAVITY_AUTH_MODE_ALIASES = {
@@ -217,18 +199,11 @@ def classify_antigravity_auth_error(error_text: str) -> bool:
 
 
 def is_antigravity_verification_required_reply(text: str) -> bool:
-    """Return True when an Antigravity reply is a Google account verification notice."""
+    """Recognize only the whole-reply native verification banner, never ordinary prose."""
     stripped = (text or "").strip()
-    if not stripped:
-        return False
-    if _VERIFICATION_REQUIRED_BANNER_RE.match(stripped):
-        return True
-    if _VERIFICATION_REQUIRED_PLAIN_RE.match(stripped):
-        if len(stripped) <= 32:
-            return True
-        lowered = stripped.lower()
-        return any(cue in lowered for cue in _VERIFICATION_REQUIRED_CUES)
-    return False
+    if stripped.startswith("**") and stripped.endswith("**"):
+        stripped = stripped[2:-2]
+    return _VERIFICATION_REQUIRED_BANNER_RE.fullmatch(stripped) is not None
 
 
 async def authenticate_antigravity_client(client: acp.AcpClient, auth_mode: str | None) -> str:
