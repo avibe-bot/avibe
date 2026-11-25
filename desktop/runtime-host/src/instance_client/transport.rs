@@ -560,8 +560,9 @@ impl NativeSession {
     }
 }
 
+/// Against a real loopback server, unlike the synthetic `tests` transport.
 #[cfg(test)]
-mod tests {
+mod user_agent {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
