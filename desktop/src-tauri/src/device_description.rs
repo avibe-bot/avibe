@@ -58,90 +58,40 @@ fn facts(app: &AppHandle) -> Option<&'static Facts> {
 /// The event the Workbench hears when the description is given to it.
 const EVENT: &str = "avibe:desktop-device";
 
-/// The Workbench's own routes (`ui/src/lib/applicationRoutes.ts`, without its
-/// catch-all): only a document at one of these is the Workbench. Anything
-/// else at the instance's origin (a Show page, a file, a sign-in page) is not.
-const WORKBENCH_ROUTES: &[&str] = &[
-    "/",
-    "/setup",
-    "/setup/remote-access",
-    "/inbox",
-    "/search",
-    "/agents",
-    "/skills",
-    "/harness",
-    "/vaults",
-    "/projects",
-    "/more",
-    "/pet",
-    "/apps",
-    "/apps/files",
-    "/apps/terminal",
-    "/apps/editor",
-    "/apps/preview",
-    "/apps/library",
-    "/admin",
-    "/admin/dashboard",
-    "/admin/permissions",
-    "/admin/remote-access",
-    "/admin/groups",
-    "/admin/users",
-    "/admin/show-pages",
-    "/admin/logs",
-    "/admin/settings/service",
-    "/admin/settings/platforms",
-    "/admin/settings/backends",
-    "/admin/settings/backends/opencode",
-    "/admin/settings/backends/claude",
-    "/admin/settings/backends/codex",
-    "/admin/settings/models",
-    "/admin/settings/dependencies",
-    "/admin/settings/memory",
-    "/admin/settings/messaging",
-    "/admin/settings/diagnostics",
-    "/admin/settings/logs",
-    "/dashboard",
-    "/groups",
-    "/channels",
-    "/users",
-    "/logs",
-    "/settings",
-    "/settings/general",
-    "/settings/notifications",
-    "/settings/memory",
-    "/settings/appearance",
-    "/settings/account",
-    "/settings/shortcuts",
-    "/settings/microphone",
-    "/settings/computer-use",
-    "/settings/service",
-    "/settings/platforms",
-    "/settings/platforms/groups",
-    "/settings/platforms/users",
-    "/settings/remote-access",
-    "/settings/remote-access/activity",
-    "/settings/remote-access/connection",
-    "/settings/remote-access/connection/address",
-    "/settings/backends",
-    "/settings/backends/vibey",
-    "/settings/backends/opencode",
-    "/settings/backends/claude",
-    "/settings/backends/codex",
-    "/settings/models",
-    "/settings/dependencies",
-    "/settings/replies",
-    "/settings/messaging",
-    "/settings/diagnostics",
-    "/settings/diagnostics/logs",
-    "/settings/logs",
-    "/settings/access",
-    "/remote-access",
-    "/doctor",
-    "/doctor/logs",
-];
-/// Its routes with one variable segment: `/apps/show/:sessionId`,
-/// `/chat/:sessionId`, `/mobile/health/:requestId`.
-const WORKBENCH_ROUTE_PREFIXES: &[&str] = &["/apps/show/", "/chat/", "/mobile/health/"];
+/// The Workbench's own routes: `ui/src/lib/applicationRoutes.ts` without its
+/// catch-all, as evaluated there (a Web UI test keeps this file equal to it).
+/// Only a document at one of these is the Workbench; anything else at the
+/// instance's origin (a Show page, a file, a sign-in page) is not.
+const WORKBENCH_ROUTES_JSON: &str = include_str!("workbench-routes.json");
+
+/// `exact` paths, and `dynamic` ones whose last segment is a parameter
+/// (`/chat/:sessionId`), held as their fixed prefix (`/chat/`).
+struct WorkbenchRoutes {
+    exact: Vec<String>,
+    prefixes: Vec<String>,
+}
+
+fn workbench_routes() -> &'static WorkbenchRoutes {
+    static ROUTES: OnceLock<WorkbenchRoutes> = OnceLock::new();
+    ROUTES.get_or_init(|| {
+        let raw: serde_json::Value = serde_json::from_str(WORKBENCH_ROUTES_JSON).expect("workbench routes");
+        let list = |key: &str| -> Vec<String> {
+            raw[key]
+                .as_array()
+                .expect("workbench route list")
+                .iter()
+                .map(|route| route.as_str().expect("workbench route").to_owned())
+                .collect()
+        };
+        WorkbenchRoutes {
+            exact: list("exact"),
+            prefixes: list("dynamic")
+                .iter()
+                .map(|route| route[..route.rfind('/').expect("a parameter segment") + 1].to_owned())
+                .collect(),
+        }
+    })
+}
 
 /// A path as the Workbench's router takes it: without trailing slashes.
 fn route(path: &str) -> &str {
@@ -153,8 +103,9 @@ fn route(path: &str) -> &str {
 
 fn workbench_route(path: &str) -> bool {
     let path = route(path);
-    WORKBENCH_ROUTES.contains(&path)
-        || WORKBENCH_ROUTE_PREFIXES.iter().any(|prefix| {
+    let routes = workbench_routes();
+    routes.exact.iter().any(|exact| exact == path)
+        || routes.prefixes.iter().any(|prefix| {
             path.strip_prefix(prefix)
                 .is_some_and(|rest| !rest.is_empty() && !rest.contains('/'))
         })
@@ -397,42 +348,17 @@ mod tests {
         }
     }
 
-    /// The Workbench's routes are declared in the Web UI. A route added there
-    /// and not here would never report; one removed there and kept here
-    /// would describe a document that is no longer the Workbench.
+    /// The route file is read in full: every route has the router's shape,
+    /// and each dynamic one ends in its single parameter.
     #[test]
-    fn the_workbench_routes_are_the_web_ui_routes() {
-        let source = include_str!("../../../ui/src/lib/applicationRoutes.ts");
-        let literals = |from: &str, to: &str| -> Vec<String> {
-            let block = &source[source.find(from).unwrap()..];
-            let block = &block[..block.find(to).unwrap()];
-            block
-                .split('\'')
-                .skip(1)
-                .step_by(2)
-                .filter(|literal| literal.starts_with('/'))
-                .map(str::to_owned)
-                .collect()
-        };
-        let mut declared = literals("APPLICATION_ROUTE_PATHS = [", "] as const");
-        // `...AGENT_BACKENDS.map((backend) => backend.settingsRoute)`.
-        let catalog = include_str!("../../../ui/src/lib/agentBackendCatalog.generated.ts");
-        declared.extend(
-            catalog
-                .split("\"settings_route\": \"")
-                .skip(1)
-                .map(|rest| rest[..rest.find('"').unwrap()].to_owned()),
-        );
-        declared.sort();
-        declared.dedup();
-        let mut ours: Vec<String> = WORKBENCH_ROUTES.iter().map(|route| (*route).to_owned()).collect();
-        ours.sort();
-        assert_eq!(ours, declared);
-        let dynamic: Vec<String> = literals("APPLICATION_DYNAMIC_ROUTE_PATHS = [", "] as const")
+    fn the_workbench_route_file_reads_whole() {
+        let routes = workbench_routes();
+        assert!(routes
+            .exact
             .iter()
-            .map(|route| route[..route.rfind('/').unwrap() + 1].to_owned())
-            .collect();
-        assert_eq!(dynamic, WORKBENCH_ROUTE_PREFIXES);
+            .all(|route| route.starts_with('/') && !route.contains(':')));
+        assert!(routes.exact.iter().any(|route| route == "/"));
+        assert_eq!(routes.prefixes, ["/apps/show/", "/chat/", "/mobile/health/"]);
     }
 
     #[test]
