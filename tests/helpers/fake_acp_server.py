@@ -95,6 +95,8 @@ class FakeAcpServer:
         self._pending_server_requests: dict[int | str, asyncio.Future[dict[str, Any]]] = {}
         self._active_cancels: dict[str, asyncio.Event] = {}
         self._active_tasks: set[asyncio.Task[None]] = set()
+        self._steer_chains: dict[str, list[int | str]] = {}
+        self._steer_resolved: set[int | str] = set()
         self._state = (
             json.loads(state_file.read_text(encoding="utf-8"))
             if state_file is not None and state_file.exists()
@@ -174,6 +176,9 @@ class FakeAcpServer:
         method = msg.get("method")
         params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
         if "id" not in msg:
+            if method == "session/cancel" and (chain := self._steer_chains.get(str(params.get("sessionId")))):
+                self._steer_resolved.add(chain[-1])
+                self._send_result(chain[-1], {"stopReason": "cancelled"})
             if method == "session/cancel" and (ev := self._active_cancels.get(str(params.get("sessionId") or ""))):
                 ev.set()
             return
@@ -185,6 +190,24 @@ class FakeAcpServer:
         self._handle_sync_request(msg["id"], str(method), params)
 
     def _handle_sync_request(self, req_id: int | str, method: str, params: dict[str, Any]) -> None:
+        if method == "test/steer":
+            sid, action = str(params["sessionId"]), params["action"]
+            chain = self._steer_chains[sid]
+            if action in {"receipt", "late_error"}:
+                for previous in chain[:-1]:
+                    if previous not in self._steer_resolved:
+                        self._steer_resolved.add(previous)
+                        if action == "late_error":
+                            self._send_error(previous, -32603, "late superseded failure")
+                        else:
+                            self._send_result(previous, {"stopReason": "end_turn"})
+            elif action == "finish":
+                self._send_update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "chain-tool", "status": "completed"})
+                self._send_update(sid, {"sessionUpdate": "usage_update", "used": 150, "size": 128000})
+                self._send_text(sid, str(params.get("text", "FIRST BANANA")))
+                self._steer_resolved.add(chain[-1])
+                self._send_result(chain[-1], {"stopReason": "end_turn"})
+            return self._send_result(req_id, {})
         if method == "initialize":
             return self._send_result(
                 req_id,
@@ -327,6 +350,17 @@ class FakeAcpServer:
         cancel_event = asyncio.Event()
         self._active_cancels[sid] = cancel_event
         try:
+            if text == "STEER_CHAIN" or sid in self._steer_chains:
+                chain = self._steer_chains.setdefault(sid, [])
+                previous = chain[-1] if chain else None
+                chain.append(req_id)
+                if previous is not None and not self._config.get("deferSteerReceipt"):
+                    self._steer_resolved.add(previous)
+                    self._send_result(previous, {"stopReason": "end_turn"})
+                if previous is None:
+                    self._send_update(sid, {"sessionUpdate": "tool_call", "toolCallId": "chain-tool", "title": "sleep 20", "status": "in_progress"})
+                    self._send_update(sid, {"sessionUpdate": "usage_update", "used": 100, "size": 128000})
+                return
             if text == "crash_mid_prompt":
                 self._send_text(sid, "starting before crash")
                 sys.stderr.write("fatal: simulated peer crash\n")

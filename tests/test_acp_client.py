@@ -101,6 +101,18 @@ async def test_session_new_and_streaming_session_updates(tmp_path: Path) -> None
         client.on_notification(on_notification)
         await client.initialize()
         sid = (await client.session_new(str(tmp_path)))["sessionId"]
+
+        def reject_before_write() -> None:
+            assert client._write_lock.locked()
+            raise ValueError("turn already finished")
+
+        with pytest.raises(ValueError, match="turn already finished"):
+            await client.session_prompt(sid, [{"type": "text", "text": "must-not-send"}], before_write=reject_before_write)
+        assert client._pending == {} and received == []
+        response = await client.session_prompt(sid, [{"type": "text", "text": "recall"}])
+        assert response["stopReason"] == "end_turn"
+        assert "must-not-send" not in json.dumps(received)
+        received.clear()
         assert (await client.session_prompt(sid, [{"type": "text", "text": "stream_all"}]))["stopReason"] == "end_turn"
 
     assert all(method == "session/update" for method, _ in received)

@@ -119,6 +119,8 @@ logger = logging.getLogger(__name__)
 AGY_CLI_DISABLE_AUTO_UPDATE_ENV = "AGY_CLI_DISABLE_AUTO_UPDATE"
 _CLIENT_INFO = {"name": "avibe", "version": "1.0.0"}
 _STOP_CANCEL_GRACE_SECONDS = 3.0
+_STEER_RECEIPT_TIMEOUT_SECONDS = 1.0
+_MAX_STEER_ATTEMPTS = 512
 _LIVE_CONFIG_FIELDS = frozenset({"idle_timeout_seconds", "auto_update"})
 _SELECTION_METADATA_KEY = "antigravity_selection"
 _MAX_CACHED_SELECTION_STATES = 512
@@ -312,6 +314,23 @@ class _ActiveTurn:
     settled: bool = False
     prompt_accepted: bool = False
     prompt_task: asyncio.Task[dict[str, Any]] | None = None
+    prompt_tasks: list[asyncio.Task[dict[str, Any]]] = field(default_factory=list)
+    prompt_changed: asyncio.Event = field(default_factory=asyncio.Event)
+    steer_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass
+class _SteerAttempt:
+    target: ActiveSteerTarget
+    predecessor: asyncio.Task[dict[str, Any]]
+    prompt: asyncio.Task[dict[str, Any]] | None = None
+    write_started: bool = False
+    prewrite_receipt: SteerResult | None = None
+
+
+class _SteerPrewriteRejected(Exception):
+    def __init__(self, receipt: SteerResult) -> None:
+        self.receipt = receipt
 
 
 @dataclass(frozen=True)
@@ -641,6 +660,7 @@ class AntigravityAgent(BaseAgent):
         self._sessions: dict[str, _RuntimeSession] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._selection_states: dict[str, _PersistedSelectionState] = {}
+        self._steer_attempts: dict[tuple[str, str, str, str], _SteerAttempt] = {}
         self._renewal_epoch: int = 0
         self._shutting_down: bool = False
         self._background_tasks: set[asyncio.Task[Any]] = set()
@@ -1791,6 +1811,12 @@ class AntigravityAgent(BaseAgent):
         session.turn_started_at = now
         session.last_activity = now
 
+        turn.prompt_task = asyncio.create_task(
+            session.client.session_prompt(session.native_session_id, prompt_blocks, timeout=None)
+        )
+        turn.prompt_tasks.append(turn.prompt_task)
+        turn.prompt_task.add_done_callback(self._consume_prompt_result)
+
         mark_backend_dispatch_attempted(request.context)
         self.mark_runtime_turn_started(request.context, activation_identity=session.activation)
 
@@ -1810,13 +1836,8 @@ class AntigravityAgent(BaseAgent):
             if session.agent_session_id:
                 await asyncio.to_thread(clear_pending_fork_handoff, session.agent_session_id)
 
-        prompt_task = asyncio.create_task(
-            session.client.session_prompt(session.native_session_id, prompt_blocks, timeout=None)
-        )
-        turn.prompt_task = prompt_task
-
         try:
-            response = await prompt_task
+            response = await self._wait_prompt_chain(turn)
             turn.prompt_accepted = True
             await _mark_fork_handoff_delivered()
             raw_stop_reason = response.get("stopReason")
@@ -1854,6 +1875,9 @@ class AntigravityAgent(BaseAgent):
                 await _mark_fork_handoff_delivered()
             await self._settle_turn_failure(session, turn, request, exc)
         finally:
+            for pending_prompt in turn.prompt_tasks:
+                if not pending_prompt.done():
+                    pending_prompt.cancel()
             if session.active_turn is turn:
                 session.active_turn = None
                 session.turn_started_at = None
@@ -1909,28 +1933,156 @@ class AntigravityAgent(BaseAgent):
         return True
 
     # ------------------------------------------------------------------
-    # Steering (Slice 2: refuse cleanly before any write)
+    # Native steering: one logical Turn owns a chain of ACP prompt requests.
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _consume_prompt_result(task: asyncio.Task[dict[str, Any]]) -> None:
+        # Superseded requests have no terminal authority, including on late failure.
+        if not task.cancelled():
+            task.exception()
+
+    @staticmethod
+    async def _wait_prompt_chain(turn: _ActiveTurn) -> dict[str, Any]:
+        while True:
+            prompt = turn.prompt_task
+            assert prompt is not None
+            turn.prompt_changed.clear()
+            changed = asyncio.create_task(turn.prompt_changed.wait())
+            try:
+                await asyncio.wait((prompt, changed), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                changed.cancel()
+            if prompt is not turn.prompt_task:
+                continue
+            return prompt.result()
+
+    def _live_steer_turn(self, target: ActiveSteerTarget) -> tuple[_RuntimeSession, _ActiveTurn] | None:
+        session = self._sessions.get(target.runtime_key)
+        turn = session.active_turn if session else None
+        if (
+            self._shutting_down or session is None or session.retired or session.intentional_teardown
+            or not session.client.is_alive or turn is None or turn.cancelled or turn.settled
+            or turn.prompt_task is None or turn.prompt_task.done()
+        ):
+            return None
+        if str((turn.request.context.platform_specific or {}).get("turn_token") or "") != target.logical_turn_id:
+            return None
+        return session, turn
+
+    def _steer_unavailable_receipt(self, target: ActiveSteerTarget) -> SteerResult:
+        session = self._sessions.get(target.runtime_key)
+        if session is not None and (
+            self._shutting_down or session.retired or session.intentional_teardown
+            or not session.client.is_alive or (session.active_turn is not None and session.active_turn.cancelled)
+        ):
+            return steer_result(SteerOutcome.REFUSED, reason="runtime_closing", backend=self.name)
+        return steer_result(SteerOutcome.NOT_ACTIVE, reason="not_active", backend=self.name)
+
     def steering_native_turn_id(self, target: ActiveSteerTarget) -> str | None:
+        live = self._live_steer_turn(target)
+        if live is None:
+            return None
+        session, turn = live
+        return f"antigravity:{session.native_session_id}:{turn.turn_id}"
+
+    @staticmethod
+    def _steer_key(request: SteerRequest | SteerReconcileRequest) -> tuple[str, str, str, str]:
+        return (request.target_session_id, request.expected_logical_turn_id,
+                request.expected_native_turn_id, request.attempt_id)
+
+    def _steer_receipt(self, attempt: _SteerAttempt) -> SteerResult:
+        if attempt.prewrite_receipt is not None:
+            return attempt.prewrite_receipt
+        if attempt.write_started and attempt.predecessor.done() and not attempt.predecessor.cancelled():
+            try:
+                response = attempt.predecessor.result()
+            except Exception:
+                pass
+            else:
+                if response.get("stopReason") == "end_turn":
+                    return steer_result(SteerOutcome.ACCEPTED, backend=self.name)
+        return steer_result(SteerOutcome.UNKNOWN, reason="acceptance_unconfirmed", backend=self.name)
+
+    def reconciliation_steer_target(self, request: SteerReconcileRequest) -> ActiveSteerTarget | None:
+        attempt = self._steer_attempts.get(self._steer_key(request))
+        return attempt.target if attempt else None
+
+    async def steer_active_turn(self, request: SteerRequest, target: ActiveSteerTarget) -> SteerResult:
+        if request.expected_logical_turn_id != target.logical_turn_id:
+            return steer_result(SteerOutcome.REFUSED, reason="logical_turn_mismatch", backend=self.name)
+        previous_attempt = self._steer_attempts.get(self._steer_key(request))
+        if previous_attempt is not None:
+            return self._steer_receipt(previous_attempt)
+        live = self._live_steer_turn(target)
+        if live is None:
+            return self._steer_unavailable_receipt(target)
+        if self.steering_native_turn_id(target) != request.expected_native_turn_id:
+            return steer_result(SteerOutcome.REFUSED, reason="native_turn_mismatch", backend=self.name)
+        if not request.attempt_id:
+            return steer_result(SteerOutcome.REFUSED, reason="missing_attempt_identity", backend=self.name)
+        session, turn = live
+        # Use exactly the normal input renderer, including file references and image blocks.
+        steered_request = replace(turn.request, message=request.text, user_message=request.text, files=list(request.files))
+        try:
+            blocks = await asyncio.to_thread(
+                self._build_prompt_blocks_sync, steered_request, request.input_metadata,
+                supports_images=session.client.supports_images,
+            )
+        except Exception:
+            return steer_result(SteerOutcome.REFUSED, reason="unsupported_content", backend=self.name)
+        async with turn.steer_lock:
+            previous_attempt = self._steer_attempts.get(self._steer_key(request))
+            if previous_attempt is not None:
+                return self._steer_receipt(previous_attempt)
+            current = self._live_steer_turn(target)
+            if current is None or current[1] is not turn:
+                return self._steer_unavailable_receipt(target)
+            assert turn.prompt_task is not None
+            attempt = _SteerAttempt(target, turn.prompt_task)
+            self._steer_attempts[self._steer_key(request)] = attempt
+            while len(self._steer_attempts) > _MAX_STEER_ATTEMPTS:
+                self._steer_attempts.pop(next(iter(self._steer_attempts)))
+
+            def claim_prompt() -> None:
+                # Runs synchronously under AcpClient's write lock immediately before stdin.write.
+                current = self._live_steer_turn(target)
+                if current is None or current[1] is not turn or turn.prompt_task is not attempt.predecessor:
+                    raise _SteerPrewriteRejected(self._steer_unavailable_receipt(target))
+                attempt.write_started = True
+                turn.prompt_task = attempt.prompt
+                turn.prompt_changed.set()
+
+            async def send_prompt() -> dict[str, Any]:
+                try:
+                    return await session.client.session_prompt(
+                        turn.native_session_id, blocks, timeout=None, before_write=claim_prompt,
+                    )
+                except _SteerPrewriteRejected as exc:
+                    attempt.prewrite_receipt = exc.receipt
+                    return {}
+
+            attempt.prompt = asyncio.create_task(send_prompt())
+            turn.prompt_tasks.append(attempt.prompt)
+            attempt.prompt.add_done_callback(self._consume_prompt_result)
+            await asyncio.wait(
+                (attempt.predecessor, attempt.prompt), timeout=_STEER_RECEIPT_TIMEOUT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not attempt.write_started and attempt.prewrite_receipt is None:
+                attempt.prompt.cancel()
+                attempt.prewrite_receipt = (
+                    self._steer_unavailable_receipt(target) if attempt.predecessor.done()
+                    else steer_result(SteerOutcome.REFUSED, reason="write_not_started", backend=self.name)
+                )
+            return self._steer_receipt(attempt)
+
+    async def reconcile_steer_attempt(self, request: SteerReconcileRequest, target: ActiveSteerTarget) -> SteerResult:
         del target
-        return None
-
-    async def steer_active_turn(
-        self,
-        request: SteerRequest,
-        target: ActiveSteerTarget,
-    ) -> SteerResult:
-        del request, target
-        return steer_result(SteerOutcome.REFUSED, reason="unsupported", backend=self.name)
-
-    async def reconcile_steer_attempt(
-        self,
-        request: SteerReconcileRequest,
-        target: ActiveSteerTarget,
-    ) -> SteerResult:
-        del request, target
-        return steer_result(SteerOutcome.REFUSED, reason="unsupported", backend=self.name)
+        attempt = self._steer_attempts.get(self._steer_key(request))
+        if attempt is None:
+            return steer_result(SteerOutcome.UNKNOWN, reason="attempt_not_found", backend=self.name)
+        return self._steer_receipt(attempt)
 
     # ------------------------------------------------------------------
     # AgentService, Runtime Ownership, and Lifecycle Parity Hooks

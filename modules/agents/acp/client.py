@@ -482,12 +482,13 @@ class AcpClient:
         prompt: Sequence[Mapping[str, Any]],
         *,
         timeout: float | None = None,
+        before_write: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "sessionId": session_id,
             "prompt": [dict(block) for block in prompt],
         }
-        return await self.send_request("session/prompt", params, timeout=timeout)
+        return await self.send_request("session/prompt", params, timeout=timeout, before_write=before_write)
 
     async def session_cancel(self, session_id: str) -> None:
         await self.send_notification("session/cancel", {"sessionId": session_id})
@@ -528,8 +529,9 @@ class AcpClient:
         params: Mapping[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        before_write: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """Send a JSON-RPC 2.0 request and await its response."""
+        """Send a request; ``before_write`` may reject it under the write lock before any bytes."""
         if not self.is_alive:
             raise AcpTransportError("ACP client is not running")
 
@@ -545,7 +547,7 @@ class AcpClient:
         self._pending[req_id] = fut
 
         try:
-            await self._write_message(msg)
+            await self._write_message(msg, before_write=before_write)
         except BaseException:
             self._pending.pop(req_id, None)
             if not fut.done():
@@ -587,13 +589,17 @@ class AcpClient:
             msg["params"] = dict(params)
         await self._write_message(msg)
 
-    async def _write_message(self, msg: dict[str, Any]) -> None:
+    async def _write_message(
+        self, msg: dict[str, Any], *, before_write: Callable[[], None] | None = None
+    ) -> None:
         proc = self._process
         if proc is None or proc.stdin is None or proc.stdin.is_closing():
             raise AcpTransportError("ACP server stdin is not available")
         payload = (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
         try:
             async with self._write_lock:
+                if before_write is not None:
+                    before_write()
                 proc.stdin.write(payload)
                 await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError) as exc:

@@ -722,14 +722,15 @@ async def test_pre_tool_use_hook_enforces_policy_and_unattributable_permission_r
 
 
 @pytest.mark.asyncio
-async def test_steering_refuses_unsupported_without_writing(tmp_path: Path) -> None:
+async def test_steering_without_a_live_turn_does_not_write(tmp_path: Path) -> None:
     async with make_agent_harness(tmp_path, cli_path="agy") as h:
         req = make_request(message="hello", workdir=h.workdir)
         target = ActiveSteerTarget(runtime_key=req.composite_session_id, logical_turn_id="turn-1", context=req.context, agent_request=req, agent=h.agent)
         assert h.agent.steering_native_turn_id(target) is None
         steer = await h.agent.steer_active_turn(SteerRequest(target_session_id="ses_1", expected_logical_turn_id="turn-1", expected_native_turn_id="native-1", text="follow up"), target)
         rec = await h.agent.reconcile_steer_attempt(SteerReconcileRequest(target_session_id="ses_1", expected_logical_turn_id="turn-1", expected_native_turn_id="native-1", attempt_id="att-1"), target)
-        assert (steer.outcome, steer.reason) == (SteerOutcome.REFUSED, "unsupported") == (rec.outcome, rec.reason)
+        assert steer.outcome == SteerOutcome.NOT_ACTIVE
+        assert (rec.outcome, rec.reason) == (SteerOutcome.UNKNOWN, "attempt_not_found")
 
 
 @pytest.mark.asyncio
@@ -1134,3 +1135,128 @@ async def test_verification_required_reply_fails_turn_and_normal_verification_pr
         assert not ok_results[0][2].get("is_error")
         assert h.controller.events("notify") == []
         assert len(title_backfills) == 1
+
+
+async def _start_steer_chain(h):
+    req = make_request(message="STEER_CHAIN", workdir=h.workdir, platform_specific={"turn_token": "logical-1"})
+    target = ActiveSteerTarget(req.composite_session_id, "logical-1", req.context, req, h.agent)
+    # Exercise the same synchronous identity lookup that on_native_start performs.
+    observed = []
+    h.controller.agent_service.mark_runtime_turn_started = lambda *_a, **_kw: observed.append(h.agent.steering_native_turn_id(target))
+    task = asyncio.create_task(h.agent.handle_message(req))
+    async def wait_started():
+        while not h.controller.events("toolcall"):
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(wait_started(), 5)
+    session = h.agent._sessions[req.composite_session_id]
+    return req, target, task, session, observed
+
+
+def _chain_steer(h, target, *, native_id=None, attempt_id="attempt-B", **kwargs):
+    return SteerRequest(
+        target_session_id="ses_1", expected_logical_turn_id=target.logical_turn_id,
+        expected_native_turn_id=native_id or h.agent.steering_native_turn_id(target) or "missing",
+        text="also include BANANA", attempt_id=attempt_id, **kwargs,
+    )
+
+
+async def _chain_control(session, action, **kwargs):
+    await session.client.send_request("test/steer", {"sessionId": session.native_session_id, "action": action, **kwargs})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steer_count", [1, 2])
+async def test_native_steer_chain_accepts_without_settling_superseded_prompt(tmp_path, steer_count):
+    from core.agent_input import AgentInputMetadata
+    from modules.im.base import FileAttachment
+
+    async with make_agent_harness(tmp_path, record_rpc=True) as h:
+        h.controller.config.include_user_info = True
+        req, target, task, session, observed = await _start_steer_chain(h)
+        request = _chain_steer(h, target, input_metadata=AgentInputMetadata(user_name="Owner", user_id="owner"), files=(
+            FileAttachment(name="pic.png", mimetype="image/png", content=b"image-bytes"),
+        ))
+        receipt = await h.agent.steer_active_turn(request, target)
+        assert receipt.outcome == SteerOutcome.ACCEPTED
+        assert observed == [request.expected_native_turn_id] and observed[0]
+        assert h.agent.steering_native_turn_id(target) == observed[0]
+        assert not task.done() and h.controller.events("result") == []
+        prompts = h.rpcs("session/prompt")
+        assert len(prompts) == 2
+        assert prompts[-1]["params"]["sessionId"] == session.native_session_id
+        blocks = prompts[-1]["params"]["prompt"]
+        assert "Owner" in blocks[0]["text"] and "also include BANANA" in blocks[0]["text"]
+        assert blocks[-1] == {"type": "image", "data": "aW1hZ2UtYnl0ZXM=", "mimeType": "image/png"}
+        if steer_count == 2:
+            again = await h.agent.steer_active_turn(_chain_steer(h, target, attempt_id="attempt-C"), target)
+            assert again.outcome == SteerOutcome.ACCEPTED
+            assert h.agent.steering_native_turn_id(target) == observed[0]
+            assert not task.done() and h.controller.events("result") == []
+        await _chain_control(session, "finish")
+        await asyncio.wait_for(task, 3)
+        assert len(h.controller.events("result")) == 1
+        assert h.controller.events("result")[0][1] == "FIRST BANANA"
+        assert len(h.controller.events("toolcall")) == 2
+        assert h.controller.token_notes == [(req.context, 100), (req.context, 150)]
+        assert h.agent.steering_native_turn_id(target) is None
+
+
+@pytest.mark.asyncio
+async def test_native_steer_after_prompt_resolved_is_not_active_and_does_not_write(tmp_path):
+    async with make_agent_harness(tmp_path, record_rpc=True) as h:
+        _, target, task, session, _ = await _start_steer_chain(h)
+        request = _chain_steer(h, target)
+        await _chain_control(session, "finish")
+        await asyncio.wait_for(task, 3)
+        receipt = await h.agent.steer_active_turn(request, target)
+        assert receipt.outcome == SteerOutcome.NOT_ACTIVE
+        assert len(h.rpcs("session/prompt")) == 1
+
+
+@pytest.mark.asyncio
+async def test_native_steer_mismatched_chain_is_refused_without_write(tmp_path):
+    async with make_agent_harness(tmp_path, record_rpc=True) as h:
+        _, target, task, session, _ = await _start_steer_chain(h)
+        receipt = await h.agent.steer_active_turn(_chain_steer(h, target, native_id="wrong-chain"), target)
+        assert (receipt.outcome, receipt.reason) == (SteerOutcome.REFUSED, "native_turn_mismatch")
+        assert len(h.rpcs("session/prompt")) == 1
+        await _chain_control(session, "finish")
+        await asyncio.wait_for(task, 3)
+
+
+@pytest.mark.asyncio
+async def test_stop_steered_chain_settles_once_and_late_superseded_error_is_ignored(tmp_path, monkeypatch):
+    monkeypatch.setattr(agy_agent_module, "_STEER_RECEIPT_TIMEOUT_SECONDS", 0.05, raising=False)
+    async with make_agent_harness(tmp_path, server_config={"deferSteerReceipt": True}) as h:
+        req, target, task, session, _ = await _start_steer_chain(h)
+        receipt = await h.agent.steer_active_turn(_chain_steer(h, target), target)
+        assert receipt.outcome == SteerOutcome.UNKNOWN
+        assert await h.agent.handle_stop(req)
+        await asyncio.wait_for(task, 3)
+        results = list(h.controller.events("result"))
+        assert len(results) == 1 and results[0][2]["output"].settled_by == SETTLED_BY_STOPPED
+        await _chain_control(session, "late_error")
+        assert h.controller.events("result") == results
+        assert h.agent.steering_native_turn_id(target) is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_steer_reconciles_receipt_without_resending_even_after_settlement(tmp_path, monkeypatch):
+    monkeypatch.setattr(agy_agent_module, "_STEER_RECEIPT_TIMEOUT_SECONDS", 0.05, raising=False)
+    async with make_agent_harness(tmp_path, record_rpc=True, server_config={"deferSteerReceipt": True}) as h:
+        _, target, task, session, _ = await _start_steer_chain(h)
+        request = _chain_steer(h, target)
+        receipt = await h.agent.steer_active_turn(request, target)
+        assert receipt.outcome == SteerOutcome.UNKNOWN
+        reconcile = SteerReconcileRequest(request.target_session_id, request.expected_logical_turn_id, request.expected_native_turn_id, request.attempt_id)
+        assert (await h.agent.reconcile_steer_attempt(reconcile, target)).outcome == SteerOutcome.UNKNOWN
+        await _chain_control(session, "receipt")
+        assert (await h.agent.reconcile_steer_attempt(reconcile, target)).outcome == SteerOutcome.ACCEPTED
+        assert not task.done() and h.controller.events("result") == []
+        # Retrying an attempt id observes its evidence instead of resending the text.
+        assert (await h.agent.steer_active_turn(request, target)).outcome == SteerOutcome.ACCEPTED
+        await _chain_control(session, "finish")
+        await asyncio.wait_for(task, 3)
+        assert h.agent.reconciliation_steer_target(reconcile) == target
+        assert (await h.agent.reconcile_steer_attempt(reconcile, target)).outcome == SteerOutcome.ACCEPTED
+        assert len(h.rpcs("session/prompt")) == 2
