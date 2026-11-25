@@ -961,6 +961,86 @@ def test_format_tool_activity_renders_real_diff_hunk_preview() -> None:
 
 
 @pytest.mark.asyncio
+async def test_large_diff_preview_is_bounded_and_offloaded_off_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agy_cfg = antigravity_config("agy")
+    controller = FakeController(app_config(agy_cfg))
+    agent = AntigravityAgent(controller, agy_cfg, rules_base_dir=tmp_path / "rules")
+    req = make_request(message="edit large file", workdir=tmp_path)
+    runtime_key = req.composite_session_id
+    turn = agy_agent_module._ActiveTurn(
+        request=req,
+        runtime_key=runtime_key,
+        native_session_id="sess-large-diff",
+        turn_id="turn-1",
+        started_at=time.monotonic(),
+    )
+    session = SimpleNamespace(
+        runtime_key=runtime_key,
+        native_session_id="sess-large-diff",
+        retired=False,
+        active_turn=turn,
+        last_activity=time.monotonic(),
+    )
+    agent._sessions[runtime_key] = session  # type: ignore[assignment]
+
+    loop_tid = threading.get_ident()
+    observed_tids: list[int] = []
+    orig_format = agy_agent_module._format_tool_activity
+
+    def _spy_format(update: Any, state: dict[str, Any]) -> tuple[str, str]:
+        observed_tids.append(threading.get_ident())
+        return orig_format(update, state)
+
+    monkeypatch.setattr(agy_agent_module, "_format_tool_activity", _spy_format)
+
+    repeated = "repeat = 1\n" * 20_000
+    old_text = f"{repeated}value = 'old'\n{repeated}"
+    new_text = f"{repeated}value = 'new'\n{repeated}"
+
+    started = time.monotonic()
+    await agent._handle_notification(
+        session,  # type: ignore[arg-type]
+        "session/update",
+        {
+            "sessionId": "sess-large-diff",
+            "update": {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tc-big",
+                "title": "Edit big file",
+                "kind": "edit",
+                "status": "completed",
+                "content": [
+                    {"type": "diff", "path": "big.py", "oldText": old_text, "newText": new_text},
+                ],
+            },
+        },
+    )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 2.0
+    assert len(observed_tids) == 1 and observed_tids[0] != loop_tid
+    tool_events = controller.events("toolcall")
+    assert len(tool_events) == 1
+    assert tool_events[0][1].splitlines() == [
+        "Edit big file (completed)",
+        "diff: big.py",
+        "- value = 'old'",
+        "+ value = 'new'",
+    ]
+
+    # Distant edits spanning 40,000+ lines stay bounded by _DIFF_PREVIEW_COMPARE_WINDOW.
+    span_started = time.monotonic()
+    span_preview = agy_agent_module._format_diff_preview_lines(
+        f"first_old\n{repeated}{repeated}last_old\n",
+        f"first_new\n{repeated}{repeated}last_new\n",
+    )
+    assert time.monotonic() - span_started < 2.0
+    assert span_preview == ["- first_old", "+ first_new"]
+
+
+@pytest.mark.asyncio
 async def test_acp_client_session_fork_applies_request_timeout() -> None:
     from modules.agents.acp.client import AcpClient
 

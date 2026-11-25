@@ -560,6 +560,7 @@ def _specs_compatible(existing: _RuntimeSession, desired: AntigravityLaunchSpec)
 
 _DIFF_PREVIEW_MAX_LINES = 4
 _DIFF_PREVIEW_MAX_LINE_CHARS = 200
+_DIFF_PREVIEW_COMPARE_WINDOW = 64
 
 
 def _truncate_diff_line(line: str, max_chars: int = _DIFF_PREVIEW_MAX_LINE_CHARS) -> str:
@@ -574,19 +575,30 @@ def _format_diff_preview_lines(old_text: str | None, new_text: str) -> list[str]
         return [f"+ {_truncate_diff_line(line)}" for line in new_lines[:_DIFF_PREVIEW_MAX_LINES]]
 
     old_lines = old_text.splitlines() if old_text else []
-    if old_lines == new_lines:
+    old_end = len(old_lines)
+    new_end = len(new_lines)
+    prefix = 0
+    min_len = min(old_end, new_end)
+    while prefix < min_len and old_lines[prefix] == new_lines[prefix]:
+        prefix += 1
+    while old_end > prefix and new_end > prefix and old_lines[old_end - 1] == new_lines[new_end - 1]:
+        old_end -= 1
+        new_end -= 1
+    if prefix == old_end and prefix == new_end:
         return []
 
-    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+    old_window = old_lines[prefix : min(old_end, prefix + _DIFF_PREVIEW_COMPARE_WINDOW)]
+    new_window = new_lines[prefix : min(new_end, prefix + _DIFF_PREVIEW_COMPARE_WINDOW)]
+    matcher = difflib.SequenceMatcher(None, old_window, new_window, autojunk=False)
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
             continue
         preview: list[str] = []
         if tag in ("replace", "delete"):
-            for line in old_lines[i1:i2][:_DIFF_PREVIEW_MAX_LINES]:
+            for line in old_window[i1:i2][:_DIFF_PREVIEW_MAX_LINES]:
                 preview.append(f"- {_truncate_diff_line(line)}")
         if tag in ("replace", "insert"):
-            for line in new_lines[j1:j2][:_DIFF_PREVIEW_MAX_LINES]:
+            for line in new_window[j1:j2][:_DIFF_PREVIEW_MAX_LINES]:
                 preview.append(f"+ {_truncate_diff_line(line)}")
         return preview
     return []
@@ -1272,7 +1284,10 @@ class AntigravityAgent(BaseAgent):
                 state["raw_output"] = update.raw_output
             if update.locations:
                 state["locations"] = update.locations
-            text, status_label = _format_tool_activity(update, state)
+            if update.diffs:
+                text, status_label = await asyncio.to_thread(_format_tool_activity, update, dict(state))
+            else:
+                text, status_label = _format_tool_activity(update, state)
             await emit_output(
                 self.controller,
                 turn.request.context,
