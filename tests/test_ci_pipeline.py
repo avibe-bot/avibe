@@ -448,12 +448,18 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     # Static checks and Vitest run independently. Only the former is in MG_THIN.
     shared = "\n".join(step["run"] for step in check_steps).splitlines()
     assert "npm ci" in shared
-    test_commands = [line for step in jobs["ui-tests"]["steps"] for line in step.get("run", "").splitlines()]
+    vitest = jobs["ui-tests"]
+    shards = vitest["strategy"]["matrix"]["shard"]
+    assert shards == list(range(1, len(shards) + 1)) and len(shards) == 3
+    assert not vitest["strategy"]["fail-fast"] and not vitest.get("continue-on-error")
+    assert "ui-tests" in jobs["fast-gate"]["needs"]
+    assert all(not step.get("if") and not step.get("continue-on-error") for step in vitest["steps"])
+    test_commands = [line for step in vitest["steps"] for line in step.get("run", "").splitlines()]
     check_commands = shared + test_commands
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
     for command in (
         "npm run validate:theme", "npm run lint", "npm run typecheck:tests",
-        "npm run typecheck:design", "npm run typecheck:e2e", "npm test",
+        "npm run typecheck:design", "npm run typecheck:e2e", "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}",
     ):
         assert check_commands.count(command) == 1
         assert command not in build_commands
