@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -22,9 +23,10 @@ producer, channel = hosted.producer, hosted.channel
 INDEX_WORKFLOW = ".github/workflows/model-hub-engine-index.yml"
 
 
-def records(repo, before, after):
-    """Only contiguous, append-only, canonical one-operation payloads are eligible."""
-    changes = gate.push_additions(repo, before=before, after=after)
+def iter_records(repo, before, after, *, proposed=False):
+    """Validate the proposed merge tree or walk actual first-parent landings."""
+    changes = (gate.added_blobs(repo, before, after) if proposed
+               else gate.iter_push_additions(repo, before=before, after=after))
     # Examine the parent tree, not just the last record found in a path-limited log.
     names = hosted.git(repo, "ls-tree", "-r", "--name-only", before, "--", hosted.LEDGER).decode().splitlines()
     if names != [f"{hosted.LEDGER}/{n:016}.payload.json" for n in range(1, len(names) + 1)]:
@@ -38,7 +40,6 @@ def records(repo, before, after):
     parent = None if not names else channel.parse_payload(hosted.file_at(repo, before, names[-1]))
     if parent and parent.sequence != len(names):
         raise hosted.Error("predecessor sequence disagrees with allocation")
-    result = []
     for seq, (commit, path, blob) in enumerate(changes, start=len(names) + 1):
         raw = hosted.file_at(repo, commit, path)
         payload = channel.parse_payload(raw)
@@ -50,23 +51,61 @@ def records(repo, before, after):
                 if not parent or not parent.tombstone(r.asset_release_tag)]
         if len(ops) != 1 or producer.plan_payload(parent, ops[0], sequence=seq, now=payload.issued_at) != raw:
             raise hosted.Error("allocation must be exactly one canonical promotion or withdrawal")
-        result.append((commit, path, blob, parent, payload, ops[0]))
+        yield commit, path, blob, parent, payload, ops[0]
         parent = payload
-    return result
 
 
-def qualify_promotion(repo, commit, op, parent, *, head, api, token):
-    # A PR's description is mutable after review. Read the designation from the
-    # reviewed commit message, not from the description or a workflow input.
+def records(repo, before, after):
+    return list(iter_records(repo, before, after))
+
+
+def qualified_prefix(rows, prove):
+    """A rejected suffix is reported, not signed. Keep already-proven predecessors."""
+    accepted = []
+    try:
+        for row in rows:
+            prove(row)
+            accepted.append(row)
+    except Exception:
+        if not accepted:
+            raise
+        return accepted, True
+    return accepted, False
+
+
+def evidence_path(sequence):
+    return f"patches/model-hub-engine-allocation-evidence/{sequence:016}.json"
+
+
+def load_receipt(repo, commit, payload, parent):
+    """Read only the immutable input preflight checked; no moving stable or Actions lookup."""
+    path = evidence_path(payload.sequence)
+    record = hosted.git(repo, "ls-tree", commit, "--", path).split()
+    if len(record) != 4 or record[:2] != [b"100644", b"blob"]:
+        raise hosted.Error("missing regular allocation evidence")
+    raw = hosted.file_at(repo, commit, path)
+    if len(raw) > 2_000_000:
+        raise hosted.Error("oversized allocation evidence")
+    receipt = json.loads(raw)
+    if (receipt.get("payload_sha256") != hashlib.sha256(payload.raw).hexdigest()
+            or receipt.get("parent_sha256") != (hashlib.sha256(parent.raw).hexdigest() if parent else None)):
+        raise hosted.Error("qualification belongs to another allocation or predecessor")
+    result = receipt["rehearsal"]
+    if any(type(result.get(k)) is not int or not 0 < result[k] < 10**20 for k in ("run_id", "run_attempt")):
+        raise hosted.Error("invalid rehearsal attempt")
+    return result, record[2].decode()
+
+
+def qualify_promotion(repo, commit, op, parent, payload, *, api, token):
+    """Pre-merge only: independently check the committed evidence while artifacts exist."""
     from core.model_hub_engine_manifest import parse_release_manifest
 
-    message = api.get(f"git/commits/{head}")
-    ids = re.findall(r"^Engine-Rehearsal: ([1-9][0-9]{0,19})$", message.get("message", ""), re.M)
-    if message.get("sha") != head or len(ids) != 1:
-        raise hosted.Error("one designated rehearsal trailer required on the reviewed head")
-    run = ids[0]
-    if api.get(f"actions/runs/{run}").get("conclusion") != "success":
-        raise hosted.Error("designated rehearsal did not succeed")
+    frozen, _ = load_receipt(repo, commit, payload, parent)
+    run, attempt = str(frozen["run_id"]), frozen["run_attempt"]
+    source = api.get(f"actions/runs/{run}/attempts/{attempt}")
+    if (source.get("run_attempt") != attempt or str(source.get("id")) != run
+            or source.get("status") != "completed" or source.get("conclusion") != "success"):
+        raise hosted.Error("designated rehearsal attempt did not succeed")
     tag = parse_release_manifest(op.manifest_bytes).asset_release_tag
     with tempfile.TemporaryDirectory() as directory:
         tmp = Path(directory)
@@ -81,8 +120,8 @@ def qualify_promotion(repo, commit, op, parent, *, head, api, token):
             subprocess.run(["gh", "run", "download", run, "--repo", producer.REPOSITORY, "--name", name, "--dir", str(tmp / name)],
                            check=True, env={"GH_TOKEN": token, "PATH": os.environ["PATH"], "HOME": directory})
         result = json.loads((tmp / qualification.UNTRUSTED_REHEARSAL_ARTIFACT / "untrusted_rehearsal.json").read_bytes())
-        if str(result.get("run_id")) != run:
-            raise hosted.Error("artifact differs from designated rehearsal")
+        if json.dumps(result, sort_keys=True) != json.dumps(frozen, sort_keys=True):
+            raise hosted.Error("downloaded rehearsal differs from immutable allocation evidence")
         rest = qualification._api(token)
         roles = qualification.trusted_released_context(reviewed, api=rest, output_dir=tmp / "released")
         bundled = [p.read_bytes() for p in (tmp / "released").glob("bundled-manifest-*.json")]
@@ -131,21 +170,82 @@ def publish_batch(entries, *, bucket, roots, verifier, envelope_for, fetch_publi
                              stored, raw, prev.raw if prev else None, roots, verifier))
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("role", choices=("prepare", "sign", "publish"))
-    parser.add_argument("--data", type=Path, required=True)
-    parser.add_argument("--avault", required=True)
-    args = parser.parse_args(argv)
-    if os.environ.get("HOSTED_COMMISSIONED") != "true" or producer.run_context_problems(os.environ, events={"push"}, workflow_path=INDEX_WORKFLOW):
-        raise hosted.Error("not the commissioned master index push")
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_bytes())
-    sha, token = os.environ["GITHUB_SHA"], os.environ["GITHUB_TOKEN"]
+def authorized_rows(rows, sequences):
+    if (not isinstance(sequences, list) or not sequences
+            or any(type(n) is not int or n <= 0 for n in sequences)):
+        raise hosted.Error("invalid prepared allocations")
+    entries = list(itertools.islice(rows, len(sequences)))
+    if [row[4].sequence for row in entries] != sequences:
+        raise hosted.Error("prepared allocations disagree with immutable landing")
+    return entries
+
+
+def preflight(repo, before, after, *, api, token, single=False):
+    """Read the synthetic PR/queue merge as Git data; never import its code."""
+    rows = list(iter_records(repo, before, after, proposed=True))
+    if single and rows:
+        if len(rows) != 1:
+            raise hosted.Error("one allocation per PR")
+        _, path, _, _, payload, op = rows[0]
+        allowed = {path} | ({evidence_path(payload.sequence)} if isinstance(op, producer.Promote) else set())
+        changes = hosted.git(repo, "diff", "--name-status", "--no-renames", before, after).decode().splitlines()
+        if sorted(changes) != sorted("A\t" + name for name in allowed):
+            raise hosted.Error("allocation PR may add only its payload and required evidence")
+    for commit, _, _, parent, payload, op in rows:
+        if isinstance(op, producer.Promote):
+            qualify_promotion(repo, commit, op, parent, payload, api=api, token=token)
+
+
+def landing_range(repo, event_name, event, sha):
+    if event_name == "workflow_dispatch":
+        landing = (event.get("inputs") or {}).get("landing", "")
+        if (not re.fullmatch("[0-9a-f]{40}", landing) or landing.encode() not in
+                hosted.git(repo, "rev-list", "--first-parent", sha).splitlines()):
+            raise hosted.Error("recovery requires an actual first-parent master landing")
+        return hosted.git(repo, "rev-parse", landing + "^1").decode().strip(), landing
     if event.get("ref") != "refs/heads/master" or event.get("after") != sha or event.get("forced") is not False:
         raise hosted.Error("not an ordinary master push")
+    return event["before"], sha
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("role", choices=("prepare", "sign", "publish", "preflight"))
+    parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument("--avault")
+    args = parser.parse_args(argv)
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_bytes())
+    sha, token = os.environ["GITHUB_SHA"], os.environ["GITHUB_TOKEN"]
     api = gate.ci.GitHubApi(producer.REPOSITORY, token)
+    event_name = os.environ["GITHUB_EVENT_NAME"]
+    if args.role == "preflight":
+        field = {"pull_request": "pull_request", "merge_group": "merge_group"}[event_name]
+        base = event[field]["base"]["sha"] if field == "pull_request" else event[field]["base_sha"]
+        if not all(re.fullmatch("[0-9a-f]{40}", s) for s in (sha, base)):
+            raise hosted.Error("missing preflight Git identities")
+        return preflight(args.data, base, sha, api=api, token=token, single=field == "pull_request")
+    if os.environ.get("HOSTED_COMMISSIONED") != "true" or producer.run_context_problems(
+            os.environ, events={"push", "workflow_dispatch"}, workflow_path=INDEX_WORKFLOW):
+        raise hosted.Error("not the commissioned master index workflow")
     gate.ci._require_on_master(api, sha)
-    entries = records(args.data, event["before"], sha)
+    before, landing = landing_range(args.data, event_name, event, sha)
+    rows = iter_records(args.data, before, landing)
+    if args.role == "prepare":
+        def prove(row):
+            commit, path, blob, parent, payload, op = row
+            _, head = gate.prove_landing(api, commit=commit, path=path, blob=blob)
+            if isinstance(op, producer.Promote):
+                _, receipt_blob = load_receipt(args.data, commit, payload, parent)
+                evidence = api.get("contents/" + evidence_path(payload.sequence), query={"ref": head})
+                if evidence.get("type") != "file" or evidence.get("sha") != receipt_blob:
+                    raise hosted.Error("landed evidence differs from preflighted head")
+        entries, rejected = qualified_prefix(rows, prove)
+        if not entries:
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fp:
+                print("sequences=[]", file=fp)
+            return
+    else:
+        entries = authorized_rows(rows, json.loads(os.environ["AUTHORIZED_SEQUENCES"]))
     roots = channel.parse_trust_roots(hosted.file_at(args.data, sha, hosted.ROOT))
     current_root = api.get("contents/" + hosted.ROOT, query={"ref": "master"})["sha"]
     if (len(roots.roots) != 1 or entries[0][4].sequence < roots.sequence_floor
@@ -153,15 +253,12 @@ def main(argv=None):
         raise hosted.Error("no matching commissioned root")
     verifier = producer.avault_verifier(args.avault)
     if args.role == "prepare":
-        for commit, path, blob, parent, payload, op in entries:
-            _, head = gate.prove_landing(api, commit=commit, path=path, blob=blob)
-            if isinstance(op, producer.Promote):
-                qualify_promotion(args.data, commit, op, parent, head=head, api=api, token=token)
         parent = entries[0][3]
         allowed = [row[4].raw for row in entries] + ([parent.raw] if parent else [])
         wait_for_parent(producer.fetch_public_index, allowed=allowed, parent=parent, roots=roots, verifier=verifier)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fp:
             print("sequences=" + json.dumps([row[4].sequence for row in entries]), file=fp)
+            print("rejected=" + str(rejected).lower(), file=fp)
         return
     run, attempt = os.environ["GITHUB_RUN_ID"], os.environ["GITHUB_RUN_ATTEMPT"]
     if args.role == "sign":

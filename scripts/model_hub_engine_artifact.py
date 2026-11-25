@@ -31,7 +31,7 @@ def wait_for_artifact(api, run, sha, name, *, attempt, timeout=300, clock=time.m
     base = f"/repos/{producer.REPOSITORY}/actions/runs/{run}"
     source = api(base) or {}
     if (str(source.get("id")) != run or str(source.get("run_attempt")) != attempt or source.get("head_sha") != sha
-            or source.get("head_branch") != "master" or source.get("event") != "push"
+            or source.get("head_branch") != "master" or source.get("event") not in {"push", "workflow_dispatch"}
             or source.get("path") != ".github/workflows/model-hub-engine-index.yml" or (source.get("repository") or {}).get("full_name") != producer.REPOSITORY):
         raise Error("artifact source is not the exact channel workflow, repo, ref, SHA, run and attempt")
     deadline = clock() + timeout

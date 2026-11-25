@@ -21,11 +21,27 @@ def _check_review(api, number, head, merged_at):
             continue
         marker = re.search(r"<!-- codex-review-state:v1 (\{[^\n]*\}) -->", comment.get("body", ""))
         if marker:
-            review = json.loads(marker[1]).get("code_review") or {}
+            verdict = json.loads(marker[1])
+            review = verdict.get("code_review") or {}
+            active = [part for part in verdict.values() if isinstance(part, dict) and part.get("status") is not None]
             if (review.get("commit_sha") == head and review.get("status") == "completed"
-                    and review.get("has_any_findings") is False and review.get("has_unresolved_findings") is False):
+                    and review.get("has_unresolved_findings") is False and all(
+                        part.get("status") == "completed" and part.get("has_any_findings") is False
+                        and part.get("has_unresolved_findings") is not True for part in active)):
                 return
     raise hosted.Error("no pre-merge clean review of the exact PR head")
+
+
+def require_preflight(api, head, merged_at):
+    # Required aggregate checks can pass on older workflows without this job.
+    # A skipped/pending check, a different integration or a post-merge rerun
+    # does not validate the committed rehearsal receipt.
+    checks = ci._paged(api, f"commits/{head}/check-runs", query={"filter": "all"})
+    candidates = [c for c in checks if c.get("name") == "engine-allocation-preflight"
+                  and (c.get("app") or {}).get("slug") == "github-actions"
+                  and c.get("completed_at") and ci._timestamp(c["completed_at"], context="preflight") <= merged_at]
+    if not candidates or max(candidates, key=lambda c: c["id"]).get("conclusion") != "success":
+        raise hosted.Error("no successful allocation preflight before merge")
 
 
 def prove_landing(api, *, commit, path, blob):
@@ -49,6 +65,9 @@ def prove_landing(api, *, commit, path, blob):
             continue
         if len(changes) != 1 or changes[0].get("status") != "added" or changes[0].get("sha") != blob:
             raise hosted.Error("PR did not add exactly the landed allocation bytes")
+        allowed = {path, path.replace(hosted.LEDGER, "patches/model-hub-engine-allocation-evidence").replace(".payload.json", ".json")}
+        if any(f.get("status") != "added" or f.get("filename") not in allowed for f in files):
+            raise hosted.Error("allocation PR must not change its own checks or unrelated files")
         head = ci._sha((pull.get("head") or {}).get("sha"), context="merged PR head")
         contents = api.get(f"contents/{path}", query={"ref": head})
         if contents.get("type") != "file" or contents.get("sha") != blob:
@@ -58,30 +77,40 @@ def prove_landing(api, *, commit, path, blob):
         raise hosted.Error("no unique merged allocation PR for this landing")
     number, head, merged_at = matches[0]
     _check_review(api, number, head, merged_at)
+    require_preflight(api, head, merged_at)
     ci._require_green_checks(api, pull_number=number, head_sha=head, merged_at=merged_at)
     return number, head
 
 
-def push_additions(repo, *, before, after):
+def added_blobs(repo, before, after):
+    delta = hosted.git(repo, "diff-tree", "--no-commit-id", "--no-renames", "--no-abbrev", "-r", "--raw", "-z",
+                       before, after, "--", hosted.LEDGER).split(b"\0")
+    for header, name in zip(delta[:-1:2], delta[1::2], strict=True):
+        path = name.decode("ascii")
+        record = re.fullmatch(rb":000000 100644 0{40} ([0-9a-f]{40}) A", header)
+        if not record or not re.fullmatch(hosted.LEDGER + r"/[0-9]{16}\.payload\.json", path):
+            raise hosted.Error("ledger change is not a regular allocation addition")
+        yield after, path, record[1].decode()
+
+
+def iter_push_additions(repo, *, before, after):
     """Walk each actual first-parent delta, including intermediate queue commits."""
     for sha in (before, after):
         if not re.fullmatch("[0-9a-f]{40}", sha) or sha == "0" * 40:
             raise hosted.Error("not an ordinary master update")
     commits = hosted.git(repo, "rev-list", "--first-parent", "--reverse", f"{before}..{after}").decode().splitlines()
     previous = before
-    additions = []
     for commit in commits:
         if hosted.git(repo, "rev-parse", f"{commit}^1").decode().strip() != previous:
             raise hosted.Error("not a fast-forward first-parent master update")
-        delta = hosted.git(repo, "diff-tree", "--no-commit-id", "--no-renames", "--no-abbrev", "-r", "--raw", "-z",
-                           previous, commit, "--", hosted.LEDGER).split(b"\0")
-        for header, name in zip(delta[:-1:2], delta[1::2], strict=True):
-            path = name.decode("ascii")
-            record = re.fullmatch(rb":000000 100644 0{40} ([0-9a-f]{40}) A", header)
-            if not record or not re.fullmatch(hosted.LEDGER + r"/[0-9]{16}\.payload\.json", path):
-                raise hosted.Error("ledger change is not a regular allocation addition")
-            additions.append((commit, path, record[1].decode()))
+        yield from added_blobs(repo, previous, commit)
         previous = commit
-    if previous != after or not additions:
+    if previous != after:
+        raise hosted.Error("master landing range is not contiguous")
+
+
+def push_additions(repo, *, before, after):
+    additions = list(iter_push_additions(repo, before=before, after=after))
+    if not additions:
         raise hosted.Error("no new master allocation")
     return additions

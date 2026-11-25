@@ -20,6 +20,8 @@ class Api:
         self.review = dict(status="completed", commit_sha=HEAD, has_any_findings=False, has_unresolved_findings=False)
         self.runs = [{"id": 3, "app": {"id": 5}, "name": "lint", "status": "completed", "conclusion": "success",
                       "completed_at": "2026-01-02T09:57:00Z"}]
+        self.runs.append(dict(self.runs[0], id=4, app={"slug": "github-actions"}, name="engine-allocation-preflight"))
+        self.security = {"status": None}
         self.associated = [1]
 
     def get(self, path, *, query=None):
@@ -35,7 +37,7 @@ class Api:
             return {"type": "file", "sha": BLOB}
         if path == "issues/1/comments":
             return [{"user": {"login": "chatgpt-codex-connector[bot]"}, "updated_at": "2026-01-02T09:58:00Z",
-                     "body": "<!-- codex-review-state:v1 " + json.dumps({"code_review": self.review}) + " -->"}]
+                     "body": "<!-- codex-review-state:v1 " + json.dumps({"code_review": self.review, "security_review": self.security}) + " -->"}]
         if path == f"commits/{HEAD}/check-runs":
             return {"check_runs": self.runs}
         if path == "rules/branches/master":
@@ -70,6 +72,24 @@ def test_refuse_unproven_landing(failure):
     else:
         api.runs = []
     with pytest.raises((gate.hosted.Error, gate.ci.ReleaseBackstopError)):
+        gate.prove_landing(api, commit=MERGE, path=PATH, blob=BLOB)
+
+
+@pytest.mark.parametrize("security", [{"status": "running"}, {"status": "failed"},
+                                       {"status": "completed", "has_any_findings": True}])
+def test_clean_code_review_does_not_override_active_security_review(security):
+    api = Api()
+    api.security = security
+    with pytest.raises(gate.hosted.Error, match="review"):
+        gate.prove_landing(api, commit=MERGE, path=PATH, blob=BLOB)
+
+
+@pytest.mark.parametrize("mutation", [{"conclusion": "skipped"}, {"app": {"slug": "other"}},
+                                     {"completed_at": "2026-01-03T10:00:00Z"}])
+def test_required_aggregate_cannot_substitute_for_actual_premerge_preflight(mutation):
+    api = Api()
+    api.runs[-1].update(mutation)
+    with pytest.raises(gate.hosted.Error, match="preflight"):
         gate.prove_landing(api, commit=MERGE, path=PATH, blob=BLOB)
 
 
