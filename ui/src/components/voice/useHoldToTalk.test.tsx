@@ -446,6 +446,118 @@ describe('useHoldToTalk', () => {
     expect(native.notify).toHaveBeenCalledWith('warning');
   });
 
+  // WebKit can lose a finger's capture during a slide without a lost-capture, and the release then
+  // goes to where the finger lifted (iOS hold smoke: pointer-up on the body). The window hears it.
+  it("ends a finger's hold on a release the element never hears: sends it, or cancels it when armed", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('发出去');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 500 });
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+    await act(async () => pipeline.takes[0].resolve('发出去'));
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('sent');
+
+    await holdFor(el);
+    await speak('不要了');
+    move(el, 410);
+    expect(hold.phase).toBe('armed');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 350 });
+    await flush();
+    expect(pipeline.takes[1].abort).toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('cancelled');
+    expect(hold.phase).toBe('idle');
+  });
+
+  // Once the capture is lost, the moves go where the finger is too: a slide up to cancel is still
+  // a cancel, and a press that moved off before the hold is still given back to the page.
+  it("judges a finger's slide by the moves only the window hears", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('不要了');
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 500 - 81 });
+    expect(hold.phase).toBe('armed');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 400 });
+    await flush();
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.outcome).toBe('cancelled');
+    // Into the cancel position once, for a move both paths heard: one rigid.
+    move(el, 500 - 90);
+    expect(native.impact.mock.calls.map(([style]) => style)).toEqual(['medium', 'rigid']);
+
+    down(el);
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 470 });
+    await elapse(400);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 470 });
+    expect(onTap).not.toHaveBeenCalled();
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it('ends a hold once when both the element and the window hear its release', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('一次');
+    await elapse(2_000);
+    up(el);
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 100, clientY: 500 });
+    fireEvent.pointerCancel(window, { pointerId: 1 });
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+    await act(async () => pipeline.takes[0].resolve('一次'));
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('sent');
+
+    // A tap, likewise: one tap, no take.
+    down(el);
+    await elapse(100);
+    up(el);
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 100, clientY: 500 });
+    expect(onTap).toHaveBeenCalledTimes(1);
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it("leaves a finger's hold alone when another pointer is released or cancelled", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('还在说');
+    fireEvent.pointerUp(document.body, { pointerId: 2, clientX: 100, clientY: 500 });
+    fireEvent.pointerCancel(document.body, { pointerId: 2 });
+    expect(hold.phase).toBe('recording');
+    expect(pipeline.takes[0].finish).not.toHaveBeenCalled();
+    expect(pipeline.takes[0].abort).not.toHaveBeenCalled();
+    await elapse(2_000);
+    up(el);
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the window hearing a finger's release once the press ends or the surface goes", async () => {
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    const ends = (spy: typeof added) => spy.mock.calls
+      .filter(([type, , options]) => ['pointermove', 'pointerup', 'pointercancel'].includes(type) && options === true)
+      .map(([type, listener]) => [type, listener]);
+    const el = await mount();
+    down(el);
+    await elapse(100);
+    up(el);
+    expect(ends(added)).toHaveLength(3);
+    expect(ends(removed)).toEqual(ends(added));
+
+    // Unmounted mid-hold.
+    await holdFor(el);
+    expect(ends(added)).toHaveLength(6);
+    cleanup();
+    expect(ends(removed)).toEqual(ends(added));
+    added.mockRestore();
+    removed.mockRestore();
+  });
+
   it('drops a take shorter than half a second as too short', async () => {
     const el = await mount();
     await holdFor(el);

@@ -144,6 +144,8 @@ type Press = {
   frame: number;
   /** Stops the window following a press the element has not captured (a mouse before `holdMs`). */
   unfollow: (() => void) | null;
+  /** Stops the window hearing a finger's moves, release and cancel, which it does for the whole press. */
+  ends: (() => void) | null;
   /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
    *  `holdMs` before the page recognises the hold itself. */
   followed: boolean;
@@ -385,6 +387,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     clearTimeout(current.timer);
     cancelAnimationFrame(current.frame);
     current.unfollow?.();
+    current.ends?.();
     releasing.current = true;
     try {
       if (current.element.hasPointerCapture?.(current.pointerId)) current.element.releasePointerCapture(current.pointerId);
@@ -923,6 +926,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       clearTimeout(press.current.timer);
       cancelAnimationFrame(press.current.frame);
       press.current.unfollow?.();
+      press.current.ends?.();
     }
   }, []);
 
@@ -987,6 +991,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     handled.current = true;
     const element = event.currentTarget;
     let unfollow: (() => void) | null = null;
+    let ends: (() => void) | null = null;
     if (event.pointerType === 'mouse') {
       // A mouse press stays the browser's until it becomes a hold: its mouseup and click reach
       // what was pressed, so an editor places and shows its caret as on any click. The element
@@ -1005,6 +1010,20 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       } catch {
         // Without capture the hold still works while the pointer stays on the element.
       }
+      // The window hears a finger's moves, release and cancel too: WebKit can lose the capture
+      // during a slide without saying so, and from then on they go to wherever the finger is
+      // (seen in the iOS hold smoke: pointer-up on the body, no lost-capture), which the element
+      // never hears. A slide up to cancel is judged by those moves, so they count as well. Both
+      // paths are safe to run for one event: a move changes nothing it already changed, and the
+      // first to end the press clears it, so the other does nothing.
+      window.addEventListener('pointermove', onPointerMove, true);
+      window.addEventListener('pointerup', onPointerUp, true);
+      window.addEventListener('pointercancel', onPointerCancel, true);
+      ends = () => {
+        window.removeEventListener('pointermove', onPointerMove, true);
+        window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('pointercancel', onPointerCancel, true);
+      };
     }
     // The App's own capture needs no audio context of the page's.
     if (!hasNativeVoiceCapture()) void prewarmVoiceCapture().catch(() => undefined);
@@ -1036,6 +1055,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       timer: setTimeout(() => void holdReached(), holdMs + (followed ? NATIVE_HOLD_GRACE_MS : 0)),
       frame: requestAnimationFrame(tick),
       unfollow,
+      ends,
       followed,
       ...(miss ? { miss } : {}),
       reached: false,
