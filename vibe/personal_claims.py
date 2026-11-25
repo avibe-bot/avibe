@@ -785,6 +785,9 @@ class RebindClaims(RedirectClaims):
         from storage.mobile_store import MobileStore, mobile_store_path
         from vibe import binding_reset
 
+        if action == 'legacy':
+            # The page that confirmed only a local reset predates deleting on avibe.bot first.
+            raise ClaimError('reload_required')
         try:
             with admitted('reset'):
                 # Serialize superseding start/cancel with the validation + seal, not the cleanup.
@@ -802,7 +805,7 @@ class RebindClaims(RedirectClaims):
                         cfg = local._config()
                         if local.claim_revision(cfg, local._installation_id(), local._pending()) != flow.refused_revision:
                             raise ClaimError('local_binding_changed')
-                        if action not in ('legacy', 'unbind', 'local_after_refusal'):
+                        if action not in ('unbind', 'local_after_refusal'):
                             raise ClaimError('invalid_request')
                         if action == 'local_after_refusal':
                             from vibe import binding_unbind, binding_admission
@@ -810,7 +813,7 @@ class RebindClaims(RedirectClaims):
                                     binding_unbind.last_result(cfg, operation=flow.unbind_operation) !=
                                     {'state': 'not_unbound', 'reason_code': 'invalid_credential'}):
                                 raise ClaimError('reset_not_eligible')
-                        elif flow.unbind_operation or (action == 'legacy' and flow.unbind_evidence is not None):
+                        elif flow.unbind_operation:
                             raise ClaimError('reset_not_eligible')
                         if confirmation is None:
                             connected = mobile_store_path().is_file() and MobileStore(existing_only=True).active_device() is not None

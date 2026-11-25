@@ -222,18 +222,23 @@ def test_constrained_browser_refusal_then_confirmed_reset(rebind_machine, monkey
     monkeypatch.setattr(remote_access, 'stop', lambda _: {'ok': True})
     monkeypatch.setattr(remote_access, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
     monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    from vibe import binding_unbind
+    sends = []
+    monkeypatch.setattr(binding_unbind, 'send_original', lambda cfg, op, **kw: sends.append(op) or 'unbound')
     client, headers, path, outcome = _constrained_browser_return(peer)
     assert outcome['state'] == 'error' and outcome['reason_code'] == 'predecessor_unrecoverable'
     status = '/api/remote-access/rebind'
     assert client.get(status, base_url=ORIGIN).get_json()['next_action'] == 'confirm_as_new'
-    reset = path + '/reset'
+    reset = path + '/reset/unbind'  # Bind as a new computer deletes on avibe.bot first.
     preview = client.post(reset + '/preview', base_url=ORIGIN, headers=headers, json={})
     assert preview.status_code == 200
     assert V2Config.load().remote_access.vibe_cloud == before and desktop_local_instance._installation_id()
     assert not binding_admission.reset_in_progress()
     proof = {'confirmation_id': preview.get_json()['confirmation_id']}
     response = client.post(reset, base_url=ORIGIN, headers=headers, json=proof)
-    assert response.status_code == 200 and response.get_json() == {'state': 'unpaired'}
+    assert response.status_code == 202 and response.get_json() == {'state': 'unbinding'} and not sends
+    remote_access._drive_pending_pairing()
+    assert len(sends) == 1
     assert client.get(status, base_url=ORIGIN).get_json()['binding_state'] == 'unpaired'
     assert not desktop_local_instance._installation_id() and not V2Config.load().remote_access.vibe_cloud.instance_secret
     assert client.post(reset, base_url=ORIGIN, headers=headers, json=proof).status_code == 409

@@ -210,6 +210,7 @@ class DirectAccessLifecycle:
         self._stopped = asyncio.Event()
         self._shutdown = False
         self._pairing_suspended = False
+        self._suspension_token = 0
         self._config: V2Config | None = None
         self._signature: tuple[Any, ...] | None = None
         self._generation = 0
@@ -367,26 +368,29 @@ class DirectAccessLifecycle:
         return (self._permission_allowed is True and self._permission_received_at is not None
                 and 0 <= time.monotonic() - self._permission_received_at < PERMISSION_MAX_AGE_SECONDS)
 
-    async def prepare_pairing_change(self) -> None:
+    async def prepare_pairing_change(self) -> int:
         """Fence starts, then let the one resource owner stop before key discard.
 
         Does not load config or await a certificate worker: the writer already
         holds the config lock. A failed config commit deliberately stays closed.
         """
         self._pairing_suspended = True
+        self._suspension_token += 1
+        token = self._suspension_token
         self._deny("pairing_changed")
         self._stopped.clear()
         self._wake.set()
         await self._stopped.wait()
+        return token
 
-    def _release_pairing_suspension(self) -> None:
+    def _release_pairing_suspension(self, token: int) -> None:
         """A pairing change was abandoned with the same config: open starts again.
 
         The config signature is unchanged, so ``_observe_config`` would never
         clear the fence. Permission is asked for afresh, as after any stop.
         """
-        if self._shutdown or not self._pairing_suspended:
-            return
+        if self._shutdown or not self._pairing_suspended or token != self._suspension_token:
+            return  # Another pairing change stopped it since: that fence is not ours to open.
         self._pairing_suspended = False
         self._permission_allowed = None
         self._permission_received_at = None
@@ -394,13 +398,14 @@ class DirectAccessLifecycle:
         self._resume_required = True
         self._wake.set()
 
-    def release_pairing_suspension(self) -> None:
-        self._submit(self._release_pairing_suspension)
+    def release_pairing_suspension(self, token: int) -> None:
+        self._submit(self._release_pairing_suspension, token)
 
-    def stop_for_pairing_change(self, timeout_seconds: float = 10.0) -> bool:
+    def suspend_for_pairing_change(self, timeout_seconds: float = 10.0) -> int | None | bool:
+        """The suspension token, None when nothing was running, or False when it could not stop."""
         loop = self._loop
         if loop is None:
-            return True
+            return None
         try:
             if asyncio.get_running_loop() is loop:
                 return False
@@ -408,11 +413,13 @@ class DirectAccessLifecycle:
             pass
         future = asyncio.run_coroutine_threadsafe(self.prepare_pairing_change(), loop)
         try:
-            future.result(timeout=timeout_seconds)
-            return True
+            return future.result(timeout=timeout_seconds)
         except Exception:
             # Do not cancel the stop: a timed-out writer must not leave a child.
             return False
+
+    def stop_for_pairing_change(self, timeout_seconds: float = 10.0) -> bool:
+        return self.suspend_for_pairing_change(timeout_seconds) is not False
 
     def _load_config(self, generation: int) -> tuple[int, V2Config]:
         return generation, copy.deepcopy(self._config_loader())
@@ -882,10 +889,15 @@ def stop_for_pairing_change(timeout_seconds: float = 10.0) -> bool:
     return lifecycle is None or lifecycle.stop_for_pairing_change(timeout_seconds)
 
 
-def release_pairing_suspension() -> None:
+def suspend_for_pairing_change(timeout_seconds: float = 10.0) -> int | None | bool:
+    lifecycle = active_lifecycle()
+    return None if lifecycle is None else lifecycle.suspend_for_pairing_change(timeout_seconds)
+
+
+def release_pairing_suspension(token: int) -> None:
     lifecycle = active_lifecycle()
     if lifecycle is not None:
-        lifecycle.release_pairing_suspension()
+        lifecycle.release_pairing_suspension(token)
 
 
 def notify_config_changed(config: V2Config) -> None:

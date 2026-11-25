@@ -33,6 +33,8 @@ def _save(intent):
 
 
 _CLOUD_PHASES = ('cloud', 'repair', 'invalid_credential', 'ineligible')
+# The direct-path stop this process made for the unbind it is running; only that one is undone.
+_direct_stop = None
 
 
 def _read():
@@ -432,7 +434,8 @@ def _resume_cloud(record):
     with config_file_lock():
         cfg = local._config()
         _verify_stage(record, cfg)
-    remote._stop_direct_lifecycle_before_pairing_discard(cfg)
+    global _direct_stop
+    _direct_stop = remote._stop_direct_lifecycle_before_pairing_discard(cfg)
     if not remote.stop(cfg).get('ok'):
         return {'state': 'unbinding'}
     if record.get('dispatched') is False:
@@ -475,7 +478,9 @@ def _finish_denial(record):
         unbind.save_result(record['source'], 'not_unbound', reason, operation=record['operation'])
         gate.reset_intent_path().unlink()
         cfg = local._config()
-    remote._release_direct_lifecycle_after_refused_change(cfg)
+    global _direct_stop
+    token, _direct_stop = _direct_stop, None
+    remote._release_direct_lifecycle_after_refused_change(cfg, token)
     return {'state': 'not_unbound', 'reason_code': reason, 'operation': record['operation']}
 
 

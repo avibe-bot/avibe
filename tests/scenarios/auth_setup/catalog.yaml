@@ -592,7 +592,7 @@ scenarios:
     layer: scenario
     backend: personal-claims
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_refusal_then_confirmed_reset
-    reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, and read back unpaired without redeeming a new key.
+    reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, delete the binding on avibe.bot first (issuer peer, one request), and read back unpaired without redeeming a new key.
   - id: AUTH-SETUP-215
     name: Cancelled on avibe.bot, the initiating browser comes back to a declined bind-again attempt
     status: covered

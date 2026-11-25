@@ -95,11 +95,15 @@ def test_rebind_through_shared_callback(machine, reason):
         assert view['code'] == 'installation_unverified'
         assert view.get('reason_code') == (None if reason == 'malformed' else reason)
         assert not redeemed and cloud.instance_secret == 'fixture-secret-inst_A'
-        path = ROOT + '/' + ident + '/reset'
+        legacy = ROOT + '/' + ident + '/reset'
+        # A page that only knew the local reset is sent to reload, whatever the claim.
+        old_page = browser.post(legacy + '/preview', base_url=ORIGIN, headers=hdr, json={})
+        assert old_page.status_code == 409 and old_page.get_json()['code'] == 'reload_required'
+        path = legacy + '/unbind'
         preview = browser.post(path + '/preview', base_url=ORIGIN, headers=hdr, json={})
         if reason in ('other_account', 'predecessor_unrecoverable'):
             assert preview.status_code == 200, preview.get_json()
-            assert set(preview.get_json()) == {'confirmation_id', 'expires_at', 'health_connected'}
+            assert set(preview.get_json()) == {'confirmation_id', 'expires_at', 'health_connected', 'action', 'instance_id'}
             confirmation = {'confirmation_id': preview.get_json()['confirmation_id']}
             stranger = ui_server.app.test_client()
             denied = stranger.post(path, base_url=ORIGIN, headers=csrf_headers(stranger), json=confirmation)
@@ -130,6 +134,10 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
     monkeypatch.setattr(remote_access, 'stop', lambda _: {'ok': True})
     monkeypatch.setattr(remote_access, '_stop_direct_lifecycle_before_pairing_discard', lambda _: None)
     monkeypatch.setattr(direct_certificates, 'discard_direct_certificates', lambda: None)
+    from vibe import binding_unbind
+    sends = []
+    monkeypatch.setattr(binding_unbind, 'send_original', lambda cfg, operation, **kw: sends.append(operation) or (
+        'invalid_credential' if finish == 'cloud_then_local' else 'unbound'))
     browser = ui_server.app.test_client()
     hdr = csrf_headers(browser)
     def post(path, body):
@@ -137,7 +145,8 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
     started = post(ROOT, {}).get_json()
     ident = started['claim_id']
     scope = ROOT + '/' + ident
-    path = scope + '/reset'
+    legacy = scope + '/reset'
+    path = legacy + '/unbind'
     assert post(path + '/preview', {}).status_code == 409
     peer.outcomes.append((409, {'error': 'installation_unverified', 'recovery': 'reset_as_new',
                                 'reason': 'predecessor_unrecoverable'}, None))
@@ -149,21 +158,13 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
     assert browser.get('/api/remote-access/rebind', base_url=ORIGIN).get_json()['next_action'] == 'confirm_as_new'
     old, fresh = (post(path + '/preview', {}).get_json()['confirmation_id'] for _ in range(2))
     assert old != fresh and post(path, {'confirmation_id': old}).status_code == 409
+    assert post(legacy, {'confirmation_id': fresh}).get_json()['code'] == 'reload_required'
     assert not binding_admission.reset_in_progress() and local._installation_id()
     if finish == 'cloud_then_local':
-        from vibe import binding_unbind
-        sends = []
-        monkeypatch.setattr(binding_unbind, 'send_original', lambda cfg, operation, **kw:
-                            sends.append(operation) or 'invalid_credential')
-        cloud = path + '/unbind'
-        fallback = path + '/local-after-refusal'
-        preview = post(cloud + '/preview', {})
-        assert preview.status_code == 200, preview.get_json()
-        cloud_token = {'confirmation_id': preview.get_json()['confirmation_id']}
-        assert post(cloud, {'confirmation_id': fresh}).status_code == 409
-        assert post(path, cloud_token).status_code == 409
+        fallback = legacy + '/local-after-refusal'
+        cloud_token = {'confirmation_id': fresh}
         assert post(fallback + '/preview', {}).status_code == 409
-        assert post(cloud, cloud_token).status_code == 202 and not sends
+        assert post(path, cloud_token).status_code == 202 and not sends
         assert remote_access._drive_pending_pairing()[0] and len(sends) == 1
         assert local._installation_id() and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
         second = post(fallback + '/preview', {})
@@ -180,12 +181,13 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
         flow.reset_expiry = 0
     result = post(path, {'confirmation_id': fresh})
     if finish == 'confirm':
-        assert result.status_code == 200 and result.get_json() == {'state': 'unpaired'}
+        assert result.status_code == 202 and result.get_json() == {'state': 'unbinding'} and not sends
+        assert remote_access._drive_pending_pairing()[0] and len(sends) == 1
         assert local._installation_id() is None and not V2Config.load().remote_access.vibe_cloud.instance_id
         assert post(path, {'confirmation_id': fresh}).status_code == 409
     else:
         assert result.status_code == 409 and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
-        assert local._installation_id()
+        assert local._installation_id() and not sends
     assert len(peer.calls) == 2 and not redeems and not binding_admission.reset_in_progress()
 
 

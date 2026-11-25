@@ -1109,7 +1109,8 @@ def test_suspend_cookie_guard_reads_config_while_another_process_holds_writer_lo
                     )
                 response = await asyncio.wait_for(asyncio.to_thread(request_stop), 3)
                 assert response.status_code == 200, response.get_json()
-                assert response.get_json() == {"ok": True, "stopped": True}
+                # The first stop's token, so only that stop can be undone.
+                assert response.get_json() == {"ok": True, "stopped": True, "token": 1}
                 assert owner._pairing_suspended
                 assert cookie_guard_loads == ["instance-one"]
                 print(json.dumps({"pid": os.getpid(), "read_under_foreign_lock": True}))

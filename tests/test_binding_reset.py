@@ -186,7 +186,7 @@ def test_rejected_unbind_restores_intent_without_connecting_or_sending(reset_hos
     assert workspace.read_text() == 'keep' and local._installation_id() is not None
 
 
-@pytest.mark.parametrize('reply', ['lose_first_response', 'malformed_503'])
+@pytest.mark.parametrize('reply', ['lose_first_response', 'other_503', 'html_502', 'wrong_op_200'])
 def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, monkeypatch, reply):
     import http.client
     import json
@@ -213,12 +213,19 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
             posts.append((body, headers['X-Vibe-Device-Secret']))
 
         def getresponse(self):
-            if reply == 'lose_first_response' and len(posts) == 1:
+            first = len(posts) == 1
+            if reply == 'lose_first_response' and first:
                 raise http.client.RemoteDisconnected()
-            bad = reply == 'malformed_503'
-            data = {'error': 'unbind_unavailable', 'extra': 1} if bad else {
-                'status': 'unbound', **json.loads(posts[-1][0])}
-            return SimpleNamespace(status=503 if bad else 200, read=lambda size: json.dumps(data).encode(),
+            if reply == 'html_502' and first:
+                return SimpleNamespace(status=502, read=lambda size: b'<html>bad gateway</html>',
+                                       getheader=lambda key: {'Content-Type': 'text/html'}.get(key))
+            if reply == 'other_503' and first:
+                status, data = 503, {'error': 'unbind_unavailable', 'extra': 1}
+            elif reply == 'wrong_op_200':
+                status, data = 200, {'status': 'unbound', 'operation_id': '41d8da35-78cd-43e9-b016-f29971164963'}
+            else:
+                status, data = 200, {'status': 'unbound', **json.loads(posts[-1][0])}
+            return SimpleNamespace(status=status, read=lambda size: json.dumps(data).encode(),
                                    getheader=lambda key: {'Content-Type': 'application/json'}.get(key))
 
         def close(self):
@@ -229,11 +236,12 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
     op = reset._read()['operation']
     assert remote._drive_pending_pairing()[0]
     first = unbind.device_state(V2Config.load())['state']
-    assert first == ('unbinding' if reply == 'lose_first_response' else 'reset_repair_required')
+    # Lost replies, gateway pages and off-contract 5xx prove nothing: the same request goes again.
+    assert first == ('reset_repair_required' if reply == 'wrong_op_200' else 'unbinding')
     assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
     assert remote._drive_pending_pairing()[0]
     second = unbind.device_state(V2Config.load())['state']
-    if reply == 'lose_first_response':
+    if reply != 'wrong_op_200':
         assert second == 'unbound' and len(posts) == 2 and posts[0] == posts[1]
         assert unbind.last_result(V2Config.load()) == {'state': 'unbound'}
         assert unbind.last_result(cfg) is None
@@ -250,12 +258,15 @@ def test_refused_unbind_reopens_the_direct_path_it_fenced(reset_host, monkeypatc
     cfg = V2Config.load()
     cfg.remote_access.vibe_cloud.direct = True
     cfg.save()
-    lifecycle = SimpleNamespace(released=0)
-    lifecycle.release_pairing_suspension = lambda: setattr(lifecycle, 'released', lifecycle.released + 1)
+    lifecycle = SimpleNamespace(released=[])
+    lifecycle.release_pairing_suspension = lifecycle.released.append
     monkeypatch.setattr(direct_lifecycle, 'active_lifecycle', lambda: lifecycle)
+    # The attempt's own stop answers with token 5; only that token is released.
+    monkeypatch.setattr(remote, '_stop_direct_lifecycle_before_pairing_discard', lambda cfg: 5)
+    monkeypatch.setattr(unbind, 'send_original', lambda *a, **kw: 'ineligible')
     reset._save({**reset._new_record(V2Config.load()), 'schema': 2, 'operation': '7a0a3a3e-9f43-4a52-9c1e-1d1a4f3b6c20',
-                 'phase': 'ineligible', 'accepted': False, 'was_requested': True, 'root': unbind.root_stamp()})
-    assert reset.resume()['state'] == 'not_unbound' and lifecycle.released == 1
+                 'phase': 'cloud', 'accepted': False, 'was_requested': True, 'root': unbind.root_stamp()})
+    assert reset.resume()['state'] == 'not_unbound' and lifecycle.released == [5]
 
 
 def test_lifecycle_release_clears_only_a_pairing_suspension():
@@ -263,13 +274,15 @@ def test_lifecycle_release_clears_only_a_pairing_suspension():
     from vibe.direct_lifecycle import DirectAccessLifecycle
 
     woke = []
-    state = SimpleNamespace(_shutdown=False, _pairing_suspended=True, _permission_allowed=False,
+    state = SimpleNamespace(_shutdown=False, _pairing_suspended=True, _suspension_token=2, _permission_allowed=False,
                             _permission_received_at=1.0, _permission_reason='pairing_changed', _resume_required=False,
                             _wake=SimpleNamespace(set=lambda: woke.append(1)))
-    DirectAccessLifecycle._release_pairing_suspension(state)
+    DirectAccessLifecycle._release_pairing_suspension(state, 1)  # A later pairing change stopped it since.
+    assert state._pairing_suspended and not woke
+    DirectAccessLifecycle._release_pairing_suspension(state, 2)
     assert not state._pairing_suspended and state._permission_allowed is None and state._resume_required and woke
-    DirectAccessLifecycle._release_pairing_suspension(state)
-    assert len(woke) == 1  # Nothing to release: a later stop's fence is never opened here.
+    DirectAccessLifecycle._release_pairing_suspension(state, 2)
+    assert len(woke) == 1
 
 
 def test_worker_finishes_authorized_reset_including_private_health_store(reset_host, monkeypatch):

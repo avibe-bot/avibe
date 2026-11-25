@@ -28,11 +28,15 @@ def valid_operation(operation) -> bool:
         return False
 
 
+class _DuplicateField(Exception):
+    pass
+
+
 def _unique_object(pairs):
     result = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError('duplicate field')
+            raise _DuplicateField()
         result[key] = value
     return result
 
@@ -45,16 +49,21 @@ def classify_receipt(status: int, body: bytes, operation: str, *, accepted: bool
     """
     if not valid_operation(operation):
         return 'repair'
-    if status == 429:
+    # Proves nothing about admission: rate limits, any 5xx, redirects and an old
+    # service's 404 are all retried with the same operation and key.
+    if status == 429 or status == 404 or 300 <= status < 400 or status >= 500:
         return 'retry'
     if len(body) > 4096:
-        return 'repair'
+        return 'retry'
     try:
         data = json.loads(body.decode('utf-8'), object_pairs_hook=_unique_object)
+    except _DuplicateField:
+        return 'repair'  # Parsed JSON that names a field twice: ambiguous, never acted on or resent.
     except (UnicodeError, ValueError, RecursionError):
-        return 'repair'
-    if status == 503 and data == {'error': 'unbind_unavailable'}:
+        return 'retry'  # Not the issuer's JSON: an intermediary or a truncated reply.
+    if not isinstance(data, dict):
         return 'retry'
+    # From here on the issuer answered with well-formed JSON; outside the contract it needs local attention.
     if status == 200 and data == {'status': 'unbound', 'operation_id': operation}:
         return 'unbound'
     if status == 202 and data == {'status': 'pending', 'operation_id': operation}:
@@ -147,11 +156,9 @@ def send_original(config, operation: str, *, accepted: bool) -> str:
                                  'Accept': 'application/json', 'Cache-Control': 'no-store',
                                  'X-Vibe-Device-Secret': cloud.instance_secret})
                 response = conn.getresponse()
-                if response.status == 429:
-                    return 'retry'
                 if ((response.getheader('Content-Type') or '').partition(';')[0].strip().lower() != 'application/json'
                         or (response.getheader('Age') or '0').strip() != '0'):
-                    return 'repair'
+                    return 'retry'  # An intermediary or a cache answered, not the issuer.
                 return classify_receipt(response.status, response.read(4097), operation, accepted=accepted)
             finally:
                 conn.close()

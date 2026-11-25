@@ -9290,8 +9290,9 @@ def remote_access_direct_suspend():
         return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
     from vibe import direct_lifecycle
 
-    if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
-        return jsonify({"ok": True, "stopped": True})
+    token = direct_lifecycle.suspend_for_pairing_change(timeout_seconds=10.0)
+    if token is not False:
+        return jsonify({"ok": True, "stopped": True, **({"token": token} if type(token) is int else {})})
     return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
 
 
@@ -9303,7 +9304,11 @@ def remote_access_direct_release():
         return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
     from vibe import direct_lifecycle
 
-    direct_lifecycle.release_pairing_suspension()
+    body = request.get_json(silent=True)
+    token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
+    if type(token) is not int or token < 1:
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    direct_lifecycle.release_pairing_suspension(token)
     return jsonify({"ok": True})
 
 
