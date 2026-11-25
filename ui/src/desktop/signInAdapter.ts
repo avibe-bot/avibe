@@ -59,9 +59,16 @@ const canonicalCode = (code: string, operation: Operation): SignInErrorCode => {
     case 'provider_unavailable':
     case 'provider_email_unverified':
       return code;
-    case 'invalid_or_expired':
     case 'provider_timeout':
       return operation === 'provider' ? 'invalid_or_expired' : 'network';
+    // A refused code (native's 403 verification_invalid, 400 invalid) on a code step is the code,
+    // not the network; a provider's refusal keeps its own wording.
+    case 'invalid_or_expired':
+      if (operation === 'provider' || operation === 'verify') return 'invalid_or_expired';
+      if (operation === 'totp' || operation === 'recovery' || operation === 'passkey' || operation === 'primaryPasskey') {
+        return 'invalid';
+      }
+      return 'network';
     case 'otp_expired':
     case 'invalid_otp':
     case 'invalid_code':

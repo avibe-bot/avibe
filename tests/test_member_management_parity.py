@@ -126,6 +126,7 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
     ("GET", "/api/desktop/local-instance"),
     ("POST", "/api/desktop/local-instance/prepare"),
+    ("POST", "/api/desktop/claim/v1/admit"),
     ("GET", "/api/devices/connection"),
     ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
@@ -212,12 +213,13 @@ def test_complete_registered_api_management_inventory():
     # + 8 device function, activity and Health ticket methods.
     # + 2 Owner-only connection settings methods.
     # + 3 instance address methods (Owner; the handler also requires the current Owner or direct loopback).
+    # + 1 private Desktop claim acknowledgement (Owner and direct-loopback-only).
     # + 6 constrained local rebind/reset methods (Owner and local operator).
     # + 1 host network restriction (Owner, separately limited to unbound installations).
     # + 2 Antigravity auth status/config methods (Member, like Claude/Codex auth) and
     #   1 Antigravity model catalog read (Editor, like Claude/Codex models).
     # Three independent engine channel controls are owner-only, including metadata refresh.
-    assert len(endpoints) == 387
+    assert len(endpoints) == 388
     for method in ("GET", "POST"):
         assert (method, "/api/backend/antigravity/auth") in endpoints
         assert http_authorization_policy(method, "/api/backend/antigravity/auth").minimum_role == "member"
@@ -244,6 +246,7 @@ def test_complete_registered_api_management_inventory():
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
+        ("POST", "/api/desktop/claim/v1/admit"),
     ):
         assert (method, path) in endpoints
         policy = http_authorization_policy(method, path)
@@ -344,6 +347,7 @@ def test_desktop_local_enrollment_refuses_every_remote_role(management_http, rol
     for method, path in (
         ("GET", "/api/desktop/local-instance"),
         ("POST", "/api/desktop/local-instance/prepare"),
+        ("POST", "/api/desktop/claim/v1/admit"),
     ):
         response = request_http(method, path, payload={} if method == "POST" else None)
         assert response.status_code == 403

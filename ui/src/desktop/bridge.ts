@@ -127,6 +127,9 @@ export const DESKTOP_CLIENT_STATE_EVENT = 'avibe:desktop-client-state';
 export const DESKTOP_PRESENT_EVENT = 'avibe:desktop-present';
 export const DESKTOP_CLIENT_VIEWS = ['account', 'instances', 'setup-complete', 'sign-out', 'updates'] as const;
 export type DesktopClientView = typeof DESKTOP_CLIENT_VIEWS[number];
+/** The claim view: only this computer's own Workbench asks for it (「开启远程访问」), never native
+ *  with a token. It carries nothing but the locale; the shell decides what it shows. */
+export const DESKTOP_CLAIM_VIEW = 'claim';
 declare global {
   interface Window {
     readonly __AVIBE_DESKTOP_CLIENT_VERSION__?: number;
@@ -151,6 +154,12 @@ export function isClientState(value: unknown): value is DesktopClientState {
 export function isNewerClientState(next: DesktopClientProjection, previous: DesktopClientProjection | null): boolean {
   return !previous || next.generation > previous.generation
     || (next.generation === previous.generation && next.revision >= previous.revision);
+}
+/** Asks the shell to show the claim dialog in its own document, in front of this Workbench. */
+export function presentDesktopClaim(locale: 'en' | 'zh'): boolean {
+  if (!hasDesktopClient()) return false;
+  window.location.assign(`avibe://desktop/${DESKTOP_CLAIM_VIEW}?locale=${locale}`);
+  return true;
 }
 /** The caller owns the navigation guard. Sign-out admits the A4 native intent; other views present trusted UI. A native request
  *  carries its `presentationToken` back unchanged, so native can match the approval to that request. */

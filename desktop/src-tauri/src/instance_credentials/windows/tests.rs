@@ -70,6 +70,10 @@ fn live_credential_peer() {
 
 fn exercise_live_contention(owner: &Arc<NativeCredentials>, profile: &str, dir: &Path) {
     let mut held = owner.clone().begin_write(ACCOUNT).unwrap();
+    assert!(held.observe().is_err()); // absent is not a prior jar for a narrow save
+    let bytes = vec![b'p'; CHUNK + 1];
+    held.publish(&bytes).unwrap();
+    assert!(held.observe().unwrap().is_attempted(&bytes));
     let mut peer = Command::new(std::env::current_exe().unwrap())
         .stdout(std::process::Stdio::null())
         .args([LIVE_CASE, "--ignored", "--exact"])
@@ -78,7 +82,8 @@ fn exercise_live_contention(owner: &Arc<NativeCredentials>, profile: &str, dir: 
         .spawn()
         .unwrap();
     wait_for(dir, "timed-out");
-    held.publish(&vec![b'p'; CHUNK + 1]).unwrap();
+    // Readback and waiting for the publication decision did not release the lock.
+    assert!(held.observe().unwrap().is_attempted(&bytes));
     drop(held);
     signal(dir, "published");
     wait_for(dir, "overwritten");
@@ -154,9 +159,15 @@ fn windows_native_account_jar_lifecycle() {
         .unwrap();
     assert_eq!(status.code(), Some(73)); // a filtered/ignored child cannot satisfy the crash test
     assert!(read().unwrap().as_deref() == Some(first.as_slice()));
+    let mut ordinary = owner.clone().begin_write(account).unwrap();
+    ordinary.publish(&second).unwrap();
+    ordinary.rollback().unwrap(); // failed connection-record commit needs no prior decode
+    assert!(released.get_secret().unwrap() == manifest);
     let mut change = owner.clone().begin_write(account).unwrap();
+    assert!(change.observe().unwrap().is_prior(&first));
     change.publish(&second).unwrap();
-    change.rollback().unwrap(); // failed connection-record commit restores the exact old root
+    assert!(change.observe().unwrap().is_attempted(&second));
+    change.rollback_existing(&first, &second).unwrap(); // narrow publication lost its account slot
     assert!(released.get_secret().unwrap() == manifest);
     assert!(read().unwrap().as_deref() == Some(first.as_slice()));
     owner.write(account, &second).unwrap();
@@ -170,7 +181,8 @@ fn windows_native_account_jar_lifecycle() {
     }
     assert!(read().is_err_and(|e| e.code == "credentials_unavailable"));
     let mut signin = owner.clone().begin_write(account).unwrap();
-    signin.publish(&first).unwrap();
+    assert!(signin.observe().is_err()); // narrow save cannot replace this unreadable prior
+    signin.publish(&first).unwrap(); // explicit ordinary sign-in needs no decode
     drop(signin);
     assert!(read().unwrap().as_deref() == Some(first.as_slice()));
     let mut m = Manifest::parse(&released.get_secret().unwrap()).unwrap();
@@ -185,6 +197,28 @@ fn windows_native_account_jar_lifecycle() {
     released.delete_credential().unwrap();
     assert!(read().unwrap().is_none());
     exercise_live_contention(&owner, &profile, dir.path());
+    // A compatible writer participates in Scope; an uncoordinated root replacement
+    // does not. Equal plaintext under another manifest is not our write or undo authority.
+    owner.write(account, &small).unwrap();
+    let mut change = Box::new(Change::begin(&owner, account).unwrap());
+    change.publish(&first).unwrap();
+    let other = change
+        .scope
+        .stage(Some(&released.get_secret().unwrap()), &first)
+        .unwrap();
+    released.set_secret(&other).unwrap();
+    assert!(change.scope.read().unwrap().as_deref() == Some(first.as_slice()));
+    assert!(change.observe().is_err());
+    assert!(change.rollback_existing(&small, &first).is_err());
+    assert!(released.get_secret().unwrap() == other);
+    // Change root *before* publish. Writing chunks against the stale prior would
+    // corrupt a now-active bank even if the final root comparison then refused.
+    let mut stale = Change::begin(&owner, account).unwrap();
+    let moved = stale.scope.stage(stale.prior(), &second).unwrap();
+    released.set_secret(&moved).unwrap();
+    assert!(stale.publish(&first).is_err());
+    drop(stale);
+    assert!(read().unwrap().as_deref() == Some(second.as_slice()));
     owner.write(account, &first).unwrap();
     {
         let scope = Scope::open(&owner, account).unwrap();

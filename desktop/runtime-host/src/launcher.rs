@@ -228,6 +228,12 @@ pub trait RuntimeLauncher: Send + Sync {
 /// spawned; readiness is decided by the presence probe.
 pub trait ResolvedRuntimeLauncher: Send + Sync {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError>;
+
+    /// Fixed private Desktop protocol, not a general command builder. An origin-only
+    /// launcher or an older implementation supplies no machine channel.
+    fn claim_helper(&self) -> Option<ClaimHelperCommand> {
+        None
+    }
     /// Work that must happen before `launch` and that must not hold the
     /// launch-state mutex: the login-shell `PATH` lookup, which can wait 10 s
     /// on a hanging startup file. The default is a no-op so a test launcher
@@ -604,6 +610,38 @@ impl ResolvedVibeExecutable {
 }
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
+    fn claim_helper(&self) -> Option<ClaimHelperCommand> {
+        let runtime = &self.command;
+        if !runtime.executable.is_absolute() {
+            return None; // Command::new must never perform another PATH lookup.
+        }
+        let mut command = Command::new(&runtime.executable);
+        #[cfg(windows)]
+        if !runtime
+            .executable
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+        {
+            return None; // never a batch file or shell-mediated launcher
+        }
+        let inherited_path = match self.login_path.get() {
+            Some(LoginPath::Resolved(path)) => Some(path.as_os_str()),
+            _ => None,
+        };
+        runtime.apply(&mut command, inherited_path);
+        command
+            .arg("__desktop-claim-pipe")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        Some(ClaimHelperCommand(command))
+    }
+
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
         let endpoint = query_endpoint(&self.command, &self.log)?;
         self.wants_runtime_replaced
@@ -708,6 +746,10 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         }
     }
 }
+
+/// Opaque even to the shell UI layer: only the private transport can spawn it.
+/// In particular this command must not go through BootstrapLog or receipt readers.
+pub struct ClaimHelperCommand(pub(crate) Command);
 
 #[derive(Debug)]
 struct RuntimeCommand {

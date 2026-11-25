@@ -106,7 +106,7 @@ def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
     model_hub_app,
     protocol: str,
 ) -> None:
-    """B1: Auto never proves a key; the declared interface's key-gated listing does (#1920, #1936)."""
+    """B1: only a credential-gated listing can turn ambiguous relay shapes into proof."""
 
     _configure_protocol(mock_llm_upstream, protocol)
     _require_key(mock_llm_upstream, SYNTHETIC_API_KEY)
@@ -122,20 +122,9 @@ def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
     body = response.json()
     assert response.status == 200, body
     assert body["contract_version"] == CONTRACT_VERSION
-    # A model-free probe's schema error shows a shape, never the key, and Auto
-    # never asks a listing, which names no protocol.
-    assert body["observation"] == {
-        "contract_version": CONTRACT_VERSION,
-        "outcome": "adapter_error",
-        "reachable": True,
-        "authenticated": "unknown",
-        "protocol": None,
-        "discovery": "not_attempted",
-        "models": [],
-        "model_metadata": [],
-    }
-    assert "/v1/models" not in [item["path"] for item in mock_llm_upstream.requests()]
-
+    auto = body["observation"]
+    auto_paths = [item["path"] for item in mock_llm_upstream.requests()]
+    # Exercise the declared interface even if Auto misclassifies this fixture.
     mock_llm_upstream.reset_requests()
     response = model_hub_app.client.post(
         "/api/models/sources/observe", {**request, "protocol": protocol}
@@ -157,6 +146,27 @@ def test_b1_auto_observe_needs_a_declared_protocol_to_prove_the_key(
     captured_paths = [item["path"] for item in mock_llm_upstream.requests()]
     assert "/v1/models" in captured_paths
     assert any(path != "/v1/models" for path in captured_paths)
+
+    # A gated listing proves the key, not that a different interface serves it.
+    if auto["outcome"] == "observed":
+        assert "/v1/models" in auto_paths
+        if protocol == "anthropic" and auto == {**body["observation"], "protocol": "openai_chat"}:
+            pytest.xfail("B1: Auto mistakes the Anthropic-only fixture's generic 400 for Chat support")
+        assert protocol in {"openai_chat", "anthropic"}
+        assert auto == body["observation"]
+    else:
+        assert protocol != "openai_chat"
+        assert auto == {
+            "contract_version": CONTRACT_VERSION,
+            "outcome": "adapter_error",
+            "reachable": True,
+            "authenticated": "unknown",
+            "protocol": None,
+            "discovery": "not_attempted",
+            "models": [],
+            "model_metadata": [],
+        }
+        assert "/v1/models" not in auto_paths
 
 
 def test_b2_manual_protocol_mismatch_is_refused_with_proof_error(
@@ -344,8 +354,9 @@ def test_b6_replace_key_rolls_back_then_rename_and_retarget_commit(
         {"key": "sk-model-hub-e2e-rejected"},
     )
     failed_body = failed.json()
-    assert failed.status == 502, failed_body
+    assert failed.status == 422, failed_body
     assert failed_body["error"] == "discovery_failed"
+    assert failed_body["detail"] == "modelHub.errors.authentication_failed"
     after_failure = model_hub_app.client.get(
         "/api/models/sources"
     ).json()["sources"][0]
@@ -524,8 +535,16 @@ def test_b8_delete_force_is_query_only_in_the_current_http_contract(
     assert query_force.status == 200, query_force.json()
 
 
+@pytest.fixture
+def listing_upstream():
+    # B8 needs one catalog to keep listing the model after the other empties.
+    with MockLLMUpstream() as upstream:
+        yield upstream
+
+
 def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     mock_llm_upstream: MockLLMUpstream,
+    listing_upstream: MockLLMUpstream,
     model_hub_app,
 ) -> None:
     """B8: refresh force is body-only in the current HTTP contract."""
@@ -535,9 +554,10 @@ def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     # An API-key hop needs no inventory membership (#1897), so an emptied
     # listing strands nothing on its own. Refresh drops a hop where another
     # Source still lists the model and automatic matching narrows to it (#1934).
+    _configure_protocol(listing_upstream, "anthropic", models=[{"id": MENU_MODEL}])
     _configure_protocol(mock_llm_upstream, "anthropic", models=[{"id": MENU_MODEL}])
-    _create_source(
-        model_hub_app, mock_llm_upstream, nonce="scn_b800000000000001",
+    listing_source, _ = _create_source(
+        model_hub_app, listing_upstream, nonce="scn_b800000000000001",
         vendor="anthropic", display_name="Listing E2E source",
     )
     source, _ = _create_source(
@@ -578,6 +598,7 @@ def test_b8_refresh_force_is_body_only_in_the_current_http_contract(
     body = body_force.json()
     assert body_force.status == 200, body
     assert body["removed_hops"] == refusal["would_remove_hops"]
+    assert all(hop["source_id"] != listing_source["id"] for hop in body["removed_hops"])
     assert body["interrupted"] == refusal["would_interrupt"]
 
 

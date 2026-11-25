@@ -89,6 +89,30 @@ afterEach(() => {
 });
 
 describe('DevicesPage · turning remote access on', () => {
+  it('in the Desktop App asks the shell for its claim dialog once, and starts no claim here', async () => {
+    vi.stubGlobal('__AVIBE_DESKTOP_CLIENT_VERSION__', 1);
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, assign });
+    const start = vi.spyOn(devicesApi, 'startClaim');
+    try {
+      mount();
+      const turnOn = await screen.findByRole('button', { name: '开启远程访问' });
+      // One action: no sign-in button, no name field on this page (ui/design: desktop/bind-home/devices-off).
+      expect(screen.queryByRole('textbox')).toBeNull();
+      expect(document.body.textContent).toContain(i18n.t('devices.reach.desktopHint'));
+      fireEvent.click(turnOn);
+      expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/claim?locale=zh');
+      // Off after the press, so requests never stack.
+      await waitFor(() => expect((turnOn as HTMLButtonElement).disabled).toBe(true));
+      fireEvent.click(turnOn);
+      expect(assign).toHaveBeenCalledTimes(1);
+      expect(start).not.toHaveBeenCalled();
+      expect(submitted).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('has no pairing-key field, and takes the user code and state only from the local API\'s answer', async () => {
     const form: ClaimForm = {
       claimId: 'claim-1', action: 'https://avibe.bot/api/v1/claims/redirect-entry', method: 'POST',

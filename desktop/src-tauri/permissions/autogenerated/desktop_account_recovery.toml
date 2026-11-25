@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-account-recovery"
+description = "Enables the desktop_account_recovery command without any pre-configured scope."
+commands.allow = ["desktop_account_recovery"]
+
+[[permission]]
+identifier = "deny-desktop-account-recovery"
+description = "Denies the desktop_account_recovery command without any pre-configured scope."
+commands.deny = ["desktop_account_recovery"]

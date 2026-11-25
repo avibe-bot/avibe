@@ -4,7 +4,7 @@ import { cleanup, render, screen } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, it } from 'vitest';
-import en from '../i18n/en.json';
+import { desktopEn as en } from '../i18n/desktop';
 import states from './__fixtures__/instance-client-v1/states.json';
 import { InstanceSwitcherView, type InstanceSwitcherViewProps } from './InstanceSwitcherView';
 import type { DesktopClientState, Instance } from './bridge';
@@ -52,7 +52,7 @@ it('reads other rows from the catalog: green reachable, grey offline, gold only 
   expect(tone('studio')).toBe('connecting');
   expect(tone('weekend')).toBe('stopped');
   expect(tone('team')).toBe('running');
-  expect(dotLabel('team')).toBe(en.desktopClient.online);
+  expect(dotLabel('team')).toBe(en.desktopAccount.online);
   expect(tone('lab')).toBe('stopped');
   const opening = document.querySelector('[data-instance-id="studio"]')!;
   expect(opening.querySelector('[role="status"]')!.className).toContain('text-gold-ink');
@@ -80,14 +80,14 @@ it.each([['unavailable', [item('local', false), studio]], ['unlisted', [studio]]
     expect(tone('local')).toBeNull();
     const button = document.querySelector('[data-instance-id="local"] button') as HTMLButtonElement;
     expect(button.disabled).toBe(false);
-    expect(button.textContent).not.toContain(en.desktopClient.offline);
+    expect(button.textContent).not.toContain(en.desktopAccount.offline);
   });
 
 it('greys an unreachable current remote', () => {
   view(onRemote('remote_unreachable', [item('local', true), studio]));
   expect(tone('studio')).toBe('stopped');
   expect(dotLabel('studio')).toBe(en.desktopClient.disconnected);
-  expect(rowText('studio')).toContain(en.desktopClient.offline);
+  expect(rowText('studio')).toContain(en.desktopAccount.offline);
 });
 
 it.each([
@@ -98,15 +98,15 @@ it.each([
   view(onRemote('remote_connected', [...instances], current));
   expect(tone('studio')).toBe('running');
   expect(dotLabel('studio')).toBe(en.desktopClient.connected);
-  expect(rowText('studio')).not.toContain(en.desktopClient.offline);
-  expect(screen.queryAllByRole('img', { name: en.desktopClient.online }).filter((node) => node.closest('[data-instance-id="studio"]'))).toHaveLength(0);
+  expect(rowText('studio')).not.toContain(en.desktopAccount.offline);
+  expect(screen.queryAllByRole('img', { name: en.desktopAccount.online }).filter((node) => node.closest('[data-instance-id="studio"]'))).toHaveLength(0);
   expect((document.querySelector('[data-instance-id="studio"] button') as HTMLButtonElement).disabled).toBe(false);
 });
 
 it('keeps a reachable row green after a failed open and announces each dot once', () => {
   view(base([item('local', true), item('studio', true)]), { failure: { instanceId: 'studio', message: 'Could not open' } });
   expect(tone('studio')).toBe('running');
-  expect(screen.getAllByRole('img', { name: en.desktopClient.online })).toHaveLength(1);
+  expect(screen.getAllByRole('img', { name: en.desktopAccount.online })).toHaveLength(1);
   expect(screen.getAllByRole('img', { name: en.desktopClient.connected })).toHaveLength(1);
   const local = document.querySelector('[data-instance-id="local"] button')!;
   expect(local.hasAttribute('aria-describedby')).toBe(false);

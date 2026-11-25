@@ -362,7 +362,11 @@ def test_unknown_pin_replica_owner_defers_cleanup_not_runtime_monitoring(rig, mo
     def quality_thread(*, target, args, kwargs, **unused):
         assert target is ra._quality_monitor_loop
         pending.append(kwargs['orphan_candidate_pending'])
-        return SimpleNamespace(start=lambda: workers.append('quality'))
+        def launch():
+            if len(pending) == 1:
+                raise RuntimeError('fixture thread refused')
+            workers.append('quality')
+        return SimpleNamespace(start=launch)
     monkeypatch.setattr(ra, 'threading', SimpleNamespace(Thread=quality_thread, local=__import__('threading').local,
                                                         get_ident=__import__('threading').get_ident))
     for module, name in ((ra, 'start_status_heartbeat'), (ra, 'start_authorization_revision_polling'),
@@ -373,10 +377,13 @@ def test_unknown_pin_replica_owner_defers_cleanup_not_runtime_monitoring(rig, mo
     monkeypatch.setattr(ra, '_promote_candidate_connector', lambda *a, **kw: pytest.fail('ownership unknown'))
     cs.journal.path.parent.mkdir(exist_ok=True, parents=True)
     cs.journal.path.write_text('unreadable fixture')
-    ra.start_runtime_monitoring(rig.cfg)
-    assert workers == ['quality', 'start_status_heartbeat', 'start_authorization_revision_polling',
-                       'start_project_access_sync', 'start_resource_acl_sync_polling']
-    assert pending == [True] and not ra._reconcile_orphan_candidate_when_free()
+    policy_workers = ['start_status_heartbeat', 'start_authorization_revision_polling',
+                      'start_project_access_sync', 'start_resource_acl_sync_polling']
+    assert not ra.start_runtime_monitoring(rig.cfg) and workers == policy_workers
+    workers.clear()
+    assert ra.start_runtime_monitoring(rig.cfg) and workers == ['quality', *policy_workers]
+    assert ra.start_tunnel_quality_monitor()  # acknowledgement of the same worker, not a second launch
+    assert pending == [True, True] and not ra._reconcile_orphan_candidate_when_free()
     assert caplog.text.count('Connection settings journal unavailable') == 1
     assert cs.journal.path.read_text() == 'unreadable fixture' and slots['active'] == rig.active
     # A subsequent tick can distinguish a previous worker from one still running.

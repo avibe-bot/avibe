@@ -218,6 +218,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { desktopEn as en, desktopZh as zh } from './desktop';
 
 import { createInstance, type i18n as I18n } from 'i18next';
 import { API, type Checker, type Type } from 'typescript/unstable/sync';
@@ -248,8 +249,6 @@ import {
 } from 'typescript/unstable/ast';
 import { describe, expect, it } from 'vitest';
 
-import en from './en.json';
-import zh from './zh.json';
 import { parseSource } from '../../scripts/typescriptSource.mjs';
 
 const APP_SOURCE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
