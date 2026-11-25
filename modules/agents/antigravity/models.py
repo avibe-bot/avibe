@@ -2,12 +2,31 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from config import paths
+from config.atomic_io import write_atomic
 from modules.agents.acp import AcpClient, AcpRpcError
 from modules.agents.base import AgentRequest
+
+logger = logging.getLogger(__name__)
+
+_LIVE_MODELS_CACHE_FILENAME = "antigravity_models_cache.json"
+_LIVE_MODELS_CACHE_LOCK = threading.Lock()
+_CANONICAL_AUTH_MODES = ("oauth-personal", "oauth-business", "gemini-api-key", "agent-platform")
+_AUTH_MODE_ALIASES = {
+    "api_key": "gemini-api-key",
+    "agent_platform": "agent-platform",
+    "adc": "agent-platform",
+}
 
 
 class AntigravityModelSelectionError(RuntimeError):
@@ -329,7 +348,16 @@ async def _set_effort_option(
             model=selected_model,
             default_effort=default_effort,
         ) from exc
-    updated = _normalize_config_options(resp.get("configOptions"))
+    try:
+        updated = validate_model_selection_receipt(resp, selected_model)
+    except AntigravityModelSelectionError as exc:
+        raise AntigravityModelSelectionError(
+            str(exc),
+            reason=exc.reason,
+            config_options=exc.config_options or fallback_config_options,
+            model=selected_model,
+            default_effort=default_effort,
+        ) from exc
     if not updated:
         return _with_option_current_value(
             options,
@@ -548,3 +576,306 @@ async def apply_model_and_effort(
         config_options=options,
         default_effort=baseline_effort,
     )
+
+
+def _config_str(config: Any, field_name: str) -> str:
+    value = getattr(config, field_name, None)
+    return str(value).strip() if value is not None else ""
+
+
+def _extract_antigravity_config(config: Any) -> Any:
+    if config is None:
+        return None
+    agents = getattr(config, "agents", None)
+    if agents is not None and hasattr(agents, "antigravity"):
+        return getattr(agents, "antigravity")
+    if hasattr(config, "antigravity"):
+        return getattr(config, "antigravity")
+    return config
+
+
+def _canonical_auth_mode(antigravity_config: Any) -> str:
+    raw = (_config_str(antigravity_config, "auth_mode") or "oauth-personal").lower()
+    mode = _AUTH_MODE_ALIASES.get(raw, raw)
+    return mode if mode in _CANONICAL_AUTH_MODES else "oauth-personal"
+
+
+def auth_config_fingerprint(antigravity_config: Any) -> str:
+    """Hash auth-affecting Antigravity config fields without exposing secrets."""
+    cfg = _extract_antigravity_config(antigravity_config)
+    payload = {
+        "auth_mode": _canonical_auth_mode(cfg),
+        "api_key": _config_str(cfg, "api_key"),
+        "base_url": _config_str(cfg, "base_url"),
+        "gcp_project": _config_str(cfg, "gcp_project"),
+        "gcp_location": _config_str(cfg, "gcp_location"),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _extract_option_choices_ordered(option: Mapping[str, Any]) -> list[tuple[str, str | None]]:
+    """Extract ordered, unique ``(value, display_name)`` pairs from flat or grouped ACP config options."""
+    choices: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
+
+    def _add(entry: Any) -> None:
+        if isinstance(entry, str):
+            val = entry.strip()
+            label = None
+        elif isinstance(entry, Mapping):
+            raw_val = entry.get("value") or entry.get("id") or entry.get("modelId")
+            val = raw_val.strip() if isinstance(raw_val, str) else ""
+            raw_label = (
+                entry.get("name")
+                or entry.get("label")
+                or entry.get("displayName")
+                or entry.get("display_name")
+            )
+            label = raw_label.strip() if isinstance(raw_label, str) and raw_label.strip() else None
+        else:
+            return
+        if val and val not in seen:
+            seen.add(val)
+            choices.append((val, label))
+
+    raw_options = option.get("options")
+    if not isinstance(raw_options, Sequence) or isinstance(raw_options, (str, bytes)):
+        return choices
+    for entry in raw_options:
+        if isinstance(entry, Mapping):
+            if entry.get("value") or entry.get("id") or entry.get("modelId"):
+                _add(entry)
+            nested = entry.get("options")
+            if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes)):
+                for sub in nested:
+                    _add(sub)
+        else:
+            _add(entry)
+    return choices
+
+
+def extract_live_model_catalog_entries(
+    session_or_config_options: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Extract live model catalog entries from ACP ``session/new`` or ``configOptions`` payloads."""
+    entries_by_id: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+
+    def _upsert(
+        model_id: str,
+        *,
+        label: str | None = None,
+        reasoning_efforts: Sequence[str] | None = None,
+    ) -> None:
+        cleaned_id = model_id.strip()
+        if not cleaned_id:
+            return
+        existing = entries_by_id.get(cleaned_id)
+        if existing is None:
+            existing = {"id": cleaned_id}
+            entries_by_id[cleaned_id] = existing
+            order.append(cleaned_id)
+        if label and label != cleaned_id and (not existing.get("label") or existing["label"] == cleaned_id):
+            existing["label"] = label
+        if reasoning_efforts:
+            existing["reasoning_efforts"] = list(reasoning_efforts)
+
+    config_options: tuple[dict[str, Any], ...] = ()
+    current_model: str | None = None
+
+    if isinstance(session_or_config_options, Mapping):
+        raw_models = session_or_config_options.get("models")
+        if isinstance(raw_models, Mapping):
+            current_model = _clean_optional(
+                raw_models.get("currentModelId") or raw_models.get("current_model_id")
+            )
+            avail = raw_models.get("availableModels")
+            if isinstance(avail, Sequence) and not isinstance(avail, (str, bytes)):
+                for item in avail:
+                    if isinstance(item, str):
+                        _upsert(item)
+                    elif isinstance(item, Mapping):
+                        raw_id = item.get("modelId") or item.get("id") or item.get("value")
+                        if isinstance(raw_id, str) and raw_id.strip():
+                            raw_label = (
+                                item.get("name")
+                                or item.get("label")
+                                or item.get("displayName")
+                                or item.get("display_name")
+                            )
+                            label = (
+                                raw_label.strip()
+                                if isinstance(raw_label, str) and raw_label.strip()
+                                else None
+                            )
+                            _upsert(raw_id, label=label)
+        config_options = _normalize_config_options(session_or_config_options.get("configOptions"))
+    elif isinstance(session_or_config_options, Sequence) and not isinstance(
+        session_or_config_options, (str, bytes)
+    ):
+        config_options = tuple(
+            dict(item) for item in session_or_config_options if isinstance(item, Mapping)
+        )
+
+    model_option = _find_config_option(config_options, categories=("model",), ids=("model",))
+    if model_option is not None:
+        for val, label in _extract_option_choices_ordered(model_option):
+            _upsert(val, label=label)
+        opt_current = _option_current_value(model_option)
+        if opt_current:
+            current_model = opt_current
+
+    effort_option = _find_config_option(
+        config_options,
+        categories=_EFFORT_CATEGORIES,
+        ids=_EFFORT_IDS,
+    )
+    if effort_option is not None and current_model:
+        efforts = [val for val, _ in _extract_option_choices_ordered(effort_option)]
+        if efforts:
+            _upsert(current_model, reasoning_efforts=efforts)
+
+    return [entries_by_id[model_id] for model_id in order]
+
+
+def _antigravity_models_cache_path() -> Path:
+    return paths.get_state_dir() / _LIVE_MODELS_CACHE_FILENAME
+
+
+def _normalize_cached_model_entry(item: Any) -> dict[str, Any] | None:
+    if not isinstance(item, Mapping):
+        return None
+    raw_id = item.get("id")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        return None
+    entry: dict[str, Any] = {"id": raw_id.strip()}
+    raw_label = item.get("label")
+    if isinstance(raw_label, str) and raw_label.strip() and raw_label.strip() != entry["id"]:
+        entry["label"] = raw_label.strip()
+    raw_efforts = item.get("reasoning_efforts")
+    if isinstance(raw_efforts, Sequence) and not isinstance(raw_efforts, (str, bytes)):
+        efforts: list[str] = []
+        seen: set[str] = set()
+        for val in raw_efforts:
+            if isinstance(val, str):
+                cleaned = val.strip()
+                if cleaned and cleaned not in seen:
+                    seen.add(cleaned)
+                    efforts.append(cleaned)
+        if efforts:
+            entry["reasoning_efforts"] = efforts
+    return entry
+
+
+def _read_raw_live_models_cache(cache_path: Path) -> dict[str, Any]:
+    try:
+        loaded = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def record_antigravity_live_models(
+    config: Any,
+    payload: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    *,
+    auth_fingerprint: str | None = None,
+) -> None:
+    """Persist account-scoped live Antigravity models and per-model effort options atomically."""
+    extracted = extract_live_model_catalog_entries(payload)
+    if not extracted:
+        return
+
+    active_fp = (auth_fingerprint or "").strip() or auth_config_fingerprint(config)
+    replace_set = isinstance(payload, Mapping)
+    cache_path = _antigravity_models_cache_path()
+
+    try:
+        with _LIVE_MODELS_CACHE_LOCK:
+            existing = _read_raw_live_models_cache(cache_path)
+            existing_models: list[dict[str, Any]] = []
+            if existing.get("auth_fingerprint") == active_fp and isinstance(existing.get("models"), list):
+                for item in existing["models"]:
+                    normalized = _normalize_cached_model_entry(item)
+                    if normalized is not None:
+                        existing_models.append(normalized)
+
+            if replace_set:
+                prev_by_id = {m["id"]: m for m in existing_models}
+                merged_models: list[dict[str, Any]] = []
+                for entry in extracted:
+                    merged = dict(entry)
+                    prev = prev_by_id.get(entry["id"])
+                    if prev is not None:
+                        if not merged.get("label") and prev.get("label"):
+                            merged["label"] = prev["label"]
+                        if not merged.get("reasoning_efforts") and prev.get("reasoning_efforts"):
+                            merged["reasoning_efforts"] = list(prev["reasoning_efforts"])
+                    merged_models.append(merged)
+            elif existing_models:
+                merged_by_id = {m["id"]: dict(m) for m in existing_models}
+                order = [m["id"] for m in existing_models]
+                for entry in extracted:
+                    model_id = entry["id"]
+                    current = merged_by_id.get(model_id)
+                    if current is None:
+                        merged_by_id[model_id] = dict(entry)
+                        order.append(model_id)
+                        continue
+                    if entry.get("label") and entry["label"] != model_id:
+                        current["label"] = entry["label"]
+                    if entry.get("reasoning_efforts"):
+                        current["reasoning_efforts"] = list(entry["reasoning_efforts"])
+                merged_models = [merged_by_id[mid] for mid in order]
+            else:
+                merged_models = [dict(entry) for entry in extracted]
+
+            document = {
+                "auth_fingerprint": active_fp,
+                "updated_at": time.time(),
+                "models": merged_models,
+            }
+            write_atomic(cache_path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+    except Exception:
+        logger.debug("Best-effort Antigravity live model cache write skipped", exc_info=True)
+
+
+def read_antigravity_live_models(
+    config: Any | None = None,
+    *,
+    auth_fingerprint: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return cached live Antigravity models when the cache matches the active auth fingerprint."""
+    cache_path = _antigravity_models_cache_path()
+    if not cache_path.is_file():
+        return []
+
+    cached = _read_raw_live_models_cache(cache_path)
+    cached_fp = cached.get("auth_fingerprint")
+    raw_models = cached.get("models")
+    if not isinstance(cached_fp, str) or not cached_fp or not isinstance(raw_models, list) or not raw_models:
+        return []
+
+    active_fp = (auth_fingerprint or "").strip()
+    if not active_fp:
+        if config is not None:
+            active_fp = auth_config_fingerprint(config)
+        else:
+            try:
+                from config.v2_config import V2Config
+
+                active_fp = auth_config_fingerprint(V2Config.load().agents.antigravity)
+            except Exception:
+                logger.debug("Could not load V2Config for Antigravity live model cache lookup", exc_info=True)
+                return []
+
+    if cached_fp != active_fp:
+        return []
+
+    entries: list[dict[str, Any]] = []
+    for item in raw_models:
+        normalized = _normalize_cached_model_entry(item)
+        if normalized is not None:
+            entries.append(normalized)
+    return entries

@@ -441,6 +441,25 @@ class AcpClient:
             params["additionalDirectories"] = list(additional_directories)
         return await self.send_request("session/load", params, timeout=self._request_timeout)
 
+    async def session_fork(
+        self,
+        session_id: str,
+        cwd: str,
+        *,
+        mcp_servers: Sequence[Mapping[str, Any]] = (),
+        additional_directories: Sequence[str] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "sessionId": session_id,
+            "cwd": cwd,
+            "mcpServers": [dict(server) for server in mcp_servers],
+        }
+        if additional_directories is not None:
+            params["additionalDirectories"] = list(additional_directories)
+        effective_timeout = self._request_timeout if timeout is None else timeout
+        return await self.send_request("session/fork", params, timeout=effective_timeout)
+
     async def session_list(
         self,
         *,
