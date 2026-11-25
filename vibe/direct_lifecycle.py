@@ -13,6 +13,7 @@ import contextlib
 import copy
 import logging
 import re
+import secrets
 import sys
 import threading
 import time
@@ -210,7 +211,7 @@ class DirectAccessLifecycle:
         self._stopped = asyncio.Event()
         self._shutdown = False
         self._pairing_suspended = False
-        self._suspension_token = 0
+        self._suspension_token: str | None = None
         self._config: V2Config | None = None
         self._signature: tuple[Any, ...] | None = None
         self._generation = 0
@@ -368,22 +369,22 @@ class DirectAccessLifecycle:
         return (self._permission_allowed is True and self._permission_received_at is not None
                 and 0 <= time.monotonic() - self._permission_received_at < PERMISSION_MAX_AGE_SECONDS)
 
-    async def prepare_pairing_change(self) -> int:
+    async def prepare_pairing_change(self) -> str:
         """Fence starts, then let the one resource owner stop before key discard.
 
         Does not load config or await a certificate worker: the writer already
         holds the config lock. A failed config commit deliberately stays closed.
         """
         self._pairing_suspended = True
-        self._suspension_token += 1
-        token = self._suspension_token
+        # Random, not a counter: a token kept across a UI restart must match nothing.
+        token = self._suspension_token = secrets.token_hex(16)
         self._deny("pairing_changed")
         self._stopped.clear()
         self._wake.set()
         await self._stopped.wait()
         return token
 
-    def _release_pairing_suspension(self, token: int) -> None:
+    def _release_pairing_suspension(self, token: str) -> None:
         """A pairing change was abandoned with the same config: open starts again.
 
         The config signature is unchanged, so ``_observe_config`` would never
@@ -398,10 +399,10 @@ class DirectAccessLifecycle:
         self._resume_required = True
         self._wake.set()
 
-    def release_pairing_suspension(self, token: int) -> None:
+    def release_pairing_suspension(self, token: str) -> None:
         self._submit(self._release_pairing_suspension, token)
 
-    def suspend_for_pairing_change(self, timeout_seconds: float = 10.0) -> int | None | bool:
+    def suspend_for_pairing_change(self, timeout_seconds: float = 10.0) -> str | None | bool:
         """The suspension token, None when nothing was running, or False when it could not stop."""
         loop = self._loop
         if loop is None:
@@ -889,12 +890,12 @@ def stop_for_pairing_change(timeout_seconds: float = 10.0) -> bool:
     return lifecycle is None or lifecycle.stop_for_pairing_change(timeout_seconds)
 
 
-def suspend_for_pairing_change(timeout_seconds: float = 10.0) -> int | None | bool:
+def suspend_for_pairing_change(timeout_seconds: float = 10.0) -> str | None | bool:
     lifecycle = active_lifecycle()
     return None if lifecycle is None else lifecycle.suspend_for_pairing_change(timeout_seconds)
 
 
-def release_pairing_suspension(token: int) -> None:
+def release_pairing_suspension(token: str) -> None:
     lifecycle = active_lifecycle()
     if lifecycle is not None:
         lifecycle.release_pairing_suspension(token)

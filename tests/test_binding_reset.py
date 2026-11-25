@@ -186,7 +186,7 @@ def test_rejected_unbind_restores_intent_without_connecting_or_sending(reset_hos
     assert workspace.read_text() == 'keep' and local._installation_id() is not None
 
 
-@pytest.mark.parametrize('reply', ['lose_first_response', 'html_404', 'html_502', 'wrong_op_200'])
+@pytest.mark.parametrize('reply', ['lose_first_response', 'html_404', 'html_502', 'json_500', 'wrong_op_200'])
 def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, monkeypatch, reply):
     import http.client
     import json
@@ -220,7 +220,10 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
                 # A gateway page, or an old service without the route: not the issuer's answer.
                 return SimpleNamespace(status=502 if reply == 'html_502' else 404, read=lambda size: b'<html>x</html>',
                                        getheader=lambda key: {'Content-Type': 'text/html'}.get(key))
-            if reply == 'wrong_op_200':
+            if reply == 'json_500' and first:
+                # A hosting platform's own JSON error, outside the contract: still only a retry.
+                status, data = 500, {'error': {'code': '500', 'message': 'A server error has occurred'}}
+            elif reply == 'wrong_op_200':
                 status, data = 200, {'status': 'unbound', 'operation_id': '41d8da35-78cd-43e9-b016-f29971164963'}
             else:
                 status, data = 200, {'status': 'unbound', **json.loads(posts[-1][0])}
@@ -260,12 +263,29 @@ def test_refused_unbind_reopens_the_direct_path_it_fenced(reset_host, monkeypatc
     lifecycle = SimpleNamespace(released=[])
     lifecycle.release_pairing_suspension = lifecycle.released.append
     monkeypatch.setattr(direct_lifecycle, 'active_lifecycle', lambda: lifecycle)
-    # The attempt's own stop answers with token 5; only that token is released.
-    monkeypatch.setattr(remote, '_stop_direct_lifecycle_before_pairing_discard', lambda cfg: 5)
+    # The attempt's own stop answers with a token; only that token is released.
+    monkeypatch.setattr(remote, '_stop_direct_lifecycle_before_pairing_discard', lambda cfg: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
     monkeypatch.setattr(unbind, 'send_original', lambda *a, **kw: 'ineligible')
     reset._save({**reset._new_record(V2Config.load()), 'schema': 2, 'operation': '7a0a3a3e-9f43-4a52-9c1e-1d1a4f3b6c20',
                  'phase': 'cloud', 'accepted': False, 'was_requested': True, 'root': unbind.root_stamp()})
-    assert reset.resume()['state'] == 'not_unbound' and lifecycle.released == [5]
+    assert reset.resume()['state'] == 'not_unbound' and lifecycle.released == ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa']
+
+
+def test_a_later_process_releases_the_direct_stop_the_journal_names(reset_host, monkeypatch):
+    from types import SimpleNamespace
+    from vibe import binding_unbind as unbind, direct_lifecycle
+
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.direct = True
+    cfg.save()
+    lifecycle = SimpleNamespace(released=[])
+    lifecycle.release_pairing_suspension = lifecycle.released.append
+    monkeypatch.setattr(direct_lifecycle, 'active_lifecycle', lambda: lifecycle)
+    # Another process stopped the direct path and recorded the 401; this one finishes the denial.
+    reset._save({**reset._new_record(cfg), 'schema': 2, 'operation': '7a0a3a3e-9f43-4a52-9c1e-1d1a4f3b6c20',
+                 'phase': 'invalid_credential', 'accepted': False, 'was_requested': False,
+                 'root': unbind.root_stamp(), 'direct_stop': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'})
+    assert reset.resume()['state'] == 'not_unbound' and lifecycle.released == ['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb']
 
 
 def test_lifecycle_release_clears_only_a_pairing_suspension():
@@ -273,14 +293,14 @@ def test_lifecycle_release_clears_only_a_pairing_suspension():
     from vibe.direct_lifecycle import DirectAccessLifecycle
 
     woke = []
-    state = SimpleNamespace(_shutdown=False, _pairing_suspended=True, _suspension_token=2, _permission_allowed=False,
+    state = SimpleNamespace(_shutdown=False, _pairing_suspended=True, _suspension_token='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', _permission_allowed=False,
                             _permission_received_at=1.0, _permission_reason='pairing_changed', _resume_required=False,
                             _wake=SimpleNamespace(set=lambda: woke.append(1)))
-    DirectAccessLifecycle._release_pairing_suspension(state, 1)  # A later pairing change stopped it since.
+    DirectAccessLifecycle._release_pairing_suspension(state, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')  # A later pairing change stopped it since.
     assert state._pairing_suspended and not woke
-    DirectAccessLifecycle._release_pairing_suspension(state, 2)
+    DirectAccessLifecycle._release_pairing_suspension(state, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
     assert not state._pairing_suspended and state._permission_allowed is None and state._resume_required and woke
-    DirectAccessLifecycle._release_pairing_suspension(state, 2)
+    DirectAccessLifecycle._release_pairing_suspension(state, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')
     assert len(woke) == 1
 
 

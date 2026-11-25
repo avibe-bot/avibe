@@ -80,7 +80,9 @@ def classify_receipt(status: int, body: bytes, operation: str, *, accepted: bool
     # admission, so it is retried with the same operation and key. Rate limits and
     # redirects, and any reply without a JSON object (gateway pages, an old
     # service's HTML 404, a truncated body), are such answers.
-    if status == 429 or 300 <= status < 400 or len(body) > 4096:
+    # Any 5xx too, JSON or not: a platform's own error (timeout, crash, failed deploy)
+    # may carry JSON, and the contract has no terminal 5xx (table v2.2, 19:53).
+    if status == 429 or 300 <= status < 400 or status >= 500 or len(body) > 4096:
         return 'retry'
     try:
         data = json.loads(body.decode('utf-8'), object_pairs_hook=_unique_object)
@@ -89,8 +91,6 @@ def classify_receipt(status: int, body: bytes, operation: str, *, accepted: bool
     except (UnicodeError, ValueError, RecursionError):
         return 'retry'
     if not isinstance(data, dict):
-        return 'retry'
-    if status == 503 and data == {'error': 'unbind_unavailable'}:
         return 'retry'
     # From here on the issuer answered with a JSON object; outside the contract it needs local attention.
     if status == 200 and _completed(data, operation):

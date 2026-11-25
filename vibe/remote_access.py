@@ -6241,9 +6241,9 @@ def _pairing_identity_revoked(base_config: V2Config | None, candidate_config: V2
     return previous.is_runtime_paired() and not current.is_runtime_paired()
 
 
-def _release_direct_lifecycle_after_refused_change(base_config: V2Config | None, token: int | None) -> None:
+def _release_direct_lifecycle_after_refused_change(base_config: V2Config | None, token: str | None) -> None:
     """Best effort: reopen only the direct-path stop this refused unbind made. Never raises."""
-    if base_config is None or not base_config.remote_access.vibe_cloud.direct or type(token) is not int:
+    if base_config is None or not base_config.remote_access.vibe_cloud.direct or not isinstance(token, str):
         return
     try:
         from vibe import direct_lifecycle
@@ -6270,7 +6270,7 @@ def _release_direct_lifecycle_after_refused_change(base_config: V2Config | None,
         logger.warning("Could not reopen the direct path after a refused unbind", exc_info=True)
 
 
-def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> int | None:
+def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> str | None:
     """Fence a previously opted-in UI owner before retiring its pairing keys.
 
     Returns that stop's token when one was made, so only it can be undone.
@@ -6342,7 +6342,7 @@ def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) 
             "UI direct access lifecycle did not confirm certificate retirement safety"
         )
     token = payload.get("token")
-    return token if type(token) is int else None
+    return token if isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) else None
 
 
 def prepare_pairing_revocation(

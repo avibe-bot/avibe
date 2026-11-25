@@ -9292,7 +9292,7 @@ def remote_access_direct_suspend():
 
     token = direct_lifecycle.suspend_for_pairing_change(timeout_seconds=10.0)
     if token is not False:
-        return jsonify({"ok": True, "stopped": True, **({"token": token} if type(token) is int else {})})
+        return jsonify({"ok": True, "stopped": True, **({"token": token} if isinstance(token, str) else {})})
     return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
 
 
@@ -9306,7 +9306,7 @@ def remote_access_direct_release():
 
     body = request.get_json(silent=True)
     token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
-    if type(token) is not int or token < 1:
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
         return jsonify({"ok": False, "error": "invalid_request"}), 400
     direct_lifecycle.release_pairing_suspension(token)
     return jsonify({"ok": True})

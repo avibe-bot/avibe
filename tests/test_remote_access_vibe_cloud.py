@@ -31,7 +31,7 @@ def test_direct_suspend_route_requires_local_cli_token(monkeypatch):
     monkeypatch.setattr(
         direct_lifecycle,
         "suspend_for_pairing_change",
-        lambda timeout_seconds=10.0: stopped.append(timeout_seconds) or 7,
+        lambda timeout_seconds=10.0: stopped.append(timeout_seconds) or "c" * 32,
     )
 
     response = ui_server.app.test_client().post(
@@ -45,7 +45,7 @@ def test_direct_suspend_route_requires_local_cli_token(monkeypatch):
 
     assert response.status_code == 200
     # The token lets only this stop's caller undo it after a refused unbind.
-    assert response.get_json() == {"ok": True, "stopped": True, "token": 7}
+    assert response.get_json() == {"ok": True, "stopped": True, "token": "c" * 32}
     assert stopped == [10.0]
 
 

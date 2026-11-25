@@ -33,8 +33,6 @@ def _save(intent):
 
 
 _CLOUD_PHASES = ('cloud', 'repair', 'invalid_credential', 'ineligible')
-# The direct-path stop this process made for the unbind it is running; only that one is undone.
-_direct_stop = None
 
 
 def _read():
@@ -52,7 +50,9 @@ def _read():
                   and re.fullmatch('[0-9a-f]{32}', record['operation']))
         hosted_fields = common | {'root', 'accepted', 'was_requested'}
         hosted = (type(schema) is int and schema == 2
-                  and hosted_fields <= fields <= hosted_fields | {'dispatched', 'host', 'release_at'}
+                  and hosted_fields <= fields <= hosted_fields | {'dispatched', 'host', 'release_at', 'direct_stop'}
+                  and (record.get('direct_stop') is None or isinstance(record['direct_stop'], str)
+                       and re.fullmatch('[0-9a-f]{32}', record['direct_stop']))
                   and type(record.get('dispatched', False)) is bool
                   and unbind.valid_host(record.get('host')) and unbind.valid_release(record.get('release_at'))
                   and record['phase'] in _CLOUD_PHASES + _PHASES and unbind.valid_operation(record['operation'])
@@ -160,11 +160,22 @@ def stop_sealed_unbind():
             _verify_stage(record, cfg)
         # Sealed means accepted. If this stop fails, the worker stops again before any send.
         try:
-            remote._stop_direct_lifecycle_before_pairing_discard(cfg)
+            _remember_direct_stop(record, remote._stop_direct_lifecycle_before_pairing_discard(cfg))
             remote.stop(cfg)
         except Exception:
             pass
         return {'state': 'unbinding'}
+
+
+def _remember_direct_stop(record, token):
+    """Journal the direct-path stop this unbind made, so any later process undoes only that one."""
+    if not isinstance(token, str) or record.get('direct_stop') == token:
+        return
+    with config_file_lock():
+        if _read() != record:
+            raise ClaimError('local_binding_changed')
+        record['direct_stop'] = token
+        _save(record)
 
 
 def accept_unbind(expected):
@@ -439,8 +450,7 @@ def _resume_cloud(record):
     with config_file_lock():
         cfg = local._config()
         _verify_stage(record, cfg)
-    global _direct_stop
-    _direct_stop = remote._stop_direct_lifecycle_before_pairing_discard(cfg)
+    _remember_direct_stop(record, remote._stop_direct_lifecycle_before_pairing_discard(cfg))
     if not remote.stop(cfg).get('ok'):
         return {'state': 'unbinding'}
     if record.get('dispatched') is False:
@@ -486,9 +496,8 @@ def _finish_denial(record):
         unbind.save_result(record['source'], 'not_unbound', reason, operation=record['operation'])
         gate.reset_intent_path().unlink()
         cfg = local._config()
-    global _direct_stop
-    token, _direct_stop = _direct_stop, None
-    remote._release_direct_lifecycle_after_refused_change(cfg, token)
+    # A token from before a UI restart matches nothing there, and releases nothing.
+    remote._release_direct_lifecycle_after_refused_change(cfg, record.get('direct_stop'))
     return {'state': 'not_unbound', 'reason_code': reason, 'operation': record['operation']}
 
 
