@@ -188,7 +188,10 @@ MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
-MODEL_HUB_BACKENDS = AGENT_BACKENDS
+MODEL_HUB_BACKENDS = tuple(backend for backend in AGENT_BACKENDS if backend != "antigravity")
+MODEL_HUB_NATIVE_BACKENDS = tuple(
+    backend for backend in NATIVE_CLI_BACKENDS if backend in MODEL_HUB_BACKENDS
+)
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
     "fable": "fable",
@@ -282,7 +285,7 @@ def _migrate_gemini_native_sources(payload: dict) -> dict:
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
     """Return the bundled fixed-menu ids used by persisted Hub routes."""
 
-    if backend not in {"claude", "codex", "antigravity"}:
+    if backend not in {"claude", "codex"}:
         return ()
     from vibe.backend_model_catalog import backend_model_entries, load_bundled_catalog
 
@@ -1031,7 +1034,7 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
             return "platforms"
         if path.startswith("agents."):
             backend = path.split(".", 2)[1]
-            if backend in MODEL_HUB_BACKENDS or backend == "avault":
+            if backend in AGENT_BACKENDS or backend == "avault":
                 return f"agents.{backend}"
         return path.split(".", 1)[0]
 
@@ -1684,6 +1687,8 @@ def hub_supply_block(backend: str, hub: Optional["ModelHubConfig"]) -> Optional[
     turned the gateway off in Models. Without a Hub config only the switch can be read.
     """
 
+    if backend not in MODEL_HUB_BACKENDS:
+        return None
     if not is_model_hub_enabled():
         return None if backend in NATIVE_CLI_BACKENDS else "hub_disabled"
     if hub is None:
@@ -3014,12 +3019,6 @@ class ModelHubAgentSupplyConfig(ModelHubSnapshotNode):
                 menu_kind="open",
                 menu=ModelHubMenuConfig(),
             )
-        if backend == "antigravity":
-            return cls(
-                backend="antigravity",
-                mode="direct",
-                menu_kind="fixed",
-            )
         if backend not in {"claude", "codex"}:
             raise ValueError(f"Unsupported Model Hub backend: {backend}")
         return cls(
@@ -3679,10 +3678,7 @@ class ModelHubConfig(ModelHubSnapshotNode):
     sources: list[ModelHubSourceConfig] = field(default_factory=list)
     agents: dict[str, ModelHubAgentSupplyConfig] = field(
         default_factory=lambda: {
-            backend: ModelHubAgentSupplyConfig.default(
-                backend,
-                mode="direct" if backend == "antigravity" else "hub",
-            )
+            backend: ModelHubAgentSupplyConfig.default(backend, mode="hub")
             for backend in MODEL_HUB_BACKENDS
             if backend != "vibey"
         }
@@ -3707,8 +3703,6 @@ class ModelHubConfig(ModelHubSnapshotNode):
         if "vibey" not in self.agents:
             self.agents["vibey"] = ModelHubAgentSupplyConfig.default("vibey", mode="hub")
             self.vibey_supply_pending = True
-        if "antigravity" not in self.agents:
-            self.agents["antigravity"] = ModelHubAgentSupplyConfig.default("antigravity", mode="direct")
 
     @staticmethod
     def source_eligible_for_backend(
@@ -3855,10 +3849,6 @@ class ModelHubConfig(ModelHubSnapshotNode):
         unseeded = self.vibey_supply_pending and self.agents["vibey"] == ModelHubAgentSupplyConfig.default(
             "vibey", mode="hub"
         )
-        default_antigravity = (
-            self.agents["antigravity"].to_payload()
-            == ModelHubAgentSupplyConfig.default("antigravity", mode="direct").to_payload()
-        )
         payload = {
             "enabled": self.enabled,
             "runtime_default_applied": self.runtime_default_applied,
@@ -3867,7 +3857,6 @@ class ModelHubConfig(ModelHubSnapshotNode):
                 backend: self.agents[backend].to_payload()
                 for backend in MODEL_HUB_BACKENDS
                 if not (backend == "vibey" and unseeded)
-                and not (backend == "antigravity" and default_antigravity)
             },
         }
         if self.hosted_tools:

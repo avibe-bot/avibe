@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 from config.v2_config import (
+    MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
@@ -562,8 +563,6 @@ def test_runtime_opencode_resolution_preserves_absent_selection():
 
 
 def test_hub_subscription_is_cross_backend_eligible_and_origin_unrestricted():
-    from modules.agents.catalog import AGENT_BACKENDS
-
     source = _source(
         "src_hubsub002",
         ("shared-model",),
@@ -577,8 +576,8 @@ def test_hub_subscription_is_cross_backend_eligible_and_origin_unrestricted():
     )
     config.agents["codex"].sources.order = [source.id]
 
-    assert all(ModelHubConfig.source_eligible_for_backend(source, backend) for backend in AGENT_BACKENDS)
-    assert allowed_origins(source) == AGENT_BACKENDS
+    assert all(ModelHubConfig.source_eligible_for_backend(source, backend) for backend in MODEL_HUB_BACKENDS)
+    assert allowed_origins(source) == ("vibey", "opencode", "claude", "codex")
     resolution = resolve_model_hub_turn(config, "codex", "shared-model")
     assert resolution.source is source
 

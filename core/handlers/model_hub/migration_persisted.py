@@ -53,7 +53,6 @@ class PersistedInventory:
             "claude": claude_settings_paths(home, projects),
             "codex": codex_config_paths(home, projects),
             "opencode": opencode_config_paths(home, projects),
-            "antigravity": (),
         }
         documents: dict[Path, dict | None] = {}
         problems: dict[Path, str] = {}
@@ -86,7 +85,6 @@ class PersistedInventory:
             "claude": tuple(path.absolute() for path in native_credentials_paths("claude", home)),
             "codex": tuple(path.absolute() for path in native_credentials_paths("codex", home)),
             "opencode": (opencode_auth_path(home).absolute(),),
-            "antigravity": (),
         }
         for path in dict.fromkeys(path for paths in credential_paths.values() for path in paths):
             path = path.absolute()

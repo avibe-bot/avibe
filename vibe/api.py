@@ -32,6 +32,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from config import paths
 from config.v2_config import (
     CONFIG_LOCK,
+    MODEL_HUB_BACKENDS,
     V2Config,
     config_file_lock,
     AGENT_CREDENTIAL_SECTIONS,
@@ -8861,7 +8862,7 @@ def route_menu_options(
     normalized_backend = (backend or "").strip().lower()
     hub_agent = None
     hub_read = False
-    if hub_agent_reader is not None and normalized_backend in AGENT_BACKENDS:
+    if hub_agent_reader is not None and normalized_backend in MODEL_HUB_BACKENDS:
         try:
             hub_agent = hub_agent_reader(normalized_backend)
             hub_read = True
@@ -8882,6 +8883,7 @@ def route_menu_options(
     if options.get("ok"):
         options["mode"] = (
             "hub" if not is_native_cli_backend(normalized_backend)
+            else "direct" if normalized_backend not in MODEL_HUB_BACKENDS
             else str((hub_agent or {}).get("mode") or "direct") if hub_read else "unknown"
         )
         options["authoritative"] = not is_native_cli_backend(normalized_backend)
@@ -12730,7 +12732,8 @@ async def get_backend_connection(name: str) -> dict:
     builtin = is_builtin_backend(name)
     backend_config = None if builtin else getattr(config.agents, name)
     enabled = builtin or bool(backend_config.enabled)
-    supply_mode = config.model_hub.agents[name].mode
+    supply = config.model_hub.agents.get(name)
+    supply_mode = supply.mode if supply is not None else "direct"
     native = is_native_cli_backend(name)
     default_cli = (default_cli_for_backend(name) or name) if native else name
     cli_health = await detect_cli_async(backend_config.cli_path or default_cli, name) if native else None

@@ -21,13 +21,13 @@ from sqlalchemy import func, literal_column, select
 
 from config import paths
 from config.model_hub_snapshot import freeze_model_hub
-from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
     KEYLESS_EXA_DISPLAY_NAME,
     KEYLESS_EXA_SOURCE_ID,
     KEYLESS_EXA_SERVICE_ID,
     MODEL_HUB_BACKENDS,
+    MODEL_HUB_NATIVE_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
@@ -2573,7 +2573,7 @@ class ModelHubService:
         except (TakeoverStateError, OSError):
             # Unknown recovery state cannot authorize any native credential
             # writer or native launch. Controller recovery preserves this gate.
-            self.migration_blocked_backends.update(NATIVE_CLI_BACKENDS)
+            self.migration_blocked_backends.update(MODEL_HUB_NATIVE_BACKENDS)
             raise ModelHubError("migration_item_conflict", status=409) from None
         task = self._runtime_resume_task
         if task is None or task.done():
@@ -8164,11 +8164,7 @@ class ModelHubService:
         return hop_hosted_tools(turn, source, model_id, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     async def set_agent_mode(self, backend: str, mode: object) -> dict:
-        if (
-            mode not in {"hub", "direct"}
-            or (backend == "vibey" and mode != "hub")
-            or (backend == "antigravity" and mode != "direct")
-        ):
+        if mode not in {"hub", "direct"} or (backend == "vibey" and mode != "hub"):
             raise ModelHubError("mode_switch_blocked")
 
         # A mode is a launch input like any other: running work finishes in the
@@ -8480,7 +8476,7 @@ class ModelHubService:
 
         ranks: dict[str, int] = {}
         # Every native CLI's bundled menu; one without a menu (OpenCode) lists nothing.
-        for backend in sorted(NATIVE_CLI_BACKENDS):
+        for backend in sorted(MODEL_HUB_NATIVE_BACKENDS):
             for index, item in enumerate(self._current_builtin_models(cast(BackendName, backend))):
                 model_id = item.get("id")
                 if isinstance(model_id, str):
@@ -10697,7 +10693,7 @@ class ModelHubService:
                     clean_native_stores=(self.migration_journal.completed() or {}).get("clean_native_stores"),
                     retained_native_ids=(self.migration_journal.completed() or {}).get("retained_native_ids"),
                     legacy_auth=(
-                        self.store.native_auth_snapshot(tuple(sorted(NATIVE_CLI_BACKENDS)))
+                        self.store.native_auth_snapshot(tuple(sorted(MODEL_HUB_NATIVE_BACKENDS)))
                         if isinstance(self.store, V2ModelHubConfigStore) else None
                     ),
                 )
@@ -10751,7 +10747,7 @@ class ModelHubService:
             try:
                 pending = self.migration_journal.load()
             except (TakeoverStateError, OSError):
-                self.migration_blocked_backends.update(NATIVE_CLI_BACKENDS)
+                self.migration_blocked_backends.update(MODEL_HUB_NATIVE_BACKENDS)
                 raise ModelHubError("migration_configuration_blocked", status=409) from None
             if pending is not None and pending["phase"] == "exposed":
                 raise ModelHubError("migration_recovery_pending", status=409) from None

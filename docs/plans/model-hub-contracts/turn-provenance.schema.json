@@ -68,7 +68,7 @@
       "description": "When the FSM settled the turn."
     },
     "agent": {
-      "enum": ["claude", "codex", "opencode", "antigravity", "vibey"],
+      "enum": ["claude", "codex", "opencode", "vibey"],
       "description": "Backend identifier. Mirrors AgentSupply.backend exactly."
     },
     "requested_model_id": {

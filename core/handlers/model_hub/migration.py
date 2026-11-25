@@ -11,11 +11,12 @@ import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from modules.agents.catalog import NATIVE_CLI_BACKENDS, NativeCliBackend, display_name_for_backend
+from modules.agents.catalog import NativeCliBackend, display_name_for_backend
 from typing import Any, Awaitable, Callable, Collection, Literal, Mapping, Optional, Protocol, cast
 
 from config.v2_config import (
     MODEL_HUB_BACKENDS,
+    MODEL_HUB_NATIVE_BACKENDS,
     ModelHubConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
@@ -573,7 +574,7 @@ def _blocked_item(
         id=item_id, source_id=source_id, backend=cast(Any, backend),
         kind="api_key", masked_detail="", proposed_action="reauth",
         selected=False, notes_key=f"settings.models.migration.blocked.{reason}",
-        vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode", "antigravity": "gemini"}[backend],
+        vendor={"claude": "anthropic", "codex": "openai", "opencode": "opencode"}[backend],
         protocol="anthropic" if backend == "claude" else "openai_responses",
         display_name=display_name_for_backend(backend),
         source_paths=source_paths, shell_variables=shell_variables,
@@ -2260,7 +2261,7 @@ async def apply_native_migration(
             scan_native_configs, host.store.load(), mask_credential=mask_credential,
             home=host.migration_home,
             validate_base_url=validate_base_url,
-            legacy_auth=_native_auth_snapshot(host, tuple(sorted(NATIVE_CLI_BACKENDS))),
+            legacy_auth=_native_auth_snapshot(host, tuple(sorted(MODEL_HUB_NATIVE_BACKENDS))),
             project_roots=host.migration_project_roots(),
             clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
             retained_native_ids=(host.migration_journal.completed() or {}).get("retained_native_ids"),
@@ -2290,7 +2291,7 @@ async def apply_native_migration(
                 item for item in await asyncio.to_thread(
                     scan_native_configs, host.store.load(), mask_credential=mask_credential,
                     home=host.migration_home, validate_base_url=validate_base_url,
-                    legacy_auth=_native_auth_snapshot(host, tuple(sorted(NATIVE_CLI_BACKENDS))),
+                    legacy_auth=_native_auth_snapshot(host, tuple(sorted(MODEL_HUB_NATIVE_BACKENDS))),
                     project_roots=host.migration_project_roots(),
                     clean_native_stores=(host.migration_journal.completed() or {}).get("clean_native_stores"),
                 )
