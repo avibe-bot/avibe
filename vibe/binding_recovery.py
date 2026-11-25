@@ -46,7 +46,7 @@ def _run_pair(record):
     return {'state': 'pairing_recovery_required', 'reason_code': _pair_reason(current, error, local._config())}
 
 
-def _repair_snapshot():
+def _repair_snapshot(*, allow_cloud=False):
     """Under reset admission + config lock. Never derive a deletion path from a marker."""
     from storage.mobile_store import mobile_store_path
     root = paths.get_vibe_remote_dir().resolve(strict=True)
@@ -60,6 +60,10 @@ def _repair_snapshot():
         raise ClaimError('reset_repair_required')
     cfg = local._config()
     reason = reset._repair_reason(cfg)
+    if reason is None and allow_cloud:
+        current = reset._read()
+        if current['schema'] == 2 and current['phase'] == 'cloud':
+            reason = 'unbind_local_override'
     if reason is None:
         raise ClaimError('operation_in_progress')
     record, error = remote._read_pending_pairing_record()
@@ -96,10 +100,10 @@ def _approved_hostname(record):
     return host if len(host) <= 253 and all(_HOST.fullmatch(label) for label in host.split('.')) else None
 
 
-def _repair(*, confirm, keep_pairing, expected_hostname=None):
+def _repair(*, confirm, keep_pairing, expected_hostname=None, allow_cloud=False):
     reset._require_local_terminal()
     with gate.admitted('reset'), config_file_lock():
-        _, before, record, replay = _repair_snapshot()
+        _, before, record, replay = _repair_snapshot(allow_cloud=allow_cloud)
         if replay and expected_hostname is not None and expected_hostname != _approved_hostname(record):
             raise ClaimError('local_binding_changed')
         if replay != keep_pairing:
@@ -111,7 +115,7 @@ def _repair(*, confirm, keep_pairing, expected_hostname=None):
     reset._require_local_terminal()
     with gate.admitted('reset'):
         with config_file_lock():
-            cfg, after, record, replay = _repair_snapshot()
+            cfg, after, record, replay = _repair_snapshot(allow_cloud=allow_cloud)
             if before != after:
                 raise ClaimError('local_binding_changed')
             if replay:
@@ -121,7 +125,17 @@ def _repair(*, confirm, keep_pairing, expected_hostname=None):
                 # normal recovery owner. The admission file lock never drops.
                 gate.reset_intent_path().unlink()
             else:
-                reset._seal(cfg, replace=True)
+                try:
+                    previous = reset._read()
+                except ClaimError:
+                    previous = None
+                if previous and previous['schema'] == 2:
+                    # The separate TTY consent replaces a hosted intent with local-only cleanup;
+                    # schema 1's operation is the same UUID in its legacy 32-hex representation.
+                    reset._save({**reset._new_record(cfg), 'schema': 1, 'phase': 'retire',
+                                 'operation': previous['operation'].replace('-', '')})
+                else:
+                    reset._seal(cfg, replace=True)
         if not replay:
             return _resume_reset()
         with gate.transfer_to_pairing():

@@ -4883,8 +4883,11 @@ def _write_device_access_switch(config, enabled):
 def stop(config: V2Config | None = None) -> dict[str, Any]:
     """Stop the connector and withdraw the request that keeps one running."""
 
+    from vibe import binding_admission as gate
     try:
         with _connector_lifecycle():
+            if gate.reset_in_progress() and not gate.owns_reset_admission():
+                return {'ok': False, 'error': 'reset_in_progress', 'status': 409}
             requested = _connector_requested_path().is_file()
             try:
                 # A new-version Stop can arrive before the first UI startup.
@@ -4986,9 +4989,14 @@ def start(config: V2Config | None = None) -> dict[str, Any]:
         loaded = config or V2Config.load()
     except Exception:
         loaded = None
+    from vibe.binding_admission import reset_in_progress
+    if reset_in_progress():
+        return {'ok': False, 'error': 'reset_in_progress', 'status': 409}
     install_failure = _ensure_cloudflared_pin(loaded)
     try:
         with _connector_lifecycle():
+            if reset_in_progress():
+                return {'ok': False, 'error': 'reset_in_progress', 'status': 409}
             requested = _connector_requested_path().is_file()
             result = _start(loaded or config, record_request=True, install_failure=install_failure)
             if result.get('ok') and not requested and _connector_requested_path().is_file():
@@ -6233,8 +6241,40 @@ def _pairing_identity_revoked(base_config: V2Config | None, candidate_config: V2
     return previous.is_runtime_paired() and not current.is_runtime_paired()
 
 
-def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> None:
-    """Fence a previously opted-in UI owner before retiring its pairing keys."""
+def _release_direct_lifecycle_after_refused_change(base_config: V2Config | None, token: str | None) -> None:
+    """Best effort: reopen only the direct-path stop this refused unbind made. Never raises."""
+    if base_config is None or not base_config.remote_access.vibe_cloud.direct or not isinstance(token, str):
+        return
+    try:
+        from vibe import direct_lifecycle
+
+        if direct_lifecycle.active_lifecycle() is not None:
+            direct_lifecycle.release_pairing_suspension(token)
+            return
+        from vibe import runtime
+
+        if runtime.recorded_ui_is_gone():
+            return  # A UI that starts later begins unsuspended.
+        from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+
+        with requests.Session() as client:
+            client.trust_env = False
+            client.post(
+                f"{origin_service_for_pairing(base_config)}/api/remote-access/direct/release",
+                headers={"X-Vibe-Show-Client": "cli", SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token()},
+                json={"token": token},
+                timeout=(1.0, 5.0),
+                allow_redirects=False,
+            )
+    except Exception:
+        logger.warning("Could not reopen the direct path after a refused unbind", exc_info=True)
+
+
+def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> str | None:
+    """Fence a previously opted-in UI owner before retiring its pairing keys.
+
+    Returns that stop's token when one was made, so only it can be undone.
+    """
 
     # Read the persisted/base choice, never the candidate: ON -> OFF can
     # still have a running owner, while OFF must retain the old pairing save
@@ -6248,11 +6288,12 @@ def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) 
     except ImportError:
         return
     if lifecycle is not None:
-        if not direct_lifecycle.stop_for_pairing_change():
+        token = direct_lifecycle.suspend_for_pairing_change()
+        if token is False:
             raise _PairingRevocationUnavailable(
                 "direct access lifecycle could not stop before certificate retirement"
             )
-        return
+        return token
     if not base_config.remote_access.vibe_cloud.is_runtime_paired():
         return
     try:
@@ -6300,6 +6341,8 @@ def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) 
         raise _PairingRevocationUnavailable(
             "UI direct access lifecycle did not confirm certificate retirement safety"
         )
+    token = payload.get("token")
+    return token if isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token) else None
 
 
 def prepare_pairing_revocation(
@@ -7091,9 +7134,11 @@ def _persist_pairing_impl(
             except (OSError, ClaimError):
                 return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         from vibe.binding_health import clear_after_publication
+        from vibe.binding_unbind import clear_result
         _check_pairing_home()
         try:
             clear_after_publication()
+            clear_result()  # A later local-only reset must not revive the old unbind result.
         except OSError:
             return {"ok": False, "error": "pairing_retirement_failed", "pairing": {"recoverable": True}}
         if not _retire_pending_pairing(operation_id=str(record["operation_id"])):
