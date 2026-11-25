@@ -100,7 +100,7 @@ const hubSupply = (backend: AgentBackend, named: NamedAgentSupply[], overrides: 
 /** The Agent listing and the Hub's routing table, kept agreeing the way a server that
  *  routes the Agents it knows keeps them. The gate exists for the cases where they do
  *  NOT agree, and those set one of the two projections again afterwards. */
-function serveAgents(defaultName: string | null, agents: Array<{ name: string; backend: AgentBackend } & Record<string, unknown>>) {
+function serveAgents(defaultName: string | null, agents: Array<{ name: string; backend: AgentBackend | 'antigravity' } & Record<string, unknown>>) {
   listing = {
     ok: true,
     default_agent_name: defaultName,
@@ -125,7 +125,9 @@ function serveAgents(defaultName: string | null, agents: Array<{ name: string; b
     };
   });
   const byBackend = new Map<AgentBackend, NamedAgentSupply[]>();
-  for (const agent of agents) byBackend.set(agent.backend, [...byBackend.get(agent.backend) ?? [], route(agent.name)]);
+  for (const agent of agents) {
+    if (agent.backend !== 'antigravity') byBackend.set(agent.backend, [...byBackend.get(agent.backend) ?? [], route(agent.name)]);
+  }
   mock.models.listAgents.mockResolvedValue([...byBackend].map(([backend, named]) => hubSupply(backend, named)));
 }
 /** The baseline candidate: an ordinary shipped Claude Agent on a routed backend. */
@@ -544,32 +546,15 @@ describe('the correlated entry gate', () => {
 
   it('admits healthy Direct-only Antigravity as the sole configured assistant without a Hub supply or running Hub engine', async () => {
     serveConfig(baseConfig({
-      agents: {
-        claude: { enabled: false },
-        codex: { enabled: false },
-        opencode: { enabled: false },
-        antigravity: { enabled: true, cli_path: 'agy' },
-      },
+      agents: { claude: { enabled: false }, codex: { enabled: false }, opencode: { enabled: false }, antigravity: { enabled: true, cli_path: 'agy' } },
     }));
-    const antigravityAgent = {
-      id: 'ag-1', name: 'antigravity', display_name: 'Antigravity', description: null,
-      backend: 'antigravity', model: 'gemini-4-neon', reasoning_effort: null,
-      enabled: true, archived: false, archived_at: null, source: 'builtin', updated_at: '',
-    };
-    listing = { ok: true, default_agent_name: null, agents: [antigravityAgent] };
-    mock.api.listVibeAgents.mockImplementation(async () => listing);
-    mock.api.getVibeAgent.mockImplementation(async (name: string) => name === 'antigravity'
-      ? { ok: true, default_agent_name: listing.default_agent_name, agent: { ...antigravityAgent, system_prompt: null, created_at: '', metadata: { builtin_default: true } } }
-      : { ok: false, agent: null, default_agent_name: listing.default_agent_name });
+    serveAgents(null, [{ name: 'antigravity', backend: 'antigravity', display_name: 'Antigravity', model: 'gemini-4-neon' }]);
     mock.api.detectCli.mockImplementation(async (binary: string, backend: string) => ({
-      found: backend === 'antigravity',
-      status: backend === 'antigravity' ? 'ok' as const : 'missing' as const,
-      path: binary,
+      found: backend === 'antigravity', status: backend === 'antigravity' ? 'ok' as const : 'missing' as const, path: binary,
     }));
     mock.api.getBackendConnection.mockImplementation(async (backend: string) => backend === 'antigravity'
       ? { ok: true, backend, enabled: true, installed: true, auth: 'subscription', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct' }
       : { ok: true, backend, enabled: false, installed: false, auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub' });
-    mock.models.listAgents.mockResolvedValue([]);
 
     const enter = await setup();
     // Even if Hub runtime and supply IPC fail at completion time, Direct-only Antigravity still enters.
