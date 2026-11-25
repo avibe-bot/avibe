@@ -209,6 +209,9 @@ def _append_source(
             # A Gemini Source names a model as Google lists it (``models/<id>``); the executor puts its name in the
             # upstream path itself, so the name is the bare id and the listed one is the alias it is routed by.
             entry["models"] = [{**model, "name": model["name"].removeprefix("models/")} for model in models]
+        else:
+            # CPA substitutes its native Gemini catalog for an empty models list.
+            entry["excluded-models"] = ["*"]
         payload.setdefault("gemini-api-key", []).append(entry)
         if images:
             # The engine's images endpoints serve an image model only from an OpenAI-compatible entry that flags it
@@ -245,6 +248,10 @@ def _append_source(
         }
         if models:
             entry["models"] = models
+        else:
+            # Keep the credential for discovery, not the built-in Claude catalog:
+            # otherwise a just-removed route can stay registered through reload.
+            entry["excluded-models"] = ["*"]
         payload.setdefault("claude-api-key", []).append(entry)
         return
     if source.protocol == "openai_responses":
