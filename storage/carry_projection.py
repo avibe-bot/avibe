@@ -18,7 +18,7 @@ from sqlalchemy.engine import Connection
 
 from core.agent_core.harness.store import ContextEntry
 from core.agent_core.messages import UserMessage
-from storage.models import agent_sessions, message_deliveries
+from storage.models import agent_sessions, message_deliveries, messages, session_turns
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +76,22 @@ class CarryProjection:
             yield row
 
     def _survivor(self, row):
-        from storage.carry_members import surviving_input
+        from storage.carry_members import host_only_input, surviving_input
 
         mid = row.row_id
         members = tuple(self.conn.execute(select(message_deliveries.c.id).where(message_deliveries.c.message_id == mid)
                         .order_by(message_deliveries.c.turn_position, message_deliveries.c.id)).scalars())
         hidden = set(self.occurrences[mid][1])
         if hidden == set(members):
-            return None
+            legacy_dispatch = None
+            if len(members) == 1 and not row.payload.get("carry_render"):
+                # Host handoff was attached to initial input, never to a steer. Only the real
+                # dispatch body proves where host-authored prose ends on an old text-only row.
+                legacy_dispatch = self.conn.execute(select(session_turns.c.dispatch_text)
+                    .join(messages, messages.c.id == session_turns.c.initial_delivery_id)
+                    .where(messages.c.id == mid, session_turns.c.session_id == row.session_id,
+                           text("coalesce(json_array_length(messages.content_json,'$.attachments'),0)=0"))).scalar()
+            return host_only_input(row.message, row.payload, legacy_dispatch=legacy_dispatch)
         replacement = surviving_input(self.conn, mid, members, hidden, row.message)
         if replacement is None:
             _opaque(mid)
@@ -91,15 +99,17 @@ class CarryProjection:
         return replacement
 
 
-# Drive the lookup from the small partial index on carry children. A predecessor's
+# Scan only this session's IDs in its existing covering queue index. Fetch a history by
+# primary key only for a matching carry ID, never for an ordinary delivery. A predecessor's
 # id is immediate; original_id in the event refers instead to the root of a chain.
 _CARRY_EDGES = text("""
     SELECT d.id, d.message_id, m.context_seq, json_extract(e.value,'$.at') AS created
-    FROM message_deliveries AS c INDEXED BY ix_message_deliveries_session_carry
-    CROSS JOIN message_deliveries AS d ON d.id=substr(c.id,1,length(c.id)-6) AND d.session_id=c.session_id
+    FROM message_deliveries AS ids INDEXED BY ix_message_deliveries_session_state
+    CROSS JOIN message_deliveries AS c ON c.id=ids.id
+    CROSS JOIN message_deliveries AS d ON d.id=substr(ids.id,1,length(ids.id)-6) AND d.session_id=ids.session_id
     CROSS JOIN messages AS m ON m.id=d.message_id AND m.session_id=d.session_id
     CROSS JOIN json_each(c.delivery_history_json,'$.events') AS e
-    WHERE c.session_id=:member AND c.id GLOB '*~carry' AND m.context_seq IS NOT NULL
+    WHERE ids.session_id=:member AND ids.id GLOB '*~carry' AND m.context_seq IS NOT NULL
     AND (:bound IS NULL OR m.context_seq<=:bound)
     AND json_extract(e.value,'$.kind')='turn_carry'
     AND json_extract(e.value,'$.reason') IN ('failed','failed_user')

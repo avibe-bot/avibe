@@ -1302,7 +1302,6 @@ message_deliveries = Table(
         "id",
         sqlite_where=text(DELIVERY_SESSION_ORDER_PREDICATE),
     ),
-    Index("ix_message_deliveries_session_carry", "session_id", "id", sqlite_where=text("id GLOB '*~carry'")),
     Index("ix_message_deliveries_session_state", "session_id", "state", "submitted_at", "id"),
     Index(
         "ix_message_deliveries_message",
