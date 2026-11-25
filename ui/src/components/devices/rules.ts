@@ -94,7 +94,8 @@ export function activityText(t: TFunction, language: string, item: DeviceActivit
       const what = event.label
         ? t(alarm ? 'devices.activity.alarmLabelled' : 'devices.activity.reminderLabelled', { label: event.label })
         : t(alarm ? 'devices.activity.alarm' : 'devices.activity.reminder');
-      return event.confirmed ? t('devices.activity.confirmedOn', { what, device }) : what;
+      if (!event.confirmed) return what;
+      return device ? t('devices.activity.confirmedOn', { what, device }) : t('devices.activity.formerConfirmedOn', { what });
     }
     case 'remoteAccessOn':
       return t('devices.activity.remoteAccessOn');

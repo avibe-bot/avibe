@@ -8186,6 +8186,7 @@
       "alarmLabelled": "创建闹钟「{{label}}」",
       "reminderLabelled": "创建提醒「{{label}}」",
       "confirmedOn": "{{what}}，已在 {{device}} 上确认",
+      "formerConfirmedOn": "{{what}}，已在一台已不在列表里的设备上确认",
       "remoteAccessOff": "远程访问已关闭",
       "earlier": "更早的活动"
     },

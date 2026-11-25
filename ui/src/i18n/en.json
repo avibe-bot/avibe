@@ -8186,6 +8186,7 @@
       "alarmLabelled": "Alarm “{{label}}” created",
       "reminderLabelled": "Reminder “{{label}}” created",
       "confirmedOn": "{{what}}, confirmed on {{device}}",
+      "formerConfirmedOn": "{{what}}, confirmed on a device no longer in the list",
       "remoteAccessOff": "Remote access turned off",
       "earlier": "Earlier activity"
     },
