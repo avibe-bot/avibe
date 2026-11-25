@@ -35,21 +35,18 @@ from vibe.desktop_backends import BACKEND_SPECS, DesktopBackendError, install_de
 
 
 def test_catalog_registers_antigravity_and_never_acp():
-    assert "antigravity" in AGENT_BACKENDS
-    assert "antigravity" in NATIVE_CLI_BACKENDS
+    assert "antigravity" in AGENT_BACKENDS and "antigravity" in NATIVE_CLI_BACKENDS
     assert "acp" not in AGENT_BACKEND_REGISTRY
-    descriptor = get_agent_backend_descriptor("antigravity")
-    assert descriptor.display_name == "Antigravity"
-    assert descriptor.default_cli == "agy"
-    assert descriptor.default_enabled is False
-    assert descriptor.latest_probe == ("github", "google-antigravity/antigravity-cli")
+    d = get_agent_backend_descriptor("antigravity")
+    assert (d.display_name, d.default_cli, d.default_enabled, d.latest_probe) == (
+        "Antigravity", "agy", False, ("github", "google-antigravity/antigravity-cli")
+    )
 
 
-def test_antigravity_config_round_trip_and_api_masking(tmp_path: Path):
+def test_antigravity_config_round_trip_masking_and_upgrade_compat(tmp_path: Path):
     config = V2Config.default()
     assert config.agents.antigravity == AntigravityConfig()
-    assert config.agents.antigravity.enabled is False
-    assert config.agents.antigravity.cli_path == "agy"
+    assert (config.agents.antigravity.enabled, config.agents.antigravity.cli_path) == (False, "agy")
 
     config.agents.antigravity = AntigravityConfig(
         enabled=True,
@@ -66,55 +63,36 @@ def test_antigravity_config_round_trip_and_api_masking(tmp_path: Path):
     config.save(config_path)
 
     loaded = V2Config.load(config_path)
-    assert loaded.load_warnings == ()
-    assert loaded.agents.antigravity == config.agents.antigravity
+    assert loaded.load_warnings == () and loaded.agents.antigravity == config.agents.antigravity
 
     compat = to_app_config(loaded, resolve_agent_paths=False)
     assert compat.antigravity is not None
-    assert compat.antigravity.binary == "/opt/bin/agy"
-    assert compat.antigravity.auth_mode == "gemini-api-key"
-    assert compat.antigravity.gcp_project == "demo-project"
+    assert (compat.antigravity.binary, compat.antigravity.auth_mode, compat.antigravity.gcp_project) == (
+        "/opt/bin/agy", "gemini-api-key", "demo-project"
+    )
 
     public_payload = api.config_to_payload(loaded, include_secrets=False)
     ag_public = public_payload["agents"]["antigravity"]
-    assert ag_public["api_key"] is None
-    assert ag_public["has_api_key"] is True
-    assert ag_public["api_key_length"] == len("AIza-test-secret")
+    assert (ag_public["api_key"], ag_public["has_api_key"], ag_public["api_key_length"]) == (
+        None, True, len("AIza-test-secret")
+    )
+    stripped = api._strip_agent_auth_fields(public_payload)["agents"]["antigravity"]
+    assert not any(f in stripped for f in ("auth_mode", "api_key", "base_url", "gcp_project", "gcp_location"))
 
-    stripped = api._strip_agent_auth_fields(public_payload)
-    for field in ("auth_mode", "api_key", "base_url", "gcp_project", "gcp_location"):
-        assert field not in stripped["agents"]["antigravity"]
-
-
-def test_antigravity_config_upgrade_and_downgrade_compatibility(tmp_path: Path):
-    # Pre-antigravity saved config loads cleanly with Antigravity disabled and no warnings.
-    fresh = V2Config.default()
-    config_path = tmp_path / "config.json"
-    fresh.save(config_path)
+    # Upgrade from pre-antigravity config keeps it disabled and excluded from Model Hub.
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-
-    # Antigravity is excluded from Model Hub entirely.
-    assert "antigravity" not in raw["model_hub"]["agents"]
-    assert "antigravity" in raw["agents"]
-
-    # Upgrade from a legacy config lacking agents.antigravity keeps it disabled.
+    assert "antigravity" not in raw["model_hub"]["agents"] and "antigravity" in raw["agents"]
     raw["agents"].pop("antigravity")
     config_path.write_text(json.dumps(raw), encoding="utf-8")
-    loaded = V2Config.load(config_path)
-    assert loaded.load_warnings == ()
-    assert loaded.agents.antigravity.enabled is False
-    assert "antigravity" not in loaded.model_hub.agents
+    upgraded = V2Config.load(config_path)
+    assert upgraded.load_warnings == () and upgraded.agents.antigravity.enabled is False
+    assert "antigravity" not in upgraded.model_hub.agents
 
-    # Malformed agents.antigravity.auto_update recovers that field alone and keeps other fields.
-    raw["agents"]["antigravity"] = {
-        "enabled": True,
-        "cli_path": "/custom/agy",
-        "auto_update": "not-a-bool",
-    }
+    # Malformed auto_update recovers that field alone and keeps sibling fields.
+    raw["agents"]["antigravity"] = {"enabled": True, "cli_path": "/custom/agy", "auto_update": "not-a-bool"}
     config_path.write_text(json.dumps(raw), encoding="utf-8")
     recovered = V2Config.load(config_path)
-    assert recovered.load_warnings
-    assert recovered.agents.antigravity.auto_update is False
+    assert recovered.load_warnings and recovered.agents.antigravity.auto_update is False
     assert recovered.agents.antigravity.cli_path == "/custom/agy"
 
 
@@ -123,13 +101,11 @@ async def test_model_hub_excludes_antigravity_and_keeps_it_direct(tmp_path: Path
     assert "antigravity" not in MODEL_HUB_BACKENDS
     hub_config = ModelHubConfig()
     assert "antigravity" not in hub_config.agents
-    assert hub_supply_block("antigravity", hub_config) is None
-    assert hub_supply_block("antigravity", ModelHubConfig(enabled=False)) is None
-    assert hub_supply_block("antigravity", None) is None
+    for cfg in (hub_config, ModelHubConfig(enabled=False), None):
+        assert hub_supply_block("antigravity", cfg) is None
 
-    resolution = resolve_model_hub_turn(hub_config, "antigravity", "gemini-4-neon")
-    assert resolution.channel == "direct"
-    assert resolution.source is None
+    res = resolve_model_hub_turn(hub_config, "antigravity", "gemini-4-neon")
+    assert (res.channel, res.source) == ("direct", None)
 
     class _MemoryStore:
         def __init__(self, cfg: ModelHubConfig) -> None:
@@ -144,35 +120,23 @@ async def test_model_hub_excludes_antigravity_and_keeps_it_direct(tmp_path: Path
         def mutate(self, mutator) -> None:
             mutator(self.cfg)
 
-    service = ModelHubService(
-        store=_MemoryStore(hub_config),
-        adapter=object(),  # type: ignore[arg-type]
-        events=BoundedEventLog(tmp_path / "events.json"),
-    )
+    service = ModelHubService(store=_MemoryStore(hub_config), adapter=object(), events=BoundedEventLog(tmp_path / "events.json"))  # type: ignore[arg-type]
     assert "antigravity" not in {agent["backend"] for agent in service.list_agents()}
     with pytest.raises(ModelHubError) as exc_info:
         await service.set_agent_mode("antigravity", "hub")
     assert exc_info.value.code == "mode_switch_blocked"
 
 
-def test_antigravity_bundled_models_and_cli_options():
+def test_antigravity_bundled_models_cli_health_repair_and_desktop_guard(tmp_path: Path):
     snapshot = backend_model_snapshot("antigravity", schedule_refresh=False)
     assert snapshot["ok"] is True
-    assert RECOMMENDED_AGENT_MODELS["antigravity"] in snapshot["models"]
-    assert "gemini-4-neon" in snapshot["models"]
-    neon_efforts = [
-        item["value"]
-        for item in snapshot["reasoning_options"]["gemini-4-neon"]
-        if item["value"] != "__default__"
+    assert RECOMMENDED_AGENT_MODELS["antigravity"] in snapshot["models"] and "gemini-4-neon" in snapshot["models"]
+    assert [i["value"] for i in snapshot["reasoning_options"]["gemini-4-neon"] if i["value"] != "__default__"] == [
+        "low", "medium", "high", "xhigh"
     ]
-    assert neon_efforts == ["low", "medium", "high", "xhigh"]
-
     options = api.agent_model_options("antigravity")
-    assert options["ok"] is True
-    assert any(row["value"] == "gemini-4-neon" for row in options["models"])
+    assert options["ok"] is True and any(row["value"] == "gemini-4-neon" for row in options["models"])
 
-
-def test_antigravity_cli_health_repair_and_desktop_guard(tmp_path: Path):
     assert cli_version("antigravity", "1.5.16\n", "") == "1.5.16"
     assert cli_version("antigravity", "not-a-version", "") is None
 
@@ -180,9 +144,7 @@ def test_antigravity_cli_health_repair_and_desktop_guard(tmp_path: Path):
     native_bin.parent.mkdir(parents=True)
     native_bin.write_text("#!/bin/sh\n", encoding="utf-8")
     source = identify_repair_source("antigravity", str(native_bin), home=tmp_path)
-    assert source is not None
-    assert source.kind == "native"
-    assert source.destination == str(native_bin)
+    assert source is not None and (source.kind, source.destination) == ("native", str(native_bin))
 
     assert BACKEND_SPECS["antigravity"].install_kind == "release_archive"
     with pytest.raises(DesktopBackendError) as exc_info:
@@ -190,32 +152,26 @@ def test_antigravity_cli_health_repair_and_desktop_guard(tmp_path: Path):
     assert exc_info.value.code == "desktop_toolchain_unavailable"
 
 
-def test_antigravity_managed_skills_and_native_agent_discovery(tmp_path: Path, monkeypatch):
-    home = tmp_path / "home"
-    workspace = tmp_path / "project"
+def test_antigravity_managed_skills_native_agents_and_mcp_sources(tmp_path: Path, monkeypatch):
+    home, workspace = tmp_path / "home", tmp_path / "project"
     workspace.mkdir(parents=True)
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for var, sub in (("CLAUDE_CONFIG_DIR", ".claude-none"), ("CODEX_HOME", ".codex-none"), ("XDG_CONFIG_HOME", ".xdg-none")):
+        monkeypatch.setenv(var, str(home / sub))
 
     for idx, rel in enumerate(
-        (
-            Path(".gemini/config/skills/ag-config-skill"),
-            Path(".gemini/skills/ag-gemini-skill"),
-            Path(".gemini/antigravity-cli/skills/ag-cli-skill"),
-        ),
+        (".gemini/config/skills/ag-config-skill", ".gemini/skills/ag-gemini-skill", ".gemini/antigravity-cli/skills/ag-cli-skill"),
         start=1,
     ):
         skill_dir = home / rel
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(
-            f"---\nname: {skill_dir.name}\ndescription: Skill {idx}\n---\nBody {idx}\n",
-            encoding="utf-8",
-        )
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_dir.name}\ndescription: Skill {idx}\n---\nBody {idx}\n", encoding="utf-8")
 
     discovered = {
-        skill.name
-        for skill in resolve_skills(
+        s.name
+        for s in resolve_skills(
             workspace,
             home=home,
             avibe_home=tmp_path / ".avibe",
@@ -227,29 +183,15 @@ def test_antigravity_managed_skills_and_native_agent_discovery(tmp_path: Path, m
     }
     assert {"ag-config-skill", "ag-gemini-skill", "ag-cli-skill"} <= discovered
 
-    gemini_agents = home / ".gemini" / "config" / "agents"
-    shared_agents = home / ".agents" / "agents"
-    gemini_agents.mkdir(parents=True)
-    shared_agents.mkdir(parents=True)
-    first = gemini_agents / "planner.md"
-    second = shared_agents / "reviewer.md"
-    first.write_text("# planner\n", encoding="utf-8")
-    second.write_text("# reviewer\n", encoding="utf-8")
-
-    found_agents = iter_global_agent_files("antigravity")
-    assert found_agents == [(first, "antigravity"), (second, "antigravity")]
-
-
-def test_antigravity_native_mcp_global_and_project_sources(tmp_path: Path, monkeypatch):
-    home = tmp_path / "home"
-    project = tmp_path / "workspace"
-    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home / ".claude-none"))
-    monkeypatch.setenv("CODEX_HOME", str(home / ".codex-none"))
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".xdg-none"))
+    first = home / ".gemini" / "config" / "agents" / "planner.md"
+    second = home / ".agents" / "agents" / "reviewer.md"
+    for p, text in ((first, "# planner\n"), (second, "# reviewer\n")):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text, encoding="utf-8")
+    assert iter_global_agent_files("antigravity") == [(first, "antigravity"), (second, "antigravity")]
 
     global_cfg = home / ".gemini" / "config" / "mcp_config.json"
-    global_cfg.parent.mkdir(parents=True)
+    global_cfg.parent.mkdir(parents=True, exist_ok=True)
     global_cfg.write_text(
         json.dumps(
             {
@@ -261,22 +203,14 @@ def test_antigravity_native_mcp_global_and_project_sources(tmp_path: Path, monke
         ),
         encoding="utf-8",
     )
-
     servers = mcp_native.read_all()
-    assert "ag-http" in servers
-    assert servers["ag-http"].source == "antigravity"
+    assert "ag-http" in servers and servers["ag-http"].source == "antigravity"
     assert servers["ag-http"].definition is not None
     assert servers["ag-http"].definition["transport"]["url"] == "https://mcp.example.invalid/stream"
-    assert "ag-disabled" not in servers
-    assert mcp_native.disabled_source("ag-disabled") == "antigravity"
+    assert "ag-disabled" not in servers and mcp_native.disabled_source("ag-disabled") == "antigravity"
 
-    proj_cfg = project / ".agents" / "mcp_config.json"
-    proj_cfg.parent.mkdir(parents=True)
-    proj_cfg.write_text(
-        json.dumps({"mcpServers": {"ag-proj": {"command": "python3", "args": ["-V"]}}}),
-        encoding="utf-8",
-    )
-    proj_servers = mcp_native.read_project(project)
-    assert "ag-proj" in proj_servers
-    assert proj_servers["ag-proj"].source == "antigravity"
-    assert proj_servers["ag-proj"].definition is not None
+    proj_cfg = workspace / ".agents" / "mcp_config.json"
+    proj_cfg.parent.mkdir(parents=True, exist_ok=True)
+    proj_cfg.write_text(json.dumps({"mcpServers": {"ag-proj": {"command": "python3", "args": ["-V"]}}}), encoding="utf-8")
+    proj_servers = mcp_native.read_project(workspace)
+    assert "ag-proj" in proj_servers and proj_servers["ag-proj"].source == "antigravity" and proj_servers["ag-proj"].definition is not None
