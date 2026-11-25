@@ -290,7 +290,10 @@ final class FixtureHoldViewController: UIViewController {
         if (!press.armed && up > CANCEL) { press.armed = true; state("armed"); }
         else if (press.armed && up <= UNCANCEL) { press.armed = false; state(press.failed ? "own-failed" : "recording"); }
       });
-      input.addEventListener("pointerup", (event) => {
+      // As the composer's gesture, the window hears the press's release and cancel too: WebKit can
+      // lose the capture during a slide without a lost-capture, and the release then goes to
+      // where the finger lifted. The first to end the press clears it; the other does nothing.
+      const released = (event) => {
         if (!press || event.pointerId !== press.id) return;
         pressed("up");
         tap("pu");
@@ -301,13 +304,17 @@ final class FixtureHoldViewController: UIViewController {
           return;
         }
         end(press.armed ? "cancelled" : press.failed ? "failed" : press.take ? "sent" : "early");
-      });
-      input.addEventListener("pointercancel", (event) => {
+      };
+      const cancelled = (event) => {
         if (!press || event.pointerId !== press.id) return;
         pressed("cancel");
         if (press.recognised || press.own) end("system");
         else drop();
-      });
+      };
+      input.addEventListener("pointerup", released);
+      input.addEventListener("pointercancel", cancelled);
+      window.addEventListener("pointerup", released, true);
+      window.addEventListener("pointercancel", cancelled, true);
       window.addEventListener("avibe:native:voice.hold", (event) => {
         const detail = event.detail || {};
         note(detail.phase);
