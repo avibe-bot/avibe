@@ -567,8 +567,8 @@ export function ConnectionPage() {
 
   // Binding as a new computer deletes the binding at avibe.bot first, as unbinding does; after
   // avibe.bot refused that because this computer's key no longer works, a separate question clears
-  // this computer only. An instance before either keeps its local-only reset.
-  const resetAction = useRef<ResetAction>('legacy');
+  // this computer only. The older local-only reset is not used.
+  const resetAction = useRef<ResetAction>('unbind');
   const offerAsNew = () => {
     const id = flow.claimId;
     if (!id) return;
@@ -577,15 +577,8 @@ export function ConnectionPage() {
     const refusedKey = unbindReport?.state === 'notUnbound' && unbindReport.reason === 'invalidCredential';
     void (async () => {
       try {
-        let action: ResetAction = refusedKey ? 'localAfterRefusal' : 'unbind';
-        let answer;
-        try {
-          answer = await api.previewReset(id, action);
-        } catch (error) {
-          if (!(error instanceof DevicesApiError && error.status === 404)) throw error;
-          action = 'legacy';
-          answer = await api.previewReset(id, action);
-        }
+        const action: ResetAction = refusedKey ? 'localAfterRefusal' : 'unbind';
+        const answer = await api.previewReset(id, action);
         if (!alive.current) return;
         resetAction.current = action;
         resetConfirmation.current = answer.confirmationId;

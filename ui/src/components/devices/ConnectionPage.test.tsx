@@ -587,30 +587,35 @@ describe('ConnectionPage · binding again', () => {
     expect(readClaimMarker()?.away).toBeUndefined();
   });
 
-  it('offers binding as a new computer only after a refusal that allows it, to the browser that started the attempt (an instance before deleting first)', async () => {
+  it('offers binding as a new computer only after a refusal that allows it, to the browser that started the attempt', async () => {
     vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' });
     vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'other_account' });
-    // This instance has no delete-first route: it answers 404, and the local-only reset is offered.
-    const preview = vi.spyOn(devicesApi, 'previewReset').mockImplementation(async (_id, action) => {
-      if (action === 'unbind') throw new DevicesApiError(404, 'not_found', {});
-      return { confirmationId: 'reset-1', healthConnected: true };
-    });
+    const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: true });
+    mount();
+
+    expect(await screen.findByText(said('属于另一个账号（m***@gmail.com）'))).toBeTruthy();
+    // Not the browser that started the attempt: nothing to press.
+    expect(screen.queryByRole('button', { name: '作为一台新电脑重新绑定' })).toBeNull();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it('after avibe.bot refused deleting first because this computer\'s key no longer works, asks separately to clear this computer only', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'notUnbound', reason: 'invalidCredential' } });
+    const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-2', healthConnected: false });
     const reset = vi.spyOn(devicesApi, 'reset').mockResolvedValue('unpaired');
     writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
     mount();
 
-    expect(await screen.findByText(said('属于另一个账号（m***@gmail.com）'))).toBeTruthy();
+    await waitFor(() => expect(devicesApi.devices).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1', 'legacy'));
-    // Whose Avibe it is comes first, then what is discarded; the copied-data sentence is the reset's own.
-    expect(dialog.textContent).toContain('这台电脑绑定的 Avibe 属于另一个账号（m***@gmail.com）。');
-    expect(dialog.textContent).toContain('你授权过的人都会失去访问权限');
-    expect(dialog.textContent).toContain('已同步的健康数据会删除');
-    expect(dialog.textContent).toContain('还要在 avibe.bot 上删除原来的 Avibe：在那之前，拿到副本的人仍然可以用它。');
-    expect(reset).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole('button', { name: '作为一台新电脑重新绑定' }));
-    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1', 'legacy'));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1', 'localAfterRefusal'));
+    expect(dialog.textContent).toContain('avibe.bot 没有接受这次删除：这台电脑保存的钥匙已经不能用了。');
+    expect(dialog.textContent).toContain('这一步不会动 avibe.bot 上的任何东西。');
+    fireEvent.click(within(dialog).getByRole('button', { name: '只清除这台电脑上的绑定' }));
+    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-2', 'localAfterRefusal'));
     expect(await screen.findByText(said('完成。这台电脑不再绑定任何 Avibe，电脑上的内容原样保留。'))).toBeTruthy();
   });
 
