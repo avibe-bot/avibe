@@ -8504,7 +8504,6 @@
         "copiedData": "If someone may have copied this computer's Avibe data as a whole, also delete the old Avibe at avibe.bot: until then, whoever holds the copy can still use it.",
         "irreversible": "This cannot be undone.",
         "refusedLead": "avibe.bot did not accept this deletion: the key this computer keeps no longer works.",
-        "introLocal": "You can clear the binding on this computer only, then bind it as a new computer to any account.",
         "localAction": "Clear this computer's binding only"
       },
       "resetDoneTitle": "This computer is no longer bound",
@@ -8531,6 +8530,11 @@
         "loseNameDays_other": "{{host}} stays with the original account for {{count}} days; after that someone else can claim it.",
         "loseNamePlain": "{{host}} stays with the original account for a while; after that someone else can claim it.",
         "title": "Delete {{host}} and bind as a new computer?",
+        "next": "After that, this computer is bound as a new computer to the account you sign in with next at avibe.bot."
+      },
+      "asNewLocal": {
+        "title": "Clear this computer's binding only?",
+        "untouched": "This step changes nothing at avibe.bot.",
         "next": "After that, this computer is bound as a new computer to the account you sign in with next at avibe.bot."
       }
     },

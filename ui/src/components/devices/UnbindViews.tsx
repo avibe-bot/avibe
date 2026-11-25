@@ -38,7 +38,7 @@ export function UnbindLine({ state }: { state: UnbindState }) {
 /** What ends, what is removed for good, and what stays: one wording wherever the binding at
  *  avibe.bot is deleted (unbinding, binding as a new computer). `computer`: named from another
  *  device. `nameLine`: how long the name stays, and with whom. */
-export function UnbindConsequences({ healthConnected, computer, nameLine }: { healthConnected: boolean; computer?: string; nameLine: string }) {
+export function UnbindConsequences({ healthConnected, computer, nameLine }: { healthConnected: boolean; computer?: string; nameLine?: string }) {
   const { t } = useTranslation();
   const lost = [
     t('devices.unbind.lostRemote'),
@@ -53,10 +53,12 @@ export function UnbindConsequences({ healthConnected, computer, nameLine }: { he
           <span><KeptTail fill text={line} /></span>
         </li>
       ))}
-      <li className="flex gap-2.5">
-        <Check className="mt-1 size-3.5 shrink-0 text-mint-ink" />
-        <span><KeptTail fill text={nameLine} /></span>
-      </li>
+      {nameLine && (
+        <li className="flex gap-2.5">
+          <Check className="mt-1 size-3.5 shrink-0 text-mint-ink" />
+          <span><KeptTail fill text={nameLine} /></span>
+        </li>
+      )}
       <li className="flex gap-2.5">
         <Check className="mt-1 size-3.5 shrink-0 text-mint-ink" />
         <span><KeptTail fill text={computer ? t('devices.unbind.keptNamed', { computer }) : t('devices.unbind.kept')} /></span>
