@@ -48,8 +48,11 @@ const iphone = (extra: Partial<Device> = {}): Device => ({
   ...extra,
 });
 
+/** Avibe Desktop as it reports itself (`device.describe`): the computer's name, then the app's own
+ *  version (from its release tag, `gh-v3.2.9rc1` → `3.2.9-rc.1`) and the system's. */
+const DESKTOP_VERSION = '3.2.9-rc.1';
 const macMini: Device = {
-  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', account, client: { kind: 'desktop', version: '3.2.8', platform: 'macOS' },
+  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', account, client: { kind: 'desktop', version: DESKTOP_VERSION, platform: 'macOS 26.1' },
   online: { path: 'tunnel', ms: 120 }, signedInAt: ago(379), functions: [],
 };
 const chrome: Device = {
@@ -166,6 +169,27 @@ const signedOut: SignedOutDevice[] = [
   signedOutRow('s11', 'Galaxy S24', ['unconfirmed'], 'mine'),
   signedOutRow('s12', 'Vivaldi · Linux', ['unknown']),
   signedOutRow('s13', 'Mac mini（客厅）', ['accepted', 'localOnly'], 'mine'),
+];
+
+/** Avibe Desktop on another Mac, viewing this instance: it describes itself (`device.describe`), so every
+ *  sign-in it makes here is one row, under the computer's own name. */
+const desktopApp: Device = {
+  id: 'desktop-app', group: 'mine', kind: 'desktop', name: 'Max 的 MacBook Air', account, client: { kind: 'desktop', version: DESKTOP_VERSION, platform: 'macOS 26.1' },
+  online: { path: 'tunnel', ms: 95 }, signedInAt: ago(2 * DAY), self: true, functions: [],
+};
+/** A browser that signed in twice: each sign-in is its own row, as a browser reports nothing of itself. */
+const chromeMac = (id: string, lastActive: number, signedIn: number): Device => ({
+  id, group: 'mine', kind: 'browser', name: 'Chrome · macOS', account, client: { kind: 'browser' },
+  lastActiveAt: ago(lastActive), signedInAt: ago(signedIn), functions: [],
+});
+const safariMac: Device = {
+  id: 'safari-mac', group: 'mine', kind: 'browser', name: 'Safari · macOS', account, client: { kind: 'browser' },
+  lastActiveAt: ago(5 * DAY), signedInAt: ago(12 * DAY), functions: [],
+};
+const ownerSet: Device[] = [macbook(), desktopApp, iphone(), chromeMac('chrome-1', 40, 3 * DAY), chromeMac('chrome-2', 2 * DAY, 9 * DAY), safariMac];
+const ownerActivity: DeviceActivity[] = [
+  { id: 'o1', deviceId: 'desktop-app', at: ago(2 * DAY), device: 'Max 的 MacBook Air', event: { kind: 'signedIn' } },
+  ...activity.filter((each) => each.deviceId === 'iphone'),
 ];
 
 const at = (height: number) => ({ width: 1440, height });
@@ -426,7 +450,13 @@ const designFrames = frames([
   frame('activity-phone', '活动 · 375 宽', { width: 375, height: 1100 }, { reach: on, devices: all('host'), activity: fullActivity, view: 'activity' }),
   frame('activity-empty', '活动：还没有', at(500), { reach: on, devices: all('host'), activity: [], view: 'activity' }),
 
-  // 10. Whole pages the instance itself answers with (plain HTML from the Runtime): the design record.
+  // 10. Avibe Desktop names itself: one row for the computer, however often it opened this instance.
+  frame('desktop-described', '我的设备 · 在 Avibe Desktop 里看：这台 Mac 一行（电脑名 · Avibe Desktop 版本 · macOS 版本），iPhone App 一行，浏览器每次登录各一行', TALL,
+    { ...remote, devices: ownerSet, activity: ownerActivity, bulk: 'other_sessions' }),
+  frame('desktop-described-phone', '同上 · 390 宽', { width: 390, height: 1300 },
+    { ...remote, devices: ownerSet, activity: ownerActivity, bulk: 'other_sessions' }),
+
+  // 11. Whole pages the instance itself answers with (plain HTML from the Runtime): the design record.
   { name: 'page-moved', title: '旧地址 · 等待期内打开：清掉本机数据后，一句话加 avibe.bot 的链接（实例直接返回的页面）', width: 1440, height: 800, status: 'proposed', themes: ['light'],
     fixtures: fixtures(), render: () => <MovedPage /> },
   { name: 'page-signed-out', title: '被退出的设备在撤销完成前回来：「这台设备已被退出」（实例直接返回的页面）', width: 1440, height: 800, status: 'proposed', themes: ['light'],

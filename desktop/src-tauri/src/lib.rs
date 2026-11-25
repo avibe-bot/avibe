@@ -23,6 +23,7 @@ use std::time::Duration;
 
 pub mod app_lock;
 mod app_windows;
+mod device_description;
 pub mod direct;
 pub mod instance_client;
 mod instance_credentials;
