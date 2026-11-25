@@ -297,58 +297,45 @@ def test_session_models_reports_an_explicitly_pinned_null_as_the_sessions_own(mo
     assert inherited["current"]["from"] == {"model": "agent", "reasoning_effort": "agent"}
 
 
-def test_antigravity_direct_session_model_accepts_gemini_and_rejects_other_families(monkeypatch, tmp_path, capsys):
+def test_antigravity_direct_models_use_authoritative_live_menu(monkeypatch, tmp_path, capsys):
+    from config.v2_config import V2Config
+    from modules.agents.antigravity.models import record_antigravity_live_models
+
     engine = _setup(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        api,
-        "agent_model_options",
-        lambda backend, **kwargs: {
-            "ok": True,
-            "backend": backend,
-            "models": [
-                {"value": "gemini-2.5-pro", "reasoning_efforts": ["low", "high"]},
-                {"value": "gemini-3-pro", "reasoning_efforts": ["low", "high"]},
-            ],
-        },
-    )
-    _seed(engine, "sesag", backend="antigravity", model="gemini-3-pro", effort="low")
 
-    code, payload = _update(capsys, "sesag", "--model", "gemini-2.5-pro")
-    assert code == 0, payload
-    assert payload["session"]["model"] == "gemini-2.5-pro"
-    assert _row(engine, "sesag") == ("gemini-2.5-pro", "low", None)
+    cfg = V2Config.default()
+    cfg.save()
+    record_antigravity_live_models(cfg, {
+        "configOptions": [{
+            "id": "model", "category": "model", "currentValue": "gemini-4-neon",
+            "options": [{"value": "gemini-4-neon"}, {"value": "claude-sonnet-5-5"}],
+        }],
+    })
+    _seed(engine, "sesag", backend="antigravity", model="gemini-4-neon", effort=None)
 
-    assert (
-        cli._session_model_override_fields(
-            backend="antigravity",
-            agent_label="antigravity",
-            model="gemini-2.5-pro",
-            reasoning_effort="high",
-            hub_agent_reader=_hub_reader,
+    for model in ("gemini-4-neon", "claude-sonnet-5-5"):
+        code, payload = _update(capsys, "sesag", "--model", model)
+        assert code == 0, payload
+        assert payload["session"]["model"] == model
+        assert _row(engine, "sesag") == (model, None, None)
+        assert cli._session_model_override_fields(
+            backend="antigravity", agent_label="antigravity", model=model,
+            reasoning_effort=None, hub_agent_reader=_hub_reader,
             help_command="vibe agent run --help",
-        )
-        == {}
-    )
+        ) == {}
 
     code, menu = _run(cli.cmd_session_models, ["session", "models", "--session-id", "sesag"], capsys)
     assert code == 0, menu
-    assert any("only Gemini models" in note for note in menu["notes"])
+    assert not any("only Gemini models" in note for note in menu["notes"])
+    assert api.route_menu_options("antigravity", hub_agent_reader=_hub_reader)["authoritative"] is True
 
-    for wrong_model in ("gpt-6.1-sol", "claude-opus-5-5"):
-        status, err = _update(capsys, "sesag", "--model", wrong_model)
-        assert status == 1 and err["code"] == "model_family_unsupported"
-        assert "Gemini" in err["error"]
-        assert err["hint"]
-        assert _row(engine, "sesag") == ("gemini-2.5-pro", "low", None)
-
+    status, err = _update(capsys, "sesag", "--model", "gemini-4-carbon-medium")
+    assert status == 1 and err["code"] == "session_model_unavailable"
+    assert _row(engine, "sesag") == ("claude-sonnet-5-5", None, None)
     with pytest.raises(cli.TaskCliError) as refused:
         cli._session_model_override_fields(
-            backend="antigravity",
-            agent_label="antigravity",
-            model="gpt-6.1-sol",
-            reasoning_effort=None,
-            hub_agent_reader=_hub_reader,
+            backend="antigravity", agent_label="antigravity", model="gemini-4-carbon-medium",
+            reasoning_effort=None, hub_agent_reader=_hub_reader,
             help_command="vibe agent run --help",
         )
-    assert refused.value.code == "model_family_unsupported"
-    assert "Gemini" in str(refused.value)
+    assert refused.value.code == "session_model_unavailable"

@@ -21,6 +21,7 @@ from modules.agents.antigravity.models import (
     AntigravityModelSelectionError,
     apply_model_and_effort,
     auth_config_fingerprint,
+    extract_live_model_catalog_entries,
     has_model_config_option,
     record_antigravity_live_models,
     validate_model_selection_receipt,
@@ -202,24 +203,7 @@ def build_antigravity_auth_env(
 
 def extract_acp_live_models(session_payload: Mapping[str, Any]) -> list[str]:
     """Extract live model ids advertised by an ACP ``session/new`` response."""
-    models: list[str] = []
-    seen: set[str] = set()
-
-    def _add(raw_id: Any) -> None:
-        if isinstance(raw_id, str) and (cleaned := raw_id.strip()) and cleaned not in seen:
-            seen.add(cleaned)
-            models.append(cleaned)
-
-    raw_models = session_payload.get("models")
-    if isinstance(raw_models, Mapping) and isinstance(raw_models.get("availableModels"), list):
-        for entry in raw_models["availableModels"]:
-            _add(entry.get("modelId") or entry.get("id") if isinstance(entry, Mapping) else entry)
-
-    for opt in session_payload.get("configOptions") or ():
-        if isinstance(opt, Mapping) and (opt.get("id") == "model" or opt.get("category") == "model"):
-            for choice in opt.get("options") or ():
-                _add(choice.get("value") or choice.get("id") if isinstance(choice, Mapping) else choice)
-    return models
+    return [entry["id"] for entry in extract_live_model_catalog_entries(session_payload)]
 
 
 def classify_antigravity_auth_error(error_text: str) -> bool:

@@ -357,3 +357,79 @@ async def test_antigravity_live_model_catalog_cache_is_account_scoped_and_enrich
     assert "gemini-4-neon" in fallback["models"]
     assert "live-only-model" not in fallback["models"]
     assert spawn_count == 1
+
+
+@pytest.fixture
+def agy_session_options() -> dict:
+    """Trimmed agy 1.5.17 capture: legacy model IDs differ from selectable values."""
+    return {
+        "sessionId": "captured-session",
+        "models": {"availableModels": [{"modelId": value} for value in [
+            "gemini-4-neon-high", "gemini-4-neon-xhigh", "gemini-4-neon-medium", "gemini-4-neon-low",
+            "gemini-4-carbon-medium", "gemini-4-carbon-high", "gemini-4-carbon-low",
+            "gemini-3.8-flash-high", "claude-opus-5-5-low", "claude-sonnet-5-5-medium", "gpt-oss-120b-medium",
+        ]]},
+        "configOptions": [
+            {"id": "model", "category": "model", "type": "select", "currentValue": "gemini-4-neon",
+             "options": [{"value": value} for value in [
+                 "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
+                 "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
+                 "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
+             ]]},
+            {"id": "thought_level", "category": "thought_level", "type": "select", "currentValue": "high",
+             "options": [{"value": value} for value in ["low", "medium", "high", "xhigh"]]},
+            {"id": "mode", "category": "mode", "type": "select", "currentValue": "default",
+             "options": [{"value": value} for value in ["default", "accept-edits", "auto", "plan"]]},
+        ],
+    }
+
+
+@pytest.mark.parametrize("extractor", ["catalog", "auth"])
+def test_live_catalog_uses_only_config_options(agy_session_options, extractor):
+    from modules.agents.antigravity.auth import extract_acp_live_models
+    from modules.agents.antigravity.models import extract_live_model_catalog_entries
+
+    expected = [
+        "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
+        "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
+        "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
+    ]
+    if extractor == "auth":
+        assert extract_acp_live_models(agy_session_options) == expected
+        assert extract_acp_live_models({"models": agy_session_options["models"]}) == []
+    else:
+        entries = extract_live_model_catalog_entries(agy_session_options)
+        assert [entry["id"] for entry in entries] == expected
+        assert entries[0]["reasoning_efforts"] == ["low", "medium", "high", "xhigh"]
+        assert all("reasoning_efforts" not in entry for entry in entries[1:])
+        assert extract_live_model_catalog_entries({"models": agy_session_options["models"]}) == []
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_legacy_model_cache_is_ignored_and_replaced(tmp_path, monkeypatch, agy_session_options, refresh):
+    from config import paths
+    from modules.agents.antigravity.models import (
+        auth_config_fingerprint,
+        read_antigravity_live_models,
+        record_antigravity_live_models,
+    )
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / ".avibe"))
+    cfg = V2Config.default()
+    cache_path = paths.get_state_dir() / "antigravity_models_cache.json"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps({
+        "auth_fingerprint": auth_config_fingerprint(cfg),
+        "models": [{"id": "gemini-4-carbon-medium"}],
+    }))
+    if not refresh:
+        assert read_antigravity_live_models(cfg) == []
+    else:
+        # Config-option updates must discard legacy entries too, even without a full session payload.
+        record_antigravity_live_models(cfg, agy_session_options["configOptions"])
+        entries = read_antigravity_live_models(cfg)
+        assert [entry["id"] for entry in entries] == [
+            "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
+            "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
+            "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
+        ]

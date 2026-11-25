@@ -1427,6 +1427,7 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         "sources": [name for name, entries in sources if entries],
         "source": " + ".join(name for name, entries in sources if entries),
         "live": False,
+        "authoritative": backend_key == "antigravity" and bool(local_catalog),
         "notes": notes or None,
         "catalog_refresh_pending": remote_catalog_refresh_pending(
             refresh_token,

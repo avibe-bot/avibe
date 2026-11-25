@@ -8809,6 +8809,7 @@ def agent_model_options(
             "models": _flat_catalog_models(data),
             "source": data.get("source"),
             "live": bool(data.get("live")),
+            "authoritative": bool(data.get("authoritative")),
             "notes": data.get("notes"),
             "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
@@ -8862,7 +8863,8 @@ def route_menu_options(
     ``hub_agent_reader`` returns Model Hub's Agent payload for a backend (``ModelHubService.get_agent_sources``,
     in the service or over its internal RPC). A Hub-served backend's menu comes from it and is authoritative.
     A Direct backend, or a Hub that cannot answer, falls back to ``agent_model_options``: Vibey's configured menu
-    stays authoritative, while Claude and Codex bundled catalogs may lag a release. Only Hub offers fast mode.
+    stays authoritative, as does Antigravity's cached live menu; Claude and Codex bundled catalogs may lag a
+    release. Only Hub offers fast mode.
     """
     normalized_backend = (backend or "").strip().lower()
     hub_agent = None
@@ -8891,7 +8893,7 @@ def route_menu_options(
             else "direct" if normalized_backend not in MODEL_HUB_BACKENDS
             else str((hub_agent or {}).get("mode") or "direct") if hub_read else "unknown"
         )
-        options["authoritative"] = not is_native_cli_backend(normalized_backend)
+        options["authoritative"] = bool(options.get("authoritative")) or not is_native_cli_backend(normalized_backend)
     return options
 
 

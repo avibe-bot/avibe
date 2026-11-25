@@ -19,6 +19,7 @@ from modules.agents.base import AgentRequest
 
 logger = logging.getLogger(__name__)
 
+_LIVE_MODELS_CACHE_SCHEMA_VERSION = 1
 _LIVE_MODELS_CACHE_FILENAME = "antigravity_models_cache.json"
 _LIVE_MODELS_CACHE_LOCK = threading.Lock()
 _CANONICAL_AUTH_MODES = ("oauth-personal", "oauth-business", "gemini-api-key", "agent-platform")
@@ -685,31 +686,6 @@ def extract_live_model_catalog_entries(
     current_model: str | None = None
 
     if isinstance(session_or_config_options, Mapping):
-        raw_models = session_or_config_options.get("models")
-        if isinstance(raw_models, Mapping):
-            current_model = _clean_optional(
-                raw_models.get("currentModelId") or raw_models.get("current_model_id")
-            )
-            avail = raw_models.get("availableModels")
-            if isinstance(avail, Sequence) and not isinstance(avail, (str, bytes)):
-                for item in avail:
-                    if isinstance(item, str):
-                        _upsert(item)
-                    elif isinstance(item, Mapping):
-                        raw_id = item.get("modelId") or item.get("id") or item.get("value")
-                        if isinstance(raw_id, str) and raw_id.strip():
-                            raw_label = (
-                                item.get("name")
-                                or item.get("label")
-                                or item.get("displayName")
-                                or item.get("display_name")
-                            )
-                            label = (
-                                raw_label.strip()
-                                if isinstance(raw_label, str) and raw_label.strip()
-                                else None
-                            )
-                            _upsert(raw_id, label=label)
         config_options = _normalize_config_options(session_or_config_options.get("configOptions"))
     elif isinstance(session_or_config_options, Sequence) and not isinstance(
         session_or_config_options, (str, bytes)
@@ -729,9 +705,9 @@ def extract_live_model_catalog_entries(
     effort_option = _find_config_option(
         config_options,
         categories=_EFFORT_CATEGORIES,
-        ids=_EFFORT_IDS,
+        ids=("thought_level",),
     )
-    if effort_option is not None and current_model:
+    if effort_option is not None and current_model in entries_by_id:
         efforts = [val for val, _ in _extract_option_choices_ordered(effort_option)]
         if efforts:
             _upsert(current_model, reasoning_efforts=efforts)
@@ -773,7 +749,11 @@ def _read_raw_live_models_cache(cache_path: Path) -> dict[str, Any]:
         loaded = json.loads(cache_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
         return {}
-    return loaded if isinstance(loaded, dict) else {}
+    return (
+        loaded
+        if isinstance(loaded, dict) and loaded.get("schema_version") == _LIVE_MODELS_CACHE_SCHEMA_VERSION
+        else {}
+    )
 
 
 def record_antigravity_live_models(
@@ -832,6 +812,7 @@ def record_antigravity_live_models(
                 merged_models = [dict(entry) for entry in extracted]
 
             document = {
+                "schema_version": _LIVE_MODELS_CACHE_SCHEMA_VERSION,
                 "auth_fingerprint": active_fp,
                 "updated_at": time.time(),
                 "models": merged_models,
