@@ -1459,9 +1459,10 @@ def fit_mind(text: str, marker: str, window: Optional[int] = None) -> tuple[str,
     """``text`` (a mind with its structure intact) with each section past its limit cut to it (section 10): every
     heading line kept; finished entries of Mission and Workstreams left out first, from the top, while the section is
     past its room; then, unless what is left is within the limit but for ``marker``, the head of what is under each
-    heading kept until the room runs out; and ``marker`` once, ending the section. The fixed part, the heading lines and the one marker, is all a section shows when its limit
-    leaves no more room (a small route's, section 7). The cut sections' whole text, for the next checkpoint request
-    (section 11), comes second."""
+    heading kept until the room runs out; and ``marker`` once, ending the section. When a head cut is still needed
+    and the limit leaves no more room (a small route's, section 7), the fixed part, the heading lines and the one
+    marker, is all the section shows. The cut sections' whole text, for the next checkpoint request (section 11),
+    comes second."""
     parsed, problem = mind_blocks(text)
     if parsed is None:
         raise ValueError(f"not a mind: {problem}")
