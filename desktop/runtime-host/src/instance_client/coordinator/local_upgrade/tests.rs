@@ -417,3 +417,35 @@ async fn a_runtime_too_old_to_describe_itself_still_names_its_binding() {
         assert_eq!(local.instance_id.as_deref(), expected);
     }
 }
+
+/// A restart long enough for the shell's monitor to lose the Runtime: the
+/// shell unbinds it (`local_origin(None)`) and binds it again after the
+/// recovery adopts it. `upgraded` comes only after that rebinding, so the
+/// generation the page repeats its step in is not retired behind it.
+#[tokio::test(start_paused = true)]
+async fn an_upgrade_answers_only_once_the_shell_has_bound_the_runtime_again() {
+    let runtime = Runtime {
+        describes: true,
+        stable_update: true,
+        ..Default::default()
+    };
+    let (c, runtime, host, _root) = setup(runtime, "3.2.9").await;
+    let shell = {
+        let (c, runtime) = (c.clone(), runtime.clone());
+        tokio::spawn(async move {
+            while upgrades(&runtime) == 0 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            c.local_origin(None);
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            c.local_origin(Some(LoopbackOrigin::parse(ORIGIN).unwrap()));
+            c.state().generation
+        })
+    };
+    let started = tokio::time::Instant::now();
+    assert_eq!(state(c.upgrade_local_runtime(&host).await), "upgraded");
+    let answered = c.state().generation;
+    assert!(started.elapsed() >= Duration::from_secs(20));
+    assert_eq!(shell.await.unwrap(), answered);
+    assert!(!c.state().local.runtime_too_old);
+}

@@ -115,12 +115,27 @@ impl Coordinator {
             }
             // The new Runtime answers. It must also be this Desktop's again (an
             // adoption the claim pipe can use), and have the claim protocol.
-            if host.claim_source().is_none() {
+            let Some(source) = host.claim_source() else {
+                continue;
+            };
+            // A restart long enough for the shell's monitor to lose the Runtime
+            // unbinds it here, and the recovery binds it again once re-adopted;
+            // each starts a new generation and retires claim documents. Answer
+            // only once it is bound to the adopted origin again, so the page's
+            // repeated step runs in the generation that lasts.
+            let bound = self
+                .inner
+                .lock()
+                .expect("client state")
+                .local
+                .as_ref()
+                .is_some_and(|local| local.origin == source.origin.navigation_url());
+            if !bound {
                 continue;
             }
             // Only the Runtime's own answer ends the wait; an inconclusive probe
             // (restarting, no token, a server error) is asked again.
-            match machine::claim_route(&loopback, self.transport.clone()).await {
+            match machine::claim_route(&source.origin, self.transport.clone()).await {
                 Some(true) => {}
                 Some(false) => return Err(ClientError::new("local_runtime_still_too_old")),
                 None => continue,
