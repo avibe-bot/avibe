@@ -12,7 +12,9 @@ import { DevicesPageView, type DevicesPageViewProps } from '@/components/devices
 import type { AccountResult, Device, DeviceActivity, DeviceFunction, Reach, SignedOutDevice } from '@/components/devices/types';
 import { tunnelFromStatus } from '@/components/devices/wire';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
+import en from '@/i18n/en.json';
 import { MovedPage, SignInNotFinishedPage } from '../../kit/devices-pages';
+import { copyFor } from '../desktop/instances-fixtures';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access';
@@ -154,21 +156,16 @@ const memberDevices: Device[] = [
 const signedOutRow = (id: string, device: string | null, results: AccountResult[], owner: SignedOutDevice['owner'] = 'unknown'): SignedOutDevice => (
   { id, device, kind: 'browser', owner, results }
 );
-/** One row per distinct thing the instance can say about the account sign-in. */
+/** The list says the names only, whatever avibe.bot did (owner, 2026-11-25). */
 const signedOut: SignedOutDevice[] = [
   signedOutRow('s1', 'iPhone 14', ['queued'], 'mine'),
   signedOutRow('s2', 'Firefox · Linux', ['retrying'], 'mine'),
   signedOutRow('s3', 'Chrome · Windows', ['accepted'], 'mine'),
   signedOutRow('s4', 'Safari · iPad', ['localOnly'], 'mine'),
   signedOutRow('s5', 'Chrome · macOS', ['localOnly'], 'others'),
-  signedOutRow('s6', null, ['localOnly']),
+  signedOutRow('s6', null, ['accepted']),
   signedOutRow('s7', 'Edge · Windows', ['sharedSignIn'], 'mine'),
-  signedOutRow('s8', 'Arc · macOS', ['keeperUnknown'], 'mine'),
-  signedOutRow('s9', 'iPad Air', ['refusedCredential'], 'mine'),
-  signedOutRow('s10', 'Pixel 8', ['refused'], 'mine'),
-  signedOutRow('s11', 'Galaxy S24', ['unconfirmed'], 'mine'),
-  signedOutRow('s12', 'Vivaldi · Linux', ['unknown']),
-  signedOutRow('s13', 'Mac mini（客厅）', ['accepted', 'localOnly'], 'mine'),
+  signedOutRow('s8', 'iPhone 13', ['unconfirmed'], 'mine'),
 ];
 
 /** Avibe Desktop on another Mac, viewing this instance: it describes itself (`device.describe`), so every
@@ -388,20 +385,21 @@ const designFrames = frames([
   frame('confirm-sign-out-all-remote', '在运行 Avibe 的电脑上退出所有远程设备：包括别人的', at(860),
     { reach: on, devices: [...all('host'), sara], activity, bulk: 'all_remote', confirm: 'remove-all-remote' }),
 
-  // 6. Signing out: what avibe.bot did about the account sign-in. Never 「已结束」.
-  frame('sign-out-queued', '刚退出 · 已排队；这一行显示过健康，所以健康清理说「尚未确认」', TALL,
-    { reach: on, devices: all('host'), activity, signOutNotice: { device: 'iPhone 14', owner: 'mine', results: ['queued'], healthCleanupPending: true, hadHealth: true } }),
-  frame('sign-out-local-mine', '刚退出我自己的一台 · 只在这个 Avibe 上退出了：只说对自己设备成立的那一半', TALL,
-    { reach: on, devices: all('host'), activity, signOutNotice: { device: 'Safari · iPad', owner: 'mine', results: ['localOnly'], healthCleanupPending: true, hadHealth: false } }),
-  frame('sign-out-local-others', '刚退出别人的一台 · 只说对别人设备成立的那一半', TALL,
-    { reach: on, devices: [...all('host'), sara], activity, signOutNotice: { device: 'Chrome · macOS', owner: 'others', results: ['localOnly'], healthCleanupPending: false, hadHealth: false } }),
-  frame('sign-out-many', '刚退出所有远程设备 · 几种结果各一句，不知道是谁的就两半都说', at(1100),
-    { reach: on, devices: onlyHost, activity, signOutNotice: { device: null, owner: 'unknown', results: ['accepted', 'localOnly', 'retrying'], healthCleanupPending: false, hadHealth: false } }),
-  frame('sign-out-many-phone', '刚退出所有远程设备 · 375 宽', { width: 375, height: 1300 },
-    { reach: on, devices: onlyHost, activity, signOutNotice: { device: null, owner: 'unknown', results: ['accepted', 'localOnly', 'retrying'], healthCleanupPending: false, hadHealth: false } }),
-  frame('signed-out', '最近退出的设备：接口能说出的每一种结果各一行', at(2100),
-    { reach: on, devices: all('host'), signedOut }),
-  frame('signed-out-phone', '最近退出的设备 · 375 宽', { width: 375, height: 3300 }, { reach: on, devices: onlyHost, signedOut }),
+  // 6. Signing out (owner, 2026-11-25): one toast, 已退出「…」, where the App shows toasts; it leaves
+  //    by itself and the row leaves at once. Nothing else, whatever avibe.bot did.
+  ...(['zh', 'en'] as const).flatMap((lang) => {
+    const copy = lang === 'en' ? { copy: copyFor(en) } : {};
+    const remaining = all('host').filter((each) => each.id !== 'chrome');
+    const values = { device: 'Chrome · Windows' };
+    const toast = { fixtures: fixtures({ ...copy, toasts: [{ key: 'devices.signedOut.toast', values }] }) };
+    const list = { fixtures: fixtures(copy) };
+    return [
+      frame(`sign-out-toast-${lang}`, `刚退出（无论 avibe.bot 那边怎样）：一个提示条，那一行马上不见，提示条自己消失 · ${lang}`, at(900), { reach: on, devices: remaining, activity }, toast),
+      frame(`sign-out-toast-390-${lang}`, `刚退出 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining, activity }, toast),
+      frame(`signed-out-list-${lang}`, `最近退出的设备：只显示名字 · ${lang}`, at(1500), { reach: on, devices: onlyHost, signedOut }, list),
+      frame(`signed-out-list-390-${lang}`, `最近退出的设备 · 390 宽 · ${lang}`, { width: 390, height: 2000 }, { reach: on, devices: onlyHost, signedOut }, list),
+    ];
+  }),
 
   // 7. Health connections no listed device is proven to own; things that did not happen.
   frame('unlinked-health', '未对应到设备的健康连接：各自一行，按自己的编号断开', at(1100),

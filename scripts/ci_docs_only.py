@@ -189,16 +189,16 @@ def scope_of(entries: list[tuple[str, str, str, str]], routable: bool) -> Scope:
     if code is None:
         reason = f"all {len(paths)} changed paths are narrative documentation"
         return Scope(True, reason, False, SKIP, reason, SKIP, reason, tuple(paths), routable)
+    # For non-narrative diffs, evaluate added names independently of whether
+    # another path already selected platform checks.
+    added = next((p for status, _, _, p in entries if status == "A" and not portable_path(p)), None)
+    if added is not None:
+        return full(f"added name {json.dumps(added, ensure_ascii=True)} is not portable", windows_control_ipc)
     reason = f"not documentation only: {json.dumps(code, ensure_ascii=True)}"
     if not routable:
         return full(reason, windows_control_ipc)
     browser, browser_reason = route(paths, browser_independent, "browser lanes")
     platform, platform_reason = route(paths, platform_independent, "installed-package platform checks")
-    if platform == SKIP:
-        # No rename detection: a rename is a deletion plus this added path.
-        added = next((path for status, _, _, path in entries if status == "A" and not portable_path(path)), None)
-        if added is not None:
-            platform, platform_reason = RUN, f"added name {json.dumps(added, ensure_ascii=True)} is not portable"
     return Scope(False, reason, windows_control_ipc, browser, browser_reason, platform, platform_reason,
                  tuple(paths), routable)
 
