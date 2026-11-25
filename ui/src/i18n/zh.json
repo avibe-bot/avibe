@@ -8047,7 +8047,10 @@
       "unattributedHint": "这些设备还在接收通知，但认不出属于哪个账号。可以逐台停止。",
       "signOutAllRemote": "退出所有远程设备",
       "online": "在线",
-      "unknown": "现在读不到设备列表。"
+      "unknown": "现在读不到设备列表。",
+      "signedInToday": "今天 {{time}} 登录",
+      "signedInYesterday": "昨天 {{time}} 登录",
+      "signedInDated": "{{date}} 登录"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8166,7 +8169,9 @@
       "signedIn": "{{device}} 登录",
       "signedOut": "{{device}} 已被退出",
       "remoteAccessOn": "远程访问已开启",
-      "formerDevice": "一台已不在列表里的设备",
+      "formerSignedIn": "一台已不在列表里的设备登录",
+      "formerSignedOut": "一台已不在列表里的设备已被退出",
+      "formerSignedOutBy": "一台已不在列表里的设备已被退出 · 由 {{actor}} 操作",
       "signedOutBy": "{{device}} 已被退出 · 由 {{actor}} 操作",
       "day": "{{day}}",
       "days": "{{from}} 至 {{to}}",
@@ -8177,6 +8182,7 @@
       "alarmLabelled": "创建闹钟「{{label}}」",
       "reminderLabelled": "创建提醒「{{label}}」",
       "confirmedOn": "{{what}}，已在 {{device}} 上确认",
+      "formerConfirmedOn": "{{what}}，已在一台已不在列表里的设备上确认",
       "remoteAccessOff": "远程访问已关闭",
       "earlier": "更早的活动"
     },
@@ -8405,7 +8411,8 @@
       "desktop": "Avibe Desktop",
       "browser": "浏览器",
       "homeScreen": "主屏幕 App",
-      "other": "设备"
+      "other": "设备",
+      "unrecognized": "未识别的客户端"
     },
     "unlinkedHealth": {
       "title": "未对应到设备的健康连接",
@@ -8415,25 +8422,8 @@
     },
     "signedOut": {
       "title": "最近退出的设备",
-      "here": "已在这个 Avibe 上退出",
-      "unnamed": "一台设备",
-      "justNow": "已在这个 Avibe 上退出 {{device}}",
-      "justNowMany": "已在这个 Avibe 上退出这些设备",
-      "queued": "已排队，还没有通知到 avibe.bot。远程访问关着或这台电脑休眠时会一直等着。",
-      "retrying": "暂时连不上 avibe.bot，会自动重试，连上后结束它的账号登录。",
-      "accepted": "已通知 avibe.bot 结束它的账号登录。",
-      "localOnlyMine": "这次只在这个 Avibe 上退出了它，没有结束它的账号登录，它可能不用验证就能再登录进来。在那台设备上退出 avibe.bot；设备不在手边，就到 avibe.bot 的「账号安全」里退出其他设备。",
-      "localOnlyOthers": "这次只在这个 Avibe 上退出了它。对方的访问权限还在的话可以再登录进来；不想让对方再进来，就在「访问」里移除对方。",
-      "localOnlyEither": "这次只在这个 Avibe 上退出了它，没有结束它的账号登录，它可能不用验证就能再登录进来。是你自己的设备的话：在那台设备上退出 avibe.bot；设备不在手边，就到 avibe.bot 的「账号安全」里退出其他设备。是别人的设备的话：不想让对方再进来，就在「访问」里移除对方。",
-      "sharedSignIn": "它和你现在用的这台设备是同一次账号登录，所以没有结束账号登录。",
-      "keeperUnknown": "没法确认它和你现在用的这台是不是同一次账号登录，所以这次没有结束它的账号登录。逐台退出时会结束。",
-      "refusedCredential": "avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。先重新绑定远程访问。",
-      "refused": "avibe.bot 没有接受这次请求，这次没有结束它的账号登录。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。",
-      "unconfirmed": "多次重试后，仍不确定它的账号登录有没有结束。设备丢了的话，到 avibe.bot 的「账号安全」里退出其他设备。",
-      "unknown": "不清楚 avibe.bot 那边的结果。",
-      "healthPending": "它同步过的健康数据，清理尚未确认。",
-      "healthPendingIfAny": "如果它同步过健康数据，清理尚未确认。",
-      "refusedCredentialPlain": "avibe.bot 不再接受这台电脑的绑定，所以没有结束它的账号登录。"
+      "toast": "已退出「{{device}}」",
+      "toastOthers": "已退出其他设备"
     },
     "problem": {
       "functionNeedsDevice": "要先在那台设备上打开这一项。",
@@ -8572,6 +8562,10 @@
     "taken": "已被占用",
     "reclaim": "你用过的",
     "checking": "检查中…",
-    "invalid": "只能用小写字母、数字和连字符"
+    "invalid": "只能用小写字母、数字和连字符",
+    "short": "至少 2 个字符",
+    "long": "最多 46 个字符",
+    "hyphenEnds": "不能以连字符开头或结尾",
+    "doubleHyphen": "第 3、4 个字符不能都是连字符"
   }
 }

@@ -183,7 +183,15 @@ differs from the phone App:
   newest: a delivery that arrives late does not put an older choice back.
 - `direct.setPreference` changes the choice the app's own 「连接方式」 menu
   shows. Between `"automatic"` and `"tunnel"` it reloads nothing; choosing
-  `"direct"`, or leaving it, reopens the instance. The desktop app sets a
+  `"direct"`, or leaving it, reopens the instance at once and brings the new
+  view back to the URL the old one showed (the instance's first page when
+  the old view was not showing the instance). The new view has new browsing
+  data: a draft's text is there again when the page had saved it on the
+  instance, and what only the old view held is not (the last moment's
+  typing, text typed while the instance could not be reached, files
+  attached to an unsent message). Nothing waits for the app to
+  be opened again, so `pendingRelaunch`, which its answers and events carry
+  as the App's do, is always `false`. The desktop app sets a
   choice back itself only from `"direct"` (`reverted.from` is always
   `"direct"`), never from `"tunnel"`. From `directPreference` version 2 it
   delivers `direct.preferenceChanged` as the window event
@@ -191,6 +199,21 @@ differs from the phone App:
   choice changes while the page is open. Version 1 sends no event: a change
   made in the app's own menu is seen when the page reads the choice again
   (Devices › Connection does so each time the page is shown again).
+- `direct.measure()` (`directMeasure` 1) measures the instance the window
+  was made for, by the address the shell keeps for that window: nothing of
+  the request names what is measured. `current` is the path that window
+  uses, through its own registration with the session's listener, and
+  `null` for a window with no session's route. One measurement runs at a
+  time in the whole app, and another is refused with `{code: "busy"}`. The
+  shell bounds one at 30 s and the bridge waits 35 s for it (10 s for every
+  other request). A measurement whose window has lost the route it was
+  measured through is refused with `{code: "unavailable"}`.
+- An answer that takes time is handed to the document that asked and to no
+  other. Every document marks itself when its bridge starts and sends the
+  mark with its requests; the shell's answer is dropped in the window
+  unless the document there bears that mark, and is not sent at all once
+  another window has the label. A reload or a navigation within the
+  instance gets nothing of what the document before it asked.
 - A request reaches the shell as a link to `avibe-app://direct` that the
   shell refuses to follow, carrying a token only that window's bridge script
   has. No command or message handler is given to the instance's origin. On

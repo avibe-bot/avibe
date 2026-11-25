@@ -16,10 +16,18 @@ from storage.models import (
 )
 
 RECEIPT_TTL = 7 * 86400
+# A session the owner's own "sign out this device" ended, for one later sign-in to finish:
+# see ``device_registry.record_session``. Kept beside the tombstone, never in it.
+OWNER_SIGNED_OUT_PREFIX = 'remote_access.owner_signed_out.v1:'
 
 
 class AccountSessionSignedOut(PermissionError):
     pass
+
+
+class AccountSignInEnded(AccountSessionSignedOut):
+    """This sign-in finished an owner's sign-out of the browser's old session: refused, and the
+    browser's old cookie is cleared."""
 
 
 def enroll(conn, *, sid, subject, binding, epoch, reference, expires_at):
@@ -29,6 +37,34 @@ def enroll(conn, *, sid, subject, binding, epoch, reference, expires_at):
     if conn.scalar(select(jobs.c.digest).where(jobs.c.digest == digest)):
         raise AccountSessionSignedOut('account_session_signed_out')
     conn.execute(refs.insert().values(sid=sid, cookie_binding=binding, epoch=epoch, digest=digest, reference=reference, expires_at=expires_at))
+
+
+def enrolled_elsewhere(conn, *, epoch, subject, reference, now):
+    """Whether a live, not signed-out session here is enrolled with this same account session (the
+    device a sign-out kept, for one). Only what is live now: a kept device with no live row here is
+    not seen."""
+    digest = hashlib.sha256(json.dumps([epoch, subject, reference]).encode()).hexdigest()
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+    signed_out = select(state_meta.c.key).where(
+        state_meta.c.key == literal(REVOKED_BROWSER_SESSION_KEY_PREFIX) + sessions.c.session_id).exists()
+    return conn.scalar(select(refs.c.sid).select_from(refs.join(sessions, sessions.c.session_id == refs.c.sid)).where(
+        refs.c.digest == digest, sessions.c.cookie_exp > now, sessions.c.expires_at > now, ~signed_out).limit(1)) is not None
+
+
+def revoke_late(conn, *, epoch, subject, reference, now):
+    """Queue avibe.bot's sign-out of one exact account session, met at a later sign-in.
+
+    Never restarts an existing job, whatever its state. With the pairing already refused there is
+    nothing to send, but the digest is written so that the same session is still refused here.
+    """
+    digest = hashlib.sha256(json.dumps([epoch, subject, reference]).encode()).hexdigest()
+    if conn.scalar(select(jobs.c.digest).where(jobs.c.digest == digest)):
+        return
+    values = dict(digest=digest, epoch=epoch, created_at=now, attempts=0, answers=0)
+    if conn.scalar(select(pairings.c.refused).where(pairings.c.epoch == epoch)):
+        conn.execute(jobs.insert().values(**values, reference=None, status='refused', reason='credential', next_at=None))
+    else:
+        conn.execute(jobs.insert().values(**values, reference=reference, status='pending', reason='queued', next_at=now))
 
 
 def _job(conn, row, now):

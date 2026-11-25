@@ -10,7 +10,8 @@ import secrets
 import shutil
 import stat
 import threading
-from dataclasses import asdict, dataclass
+import uuid
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -58,6 +59,8 @@ class EngineStateContentError(EngineStateError):
 class RuntimeSecrets:
     management_key: str
     gateway_token: str
+    # Public identity of this managed installation, independent of its credentials.
+    server_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
 
 def _without_credential_addresses(payload: dict[str, Any]) -> dict[str, Any]:
@@ -232,7 +235,19 @@ class EngineStateStore:
                     management_key = existing.get("management_key")
                     gateway_token = existing.get("gateway_token")
                     if isinstance(management_key, str) and isinstance(gateway_token, str):
-                        return instance_dir, RuntimeSecrets(management_key, gateway_token)
+                        if "server_id" in existing:
+                            server_id = existing["server_id"]
+                            try:
+                                parsed = uuid.UUID(server_id) if isinstance(server_id, str) else None
+                            except ValueError:
+                                parsed = None
+                            if parsed is None or not parsed.int or str(parsed) != server_id:
+                                raise EngineStateError("invalid engine server identity")
+                            return instance_dir, RuntimeSecrets(management_key, gateway_token, server_id)
+                        # Upgrade a pre-8.1.2 record without changing either live credential.
+                        migrated = RuntimeSecrets(management_key, gateway_token)
+                        self._secure_write_json(secrets_path, {**existing, "server_id": migrated.server_id})
+                        return instance_dir, migrated
             generated = RuntimeSecrets(
                 management_key=secrets.token_urlsafe(48),
                 gateway_token=secrets.token_urlsafe(48),

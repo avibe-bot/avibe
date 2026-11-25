@@ -12,11 +12,17 @@ import zh from './zh.json';
 
 afterEach(() => {
   window.localStorage.clear();
+  vi.unstubAllGlobals();
   vi.resetModules();
 });
 
-const open = async (stored: string) => {
-  window.localStorage.setItem('i18nextLng', stored);
+/** The browser's preferred languages, as `navigator.languages` reports them. */
+const environment = (...languages: string[]) => {
+  vi.stubGlobal('navigator', { ...window.navigator, languages, language: languages[0] });
+};
+
+const open = async (stored?: string) => {
+  if (stored !== undefined) window.localStorage.setItem('i18nextLng', stored);
   const { default: i18n, i18nReady } = await import('./app');
   await i18nReady;
   return i18n;
@@ -46,5 +52,82 @@ describe('the Web UI language', () => {
 
     expect(i18n.language).toBe('en');
     expect(i18n.t('common.loading')).toBe(en.common.loading);
+  });
+});
+
+// Until the reader picks a language, the page follows the browser's preferred
+// one, and following it is never written down as a choice.
+describe('the language before the reader picks one', () => {
+  it.each(['zh', 'zh-CN', 'zh-TW', 'zh-HK', 'zh-Hant-HK'])('opens in Chinese for a %s browser, storing nothing', async (code) => {
+    environment(code, 'en-US');
+    const i18n = await open();
+
+    expect(i18n.language).toBe('zh');
+    expect(i18n.t('common.loading')).toBe(zh.common.loading);
+    expect(window.localStorage.getItem('i18nextLng')).toBeNull();
+  });
+
+  it.each(['en-US', 'en', 'fr-FR'])('opens in English for a %s browser, storing nothing', async (code) => {
+    environment(code);
+    const i18n = await open();
+
+    expect(i18n.language).toBe('en');
+    expect(i18n.t('common.loading')).toBe(en.common.loading);
+    expect(window.localStorage.getItem('i18nextLng')).toBeNull();
+  });
+
+  it('keeps following the browser after a language change it did not pick', async () => {
+    environment('zh-CN');
+    const i18n = await open();
+    await i18n.changeLanguage('en');
+
+    expect(window.localStorage.getItem('i18nextLng')).toBeNull();
+  });
+
+  it('lets a kept pick win over the browser', async () => {
+    environment('zh-CN');
+    const i18n = await open('en');
+
+    expect(i18n.language).toBe('en');
+    expect(i18n.t('common.loading')).toBe(en.common.loading);
+  });
+
+  it('leaves a language an existing install already stored as it is', async () => {
+    environment('en-US');
+    const i18n = await open('zh-CN');
+
+    expect(i18n.language).toBe('zh');
+    expect(window.localStorage.getItem('i18nextLng')).toBe('zh-CN');
+  });
+
+  it('keeps a pick from the language switch', async () => {
+    environment('zh-CN');
+    const i18n = await open();
+    const { selectLanguage } = await import('../lib/useLanguageSelection');
+    await selectLanguage(i18n, 'en');
+
+    await vi.waitFor(() => expect(i18n.language).toBe('en'));
+    expect(window.localStorage.getItem('i18nextLng')).toBe('en');
+  });
+});
+
+describe('the instance language an owner\'s browser adopts', () => {
+  it('is kept, so the next load starts in it', async () => {
+    environment('en-US');
+    const i18n = await open();
+    const { adoptPersistedLanguage } = await import('../lib/useLanguageSelection');
+    adoptPersistedLanguage(i18n, 'zh');
+
+    await vi.waitFor(() => expect(i18n.language).toBe('zh'));
+    expect(window.localStorage.getItem('i18nextLng')).toBe('zh');
+  });
+
+  it('stores nothing when it is the language the browser already shows', async () => {
+    environment('zh-CN');
+    const i18n = await open();
+    const { adoptPersistedLanguage } = await import('../lib/useLanguageSelection');
+    adoptPersistedLanguage(i18n, 'zh');
+
+    expect(window.localStorage.getItem('i18nextLng')).toBeNull();
   });
 });

@@ -446,6 +446,318 @@ describe('useHoldToTalk', () => {
     expect(native.notify).toHaveBeenCalledWith('warning');
   });
 
+  // WebKit can lose a finger's capture during a slide without a lost-capture, and the release then
+  // goes to where the finger lifted (iOS hold smoke: pointer-up on the body). The window hears it.
+  it("ends a finger's hold on a release the element never hears: sends it, or cancels it when armed", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('发出去');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 500 });
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+    await act(async () => pipeline.takes[0].resolve('发出去'));
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('sent');
+
+    await holdFor(el);
+    await speak('不要了');
+    move(el, 410);
+    expect(hold.phase).toBe('armed');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 350 });
+    await flush();
+    expect(pipeline.takes[1].abort).toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('cancelled');
+    expect(hold.phase).toBe('idle');
+  });
+
+  // Once the capture is lost, the moves go where the finger is too: a slide up to cancel is still
+  // a cancel, and a press that moved off before the hold is still given back to the page.
+  it("judges a finger's slide by the moves only the window hears", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('不要了');
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 500 - 81 });
+    expect(hold.phase).toBe('armed');
+    await elapse(2_000);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 400 });
+    await flush();
+    expect(pipeline.takes[0].abort).toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+    expect(hold.outcome).toBe('cancelled');
+    // Into the cancel position once, for a move both paths heard: one rigid.
+    move(el, 500 - 90);
+    expect(native.impact.mock.calls.map(([style]) => style)).toEqual(['medium', 'rigid']);
+
+    down(el);
+    fireEvent.pointerMove(document.body, { pointerId: 1, clientX: 100, clientY: 470 });
+    await elapse(400);
+    fireEvent.pointerUp(document.body, { pointerId: 1, clientX: 100, clientY: 470 });
+    expect(onTap).not.toHaveBeenCalled();
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it('ends a hold once when both the element and the window hear its release', async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('一次');
+    await elapse(2_000);
+    up(el);
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 100, clientY: 500 });
+    fireEvent.pointerCancel(window, { pointerId: 1 });
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+    await act(async () => pipeline.takes[0].resolve('一次'));
+    await flush();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(hold.outcome).toBe('sent');
+
+    // A tap, likewise: one tap, no take.
+    down(el);
+    await elapse(100);
+    up(el);
+    fireEvent.pointerUp(window, { pointerId: 1, clientX: 100, clientY: 500 });
+    expect(onTap).toHaveBeenCalledTimes(1);
+    expect(pipeline.takes).toHaveLength(1);
+  });
+
+  it("leaves a finger's hold alone when another pointer is released or cancelled", async () => {
+    const el = await mount();
+    await holdFor(el);
+    await speak('还在说');
+    fireEvent.pointerUp(document.body, { pointerId: 2, clientX: 100, clientY: 500 });
+    fireEvent.pointerCancel(document.body, { pointerId: 2 });
+    expect(hold.phase).toBe('recording');
+    expect(pipeline.takes[0].finish).not.toHaveBeenCalled();
+    expect(pipeline.takes[0].abort).not.toHaveBeenCalled();
+    await elapse(2_000);
+    up(el);
+    expect(pipeline.takes[0].finish).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops the window hearing a finger's release once the press ends or the surface goes", async () => {
+    const added = vi.spyOn(window, 'addEventListener');
+    const removed = vi.spyOn(window, 'removeEventListener');
+    const ends = (spy: typeof added) => spy.mock.calls
+      .filter(([type, , options]) => ['pointermove', 'pointerup', 'pointercancel'].includes(type) && options === true)
+      .map(([type, listener]) => [type, listener]);
+    const el = await mount();
+    down(el);
+    await elapse(100);
+    up(el);
+    expect(ends(added)).toHaveLength(3);
+    expect(ends(removed)).toEqual(ends(added));
+
+    // Unmounted mid-hold.
+    await holdFor(el);
+    expect(ends(added)).toHaveLength(6);
+    cleanup();
+    expect(ends(removed)).toEqual(ends(added));
+    added.mockRestore();
+    removed.mockRestore();
+  });
+
+  // The wait at the hold was the device starting only then (owner, 11-25: the ring is full and
+  // nothing happens yet). The press starts it, so at the hold the take only begins on it.
+  describe('the microphone during a press', () => {
+    const openStream = () => {
+      const track = { stop: vi.fn() };
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementation(async () => ({ getTracks: () => [track] }) as unknown as MediaStream);
+      return track;
+    };
+    const opened = () => vi.mocked(navigator.mediaDevices.getUserMedia).mock.calls.length;
+    const mouse = () => mount({ gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}) });
+    /** What this page knows of the microphone, forgotten as a hold the microphone refused forgets
+     *  it (earlier tests leave it known). Asks nothing of the device itself. */
+    const forgetMicrophone = async (el: HTMLElement) => {
+      pipeline.startError = new DOMException('Blocked', 'NotAllowedError');
+      await holdFor(el);
+      up(el);
+      await flush();
+      pipeline.startError = null;
+    };
+
+    it('opens it 150 ms into a press and hands it to the take at the hold, opening nothing then', async () => {
+      const track = openStream();
+      const el = await mount();
+      down(el);
+      await elapse(149);
+      expect(opened()).toBe(0);
+      await elapse(1);
+      await flush();
+      expect(opened()).toBe(1);
+      expect(pipeline.takes).toHaveLength(0);
+      await elapse(50);
+      await flush();
+      // The hold: the take starts on the open microphone, and nothing new is asked of the device.
+      expect(pipeline.takes).toHaveLength(1);
+      expect(opened()).toBe(1);
+      const stream = await pipeline.takes[0].input.stream;
+      expect(stream?.getTracks()).toEqual([track]);
+      expect(track.stop).not.toHaveBeenCalled();
+    });
+
+    it('closes it when the press ends before the hold: a tap records and sends nothing', async () => {
+      const track = openStream();
+      const el = await mount();
+      down(el);
+      await elapse(170);
+      await flush();
+      expect(opened()).toBe(1);
+      up(el);
+      await flush();
+      expect(onTap).toHaveBeenCalledTimes(1);
+      expect(track.stop).toHaveBeenCalledTimes(1);
+      expect(pipeline.takes).toHaveLength(0);
+      expect(send).not.toHaveBeenCalled();
+
+      // A press that moved off is given back to the page, and closes it too.
+      down(el);
+      await elapse(170);
+      await flush();
+      move(el, 470);
+      await flush();
+      expect(track.stop).toHaveBeenCalledTimes(2);
+      expect(pipeline.takes).toHaveLength(0);
+    });
+
+    it('opens nothing for an ordinary tap or click', async () => {
+      openStream();
+      const el = await mouse();
+      down(el);
+      await elapse(130);
+      up(el);
+      down(el, 500, 'mouse');
+      await elapse(130);
+      up(el);
+      await flush();
+      await elapse(400);
+      expect(opened()).toBe(0);
+
+      // A mouse held past it opens it, and its hold takes it.
+      down(el, 500, 'mouse');
+      await elapse(150);
+      await flush();
+      expect(opened()).toBe(1);
+      await elapse(200);
+      await flush();
+      expect(pipeline.takes).toHaveLength(1);
+      expect(pipeline.takes[0].input.stream).toBeDefined();
+      expect(opened()).toBe(1);
+    });
+
+    it('opens nothing during a press unless the microphone is known to be allowed', async () => {
+      openStream();
+      const el = await mount();
+      await forgetMicrophone(el);
+      // The question this hold brings up is refused, so this page has no allowed answer after it.
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValueOnce(new DOMException('Blocked', 'NotAllowedError'));
+      pipeline.permission = 'prompt';
+      down(el);
+      await elapse(170);
+      await flush();
+      // The question stays the hold's, as before: it comes at the hold, not during the press.
+      expect(opened()).toBe(0);
+      await elapse(30);
+      await flush();
+      expect(opened()).toBe(1);
+      expect(hold.outcome).toBe('denied');
+
+      pipeline.permission = 'denied';
+      down(el);
+      await elapse(170);
+      await flush();
+      expect(opened()).toBe(1);
+    });
+
+    // WebKit on iOS can ask again after Allow, even where it answers `granted`.
+    it('in a browser on iOS, opens nothing during a press', async () => {
+      const agent = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15');
+      try {
+        openStream();
+        const el = await mount();
+        down(el);
+        await elapse(190);
+        await flush();
+        expect(opened()).toBe(0);
+        await elapse(10);
+        await flush();
+        expect(pipeline.takes).toHaveLength(1);
+        expect(pipeline.takes[0].input.stream).toBeUndefined();
+      } finally {
+        agent.mockRestore();
+      }
+    });
+
+    it('on Desktop, opens it during a press only while a take in this page has opened it', async () => {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+      openStream();
+      const el = await mount();
+      await forgetMicrophone(el);
+      expect(opened()).toBe(0);
+
+      // Desktop cannot read the Mac's permission: the first take opens its own, at the hold.
+      down(el);
+      await elapse(150);
+      await flush();
+      expect(opened()).toBe(0);
+      await elapse(50);
+      await flush();
+      await elapse(0);
+      await flush();
+      expect(pipeline.takes.at(-1)!.input.stream).toBeUndefined();
+      expect(hold.phase).toBe('listening');
+      fireEvent.keyDown(window, { key: 'Escape' });
+      await flush();
+
+      // After it, a press opens it ahead of the hold.
+      down(el);
+      await elapse(150);
+      await flush();
+      expect(opened()).toBe(1);
+      up(el);
+      await flush();
+
+      // Refused there (withdrawn in System Settings): the page no longer knows it allowed.
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValueOnce(new DOMException('Blocked', 'NotAllowedError'));
+      down(el);
+      await elapse(150);
+      await flush();
+      expect(opened()).toBe(2);
+      up(el);
+      await flush();
+      down(el);
+      await elapse(170);
+      await flush();
+      expect(opened()).toBe(2);
+    });
+
+    it('opens nothing for a surface gone while the permission was still being read', async () => {
+      openStream();
+      let answer!: (status: { state: PermissionState }) => void;
+      vi.mocked(navigator.permissions.query).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve as typeof answer; }));
+      const el = await mount();
+      down(el);
+      await elapse(150);
+      await flush();
+      cleanup();
+      await act(async () => answer({ state: 'granted' }));
+      await flush();
+      expect(opened()).toBe(0);
+    });
+
+    it('in the iOS App, leaves the microphone to the App', async () => {
+      native.capture.mockReturnValue(true);
+      native.permission.mockResolvedValue('granted');
+      openStream();
+      const el = await mount();
+      await holdFor(el);
+      expect(opened()).toBe(0);
+      expect(pipeline.takes[0].input.stream).toBeUndefined();
+    });
+  });
+
   it('drops a take shorter than half a second as too short', async () => {
     const el = await mount();
     await holdFor(el);

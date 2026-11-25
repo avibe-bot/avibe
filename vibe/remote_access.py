@@ -7390,7 +7390,11 @@ def make_session_cookie(
     device_headers: Mapping[str, str] | None = None,
     account_session_ref: str | None = None,
     account_enroll_before: int | None = None,
+    previous: Mapping[str, Any] | None = None,
+    owner_signed_out: Mapping[str, Any] | None = None,
 ) -> str:
+    """Issue a new session. ``previous`` (from :func:`same_browser_session`) is the session this
+    browser already holds; the new one takes over its device row and it is signed out."""
     cloud = config.remote_access.vibe_cloud
     if not cloud.session_secret:
         raise ValueError("Remote access session secret is not configured")
@@ -7438,7 +7442,8 @@ def make_session_cookie(
     }
     cookie = _encode_session_cookie(cloud.session_secret, payload)
     register_device_session(config, payload, validated_claims, device_headers or {}, fresh=True,
-                            account_session_ref=account_session_ref, account_enroll_before=account_enroll_before)
+                            account_session_ref=account_session_ref, account_enroll_before=account_enroll_before,
+                            previous=previous, owner_signed_out=owner_signed_out)
     return cookie
 
 
@@ -7449,17 +7454,71 @@ def device_binding(config: V2Config) -> str:
     return binding_key(cloud.instance_id, cloud.session_secret)
 
 
-def register_device_session(config, identity, claims, headers, *, fresh=False, account_session_ref=None, account_enroll_before=None):
+def register_device_session(config, identity, claims, headers, *, fresh=False, account_session_ref=None,
+                            account_enroll_before=None, previous=None, owner_signed_out=None):
     from vibe.account_session_revoke import pairing_epoch
-    from storage import device_registry
+    from storage import device_health_registry, device_registry
+    from storage.db import get_cached_sqlite_engine
     from vibe.device_metadata import describe
 
-    device_registry.record_session(
+    replaced = device_registry.record_session(
         device_binding(config), identity, claims['vibe_instance_role'], describe(headers),
         expires_at=identity['auth_time'] + SESSION_ABSOLUTE_TTL_SECONDS, now=int(time.time()), fresh=fresh,
         epoch=pairing_epoch(config) if account_session_ref else None, reference=account_session_ref,
-        account_enroll_before=account_enroll_before,
+        account_enroll_before=account_enroll_before, previous=previous if fresh else None,
+        owner_signed_out=owner_signed_out if fresh else None,
     )
+    if replaced == device_registry.ENDED:
+        from storage.device_account_signout import AccountSignInEnded
+        raise AccountSignInEnded('account_session_signed_out')
+    if replaced:
+        # Committed: close the replaced session's streams, then clear its unused Health codes.
+        old_sid, pending = replaced
+        publish_browser_session_revoked(old_sid)
+        device_health_registry.finish_pending(get_cached_sqlite_engine(), pending)
+
+
+def signed_out_session(config: V2Config, cookie_value: str | None) -> dict[str, Any] | None:
+    """The signed-out session this request's own cookie names, verified with this instance's
+    current secret: its id and the cookie's own deadline (its ``exp``, or ``iat`` + the
+    organization limit). Whether the owner ended it, and whether that is finished, is for
+    ``record_session`` to read under its lock."""
+    identity = parse_session_identity(config, cookie_value, allow_revoked=True)
+    sid = identity.get(_SESSION_BROWSER_ID_KEY) if identity is not None else None
+    if not isinstance(sid, str) or not _SESSION_BROWSER_ID_RE.fullmatch(sid):
+        return None
+    valid_until = int(identity["exp"])
+    if _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) == "organization":
+        valid_until = min(valid_until, int(identity["iat"]) + ORGANIZATION_SESSION_TTL_SECONDS)
+    return {"sid": sid, "valid_until": valid_until}
+
+
+def same_browser_session(config: V2Config, cookie_value: str | None, subject: str) -> dict[str, Any] | None:
+    """The session this request's own cookie proves the browser holds, for the same account.
+
+    Only the cookie proves it: no name, user agent, address, device id, or sign-in link. A cookie
+    of another account, a revoked or expired one, or one signed before a re-pair is not a match.
+    """
+    identity = parse_session_identity(config, cookie_value)
+    if identity is None or identity.get("sub") != subject or not session_identity_is_current(identity):
+        return None
+    sid = identity.get(_SESSION_BROWSER_ID_KEY)
+    if not isinstance(sid, str) or not _SESSION_BROWSER_ID_RE.fullmatch(sid):
+        return None
+    issued_at, expires_at, auth_time = int(identity["iat"]), int(identity["exp"]), int(identity["auth_time"])
+    valid_until = expires_at
+    if _normalized_instance_kind(config.remote_access.vibe_cloud.instance_kind) == "organization":
+        # The request check refuses it from iat + the organization limit on, whatever its exp says.
+        valid_until = min(valid_until, issued_at + ORGANIZATION_SESSION_TTL_SECONDS)
+    return {
+        "sid": sid,
+        "binding": identity["_device_binding"],
+        "subject": subject,
+        "auth_time": auth_time,
+        "valid_until": valid_until,
+        # The latest exp any copy of this cookie can carry: what a sign-out tombstones it until.
+        "cap": max(expires_at, auth_time + SESSION_ABSOLUTE_TTL_SECONDS),
+    }
 
 
 def _session_idle_ttl_seconds(instance_kind: object) -> int:

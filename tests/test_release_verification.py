@@ -668,10 +668,17 @@ def test_release_workflows_split_core_publication_from_desktop_stage():
         "release-backstop", "resolve-show-runtime-ref", "resolve-show-runtime-canonical",
         "show-runtime-bundles", "build-assets", "release",
     }
-    assert stage1["release"]["needs"] == "release-backstop"
+    assert stage1["release"]["needs"] == ["release-backstop", "build-assets"]
+    condition = stage1["release"]["if"]
+    for event in ("push", "workflow_dispatch"):
+        for tag, expected_build in (("gh-v3.2.6rc1", "success"), ("v3.2.6", "skipped")):
+            for build in ("success", "skipped", "cancelled", "failure"):
+                assert _evaluate_release_ai_if(condition, tag=tag, event=event, build_result=build) == (build == expected_build)
+            assert not _evaluate_release_ai_if(condition, tag=tag, event=event, build_result=expected_build, cancelled=True)
+            assert not _evaluate_release_ai_if(condition, tag=tag, event=event, build_result=expected_build, backstop_result="failure")
     release_steps = stage1["release"]["steps"]
     download = _step(stage1["release"], "Download release artifacts")
-    assert "wait-build" in download["run"]
+    assert "fetch-build" in download["run"]
     assert '--attempt "$GITHUB_RUN_ATTEMPT"' in download["run"]
     assert release_steps.index(download) < release_steps.index(_step(stage1["release"], "Create GitHub-only Release"))
     workflow = yaml.safe_load((ROOT / ".github/workflows/release_ai.yml").read_text())

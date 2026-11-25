@@ -348,6 +348,16 @@ describe('ConnectionPage · the domain', () => {
     fireEvent.change(input, { target: { value: '  Max Well ' } });
     expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('max well');
     expect(screen.getByText(i18n.t('domainField.invalid'))).toBeTruthy();
+    // One reason at a time, the same sentences as claiming.
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: 'm' } });
+    expect(screen.getByText(i18n.t('domainField.short'))).toBeTruthy();
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: 'max-' } });
+    expect(screen.getByText(i18n.t('domainField.hyphenEnds'))).toBeTruthy();
+    // Emptied: nothing said, nothing to press.
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: '' } });
+    expect(document.querySelector('[data-domain-field] [role="status"]')?.textContent).toBe('');
+    expect(screen.getByRole('button', { name: '继续' }).hasAttribute('disabled')).toBe(true);
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: '  Max Well ' } });
     const next = screen.getByRole('button', { name: '继续' });
     expect(next.hasAttribute('disabled')).toBe(true);
     fireEvent.click(next);

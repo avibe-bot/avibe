@@ -46,6 +46,15 @@ impl Registered {
         self.windows.get(window)
     }
 
+    /// Whether the window that has this label now is still registered as
+    /// `registration`: not a window that took the label later, and not the
+    /// same window registered anew.
+    pub fn is(&self, window: &str, registration: &WindowRegistration) -> bool {
+        self.windows
+            .get(window)
+            .is_some_and(|current| current.native_login() == registration.native_login())
+    }
+
     /// Revokes the registration of every window that is no longer `routed`:
     /// its connections are closed, and its credential opens no new one.
     pub fn keep(&mut self, routed: impl Fn(&str) -> bool) {
@@ -57,6 +66,16 @@ impl Registered {
             }
             kept
         });
+    }
+
+    /// How many tunnel connections the listener carries for these windows
+    /// now, busy or quiet.
+    pub fn public_legs(&self) -> usize {
+        self.windows
+            .values()
+            .filter_map(|registration| self.handover.window_census(registration))
+            .map(|census| census.quiet + census.busy)
+            .sum()
     }
 
     /// The session is ending: every registration is revoked.

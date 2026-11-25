@@ -101,6 +101,28 @@ describe('the device report', () => {
     expect(apiFetch).toHaveBeenCalledTimes(1);
   });
 
+  it('sends what the Desktop app gives its view of the instance, once per page and without asking', async () => {
+    const computer = {
+      kind: 'desktop_app',
+      display_name: 'Studio Mac',
+      installation_id: '3f'.repeat(32),
+      aliases: [],
+      app_version: '0.4.2',
+      system_version: 'macOS 26.1',
+    };
+    vi.stubGlobal('window', { __AVIBE_DESKTOP_DEVICE__: Object.freeze(computer) });
+
+    await reportNativeDevice(apiFetch);
+    await reportNativeDevice(apiFetch);
+
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+    expect(apiFetch).toHaveBeenCalledWith('/api/devices/self', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(computer),
+    });
+  });
+
   it('never lets a failed report surface', async () => {
     installShell(described);
     apiFetch.mockRejectedValueOnce(new Error('offline'));

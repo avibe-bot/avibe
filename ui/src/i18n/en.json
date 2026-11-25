@@ -8047,7 +8047,10 @@
       "unattributedHint": "These devices still receive notifications, but the account they belong to cannot be told. You can stop each one.",
       "signOutAllRemote": "Sign out all remote devices",
       "online": "Online",
-      "unknown": "The device list cannot be read right now."
+      "unknown": "The device list cannot be read right now.",
+      "signedInToday": "Signed in today at {{time}}",
+      "signedInYesterday": "Signed in yesterday at {{time}}",
+      "signedInDated": "Signed in {{date}}"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8166,7 +8169,9 @@
       "signedIn": "{{device}} signed in",
       "signedOut": "{{device}} was signed out",
       "remoteAccessOn": "Remote access turned on",
-      "formerDevice": "A device no longer in the list",
+      "formerSignedIn": "A device no longer in the list signed in",
+      "formerSignedOut": "A device no longer in the list was signed out",
+      "formerSignedOutBy": "A device no longer in the list was signed out · from {{actor}}",
       "signedOutBy": "{{device}} was signed out · from {{actor}}",
       "day": "{{day}}",
       "days": "{{from}} to {{to}}",
@@ -8177,6 +8182,7 @@
       "alarmLabelled": "Alarm “{{label}}” created",
       "reminderLabelled": "Reminder “{{label}}” created",
       "confirmedOn": "{{what}}, confirmed on {{device}}",
+      "formerConfirmedOn": "{{what}}, confirmed on a device no longer in the list",
       "remoteAccessOff": "Remote access turned off",
       "earlier": "Earlier activity"
     },
@@ -8405,7 +8411,8 @@
       "desktop": "Avibe Desktop",
       "browser": "Browser",
       "homeScreen": "Home-screen app",
-      "other": "Device"
+      "other": "Device",
+      "unrecognized": "Unrecognized client"
     },
     "unlinkedHealth": {
       "title": "Health connections not matched to a device",
@@ -8415,25 +8422,8 @@
     },
     "signedOut": {
       "title": "Recently signed out",
-      "here": "Signed out of this Avibe",
-      "unnamed": "A device",
-      "justNow": "{{device}} is signed out of this Avibe",
-      "justNowMany": "These devices are signed out of this Avibe",
-      "queued": "Queued; avibe.bot has not been told yet. It waits while remote access is off or this computer sleeps.",
-      "retrying": "Cannot reach avibe.bot right now; Avibe keeps trying and ends its account sign-in once it gets through.",
-      "accepted": "Told avibe.bot to end its account sign-in.",
-      "localOnlyMine": "This signed it out of this Avibe only. Its account sign-in was not ended, so it may be able to sign in here again without verifying. Sign out of avibe.bot on that device; without the device, use Sign out other devices under Account security at avibe.bot.",
-      "localOnlyOthers": "This signed it out of this Avibe only. While its owner still has access they can sign in again; to keep them out, remove them under Access.",
-      "localOnlyEither": "This signed it out of this Avibe only. Its account sign-in was not ended, so it may be able to sign in here again without verifying. If the device is yours: sign out of avibe.bot on it, or, without the device, use Sign out other devices under Account security at avibe.bot. If it is someone else's: to keep them out, remove them under Access.",
-      "sharedSignIn": "It shares one account sign-in with the device you are using now, so that sign-in was not ended.",
-      "keeperUnknown": "It could not be confirmed whether it shares an account sign-in with the device you are using now, so its account sign-in was not ended this time. Signing devices out one at a time does end it.",
-      "refusedCredential": "avibe.bot no longer accepts this computer's binding, so its account sign-in was not ended. Bind remote access again first.",
-      "refused": "avibe.bot did not accept the request, so its account sign-in was not ended this time. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.",
-      "unconfirmed": "After many tries, it is still unclear whether its account sign-in ended. If the device is lost, go to Account security at avibe.bot and choose Sign out other devices.",
-      "unknown": "The result at avibe.bot is not known.",
-      "healthPending": "Clearing the Health data it synced is not confirmed yet.",
-      "healthPendingIfAny": "If it synced Health data, clearing it is not confirmed yet.",
-      "refusedCredentialPlain": "avibe.bot no longer accepts this computer's binding, so its account sign-in was not ended."
+      "toast": "Signed out {{device}}",
+      "toastOthers": "Signed out the other devices"
     },
     "problem": {
       "functionNeedsDevice": "Turn this on on that device first.",
@@ -8572,6 +8562,10 @@
     "taken": "Taken",
     "reclaim": "Yours from before",
     "checking": "Checking…",
-    "invalid": "Lowercase letters, digits and hyphens only"
+    "invalid": "Lowercase letters, digits and hyphens only",
+    "short": "At least 2 characters",
+    "long": "At most 46 characters",
+    "hyphenEnds": "Can’t start or end with a hyphen",
+    "doubleHyphen": "The 3rd and 4th characters can’t both be hyphens"
   }
 }

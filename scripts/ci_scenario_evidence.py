@@ -239,12 +239,18 @@ def read_release_report(junit_dir: Path, repo_root: Path = REPO_ROOT) -> dict[st
     return outcomes
 
 
-def matrix_size(job: dict) -> int:
+def matrix_size(job: dict, *, mode: str | None = None) -> int:
     """How many runs a job's matrix makes: the product of its value lists, or its ``include`` entries alone."""
 
     matrix = (job.get("strategy") or {}).get("matrix")
     if not isinstance(matrix, dict):
         return 1
+    if matrix.get('python') == '${{ fromJSON(needs.changes.outputs.unit_python) }}':
+        from scripts.ci_scope import unit_python_versions
+
+        if mode is None:
+            raise ValueError('Unit evidence requires a validated workflow mode')
+        matrix = {**matrix, 'python': unit_python_versions(mode)}
     size = 1
     lists = [value for key, value in matrix.items() if key not in ("include", "exclude") and isinstance(value, list)]
     for value in lists:
@@ -746,7 +752,7 @@ def main(argv: list[str]) -> int:
     reports = read_reports(junit_dir)
     lint_commands = pytest_commands(WORKFLOWS / LINT_WORKFLOW)
     lint_runs = {
-        job_id: matrix_size(job) for job_id, job in workflow_jobs(WORKFLOWS / LINT_WORKFLOW).items()
+        job_id: matrix_size(job, mode=plan['mode']) for job_id, job in workflow_jobs(WORKFLOWS / LINT_WORKFLOW).items()
         if "AVIBE_CI_JUNIT_DIR" in job.get("env", {})
     }
     release_commands = [args for name in RELEASE_WORKFLOWS for commands in pytest_commands(WORKFLOWS / name).values() for args in commands]

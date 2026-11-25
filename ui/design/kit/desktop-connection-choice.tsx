@@ -1,22 +1,25 @@
 // Approved 2026-11-21 (Product; ui/design: desktop/connection-choice/*): where the Desktop App keeps
-// this computer's choice of path to an instance, 「自动」 or 「仅 Cloudflare 隧道」. As in the iPhone
-// App, the choice is per account and instance, kept by the app itself; no page can read or change it.
+// this computer's choice of path to an instance: 「自动」, 「仅 Cloudflare 隧道」, and since
+// 2026-11-24 (Product, option A) 「仅直连和中继」. As in the iPhone App, the choice is per account
+// and instance, kept by the app itself; the instance's Devices › 连接方式 page shows and changes the
+// same choice.
 //
 // It lives in the app's own menus (the tray menu on macOS and Windows, and the macOS application
-// menu), right after 「切换实例」: a 「连接方式」 item whose submenu holds the two choices, the one
-// for the instance on show ticked. While this computer's own instance is on show there is nothing
-// to choose and the item is greyed. The system draws these menus; `MenuPanel` is a stand-in for
+// menu), right after 「切换实例」: a 「连接方式」 item whose submenu holds the choices, the one for
+// the instance on show ticked. While this computer's own instance is on show there is nothing to
+// choose and the item is greyed. 「仅直连和中继」 is in the submenu only for an instance that could
+// be reached on a path that is not the tunnel (`direct`); for any other it is absent, not greyed. The system draws these menus; `MenuPanel` is a stand-in for
 // them, as `kit/desktop-native-show-window.tsx` is for the title bar. The other items are the
 // shell's shipped ones, in the shell's order (`install_native_tray` in `desktop/src-tauri/src/lib.rs`).
 //
-// All three strings are the Devices page's shipped copy (`devices.connection.title`, `.automatic`,
-// `.tunnelOnly`), read by key (`ConnectionMenu` in `desktop/src-tauri/src/direct/shell.rs`), so the
-// menu and that page cannot drift apart.
+// Every string is the Devices page's shipped copy (`devices.connection.title`, `.automatic`,
+// `.tunnelOnly`, `.directOnly`), read by key (`ConnectionMenu` in
+// `desktop/src-tauri/src/direct/shell.rs`), so the menu and that page cannot drift apart.
 import { Check, ChevronRight } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 
-export type ConnectionChoice = 'automatic' | 'tunnel';
+export type ConnectionChoice = 'automatic' | 'tunnel' | 'direct';
 
 type Item = { label: string; ticked?: boolean; disabled?: boolean; shortcut?: string; open?: boolean } | 'separator';
 
@@ -43,8 +46,9 @@ function MenuPanel({ items, system, className = '' }: { items: Item[]; system: '
 }
 
 /** The tray menu with 「连接方式」: open on the choice of the instance on show, or greyed (`choice`
- *  null) while this computer's own instance is. */
-export function ConnectionChoiceMenu({ choice, system }: { choice: ConnectionChoice | null; system: 'macos' | 'windows' }) {
+ *  null) while this computer's own instance is. `direct`: the instance on show could be routed, so
+ *  「仅直连和中继」 is offered. */
+export function ConnectionChoiceMenu({ choice, system, direct = true }: { choice: ConnectionChoice | null; system: 'macos' | 'windows'; direct?: boolean }) {
   const { t } = useTranslation();
   const mac = system === 'macos';
   const remote = choice !== null;
@@ -72,6 +76,7 @@ export function ConnectionChoiceMenu({ choice, system }: { choice: ConnectionCho
   const choices: Item[] = [
     { label: t('devices.connection.automatic'), ticked: choice === 'automatic' },
     { label: t('devices.connection.tunnelOnly'), ticked: choice === 'tunnel' },
+    ...(direct ? [{ label: t('devices.connection.directOnly'), ticked: choice === 'direct' }] : []),
   ];
   return (
     <div className={`flex h-full w-full bg-background p-6 text-foreground ${mac ? 'items-start' : 'items-end'}`}>

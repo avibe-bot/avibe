@@ -32,8 +32,31 @@
 //!   instance that has not answered before is asked from its open view and
 //!   routed there; that view keeps the tunnel while its connections live,
 //!   and the windows opened from it later are routed as they are made.
+//!
+//! An instance whose choice is "the direct path and the relay only" has its
+//! own rules on top (`Only`), which the three constants below it time:
+//! - its windows are never without the session's route, and that route
+//!   allows no failover: a window whose listener is gone or refuses shows a
+//!   failure, never the tunnel. So its client and route are there before
+//!   its view's first load, first open included; a view that has none is
+//!   opened again with one;
+//! - connecting goes through the tunnel once: the session's listener serves
+//!   the tunnel until its first direct link is up (the view's sign-in, its
+//!   first load and the rendezvous need it). Then the listener is made
+//!   direct-only, its tunnel connections are closed, and its windows are
+//!   reloaded once, onto the link;
+//! - when the link goes, the listener stays direct-only for a while:
+//!   requests wait and then fail. Then the session connects again as it did
+//!   the first time, through the tunnel, and reloads its windows once the
+//!   link is back;
+//! - the choice is set back to automatic, and the instance opened again
+//!   under it, when the tunnel reaches the instance and no link comes up,
+//!   or when the link has had to be made again too often and the instance
+//!   is then heard from. Never because nothing reaches the instance at
+//!   all, and never by a timer alone: a computer that is offline keeps its
+//!   choice.
 use super::{
-    choices::{Choices, Mode},
+    choices::{Choices, Mode, Reverted},
     connect::Authority,
     RefreshOutcome,
 };
@@ -94,6 +117,11 @@ pub struct Published {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Material {
     pub proxy: SocketAddrV4,
+    /// The route allows no failover: when the listener cannot be reached,
+    /// or refuses, the window's request fails instead of going to the
+    /// instance's address by itself. For "the direct path and the relay
+    /// only".
+    pub exclusive: bool,
 }
 
 /// What the shell does next. Labels only.
@@ -107,6 +135,93 @@ pub enum Effect {
     Answer { session: u64, window: String },
     /// Take the route off these windows, then drop the session's client.
     Retire { session: u64, detach: Vec<String> },
+    /// Make the session's listener direct-only, closing the tunnel
+    /// connections it carries (`true`), or let it serve the tunnel again
+    /// (`false`), for the connections its windows open from now on.
+    Strict { session: u64, only: bool },
+    /// Reload these windows of the session, once: their connections are
+    /// then made anew, on the session's direct link.
+    Reload { session: u64, windows: Vec<String> },
+    /// Ask the session's rendezvous now, not when it is next due.
+    Ask { session: u64 },
+    /// Open the instance of the view `runtime` again: a new view, with a
+    /// new session's route from before its first load.
+    Reopen { runtime: String },
+    /// Put a route to nothing on this window, with no failover: an app
+    /// window of the direct-only instance at `origin`, opened while that
+    /// instance has no session. Its requests fail; they never take the
+    /// tunnel. Only where a route is put on an open window.
+    Block { window: String, origin: String },
+    /// Set this instance's choice back to automatic (`Wiring::revert`),
+    /// then open the instance of the view `runtime` again under it.
+    Revert {
+        account: String,
+        origin: String,
+        runtime: String,
+    },
+}
+
+/// A session of an instance whose choice is "the direct path and the relay
+/// only".
+struct Only {
+    phase: Phase,
+    /// The core's count of failed direct-only connections at the last look.
+    counted: Option<u64>,
+    /// The core's count of path changes at the last look.
+    sequence: Option<u64>,
+    /// When direct-only connections failed while a link was reported.
+    failed: Vec<Instant>,
+}
+
+enum Phase {
+    /// The listener serves the tunnel, until a link is up.
+    Connecting {
+        /// Since when the tunnel is known to reach the instance with no
+        /// link coming of it, and how often the instance has answered so.
+        unlinked: Option<(Instant, u8)>,
+    },
+    /// A link is up and the listener is direct-only.
+    Linked,
+    /// The link went and the listener is still direct-only: requests wait,
+    /// then fail, until `until`.
+    Failing { until: Instant },
+}
+
+/// How long requests fail after a direct-only session's link went, before
+/// it connects again through the tunnel. The core lets one request wait as
+/// long for a link before it fails it.
+const FAILING: Duration = Duration::from_secs(10);
+/// A direct-only session that is connecting: how long the tunnel may reach
+/// the instance with no link coming up, and how many of the instance's
+/// answers may come to nothing, before the choice is set back.
+const UNLINKED: (Duration, u8) = (Duration::from_secs(20), 2);
+/// How often, within how long, a direct-only instance's link may have to be
+/// made again: the third time in ten minutes arms the setting-back, which
+/// is done when the instance is next heard from (it answers a rendezvous,
+/// or a link comes up). Three drops for want of any network set nothing
+/// back.
+const AGAIN: (usize, Duration) = (3, Duration::from_secs(600));
+/// How many direct-only connections may fail, within how long, while a link
+/// is reported, before that link is taken for one that carries nothing.
+const CARRYING: (usize, Duration) = (3, Duration::from_secs(60));
+/// How long an instance that is being opened again may take to show its
+/// new view before it is asked again. The sign-in it starts with and the
+/// new view's creation come within this.
+const REOPENING: Duration = Duration::from_secs(60);
+/// How soon an instance is asked again after the request to open it again
+/// failed outright: this long after the first failure, twice as long after
+/// each further one, and never sooner than `REOPENING` allows later.
+const REFUSED: Duration = Duration::from_secs(10);
+
+/// A view whose instance is being opened again. It stays the one that is to
+/// be replaced until another view is on show: whatever the choice has
+/// become meanwhile, its route was made for another kind of choice.
+struct Reopening {
+    runtime: String,
+    /// Not asked again before this.
+    until: Instant,
+    /// How often the request has failed outright, in a row.
+    refused: u32,
 }
 
 struct Session {
@@ -128,6 +243,8 @@ struct Session {
     /// before its first load, without waiting for an answer.
     early: bool,
     opened: Instant,
+    /// The choice is "the direct path and the relay only".
+    only: Option<Only>,
 }
 
 /// How long a session made for a window that is being created may wait for
@@ -197,6 +314,11 @@ impl Pace {
     }
 }
 
+/// One account's instance, as the things kept per instance name it.
+fn key(account: &str, origin: &str) -> String {
+    format!("{account} {origin}")
+}
+
 /// An app window that shows another computer's instance, whether or not a
 /// session exists for it right now.
 struct AppWindow {
@@ -218,6 +340,18 @@ pub struct Wiring {
     app_windows: Vec<AppWindow>,
     next: u64,
     cooling: Option<(String, Instant)>,
+    /// When a direct-only instance's link had to be made again, by account
+    /// and origin.
+    again: Vec<(String, Instant)>,
+    /// The instances whose link was made again once too often: their
+    /// choice is set back when they are next heard from.
+    armed: Vec<String>,
+    /// The instance view that is being opened again.
+    reopening: Option<Reopening>,
+    /// The view that an opening-again brought, until a session holds it.
+    /// One that comes without a session is not opened again a second time:
+    /// the tunnel has just carried its sign-in, and no route could be made.
+    reopened: Option<String>,
 }
 
 impl Wiring {
@@ -232,6 +366,10 @@ impl Wiring {
             app_windows: Vec::new(),
             next: 0,
             cooling: None,
+            again: Vec::new(),
+            armed: Vec::new(),
+            reopening: None,
+            reopened: None,
         }
     }
 
@@ -239,22 +377,61 @@ impl Wiring {
         self.choices.mode(account, origin)
     }
 
-    /// The choice, with how many choices had been made when it is read:
-    /// what puts two readings of it in order, whichever is told first.
-    pub fn choice(&self, account: &str, origin: &str) -> (Mode, u64) {
-        (self.mode(account, origin), self.chosen)
+    /// The choice, with the app's own setting-back of it while that stands
+    /// and how many choices had been made when it is read: what puts two
+    /// readings of it in order, whichever is told first.
+    pub fn choice(&self, account: &str, origin: &str) -> (Mode, Option<Reverted>, u64) {
+        (
+            self.mode(account, origin),
+            self.choices.reverted(account, origin),
+            self.chosen,
+        )
     }
 
-    /// Keeps the choice for this account's instance. "Cloudflare tunnel only"
-    /// ends its sessions at once; "automatic" starts one at the next
-    /// `reconcile` (live routing) or the next window (routing at creation).
+    /// Keeps the choice someone made for this account's instance.
+    /// "Cloudflare tunnel only" ends its sessions at once; "automatic"
+    /// starts one at the next `reconcile` (live routing) or the next window
+    /// (routing at creation).
+    ///
+    /// A choice to or from "the direct path and the relay only" ends the
+    /// instance's sessions too, whichever way: its windows were made for
+    /// the other kind of route. The caller then opens the instance again
+    /// (`reopens`).
     pub fn choose(&mut self, account: &str, origin: &str, mode: Mode) -> Vec<Effect> {
+        let before = self.mode(account, origin);
         self.choices.set(account, origin, mode);
         self.chosen += 1;
-        if mode == Mode::Automatic {
+        self.forget_again(account, origin);
+        if mode != Mode::Tunnel && !Self::reopens(before, mode) {
             return Vec::new();
         }
         self.retire_where(|session| session.target.account == account && session.target.origin == origin)
+    }
+
+    /// Whether a change of the choice needs the instance opened again: one
+    /// to or from "the direct path and the relay only". A window's route is
+    /// of one kind for as long as its connections live (the module's
+    /// notes), so only a new view takes the other.
+    pub fn reopens(before: Mode, after: Mode) -> bool {
+        before != after && (before == Mode::Direct || after == Mode::Direct)
+    }
+
+    /// The app sets this instance's choice back to automatic itself
+    /// (`Effect::Revert`), and its sessions end. The caller opens the
+    /// instance again.
+    pub fn revert(&mut self, account: &str, origin: &str, reverted: Reverted) -> Vec<Effect> {
+        self.choices.revert(account, origin, reverted);
+        self.chosen += 1;
+        self.forget_again(account, origin);
+        self.retire_where(|session| session.target.account == account && session.target.origin == origin)
+    }
+
+    /// A choice was made or set back: what was counted against the old one
+    /// is forgotten.
+    fn forget_again(&mut self, account: &str, origin: &str) {
+        let instance = key(account, origin);
+        self.again.retain(|(noted, _)| *noted != instance);
+        self.armed.retain(|noted| *noted != instance);
     }
 
     /// What the system's own proxy settings say now. They rule the direct
@@ -282,7 +459,12 @@ impl Wiring {
             && target.host().is_some_and(|host| Authority::managed(host).is_some())
             && !target.account.is_empty()
             && !target.instance.is_empty()
-            && self.choices.mode(&target.account, &target.origin) == Mode::Automatic
+            && self.choices.mode(&target.account, &target.origin) != Mode::Tunnel
+    }
+
+    /// Whether `target`'s choice is "the direct path and the relay only".
+    pub fn only(&self, target: &Target) -> bool {
+        self.choices.mode(&target.account, &target.origin) == Mode::Direct
     }
 
     fn reached(&self, target: &Target) -> bool {
@@ -297,9 +479,9 @@ impl Wiring {
     /// Whether the instance view about to be created for `target` gets a
     /// route before its first load, so that a client must exist before it
     /// does: wherever a window can be routed, for an instance that answered
-    /// before.
+    /// before, and always for "the direct path and the relay only".
     pub fn starts_at_creation(&self, target: &Target) -> bool {
-        self.permitted(target) && self.reached(target)
+        self.permitted(target) && (self.reached(target) || self.only(target))
     }
 
     /// A client exists for `target`. `runtime` is the published instance view
@@ -308,6 +490,14 @@ impl Wiring {
     /// window with `window_created`.
     pub fn open(&mut self, target: Target, material: Material, runtime: Option<&str>, now: Instant) -> u64 {
         self.next += 1;
+        // A direct-only session starts by connecting, with a listener that
+        // serves the tunnel as any does.
+        let only = self.only(&target).then(|| Only {
+            phase: Phase::Connecting { unlinked: None },
+            counted: None,
+            sequence: None,
+            failed: Vec::new(),
+        });
         // Where a route is given only at creation, a session started for a
         // view that is already open can route nothing.
         let scout = self.routing == Routing::AtCreation && runtime.is_some();
@@ -338,6 +528,7 @@ impl Wiring {
             scout,
             early,
             opened: now,
+            only,
         });
         self.next
     }
@@ -411,7 +602,29 @@ impl Wiring {
             Routing::AtCreation => created_for,
             Routing::Unsupported => None,
         };
-        session.map_or_else(Vec::new, |session| self.window_created(session, window))
+        if let Some(session) = session {
+            return self.window_created(session, window);
+        }
+        // A direct-only instance's window is never left without a route:
+        // with no session to join it gets one to nothing, and fails until
+        // its instance is opened again, which closes it. (Where the route
+        // is given at creation, it was: `blocks`.)
+        if self.routing == Routing::Live && self.blocks(account, origin) {
+            return vec![Effect::Block {
+                window: window.to_owned(),
+                origin: origin.to_owned(),
+            }];
+        }
+        Vec::new()
+    }
+
+    /// Whether an app window of this account's instance that has no session
+    /// to join must get a route to nothing: the instance's choice is "the
+    /// direct path and the relay only". Without one the window would load
+    /// through the tunnel, which that choice forbids once and for all
+    /// windows.
+    pub fn blocks(&self, account: &str, origin: &str) -> bool {
+        self.choices.mode(account, origin) == Mode::Direct
     }
 
     /// A window that shows the session's instance now exists: its instance
@@ -490,13 +703,77 @@ impl Wiring {
             if keep {
                 kept.push(session);
             } else {
-                effects.push(Effect::Retire {
-                    session: session.id,
-                    detach: session.routed,
-                });
+                effects.push(self.retired(session));
             }
         }
         self.sessions = kept;
+        effects.extend(self.only_in_time(now));
+        if self
+            .reopening
+            .as_ref()
+            .is_some_and(|replaced| published.is_none_or(|shown| shown.runtime != replaced.runtime))
+        {
+            // The view that was being replaced is gone, and the one on show
+            // now, if any, is what replaced it.
+            self.reopening = None;
+            self.reopened = published.map(|shown| shown.runtime.clone());
+        }
+        // A direct-only instance's view is never left without a session's
+        // route, whatever document is in it: it is opened again with one.
+        // Where no window of it can be routed now, the choice is set back.
+        if let Some(shown) = published.filter(|shown| self.only(&shown.target)) {
+            let held = self.sessions.iter().any(|session| {
+                session.target == shown.target
+                    && (session.runtime.as_deref() == Some(shown.runtime.as_str())
+                        || session.windows.contains(&shown.runtime))
+            });
+            if held && self.reopened.as_deref() == Some(shown.runtime.as_str()) {
+                self.reopened = None;
+            }
+            // A view that a session holds is not one to be replaced.
+            if held
+                && self
+                    .reopening
+                    .as_ref()
+                    .is_some_and(|replaced| replaced.runtime == shown.runtime && now >= replaced.until)
+            {
+                self.reopening = None;
+            }
+            if !held && !self.is_reopening(now) {
+                let came_without = self.reopened.as_deref() == Some(shown.runtime.as_str());
+                let effect = if self.permitted(&shown.target) && !came_without {
+                    // Opening it again is making its link again.
+                    self.made_again(&shown.target, now);
+                    self.replacing(&shown.runtime, now);
+                    Effect::Reopen {
+                        runtime: shown.runtime.clone(),
+                    }
+                } else {
+                    self.set_back(&shown.target, &shown.runtime, now)
+                };
+                effects.push(effect);
+            }
+            return effects;
+        }
+        // A view that was to be replaced and is still the one on show: the
+        // request to open its instance again failed, or brought no view.
+        // It is asked again, whatever the choice is now. A view that left
+        // "the direct path and the relay only" keeps a route that serves
+        // nothing and allows no failover, so nothing else would ever bring
+        // it back; and it gets no session of its own (below) either way.
+        if let Some(shown) = published {
+            let due = self
+                .reopening
+                .as_ref()
+                .is_some_and(|replaced| replaced.runtime == shown.runtime && now >= replaced.until);
+            if due {
+                self.replacing(&shown.runtime, now);
+                effects.push(Effect::Reopen {
+                    runtime: shown.runtime.clone(),
+                });
+                return effects;
+            }
+        }
         if let Some(shown) = published.filter(|shown| shown.document) {
             let held = self
                 .sessions
@@ -513,13 +790,347 @@ impl Wiring {
                 Routing::AtCreation => !self.reached(&shown.target),
                 Routing::Unsupported => false,
             };
-            if wanted && !held && !cooling && self.permitted(&shown.target) {
+            // A view that is about to be replaced gets no session of its own.
+            if wanted && !held && !cooling && !self.is_reopening(now) && self.permitted(&shown.target) {
                 effects.push(Effect::Open {
                     runtime: shown.runtime.clone(),
                 });
             }
         }
         effects
+    }
+
+    /// What time alone changes for the direct-only sessions: one whose
+    /// requests have failed for long enough connects again, and one that
+    /// has been connecting for too long, with the tunnel reaching the
+    /// instance, has its choice set back.
+    fn only_in_time(&mut self, now: Instant) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        let due: Vec<(u64, bool)> = self
+            .sessions
+            .iter()
+            .filter_map(|session| match session.only.as_ref()?.phase {
+                Phase::Failing { until } if now >= until => Some((session.id, true)),
+                Phase::Connecting {
+                    unlinked: Some((since, _)),
+                } if now.saturating_duration_since(since) >= UNLINKED.0 => Some((session.id, false)),
+                _ => None,
+            })
+            .collect();
+        for (id, failing) in due {
+            let Some(target) = self.target_of(id) else { continue };
+            if failing {
+                // Connecting again is making the link again.
+                self.made_again(&target, now);
+                if let Some(only) = self.only_mut(id) {
+                    only.phase = Phase::Connecting { unlinked: None };
+                }
+                effects.push(Effect::Strict {
+                    session: id,
+                    only: false,
+                });
+                effects.push(Effect::Ask { session: id });
+            } else if let Some(runtime) = self.view_of(id) {
+                // The instance answered in this very connecting, and no
+                // link has come since: it is heard from, and not linked.
+                effects.push(self.set_back(&target, &runtime, now));
+            }
+        }
+        effects
+    }
+
+    /// When time alone next changes something: for a direct-only session
+    /// (`only_in_time`), or for a view that is to be replaced, whose
+    /// instance is asked for again then. The shell looks then, and not only
+    /// at its usual pace (`next_look`).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.sessions
+            .iter()
+            .filter_map(|session| match session.only.as_ref()?.phase {
+                Phase::Failing { until } => Some(until),
+                Phase::Connecting {
+                    unlinked: Some((since, _)),
+                } => Some(since + UNLINKED.0),
+                _ => None,
+            })
+            .chain(self.reopening.as_ref().map(|replaced| replaced.until))
+            .min()
+    }
+
+    /// How long the shell waits for its next look when nothing pokes it;
+    /// `None`: until something does. `look` while any session exists, and
+    /// `wait` while the view on show may still get one by itself; sooner
+    /// for what time alone brings due (`deadline`), which is waited for
+    /// even when there is no session and none to wait for: a view that
+    /// left "the direct path and the relay only" has neither, and its
+    /// instance is still to be asked for again.
+    ///
+    /// Something due that a look has not dealt with yet is looked at
+    /// within a second, and not faster than that for as long as it stays.
+    pub fn next_look(
+        &self,
+        published: Option<&Published>,
+        now: Instant,
+        look: Duration,
+        wait: Duration,
+    ) -> Option<Duration> {
+        let pace = if self.busy() {
+            Some(look)
+        } else if self.awaits(published) {
+            Some(wait)
+        } else {
+            None
+        };
+        let due = self.deadline().map(|at| {
+            if at > now {
+                at.saturating_duration_since(now) + Duration::from_millis(50)
+            } else {
+                Duration::from_secs(1)
+            }
+        });
+        match (pace, due) {
+            (Some(pace), Some(due)) => Some(pace.min(due)),
+            (pace, due) => pace.or(due),
+        }
+    }
+
+    /// The session's client says whether a direct link is up (`linked`),
+    /// how often its path has changed so far (`sequence`) and how many
+    /// direct-only connections it has failed so far (`failures`); both
+    /// counts only ever grow. Nothing follows for a session that is not
+    /// direct-only.
+    ///
+    /// The client is looked at when it says something changed, and several
+    /// changes may have happened by then. So every failure since the last
+    /// look counts, not one a look; and failures count against a link only
+    /// when the path did not change between the two looks: a link that
+    /// went and came back unseen failed them for want of a link, which is
+    /// no fault of the link that is there now. For the same reason a change
+    /// of the path, seen or not, starts the count again: three failures
+    /// are three on one path.
+    pub fn path(&mut self, session: u64, linked: bool, sequence: u64, failures: u64, now: Instant) -> Vec<Effect> {
+        let Some(found) = self.sessions.iter_mut().find(|candidate| candidate.id == session) else {
+            return Vec::new();
+        };
+        let Some(only) = found.only.as_mut() else {
+            return Vec::new();
+        };
+        // The first count is where this session starts counting from.
+        let fresh = failures.saturating_sub(only.counted.unwrap_or(failures));
+        only.counted = Some(failures);
+        let steady = only.sequence.replace(sequence) == Some(sequence);
+        if !steady {
+            // Another path, or the same one after something was closed on
+            // it: what failed before is no evidence about it.
+            only.failed.clear();
+        }
+        let (connecting, failing) = match only.phase {
+            Phase::Connecting { .. } => (true, false),
+            Phase::Failing { .. } => (false, true),
+            Phase::Linked => (false, false),
+        };
+        if connecting {
+            if !linked {
+                return Vec::new();
+            }
+            // A link that had to be made once too often: the instance is
+            // heard from, and its choice is set back.
+            let target = found.target.clone();
+            if self.armed.contains(&key(&target.account, &target.origin)) {
+                return match self.view_of(session) {
+                    Some(runtime) => vec![self.set_back(&target, &runtime, now)],
+                    None => Vec::new(),
+                };
+            }
+            let Some(only) = self.only_mut(session) else {
+                return Vec::new();
+            };
+            // Connected: from here on nothing of this session's uses the
+            // tunnel. Its windows are reloaded onto the link.
+            only.phase = Phase::Linked;
+            only.failed.clear();
+            let windows = self
+                .sessions
+                .iter()
+                .find(|candidate| candidate.id == session)
+                .map(|found| found.routed.clone())
+                .unwrap_or_default();
+            return vec![
+                Effect::Strict { session, only: true },
+                Effect::Reload { session, windows },
+            ];
+        }
+        if failing {
+            // Back while requests were still failing: they go on the link
+            // again by themselves, and nothing was let onto the tunnel.
+            if linked {
+                only.phase = Phase::Linked;
+            }
+            return Vec::new();
+        }
+        if !linked {
+            // The link went. The listener stays direct-only: requests wait
+            // for a link, and fail without one.
+            only.phase = Phase::Failing { until: now + FAILING };
+            return Vec::new();
+        }
+        if fresh == 0 || !steady {
+            return Vec::new();
+        }
+        // A link is reported, and connections fail on it all the same: it
+        // carries nothing, and asking again would only renew it. A new
+        // client makes a new one.
+        let fresh = usize::try_from(fresh).unwrap_or(CARRYING.0).min(CARRYING.0);
+        only.failed.resize(only.failed.len() + fresh, now);
+        only.failed.retain(|at| now.saturating_duration_since(*at) < CARRYING.1);
+        if only.failed.len() < CARRYING.0 {
+            return Vec::new();
+        }
+        only.failed.clear();
+        let target = found.target.clone();
+        let Some(runtime) = self.view_of(session) else {
+            return Vec::new();
+        };
+        self.made_again(&target, now);
+        self.replacing(&runtime, now);
+        let mut effects = self.retire_where(|candidate| candidate.id == session);
+        effects.push(Effect::Reopen { runtime });
+        effects
+    }
+
+    /// The instance answered a rendezvous of the session through the
+    /// tunnel, and no link came of it: it offers no direct path now, or
+    /// none that reaches it from here. For a direct-only session that is
+    /// connecting, the second such answer sets the choice back. A request
+    /// that reached nothing is not this: nothing is learned from it.
+    pub fn unlinked(&mut self, session: u64, now: Instant) -> Vec<Effect> {
+        let Some(found) = self.sessions.iter_mut().find(|candidate| candidate.id == session) else {
+            return Vec::new();
+        };
+        let Some(Only {
+            phase: Phase::Connecting { unlinked },
+            ..
+        }) = found.only.as_mut()
+        else {
+            return Vec::new();
+        };
+        let (_, answers) = unlinked.get_or_insert((now, 0));
+        *answers += 1;
+        let answers = *answers;
+        let target = found.target.clone();
+        // One answer is enough for a link that was made once too often.
+        if answers < UNLINKED.1 && !self.armed.contains(&key(&target.account, &target.origin)) {
+            return Vec::new();
+        }
+        match self.view_of(session) {
+            Some(runtime) => vec![self.set_back(&target, &runtime, now)],
+            None => Vec::new(),
+        }
+    }
+
+    /// The instance of the view `runtime` is being opened again from now:
+    /// until its new view is the one on show, or for as long as that may
+    /// take, the old view gets no session and is not opened again.
+    pub fn reopening(&mut self, runtime: &str, now: Instant) {
+        self.replacing(runtime, now);
+    }
+
+    /// The request to open the instance of the view `runtime` again failed
+    /// outright (no network, or its sign-in was refused): it is asked again
+    /// sooner than a request that is still under way would be, and later
+    /// each time it fails again. For a view of "the direct path and the
+    /// relay only" nothing changes: its opening-again is counted, and keeps
+    /// its pace.
+    pub fn reopen_refused(&mut self, runtime: &str, target: &Target, now: Instant) {
+        if self.only(target) {
+            return;
+        }
+        let Some(replaced) = self.reopening.as_mut().filter(|replaced| replaced.runtime == runtime) else {
+            return;
+        };
+        replaced.refused += 1;
+        let wait = REFUSED
+            .checked_mul(1 << (replaced.refused - 1).min(8))
+            .map_or(REOPENING, |wait| wait.min(REOPENING));
+        replaced.until = replaced.until.min(now + wait);
+    }
+
+    /// The view `runtime` is to be replaced from now. A view that already
+    /// was keeps its count of refused requests.
+    fn replacing(&mut self, runtime: &str, now: Instant) {
+        let refused = self
+            .reopening
+            .as_ref()
+            .filter(|replaced| replaced.runtime == runtime)
+            .map_or(0, |replaced| replaced.refused);
+        self.reopening = Some(Reopening {
+            runtime: runtime.to_owned(),
+            until: now + REOPENING,
+            refused,
+        });
+    }
+
+    fn is_reopening(&self, now: Instant) -> bool {
+        self.reopening.as_ref().is_some_and(|replaced| now < replaced.until)
+    }
+
+    /// Notes that this instance's link has to be made again now. Once too
+    /// often (`AGAIN`), its choice is set back when it is next heard from.
+    fn made_again(&mut self, target: &Target, now: Instant) {
+        let instance = key(&target.account, &target.origin);
+        self.again
+            .retain(|(_, at)| now.saturating_duration_since(*at) < AGAIN.1);
+        self.again.push((instance.clone(), now));
+        if self.again.iter().filter(|(noted, _)| *noted == instance).count() >= AGAIN.0
+            && !self.armed.contains(&instance)
+        {
+            self.armed.push(instance);
+        }
+    }
+
+    fn set_back(&mut self, target: &Target, runtime: &str, now: Instant) -> Effect {
+        self.replacing(runtime, now);
+        Effect::Revert {
+            account: target.account.clone(),
+            origin: target.origin.clone(),
+            runtime: runtime.to_owned(),
+        }
+    }
+
+    fn target_of(&self, session: u64) -> Option<Target> {
+        self.sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .map(|found| found.target.clone())
+    }
+
+    fn only_mut(&mut self, session: u64) -> Option<&mut Only> {
+        self.sessions
+            .iter_mut()
+            .find(|candidate| candidate.id == session)?
+            .only
+            .as_mut()
+    }
+
+    /// The session's instance view: the one it is published as, or the
+    /// first window it was given, which is that view before it is shown.
+    fn view_of(&self, session: u64) -> Option<String> {
+        let found = self.sessions.iter().find(|candidate| candidate.id == session)?;
+        found.runtime.clone().or_else(|| found.windows.first().cloned())
+    }
+
+    /// The end of one session, as an effect. A direct-only session's route
+    /// is not taken off a window that is still open where that would let
+    /// the window onto the tunnel (live routing: the route is all that
+    /// stands between it and the instance's address). Its client is
+    /// dropped, the route then points at nothing and allows no failover,
+    /// and the window's requests fail until it is opened again.
+    fn retired(&self, session: Session) -> Effect {
+        let keeps_route = session.only.is_some() && self.routing == Routing::Live;
+        Effect::Retire {
+            session: session.id,
+            detach: if keeps_route { Vec::new() } else { session.routed },
+        }
     }
 
     /// Whether a session may still start for the published view with nothing
@@ -532,6 +1143,11 @@ impl Wiring {
             .sessions
             .iter()
             .any(|session| session.runtime.as_deref() == Some(shown.runtime.as_str()));
+        // A direct-only instance's view always gets a session, or has its
+        // choice set back, at the next look.
+        if self.only(&shown.target) {
+            return !held;
+        }
         let wanted = match self.routing {
             Routing::Live => true,
             Routing::AtCreation => !self.reached(&shown.target),
@@ -602,13 +1218,7 @@ impl Wiring {
             .into_iter()
             .partition(|session| ends(session));
         self.sessions = kept;
-        ended
-            .into_iter()
-            .map(|session| Effect::Retire {
-                session: session.id,
-                detach: session.routed,
-            })
-            .collect()
+        ended.into_iter().map(|session| self.retired(session)).collect()
     }
 
     /// Whether `window` is still the session's instance view: the selection
@@ -630,6 +1240,17 @@ impl Wiring {
         self.sessions
             .iter()
             .any(|candidate| candidate.id == session && candidate.routed.iter().any(|label| label == window))
+    }
+
+    /// Whether no session routes `window` at this moment. Asked on the main
+    /// thread just before a route to nothing is put on it (`Effect::Block`):
+    /// a window that a session has taken meanwhile keeps that session's
+    /// route.
+    pub fn unrouted(&self, window: &str) -> bool {
+        !self
+            .sessions
+            .iter()
+            .any(|candidate| candidate.routed.iter().any(|label| label == window))
     }
 
     /// The window a session asks its rendezvous through: its instance view,
@@ -671,6 +1292,16 @@ impl Wiring {
             .iter()
             .find(|session| session.routed.iter().any(|label| label == window))
             .map(|session| session.id)
+    }
+
+    /// Whether the session is direct-only and has its listener so now: a
+    /// link is up, or went a moment ago.
+    pub fn is_direct_only(&self, session: u64) -> bool {
+        self.sessions
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|found| found.only.as_ref())
+            .is_some_and(|only| !matches!(only.phase, Phase::Connecting { .. }))
     }
 
     /// Whether any session exists, so the shell knows to keep looking for
