@@ -294,7 +294,7 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
             )
             .on_conflict_do_nothing(index_elements=["session_id"])
         )
-        if fresh and not written.rowcount:
+        if fresh and written.rowcount != 1:
             # Not recorded under its own id: issuing it would hand out an unlisted session.
             raise SessionNotRegistered('session_not_registered')
         if fresh and reference:

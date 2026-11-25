@@ -365,6 +365,29 @@ def test_an_unused_code_is_cleared_from_both_stores_and_cannot_be_redeemed(insta
         device_health_registry.pair(store, payload, identity)
 
 
+def test_an_unused_code_is_refused_from_the_hand_over_on_even_while_its_cleanup_waits(install, monkeypatch):
+    from core.mobile_health_contract import MobileError
+    from storage.mobile_store import MobileStore
+
+    store = MobileStore()
+    cookie, viewer, device, identity, payload = health_phone(install, store)
+    real = device_health_registry.MobileStore
+    monkeypatch.setattr(device_health_registry, "MobileStore", None)  # the cleanup cannot run yet
+    c = browser(cookie)
+    relogin(c, monkeypatch, install)
+    assert code_kept(store, payload) and authenticated(held(c))
+    with pytest.raises(MobileError) as refused:
+        device_health_registry.pair(store, payload, identity)
+    assert refused.value.status == 401
+    with store.transaction() as mobile:
+        assert mobile.execute("SELECT COUNT(*) FROM devices").fetchone()[0] == 0
+    monkeypatch.setattr(device_health_registry, "MobileStore", real)
+    device_health_registry.maintain(get_cached_sqlite_engine(), int(time.time()))
+    assert not code_kept(store, payload)
+    with get_cached_sqlite_engine().connect() as conn:
+        assert conn.execute(select(health)).first() is None
+
+
 def test_a_code_that_paired_before_the_registry_saw_it_survives_signing_in_again(install, monkeypatch):
     from storage.mobile_store import MobileStore
 
@@ -491,7 +514,7 @@ def test_an_old_cookie_that_no_longer_counts_changes_nothing(install, monkeypatc
 
 # ── 5. Issuance failure leaves the old session as it was ────────────────────────────────────────
 
-@pytest.mark.parametrize("why", ["sid-taken", "sid-tombstoned", "sid-of-unregistered-cookie"])
+@pytest.mark.parametrize("why", ["sid-of-another-session", "sid-tombstoned", "sid-of-unregistered-cookie"])
 def test_a_new_session_that_cannot_be_issued_replaces_nothing(issuer, monkeypatch, quiet, why):
     install = issuer
     old = first_login(install, ref=REF_A)
@@ -503,21 +526,30 @@ def test_a_new_session_that_cannot_be_issued_replaces_nothing(issuer, monkeypatc
         with get_cached_sqlite_engine().begin() as conn:
             conn.execute(refs.delete().where(refs.c.sid == old_sid))
             conn.execute(sessions.delete().where(sessions.c.session_id == old_sid))
+    sibling = first_login(install, ref="asr1_" + "s" * 43)
+    sibling_sid = sid_of(install, sibling)
+    sibling_before, sibling_refs = row(sibling_sid), refs_of(sibling_sid)
     before, old_refs = row(old_sid), refs_of(old_sid)
-    taken = "x" * 32 if why == "sid-tombstoned" else old_sid
+    # Another registered session holds the id: the insert itself finds it taken.
+    taken = {"sid-of-another-session": sibling_sid, "sid-tombstoned": "x" * 32}.get(why, old_sid)
     if why == "sid-tombstoned":
         with get_cached_sqlite_engine().begin() as conn:
             device_registry._tombstone(conn, taken, 2**40, 0)
-    monkeypatch.setattr(remote_access.secrets, "token_urlsafe", lambda *_: taken)
-    set_authorization(install, old, lapsed=True)
-    answer = sign_in(c, monkeypatch, install, ref=REF_B)
+    real_token = remote_access.secrets.token_urlsafe
+    # Only the browser session id (24 bytes) is fixed; every other token stays random.
+    monkeypatch.setattr(remote_access.secrets, "token_urlsafe", lambda n=None: taken if n == 24 else real_token(n))
+    # Without an account reference to enroll, so only the insert can notice the taken id.
+    ref = None if why == "sid-of-another-session" else REF_B
+    answer = finish(c, monkeypatch, install, begin_relogin(c, install), ref=ref)
     assert answer.status_code >= 400
     assert not any(h.startswith(remote_access.SESSION_COOKIE_NAME + "=") and "Max-Age=0" not in h
                    for h in answer.headers.getlist("Set-Cookie"))
     assert held(c) == old and row(old_sid) == before and refs_of(old_sid) == old_refs and quiet == []
     assert tombstone(old_sid) is None and REF_B not in json.dumps([refs_of(taken)])
+    assert row(sibling_sid) == sibling_before and refs_of(sibling_sid) == sibling_refs
+    assert tombstone(sibling_sid) is None and authenticated(sibling)
     with get_cached_sqlite_engine().connect() as conn:
-        assert conn.scalar(select(func.count()).select_from(sessions)) == (0 if before is None else 1)
+        assert conn.scalar(select(func.count()).select_from(sessions)) == (1 if before is None else 2)
 
 
 # ── 6. Races, in real lock order ────────────────────────────────────────────────────────────────
@@ -619,7 +651,8 @@ def test_signing_the_device_out_after_the_hand_over_takes_the_new_session(instal
         lambda: sign_out(owner, device["id"] + "/sign-out"), first_in=RECORD, second_in=SIGN_OUT)
     assert answer.status_code == 302 and signed_out.status_code == 200
     new = held(c)
-    assert quiet == [sid_of(install, old), sid_of(install, new)]
+    # Each publishes after its own commit, from its own thread: both, once each, in either order.
+    assert sorted(quiet) == sorted([sid_of(install, old), sid_of(install, new)])
     assert not authenticated(new) and not authenticated(old)
 
 
