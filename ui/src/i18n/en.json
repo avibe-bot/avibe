@@ -8503,7 +8503,7 @@
         "unchangedCredentials": "No credential is changed: not the tunnel credential, not model keys, not the Vault.",
         "copiedData": "If someone may have copied this computer's Avibe data as a whole, also delete the old Avibe at avibe.bot: until then, whoever holds the copy can still use it.",
         "irreversible": "This cannot be undone.",
-        "refusedLead": "avibe.bot did not accept the deletion: the key this computer keeps no longer works, and the Avibe at avibe.bot was not deleted.",
+        "refusedLead": "avibe.bot did not accept this deletion: the key this computer keeps no longer works.",
         "introLocal": "You can clear the binding on this computer only, then bind it as a new computer to any account.",
         "localAction": "Clear this computer's binding only"
       },

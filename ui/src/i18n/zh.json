@@ -8503,7 +8503,7 @@
         "unchangedCredentials": "不会更换任何凭证：隧道凭证、模型密钥、Vault 都不变。",
         "copiedData": "如果这台电脑上的 Avibe 数据可能被人整个复制走过，还要在 avibe.bot 上删除原来的 Avibe：在那之前，拿到副本的人仍然可以用它。",
         "irreversible": "这一步不能撤销。",
-        "refusedLead": "avibe.bot 没有接受删除：这台电脑保存的钥匙已经不能用了，avibe.bot 上的那个 Avibe 没有被删除。",
+        "refusedLead": "avibe.bot 没有接受这次删除：这台电脑保存的钥匙已经不能用了。",
         "introLocal": "可以只清除这台电脑上的绑定，之后作为一台新电脑绑定到任何账号。",
         "localAction": "只清除这台电脑上的绑定"
       },
