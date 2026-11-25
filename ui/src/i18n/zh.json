@@ -8422,7 +8422,8 @@
       "choiceRevertedDirectDesktopUndated": "「仅直连和中继」连不上，Avibe Desktop 已自己改回「自动」。",
       "choiceRevertedDirectDesktopToday": "「仅直连和中继」今天 {{time}} 连不上，Avibe Desktop 已自己改回「自动」。",
       "choiceRevertedDirectDesktopYesterday": "「仅直连和中继」昨天 {{time}} 连不上，Avibe Desktop 已自己改回「自动」。",
-      "choiceRevertedDirectDesktopDated": "「仅直连和中继」{{date}} {{time}} 连不上，Avibe Desktop 已自己改回「自动」。"
+      "choiceRevertedDirectDesktopDated": "「仅直连和中继」{{date}} {{time}} 连不上，Avibe Desktop 已自己改回「自动」。",
+      "directOnlyRelaunch": "重新打开 App 后生效。"
     },
     "rename": {
       "title": "更改域名",

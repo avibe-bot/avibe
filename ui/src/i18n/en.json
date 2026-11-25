@@ -8422,7 +8422,8 @@
       "choiceRevertedDirectDesktopUndated": "Direct and relay only could not connect, so Avibe Desktop went back to Automatic by itself.",
       "choiceRevertedDirectDesktopToday": "Direct and relay only could not connect today at {{time}}, so Avibe Desktop went back to Automatic by itself.",
       "choiceRevertedDirectDesktopYesterday": "Direct and relay only could not connect yesterday at {{time}}, so Avibe Desktop went back to Automatic by itself.",
-      "choiceRevertedDirectDesktopDated": "Direct and relay only could not connect on {{date}} at {{time}}, so Avibe Desktop went back to Automatic by itself."
+      "choiceRevertedDirectDesktopDated": "Direct and relay only could not connect on {{date}} at {{time}}, so Avibe Desktop went back to Automatic by itself.",
+      "directOnlyRelaunch": "Takes effect after you reopen the App."
     },
     "rename": {
       "title": "Change the domain",
