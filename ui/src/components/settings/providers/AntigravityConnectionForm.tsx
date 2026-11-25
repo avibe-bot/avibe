@@ -53,9 +53,6 @@ const isAuthVerified = (fresh: AntigravityAuthState | null, expectedMode?: Antig
   if (expectedMode && fresh.auth_mode !== expectedMode) {
     return false;
   }
-  if (fresh.auth_mode === 'agent-platform' && !fresh.adc_present) {
-    return false;
-  }
   if (fresh.auth_mode === 'gemini-api-key' && !fresh.has_api_key) {
     return false;
   }
@@ -71,7 +68,7 @@ const unconfirmedAuthKey = (
   fresh: AntigravityAuthState,
   expectedMode: AntigravityAuthMode,
 ): UnconfirmedAuthKey => {
-  if (expectedMode === 'agent-platform' && (fresh.error === 'adc_missing' || !fresh.adc_present)) {
+  if (expectedMode === 'agent-platform' && (fresh.error === 'adc_missing' || fresh.error === 'not_logged_in' || !fresh.adc_present)) {
     return 'settings.backends.antigravityAdcSaveNeedsAuth';
   }
   if (expectedMode === 'gemini-api-key' && (fresh.error === 'invalid_credentials' || fresh.error === 'missing_api_key')) {
@@ -399,6 +396,7 @@ export function AntigravityConnectionForm({
     oauth.callbackKind === 'code' || oauth.callbackKind === 'redirect' || (!oauth.callbackKind && Boolean(oauth.url) && !oauth.deviceCode)
   );
   const adcCommand = auth?.adc_command?.trim() || '';
+  const adcReady = Boolean(auth?.adc_present || (auth?.auth_mode === 'agent-platform' && auth?.authenticated));
   const enterpriseTerminalCommand = oauth.terminalCommand?.trim() || '';
   const enterpriseTerminalInstructions = oauth.instructions?.trim() || '';
   const showEnterpriseTerminal =
@@ -586,11 +584,11 @@ export function AntigravityConnectionForm({
                 />
                 <div className="flex flex-col gap-2.5 rounded-lg border border-edge bg-surface-2/60 px-3.5 py-3 shadow-elevation-0">
                   <span className="text-[12px] font-semibold text-foreground">{t('settings.backends.antigravityAdcStatusLabel')}</span>
-                  <div className={`flex items-start gap-2 text-[12px] ${auth?.adc_present ? 'text-mint-ink' : 'text-gold-ink'}`}>
-                    {auth?.adc_present ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
-                    <span>{t(auth?.adc_present ? 'settings.backends.antigravityAdcPresent' : 'settings.backends.antigravityAdcMissing')}</span>
+                  <div className={`flex items-start gap-2 text-[12px] ${adcReady ? 'text-mint-ink' : 'text-gold-ink'}`}>
+                    {adcReady ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" /> : <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />}
+                    <span>{t(adcReady ? 'settings.backends.antigravityAdcPresent' : 'settings.backends.antigravityAdcMissing')}</span>
                   </div>
-                  {!auth?.adc_present && adcCommand && (
+                  {!adcReady && adcCommand && (
                     <>
                       <p className="text-[12px] leading-relaxed text-muted">{t('settings.backends.antigravityAdcCommandHint')}</p>
                       <div className="flex items-center justify-between gap-2 rounded-md border border-edge bg-background px-3 py-2">
