@@ -180,6 +180,45 @@ def test_switch_handoff_survives_removal_without_trusting_body_markers(engine, c
             )
 
 
+@pytest.mark.parametrize("case", ["host_handoff", "member_only", "attachment"])
+def test_runtime_projects_fully_carried_legacy_merged_initial(engine, case):
+    from core.session_handoff import render_backend_handoff
+
+    session = "ses_authority"
+    handoff = render_backend_handoff(
+        session, {"from_backend": "codex"}, to_backend="vibey", messages=[], has_older=False, open_work=[]
+    )
+    words = ["[Avibe handoff]\nmember-owned text\n[End of Avibe handoff]\n\ncontinue", "second input"]
+    with engine.begin() as conn:
+        _batch(conn, words, [[], ["upload"] if case == "attachment" else []])
+    # Released consumer: one model message, without private render receipts. In the image
+    # case the *text* still ends with the exact dispatch, so dropping the guard is observable.
+    dispatch = "\n\n---\n\n".join(words)
+    rendered = AgentInputMetadata(
+        handoff=handoff if case != "member_only" else None, harness_source="; ".join(map(harness_source, SPECS))
+    ).render(dispatch, SimpleNamespace(include_time_info=False))
+    blocks = (TextBlock(ENV), TextBlock(rendered))
+    if case == "attachment":
+        blocks += (ImageBlock("image/png", "snapshot", "image.png"),)
+    store = SQLiteTranscriptStore(engine)
+    entry = asyncio.run(store.consume_input(session, IDS[0], UserMessage(blocks)))
+    assert "carry_render" not in entry.payload
+    with engine.begin() as conn:
+        deliveries.terminalize_turn(
+            conn,
+            "turn",
+            outcome="failed",
+            settled_by="terminal_result",
+            evidence_kind="terminal_result",
+            evidence={"output_provenance": {"error_kind": "server"}},
+        )
+        assert {item["id"] for item in deliveries.list_queued(conn, session)} == {i + "~carry" for i in IDS}
+    runtime = asyncio.run(store.load_for_run(session))
+    assert [e.message for e in runtime.entries if e.kind == "input"] == (
+        [UserMessage((TextBlock(ENV), TextBlock(handoff)))] if case == "host_handoff" else []
+    )
+
+
 @pytest.mark.parametrize("opaque", [False, True])
 def test_legacy_batch_requires_unambiguous_boundaries(engine, opaque):
     texts = ["first\n\n---\n\nextra", "second"]

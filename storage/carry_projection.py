@@ -84,9 +84,9 @@ class CarryProjection:
         hidden = set(self.occurrences[mid][1])
         if hidden == set(members):
             legacy_dispatch = None
-            if len(members) == 1 and not row.payload.get("carry_render"):
-                # Host handoff was attached to initial input, never to a steer. Only the real
-                # dispatch body proves where host-authored prose ends on an old text-only row.
+            if not row.payload.get("carry_render"):
+                # The initial Turn persisted its entire dispatch, including every merged member.
+                # On text-only inputs that exact suffix isolates the host header from member prose.
                 legacy_dispatch = self.conn.execute(select(session_turns.c.dispatch_text)
                     .join(messages, messages.c.id == session_turns.c.initial_delivery_id)
                     .where(messages.c.id == mid, session_turns.c.session_id == row.session_id,
