@@ -2772,12 +2772,17 @@ async fn failed_selection_persistence_never_publishes_success_or_recency() {
     assert_eq!(order(&f.client), ["one", "two"]);
 }
 
-/// The requests made since `from`, and the cookies each sent.
+/// The requests made since `from`, and the cookies each sent. Instance
+/// sign-outs are sent without waiting, so they can land anywhere in this
+/// order; they are read from `Http::logouts` instead.
 fn since(f: &Fixture, from: usize) -> (Vec<String>, Vec<String>) {
-    (
-        f.http.calls.lock().unwrap()[from..].to_vec(),
-        f.http.cookies.lock().unwrap()[from..].to_vec(),
-    )
+    let calls = f.http.calls.lock().unwrap()[from..].to_vec();
+    let cookies = f.http.cookies.lock().unwrap()[from..].to_vec();
+    calls
+        .into_iter()
+        .zip(cookies)
+        .filter(|(path, _)| path != "/auth/logout")
+        .unzip()
 }
 
 /// Opening an instance again in the same run (from the list, back from this
