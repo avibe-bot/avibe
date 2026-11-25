@@ -503,9 +503,10 @@ protocol DirectTransporting: AnyObject, Sendable {
     var pathCounts: DirectPathCounts { get }
 
     /// The path the usable connection runs on now, read now, with its
-    /// mark: for a measurement. Nil with no usable connection, with none of
-    /// its paths selected or one that has no kind, or when the transport
-    /// cannot watch its paths.
+    /// mark: for a measurement. Nil with no usable connection, once the
+    /// answer it was admitted under has run out (by the clock at this
+    /// read, not by a timer having run), with none of its paths selected or
+    /// one that has no kind, or when the transport cannot watch its paths.
     @MainActor
     var markedPath: DirectMarkedPath? { get }
 }

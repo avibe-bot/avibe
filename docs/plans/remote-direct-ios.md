@@ -378,6 +378,12 @@ stickiness, closure or count, under 「仅直连和中继」 too.
     before the controller hears of it. For the same reason the status's
     `sequence` is no part of this: it advances when that news arrives, and
     for closures and preferences, none of which is a change of the path.
+  - There is no mark from the moment the rendezvous answer the path was
+    admitted under has run out. That is read from the transport's clock at
+    the observation, not taken from the timer that ends the path having
+    run: streams opened before the deadline go on carrying until it has,
+    and a request answered in between must not count. The read changes
+    nothing; ending the path stays the timer's work.
   - Only counts and labels leave the transport; which path it is stays
     there.
   - What it does not see: a path that changed and changed back between two

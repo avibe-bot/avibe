@@ -1501,7 +1501,8 @@ extension DirectIrohTransport: DirectTransporting {
     /// its mark (`DirectMarkedPath`). The read is an observation like the
     /// one a report of the watch causes: it finds a change of the selected
     /// path that has not been reported yet, and the change stays counted if
-    /// the path changes back.
+    /// the path changes back. Nil from the moment the answer the path was
+    /// admitted under has run out, by the clock.
     var markedPath: DirectMarkedPath? {
         // Without a watch nothing is told of a path that changed and
         // changed back between two reads. The watch ends only with its
@@ -1511,7 +1512,13 @@ extension DirectIrohTransport: DirectTransporting {
         }
         let connection = session.link.connection
         let observed = session.pathFence.observe { connection.selectedPathRead }
-        guard let labels = observed.path?.labels else {
+        // `isUsable` turns false at the answer's deadline only once the
+        // timer for it has run on this actor. Streams opened before go on
+        // carrying, so a request could be answered and counted in between.
+        // The deadline is read from the clock here, at the observation
+        // itself. Only read: ending the path stays the timer's work
+        // (`reconcileLease`).
+        guard session.authority.isWithinDeadline, let labels = observed.path?.labels else {
             return nil
         }
         return DirectMarkedPath(

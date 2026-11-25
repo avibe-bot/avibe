@@ -494,6 +494,16 @@ final class DirectIrohAuthority: @unchecked Sendable {
         }
     }
 
+    /// Whether the answer the path was admitted under still holds at this
+    /// moment: read from the clock, whether or not the timer that ends the
+    /// path at its deadline has run yet. It changes nothing.
+    var isWithinDeadline: Bool {
+        let now = clock()
+        return lock.withLock {
+            !isRevoked && now < deadline
+        }
+    }
+
     /// How many times the path stopped being usable.
     var suspensionCount: Int {
         lock.withLock { suspensions }

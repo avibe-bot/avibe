@@ -973,6 +973,51 @@ final class DirectIrohTransportTests: XCTestCase {
         harness.transport.deselect()
     }
 
+    /// The answer a path was admitted under runs out by the clock. The
+    /// timer that then ends the path runs a turn of the main actor later,
+    /// or much later when that actor is busy, and until it has the
+    /// transport still calls the path usable and its open streams carry.
+    /// A measurement's observation reads the clock itself: no mark from
+    /// the deadline on, and a request answered across it is not counted.
+    func testAMarkedPathEndsAtItsAnswersDeadlineByTheClockBeforeTheTimerHasRun() async throws {
+        let (harness, _) = try await relayedPath()
+        let transport = harness.transport
+        let clock = harness.clock
+        let sample = DirectMeasure.Sample(elapsed: .milliseconds(20), healthy: true, counts: true)
+
+        // Just short of the deadline: marked, and the same mark.
+        let before = try XCTUnwrap(transport.markedPath).mark
+        clock.now += 299
+        XCTAssertEqual(transport.markedPath?.mark, before)
+
+        // A leg begins. During its third timed request the deadline
+        // passes. The timer is not fired: nothing has told the transport,
+        // which still reads its path as live and has reported nothing.
+        let ended = await DirectMeasure.sample(
+            limits: .standard,
+            end: ContinuousClock.now.advanced(by: .seconds(30)),
+            unchanged: { _ in await MainActor.run { transport.markedPath?.mark == before } }
+        ) { index in
+            if index == 3 {
+                clock.now += 1
+            }
+            return sample
+        }
+        XCTAssertEqual(ended.times.count, 2)
+        XCTAssertEqual(ended.error, .failed)
+        XCTAssertNil(transport.markedPath)
+        XCTAssertEqual(transport.pathDiagnostics.current, .relay)
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1")])
+        // Asking changed nothing: the timer is still to run, and when it
+        // does it ends the path as it always has.
+        XCTAssertEqual(harness.scheduler.pending.filter { $0 == 300 }, [300])
+        XCTAssertTrue(harness.scheduler.fire(300))
+        XCTAssertEqual(harness.reports, [.usable(generation: "boot:1"), .verifying])
+        XCTAssertNil(transport.markedPath)
+
+        harness.transport.deselect()
+    }
+
     /// Only the class of the far end's address leaves the binding: local
     /// (private, shared address space, unique-local, link-local) or not. Zero round trip is
     /// "not measured".
