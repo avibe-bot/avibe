@@ -192,6 +192,11 @@ export function ConnectionPage() {
       if (snapshot.unbind || (pressedAt !== null && startedAt >= pressedAt)) {
         unbindPressedAt.current = null;
         setUnbindPressed(false);
+        // Pressed, and the instance reports nothing: nothing began. Said, never silent.
+        if (!snapshot.unbind && pressedAt !== null) {
+          followingUnbind.current = false;
+          setUnbindFailed(true);
+        }
       }
     } catch {
       // The list stays as it was read last.

@@ -701,8 +701,9 @@ describe('ConnectionPage · binding again', () => {
     mount();
     fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '解除绑定' }));
-    // The read after it reports no unbinding: nothing began.
-    expect(await screen.findByRole('button', { name: '解除绑定' })).toBeTruthy();
+    // The read after it reports no unbinding: nothing began, and the page says so.
+    expect(await screen.findByText(said('没有完成，请再试一次。'))).toBeTruthy();
+    expect(screen.getByRole('button', { name: '解除绑定' })).toBeTruthy();
     expect(screen.queryByText(said('正在解除绑定，会自动继续。'))).toBeNull();
   });
 
