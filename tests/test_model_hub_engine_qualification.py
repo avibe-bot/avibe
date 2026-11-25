@@ -213,7 +213,7 @@ class GitHub:
 
     def __call__(self, path: str):
         prefix = "/repos/avibe-bot/avibe"
-        if path == f"{prefix}/actions/runs/{RUN_ID}": return self.run
+        if path == f"{prefix}/actions/runs/{RUN_ID}/attempts/{ATTEMPT}": return self.run
         if path.startswith(f"{prefix}/compare/") and path.endswith("...master"): return self.comparison
         if path == f"{prefix}/actions/runs/{RUN_ID}/attempts/{ATTEMPT}/jobs?per_page=100":
             total = len(self.jobs) if self.total_jobs is None else self.total_jobs

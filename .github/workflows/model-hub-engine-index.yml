@@ -26,7 +26,7 @@ jobs:
       - &tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 05028716204d260063d14a81a91565e039c045a7
+          ref: 47bf08388e13336ec5d320e7c6dbf62b19703061
           path: tools
           persist-credentials: false
       - uses: &checkout actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1

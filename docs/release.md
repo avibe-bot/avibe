@@ -314,7 +314,7 @@ Nothing regenerates the index from the list of GitHub releases, and
    a fixed checkout, checks the exact run and current candidate/source/manifest/
    archive digests, parses the result as bounded untrusted data, and places
    only byte-checked assets in a separate trusted artifact namespace. The
-   existing protected writer environment then requires explicit owner approval
+   dedicated asset-approval environment requires explicit owner approval
    for this run and digest before publishing immutable, non-latest assets.
 4. **Promote.** After the mirror holds the release, merge the reviewed allocation PR. The PR preflight verifies the designated rehearsal and published bytes before merge. Asset publication alone never changes the index.
 
@@ -376,17 +376,21 @@ This is the chosen behaviour, not a gap to close with a time limit
 machine when that machine next reaches the index.
 
 A withdrawal is permanent. Later indexes carry it unchanged, clients refuse
-an index that drops it, and the writer refuses to publish one. The release's
-assets and its index entry stay. The fallback must be a listed release that
+an index that drops it, and the writer refuses to publish one. The tombstone
+stays; the withdrawn release leaves the installable list. Existing release
+assets are not deleted. The fallback must be a listed release that
 was not withdrawn and that does not need a newer Avibe than the withdrawn
-one. An engine that only a packaged Avibe bundles can be withdrawn too.
+one. For a packaged-only engine with no listed minimum, the fallback must
+work on the earliest channel-capable Avibe; a newer minimum is not evidence
+that older installations can roll back.
 Clients learn of a withdrawal at their next check; a machine that cannot
 reach the index learns of it when it can.
 
 ### Availability of listed releases
 
 `Guard Model Hub engine release` keeps available the engine Avibe packages and
-every release the index lists, withdrawn ones and rollback targets included.
+every release the current index offers, including rollback targets. A withdrawn
+release that is no longer packaged or listed has no guaranteed backup or restoration.
 On its schedule it verifies each release's published assets against the
 manifest, keeps a verified backup, and restores assets a release lost from
 the newest backup that still verifies. It uploads only asset names that are
@@ -443,7 +447,7 @@ The owner generates a dedicated fresh key using the reviewed hosted helper
 (`generate`, an explicit `--avault` executable and a new private `--output` file).
 The generator needs avault 0.1.11 or later; the CI exercise uses 0.1.11 and the
 hosted signer and oldest client verifier use the pinned 0.1.10 binary. Only the
-compressed public key is printed. At commissioning, the owner must verify that signing material exists only in the signer environment, restricted to the master branch, with no same-name repository or organization fallback. No manual environment reviewer is required for index publication. Restrict the separate index writer environment to master; do not weaken the asset-release writer's existing approval policy. The index uses the existing mirror credential and requires no new read token. Referencing an environment in YAML does not establish that these deployment settings are present.
+compressed public key is printed. At commissioning, the owner must verify that signing material exists only in the signer environment, restricted to the master branch, with no same-name repository or organization fallback. No manual environment reviewer is required for index publication. Restrict the automatic index writer to master. Asset publication is a distinct, owner-approved deployment: the asset-approval environment must have a named required reviewer and admit only master. Without that policy and a matching approval on the release run, assets cannot be published. The index uses the existing mirror credential and requires no new read token. Referencing an environment in YAML does not establish that these deployment settings are present.
 The private runbook holds the exact setup commands. Only the public key ID,
 compressed public key and genesis sequence floor belong in the root PR.
 

@@ -82,7 +82,7 @@ jobs:
       - name: Upload the candidate assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-untrusted-assets
+          name: ${{ github.run_attempt == 1 && 'model-hub-engine-untrusted-assets' || format('model-hub-engine-untrusted-assets-attempt-{0}', github.run_attempt) }}
           path: ${{ runner.temp }}/candidate-assets
           if-no-files-found: error
           retention-days: 30
@@ -179,7 +179,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-untrusted-assets
+          name: ${{ github.run_attempt == 1 && 'model-hub-engine-untrusted-assets' || format('model-hub-engine-untrusted-assets-attempt-{0}', github.run_attempt) }}
           path: ${{ runner.temp }}/candidate-assets
 
       - name: Start the candidate and require Avibe's health check
@@ -276,7 +276,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-untrusted-assets
+          name: ${{ github.run_attempt == 1 && 'model-hub-engine-untrusted-assets' || format('model-hub-engine-untrusted-assets-attempt-{0}', github.run_attempt) }}
           path: ${{ runner.temp }}/candidate-assets
 
       - name: Point the released Avibe at the exact candidate bytes
@@ -371,7 +371,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:
-          name: model-hub-engine-untrusted-assets
+          name: ${{ github.run_attempt == 1 && 'model-hub-engine-untrusted-assets' || format('model-hub-engine-untrusted-assets-attempt-{0}', github.run_attempt) }}
           path: ${{ runner.temp }}/candidate-assets
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
@@ -493,7 +493,7 @@ jobs:
       - name: Upload the untrusted rehearsal result
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
-          name: model-hub-engine-untrusted-rehearsal
+          name: ${{ github.run_attempt == 1 && 'model-hub-engine-untrusted-rehearsal' || format('model-hub-engine-untrusted-rehearsal-attempt-{0}', github.run_attempt) }}
           path: ${{ runner.temp }}/untrusted_rehearsal.json
           if-no-files-found: error
           retention-days: 90

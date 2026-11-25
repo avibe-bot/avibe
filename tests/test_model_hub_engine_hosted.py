@@ -67,6 +67,56 @@ def test_invalid_snapshot_stops_at_merge_tree(tmp_path, bad):
         snapshot.revision_step(tmp_path, base, commit(tmp_path, raw))
 
 
+def test_preflight_binds_real_merge_parents_after_base_advances(tmp_path):
+    hosted.git(tmp_path, 'init', '-q')
+    recorded = commit(tmp_path, None)
+    actual = commit(tmp_path, payload(2, [1]).raw)
+    hosted.git(tmp_path, 'update-ref', 'refs/remotes/origin/master', actual)
+    hosted.git(tmp_path, 'checkout', '-qb', 'topic', recorded)
+    topic = commit(tmp_path, payload(3, [1, 2]).raw)
+    # Use a genuine two-parent Git commit, without resolving the fixture's two
+    # deliberately competing ledger edits by merging the worktree ourselves.
+    tree = hosted.git(tmp_path, 'rev-parse', topic + '^{tree}').decode().strip()
+    def merge(first, second):
+        head = hosted.git(tmp_path, '-c', 'user.name=test', '-c', 'user.email=t@example.invalid',
+                          'commit-tree', tree, '-p', first, '-p', second, '-m', 'synthetic').decode().strip()
+        hosted.git(tmp_path, 'checkout', '-q', '--detach', head)
+        return head
+    event = {'pull_request': {'base': {'sha': recorded, 'ref': 'master'}, 'head': {'sha': topic}}}
+    sha = merge(actual, topic)
+    assert gate.merge_base(tmp_path, 'pull_request', event, sha) == actual
+    with pytest.raises(hosted.Error, match='second parent'):
+        gate.merge_base(tmp_path, 'pull_request', event, merge(actual, recorded))
+    with pytest.raises(hosted.Error, match='base branch'):
+        gate.merge_base(tmp_path, 'pull_request', event, merge(sha, topic))
+
+
+@pytest.mark.parametrize('minimum,action', [('3.2.6', 'withdraw'), ('3.3.0', 'blocked')])
+def test_packaged_only_withdrawal_must_work_on_oldest_client(tmp_path, monkeypatch, minimum, action):
+    fallback = release_entry(manifest_bytes(build=1), minimum)
+    def make(seq, revoked):
+        return channel.parse_payload(json.dumps(payload_document(seq, releases=[fallback], revoked=revoked),
+                                                sort_keys=True, separators=(',', ':')).encode())
+    old = make(2, [])
+    desired = make(3, [tombstone(B, A)])
+    # B was packaged, never listed. Exercise the *client's* real decision first.
+    assert channel.resolve(desired, hold=None, avibe_version='3.2.6', host_platform='linux-amd64',
+                           bundled=B, current=B).action.value == action
+    hosted.git(tmp_path, 'init', '-q')
+    before, head = commit(tmp_path, old.raw), commit(tmp_path, desired.raw)
+    monkeypatch.setattr(gate.qualification, 'require_listed_assets', lambda _: None)
+    def preflight():
+        gate.preflight(tmp_path, before, head, published=lambda: pytest.fail('public cache read'), api=None, token=None)
+    if action == 'blocked':
+        with pytest.raises(hosted.Error, match='affected client'):
+            preflight()
+        with pytest.raises(hosted.Error, match='affected client'):
+            snapshot.transition(old, desired)
+    else:
+        preflight()
+        assert snapshot.transition(old, desired) == 'sign'
+
+
 class Bucket:
     def __init__(self, initial=None):
         self.initial = initial
@@ -226,7 +276,9 @@ def test_withdrawal_rechecks_fallback_after_preflight_but_never_fetches_bad_arch
     repo = tmp_path / 'ledger'; repo.mkdir(); hosted.git(repo, 'init', '-q')
     before = commit(repo, old.raw)
     head = commit(repo, desired.raw)
-    gate.preflight(repo, before, head, published=lambda: old, api=None, token=None)
+    def offline():
+        raise OSError('public index is down')
+    gate.preflight(repo, before, head, published=offline, api=None, token=None)
 
     signer = Signer()
     raw = envelope_bytes(signer, old.raw)
@@ -293,13 +345,18 @@ def test_promotion_requires_evidence_bound_to_exact_merge_tree(tmp_path, monkeyp
     head = commit(tmp_path, raw)
     github = GitHub()
     def api(path):
+        if path.endswith(f"/runs/{result['run_id']}"):
+            # A later rerun happened and failed. That must not invalidate the
+            # earlier designated attempt (or make its failed attempt succeed).
+            return {**github.run, 'run_attempt': result['run_attempt'] + 1, 'conclusion': 'failure'}
         if path.endswith(f"/attempts/{result['run_attempt']}"):
-            return {'run_attempt': result['run_attempt'], 'id': result['run_id'], 'status': 'completed',
+            return {**github.run, 'run_attempt': result['run_attempt'], 'id': result['run_id'], 'status': 'completed',
                     'conclusion': 'failure' if bad == 'attempt' else 'success'}
         return github(path)
     def download(cmd, **kwargs):
         if cmd[:3] != ['gh', 'run', 'download']:
             return original(cmd, **kwargs)
+        assert cmd[cmd.index('--name') + 1].endswith(f"-attempt-{result['run_attempt']}")
         target = Path(cmd[-1]); target.mkdir()
         (target / 'untrusted_rehearsal.json').write_text(json.dumps(result))
     original = gate.subprocess.run

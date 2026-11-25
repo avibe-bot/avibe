@@ -57,7 +57,7 @@ jobs:
           test "$HOSTED_COMMISSIONED" = true
           test "$GITHUB_RUN_ATTEMPT" = 1  # approvals are not attempt-scoped: recover by fresh dispatch
           python3 scripts/model_hub_engine_channel.py authorize \
-            --environment model-hub-engine-channel-writer --operation "$OPERATION"
+            --environment model-hub-engine-asset-approval --operation "$OPERATION"
           case "$OPERATION" in
             release)
               if ! [[ "$ASSET_RELEASE_TAG" =~ ^model-hub-engine-v[0-9]+\.[0-9]+\.[0-9]+-[1-9][0-9]*$ ]]; then
@@ -93,10 +93,14 @@ jobs:
             echo "::error::a rehearsal run id is required"
             exit 1
           fi
+          attempt=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$REHEARSAL_RUN_ID" --jq '.run_attempt')
+          [[ "$attempt" =~ ^[1-9][0-9]*$ ]]
+          suffix=""; if [[ "$attempt" != 1 ]]; then suffix="-attempt-$attempt"; fi
           gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name model-hub-engine-untrusted-rehearsal --dir "$RUNNER_TEMP/rehearsal"
+            --name "model-hub-engine-untrusted-rehearsal$suffix" --dir "$RUNNER_TEMP/rehearsal"
           gh run download "$REHEARSAL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name model-hub-engine-untrusted-assets --dir "$RUNNER_TEMP/untrusted-assets"
+            --name "model-hub-engine-untrusted-assets$suffix" --dir "$RUNNER_TEMP/untrusted-assets"
+          test "$(jq -er .run_attempt "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json")" = "$attempt"
           test "$(jq -er .run_id "$RUNNER_TEMP/rehearsal/untrusted_rehearsal.json")" = "$REHEARSAL_RUN_ID"
 
       # This job is the trusted read/prepare boundary. It never imports,
@@ -170,7 +174,7 @@ jobs:
     needs: [authorize, prepare]
     if: inputs.operation == 'release'
     runs-on: ubuntu-latest
-    environment: model-hub-engine-channel-writer
+    environment: model-hub-engine-asset-approval
     timeout-minutes: 30
     permissions:
       contents: write
@@ -186,7 +190,7 @@ jobs:
         run: |
           test "$GITHUB_RUN_ATTEMPT" = 1  # a failed-job rerun must not inherit the first attempt's approval
           python3 scripts/model_hub_engine_channel.py authorize \
-            --environment model-hub-engine-channel-writer --operation "$OPERATION" --require-approval
+            --environment model-hub-engine-asset-approval --operation "$OPERATION" --require-approval
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
         with:

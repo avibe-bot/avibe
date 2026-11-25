@@ -458,8 +458,18 @@ def test_authorization_reads_protection_and_approval_from_github_for_this_run(tm
 
     producer.authorize(producer.SIGNER_ENVIRONMENT, operation="resume", environ=RUN, api=api, require_approval=False)
     assert asked == [base, f"{base}/deployment-branch-policies"]
-    for operation in producer.OPERATION_POLICY:
+    for operation in producer.OPERATION_POLICY.keys() - {'release'}:
         producer.authorize(producer.SIGNER_ENVIRONMENT, operation=operation, environ=RUN, api=api, require_approval=True)
+    asset = producer.ASSET_APPROVAL_ENVIRONMENT
+    def asset_api(path):
+        if path.endswith('/approvals'):
+            return [_approval(environment=asset)]
+        return answers.get(path.replace(asset, producer.SIGNER_ENVIRONMENT))
+    producer.authorize(asset, operation='release', environ=RUN, api=asset_api, require_approval=True)
+    with pytest.raises(ProducerError, match='dedicated owner approval'):
+        producer.authorize(producer.WRITER_ENVIRONMENT, operation='release', environ=RUN, api=asset_api, require_approval=True)
+    with pytest.raises(ProducerError, match='not authorized'):
+        producer.authorize(asset, operation='release', environ=RUN, api=api, require_approval=True)
 
     for broken in (
         {**answers, base: None},
@@ -1308,7 +1318,7 @@ def test_the_workflow_offers_only_the_operations_the_script_authorizes_and_none_
 
 def test_every_privileged_job_follows_authorization_and_proves_approval_before_its_first_privileged_step() -> None:
     jobs = _jobs()["jobs"]
-    privileged = {"release": producer.WRITER_ENVIRONMENT}
+    privileged = {"release": producer.ASSET_APPROVAL_ENVIRONMENT}
 
     assert {name for name, job in jobs.items() if "environment" in job} == set(privileged)
     for name, environment in privileged.items():
