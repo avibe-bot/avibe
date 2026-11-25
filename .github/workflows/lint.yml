@@ -14,8 +14,9 @@ permissions:
   contents: read
 
 concurrency:
-  # One running full backstop finishes; only the newest pending master waits.
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'push' || github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  # Only PR updates may supersede each other. A pending master merge needs
+  # its own backstop even when another merge or manual dispatch arrives.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

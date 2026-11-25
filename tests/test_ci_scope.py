@@ -219,12 +219,12 @@ def test_real_workflow_gate_command_enforces_the_event_mode(tmp_path, mode):
     assert result.returncode == 1 and "expected success" in result.stdout
 
 
-def test_backstop_coalesces_whole_reusable_workflow_without_cancelling_running_master():
+def test_only_pr_updates_share_a_concurrency_group_and_master_runs_remain_independent():
     data = workflow()
     assert data[True]["push"] == {"branches": ["master"]}
     assert "workflow_dispatch" in data[True]
     assert data["concurrency"] == {
-        "group": "${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'push' || github.event_name }}-${{ github.event.pull_request.number || github.ref }}",
+        "group": "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}",
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
     for filename in ("ios-shell.yml", "desktop-shell.yml", "web-fetch-runtime.yml"):
