@@ -8047,7 +8047,10 @@
       "unattributedHint": "These devices still receive notifications, but the account they belong to cannot be told. You can stop each one.",
       "signOutAllRemote": "Sign out all remote devices",
       "online": "Online",
-      "unknown": "The device list cannot be read right now."
+      "unknown": "The device list cannot be read right now.",
+      "signedInToday": "Signed in today at {{time}}",
+      "signedInYesterday": "Signed in yesterday at {{time}}",
+      "signedInDated": "Signed in {{date}}"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8166,7 +8169,9 @@
       "signedIn": "{{device}} signed in",
       "signedOut": "{{device}} was signed out",
       "remoteAccessOn": "Remote access turned on",
-      "formerDevice": "A device no longer in the list",
+      "formerSignedIn": "A device no longer in the list signed in",
+      "formerSignedOut": "A device no longer in the list was signed out",
+      "formerSignedOutBy": "A device no longer in the list was signed out · from {{actor}}",
       "signedOutBy": "{{device}} was signed out · from {{actor}}",
       "day": "{{day}}",
       "days": "{{from}} to {{to}}",
@@ -8177,6 +8182,7 @@
       "alarmLabelled": "Alarm “{{label}}” created",
       "reminderLabelled": "Reminder “{{label}}” created",
       "confirmedOn": "{{what}}, confirmed on {{device}}",
+      "formerConfirmedOn": "{{what}}, confirmed on a device no longer in the list",
       "remoteAccessOff": "Remote access turned off",
       "earlier": "Earlier activity"
     },
@@ -8405,7 +8411,8 @@
       "desktop": "Avibe Desktop",
       "browser": "Browser",
       "homeScreen": "Home-screen app",
-      "other": "Device"
+      "other": "Device",
+      "unrecognized": "Unrecognized client"
     },
     "unlinkedHealth": {
       "title": "Health connections not matched to a device",

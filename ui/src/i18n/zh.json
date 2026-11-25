@@ -8047,7 +8047,10 @@
       "unattributedHint": "这些设备还在接收通知，但认不出属于哪个账号。可以逐台停止。",
       "signOutAllRemote": "退出所有远程设备",
       "online": "在线",
-      "unknown": "现在读不到设备列表。"
+      "unknown": "现在读不到设备列表。",
+      "signedInToday": "今天 {{time}} 登录",
+      "signedInYesterday": "昨天 {{time}} 登录",
+      "signedInDated": "{{date}} 登录"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8166,7 +8169,9 @@
       "signedIn": "{{device}} 登录",
       "signedOut": "{{device}} 已被退出",
       "remoteAccessOn": "远程访问已开启",
-      "formerDevice": "一台已不在列表里的设备",
+      "formerSignedIn": "一台已不在列表里的设备登录",
+      "formerSignedOut": "一台已不在列表里的设备已被退出",
+      "formerSignedOutBy": "一台已不在列表里的设备已被退出 · 由 {{actor}} 操作",
       "signedOutBy": "{{device}} 已被退出 · 由 {{actor}} 操作",
       "day": "{{day}}",
       "days": "{{from}} 至 {{to}}",
@@ -8177,6 +8182,7 @@
       "alarmLabelled": "创建闹钟「{{label}}」",
       "reminderLabelled": "创建提醒「{{label}}」",
       "confirmedOn": "{{what}}，已在 {{device}} 上确认",
+      "formerConfirmedOn": "{{what}}，已在一台已不在列表里的设备上确认",
       "remoteAccessOff": "远程访问已关闭",
       "earlier": "更早的活动"
     },
@@ -8405,7 +8411,8 @@
       "desktop": "Avibe Desktop",
       "browser": "浏览器",
       "homeScreen": "主屏幕 App",
-      "other": "设备"
+      "other": "设备",
+      "unrecognized": "未识别的客户端"
     },
     "unlinkedHealth": {
       "title": "未对应到设备的健康连接",

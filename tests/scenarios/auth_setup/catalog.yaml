@@ -1554,6 +1554,25 @@ scenarios:
     backend: web
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_device_account_signout_from_verified_exchange
     reason: Two signed exchanges, real callbacks, local sign-out, pending fence and receipt; fake issuer wire response, not evidence of provider deletion.
+  - id: AUTH-SETUP-917
+    name: The same browser signing in again keeps its one device row and signs its old session out
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: web
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_the_same_browser_signing_in_again_keeps_one_device_row
+    supporting_tests:
+      - tests/test_device_relogin.py::test_signing_in_again_keeps_one_row_and_signs_the_old_session_out
+      - tests/test_device_relogin.py::test_another_accounts_cookie_is_left_alone
+      - tests/test_device_relogin.py::test_a_new_session_that_cannot_be_issued_replaces_nothing
+      - tests/test_device_relogin.py::test_signing_the_device_out_while_the_login_waits
+      - tests/test_device_relogin.py::test_two_callbacks_with_the_same_old_cookie_replace_it_once
+    reason: >-
+      Real handshake, signed id_token, callback, registry and routes; only the
+      issuer's token endpoint and keys are fixtures. Only the session the
+      callback request's own cookie proves (same instance, current, same
+      account) is replaced; another browser of the same account keeps its row.
+      Push, Health, settings and lock-order cases are in tests/test_device_relogin.py.
   - id: AUTH-SETUP-916
     name: Setup offers remote access once, after completion, and neither skipping nor using it re-enters setup
     status: covered
