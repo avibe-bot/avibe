@@ -662,9 +662,11 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   each unfinished one back, whole, and for each finished one to be marked where it stands.
 
   The rule is a count over lines, like the one before it, and these are all its limits. It accepts what it should
-  not when a live entry is deleted in the turn that adds another, or in a turn that puts two or more new finished
-  lines in place of earlier ones. It asks a repair that nothing needed when a turn drops its finished history while
-  it marks a live entry, or folds while it marks a live entry in the very words of a finished one the mind held. All
+  not when a live entry is deleted in a turn in which another entry becomes live, added or reopened from finished,
+  or in a turn that puts two or more new finished lines in place of earlier ones. It asks a repair that nothing
+  needed when a turn drops its finished history while it marks a live entry, or folds while it marks a live entry in
+  the very words of a finished one the mind held. A finished entry counts as gone whenever its line is no longer
+  among the finished ones, a reopened entry included. All
   396 consolidations of the pre-merge replay (§11) pass it, 44 of them folds. Before `checkpoint-v5.2` the Mission's entries could never become fewer, so finished ones
   could not be folded and only piled up (§11).
 
@@ -677,9 +679,10 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   Goals section that is within its limit without them asks no repair: what the checkpoint shows leaves them out (the
   table), and the next request says how much of Goals they take (§11). An entry is one the turn marked unless the mind
   it started from held it as finished under the same heading, with the same lines or else the same first line; a
-  single new finished entry under a heading whose held entries are gone or reworded is their fold, not a mark, so an
-  oversized fold is asked to shrink at once (among several new entries the fold cannot be told apart, and all count
-  as marked that once). The
+  single new finished entry under a heading whose held entries are gone, reworded, or reopened is their fold, not a
+  mark, so an oversized fold is asked to shrink at once. The price is at the edges: among several new entries the fold
+  cannot be told apart, and all count as marked that once; and an entry genuinely finished in the turn that reopens a
+  held one is reported as foldable. The
   waiver does not hold for a mind past twice its limits' sum: that mind is not kept (the table), so the repair names
   Goals while the turn can still condense.
 
