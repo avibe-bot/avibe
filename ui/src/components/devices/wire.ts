@@ -95,7 +95,10 @@ function accountResult(raw: unknown): AccountResult {
   const { status, reason } = record(raw);
   if (status === 'pending') return reason === 'retrying' ? 'retrying' : 'queued';
   if (status === 'accepted') return 'accepted';
-  if (status === 'not_applicable') return reason === 'shared_sign_in' ? 'sharedSignIn' : reason === 'keeper_unknown' ? 'keeperUnknown' : 'localOnly';
+  if (status === 'not_applicable') {
+    return reason === 'shared_sign_in' ? 'sharedSignIn' : reason === 'keeper_unknown' ? 'keeperUnknown'
+      : reason === 'not_eligible' ? 'notEligible' : reason === 'push_only' ? 'pushOnly' : 'localOnly';
+  }
   if (status === 'refused') return reason === 'credential' ? 'refusedCredential' : 'refused';
   if (status === 'unconfirmed') return 'unconfirmed';
   return 'unknown';

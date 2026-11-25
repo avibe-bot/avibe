@@ -180,29 +180,32 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         {toasts.map((toast) => (
           <ToastCard key={toast.id} toast={toast} joins={toasts.some((other) => other.id < toast.id && !other.leaving)} onDismiss={dismissToast} onGone={remove} register={register}>
             {toast.type === 'success' ? (
-              <CheckCircle size={18} />
+              <CheckCircle size={18} className="shrink-0" />
             ) : toast.type === 'warning' ? (
-              <AlertTriangle size={18} />
+              <AlertTriangle size={18} className="shrink-0" />
             ) : (
-              <XCircle size={18} />
+              <XCircle size={18} className="shrink-0" />
             )}
-            <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{toast.message}</span>
-            {toast.repeats > 0 && (
-              <span className="ml-1 rounded-full bg-current/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums opacity-80">
-                ×{toast.repeats + 1}
-              </span>
-            )}
-            {toast.action && (
-              <button
-                onClick={() => {
-                  toast.action!.onClick();
-                  dismissToast(toast.id);
-                }}
-                className="ml-1 shrink-0 rounded px-1.5 py-0.5 text-xs font-semibold underline underline-offset-2 hover:opacity-80"
-              >
-                {toast.action.label}
-              </button>
-            )}
+            {/* On a phone the action goes under the message, so a longer message keeps its width. */}
+            <div className="flex min-w-0 flex-col items-start gap-1 sm:flex-row sm:items-center sm:gap-0">
+              <span className="max-w-sm whitespace-pre-wrap text-sm font-medium">{toast.message}</span>
+              {toast.repeats > 0 && (
+                <span className="ml-1 rounded-full bg-current/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums opacity-80">
+                  ×{toast.repeats + 1}
+                </span>
+              )}
+              {toast.action && (
+                <button
+                  onClick={() => {
+                    toast.action!.onClick();
+                    dismissToast(toast.id);
+                  }}
+                  className="-ml-1.5 shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-xs font-semibold underline underline-offset-2 hover:opacity-80 sm:ml-1"
+                >
+                  {toast.action.label}
+                </button>
+              )}
+            </div>
             <button
               onClick={() => dismissToast(toast.id)}
               className="ml-2 opacity-60 hover:opacity-100 transition-opacity"

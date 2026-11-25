@@ -111,17 +111,17 @@ export const ACCOUNT_SIGN_OUT_PATIENCE_MS = 24 * 60 * 60 * 1000;
 const NOT_ENDED: AccountResult[] = ['refused', 'refusedCredential', 'unconfirmed', 'keeperUnknown', 'localOnly'];
 
 /**
- * The one thing worth saying about a signed-out device's avibe.bot sign-in, or nothing (product,
- * 2026-11-25): nothing while the request is on its way or once it went through; one line when it
- * will not be ended, or when it has waited longer than a day. Someone else's device (avibe.bot does
- * not sign other people out) and a device that shares the viewer's own sign-in say nothing.
+ * Whether a signed-out device is still signed in to the avibe.bot account with nothing this Avibe
+ * will do about it, or has waited longer than a day for that (product, 2026-11-25): the one case
+ * worth a word. Nothing is said while the request is on its way, once it went through, about
+ * someone else's device, a member's or guest's, a notification registration, or a device that
+ * shares the viewer's own sign-in.
  */
-export function accountSignOutLine(device: Pick<SignedOutDevice, 'owner' | 'results' | 'signedOutAt'>, now: number): 'stillSignedIn' | 'waiting' | null {
+export function stillSignedIn(device: Pick<SignedOutDevice, 'owner' | 'results' | 'signedOutAt'>, now: number): boolean {
   const results = device.owner === 'others' ? device.results.filter((each) => each !== 'localOnly') : device.results;
-  if (results.some((each) => NOT_ENDED.includes(each))) return 'stillSignedIn';
+  if (results.some((each) => NOT_ENDED.includes(each))) return true;
   const pending = results.some((each) => each === 'queued' || each === 'retrying');
-  if (pending && device.signedOutAt !== undefined && now - device.signedOutAt > ACCOUNT_SIGN_OUT_PATIENCE_MS) return 'waiting';
-  return null;
+  return pending && device.signedOutAt !== undefined && now - device.signedOutAt > ACCOUNT_SIGN_OUT_PATIENCE_MS;
 }
 
 /** A tunnel setting's stored value, as its own control names it. */

@@ -524,6 +524,9 @@ def test_enabled_push_outlives_cookie_and_only_proven_subject_can_manage_it(inst
     assert_local_result(stopped, 0)
     # A device left with notifications only is still known by its proven account and that account's role.
     assert [row["group"] for row in stopped.get_json()["sign_out_results"]] == ["mine"]
+    # A registration with no sign-in of its own says so, not that a sign-in had no reference.
+    assert [row["account_results"] for row in stopped.get_json()["sign_out_results"]] == [
+        [{"status": "not_applicable", "reason": "push_only", "count": 1}]]
     from storage.models import remote_signout_receipt_roles as roles, remote_signout_receipts as receipts
 
     with get_cached_sqlite_engine().connect() as conn:

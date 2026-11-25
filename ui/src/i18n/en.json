@@ -8424,9 +8424,9 @@
       "title": "Recently signed out",
       "toast": "Signed out {{device}}",
       "toastOthers": "Signed out your other devices",
-      "toastStillSignedIn": "Signed out {{device}}. It’s still signed in to your account and may come back on its own.",
-      "stillSignedIn": "It’s still signed in to your account and may come back on its own.",
-      "waiting": "A day on, its sign-in to your account still hasn’t ended."
+      "toastStillSignedIn": "Signed out {{device}}. It is still signed in to your avibe.bot account. Not your device?",
+      "stillSignedIn": "It is still signed in to your avibe.bot account. Not your device?",
+      "signOutOtherDevices": "Sign out other devices"
     },
     "problem": {
       "functionNeedsDevice": "Turn this on on that device first.",

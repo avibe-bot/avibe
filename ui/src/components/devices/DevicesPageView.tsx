@@ -6,7 +6,7 @@
 import { Fragment, type ReactNode } from 'react';
 import {
   AlarmClock, Bell, ChevronRight, Copy, Download, ExternalLink, Globe, HeartPulse, Laptop, LoaderCircle,
-  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone, TriangleAlert,
+  LogOut, Monitor, MonitorCog, MonitorSmartphone, Plus, RefreshCw, Smartphone,
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -25,10 +25,12 @@ import { OpenNewAddress } from './OpenNewAddress';
 import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, signedInText, timeParts, unrecognized, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
 import { SUPPORT_EMAIL } from '@/lib/support';
+import { openLinkInNewContext } from '@/lib/pwaNavigation';
+import { ACCOUNT_SIGN_OUT_OTHERS_URL } from '@/sign-in/links';
 import { claimProblemText } from './texts';
 import { useNow } from './useNow';
 import {
-  RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountSignOutLine, activityText, functionControl, instanceUrl, lockedOutCount,
+  RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, stillSignedIn, activityText, functionControl, instanceUrl, lockedOutCount,
   newestFirst, othersSignedIn, remoteDevices, signOutNeedsConfirm,
 } from './rules';
 import type {
@@ -581,8 +583,8 @@ function UnlinkedHealthPanel({ items, onDisconnect }: { items: UnlinkedHealth[];
 }
 
 /** Devices signed out lately. Each is out of this Avibe; a line is said only when that device is
- *  still signed in to the account and nothing here will end it, or after a day of waiting
- *  (product, 2026-11-25). While its account sign-out is on its way, nothing is said. */
+ *  still signed in to the avibe.bot account and nothing here will end it, or after a day of
+ *  waiting, with the way to sign it out there (product, 2026-11-25). Otherwise just the name. */
 function SignedOutPanel({ rows, now }: { rows: SignedOutDevice[]; now?: number }) {
   const { t } = useTranslation();
   const clock = useNow(60_000);
@@ -590,13 +592,19 @@ function SignedOutPanel({ rows, now }: { rows: SignedOutDevice[]; now?: number }
   return (
     <SettingsPanel title={t('devices.signedOut.title')}>
       {rows.map((row) => {
-        const line = accountSignOutLine(row, at);
+        const still = stillSignedIn(row, at);
         return (
           <div key={row.id} className="flex items-start gap-3 border-b border-border px-5 py-3 last:border-b-0">
-            {line ? <TriangleAlert className="mt-0.5 size-4 shrink-0 text-gold-ink" /> : <LogOut className="mt-0.5 size-4 shrink-0 text-muted" />}
+            <LogOut className="mt-0.5 size-4 shrink-0 text-muted" />
             <div className="min-w-0 flex-1">
               <div className="text-[13px] font-medium text-foreground">{row.device ?? t('devices.kindName.unrecognized')}</div>
-              {line && <div className="mt-0.5 text-[12px] leading-relaxed text-foreground"><KeptTail text={t(`devices.signedOut.${line}`)} /></div>}
+              {still && <div className="mt-0.5 text-[12px] leading-relaxed text-muted">
+                {t('devices.signedOut.stillSignedIn')}
+                <a className="ml-1 whitespace-nowrap font-medium text-foreground underline underline-offset-2" href={ACCOUNT_SIGN_OUT_OTHERS_URL} target="_blank" rel="noreferrer"
+                  onClick={(event) => { event.preventDefault(); openLinkInNewContext(ACCOUNT_SIGN_OUT_OTHERS_URL, 'noopener,noreferrer'); }}>
+                  {t('devices.signedOut.signOutOtherDevices')}
+                </a>
+              </div>}
             </div>
           </div>
         );

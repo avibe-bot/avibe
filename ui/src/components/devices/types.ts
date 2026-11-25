@@ -92,6 +92,9 @@ export type UnlinkedHealth = { id: string; device: string; data: HealthData[]; l
 export type AccountResult =
   | 'queued' | 'retrying' | 'accepted'
   | 'localOnly' | 'sharedSignIn' | 'keeperUnknown'
+  /** Not this Avibe's to end (a member's or guest's sign-in), or nothing to end (a notification
+   *  registration with no sign-in of its own): nothing is said. */
+  | 'notEligible' | 'pushOnly'
   | 'refusedCredential' | 'refused' | 'unconfirmed' | 'unknown';
 
 /** A device signed out lately: it is out of this Avibe; the account side is its own story. */

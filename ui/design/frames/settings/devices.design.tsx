@@ -165,7 +165,7 @@ const signedOut: SignedOutDevice[] = [
   signedOutRow('s5', 'Chrome · macOS', ['localOnly'], 'others'),
   signedOutRow('s6', null, ['accepted']),
   signedOutRow('s7', 'Edge · Windows', ['sharedSignIn'], 'mine'),
-  signedOutRow('s8', 'Galaxy S24', ['unconfirmed'], 'mine'),
+  signedOutRow('s8', 'iPhone 13', ['pushOnly'], 'mine'),
   signedOutRow('s9', 'Pixel 8', ['retrying'], 'mine', DAY + 30),
 ];
 
@@ -370,19 +370,32 @@ const designFrames = frames([
   ...(['zh', 'en'] as const).flatMap((lang) => {
     const copy = lang === 'en' ? { copy: copyFor(en) } : {};
     const fx = { fixtures: fixtures(copy) };
-    const remaining = all('host').filter((each) => each.id !== 'safari');
-    const toast = <RaiseToast i18nKey="devices.signedOut.toast" values={{ device: 'Safari · iPad' }} />;
-    const still = <RaiseToast i18nKey="devices.signedOut.toastStillSignedIn" values={{ device: 'Safari · iPad' }} type="warning" persist />;
+    const remaining = all('host').filter((each) => each.id !== 'chrome');
+    const toast = <RaiseToast i18nKey="devices.signedOut.toast" values={{ device: 'Chrome · Windows' }} />;
+    const still = <RaiseToast i18nKey="devices.signedOut.toastStillSignedIn" values={{ device: 'Chrome · Windows' }} persist actionKey="devices.signedOut.signOutOtherDevices" />;
     const page = (raise: ReactNode, props: Partial<DevicesPageViewProps> = {}) => settingsPage('remote-access', <><DevicesPageView reach={on} devices={remaining} activity={activity} now={DESIGN_NOW} {...props} />{raise}</>);
     return [
-      frame(`sign-out-toast-${lang}`, `刚退出 · 一个提示条，那一行马上不见 · ${lang}`, at(900), { reach: on, devices: remaining }, { ...fx, render: page(toast) }),
+      frame(`sign-out-toast-${lang}`, `刚退出 · 一个提示条，那一行马上不见，提示条自己消失 · ${lang}`, at(900), { reach: on, devices: remaining }, { ...fx, render: page(toast) }),
       frame(`sign-out-toast-390-${lang}`, `刚退出 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining }, { ...fx, render: page(toast) }),
-      frame(`sign-out-still-signed-in-${lang}`, `刚退出，但它还登录着账号、这里结束不了：同一个提示条多一句，关掉才走 · ${lang}`, at(900), { reach: on, devices: remaining }, { ...fx, render: page(still) }),
+      frame(`sign-out-still-signed-in-${lang}`, `刚退出一台老会话（这里结束不了它的账号登录）：同一个提示条，一句平静的话和 avibe.bot 上「退出其他设备」的链接，关掉才走 · ${lang}`, at(900), { reach: on, devices: remaining }, { ...fx, render: page(still) }),
       frame(`sign-out-still-signed-in-390-${lang}`, `同上 · 390 宽 · ${lang}`, PHONE_390, { reach: on, devices: remaining }, { ...fx, render: page(still) }),
-      frame(`signed-out-list-${lang}`, `最近退出的设备：等待中、已送达、别人的、同一次登录都不说；结束不了和等了一天多才各一句 · ${lang}`, at(1500), { reach: on, devices: onlyHost, signedOut }, { ...fx, render: page(null, { devices: onlyHost, activity: [], signedOut }) }),
+      frame(`signed-out-list-${lang}`, `最近退出的设备：只显示名字；老会话和等了一天多的，同一句加同一个链接 · ${lang}`, at(1500), { reach: on, devices: onlyHost, signedOut }, { ...fx, render: page(null, { devices: onlyHost, activity: [], signedOut }) }),
       frame(`signed-out-list-390-${lang}`, `最近退出的设备 · 390 宽 · ${lang}`, { width: 390, height: 2000 }, { reach: on, devices: onlyHost, signedOut }, { ...fx, render: page(null, { devices: onlyHost, activity: [], signedOut }) }),
     ];
   }),
+  // The name without 「」, for Product to compare (zh only; English has no quotes either way).
+  ...((): FrameSpec[] => {
+    const plain = { 'devices.signedOut.toast': { zh: '已退出 {{device}}', en: 'Signed out {{device}}' },
+      'devices.signedOut.toastStillSignedIn': { zh: '已退出 {{device}}。它还登录着你的 avibe.bot 账号。不是你的设备？', en: 'Signed out {{device}}. It is still signed in to your avibe.bot account. Not your device?' } };
+    const remaining = all('host').filter((each) => each.id !== 'chrome');
+    const page = (raise: ReactNode) => settingsPage('remote-access', <><DevicesPageView reach={on} devices={remaining} activity={activity} now={DESIGN_NOW} />{raise}</>);
+    return [
+      frame('sign-out-toast-unquoted-zh', '对照 · 名字不加「」 · 普通', at(900), { reach: on, devices: remaining },
+        { fixtures: fixtures({ copy: plain }), render: page(<RaiseToast i18nKey="devices.signedOut.toast" values={{ device: 'Chrome · Windows' }} />) }),
+      frame('sign-out-still-signed-in-unquoted-zh', '对照 · 名字不加「」 · 老会话', at(900), { reach: on, devices: remaining },
+        { fixtures: fixtures({ copy: plain }), render: page(<RaiseToast i18nKey="devices.signedOut.toastStillSignedIn" values={{ device: 'Chrome · Windows' }} persist actionKey="devices.signedOut.signOutOtherDevices" />) }),
+    ];
+  })(),
 
   // 7. Health connections no listed device is proven to own; things that did not happen.
   frame('unlinked-health', '未对应到设备的健康连接：各自一行，按自己的编号断开', at(1100),

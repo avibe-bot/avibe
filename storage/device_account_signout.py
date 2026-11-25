@@ -125,7 +125,9 @@ def stage(conn, *, binding, actor, delegate, caller, keeper_device, target, sele
         outcomes[key][('not_applicable', reason, None)] += 1
     for key in push_devices:
         if key not in outcomes:
-            outcomes[key][('not_applicable', 'no_reference', None)] = 1
+            # Only a notification registration, no sign-in of its own: there is no account
+            # sign-in here to end, which is not the same as an old sign-in without a reference.
+            outcomes[key][('not_applicable', 'push_only', None)] = 1
     parents, children, recorded, output = [], [], [], []
     for key, counts in outcomes.items():
         device, subject = key
