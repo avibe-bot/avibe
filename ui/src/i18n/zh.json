@@ -8051,7 +8051,10 @@
       "unattributedHint": "这些设备还在接收通知，但认不出属于哪个账号。可以逐台停止。",
       "signOutAllRemote": "退出所有远程设备",
       "online": "在线",
-      "unknown": "现在读不到设备列表。"
+      "unknown": "现在读不到设备列表。",
+      "signedInToday": "今天 {{time}} 登录",
+      "signedInYesterday": "昨天 {{time}} 登录",
+      "signedInDated": "{{date}} 登录"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8394,7 +8397,8 @@
       "desktop": "Avibe Desktop",
       "browser": "浏览器",
       "homeScreen": "主屏幕 App",
-      "other": "设备"
+      "other": "设备",
+      "unrecognized": "未识别的客户端"
     },
     "unlinkedHealth": {
       "title": "未对应到设备的健康连接",

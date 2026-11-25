@@ -159,6 +159,14 @@ afterEach(() => {
 });
 
 describe('SettingsLayout', () => {
+  it('lists Devices first among connections, above messaging platforms', () => {
+    media.matches = true;
+    renderLayout('/settings/shortcuts');
+    const rows = screen.getAllByRole('link').map((row) => row.getAttribute('href'));
+    expect(rows.indexOf('/settings/remote-access')).toBeGreaterThanOrEqual(0);
+    expect(rows.indexOf('/settings/remote-access')).toBeLessThan(rows.indexOf('/settings/platforms'));
+  });
+
   it('closes a desktop overlay back to its exact opening route', async () => {
     media.matches = true;
     const user = userEvent.setup();

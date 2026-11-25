@@ -22,7 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
 import { OpenNewAddress } from './OpenNewAddress';
-import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
+import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, signedInText, timeParts, unrecognized, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
 import { SUPPORT_EMAIL } from '@/lib/support';
 import { claimProblemText } from './texts';
@@ -333,8 +333,12 @@ function DeviceRow({ device, onOpen }: { device: Device; onOpen?: (id: string) =
   const Icon = deviceIcon[device.kind];
   const offered = device.functions.filter(functionOn).map((each) => t(functionKeys[each.kind]));
   // A device with no name of its own is already named by its kind: the line does not say it twice.
-  const client = device.name === null && !device.client.version && !device.client.platform ? null : clientText(t, device.client);
-  const second = joinParts(t, [device.person, client, device.pushOnly ? t('devices.list.pushOnly') : offered.join(t('devices.listSeparator'))]);
+  // An unknown kind ("设备") says nothing a name does not.
+  const bare = !device.client.version && !device.client.platform;
+  const client = bare && (device.name === null || device.client.kind === 'other') ? null : clientText(t, device.client);
+  // Rows with no name are told apart by when they signed in.
+  const signedIn = unrecognized(device) && device.signedInAt ? signedInText(t, device.signedInAt, i18n.language) : null;
+  const second = joinParts(t, [device.person, client, signedIn, device.pushOnly ? t('devices.list.pushOnly') : offered.join(t('devices.listSeparator'))]);
   // Where it is now: the path of a connection observed right now, or when it was last here. The
   // computer the page is open on says nothing: the page being open is the fact.
   const where = device.self && !device.online?.path ? null : device.online ? (

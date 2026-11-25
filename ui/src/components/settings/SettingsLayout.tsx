@@ -82,6 +82,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     labelKey: 'settings.groups.connections',
     items: [
+      { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: MonitorSmartphone },
       {
         path: '/settings/platforms',
         labelKey: 'nav.messagingPlatforms',
@@ -104,7 +105,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
           },
         ],
       },
-      { path: '/settings/remote-access', labelKey: 'settings.sections.remoteAccess', icon: MonitorSmartphone },
     ],
   },
   {

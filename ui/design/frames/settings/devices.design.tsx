@@ -193,6 +193,25 @@ function frame(
   };
 }
 
+/** The list after one browser signed in again: it keeps its row, only the sign-in is new. */
+const webkit: Device = {
+  id: 'webkit', group: 'mine', kind: 'other', name: 'WebKit · macOS', account, client: { kind: 'other' },
+  lastActiveAt: ago(2 * DAY), signedInAt: ago(9 * DAY), functions: [],
+};
+/** Rows that never reported a name, told apart by when each signed in. */
+const unrecognizedRows: Device[] = [
+  { ...unnamed, id: 'u1', lastActiveAt: ago(35), signedInAt: ago(140) },
+  { ...unnamed, id: 'u2', kind: 'other', client: { kind: 'other' }, lastActiveAt: ago(DAY + 200), signedInAt: ago(DAY + 260) },
+  { ...unnamed, id: 'u3', lastActiveAt: ago(6 * DAY), signedInAt: ago(20 * DAY) },
+];
+const named = [macbook({ self: true }), iphone(), macMini, chrome, safari, webkit];
+const signedInAgain = [macbook({ self: true }), iphone(), macMini, { ...chrome, online: { path: 'tunnel' as const, ms: 120 }, lastActiveAt: undefined, signedInAt: ago(2) }];
+const signedInAgainActivity: DeviceActivity[] = [
+  { id: 'again', deviceId: 'chrome', at: ago(2), device: 'Chrome · Windows', event: { kind: 'signedIn' } },
+  ...activity,
+];
+const PHONE_390 = { width: 390, height: 1100 };
+
 const designFrames = frames([
   // 1. Remote access off: one action, no key.
   frame('off', '未开启 · 浏览器：一个动作，去 avibe.bot 起名后自动回来', at(700),
@@ -270,6 +289,19 @@ const designFrames = frames([
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
   frame('on-shared-phone', '三组设备 · 375 宽', { width: 375, height: 1900 },
     { reach: on, devices: [...all('host'), pushOnly, unnamed, sara, saraPhone, orphan], activity, bulk: 'all_remote' }),
+  // Device list fixes (11-25): every row has a name, an unnamed one says when it signed in, and a
+  // browser that signs in again keeps its one row.
+  frame('list-named', '设备的名字：浏览器、主屏 App、认不出浏览器的 WebKit（叫「WebKit · macOS」）、Avibe Desktop', TALL,
+    { reach: on, devices: named, activity, bulk: 'all_remote' }),
+  frame('list-named-phone', '同上 · 390 宽', PHONE_390, { reach: on, devices: named, activity, bulk: 'all_remote' }),
+  frame('list-unrecognized', '没有名字的行：「未识别的客户端」，第二行写什么时候登录的，几行之间分得开', TALL,
+    { reach: on, devices: [macbook({ self: true }), iphone(), ...unrecognizedRows], activity, bulk: 'all_remote' }),
+  frame('list-unrecognized-phone', '同上 · 390 宽', PHONE_390,
+    { reach: on, devices: [macbook({ self: true }), iphone(), ...unrecognizedRows], activity, bulk: 'all_remote' }),
+  frame('list-signed-in-again', '同一个浏览器再登录一次：还是原来那一行，最近活动多一条「登录」', TALL,
+    { reach: on, devices: signedInAgain, activity: signedInAgainActivity, bulk: 'all_remote' }),
+  frame('list-signed-in-again-phone', '同上 · 390 宽', PHONE_390,
+    { reach: on, devices: signedInAgain, activity: signedInAgainActivity, bulk: 'all_remote' }),
   frame('member-operate', '能管理这个 Avibe 的成员：自己的设备，加上远程访问的开关和「优化线路」；绑定、域名、连接方式、别人的设备都没有', at(760),
     { reach: onForMember, viewer: 'member', operate: true, viewerAccount: 'sara@example.test', bulk: 'other_sessions', devices: memberDevices }),
   frame('member-operate-phone', '能管理的成员 · 375 宽', PHONE,

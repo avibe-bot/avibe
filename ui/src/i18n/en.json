@@ -8051,7 +8051,10 @@
       "unattributedHint": "These devices still receive notifications, but the account they belong to cannot be told. You can stop each one.",
       "signOutAllRemote": "Sign out all remote devices",
       "online": "Online",
-      "unknown": "The device list cannot be read right now."
+      "unknown": "The device list cannot be read right now.",
+      "signedInToday": "Signed in today at {{time}}",
+      "signedInYesterday": "Signed in yesterday at {{time}}",
+      "signedInDated": "Signed in {{date}}"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8394,7 +8397,8 @@
       "desktop": "Avibe Desktop",
       "browser": "Browser",
       "homeScreen": "Home-screen app",
-      "other": "Device"
+      "other": "Device",
+      "unrecognized": "Unrecognized client"
     },
     "unlinkedHealth": {
       "title": "Health connections not matched to a device",
