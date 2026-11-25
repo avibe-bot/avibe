@@ -65,6 +65,10 @@ enum WebKitReadiness {
     final class LaunchTolerantTiming: RuntimeOpenTiming {
         private let clock = ContinuousRuntimeOpenTiming()
 
+        init() {
+            MainThreadWatchdog.start()
+        }
+
         var now: Duration { clock.now }
 
         var accountTransportDeadlines: MobileAuthTransportDeadlines {
@@ -101,6 +105,7 @@ enum WebKitReadiness {
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
+        MainThreadWatchdog.start()
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: webContentLaunch)
         while clock.now < deadline {
@@ -151,6 +156,7 @@ enum WebKitReadiness {
         func thrown(_ what: String, _ error: FixtureReadinessError) -> Error {
             recordsFailure ? recordThrown(what, error, file: file, line: line) : error
         }
+        MainThreadWatchdog.start()
         let clock = ContinuousClock()
         let started = clock.now
         let began = requests.elapsed
@@ -346,4 +352,93 @@ struct FixtureBootstrap: Equatable {
 
 enum WebKitReadinessError: Error {
     case documentNotLoaded
+}
+
+/// Prints every time the main thread does not answer for over a second, with
+/// the test running when it stopped answering: `[main-thread watchdog] held
+/// over 1 s in <test>` at once, again every 10 s while it lasts, and
+/// `[main-thread watchdog] blocked 2.4 s, from <test> to <test>` when it
+/// ends. A hold that never ends is still in the log.
+///
+/// Every App fixture's WebView callbacks, timers and deadlines run on the
+/// main thread, so a hold there looks like a page that never loads (the
+/// 120 s bootstrap stall of run 45564932372). This shows any hold in the run
+/// log. It starts with the first App fixture (`LaunchTolerantTiming`,
+/// `waitForSignedInFixture`, `waitForDocument`) and runs for the rest of the
+/// bundle. It only reports; it fails nothing.
+final class MainThreadWatchdog: NSObject, XCTestObservation, @unchecked Sendable {
+    static let threshold: TimeInterval = 1
+
+    private static let shared = MainThreadWatchdog()
+    private let lock = NSLock()
+    private var started = false
+    private var currentTest = "(before the first test)"
+
+    /// Idempotent; call from the main thread.
+    @MainActor
+    static func start() {
+        shared.startOnce()
+    }
+
+    @MainActor
+    private func startOnce() {
+        lock.lock()
+        let first = !started
+        started = true
+        lock.unlock()
+        guard first else {
+            return
+        }
+        // Started from inside a test, whose start was already announced.
+        setTest("(the test that started the watchdog)")
+        XCTestObservationCenter.shared.addTestObserver(self)
+        let thread = Thread { [self] in self.watch() }
+        thread.name = "main-thread watchdog"
+        thread.qualityOfService = .userInitiated
+        thread.start()
+    }
+
+    func testCaseWillStart(_ testCase: XCTestCase) {
+        setTest(testCase.name)
+    }
+
+    func testCaseDidFinish(_ testCase: XCTestCase) {
+        setTest("(after \(testCase.name))")
+    }
+
+    private func setTest(_ name: String) {
+        lock.lock()
+        currentTest = name
+        lock.unlock()
+    }
+
+    private func test() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentTest
+    }
+
+    private func watch() {
+        while true {
+            let sent = Date()
+            let answered = DispatchSemaphore(value: 0)
+            DispatchQueue.main.async { answered.signal() }
+            if answered.wait(timeout: .now() + Self.threshold) == .timedOut {
+                let from = test()
+                print("[main-thread watchdog] held over 1 s in \(from)")
+                while answered.wait(timeout: .now() + 10) == .timedOut {
+                    print(
+                        "[main-thread watchdog] still held after "
+                            + "\(Int(Date().timeIntervalSince(sent))) s, now in \(test())"
+                    )
+                }
+                let seconds = Date().timeIntervalSince(sent)
+                print(
+                    "[main-thread watchdog] blocked \(String(format: "%.1f", seconds)) s, "
+                        + "from \(from) to \(test())"
+                )
+            }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
 }

@@ -24,6 +24,7 @@ threshold (``core.presentation.interim_worthy``).
 from __future__ import annotations
 
 import functools
+from dataclasses import replace
 import platform
 import re
 from pathlib import Path
@@ -241,10 +242,10 @@ def with_fork_notice(message: UserMessage, *, source_session_id: str, source_tit
         source=display(source_session_id),
         history=FORK_HISTORY.format(seq=int(through_seq)) if through_seq else FORK_NO_HISTORY,
     )
-    return UserMessage(content=(TextBlock(text=notice), *message.content))
+    return replace(message, content=(TextBlock(text=notice), *message.content))
 
 
 def with_environment(message: UserMessage, delta: Mapping[str, EnvironmentValue]) -> UserMessage:
     if not delta:
         return message
-    return UserMessage(content=(TextBlock(text=render_environment(delta)), *message.content))
+    return replace(message, content=(TextBlock(text=render_environment(delta)), *message.content))

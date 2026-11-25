@@ -21,6 +21,7 @@ from core.agent_core.harness.cache_metrics import valid_record
 from core.agent_core.harness.projection import ProjectionError, _index_results
 from core.agent_core.harness.runtime import RunTranscript, compact_runtime, is_anchor_response
 from core.agent_core.harness.store import ContextEntry
+from storage.carry_projection import CarryProjection, read_projection
 from storage.models import agent_events, messages
 
 CAPSULE_KEY = "vibey_runtime"
@@ -47,7 +48,7 @@ def _ordered(rows: Sequence[ContextEntry]) -> list[ContextEntry]:
     return result
 
 
-def _range(conn: Connection, chain: Chain, after: int = 0) -> list[ContextEntry]:
+def _range(conn: Connection, chain: Chain, after: int = 0, *, projection: CarryProjection) -> list[ContextEntry]:
     from storage.agent_transcript import _event_entry, _message_entry
 
     entries = []
@@ -60,10 +61,10 @@ def _range(conn: Connection, chain: Chain, after: int = 0) -> list[ContextEntry]
                 conditions.append(table.c.context_seq <= bound)
             for row in conn.execute(select(table).where(*conditions)).mappings():
                 entries.append(decode(member, row))
-    return _ordered(entries)
+    return list(projection.apply(_ordered(entries)))
 
 
-def _checkpoint(conn: Connection, chain: Chain, before: int | None = None) -> Mapping[str, Any] | None:
+def _checkpoint(conn: Connection, chain: Chain, before: int | None = None, *, projection: CarryProjection) -> Mapping[str, Any] | None:
     """One descending indexed seek per ancestor; no union/global history sort."""
     newest = None
     for member, bound in chain:
@@ -72,14 +73,18 @@ def _checkpoint(conn: Connection, chain: Chain, before: int | None = None) -> Ma
         # SQLite may otherwise prefer the session/sequence unique index for an
         # upper-bounded predecessor seek and walk every intervening event. Pin
         # the checkpoint index so both latest and predecessor seeks are bounded.
-        query = text(
-            "SELECT * FROM agent_events INDEXED BY ix_agent_events_session_type_context_seq "
-            "WHERE session_id = :member AND event_type = 'context_compaction' "
-            "AND context_seq IS NOT NULL "
-            + ("AND context_seq <= :bound " if bound is not None else "")
-            + "ORDER BY context_seq DESC LIMIT 1"
-        )
-        row = conn.execute(query, {"member": member, "bound": bound}).mappings().first()
+        while True:
+            query = text(
+                "SELECT * FROM agent_events INDEXED BY ix_agent_events_session_type_context_seq "
+                "WHERE session_id = :member AND event_type = 'context_compaction' AND context_seq IS NOT NULL "
+                + ("AND context_seq <= :bound " if bound is not None else "")
+                + "ORDER BY context_seq DESC LIMIT 1"
+            )
+            row = conn.execute(query, {"member": member, "bound": bound}).mappings().first()
+            if row is None or projection.clean_checkpoint(row["context_seq"], _metadata(row)):
+                break
+            # An opaque old summary is not safe merely because a newer capsule lists its refs.
+            bound = row["context_seq"] - 1
         if row is not None and (newest is None or row["context_seq"] > newest["context_seq"]):
             newest = row
     return newest
@@ -96,6 +101,7 @@ def _prefix_chain(conn: Connection, checkpoint: Mapping[str, Any]) -> list[tuple
 def _binding(checkpoint: Mapping[str, Any], chain: Chain) -> dict[str, Any]:
     return {
         "checkpoint": [checkpoint["id"], checkpoint["session_id"], checkpoint["context_seq"]],
+        **({"carry_projection": _metadata(checkpoint)["carry_projection"]} if "carry_projection" in _metadata(checkpoint) else {}),
         "content_sha256": hashlib.sha256(checkpoint["content_json"].encode()).hexdigest(),
         "prefix": [list(member) for member in chain],
     }
@@ -123,7 +129,7 @@ def _metadata(checkpoint: Mapping[str, Any]) -> dict[str, Any]:
 
 def _cached(
     conn: Connection, checkpoint: Mapping[str, Any], chain: Chain, suffix: Sequence[ContextEntry], *,
-    include_anchor: bool = True,
+    include_anchor: bool = True, projection: CarryProjection,
 ) -> RunTranscript | None:
     """Validate envelope/provenance; repair can explicitly load only base refs."""
     from storage.agent_transcript import TranscriptError, _event_entry, _message_entry
@@ -196,7 +202,7 @@ def _cached(
             if entry.kind != kind:
                 return None
             entries.append(entry)
-        return RunTranscript(tuple(_ordered(entries)), clocks, tuple(records), changes)
+        return RunTranscript(tuple(projection.apply(_ordered(entries))), clocks, tuple(records), changes)
     except (KeyError, TypeError, ValueError, OverflowError, TranscriptError):
         # Optional metadata never converts canonical corruption into success:
         # the canonical rebuild below still validates the original rows.
@@ -262,20 +268,22 @@ def read_runtime(conn: Connection, session_id: str) -> tuple[RunTranscript, list
     from storage.agent_transcript import _ancestry, _context_entries
 
     chain = _ancestry(conn, session_id)
-    checkpoint = _checkpoint(conn, chain)
+    projection = read_projection(conn, chain)
+    checkpoint = _checkpoint(conn, chain, projection=projection)
     if checkpoint is None:
-        return compact_runtime(_context_entries(conn, session_id)), []
+        return replace(compact_runtime(list(projection.apply(_context_entries(conn, session_id)))),
+                       carry_projection=projection.identity), []
     prefix_chain = _prefix_chain(conn, checkpoint)
-    suffix = _range(conn, chain, checkpoint["context_seq"])
-    prefix = _cached(conn, checkpoint, prefix_chain, suffix)
+    suffix = _range(conn, chain, checkpoint["context_seq"], projection=projection)
+    prefix = _cached(conn, checkpoint, prefix_chain, suffix, projection=projection)
     publications = []
     if prefix is None:
-        previous = _checkpoint(conn, prefix_chain, checkpoint["context_seq"])
+        previous = _checkpoint(conn, prefix_chain, checkpoint["context_seq"], projection=projection)
         prior = None
         rows = None
         if previous is not None:
-            delta = _range(conn, prefix_chain, previous["context_seq"])
-            prior = _cached(conn, previous, _prefix_chain(conn, previous), delta)
+            delta = _range(conn, prefix_chain, previous["context_seq"], projection=projection)
+            prior = _cached(conn, previous, _prefix_chain(conn, previous), delta, projection=projection)
             if prior is not None:
                 rows = [*prior.entries, *delta]
         if rows is not None:
@@ -284,23 +292,24 @@ def read_runtime(conn: Connection, session_id: str) -> tuple[RunTranscript, list
             except ProjectionError:
                 rows = None
         if rows is None:
-            rows = _range(conn, prefix_chain)
+            rows = _range(conn, prefix_chain, projection=projection)
             prefix, publication = _capsule(checkpoint, prefix_chain, rows)
         publications.append(publication)
     try:
-        return compact_runtime([*prefix.entries, *suffix], prior=prefix), publications
+        runtime = compact_runtime([*prefix.entries, *suffix], prior=prefix)
+        return replace(runtime, carry_projection=projection.identity), publications
     except ProjectionError:
         # A newly appended edit can reach behind the certified closure. Validate
         # once against canonical history, then repair the prefix for future runs.
-        canonical = _context_entries(conn, session_id)
+        canonical = list(projection.apply(_context_entries(conn, session_id)))
         runtime = compact_runtime(canonical)
         prefix_rows = [row for row in canonical if row.context_seq <= checkpoint["context_seq"]]
         extra = _repair_dependencies(canonical, checkpoint["context_seq"])
         # Sibling forks share the checkpoint but not their suffixes. Preserve
         # every certified base repair so alternating children cannot evict one
         # another's dependencies. Optional anchor history must stay optional.
-        certified_base = _cached(conn, checkpoint, prefix_chain, suffix, include_anchor=False)
+        certified_base = _cached(conn, checkpoint, prefix_chain, suffix, include_anchor=False, projection=projection)
         if certified_base is not None:
             extra.extend(certified_base.entries)
         _, publication = _capsule(checkpoint, prefix_chain, prefix_rows, extra=extra)
-        return runtime, [publication]
+        return replace(runtime, carry_projection=projection.identity), [publication]
