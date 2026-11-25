@@ -6,7 +6,7 @@
 import type { RemoteAccessSettings, RemoteAccessStatus } from '@/context/ApiContext';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '@/lib/tunnelQuality';
 import type {
-  AccountResult, AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
+  AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
   DirectState, HealthData, ProxyAccess, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
   SignedOutDevice, SwitchSetting, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
 } from './types';
@@ -91,30 +91,11 @@ export function deviceFromWire(raw: unknown, listed?: Device['group']): Device |
   };
 }
 
-function accountResult(raw: unknown): AccountResult {
-  const { status, reason } = record(raw);
-  if (status === 'pending') return reason === 'retrying' ? 'retrying' : 'queued';
-  if (status === 'accepted') return 'accepted';
-  if (status === 'not_applicable') return reason === 'shared_sign_in' ? 'sharedSignIn' : reason === 'keeper_unknown' ? 'keeperUnknown' : 'localOnly';
-  if (status === 'refused') return reason === 'credential' ? 'refusedCredential' : 'refused';
-  if (status === 'unconfirmed') return 'unconfirmed';
-  return 'unknown';
-}
-
+/** One sign-out receipt (`recent_sign_outs`, `sign_out_results`): the device and its name. */
 export function signedOutFromWire(raw: unknown): SignedOutDevice | null {
   const row = record(raw);
-  const id = text(row.operation_id);
-  if (!id) return null;
-  const results = [...new Set(list(row.account_results).map(accountResult))];
-  return {
-    id,
-    deviceId: text(row.device_id),
-    device: text(row.display_name) ?? null,
-    kind: KINDS[String(row.kind)]?.kind ?? null,
-    // The instance says whose it was when it can; nothing here is inferred from a name or a kind.
-    owner: row.group === 'mine' || row.group === 'others' ? row.group : 'unknown',
-    results,
-  };
+  if (!text(row.operation_id)) return null;
+  return { deviceId: text(row.device_id), device: text(row.display_name) ?? null };
 }
 
 /** The declared-proxy fact as the instance computed it. Nothing is inferred: without at least one

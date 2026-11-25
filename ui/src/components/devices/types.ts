@@ -87,23 +87,9 @@ export type DeviceActivity = {
 /** A Health connection no listed device can be proven to own. */
 export type UnlinkedHealth = { id: string; device: string; data: HealthData[]; lastSeenAt?: string };
 
-/** What avibe.bot did about a signed-out device's account sign-in (`status/reason` of the
- *  contract); anything this page does not know is `unknown`. */
-export type AccountResult =
-  | 'queued' | 'retrying' | 'accepted'
-  | 'localOnly' | 'sharedSignIn' | 'keeperUnknown'
-  | 'refusedCredential' | 'refused' | 'unconfirmed' | 'unknown';
-
-/** A device signed out lately: it is out of this Avibe; the account side is its own story. */
-export type SignedOutDevice = {
-  id: string;
-  deviceId?: string;
-  device: string | null;
-  kind: DeviceKind | null;
-  /** Whose device it was, where that is known without guessing; it decides which advice applies. */
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-};
+/** A device a sign-out ended, as far as this page uses it: which row leaves at once, and its name
+ *  for the activity once it is no longer listed. The page lists no signed-out devices (owner, 2026-11-26). */
+export type SignedOutDevice = { deviceId?: string; device: string | null };
 
 /** Why a claim (turning remote access on) did not go through: the local outcome names of
  *  `personal-installation-claims-runtime.md`, and `unknown` with the raw code for the rest. */
