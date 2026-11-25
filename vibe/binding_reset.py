@@ -474,6 +474,8 @@ def _finish_denial(record):
         reason = record['phase']
         unbind.save_result(record['source'], 'not_unbound', reason, operation=record['operation'])
         gate.reset_intent_path().unlink()
+        cfg = local._config()
+    remote._release_direct_lifecycle_after_refused_change(cfg)
     return {'state': 'not_unbound', 'reason_code': reason, 'operation': record['operation']}
 
 

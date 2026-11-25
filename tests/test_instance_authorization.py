@@ -821,7 +821,8 @@ def test_registered_remote_access_writes_default_to_owner(monkeypatch, tmp_path)
                 # The ordinary key handler also refuses replacing a bound instance remotely.
                 assert response.status_code == 403
                 assert response.get_json()['error'] == 'local_operator_required'
-            elif admitted and (method, path) == ("POST", "/api/remote-access/direct/suspend"):
+            elif admitted and (method, path) in (("POST", "/api/remote-access/direct/suspend"),
+                                                 ("POST", "/api/remote-access/direct/release")):
                 # This stop-before-discard barrier additionally requires a
                 # co-located CLI token and actual loopback peer. Even a remote
                 # Owner must not cross the independent process-local boundary.

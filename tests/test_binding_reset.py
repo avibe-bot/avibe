@@ -242,6 +242,36 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
     assert json.loads(posts[0][0]) == {'operation_id': op}
 
 
+def test_refused_unbind_reopens_the_direct_path_it_fenced(reset_host, monkeypatch):
+    from types import SimpleNamespace
+    from vibe import binding_unbind as unbind, direct_lifecycle
+
+    record, _, _ = reset_host
+    cfg = V2Config.load()
+    cfg.remote_access.vibe_cloud.direct = True
+    cfg.save()
+    lifecycle = SimpleNamespace(released=0)
+    lifecycle.release_pairing_suspension = lambda: setattr(lifecycle, 'released', lifecycle.released + 1)
+    monkeypatch.setattr(direct_lifecycle, 'active_lifecycle', lambda: lifecycle)
+    reset._save({**reset._new_record(V2Config.load()), 'schema': 2, 'operation': '7a0a3a3e-9f43-4a52-9c1e-1d1a4f3b6c20',
+                 'phase': 'ineligible', 'accepted': False, 'was_requested': True, 'root': unbind.root_stamp()})
+    assert reset.resume()['state'] == 'not_unbound' and lifecycle.released == 1
+
+
+def test_lifecycle_release_clears_only_a_pairing_suspension():
+    from types import SimpleNamespace
+    from vibe.direct_lifecycle import DirectAccessLifecycle
+
+    woke = []
+    state = SimpleNamespace(_shutdown=False, _pairing_suspended=True, _permission_allowed=False,
+                            _permission_received_at=1.0, _permission_reason='pairing_changed', _resume_required=False,
+                            _wake=SimpleNamespace(set=lambda: woke.append(1)))
+    DirectAccessLifecycle._release_pairing_suspension(state)
+    assert not state._pairing_suspended and state._permission_allowed is None and state._resume_required and woke
+    DirectAccessLifecycle._release_pairing_suspension(state)
+    assert len(woke) == 1  # Nothing to release: a later stop's fence is never opened here.
+
+
 def test_worker_finishes_authorized_reset_including_private_health_store(reset_host, monkeypatch):
     from storage import mobile_store
     _, workspace, calls = reset_host

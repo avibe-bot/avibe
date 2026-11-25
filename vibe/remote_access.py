@@ -6241,6 +6241,34 @@ def _pairing_identity_revoked(base_config: V2Config | None, candidate_config: V2
     return previous.is_runtime_paired() and not current.is_runtime_paired()
 
 
+def _release_direct_lifecycle_after_refused_change(base_config: V2Config | None) -> None:
+    """Best effort: reopen the direct path a refused unbind fenced. Never raises."""
+    if base_config is None or not base_config.remote_access.vibe_cloud.direct:
+        return
+    try:
+        from vibe import direct_lifecycle
+
+        if direct_lifecycle.active_lifecycle() is not None:
+            direct_lifecycle.release_pairing_suspension()
+            return
+        from vibe import runtime
+
+        if runtime.recorded_ui_is_gone():
+            return  # A UI that starts later begins unsuspended.
+        from core.show_pages import SHOW_CLI_EVENT_TOKEN_HEADER, show_cli_event_token
+
+        with requests.Session() as client:
+            client.trust_env = False
+            client.post(
+                f"{origin_service_for_pairing(base_config)}/api/remote-access/direct/release",
+                headers={"X-Vibe-Show-Client": "cli", SHOW_CLI_EVENT_TOKEN_HEADER: show_cli_event_token()},
+                timeout=(1.0, 5.0),
+                allow_redirects=False,
+            )
+    except Exception:
+        logger.warning("Could not reopen the direct path after a refused unbind", exc_info=True)
+
+
 def _stop_direct_lifecycle_before_pairing_discard(base_config: V2Config | None) -> None:
     """Fence a previously opted-in UI owner before retiring its pairing keys."""
 

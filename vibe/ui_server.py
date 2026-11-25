@@ -953,7 +953,7 @@ def _is_mutation_guard_exempt() -> bool:
 
 def _is_cli_direct_suspend_request() -> bool:
     return (
-        request.path == "/api/remote-access/direct/suspend"
+        request.path in ("/api/remote-access/direct/suspend", "/api/remote-access/direct/release")
         and _is_direct_loopback_connection()
         and not _is_direct_ingress_request()
         and _cli_local_event_token_ok()
@@ -9293,6 +9293,18 @@ def remote_access_direct_suspend():
     if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
         return jsonify({"ok": True, "stopped": True})
     return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
+
+
+@app.route("/api/remote-access/direct/release", methods=["POST"])
+def remote_access_direct_release():
+    """Undo that stop when the binding change it fenced was refused and nothing changed."""
+
+    if not _is_cli_direct_suspend_request():
+        return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
+    from vibe import direct_lifecycle
+
+    direct_lifecycle.release_pairing_suspension()
+    return jsonify({"ok": True})
 
 
 def _remote_status_for_viewer(payload: dict) -> dict:

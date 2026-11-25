@@ -379,6 +379,24 @@ class DirectAccessLifecycle:
         self._wake.set()
         await self._stopped.wait()
 
+    def _release_pairing_suspension(self) -> None:
+        """A pairing change was abandoned with the same config: open starts again.
+
+        The config signature is unchanged, so ``_observe_config`` would never
+        clear the fence. Permission is asked for afresh, as after any stop.
+        """
+        if self._shutdown or not self._pairing_suspended:
+            return
+        self._pairing_suspended = False
+        self._permission_allowed = None
+        self._permission_received_at = None
+        self._permission_reason = "permission_required"
+        self._resume_required = True
+        self._wake.set()
+
+    def release_pairing_suspension(self) -> None:
+        self._submit(self._release_pairing_suspension)
+
     def stop_for_pairing_change(self, timeout_seconds: float = 10.0) -> bool:
         loop = self._loop
         if loop is None:
@@ -862,6 +880,12 @@ def register_active_lifecycle(lifecycle: DirectAccessLifecycle) -> None:
 def stop_for_pairing_change(timeout_seconds: float = 10.0) -> bool:
     lifecycle = active_lifecycle()
     return lifecycle is None or lifecycle.stop_for_pairing_change(timeout_seconds)
+
+
+def release_pairing_suspension() -> None:
+    lifecycle = active_lifecycle()
+    if lifecycle is not None:
+        lifecycle.release_pairing_suspension()
 
 
 def notify_config_changed(config: V2Config) -> None:
