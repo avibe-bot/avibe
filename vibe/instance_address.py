@@ -49,6 +49,8 @@ CONFIRMATION_TTL_SECONDS = 600.0
 DISPLAY_REFRESH_SECONDS = 60.0
 _DRAIN_TIMEOUT_SECONDS = 15.0
 _FIRST_ANSWER_WAIT_SECONDS = 12.0
+# Longest wait before asking again about a rename avibe.bot has accepted ("pending").
+_PENDING_RETRY_MAX_SECONDS = 5.0
 _STATE_SCHEMA_VERSION = 1
 _RECEIPT_CONTEXT = b"avibe-address-receipt-v1\x00"
 
@@ -1259,7 +1261,8 @@ def change(confirmation_id: Any, actor: tuple[str, ...]) -> tuple[int, dict[str,
                     extra = {k: v for k, v in last.items() if k not in {"operation_id", "state", "error", "status"}}
                     raise AddressError(int(last.get("status") or 409), str(last.get("error") or "unavailable"), **extra)
                 return 200, {"ok": True, "state": "applied", "hostname": last.get("hostname"), "public_url": last.get("public_url")}
-            if isinstance(journal, dict) and journal.get("phase") == "committed":
+            if isinstance(journal, dict) and (journal.get("phase") == "committed" or _accepted(journal)):
+                # avibe.bot has this operation in hand ("pending"), or has committed it.
                 return 202, {"ok": True, "state": "applying"}
             _first_answer.wait(timeout=0.25)
     return 202, {"ok": True, "state": "pending"}
@@ -1293,7 +1296,7 @@ def describe() -> dict[str, Any]:
     operation = None
     if isinstance(journal, dict):
         operation = {
-            "state": "pending" if journal.get("phase") == "intent" else "applying",
+            "state": "pending" if journal.get("phase") == "intent" and not _accepted(journal) else "applying",
             "hostname": journal.get("target_hostname"),
             "error": None,
         }
@@ -1357,18 +1360,23 @@ def describe() -> dict[str, Any]:
 # --- the worker: asks avibe.bot, then applies ----------------------------------------
 
 
-def start(*, wake_pages: Callable[[], None], close_connections: Callable[[set[str]], None]) -> None:
-    """Start the worker once per process; it resumes an unfinished journal first."""
+def start(
+    *, wake_pages: Callable[[], None], close_connections: Callable[[set[str]], None], binding_changed: bool = False
+) -> None:
+    """Ensure the one service worker exists. A published binding also owes a fresh read."""
 
     global _worker_started
 
-    _hooks["wake_pages"] = wake_pages
-    _hooks["close_connections"] = close_connections
     with _worker_guard:
-        if _worker_started:
+        _hooks["wake_pages"] = wake_pages
+        _hooks["close_connections"] = close_connections
+        if not _worker_started:
+            # Don't latch success if the OS refused to start the thread. The next
+            # service reconciliation can retry without losing this generation.
+            threading.Thread(target=_worker_loop, name="instance-address", daemon=True).start()
+            _worker_started = True
+        elif not binding_changed:
             return
-        _worker_started = True
-    threading.Thread(target=_worker_loop, name="instance-address", daemon=True).start()
     _wake_worker(read_state=True)
 
 
@@ -1424,16 +1432,26 @@ def _read_when_asked() -> bool:
 
     if not _worker_read_requested.is_set():
         return True
-    binding = current_binding()
-    if _eligibility(binding) is not None and (binding is None or _journal(binding) is None):
-        # Not a personal, paired instance on a managed name: it has no former
-        # names and nothing to read for. A pairing or a hint asks again.
-        _worker_read_requested.clear()
-        return True
-    if refresh_state(force=True):
-        _worker_read_requested.clear()
-        return True
+    # Claim only the read that was already owed. A publication/hint arriving
+    # during eligibility or network I/O belongs to the next pass, even if this
+    # pass succeeds (or concluded that the *previous* root wasn't paired).
+    _worker_read_requested.clear()
+    try:
+        binding = current_binding()
+        if _eligibility(binding) is not None and (binding is None or _journal(binding) is None):
+            return True
+        if refresh_state(force=True):
+            return True
+    except Exception:
+        _worker_read_requested.set()
+        raise
+    _worker_read_requested.set()  # keep the worker's existing backoff; don't signal an immediate retry
     return False
+
+
+def _accepted(journal: dict[str, Any]) -> bool:
+    """avibe.bot answered "pending" to this operation and has not refused a repeat."""
+    return bool(journal.get("accepted")) and not isinstance(journal.get("held"), dict)
 
 
 def _journal(binding: Binding) -> dict[str, Any] | None:
@@ -1589,8 +1607,14 @@ def _request_change(binding: Binding, journal: dict[str, Any]) -> float:
     except Exception:
         return 10.0  # no answer: the same request is sent again
     if reply.get("status") == "pending":
+        if reply.get("operation_id") == journal["operation_id"] and not journal.get("accepted"):
+            # Display only: the page says "changing" now. Recovery still follows
+            # may_have_landed; a later refusal of a repeat holds the journal as before.
+            _set_journal(binding, {**journal, "accepted": True})
+        # The owner is watching: ask again within seconds, not at avibe.bot's
+        # longer hint. The same operation_id is idempotent; 429 still backs off above.
         retry = reply.get("retry_after_seconds")
-        return float(min(max(retry, 1), 60)) if isinstance(retry, (int, float)) else 5.0
+        return float(min(max(retry, 1), _PENDING_RETRY_MAX_SECONDS)) if isinstance(retry, (int, float)) else _PENDING_RETRY_MAX_SECONDS
     receipt_host = normalize_host(reply.get("hostname")) if isinstance(reply.get("hostname"), str) else ""
     if (
         reply.get("status") != "committed"

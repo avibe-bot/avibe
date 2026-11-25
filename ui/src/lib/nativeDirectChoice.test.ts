@@ -34,14 +34,14 @@ describe('nativeDirectChoice', () => {
     expect(await setNativeDirectChoice('direct')).toBeNull();
     expect(call).not.toHaveBeenCalled();
     shell('ios', 2, { mode: 'direct', reverted: null });
-    expect(await setNativeDirectChoice('direct')).toEqual({ mode: 'direct', reverted: null });
+    expect(await setNativeDirectChoice('direct')).toEqual({ mode: 'direct', reverted: null, pendingRelaunch: false });
   });
 
   it('reads which choice went back, and a shell before `from` only ever puts the tunnel back', async () => {
     shell('ios', 2, { mode: 'automatic', reverted: { at: 1_700_000_000_000, reason: 'unreachable', from: 'direct' } });
-    expect(await readNativeDirectChoice()).toEqual({ mode: 'automatic', reverted: { at: 1_700_000_000_000, from: 'direct' } });
+    expect(await readNativeDirectChoice()).toEqual({ mode: 'automatic', reverted: { at: 1_700_000_000_000, from: 'direct' }, pendingRelaunch: false });
     shell('ios', 1, { mode: 'automatic', reverted: { at: 1_700_000_000_000, reason: 'unreachable' } });
-    expect(await readNativeDirectChoice()).toEqual({ mode: 'automatic', reverted: { at: 1_700_000_000_000, from: 'tunnel' } });
+    expect(await readNativeDirectChoice()).toEqual({ mode: 'automatic', reverted: { at: 1_700_000_000_000, from: 'tunnel' }, pendingRelaunch: false });
     shell('ios', 2, { mode: 'later', reverted: null });
     expect(await readNativeDirectChoice()).toBeNull();
   });
@@ -51,6 +51,13 @@ describe('nativeDirectChoice', () => {
     const stop = onNativeDirectChoiceChanged(heard);
     window.dispatchEvent(new CustomEvent('avibe:native:direct.preferenceChanged', { detail: { mode: 'automatic', reverted: { at: 5, reason: 'unreachable', from: 'direct' } } }));
     stop();
-    expect(heard).toHaveBeenCalledWith({ mode: 'automatic', reverted: { at: 5, from: 'direct' } });
+    expect(heard).toHaveBeenCalledWith({ mode: 'automatic', reverted: { at: 5, from: 'direct' }, pendingRelaunch: false });
+  });
+
+  it('reads that the App takes the choice only after it is opened again', async () => {
+    shell('ios', 2, { mode: 'direct', reverted: null, pendingRelaunch: true });
+    expect(await readNativeDirectChoice()).toEqual({ mode: 'direct', reverted: null, pendingRelaunch: true });
+    shell('ios', 2, { mode: 'direct', reverted: null, pendingRelaunch: 'yes' });
+    expect((await readNativeDirectChoice())?.pendingRelaunch).toBe(false);
   });
 });

@@ -9,10 +9,11 @@ import type { TranslationKey } from '@/i18n/types';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
-import { Input } from '../ui/input';
+import { DomainField } from '../DomainField';
+import { validDomainName } from '../domainName';
 import { KeptTail } from '../ui/kept-tail';
 import { deviceTime, joinParts, longDay } from './format';
-import { DOMAIN_SUFFIX, prefixOf } from './rules';
+import { prefixOf } from './rules';
 import { renameRefusalText } from './texts';
 import type { AddressState, RenameDevice, RenameDeviceKind, RenameStep, RetiredName } from './types';
 
@@ -248,20 +249,15 @@ export function RenameDialogs({ host, rename, address, devices, rebindOffered = 
           <DialogDescription>{t('devices.rename.current', { host })}</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <Input
-              className="w-48 text-[13px]"
-              value={rename.name}
-              readOnly={!actions.onRenameNameChange}
-              onChange={actions.onRenameNameChange ? (event) => actions.onRenameNameChange?.(event.target.value) : undefined}
-              aria-label={t('devices.rename.newName')}
-              aria-invalid={Boolean(refusal) || undefined}
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-            />
-            <span className="truncate font-mono text-[12px] text-muted">{DOMAIN_SUFFIX}</span>
-          </div>
+          {/* The same field, and the same clean-up, as claiming this computer's domain. */}
+          <DomainField
+            name={rename.name}
+            // A refusal (「已被占用」 among them) is said once, in its sentence below.
+            check={rename.name && !validDomainName(rename.name) ? 'invalid' : null}
+            readOnly={!actions.onRenameNameChange}
+            onChange={actions.onRenameNameChange}
+            label={t('devices.rename.newName')}
+          />
           {reason && (
             <span role="alert" className="text-[11px] leading-relaxed text-destructive-ink">
               <KeptTail text={rename.earlier ? t('devices.rename.earlierFailed', { reason }) : reason} />
@@ -303,7 +299,7 @@ export function RenameDialogs({ host, rename, address, devices, rebindOffered = 
         )}
         <DialogFooter>
           <Button variant="ghost" onClick={actions.onRenameClose}>{t('common.cancel')}</Button>
-          <Button variant="default" disabled={blocking || !rename.name || rename.busy} onClick={actions.onRenameContinue}>
+          <Button variant="default" disabled={blocking || !validDomainName(rename.name) || rename.busy} onClick={actions.onRenameContinue}>
             {reclaiming ? t('devices.rename.takeBackAction') : t('common.continue')}
           </Button>
         </DialogFooter>

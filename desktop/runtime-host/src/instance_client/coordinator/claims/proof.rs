@@ -1,0 +1,730 @@
+//! An explicit mail action follows a qualified hosted proof challenge. Its
+//! issuer result cannot publish a credential or arm the machine.
+mod factor;
+mod submission;
+use super::super::claim_binding::BindingId;
+use super::*;
+use crate::instance_client::{
+    account::{validate_code, PreparedClaimCode},
+    machine::hosted::ProofNeeded,
+    transport::FactorCookies,
+};
+pub(super) use factor::{EnrolledReply, PasskeyRefusal, TotpSetupReply};
+pub(super) use submission::SubmittedReply;
+
+pub(super) struct StepUp {
+    proof: ProofNeeded,
+    initial_credential: FactorCookies,
+    correlation: Uuid,
+    // Opaque document handle issued at delivery, never the ordinary BindingId.
+    released: Option<(Uuid, BindingId)>,
+    phase: Phase,
+    // Inert during dispatch. Only original-document delivery of a definite
+    // refusal may restore this exact input step, never the rejected operation.
+    retry_phase: Option<Phase>,
+    retry_until: Option<Instant>,
+    // Only the original final POST's native reply can take this; retirement
+    // of the document drops any still-undelivered recovery codes.
+    enrolled: Option<crate::instance_client::account::EnrolledCodes>,
+}
+enum OfferState {
+    Unreleased,
+    Released,
+    Sending { _interrupt: oneshot::Sender<()> },
+}
+enum Phase {
+    Offer {
+        state: OfferState,
+    },
+    Delivered(Box<AccountFlow>),
+    Preparing {
+        _interrupt: oneshot::Sender<()>,
+    },
+    Prepared,
+    PreparingPasskey {
+        predecessor: BindingId,
+        _interrupt: oneshot::Sender<()>,
+    },
+    IssuingTotp {
+        predecessor: BindingId,
+        until: Instant,
+        _interrupt: oneshot::Sender<()>,
+    },
+    TotpSetup {
+        predecessor: BindingId,
+        until: Instant,
+        setup: Box<factor::IssuedTotp>,
+    },
+    Submitted(BindingId), // correlation only; never evidence the new jar was actually stored
+}
+/// An outstanding refusal owns the original borrow. Only final delivery to the
+/// admitted document may mint a handle for a *separate* mail action.
+#[must_use]
+pub(super) struct PendingProofOffer<'a> {
+    coordinator: &'a Coordinator,
+    caller: ClaimCaller,
+    epoch: Epoch,
+    revision: Uuid,
+    borrow: Borrow<'a>,
+}
+impl<'a> PendingProofOffer<'a> {
+    pub(super) fn new(
+        coordinator: &'a Coordinator,
+        caller: ClaimCaller,
+        epoch: Epoch,
+        revision: Uuid,
+        borrow: Borrow<'a>,
+    ) -> Self {
+        Self {
+            coordinator,
+            caller,
+            epoch,
+            revision,
+            borrow,
+        }
+    }
+    pub(super) fn deliver(mut self) -> Result<Uuid> {
+        let revision = self.revision;
+        let offer = self.coordinator.with_proof(
+            &self.caller,
+            &self.epoch,
+            self.borrow.receipt,
+            revision,
+            |_, _, step| {
+                let Phase::Offer { state, .. } = &mut step.phase else {
+                    return Err(changed());
+                };
+                if !matches!(state, OfferState::Unreleased) || step.proof.refused_revision() != revision {
+                    return Err(changed());
+                }
+                *state = OfferState::Released;
+                step.correlation = Uuid::new_v4();
+                Ok(step.correlation)
+            },
+        )?;
+        self.borrow.returned = true;
+        Ok(offer)
+    }
+}
+
+/// No next-step handle exists while an issuer result is in transit. Dropping
+/// this value spends the offer, even if the issuer already sent the message.
+#[must_use]
+pub(super) struct PendingMail<'a> {
+    coordinator: &'a Coordinator,
+    caller: ClaimCaller,
+    epoch: Epoch,
+    offer: Uuid,
+    borrow: Borrow<'a>,
+    result: Result<Box<AccountFlow>>,
+}
+impl PendingMail<'_> {
+    pub(super) fn deliver(mut self) -> Result<Uuid> {
+        let result = self.result;
+        let delivery = self
+            .coordinator
+            .with_proof(
+                &self.caller,
+                &self.epoch,
+                self.borrow.receipt,
+                self.offer,
+                |_, _, step| {
+                    if !matches!(
+                        step.phase,
+                        Phase::Offer {
+                            state: OfferState::Sending { .. }
+                        }
+                    ) {
+                        return Err(stale());
+                    }
+                    Ok(result.map(|flow| {
+                        step.phase = Phase::Delivered(flow);
+                        step.correlation = Uuid::new_v4();
+                        step.correlation
+                    }))
+                },
+            )
+            .map_err(|_| stale())??;
+        self.borrow.returned = true;
+        Ok(delivery)
+    }
+}
+
+/// Owns a code-free start, not permission to forward. Dropping it releases this
+/// receipt; the credential handoff must recheck the original owner before send.
+#[must_use]
+pub(super) struct ClaimStart<'a> {
+    prepared: PreparedClaimCode,
+    borrow: Borrow<'a>,
+    caller: ClaimCaller,
+    epoch: Epoch,
+    delivery: Uuid,
+}
+pub(super) enum StartOutcome<'a> {
+    Ready(Box<ClaimStart<'a>>),
+    Limited(StartLimit<'a>),
+}
+pub(super) struct StartLimit<'a> {
+    borrow: Borrow<'a>,
+    delivery: Uuid,
+    error: ClientError,
+}
+impl StartLimit<'_> {
+    pub(super) fn deliver(mut self, c: &Coordinator, caller: &ClaimCaller, epoch: &Epoch) -> Result<Option<Value>> {
+        c.with_proof(caller, epoch, self.borrow.receipt, self.delivery, |_, _, step| {
+            if !matches!(step.phase, Phase::Preparing { .. }) {
+                return Err(stale());
+            }
+            step.phase = step.retry_phase.take().ok_or_else(stale)?;
+            step.retry_until = self.error.retry_until;
+            Ok(())
+        })?;
+        self.borrow.returned = true;
+        Err(self.error)
+    }
+}
+impl StepUp {
+    fn check_wait(&self) -> Result<()> {
+        if let Some(until) = self.retry_until.filter(|until| *until > Instant::now()) {
+            let mut e = ClientError::new("rate_limited");
+            let left = until.saturating_duration_since(Instant::now());
+            e.retry_after_seconds = Some((left.as_secs() + u64::from(left.subsec_nanos() != 0)).max(1));
+            e.retry_until = Some(until);
+            return Err(e);
+        }
+        Ok(())
+    }
+    fn release(&mut self, id: BindingId) -> Uuid {
+        let handle = Uuid::new_v4();
+        self.released = Some((handle, id));
+        handle
+    }
+    fn predecessor(&self, handle: Uuid, setup: bool) -> Result<BindingId> {
+        let id = match (&self.phase, setup) {
+            (Phase::Submitted(id), false) => *id,
+            (Phase::TotpSetup { predecessor, setup, .. }, true) if setup.material_delivered() => *predecessor,
+            _ => return Err(changed()),
+        };
+        (self.released == Some((handle, id))).then_some(id).ok_or_else(changed)
+    }
+    pub(super) fn live(&self, account: &Account) -> bool {
+        self.proof.check(account).is_ok()
+            && match &self.phase {
+                Phase::IssuingTotp { until, .. } | Phase::TotpSetup { until, .. } => Instant::now() < *until,
+                _ => true,
+            }
+    }
+}
+impl Claims {
+    // A terminal discovery denial is about this exact native attempt. It must
+    // release its unarmed pipe without cancelling a later sheet or account.
+    pub(in crate::instance_client::coordinator) fn retire_submission(&mut self, id: BindingId) {
+        if self.active.as_ref().is_some_and(|a| {
+            matches!(&a.stage,
+            Stage::Proof(StepUp { phase: Phase::Submitted(current), .. }) if *current == id)
+        }) {
+            self.retire();
+        }
+    }
+    pub(super) fn offer_proof(
+        &mut self,
+        receipt: Uuid,
+        revision: Uuid,
+        account: &Account,
+        proof: ProofNeeded,
+        cookies: FactorCookies,
+    ) -> Result<()> {
+        let a = self
+            .active
+            .as_mut()
+            .filter(|a| a.receipt == receipt && &a.account == account)
+            .ok_or_else(stale)?;
+        if proof.refused_revision() != revision
+            || !matches!(&a.stage, Stage::Reading { idle: None, delivery: Delivery::Confirming(r, _), .. } if *r == revision)
+        {
+            return Err(changed());
+        }
+        proof.check(account)?;
+        a.stage = Stage::Proof(StepUp {
+            proof,
+            initial_credential: cookies,
+            correlation: revision,
+            retry_phase: None,
+            retry_until: None,
+            released: None,
+            phase: Phase::Offer {
+                state: OfferState::Unreleased,
+            },
+            enrolled: None,
+        });
+        Ok(())
+    }
+}
+pub(super) struct RereadOrigin {
+    id: BindingId,
+    until: Instant,
+    adoption: tokio::sync::watch::Receiver<bool>,
+}
+impl RereadOrigin {
+    pub(super) fn check(&self, c: &Coordinator, inner: &super::super::Inner, account: &Account) -> Result<()> {
+        if Instant::now() >= self.until
+            || !*self.adoption.borrow()
+            || !matches!(self.adoption.has_changed(), Ok(false))
+            || !c
+                .binding
+                .try_lock()
+                .map_err(|_| stale())?
+                .published_for(self.id, inner, account)
+        {
+            return Err(stale());
+        }
+        Ok(())
+    }
+}
+pub(super) struct RereadFailed<'a> {
+    c: &'a Coordinator,
+    origin: RereadOrigin,
+    borrow: Borrow<'a>,
+    error: ClientError,
+}
+impl RereadFailed<'_> {
+    pub(super) fn deliver(self, epoch: &Epoch, caller: &ClaimCaller) -> Result<Option<Value>> {
+        let inner = self.c.inner.try_lock().map_err(|_| stale())?;
+        let owner = self.c.claims.lock().expect("claim owner");
+        epoch.check()?;
+        caller.check()?;
+        let active = owner
+            .active
+            .as_ref()
+            .filter(|a| {
+                a.receipt == self.borrow.receipt
+                    && matches!(
+                        &a.stage,
+                        Stage::Reading {
+                            interrupt: Some(_),
+                            idle: None,
+                            delivery: Delivery::Unreleased
+                        }
+                    )
+            })
+            .ok_or_else(stale)?;
+        self.origin.check(self.c, &inner, &active.account)?;
+        Err(self.error)
+    }
+}
+
+impl Coordinator {
+    // Resolve only a handle already delivered for the originating operation. Each
+    // factor worker must still re-admit this exact predecessor before sending.
+    pub(super) fn factor_predecessor(
+        &self,
+        caller: &ClaimCaller,
+        receipt: Uuid,
+        handle: Uuid,
+        setup: bool,
+    ) -> Result<BindingId> {
+        let mut owner = self.claims.lock().expect("claim owner");
+        owner.expire();
+        caller.check()?;
+        let a = owner
+            .active
+            .as_ref()
+            .filter(|a| a.receipt == receipt)
+            .ok_or_else(stale)?;
+        let Stage::Proof(step) = &a.stage else {
+            return Err(changed());
+        };
+        step.predecessor(handle, setup)
+    }
+    // All transitions share the retirement lock, but none waits there for HTTP.
+    fn with_proof<T>(
+        &self,
+        caller: &ClaimCaller,
+        epoch: &Epoch,
+        receipt: Uuid,
+        correlation: Uuid,
+        f: impl FnOnce(&super::super::Inner, &Account, &mut StepUp) -> Result<T>,
+    ) -> Result<T> {
+        if !Arc::ptr_eq(&self.claims, &caller.owner) {
+            return Err(stale());
+        }
+        let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
+        self.check_claim_admission()?;
+        let inner = self.inner.try_lock().map_err(|_| busy())?;
+        let mut owner = self.claims.lock().expect("claim owner");
+        epoch.check()?;
+        caller.check()?;
+        owner.expire();
+        caller.check()?;
+        let a = inner
+            .state
+            .account
+            .identity
+            .as_ref()
+            .filter(|_| inner.state.account.status == AccountStatus::SignedIn && inner.account.session.is_account())
+            .ok_or_else(auth)?;
+        let active = owner
+            .active
+            .as_mut()
+            .filter(|active| active.receipt == receipt && &active.account == a)
+            .ok_or_else(stale)?;
+        let Stage::Proof(step) = &mut active.stage else {
+            return Err(changed());
+        };
+        if step.correlation != correlation {
+            return Err(changed());
+        }
+        step.proof.check(a)?;
+        // This gate is only for the initial signed-in account, up to handoff
+        // to the ordinary owner. The refusal's own refresh is already included.
+        if inner.record.account_id.as_ref() != Some(&a.id)
+            || inner.account.resumes.as_ref() != Some(&a.id)
+            || inner.account.session.factor_cookies().as_ref() != Some(&step.initial_credential)
+        {
+            return Err(stale());
+        }
+        f(&inner, a, step)
+    }
+    /// Take this delivery once. The first HTTP request contains only the frozen
+    /// subject and mailbox; even a response racing cancellation cannot send the code.
+    pub(super) async fn prepare_proof_code<'a>(
+        &'a self,
+        caller: &ClaimCaller,
+        generation: u64,
+        receipt: Uuid,
+        delivery: Uuid,
+        code: &str,
+    ) -> Result<StartOutcome<'a>> {
+        let epoch = Epoch::new(self.generation.clone(), generation);
+        let (wake, mut interrupted) = oneshot::channel();
+        let (flow, account, deadline) = self.with_proof(caller, &epoch, receipt, delivery, |_, account, step| {
+            if !matches!(step.phase, Phase::Delivered(_)) {
+                return Err(changed());
+            }
+            step.check_wait()?;
+            validate_code(code)?;
+            let Phase::Delivered(flow) = std::mem::replace(&mut step.phase, Phase::Preparing { _interrupt: wake })
+            else {
+                unreachable!()
+            };
+            step.retry_phase = Some(Phase::Delivered(flow.clone()));
+            Ok((flow, account.clone(), step.proof.deadline()))
+        })?;
+        let borrow = Borrow {
+            owner: &self.claims,
+            receipt,
+            returned: false,
+        };
+        let prepared = tokio::select! { biased;
+            _ = &mut interrupted => return Err(stale()),
+            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
+            r = flow.prepare_claim_code(&account, code) => r,
+        };
+        // Wait for the background poll with the original result in hand. Do not
+        // reissue start, and do not let this wait extend the ticket or document.
+        let _monitor = tokio::select! { biased;
+            _ = &mut interrupted => return Err(stale()),
+            _ = tokio::time::sleep_until(deadline) => return Err(ClientError::new("expired")),
+            guard = self.descriptor_refresh.lock() => guard,
+        };
+        let prepared = match prepared {
+            Err(error) if error.code == "rate_limited" && error.retry_until.is_some() => {
+                return Ok(StartOutcome::Limited(StartLimit {
+                    borrow,
+                    delivery,
+                    error,
+                }));
+            }
+            r => r?,
+        };
+        self.with_proof(caller, &epoch, receipt, delivery, |_, _, step| {
+            if !matches!(step.phase, Phase::Preparing { .. }) {
+                return Err(stale());
+            }
+            step.phase = Phase::Prepared;
+            Ok(())
+        })?;
+        Ok(StartOutcome::Ready(Box::new(ClaimStart {
+            prepared,
+            borrow,
+            caller: caller.clone(),
+            epoch,
+            delivery,
+        })))
+    }
+    /// The waiting document owns cancellation up to the final admission in the worker.
+    /// Once admitted, dropping that waiter may retire the sheet, not the account task.
+    pub(super) async fn forward_proof_code(self: &Arc<Self>, start: ClaimStart<'_>) -> Result<SubmittedReply> {
+        let ClaimStart {
+            mut prepared,
+            mut borrow,
+            caller,
+            epoch,
+            delivery,
+        } = start;
+        let receipt = borrow.receipt;
+        let ordinary = self.clone();
+        let result = tokio::spawn(async move {
+            let (id, cookies) = ordinary.with_proof(&caller, &epoch, receipt, delivery, |inner, a, step| {
+                if !matches!(step.phase, Phase::Prepared) {
+                    return Err(changed());
+                }
+                let previous = inner
+                    .account
+                    .session
+                    .factor_cookies()
+                    .filter(|c| c == &step.initial_credential)
+                    .ok_or_else(stale)?;
+                let id = ordinary
+                    .binding
+                    .lock()
+                    .expect("ordinary binding")
+                    .reserve(inner, a, &mut prepared)?;
+                step.phase = Phase::Submitted(id);
+                Ok((id, previous))
+            })?;
+            let outcome = ordinary.accept_forward(id, prepared).await;
+            Ok(SubmittedReply::new(
+                ordinary, caller, epoch, receipt, id, cookies, outcome,
+            ))
+        })
+        .await
+        .map_err(|_| ClientError::new("code_delivery_unknown"))?;
+        borrow.returned = result.is_ok();
+        result
+    }
+    /// No machine open, grant or OTP. Only an exact ordinary commit receipt from
+    /// this delivery can release the original unarmed ticket for another review.
+    pub(super) fn deliver_proof_status(
+        &self,
+        caller: &ClaimCaller,
+        epoch: &Epoch,
+        receipt: Uuid,
+        submitted: Uuid,
+        id: BindingId,
+    ) -> Result<Option<Value>> {
+        let inner = self.inner.try_lock().map_err(|_| busy())?;
+        let mut claims = caller.owner.lock().expect("claim owner");
+        epoch.check()?;
+        claims.expire();
+        caller.check()?;
+        let active = claims
+            .active
+            .as_ref()
+            .filter(|a| a.receipt == receipt)
+            .ok_or_else(stale)?;
+        let Stage::Proof(step) = &active.stage else {
+            return Err(stale());
+        };
+        if step.predecessor(submitted, false)? != id || self.signing_out.load(Ordering::SeqCst) {
+            return Err(stale());
+        }
+        step.proof.check(&active.account)?;
+        let slot = self.binding.try_lock().map_err(|_| busy())?;
+        if slot.published_for(id, &inner, &active.account) {
+            if inner.state.account.status == AccountStatus::SecondFactorRequired {
+                return Err(auth());
+            }
+            // Publication won between admission and delivery. This receipt arose
+            // before read admission: the next call may perform the single reread.
+        } else if !slot.publishing_for(id, &inner, &active.account) {
+            return Err(changed());
+        }
+        Ok(Some(json!({"state":"publishing"})))
+    }
+    pub(super) async fn reread_after_proof(
+        &self,
+        caller: &ClaimCaller,
+        generation: u64,
+        receipt: Uuid,
+        submitted: Uuid,
+    ) -> Result<ClaimReply<'_>> {
+        if !Arc::ptr_eq(&self.claims, &caller.owner) {
+            return Err(stale());
+        }
+        let epoch = Epoch::new(self.generation.clone(), generation);
+        let (wake, mut interrupted) = oneshot::channel();
+        let (proof, origin, mut flow, state) = {
+            // Wait before taking the submission. All account/document checks below
+            // use live state after the monitor releases its operation lock.
+            let _monitor = self.descriptor_refresh.lock().await;
+            let _operation = self.operation.claim.try_lock().map_err(|_| busy())?;
+            if self.signing_out.load(Ordering::SeqCst) {
+                return Err(stale());
+            }
+            let inner = self.inner.lock().expect("client state");
+            let mut owner = self.claims.lock().expect("claim owner");
+            epoch.check()?;
+            owner.expire();
+            caller.check()?;
+            let active = owner
+                .active
+                .as_mut()
+                .filter(|a| a.receipt == receipt)
+                .ok_or_else(stale)?;
+            let account = &active.account;
+            let Stage::Proof(step) = &active.stage else {
+                return Err(changed());
+            };
+            let id = step.predecessor(submitted, false)?;
+            step.proof.check(account)?;
+            {
+                let slot = self.binding.lock().expect("ordinary binding");
+                if slot.publishing_for(id, &inner, account)
+                    || (slot.published_for(id, &inner, account)
+                        && inner.state.account.status == AccountStatus::SecondFactorRequired)
+                {
+                    return Ok(ClaimReply {
+                        body: ReplyBody::ProofStatus(self, receipt, submitted, id),
+                        account: epoch,
+                        caller: caller.clone(),
+                    });
+                }
+                if !slot.published_for(id, &inner, account) {
+                    return Err(changed());
+                }
+            }
+            self.check_claim_admission()?;
+            if inner.state.account.status != AccountStatus::SignedIn
+                || inner.state.account.identity.as_ref() != Some(account)
+                || inner.record.account_id.as_ref() != Some(&account.id)
+                || inner.account.resumes.as_ref() != Some(&account.id)
+                || !inner.account.session.is_account()
+            {
+                return Err(changed());
+            }
+            let Stage::Proof(step) = std::mem::replace(
+                &mut active.stage,
+                Stage::Reading {
+                    interrupt: Some(wake),
+                    idle: None,
+                    delivery: Delivery::Unreleased,
+                },
+            ) else {
+                unreachable!()
+            };
+            let origin = RereadOrigin {
+                id,
+                until: step.proof.deadline(),
+                adoption: step.proof.adoption(),
+            };
+            (
+                step.proof,
+                origin,
+                inner.account.for_claim(epoch.clone()),
+                inner.state.account.clone(),
+            )
+        };
+        let mut borrow = Borrow {
+            owner: &self.claims,
+            receipt,
+            returned: false,
+        };
+        let deadline = proof.deadline();
+        let claim = tokio::select! { biased;
+            _ = &mut interrupted => return Err(stale()),
+            _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+            result = proof.reread(&mut flow, &state) => result,
+        };
+        let finished = {
+            // A poll may have started during the hosted read. Keep its one result;
+            // never reissue it. Release this guard before any confirmation awaits.
+            let _monitor = tokio::select! { biased;
+                _ = &mut interrupted => return Err(stale()),
+                _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+                guard = self.descriptor_refresh.lock() => guard,
+            };
+            claim.and_then(|(claim, unchanged)| {
+                let revision = claim.revision();
+                let review =
+                    self.finish_claim_review(caller, epoch.clone(), claim, flow, &mut borrow, Some(&origin))?;
+                Ok((review, unchanged.then_some(revision)))
+            })
+        };
+        match finished {
+            Ok((_review, Some(revision))) => {
+                // This revision was never released to the page. If confirmation
+                // loses admission, do not strand an undisplayable review.
+                borrow.returned = false;
+                let decision = self
+                    .confirm_review(caller, generation, receipt, revision, Some(&origin))
+                    .await?;
+                borrow.returned = true;
+                Ok(ClaimReply {
+                    body: ReplyBody::Decision(self, Box::new(decision)),
+                    account: epoch,
+                    caller: caller.clone(),
+                })
+            }
+            Ok((review, None)) => Ok(review),
+            Err(error) => Ok(ClaimReply {
+                body: ReplyBody::RereadFailed(Box::new(RereadFailed {
+                    c: self,
+                    origin,
+                    borrow,
+                    error,
+                })),
+                account: epoch,
+                caller: caller.clone(),
+            }),
+        }
+    }
+
+    /// Native only. There is no parameter for an email, subject, target or URL.
+    /// The offer is single use even if the issuer's response is lost.
+    pub(super) async fn send_proof_code(
+        &self,
+        caller: &ClaimCaller,
+        expected_generation: u64,
+        receipt: Uuid,
+        offer: Uuid,
+    ) -> Result<PendingMail<'_>> {
+        let epoch = Epoch::new(self.generation.clone(), expected_generation);
+        let (wake, mut interrupted) = oneshot::channel();
+        let (account, deadline) = self.with_proof(caller, &epoch, receipt, offer, |_, a, step| {
+            let Phase::Offer { state, .. } = &mut step.phase else {
+                return Err(changed());
+            };
+            if !matches!(state, OfferState::Released) {
+                return Err(changed());
+            }
+            *state = OfferState::Sending { _interrupt: wake };
+            Ok((a.clone(), step.proof.deadline()))
+        })?;
+        let borrow = Borrow {
+            owner: &self.claims,
+            receipt,
+            returned: false,
+        };
+        let mut flow = AccountFlow::new(self.transport.clone(), self.passkeys.supported());
+        flow.fence(epoch.clone());
+        let before_mail = || {
+            self.with_proof(caller, &epoch, receipt, offer, |_, _, step| {
+                if matches!(
+                    step.phase,
+                    Phase::Offer {
+                        state: OfferState::Sending { .. },
+                        ..
+                    }
+                ) {
+                    Ok(())
+                } else {
+                    Err(stale())
+                }
+            })
+        };
+        let result = tokio::select! { biased;
+            _ = &mut interrupted => return Err(stale()),
+            _ = tokio::time::sleep_until(deadline) => return Err(stale()),
+            sent = flow.send_claim_code(&account, caller.epoch.clone(), before_mail) => sent,
+        };
+        Ok(PendingMail {
+            coordinator: self,
+            caller: caller.clone(),
+            epoch,
+            offer,
+            borrow,
+            result: result.map(|()| Box::new(flow)),
+        })
+    }
+}

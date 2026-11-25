@@ -316,15 +316,16 @@ describe('ConnectionPage · 连接诊断与网络路径', () => {
     return screen.findByRole('dialog');
   };
 
-  it('carries the direct certificate\'s expiry and the last connection\'s timing while direct is on', async () => {
+  it('carries the direct certificate\'s expiry while direct is on, and never the last connection\'s race', async () => {
     vi.spyOn(devicesApi, 'status').mockResolvedValue({ ...status, direct: { enabled: true, state: 'running', reason: '', certificate_not_after: '2099-02-14T00:00:00Z' } } as never);
     const dialog = await open();
     const rows = await within(dialog).findByTestId('direct-details');
     expect(rows.textContent).toContain('直连证书');
     expect(rows.textContent).toContain('有效期至 2099年2月14日');
-    // Only the Avibe App on this device records the race; a browser says so instead of a number.
-    expect(rows.textContent).toContain('最近一次连接');
-    expect(rows.textContent).toContain('这台设备没有记录');
+    // Its two numbers measured different things: 「测速」 replaces it.
+    expect(dialog.textContent).not.toContain('最近一次连接');
+    // In a browser the shell cannot measure: no 「测速」.
+    expect(within(dialog).queryByTestId('direct-measure')).toBeNull();
   });
 
   it('direct off: rows absent', async () => {
@@ -338,6 +339,25 @@ describe('ConnectionPage · 连接诊断与网络路径', () => {
 });
 
 describe('ConnectionPage · the domain', () => {
+  it('names the domain with the claim page\'s field and clean-up: lowercase, trimmed, and a name avibe.bot cannot take is never sent', async () => {
+    const preview = vi.spyOn(devicesApi, 'previewRename');
+    mount('/settings/remote-access/connection/address');
+    const input = await screen.findByRole('textbox', { name: '新名称' });
+    // The shared field: the prefix in place, then the suffix.
+    expect(input.closest('[data-domain-field]')).toBeTruthy();
+    fireEvent.change(input, { target: { value: '  Max Well ' } });
+    expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('max well');
+    expect(screen.getByText(i18n.t('domainField.invalid'))).toBeTruthy();
+    const next = screen.getByRole('button', { name: '继续' });
+    expect(next.hasAttribute('disabled')).toBe(true);
+    fireEvent.click(next);
+    expect(preview).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByRole('textbox', { name: '新名称' }), { target: { value: ' MaxWell ' } });
+    expect((screen.getByRole('textbox', { name: '新名称' }) as HTMLInputElement).value).toBe('maxwell');
+    expect(screen.queryByText(i18n.t('domainField.invalid'))).toBeNull();
+    expect(screen.getByRole('button', { name: '继续' }).hasAttribute('disabled')).toBe(false);
+  });
+
   it('goes back to the form with the one sentence when the name cannot be taken', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.spyOn(devicesApi, 'previewRename').mockResolvedValue({ confirmationId: 'conf-1', hostname: 'maxwell-app.avibe.bot', isReturn: false, holdDays: 30, releaseAt: '2026-12-23T00:00:00.000Z', healthConnected: false, devices: [] });
@@ -705,11 +725,44 @@ describe('ConnectionPageView', () => {
     expect(inUse()).toEqual([]);
   });
 
-  it('says how the last connection\'s two paths raced where the App recorded it, and an expired certificate has no date', () => {
-    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), direct: { certificate: null, lastConnection: { direct: 'timeout', public: 212 } } } });
+  it('shows the certificate without a date when it is expired, and no last-connection race', () => {
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), direct: { certificate: null } } });
     const rows = screen.getByTestId('direct-details');
-    expect(rows.textContent).toContain('直连 超时 / Cloudflare 212 ms');
     expect(rows.textContent).toContain('没有有效的证书');
+    expect(rows.textContent).not.toContain('最近一次连接');
+  });
+
+  it('shows nothing measured until 「测速」 has run, then the median and worst per path with its route', () => {
+    const onMeasure = vi.fn();
+    const { unmount } = view({ onMeasure, diagnostics: { status: null, diagnostics: null, now: Date.now(), measure: {} } });
+    const section = screen.getByTestId('direct-measure');
+    expect(section.querySelector('dl')).toBeNull();
+    fireEvent.click(within(section).getByRole('button', { name: /测速/ }));
+    expect(onMeasure).toHaveBeenCalled();
+    unmount();
+
+    const leg = (extra: object) => ({ scope: null, relayRegion: null, ok: 5, medianMs: 38, maxMs: 52, error: null, ...extra });
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), measure: { result: {
+      measuredAt: Date.now(), samples: 5,
+      current: leg({ kind: 'relay', relayRegion: 'euw1', medianMs: 85, maxMs: 140 }) as never,
+      tunnel: leg({ kind: 'tunnel', ok: 3, medianMs: 212, maxMs: 1430, error: 'timeout' }) as never,
+    } } } });
+    const rows = screen.getByTestId('direct-measure').textContent;
+    expect(rows).toContain('中继 · euw1');
+    expect(rows).toContain('中位 85 ms · 最慢 140 ms');
+    expect(rows).toContain('中位 212 ms · 最慢 1.4 s（5 次中 3 次完成）');
+    expect(rows).toMatch(/今天 \d{2}:\d{2} 测得/);
+  });
+
+  it('says a path not in use, one that never completed, and a measurement already running', () => {
+    view({ diagnostics: { status: null, diagnostics: null, now: Date.now(), measure: { error: 'busy', result: {
+      measuredAt: Date.now(), samples: 5, current: null,
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 0, medianMs: null, maxMs: null, error: 'failed' },
+    } } } });
+    const rows = screen.getByTestId('direct-measure').textContent;
+    expect(rows).toContain('直连或中继现在没有在用');
+    expect(rows).toContain('没有完成：连接失败');
+    expect(rows).toContain('另一次测速还在进行，请稍后再试。');
   });
 
   it('shows the relay only on an instance enrolled in the trial', () => {
@@ -752,6 +805,19 @@ describe('ConnectionPageView', () => {
     // Chosen, then direct turned off on the instance: the choice made is still the one shown.
     view({ remote: true, directOnly: false, preference: { mode: 'direct', reverted: null } });
     expect(screen.getByRole('radio', { name: /^仅直连和中继/ }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('says under 「仅直连和中继」 when the App takes it only after it is opened again', () => {
+    const { unmount } = view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null, pendingRelaunch: true } });
+    const option = screen.getByRole('radio', { name: /^仅直连和中继/ });
+    expect(option.textContent).toContain('重新打开 App 后生效。');
+    unmount();
+    const unset = view({ remote: true, directOnly: true, preference: { mode: 'direct', reverted: null } });
+    expect(document.body.textContent).not.toContain('重新打开 App 后生效');
+    unset.unmount();
+    // Never under the option while another one is chosen, whatever the shell sends.
+    view({ remote: true, directOnly: true, preference: { mode: 'automatic', reverted: null, pendingRelaunch: true } });
+    expect(document.body.textContent).not.toContain('重新打开 App 后生效');
   });
 
   it('says which choice went back to automatic, and by which shell', () => {

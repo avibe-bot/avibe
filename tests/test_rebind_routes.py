@@ -163,3 +163,47 @@ def test_reset_confirmation_lifecycle(machine, monkeypatch, finish):
         assert result.status_code == 409 and V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
         assert local._installation_id()
     assert len(peer.calls) == 2 and not redeems and not binding_admission.reset_in_progress()
+
+
+@pytest.mark.parametrize('decline', [(200, {'status': 'declined'}), (400, {'error': 'invalid_request'}),
+                                     (409, {'error': 'installation_unverified'})])
+def test_cancel_before_return_reads_as_cancelled(machine, decline):
+    peer, redeemed = machine
+    browser = ui_server.app.test_client()
+    hdr = csrf_headers(browser)
+    ident = browser.post(ROOT, base_url=ORIGIN, headers=hdr, json={}).get_json()['claim_id']
+    peer.outcomes.append((*decline, None))
+    assert browser.post(ROOT + '/' + ident + '/cancel', base_url=ORIGIN, headers=hdr, json={}).status_code == 200
+    flow = claims.rebind_claims._get(ident)
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] not in ('pending', 'cancelling'), timeout=5)
+    # Whatever avibe.bot answers to the best-effort decline, the person only pressed Cancel.
+    view = browser.get(ROOT + '/' + ident, base_url=ORIGIN).get_json()
+    assert (view['state'], view['code']) == ('declined', 'declined')
+    assert sum('decline' in body for _, body in peer.calls) == 1 and not redeemed
+
+
+def test_cancel_at_avibe_bot_returns_here_as_cancelled(machine):
+    peer, redeemed = machine
+    browser = ui_server.app.test_client()
+    hdr = csrf_headers(browser)
+    body = browser.post(ROOT, base_url=ORIGIN, headers=hdr, json={}).get_json()
+    assert peer.calls[0][1]['cancel_return'] is True and 'predecessor' in peer.calls[0][1]
+    ident = body['claim_id']
+    base = '/remote/claim/callback?claim_id=' + ident + '&state=' + callback_proof(body)
+    calls = len(peer.calls)
+    for bad in ('&outcome=declined&callback_token=' + 'A' * 43, '&outcome=refused', '&outcome=declined&outcome=declined'):
+        assert browser.get(base + bad, base_url=ORIGIN).headers['Location'].endswith('claim_error=invalid_return')
+    forged = '/remote/claim/callback?claim_id=' + ident + '&state=wrong&outcome=declined'
+    assert browser.get(forged, base_url=ORIGIN).headers['Location'].endswith('claim_error=invalid_return')
+    flow = claims.rebind_claims._get(ident)
+    assert flow.view['state'] == 'pending'
+    assert browser.get(base + '&outcome=declined', base_url=ORIGIN).headers['Location'] == '/settings/remote-access'
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] == 'declined', timeout=5)
+    view = browser.get(ROOT + '/' + ident, base_url=ORIGIN).get_json()
+    assert (view['state'], view['code']) == ('declined', 'declined')
+    # Declined at avibe.bot already: nothing more is sent or redeemed, and a late return is refused.
+    assert len(peer.calls) == calls and not redeemed
+    late = browser.get(base + '&callback_token=' + 'A' * 43, base_url=ORIGIN)
+    assert late.headers['Location'].endswith('claim_error=invalid_return')

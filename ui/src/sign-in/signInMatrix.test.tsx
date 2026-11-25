@@ -14,7 +14,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { DesktopSignIn } from '@/desktop/DesktopSignIn';
 import { isNewerClientState, type DesktopClientAction, type DesktopClientReply, type DesktopClientState } from '@/desktop/bridge';
-import en from '@/i18n/en.json';
+import { desktopEn as en } from '@/i18n/desktop';
 import { mobileSignInAdapter } from '@/mobile/signInAdapter';
 import type { MobileSessionState } from '@/mobile/bridge';
 import { advertisedSignInMethods, EMAIL_ONLY } from '@/mobile/useSignInMethods';
@@ -35,6 +35,9 @@ type Service = {
   sendRetryAfter: number | null;
   factorRetryAfter: number | null;
   passkey: 'cancel' | 'ok';
+  /** What the Desktop's native answers for a wrong email code: Supabase's code passed through, or
+   *  its own `invalid_or_expired` for avibe.bot's 403 verification_invalid. */
+  wrongCode?: 'otp_expired' | 'invalid_or_expired';
 };
 const service = (overrides: Partial<Service> = {}): Service => ({
   twoFactor: false,
@@ -246,7 +249,7 @@ function createDesktopNative(
         // A newer generation retired this call: `useAccountClient` answers `null`.
         if (started !== generation) return null;
         // Supabase's answer for a wrong email code, passed through by native.
-        if (action.code !== CODE) return reply(false, 'otp_expired');
+        if (action.code !== CODE) return reply(false, account.wrongCode ?? 'otp_expired');
         firstFactor();
         return reply(true);
       case 'sign_in_password':
@@ -362,7 +365,7 @@ const HARNESSES: Harness[] = [
   },
   {
     name: 'Desktop',
-    back: en.desktopClient.previousStep,
+    back: en.desktopAccount.previousStep,
     mount: (account, options) => {
       const native = createDesktopNative(account, options);
       render(<I18nextProvider i18n={i18n}><DesktopHost native={native} /></I18nextProvider>);
@@ -402,6 +405,18 @@ describe.each(HARNESSES)('shared sign-in on $name', ({ name, back, mount }) => {
     await screen.findByText(en.mobileApp.code.title);
     await typeCode('111111');
     expect(await screen.findByText(en.mobileApp.code.invalid)).toBeTruthy();
+    await typeCode(CODE);
+    expect(await screen.findByText('signed in')).toBeTruthy();
+  });
+
+  it(title('says a wrong code is wrong when native answers invalid_or_expired'), async () => {
+    mount(service({ wrongCode: 'invalid_or_expired' }));
+    startEmail();
+    click(en.mobileApp.email.send);
+    await screen.findByText(en.mobileApp.code.title);
+    await typeCode('111111');
+    expect(await screen.findByText(en.mobileApp.code.invalid)).toBeTruthy();
+    expect(screen.queryByText(en.mobileApp.errors.network)).toBeNull();
     await typeCode(CODE);
     expect(await screen.findByText('signed in')).toBeTruthy();
   });

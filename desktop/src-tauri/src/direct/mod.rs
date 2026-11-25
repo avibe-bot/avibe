@@ -35,6 +35,8 @@ mod interop;
 #[path = "../../tests/direct/lifecycle.rs"]
 mod lifecycle_tests;
 mod listener;
+mod measure;
+pub use measure::{measure, MeasureBusy, MeasureResult};
 mod quiet;
 pub use handover::{Handover, HandoverResult, PathStatus, PreferredPath};
 mod offer;
@@ -262,6 +264,7 @@ impl Client {
             links: self.links.subscribe(),
             health: self.listener.health(),
             listener: Arc::downgrade(&self.listener.access),
+            port: self.listener.port,
         }
     }
 

@@ -593,6 +593,14 @@ scenarios:
     backend: personal-claims
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_refusal_then_confirmed_reset
     reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, and read back unpaired without redeeming a new key.
+  - id: AUTH-SETUP-215
+    name: Cancelled on avibe.bot, the initiating browser comes back to a declined bind-again attempt
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: personal-claims
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_cancel_at_avibe_bot_returns_the_initiating_browser_to_a_declined_rebind
+    reason: avibe.bot declines and sends the initiating browser back with the same state proof and outcome=declined; the claim reads declined, nothing more is sent or redeemed, and the existing binding and its Off choice are unchanged.
   - id: AUTH-SETUP-901
     name: Codex setup success refreshes runtime before the next turn
     status: covered
@@ -1237,7 +1245,12 @@ scenarios:
     kind: authorization
     layer: scenario
     backend: desktop
-    reason: Native password/OTP owner and isolated HTTP/cookie/second-factor consumers exist; live provider and installed acceptance remain separate.
+    reason: >-
+      Native password and typed-code adapters are separate: only the hosted
+      first-party endpoint verifies a typed code. The runtime-host fixtures
+      exercise discovery-only recovery after an accepted code and reject a
+      different subject after MFA even when the email matches. Live issuer,
+      private claim-owner integration, and installed acceptance remain gates.
     supporting_tests:
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_password_native_http_session_and_cookie_isolation
       - desktop/src-tauri/tests/instance_chain/test_account_feedback.py::test_native_auth_completion_returns_retained_document_only_after_paired_success

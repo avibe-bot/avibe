@@ -21,6 +21,8 @@ fn main() {
         "app_lock_status",
         "app_lock_set_policy",
         "desktop_client_request",
+        "desktop_claim_review",
+        "desktop_account_recovery",
         "update_popover_fit",
         "bootstrap_status",
         "bootstrap_retry",

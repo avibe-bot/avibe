@@ -21,11 +21,10 @@ import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '../ui/dialog';
 import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
-import { ClaimFields } from './claim';
 import { OpenNewAddress } from './OpenNewAddress';
 import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, timeParts, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
-import { SUPPORT_EMAIL } from './features';
+import { SUPPORT_EMAIL } from '@/lib/support';
 import { claimProblemText } from './texts';
 import {
   RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, accountResultTexts, activityText, functionControl, instanceUrl, lockedOutCount,
@@ -49,8 +48,6 @@ export type DevicesPageActions = {
   onTurnOn?: () => void;
   /** Cancel the open claim: this page's own, or by its id the one another tab of this computer left. */
   onCancelClaim?: (claimId?: string) => void;
-  onSignIn?: () => void;
-  onNameChange?: (name: string) => void;
   onRemoteAccessChange?: (on: boolean) => void;
   onRetry?: () => void;
   onCopyAddress?: () => void;
@@ -228,21 +225,11 @@ function ReachCard({ reach, operate = false, optimize, terminal = true, actions 
   if (reach.state === 'off') {
     return (
       <SettingsPanel title={t('devices.reach.title')} description={t('devices.reach.lead')} actions={offBadge}>
-        {reach.account !== null ? (
-          <>
-            <ClaimFields account={reach.account} name={reach.name} nameState={reach.nameState} onNameChange={actions.onNameChange} />
-            <div className="border-t border-border px-5 py-4">
-              <Button variant="brand" disabled={reach.nameState === 'taken' || !reach.name} onClick={actions.onTurnOn}>
-                {t('devices.reach.turnOn')}
-              </Button>
-            </div>
-          </>
-        ) : (
-          <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center">
-            <Button variant="brand" onClick={actions.onSignIn}>{t('devices.reach.signInAndTurnOn')}</Button>
-            <p className="text-[12px] leading-relaxed text-muted">{t('devices.reach.signInHint')}</p>
-          </div>
-        )}
+        {/* ui/design: desktop/bind-home/devices-off. The dialog is the shell's own (sign-in, name). */}
+        <div className="flex flex-col gap-3 px-5 py-4 md:flex-row md:items-center">
+          <Button variant="brand" disabled={reach.busy} onClick={actions.onTurnOn}>{t('devices.reach.turnOn')}</Button>
+          <p className="text-[12px] leading-relaxed text-muted"><KeptTail text={t('devices.reach.desktopHint')} /></p>
+        </div>
       </SettingsPanel>
     );
   }

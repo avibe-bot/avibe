@@ -18,8 +18,7 @@
 // The Desktop App sets the choice back to 「自动」 by itself only from 「仅直连和中继」 (the
 // instance is reached on the tunnel and on no direct path); never from 「仅 Cloudflare 隧道」: it
 // cannot reach on a direct path an instance it cannot reach on the tunnel.
-import en from '@/i18n/en.json';
-import zh from '@/i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { frames, type FrameSpec } from '../../frame';
 import { ConnectionChoiceMenu, type ConnectionChoice } from '../../kit/desktop-connection-choice';
 import { workbenchFixtures } from '../workbench/fixtures';

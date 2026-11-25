@@ -8,10 +8,9 @@ import type { AppDefinition } from '../apps/registry';
 import type { SourceStatePresentation } from '../components/settings/models/sourceStatePresentation';
 import { FilesApiError, fileBrowserErrorMessage } from '../lib/filesApi';
 import { platformText } from '../lib/platforms';
+import { desktopEn as en, desktopZh as zh } from './desktop';
 import type { TranslationKey } from './types';
 import type { TranslationPaths } from './resourceTypes';
-import en from './en.json';
-import zh from './zh.json';
 
 // Compiled by typecheck:tests, not executed. These are real consuming prop/data
 // types: broadening a carrier or t makes an expect-error unused and fails CI.

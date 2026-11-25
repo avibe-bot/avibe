@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import zh from './zh.json';
+import { desktopZh as zh } from './desktop';
 
 // The signed-in avibe.bot account is 「账号」 (product decision, 2026-11-15). 「账户」 belongs to Vault
 // wallet accounts and provider balances, which live outside the App's account and shell copy.
@@ -17,6 +17,9 @@ describe('sign-in account wording', () => {
     const offending = [
       ...strings(zh.mobileApp, 'mobileApp'),
       ...strings(zh.appShell, 'appShell'),
+      // The Desktop App says 账号 throughout (AV-8).
+      ...strings(zh.desktopClient, 'desktopClient'),
+      ...strings(zh.desktopAccount, 'desktopAccount'),
     ].filter(([, text]) => text.includes('账户'));
     expect(offending).toEqual([]);
   });
