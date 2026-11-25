@@ -272,3 +272,46 @@ def test_an_orphan_or_expired_mark_is_pruned(issuer):
         conn.execute(state_meta.delete().where(state_meta.c.key == REVOKED_BROWSER_SESSION_KEY_PREFIX + sid))
         device_registry.prune(conn, int(time.time()))
     assert mark(sid) is None
+
+
+def test_a_cookie_whose_own_deadline_passes_while_the_sign_in_waits_finishes_nothing(issuer, monkeypatch, quiet):
+    cfg = issuer
+    cfg.remote_access.vibe_cloud.instance_kind = "organization"
+    cfg.save()
+    now = int(time.time())
+    # Issued just under the organization limit ago: the cookie's own deadline is 30 seconds away.
+    with monkeypatch.context() as m:
+        m.setattr(remote_access, "time", SimpleNamespace(time=lambda: now - remote_access.ORGANIZATION_SESSION_TTL_SECONDS + 30,
+                                                         monotonic=time.monotonic))
+        old = first_login(cfg)
+    sid = sid_of(cfg, old)
+    owner = browser(first_login(cfg, "owner", "owner", ref="asr1_" + "k" * 43))
+    (device,) = [d for d in listing(owner)["mine"] if d["kind"] != "host" and not d["current"]]
+    assert sign_out(owner, device["id"] + "/sign-out").status_code == 200 and mark(sid) is not None
+    c = browser(old)
+    asked = start(c)
+    # Past the cookie's own deadline, still inside the handshake and the mark.
+    monkeypatch.setattr(device_registry, "time", SimpleNamespace(time=lambda: now + 31))
+    answer = finish(c, monkeypatch, cfg, asked, ref=REF)
+    assert answer.status_code == 302 and issued(answer) and job_rows() == [] and mark(sid) is not None
+
+
+def test_mark_pruning_reads_one_bounded_page_and_walks_on(issuer):
+    from storage.importer import ensure_sqlite_state
+    from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
+    ensure_sqlite_state()
+    now = int(time.time())
+    live = [f"a{i:02d}" for i in range(32)]
+    with get_cached_sqlite_engine().begin() as conn:
+        for sid in live + ["zz-orphan"]:
+            conn.execute(state_meta.insert().values(key=OWNER_SIGNED_OUT_PREFIX + sid, value_json=str(now + 3600),
+                                                    updated_at=str(now)))
+        for sid in live:
+            conn.execute(state_meta.insert().values(key=REVOKED_BROWSER_SESSION_KEY_PREFIX + sid,
+                                                    value_json=str(now + 3600), updated_at=str(now)))
+        # First pass: the page is the 32 live marks; the orphan past it is not read yet.
+        device_registry._prune_owner_marks(conn, now)
+    assert all(mark(sid) is not None for sid in live) and mark("zz-orphan") is not None
+    with get_cached_sqlite_engine().begin() as conn:
+        device_registry._prune_owner_marks(conn, now)  # the cursor walks on to it
+    assert all(mark(sid) is not None for sid in live) and mark("zz-orphan") is None
