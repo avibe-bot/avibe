@@ -5996,7 +5996,8 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(registry.identifiers.contains(old))
 
         heldView = nil
-        XCTAssertTrue(await barrier.waitForRelease())
+        let released = await barrier.waitForRelease()
+        XCTAssertTrue(released)
         XCTAssertTrue(coordinator.canSweepStores)
         await store.startSweep(canSweep: { coordinator.canSweepStores }).value
         XCTAssertEqual(registry.removalAttempts, [old])
