@@ -1573,7 +1573,7 @@ scenarios:
       it on submits only the form the instance issued and hands the open claim
       to the Devices page. The claim's server side (owner routes, browser
       cookie, return gate, redemption) is the closed loop of AUTH-SETUP-914.
-  - id: AUTH-SETUP-918
+  - id: AUTH-SETUP-930
     name: An Owner unbinds this computer; it is removed on avibe.bot first and cleared here only on that exact receipt
     status: covered
     kind: authorization
