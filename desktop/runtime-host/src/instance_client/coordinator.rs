@@ -23,6 +23,7 @@ mod claim_binding;
 pub use claim_binding::{AccountRecoveryRequest, RecoveryDelivery, RecoveryWork};
 pub mod claims;
 mod kept;
+mod local_upgrade;
 mod updates;
 use super::instance_update::InstanceUpdate;
 use crate::LoopbackOrigin;
@@ -89,6 +90,9 @@ struct Inner {
     restore_allowed: bool,
     committed_view_generation: Option<u64>,
     display_account: Option<String>,
+    /// A claim step found this computer's Runtime without the claim protocol
+    /// (`local_upgrade.rs`). Kept across descriptor refreshes, which cannot see it.
+    claim_protocol_missing: bool,
 }
 
 /// An ordinary transaction publishes a working copy, so it excludes both descriptor
@@ -126,6 +130,8 @@ pub struct Coordinator {
     /// shown. A read never waits on or for the account; only its own order counts.
     sign_in_reads: AtomicU64,
     sign_in_shown: AtomicU64,
+    /// One local Runtime upgrade at a time (`local_upgrade.rs`).
+    upgrading: AtomicBool,
     /// Instance sessions opened in this run (`kept.rs`).
     kept: Mutex<KeptSessions>,
     transport: Arc<dyn Transport>,
@@ -179,6 +185,7 @@ impl Coordinator {
                 restore_allowed: true,
                 committed_view_generation: None,
                 display_account: None,
+                claim_protocol_missing: false,
             })),
             claims: Arc::new(Mutex::new(claims::Claims::default())),
             binding: Mutex::new(claim_binding::BindingSlot::default()),
@@ -194,6 +201,7 @@ impl Coordinator {
             restore_started: AtomicBool::new(false),
             sign_in_reads: AtomicU64::new(0),
             sign_in_shown: AtomicU64::new(0),
+            upgrading: AtomicBool::new(false),
             kept: Mutex::default(),
             transport,
             credentials,
@@ -445,14 +453,19 @@ impl Coordinator {
             match result {
                 Ok(_) => {
                     current.state.local = sample.local;
+                    current.state.local.runtime_too_old = current.claim_protocol_missing;
                     if current.state.connection.committed.is_local() {
                         current.state.connection.committed = sample.connection.committed;
                     }
                 }
-                Err(_) => {
+                Err(error) => {
                     current.state.local.remote_access = RemoteAccessState::Unavailable;
-                    current.state.local.instance_id = None;
                     current.state.local.remote_access_url = None;
+                    // Too old to describe itself: what it still says of its
+                    // binding (`EnrollmentFlow::read`) keeps this computer's row.
+                    let too_old = error.code == super::machine::TOO_OLD;
+                    current.state.local.runtime_too_old = too_old || current.claim_protocol_missing;
+                    current.state.local.instance_id = if too_old { sample.local.instance_id } else { None };
                 }
             }
             refresh_display(&mut current);

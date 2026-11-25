@@ -1252,7 +1252,13 @@ pub(crate) async fn desktop_claim_review(
     }
     // Only an admitted, qualified private reply can carry account-specific
     // errors or retry information. Admission failures carry no such facts.
-    let delivered = reply.deliver()?;
+    let delivered = reply.deliver().inspect_err(|error| {
+        if error.code == avibe_runtime_host::instance_client::machine::TOO_OLD {
+            // Published after this command lets go of the presentation locks.
+            let coordinator = client.coordinator.clone();
+            tauri::async_runtime::spawn(async move { coordinator.note_runtime_too_old() });
+        }
+    })?;
     if observe && account_view(&receipt.destination, &client.view.bundle) == Some("claim") {
         let role = views.account.as_mut().ok_or_else(deny)?;
         role.sheet_open
@@ -1431,6 +1437,31 @@ pub async fn desktop_client_request(
     }
     let coordinator = client.coordinator.clone();
     let receiver = window.url().map_err(|_| "untrusted_desktop_caller")?;
+    // This computer's Runtime, upgraded with the Runtime host: from the account
+    // document (Instances, Account) or its claim view, never the popup.
+    if matches!(request.action, ClientAction::UpgradeLocalRuntime {}) {
+        let shell = app.try_state::<Shell>().ok_or("desktop_client_unavailable")?;
+        let result = if request.version == 1 && request.expected_generation == coordinator.state().generation {
+            coordinator.upgrade_local_runtime(&shell.host).await
+        } else {
+            Err(ClientError::new("stale_generation"))
+        };
+        if !trusted_page(&client, &window) || window.url().ok().as_ref() != Some(&receiver) {
+            return Err("untrusted_desktop_caller".into());
+        }
+        let (result, error) = match result {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(error)),
+        };
+        return Ok(ClientReply {
+            version: 1,
+            request_id: request.request_id,
+            ok: error.is_none(),
+            state: coordinator.state(),
+            result,
+            error,
+        });
+    }
     if matches!(request.action, ClientAction::FinishTotpEnrollment { .. })
         && request.version == 1
         && !request.request_id.is_empty()
