@@ -118,7 +118,7 @@ def identify_repair_source(
                 versions = home / ".local" / "share" / "claude" / "versions"
                 if original == native and (not original.is_symlink() or target.is_relative_to(versions)):
                     return RepairSource("native", str(native))
-            elif backend in {"opencode", "antigravity"}:
+            else:
                 if original == native and (not original.is_symlink() or target.parent == original.parent):
                     return RepairSource("native", str(native))
     except (OSError, ValueError, TypeError, AttributeError):
