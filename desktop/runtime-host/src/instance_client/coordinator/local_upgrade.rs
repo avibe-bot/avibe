@@ -58,11 +58,16 @@ impl Coordinator {
         if version["managed_by"] == "desktop" {
             return Ok(state("desktop_update"));
         }
-        // Nothing to upgrade: the step may simply be tried again.
-        if self.local_runtime_ready(host, &loopback).await {
-            self.inner.lock().expect("client state").claim_protocol_missing = false;
-            self.refresh_local().await;
-            return Ok(state("upgraded"));
+        // Nothing to upgrade: the step may simply be tried again. A probe that
+        // cannot tell neither skips nor starts an upgrade.
+        match self.local_runtime_ready(host, &loopback).await {
+            Some(true) => {
+                self.inner.lock().expect("client state").claim_protocol_missing = false;
+                self.refresh_local().await;
+                return Ok(state("upgraded"));
+            }
+            None => return Err(failed()),
+            Some(false) => {}
         }
         // A prerelease Desktop needs a prerelease Runtime. Its user already takes
         // prereleases of this app, so the Runtime's switch is turned on and left on.
@@ -113,8 +118,12 @@ impl Coordinator {
             if host.claim_source().is_none() {
                 continue;
             }
-            if machine::claim_protocol_missing(&loopback, self.transport.clone()).await {
-                return Err(ClientError::new("local_runtime_still_too_old"));
+            // Only the Runtime's own answer ends the wait; an inconclusive probe
+            // (restarting, no token, a server error) is asked again.
+            match machine::claim_route(&loopback, self.transport.clone()).await {
+                Some(true) => {}
+                Some(false) => return Err(ClientError::new("local_runtime_still_too_old")),
+                None => continue,
             }
             self.inner.lock().expect("client state").claim_protocol_missing = false;
             self.refresh_local().await;
@@ -131,15 +140,17 @@ impl Coordinator {
 
     /// Whether this computer's Runtime already does what this Desktop needs of
     /// it: it describes itself, is this Desktop's, and has the claim protocol.
-    async fn local_runtime_ready(&self, host: &RuntimeHost, origin: &LoopbackOrigin) -> bool {
+    /// `None` when all else holds but the claim-route probe cannot tell.
+    async fn local_runtime_ready(&self, host: &RuntimeHost, origin: &LoopbackOrigin) -> Option<bool> {
         let mut session = NativeSession::new(origin.navigation_url(), self.transport.clone());
         let described = session
             .request(Method::GET, "/api/desktop/local-instance", None)
             .await
             .is_ok_and(|reply| reply.success());
-        described
-            && host.claim_source().is_some()
-            && !machine::claim_protocol_missing(origin, self.transport.clone()).await
+        if !described || host.claim_source().is_none() {
+            return Some(false);
+        }
+        machine::claim_route(origin, self.transport.clone()).await
     }
 
     fn desktop_prerelease(&self) -> bool {

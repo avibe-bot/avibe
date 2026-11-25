@@ -40,6 +40,9 @@ struct Runtime {
     /// projection says about the pairing.
     describes: bool,
     paired: Option<&'static str>,
+    /// How many claim-route probes are answered 503 before and after the
+    /// upgrade, as a Runtime that is busy or restarting.
+    unavailable: StdMutex<(usize, usize)>,
     state: StdMutex<(bool, bool)>, // (prereleases switched on here, upgraded)
     calls: StdMutex<Vec<String>>,
 }
@@ -98,8 +101,19 @@ impl Transport for Runtime {
                 // it; a Runtime without the route answers its unknown-API 404.
                 assert_eq!(r.body, Some(json!({})));
                 assert_eq!(r.headers["x-vibe-csrf-token"], "fixture");
+                let mut unavailable = self.unavailable.lock().unwrap();
+                let left = if upgraded {
+                    &mut unavailable.1
+                } else {
+                    &mut unavailable.0
+                };
                 let has = self.current || (upgraded && !self.still_old);
-                (if has { 400 } else { 404 }, Value::Null)
+                if *left > 0 {
+                    *left -= 1;
+                    (503, Value::Null)
+                } else {
+                    (if has { 400 } else { 404 }, Value::Null)
+                }
             }
             ("GET", "/api/desktop/local-instance") if self.describes || upgraded => (
                 200,
@@ -224,6 +238,46 @@ fn state(result: std::result::Result<DirectResult, ClientError>) -> String {
 }
 fn upgrades(runtime: &Runtime) -> usize {
     runtime.calls().iter().filter(|c| *c == "POST /api/upgrade").count()
+}
+fn probes(runtime: &Runtime) -> usize {
+    runtime
+        .calls()
+        .iter()
+        .filter(|c| *c == "POST /api/desktop/claim/v1/admit")
+        .count()
+}
+
+/// A claim-route probe that cannot tell (here 503) is neither readiness nor
+/// age. Before an upgrade it starts nothing and reports a failure the button
+/// can retry. After one it is asked again until the Runtime itself answers.
+#[tokio::test(start_paused = true)]
+async fn an_inconclusive_probe_is_neither_ready_nor_too_old() {
+    let runtime = Runtime {
+        describes: true,
+        current: true,
+        unavailable: StdMutex::new((1, 0)),
+        ..Default::default()
+    };
+    let (c, runtime, host, _root) = setup(runtime, "3.2.9").await;
+    assert_eq!(
+        state(c.upgrade_local_runtime(&host).await),
+        "local_runtime_upgrade_failed"
+    );
+    assert_eq!(upgrades(&runtime), 0);
+    assert!(c.state().local.runtime_too_old);
+
+    let runtime = Runtime {
+        describes: true,
+        stable_update: true,
+        unavailable: StdMutex::new((0, 3)),
+        ..Default::default()
+    };
+    let (c, runtime, host, _root) = setup(runtime, "3.2.9").await;
+    assert_eq!(state(c.upgrade_local_runtime(&host).await), "upgraded");
+    assert_eq!(upgrades(&runtime), 1);
+    // One before the upgrade, three unavailable after it, then the answer.
+    assert_eq!(probes(&runtime), 5);
+    assert!(!c.state().local.runtime_too_old);
 }
 
 /// Upgraded and adopted again, with the claim protocol: the step can be

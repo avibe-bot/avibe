@@ -43,19 +43,23 @@ fn too_old() -> ClientError {
     ClientError::new(TOO_OLD)
 }
 
-/// Whether the Runtime at `origin` lacks the claim protocol: its admission
-/// route does not exist. Asked only after a claim pipe failed before its first
-/// frame (an older CLI does not know the pipe) or the route answered 404; any
-/// other answer, or none, is not taken as age.
+/// Whether the Runtime at `origin` has the claim protocol's admission route:
+/// `Some(true)` or `Some(false)` only when its answer says so, `None` when the
+/// probe is inconclusive (no answer, a lost CSRF token, a server error or any
+/// other status), which is neither readiness nor age.
 ///
 /// The route only takes POST, and a GET of any API path reaches the static
 /// catch-all, which answers 404 whether or not the route exists. So this asks
 /// with the same owner POST (CSRF and Origin) as the Workbench: where the route
 /// exists its handler refuses an empty body (400/403) without acting; where it
 /// does not, the Runtime's unknown-API handler answers 404.
-pub(crate) async fn claim_protocol_missing(origin: &LoopbackOrigin, transport: Arc<dyn Transport>) -> bool {
+pub(crate) async fn claim_route(origin: &LoopbackOrigin, transport: Arc<dyn Transport>) -> Option<bool> {
     let mut local = NativeSession::new(origin.navigation_url(), transport);
-    matches!(local_mutation(&mut local, ADMIT, json!({})).await, Ok(reply) if reply.status == 404)
+    match local_mutation(&mut local, ADMIT, json!({})).await.ok()?.status {
+        400 | 403 => Some(true),
+        404 => Some(false),
+        _ => None,
+    }
 }
 fn text(s: &str, max: usize) -> bool {
     !s.is_empty() && s.trim() == s && !s.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')) && s.chars().count() <= max
@@ -279,11 +283,12 @@ async fn admit<R: AsyncBufRead + Unpin, W: AsyncWrite + Unpin>(
             Ok(Frame::Challenge { v: 1, challenge }) => challenge,
             Ok(_) => return Err(invalid()),
             Err(error) => {
-                return Err(if claim_protocol_missing(origin, transport).await {
+                // Too old only when the Runtime confirms it has no claim route.
+                return Err(if claim_route(origin, transport).await == Some(false) {
                     too_old()
                 } else {
                     error
-                })
+                });
             }
         };
         if !nonce(&challenge) {
