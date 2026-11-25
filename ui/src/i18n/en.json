@@ -8524,7 +8524,7 @@
       "invalidReturn": "Not bound again: the return from avibe.bot did not pass verification, so nothing changed. Try again.",
       "refusedUnknown": "This did not complete. (code: {{code}})",
       "asNewCloud": {
-        "intro": "{{host}} is deleted at avibe.bot first, as when unbinding. This takes effect at once and cannot be undone.",
+        "intro": "{{host}} is deleted at avibe.bot first, as when unbinding. This takes effect at once. What is lost below cannot be restored.",
         "loseName": "{{host}} stays with the original account until {{date}}; after that someone else can claim it.",
         "loseNameDays_one": "{{host}} stays with the original account for {{count}} day; after that someone else can claim it.",
         "loseNameDays_other": "{{host}} stays with the original account for {{count}} days; after that someone else can claim it.",
