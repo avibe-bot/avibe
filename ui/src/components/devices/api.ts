@@ -61,6 +61,9 @@ async function call<T = Record<string, unknown>>(path: string, init: { method?: 
     if (response.ok || GATEWAY_STATUS(response.status)) throw new LostAnswer();
   }
   if (!response.ok) {
+    // A gateway's own JSON (Cloudflare's problem details when the request asked for JSON) has no
+    // `error` of the instance's: the instance did not answer, so the outcome is not known.
+    if (GATEWAY_STATUS(response.status) && typeof body.error !== 'string') throw new LostAnswer();
     const code = typeof body.error === 'string' ? body.error : typeof body.code === 'string' ? body.code : `http_${response.status}`;
     throw new DevicesApiError(response.status, code, body);
   }
