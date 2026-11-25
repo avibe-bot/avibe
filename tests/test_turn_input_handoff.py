@@ -146,6 +146,38 @@ def test_manager_stop_dispatches_surviving_reports_once(managers, cancel_one):
     assert hints[-1][0] == STOP_LINE
 
 
+def test_pending_failed_steer_only_enters_recovery_context_on_its_own_admission(managers):
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from tests.test_agent_runtime_transcript import _user
+
+    manager, _, engine, _, _ = managers
+    sid = "ses_fsm"
+    transcript = SQLiteTranscriptStore(engine)
+    failed, _ = asyncio.run(_activate(manager, text="independent request"))
+    ids = [_merge(manager, name) for name in ("report A", "report B")]
+    for row, name in zip(ids, ("report A", "report B")):
+        asyncio.run(transcript.consume_input(sid, row, _user(name)))
+    with engine.begin() as conn:
+        _end(conn, failed, kind="server")
+    for index, (row, name) in enumerate(zip(ids, ("report A", "report B"))):
+        carried = row + "~carry"
+        with engine.begin() as conn:
+            turn = store.new_turn_id()
+            store.claim_start_batch(conn, turn_id=turn, session_id=sid, backend="vibey",
+                                    deliveries=[store.get_delivery(conn, carried)], dispatch_text=name)
+            current = store.get_turn(conn, turn)
+            store.bind_native_start(conn, turn, expected_version=current["version"], runtime_key=turn,
+                                    runtime_turn_id=turn, native_turn_id=turn)
+            store.materialize_start_acceptance(conn, turn_id=turn, evidence={})
+        asyncio.run(transcript.consume_input(sid, carried, _user(name)))
+        visible = [entry.row_id for entry in asyncio.run(transcript.load_for_run(sid)).entries if entry.kind == "input"]
+        assert visible == [item + "~carry" for item in ids[:index + 1]]
+        with engine.begin() as conn:
+            store.terminalize_turn(conn, turn, outcome="completed", settled_by="terminal_result",
+                                   evidence_kind="terminal_result")
+            assert [item["id"] for item in store.list_queued(conn, sid)] == [item + "~carry" for item in ids[index + 1:]]
+
+
 def test_late_acceptance_of_report_after_stop_starts_it_once(managers):
     """The Turn and its last queue drain are over; the carried report still starts (#4010 review)."""
     manager, other, engine, _, starts = managers
