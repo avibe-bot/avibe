@@ -195,13 +195,18 @@ final class DirectRouteOwner {
 
     /// Every host written to any route in this process, in order.
     private(set) var allowedHosts: [String] = []
-    private var hostsByStore: [UUID: [String]] = [:]
+    /// A host and the WebKit policy currently requested for it on this store.
+    private struct RoutedHost {
+        let name: String
+        let allowsFailover: Bool
+    }
+    private var hostsByStore: [UUID: [RoutedHost]] = [:]
     /// Hosts a store loaded without a route. They are never added to that
     /// store later: WebKit would keep using its existing connections.
     private var excluded: Set<StoreHost> = []
 
     func routes(_ host: String, store: UUID) -> Bool {
-        hostsByStore[store]?.contains(host) == true
+        hostsByStore[store]?.contains { $0.name == host } == true
     }
 
     func isExcluded(_ host: String, store: UUID) -> Bool {
@@ -229,7 +234,10 @@ final class DirectRouteOwner {
     /// `port`. `false` when the host is excluded for this store or the
     /// process-wide cap is reached; the host then keeps WebKit's normal path.
     @discardableResult
-    func add(_ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) -> Bool {
+    func add(
+        _ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16,
+        allowsFailover: Bool = true
+    ) -> Bool {
         if routes(host, store: store) {
             return true
         }
@@ -242,13 +250,35 @@ final class DirectRouteOwner {
             }
             allowedHosts.append(host)
         }
-        let hosts = (hostsByStore[store] ?? []) + [host]
-        hostsByStore[store] = hosts
-        dataStore.proxyConfigurations = [Self.route(port: port, hosts: hosts)]
+        let hosts = (hostsByStore[store] ?? []) + [RoutedHost(name: host, allowsFailover: allowsFailover)]
+        write(hosts, store: store, dataStore: dataStore, port: port)
         return true
     }
 
-    static func route(port: UInt16, hosts: [String]) -> ProxyConfiguration {
+    /// Changes only an already-routed host. The caller drains its connections
+    /// before asking; reapplying a policy does not rewrite the store.
+    @discardableResult
+    func rewrite(_ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16, allowsFailover: Bool) -> Bool {
+        guard var hosts = hostsByStore[store], let index = hosts.firstIndex(where: { $0.name == host }) else {
+            return false
+        }
+        if hosts[index].allowsFailover != allowsFailover {
+            hosts[index] = RoutedHost(name: host, allowsFailover: allowsFailover)
+            write(hosts, store: store, dataStore: dataStore, port: port)
+        }
+        return true
+    }
+
+    private func write(_ hosts: [RoutedHost], store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) {
+        hostsByStore[store] = hosts
+        dataStore.proxyConfigurations = [false, true].compactMap { allowsFailover in
+            let domains = hosts.filter { $0.allowsFailover == allowsFailover }.map(\.name)
+            guard !domains.isEmpty else { return nil }
+            return Self.route(port: port, hosts: domains, allowsFailover: allowsFailover)
+        }
+    }
+
+    private static func route(port: UInt16, hosts: [String], allowsFailover: Bool) -> ProxyConfiguration {
         var route = ProxyConfiguration(
             httpCONNECTProxy: .hostPort(
                 host: "127.0.0.1",
@@ -259,7 +289,7 @@ final class DirectRouteOwner {
         route.matchDomains = hosts
         // A candidate safety net, not a guarantee (section 8): WebKit may
         // take its normal path when the listener cannot be reached.
-        route.allowFailover = true
+        route.allowFailover = allowsFailover
         return route
     }
 }
@@ -268,6 +298,7 @@ final class DirectRouteOwner {
 /// section 9). Not measurements.
 struct DirectPathTiming: Sendable {
     /// How long a runtime's first load waits for the listener and its route.
+    let strictOpenSeconds: TimeInterval
     let listenerWaitSeconds: TimeInterval
     /// How long the return to the foreground may take to re-bind and check
     /// the listener's port.
@@ -289,8 +320,10 @@ struct DirectPathTiming: Sendable {
         listenerWaitSeconds: TimeInterval,
         rebindSeconds: TimeInterval,
         foregroundSeconds: TimeInterval = 5,
+        strictOpenSeconds: TimeInterval = 10,
         retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5]
     ) {
+        self.strictOpenSeconds = strictOpenSeconds
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
         self.foregroundSeconds = foregroundSeconds
@@ -530,6 +563,14 @@ final class DirectPathController {
     private var replacedGenerations: Set<String> = []
     /// The transport reported the accepted generation usable, and nothing
     /// has suspended that since.
+    private var requestedStrict: Set<String> = []
+    private var loadedWithoutServingRoute: Set<String> = []
+    private var armed: Set<String> = []
+    private var rewriting: Set<String> = []
+    private var policyGeneration: [String: UInt64] = [:]
+    private var strictFailures: [String: UInt64] = [:]
+    private var unlinkedAnswers: [String: UInt64] = [:]
+    private var lossWake: Task<Void, Never>?
     private var isUsable = false
     /// The kind of path the usable transport's connection runs on, as last
     /// reported; nil when none is usable or the transport cannot tell.
@@ -873,17 +914,18 @@ final class DirectPathController {
     /// routed stays routed after its runtime closed, so its loads still go
     /// through the listener.
     func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
-        guard
-            let authority = DirectAuthority(instanceURL: url),
-            routeOwner.routes(authority.host, store: websiteDataStore.identifier),
-            let listener
-        else {
-            // No route; or a route and no listener, which is not reachable
-            // (a listener a route was published to is never stopped or
-            // replaced) and would leave the port closed: WebKit's own path.
-            return .open
+        guard let authority = DirectAuthority(instanceURL: url) else { return .open }
+        let host = authority.host
+        if rewriting.contains(host) { return .held }
+        let strict = needsListener(host)
+        guard routeOwner.routes(host, store: websiteDataStore.identifier), let listener else {
+            return strict ? .held : .open
         }
-        return listenerGate(listener)
+        let gate = listenerGate(listener)
+        if strict, gate == .open {
+            guard case .serving = listener.lifecycle.phase else { return .held }
+        }
+        return gate
     }
 
     /// The gate of a host routed to `listener`, from its lifecycle and from
@@ -919,6 +961,80 @@ final class DirectPathController {
         // background: held on a return whose first attempt has not ended,
         // open after a failed attempt in this stay.
         return recovery?.lastFailure == nil ? .held : .open
+    }
+
+    /// Records a real load decision, not a presentation read of the load gate.
+    func noteInstanceLoad(forInstanceURL url: URL) {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return }
+        if routeOwner.routes(host, store: websiteDataStore.identifier), let listener,
+           case .serving = listener.lifecycle.phase { return }
+        if loadedWithoutServingRoute.insert(host).inserted, requestedStrict.contains(host) {
+            onAvailabilityChanged()
+        }
+    }
+
+    private func needsListener(_ host: String) -> Bool {
+        requestedStrict.contains(host) && !loadedWithoutServingRoute.contains(host)
+    }
+
+    func directOnlyNeedsRelaunch(forInstanceURL url: URL) -> Bool {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return false }
+        return requestedStrict.contains(host) && loadedWithoutServingRoute.contains(host)
+    }
+
+    func unlinkedRendezvousCount(forInstanceURL url: URL) -> UInt64 {
+        DirectAuthority(instanceURL: url).map { unlinkedAnswers[$0.host, default: 0] } ?? 0
+    }
+
+    func strictFailureCount(forInstanceURL url: URL) -> UInt64 {
+        DirectAuthority(instanceURL: url).map { strictFailures[$0.host, default: 0] } ?? 0
+    }
+
+    func isDirectOnlyLinked(forInstanceURL url: URL) -> Bool {
+        guard let authority = DirectAuthority(instanceURL: url) else { return false }
+        return armed.contains(authority.host) && !rewriting.contains(authority.host) && directAuthorized(for: authority)
+    }
+
+    func setDirectOnly(_ enabled: Bool, forInstanceURL url: URL) {
+        guard let authority = DirectAuthority(instanceURL: url) else { return }
+        let host = authority.host
+        if enabled {
+            guard requestedStrict.insert(host).inserted else { return }
+            policyGeneration[host, default: 0] &+= 1
+            if !loadedWithoutServingRoute.contains(host), directAuthorized(for: authority) { cutover(host) }
+        } else {
+            guard requestedStrict.remove(host) != nil else { return }
+            policyGeneration[host, default: 0] &+= 1
+            armed.remove(host)
+            if target?.authority.host == host { lossWake?.cancel(); lossWake = nil }
+            cutover(host)
+        }
+        onAvailabilityChanged()
+    }
+
+    /// One drain at a time per host. New plans wait; in-flight plans also
+    /// fail their commit check. Sample the latest choice after the drain so
+    /// a late completion cannot reverse a newer choice or touch another store.
+    private func cutover(_ host: String) {
+        let store = websiteDataStore.identifier
+        guard routeOwner.routes(host, store: store), let listener, let port = listenerPort,
+              rewriting.insert(host).inserted else { return }
+        policyGeneration[host, default: 0] &+= 1
+        Task { [weak self] in
+            await listener.drainHost(host)
+            guard let self else { return }
+            self.rewriting.remove(host)
+            if self.websiteDataStore.identifier == store, self.listener === listener {
+                let strict = self.requestedStrict.contains(host) && !self.loadedWithoutServingRoute.contains(host)
+                    && self.target?.authority.host == host && self.isUsable && !self.isInBackground
+                    && self.listenerState == .ready
+                if self.routeOwner.rewrite(host, store: store, dataStore: self.websiteDataStore.dataStore,
+                                           port: port, allowsFailover: !strict), strict {
+                    self.armed.insert(host)
+                } else { self.armed.remove(host) }
+            }
+            self.onAvailabilityChanged()
+        }
     }
 
     /// A runtime opened, after its route was prepared.
@@ -992,6 +1108,9 @@ final class DirectPathController {
     /// same instance is selected again on the return, and what was recorded
     /// before is what a diagnosis after the return needs.
     private func deselect(stoppingTransport: Bool = true, keepingDiagnostics: Bool = false) {
+        if let host = target?.authority.host { armed.remove(host) }
+        lossWake?.cancel()
+        lossWake = nil
         isUsable = false
         currentPath = nil
         stickyDropped = false
@@ -1019,6 +1138,10 @@ final class DirectPathController {
             return
         }
         switch report {
+        case .answeredWithoutLink:
+            unlinkedAnswers[target.authority.host, default: 0] &+= 1
+            onAvailabilityChanged()
+            return
         case .usable(let generation):
             // Generations never repeat, so one that a newer answer replaced
             // can only be a late result.
@@ -1032,7 +1155,15 @@ final class DirectPathController {
                 closeRelays(.direct, countsAsClosure: true, loss: (.generationReplaced, currentPath))
             }
             acceptedGeneration = generation
+            let wasUsable = isUsable
             isUsable = true
+            lossWake?.cancel()
+            lossWake = nil
+            let host = target.authority.host
+            if requestedStrict.contains(host), !loadedWithoutServingRoute.contains(host) {
+                if !armed.contains(host) { cutover(host) }
+                else if !wasUsable { onAvailabilityChanged() }
+            }
             let previous = currentPath
             currentPath = transport.pathDiagnostics.current
             stickyDropped = false
@@ -1083,6 +1214,19 @@ final class DirectPathController {
             return
         }
         updatePreference()
+        let host = target.authority.host
+        if armed.contains(host), lossWake == nil {
+            let seconds = timing.strictOpenSeconds
+            lossWake = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+                guard let self, self.target == target, !self.isUsable,
+                      self.armed.remove(host) != nil else { return }
+                self.lossWake = nil
+                self.strictFailures[host, default: 0] &+= 1
+                self.onAvailabilityChanged()
+            }
+            onAvailabilityChanged()
+        }
     }
 
     /// A direct candidate failed before anything was forwarded. Only a
@@ -1101,9 +1245,13 @@ final class DirectPathController {
 
     /// Decides one accepted CONNECT (section 6). `nil` refuses it.
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
-        guard routeOwner.allowedHosts.contains(authority.host) else {
+        let host = authority.host
+        guard routeOwner.allowedHosts.contains(host), !rewriting.contains(host) else {
             return nil
         }
+        let policy = policyGeneration[host, default: 0]
+        let strictChoice = needsListener(host)
+        let strict = strictChoice && armed.contains(host)
         let fence = Fence(
             selection: selection,
             pathGeneration: pathGeneration,
@@ -1111,7 +1259,9 @@ final class DirectPathController {
         )
         let transport = transport
         let publicBackend = publicBackend
-        let directTag = directStreamTag(for: authority)
+        let directTag = strictChoice && !strict ? nil : directStreamTag(for: authority)
+        let openPublic: (@Sendable () async throws -> any DirectByteStream)?
+        if strict { openPublic = nil } else { openPublic = { try await publicBackend.open(authority) } }
         let openDirect: (@Sendable () async throws -> any DirectByteStream)?
         if let directTag {
             openDirect = {
@@ -1135,11 +1285,11 @@ final class DirectPathController {
             scope: scope,
             generation: pathGeneration,
             openDirect: openDirect,
-            openPublic: {
-                try await publicBackend.open(authority)
-            },
+            openPublic: openPublic,
             isCurrent: { [weak self] in
-                self?.isCurrent(fence, lease: lease) ?? false
+                guard let self, self.policyGeneration[host, default: 0] == policy,
+                      !self.rewriting.contains(host), self.armed.contains(host) == strict else { return false }
+                return self.isCurrent(fence, lease: lease)
             },
             directFailed: { [weak self] in
                 guard let directTag else {
@@ -1150,7 +1300,8 @@ final class DirectPathController {
                 }
             }
         )
-        plan.sticky = sticky
+        plan.strictWaitSeconds = strict ? timing.strictOpenSeconds : nil
+        plan.sticky = !strict && sticky
         plan.path = directTag == nil ? nil : currentPath
         plan.stickyMissed = { [weak self] in
             Task { @MainActor in

@@ -325,8 +325,8 @@ struct DirectConnectPlan: Sendable {
     /// Opens a direct stream. `nil` when direct is not authorized for this
     /// CONNECT.
     let openDirect: (@Sendable () async throws -> any DirectByteStream)?
-    /// Opens a connection to the host's public origin.
-    let openPublic: @Sendable () async throws -> any DirectByteStream
+    /// Absent in strict mode: a replan must never add a tunnel candidate to that CONNECT.
+    let openPublic: (@Sendable () async throws -> any DirectByteStream)?
     /// Whether the selection, lease and path generation this plan was made
     /// under are all still current. Synchronous on the main actor, where
     /// every event that changes them runs. Checked when a candidate is
@@ -338,6 +338,7 @@ struct DirectConnectPlan: Sendable {
     /// The App's path is direct (IPv4 or IPv6) and was not dropped by a
     /// miss: the direct candidate runs alone for up to `stickySeconds`
     /// instead of the hedge, bounded by that too.
+    var strictWaitSeconds: TimeInterval?
     var sticky = false
     /// The kind of path the App's direct connection ran on when planned.
     var path: DirectPathKind?
@@ -368,6 +369,9 @@ actor DirectConnectListener {
         /// and counts against the limit, until its task has closed its
         /// connection and stream (`relayDidEnd`): a slot is free only when
         /// what held it is gone.
+        /// Registered before consulting the controller, so host cutover also
+        /// finds setups that have not acquired a stream or committed a grant.
+        var host: String?
         var isDraining = false
         /// The relay's current plan, once it has one: its scope, its path
         /// generation, and its race, which a newer generation retires.
@@ -704,6 +708,26 @@ actor DirectConnectListener {
         before generation: Int = .max
     ) -> [String: Int] {
         closeRelaysTimed(backend: backend, before: generation).closed
+    }
+
+    /// Ends both legs for this host, including setups, and waits until each
+    /// relay has cancelled its client socket. Does not close the listener or
+    /// an unrelated host. The controller holds new plans across the rewrite.
+    func drainHost(_ host: String) async {
+        let selected = relays.filter { $0.value.host == host }
+        for (id, _) in selected {
+            lifecycle.end(id)
+            drain(id)
+        }
+        for relay in selected.values {
+            await relay.task.value
+        }
+    }
+
+    private func identify(_ id: UUID, host: String) -> Bool {
+        guard let relay = relays[id], !relay.isDraining, lifecycle.isCandidate(id) else { return false }
+        relays[id]?.host = host
+        return true
     }
 
     /// The same close, and for each relay it ended, how many milliseconds it
@@ -1108,7 +1132,8 @@ actor DirectConnectListener {
         }
         // Bytes sent ahead of the answer are held, never forwarded before a
         // backend is selected, and bounded.
-        guard earlyData.count <= limits.earlyBytes else {
+        guard earlyData.count <= limits.earlyBytes,
+              await listener?.identify(id, host: authority.host) == true else {
             return
         }
         // From here on every read of WebKit's side goes through the reader,
@@ -1125,7 +1150,9 @@ actor DirectConnectListener {
         // (the path generation changed while it raced), within the same
         // selection and account only.
         var scope: DirectPlanScope?
-        for _ in 0..<2 {
+        var ordinaryPlans = 0
+        var strictDeadline: ContinuousClock.Instant?
+        while strictDeadline.map({ ContinuousClock.now < $0 }) ?? (ordinaryPlans < 2) {
             let race = DirectRaceHandle()
             guard
                 !Task.isCancelled,
@@ -1133,7 +1160,7 @@ actor DirectConnectListener {
                 scope == nil || plan.scope == scope,
                 let listener
             else {
-                if !Task.isCancelled {
+                if !Task.isCancelled, strictDeadline == nil {
                     await refuse(
                         connection,
                         status: scope == nil ? 403 : 503,
@@ -1143,6 +1170,14 @@ actor DirectConnectListener {
                 }
                 return
             }
+            if let seconds = plan.strictWaitSeconds {
+                guard plan.openPublic == nil else { return }
+                if strictDeadline == nil { strictDeadline = .now.advanced(by: .seconds(seconds)) }
+            } else {
+                // A deliberate re-establishment is for a new navigation, never this request.
+                guard strictDeadline == nil else { return }
+                ordinaryPlans += 1
+            }
             let admission = await listener.planned(
                 id,
                 scope: plan.scope,
@@ -1150,7 +1185,7 @@ actor DirectConnectListener {
                 race: race
             )
             guard admission != .refused else {
-                if !Task.isCancelled {
+                if !Task.isCancelled, strictDeadline == nil {
                     await refuse(
                         connection,
                         status: 503,
@@ -1167,12 +1202,14 @@ actor DirectConnectListener {
             } else {
                 // The race runs as its own task, so a newer path generation
                 // can cancel it without ending the CONNECT.
+                let deadline = strictDeadline
                 let raceTask = Task {
                     await raceWatchingClient(
                         plan,
                         authority: authority,
                         limits: limits,
-                        reader: reader
+                        reader: reader,
+                        deadline: deadline
                     )
                 }
                 race.attach { raceTask.cancel() }
@@ -1202,6 +1239,11 @@ actor DirectConnectListener {
                 guard !Task.isCancelled else {
                     return
                 }
+                if strictDeadline != nil {
+                    // Wait for an eligible replacement without spinning or restarting the budget.
+                    do { try await Task.sleep(for: .milliseconds(25)) } catch { return }
+                    continue
+                }
                 await refuse(
                     connection,
                     status: status,
@@ -1223,8 +1265,9 @@ actor DirectConnectListener {
                 let host = authority.host
                 let generation = plan.generation
                 let isCurrent = plan.isCurrent
+                let deadline = strictDeadline
                 let grant: FinalGrant = await MainActor.run {
-                    guard isCurrent() else {
+                    guard deadline.map({ ContinuousClock.now < $0 }) ?? true, isCurrent() else {
                         return .fenced
                     }
                     return lifecycle.grant(
@@ -1276,7 +1319,9 @@ actor DirectConnectListener {
                 return
             }
         }
-        await refuse(connection, status: 503, reader: reader, within: limits.headSeconds)
+        if strictDeadline == nil {
+            await refuse(connection, status: 503, reader: reader, within: limits.headSeconds)
+        }
     }
 
     private enum WatchedRace {
@@ -1295,9 +1340,17 @@ actor DirectConnectListener {
         _ plan: DirectConnectPlan,
         authority: DirectAuthority,
         limits: DirectConnectLimits,
-        reader: DirectClientReader
+        reader: DirectClientReader,
+        deadline: ContinuousClock.Instant?
     ) async -> RaceOutcome? {
         await withTaskGroup(of: WatchedRace.self) { group in
+            if let deadline {
+                group.addTask {
+                    do { try await Task.sleep(until: deadline, clock: .continuous) }
+                    catch { return .stopped }
+                    return .clientGone // Same silent close; discard even a late ready stream.
+                }
+            }
             group.addTask {
                 .race(await race(plan, authority: authority, limits: limits))
             }
@@ -1443,7 +1496,8 @@ actor DirectConnectListener {
                     }
                 }
             }
-            group.addTask {
+            if let openPublic = plan.openPublic {
+                group.addTask {
                 if directAttempted {
                     // The hedge: the public origin is dialled when the direct
                     // attempt has had its head start, or as soon as it fails.
@@ -1466,12 +1520,13 @@ actor DirectConnectListener {
                 }
                 times.publicStarted()
                 do {
-                    let stream = try await plan.openPublic()
+                    let stream = try await openPublic()
                     times.publicReady()
                     return .ready(.publicOrigin, stream, Data())
                 } catch {
                     times.publicFailed(cancelled: error is CancellationError || Task.isCancelled)
                     return .failed(.publicOrigin, error)
+                }
                 }
             }
 

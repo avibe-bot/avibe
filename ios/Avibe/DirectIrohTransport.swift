@@ -35,6 +35,9 @@ struct DirectIrohStreamTag: Equatable, Sendable {
 }
 
 enum DirectIrohReport: Equatable, Sendable {
+    /// A validated instance answer ended without a usable link. Emitted after retry scheduling
+    /// so a synchronous consumer can change the selection without leaving work behind.
+    case answeredWithoutLink
     /// A path to the instance answered a CONNECT. `generation` is the
     /// rendezvous answer's.
     case usable(generation: String)
@@ -659,6 +662,7 @@ final class DirectIrohTransport {
                 return
             }
             scheduleFetch(after: TimeInterval(retryAfterSeconds))
+            emit(.answeredWithoutLink)
         case .ready(let offer):
             // The instance issued the answer after the request was sent, so
             // a deadline counted from then is never later than the
@@ -1032,6 +1036,7 @@ final class DirectIrohTransport {
             Self.logger.info("Direct transport: no path to the instance")
             dropLease()
             scheduleRetry()
+            emit(.answeredWithoutLink)
             return
         }
         stamp += 1
@@ -1424,6 +1429,8 @@ extension DirectIrohStreamTag {
 extension DirectPathReport {
     init(_ report: DirectIrohReport) {
         switch report {
+        case .answeredWithoutLink:
+            self = .answeredWithoutLink
         case .usable(let generation):
             self = .usable(generation: generation)
         case .verifying:

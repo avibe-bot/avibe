@@ -148,6 +148,30 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertFalse(owner.isExcluded(hosts[0], store: other))
     }
 
+    /// Checks what the owner writes, not what WebKit does with the array.
+    @MainActor
+    func testHostPolicyRewriteKeepsTheOtherHostAndStoreIndependent() throws {
+        let owner = DirectRouteOwner()
+        let store = UUID()
+        let data = WKWebsiteDataStore.nonPersistent()
+        XCTAssertTrue(owner.add(one, store: store, dataStore: data, port: 40_000))
+        XCTAssertTrue(owner.add(two, store: store, dataStore: data, port: 40_000))
+        let before = try ProxyConfigurationWrites.count()
+        XCTAssertTrue(owner.rewrite(one, store: store, dataStore: data, port: 40_000, allowsFailover: false))
+        XCTAssertTrue(owner.rewrite(one, store: store, dataStore: data, port: 40_000, allowsFailover: false))
+        XCTAssertEqual(try ProxyConfigurationWrites.count(), before + 1)
+        XCTAssertEqual(data.proxyConfigurations.filter { !$0.allowFailover }.map(\.matchDomains), [[one]])
+        XCTAssertEqual(data.proxyConfigurations.filter(\.allowFailover).map(\.matchDomains), [[two]])
+        let fresh = WKWebsiteDataStore.nonPersistent()
+        XCTAssertTrue(owner.add(one, store: UUID(), dataStore: fresh, port: 40_000))
+        XCTAssertEqual(fresh.proxyConfigurations.count, 1)
+        XCTAssertEqual(fresh.proxyConfigurations.first?.allowFailover, true)
+        XCTAssertTrue(owner.rewrite(one, store: store, dataStore: data, port: 40_000, allowsFailover: true))
+        XCTAssertEqual(data.proxyConfigurations.count, 1)
+        XCTAssertEqual(data.proxyConfigurations.first?.matchDomains, [one, two])
+        XCTAssertEqual(data.proxyConfigurations.first?.allowFailover, true)
+    }
+
     // MARK: The preference
 
     @MainActor
