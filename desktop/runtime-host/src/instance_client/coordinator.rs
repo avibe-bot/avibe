@@ -15,7 +15,7 @@ use super::{
     enrollment::EnrollmentFlow,
     loopback::CallbackCopy,
     protocol::*,
-    selection::Selection,
+    selection::{Recheck, Selection},
     storage::{ConnectionRecord, ConnectionStore, Credentials, InstanceRecency},
     transport::{Epoch, NativeSession, Transport},
 };
@@ -827,8 +827,10 @@ impl Coordinator {
 
     /// The session this run kept for `instance` at `origin` (`kept.rs`), once
     /// the instance has said again that it is this account's there and may
-    /// be read. `None` when there is none, or the instance no longer takes it
-    /// (expired, signed out, the instance bound again): a new sign-in follows.
+    /// be read. `None` when there is none, or the instance refuses it (signed
+    /// out, expired, another account's, bound again): a new sign-in follows.
+    /// When the instance gives no answer that says either, the session stays
+    /// kept and the opening fails, rather than signing in again.
     async fn resume(
         &self,
         working: &Inner,
@@ -845,12 +847,13 @@ impl Coordinator {
         else {
             return Ok(None);
         };
-        let Some(kept) = self
+        let (kept, dropped) = self
             .kept
             .lock()
             .expect("kept sessions")
-            .find(&account, &instance.id, origin)
-        else {
+            .find(&account, &instance.id, origin);
+        sign_out_sessions(dropped);
+        let Some(kept) = kept else {
             return Ok(None);
         };
         let mut asked_view = false;
@@ -858,10 +861,10 @@ impl Coordinator {
             let mut session = kept.session();
             session.fence(epoch.clone());
             let mut selection = Selection::resumed(instance.clone(), session);
-            match selection.readiness(&working.state).await {
-                Ok(()) => return Ok(Some(selection)),
-                Err(error) if error.code == "stale_generation" => return Err(error),
-                Err(_) if !asked_view => {
+            match selection.recheck(&working.state).await {
+                Recheck::Ready => return Ok(Some(selection)),
+                Recheck::Unavailable(error) => return Err(error),
+                Recheck::Refused if !asked_view => {
                     // The instance's page may hold a rotation this jar never
                     // saw: take that page's cookies for this exact origin once.
                     asked_view = true;
@@ -876,9 +879,10 @@ impl Coordinator {
                         continue;
                     }
                 }
-                Err(_) => {}
+                Recheck::Refused => {}
             }
-            self.kept.lock().expect("kept sessions").forget(&kept);
+            let refused = self.kept.lock().expect("kept sessions").forget(&kept);
+            sign_out_sessions(refused);
             return Ok(None);
         }
     }
@@ -914,9 +918,12 @@ impl Coordinator {
         if let Some(account) = &working.display_account {
             // Checked under this lock: a sign-out advances the generation
             // before it takes every kept session, so none outlives it.
-            let mut kept = self.kept.lock().expect("kept sessions");
-            epoch.check()?;
-            kept.keep(account, &target, session);
+            let dropped = {
+                let mut kept = self.kept.lock().expect("kept sessions");
+                epoch.check()?;
+                kept.keep(account, &target, session)
+            };
+            sign_out_sessions(dropped);
         }
         working.selection = None;
         Ok(())
@@ -1331,9 +1338,7 @@ impl Coordinator {
                 });
                 // So are the sign-ins this run opened on instances. Offline,
                 // nothing of them is left here; the instances let them lapse.
-                for session in kept {
-                    tokio::spawn(async move { session.sign_out().await });
-                }
+                sign_out_sessions(kept);
             }
             let result = view_result.and(cleanup);
             if signing_out {
@@ -1581,5 +1586,13 @@ fn refresh_display(inner: &mut Inner) {
         inner.state.current_instance = matches(instance).then(|| instance.clone());
     } else if !inner.state.current_instance.as_ref().is_some_and(matches) {
         inner.state.current_instance = None;
+    }
+}
+
+/// Signs each session that left the kept list (`kept.rs`) out of its
+/// instance, as far as the instance can be reached. Nothing waits on it.
+fn sign_out_sessions(sessions: Vec<Arc<CommittedUpdate>>) {
+    for session in sessions {
+        tokio::spawn(async move { session.sign_out().await });
     }
 }
