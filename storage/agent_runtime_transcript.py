@@ -81,7 +81,7 @@ def _checkpoint(conn: Connection, chain: Chain, before: int | None = None, *, pr
                 + "ORDER BY context_seq DESC LIMIT 1"
             )
             row = conn.execute(query, {"member": member, "bound": bound}).mappings().first()
-            if row is None or projection.clean_checkpoint(row["context_seq"], json.loads(row["content_json"])):
+            if row is None or projection.clean_checkpoint(row["context_seq"], _metadata(row)):
                 break
             # An opaque old summary is not safe merely because a newer capsule lists its refs.
             bound = row["context_seq"] - 1
@@ -101,6 +101,7 @@ def _prefix_chain(conn: Connection, checkpoint: Mapping[str, Any]) -> list[tuple
 def _binding(checkpoint: Mapping[str, Any], chain: Chain) -> dict[str, Any]:
     return {
         "checkpoint": [checkpoint["id"], checkpoint["session_id"], checkpoint["context_seq"]],
+        **({"carry_projection": _metadata(checkpoint)["carry_projection"]} if "carry_projection" in _metadata(checkpoint) else {}),
         "content_sha256": hashlib.sha256(checkpoint["content_json"].encode()).hexdigest(),
         "prefix": [list(member) for member in chain],
     }

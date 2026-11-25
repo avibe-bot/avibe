@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "agent-core/transcript-rows.schema.json",
   "title": "TranscriptRowPayloads",
-  "description": "C-5 payloads of context rows (transcript.md). Written by the adapter's TranscriptStore for the `harness`; read by projection, fork, resume, and the Workbench model view. All shapes are persisted and versioned.",
+  "description": "C-5 payloads of context rows (transcript.md). Written by the adapter's TranscriptStore for the `harness`; read by projection, fork, resume, and the Workbench model view. All payload shapes are persisted and versioned. Optional carry_projection (response or compaction) and carry_render (materialized input) belong in row metadata_json, not in these version-1 payloads; the model view overlays them only in memory.",
   "definitions": {
     "CacheObservation": {
       "description": "Optional request-start diagnostics (system-prompt-cache-tiers.md). Never canonical usage or a C-9 control clock. Damaged diagnostics are ignored by readers; unknown fields permit additions without a migration.",
@@ -27,7 +27,6 @@
         "version": {
           "const": 1
         },
-        "carry_render": {"type": "object", "description": "Internal per-member rendering receipt used for carry projection; never sent as model text."},
         "message": {
           "$ref": "message.schema.json#/definitions/UserMessage",
           "description": "The input exactly as sent, including the rendered time and identity prefix and attachments."
@@ -59,7 +58,6 @@
           ],
           "additionalProperties": false,
           "properties": {
-            "carry_projection": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "tokens": {
               "type": "integer",
               "minimum": 0,
@@ -195,7 +193,6 @@
           "minimum": 1,
           "description": "`context_seq` of the first unit kept verbatim."
         },
-        "carry_projection": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "kept_inputs": {
           "type": "array",
           "items": {

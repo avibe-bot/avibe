@@ -247,10 +247,34 @@ def test_new_carry_invalidates_only_usage_anchors_measured_on_a_different_prefix
     runtime = asyncio.run(transcript.load_for_run(sid))
     assert response.row_id in {r.row_id for r in runtime.entries}
     assert last_anchor(runtime.entries, context_view(runtime.entries)) is None
-    asyncio.run(transcript.append_response(sid, _assistant("fresh"), final=True,
+    stored = asyncio.run(transcript.append_response(sid, _assistant("fresh"), final=True,
                 request={"tokens": 35, "carry_projection": runtime.carry_projection}))
+    with engine.connect() as conn:
+        content, meta = conn.execute(select(messages.c.content_json, messages.c.metadata_json).where(messages.c.id == stored.row_id)).one()
+        # Released v1 reader requires exactly this request-facts shape.
+        assert json.loads(content)["model"]["request"] == {"tokens": 35}
+        assert json.loads(meta)["carry_projection"] == runtime.carry_projection
     fresh = asyncio.run(transcript.load_for_run(sid)).entries
     assert last_anchor(fresh, context_view(fresh)) is not None
+
+
+def test_input_render_receipt_survives_without_changing_downgrade_payload(managers):
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from storage.carry_members import RenderedInput
+    from tests.test_agent_transcript import _user
+
+    manager, _, engine, _, _ = managers
+    asyncio.run(_activate(manager, text="ask"))
+    mid = _merge(manager, "report")
+    store = SQLiteTranscriptStore(engine)
+    ordinary = _user("switch: report")
+    stamped = RenderedInput(ordinary.content, handoff_chars=8)
+    first = asyncio.run(store.consume_input("ses_fsm", mid, stamped))
+    with engine.connect() as conn:
+        content, meta = conn.execute(select(messages.c.content_json, messages.c.metadata_json).where(messages.c.id == mid)).one()
+        assert set(json.loads(content)["model"]) == {"version", "message"}
+        assert json.loads(meta)["carry_render"] == {"handoff_chars": 8}
+    assert asyncio.run(store.consume_input("ses_fsm", mid, ordinary)).payload == first.payload
 
 
 def test_clean_checkpoint_does_not_reconstruct_historical_carried_inputs(managers, monkeypatch):
@@ -267,9 +291,15 @@ def test_clean_checkpoint_does_not_reconstruct_historical_carried_inputs(manager
     with engine.begin() as conn:
         _end(conn, failed, kind="server")
     epoch = asyncio.run(transcript.load_for_preview(sid)).carry_projection
-    asyncio.run(transcript.append_payload(sid, "compaction", {
-        **COMPACTION, "first_kept_seq": 2, "summarized_to_seq": 1, "carry_projection": epoch,
-    }))
+    old_payload = {**COMPACTION, "first_kept_seq": 2, "summarized_to_seq": 1}
+    checkpoint = asyncio.run(transcript.append_payload(sid, "compaction", {**old_payload, "carry_projection": epoch}))
+    from storage.models import agent_events
+    with engine.connect() as conn:
+        content, meta = conn.execute(select(agent_events.c.content_json, agent_events.c.metadata_json).where(agent_events.c.id == checkpoint.row_id)).one()
+        assert json.loads(content) == old_payload  # released v1 fixture, no new payload keys
+        assert json.loads(meta)["carry_projection"] == epoch
+    cut = asyncio.run(transcript.load_for_preview(sid, context_seq=checkpoint.context_seq))
+    assert any(row.payload.get("carry_projection") == epoch for row in cut.entries)
     asyncio.run(transcript.load_for_run(sid))  # Certify once.
     monkeypatch.setattr(CarryProjection, "_survivor", lambda *a: pytest.fail("discarded payload reloaded"))
     assert asyncio.run(transcript.load_for_preview(sid)).carry_projection == epoch

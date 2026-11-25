@@ -210,8 +210,7 @@ def surviving_input(
     )
     content = json.loads(row["content_json"])
     meta = json.loads(row["metadata_json"])
-    model = content.get("model") or {}
-    render = model.get("carry_render") or {}
+    render = meta.get("carry_render") or {}
     histories = conn.execute(
         select(
             message_deliveries.c.id, message_deliveries.c.delivery_history_json, message_deliveries.c.dispatch_sha256
