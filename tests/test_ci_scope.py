@@ -366,6 +366,23 @@ def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
         selected(full('unknown diff', False))
 
 
+@pytest.mark.parametrize('path,group,proof', [
+    ('vibe/model_hub_runtime/cliproxyapi_manifest.json', 'engine-wire', 'model-hub-hosted-wire'),
+    ('core/control_ipc.py', 'identity', 'windows-control-ipc'),
+    ('core/private_fs.py', 'identity', 'windows-control-ipc'),
+    ('tests/test_control_ipc.py', 'identity', 'windows-control-ipc'),
+    ('scripts/desktop_release.py', 'desktop', 'desktop-shell'),
+    ('packaging/iroh-apple/release.json', 'ios', 'ios-shell'),
+    ('storage/compatibility.py', 'migration', 'install-upgrade-shards'),
+])
+def test_indirect_sensitive_inputs_require_the_consuming_producer(path, group, proof):
+    from scripts.ci_fast_pr import selected
+
+    groups, jobs = selected(scope(path, 'docs/guide.md'))
+    assert group in groups and proof in jobs
+    assert proof in workflow()['jobs']['sensitive-proof']['needs']
+
+
 @pytest.mark.parametrize('gate', ['fast-gate', 'sensitive-proof'])
 def test_portfolio_aggregate_rejects_missing_cancelled_skipped_or_red(gate):
     from scripts.ci_fast_pr import LINUX, EXTRA, verify

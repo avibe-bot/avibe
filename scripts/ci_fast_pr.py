@@ -12,6 +12,7 @@ PROOFS = {
     'vault': {'ui-browser-checks', 'windows-control-ipc'},
     'install': {'install-upgrade-shards', 'windows-install-smoke-runners'},
     'migration': {'install-upgrade-shards'},  # Linux floor already exercises the previous published reader/writer.
+    'engine-wire': {'model-hub-hosted-wire'},
     'desktop': {'desktop-shell'},
     'ios': {'ios-shell'},
     'shared': {'manifest-consistency'},  # The Linux floor also builds the wheel and UIs.
@@ -24,13 +25,21 @@ SHARED = re.compile(r'(^|/)([^/]*\.lock|package-lock\.json|pnpm-lock\.yaml|requi
 def path_groups(path: str) -> set[str]:
     p = path.lower()
     groups = set()
-    if IDENTITY.search(p) or p in WINDOWS_CONTROL_IPC_PATHS:
+    if p == 'vibe/model_hub_runtime/cliproxyapi_manifest.json':
+        groups.add('engine-wire')
+    if p in {'scripts/desktop_release.py', 'scripts/check-restricted-entitlement-refusal.sh'}:
+        groups.add('desktop')
+    if p.startswith('packaging/iroh-apple/'):
+        groups.add('ios')
+    if IDENTITY.search(p) or p in WINDOWS_CONTROL_IPC_PATHS or p in {
+        'core/control_ipc.py', 'core/private_fs.py', 'tests/test_control_ipc.py',
+    }:
         groups.add('identity')
     if any(s in p for s in ('vault', 'sandbox')):
         groups.add('vault')
     if any(s in p for s in ('install', 'upgrade', 'bootstrap', 'distribution')) or p.startswith(('packaging/', 'npm/')):
         groups.add('install')
-    if 'alembic' in p or 'migrat' in p:
+    if 'alembic' in p or 'migrat' in p or p == 'storage/compatibility.py':
         groups.add('migration')
     if p.startswith('desktop/') or any(s in p for s in ('updater', 'auto_update', 'signing', 'codesign', 'notariz')):
         groups.add('desktop')

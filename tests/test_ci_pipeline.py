@@ -56,6 +56,16 @@ def _run_isolated_unit_files(
     )
 
 
+@pytest.mark.parametrize('planner', ['raise SystemExit(7)', 'pass', "print('tests/a.py\\t15\\t1'); raise SystemExit(2)"])
+def test_unit_file_planner_errors_cannot_turn_into_empty_green(tmp_path: Path, planner: str) -> None:
+    (tmp_path / 'scripts').mkdir()
+    (tmp_path / 'scripts/ci_unit_test_shards.py').write_text(planner)
+    result = subprocess.run(['bash', str(ROOT / 'scripts/ci_unit_tests.sh'), '0', '32'],
+                            cwd=tmp_path, env={**os.environ, 'PYTHON': sys.executable}, capture_output=True, text=True)
+    assert result.returncode != 0 and 'All unit test files passed' not in result.stdout
+    assert 'Starting tests/' not in result.stdout
+
+
 def test_unit_shard_has_an_outer_deadline_without_weakening_failure_propagation() -> None:
     shard = _jobs()["unit-test-shards"]
     assert shard["timeout-minutes"] == 20

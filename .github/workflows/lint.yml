@@ -160,7 +160,7 @@ jobs:
         run: python3 scripts/ci_scope.py --portfolio-gate fast-gate
 
   sensitive-proof:
-    needs: [changes, ui-browser-checks, windows-control-ipc, install-upgrade-shards, windows-install-smoke-runners, desktop-shell, ios-shell, manifest-consistency, unit-tests, install-upgrade-regression, windows-install-smoke]
+    needs: [changes, model-hub-hosted-wire, ui-browser-checks, windows-control-ipc, install-upgrade-shards, windows-install-smoke-runners, desktop-shell, ios-shell, manifest-consistency, unit-tests, install-upgrade-regression, windows-install-smoke]
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') && (needs.changes.outputs.portfolio != 'true' || needs.changes.outputs.sensitive == 'true')
     runs-on: ubuntu-latest
     steps:
@@ -614,7 +614,7 @@ jobs:
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 7
 
   model-hub-hosted-wire:
