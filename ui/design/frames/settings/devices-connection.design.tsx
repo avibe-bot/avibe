@@ -10,6 +10,7 @@ import { frames, type FrameSpec } from '../../frame';
 import { ConnectionPageView, type ConnectionPageViewProps } from '@/components/devices/ConnectionPageView';
 import type { AddressState, ConnectionState, RebindState, TunnelChange } from '@/components/devices/types';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
+import type { DirectMeasurement } from '@/lib/nativeDirectMeasure';
 import { settingsFixtures, settingsPage } from './fixtures';
 
 const route = '/settings/remote-access/connection';
@@ -56,6 +57,13 @@ const status: RemoteAccessStatus = {
 } as unknown as RemoteAccessStatus;
 
 const WIDE = { width: 1440, height: 1300 };
+/** A finished 「测速」 on a punched IPv6 path, with what a frame changes. */
+const measured = (extra: Partial<DirectMeasurement> = {}): DirectMeasurement => ({
+  measuredAt: DESIGN_NOW - 2 * 60_000, samples: 5,
+  current: { kind: 'ipv6', scope: 'global', relayRegion: null, ok: 5, medianMs: 38, maxMs: 61, error: null },
+  tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 5, medianMs: 212, maxMs: 340, error: null },
+  ...extra,
+});
 const PHONE = { width: 375, height: 2000 };
 const APP_390 = { ...IPHONE_17_PRO, width: 390, height: 2400 };
 
@@ -159,12 +167,28 @@ const designFrames = frames([
   frame('optimize-started', '优化线路 · 已开始', WIDE, { optimize: { started: true } }),
   frame('diagnostics', '连接诊断与网络路径 · 诊断跑完；直连关着，没有直连那两行', WIDE,
     { diagnostics: { status, now: DESIGN_NOW, diagnostics: { ok: true, sampled_at: ago(0), effective_protocol: 'quic', dns: { status: 'available' }, quic: { status: 'available', source: 'probe' }, http2: { status: 'unknown', source: 'probe' }, cloudflared_version: '2026.10.1' } } }),
-  frame('diagnostics-direct', '连接诊断与网络路径 · 直连开着：多两行，证书到期日和最近一次连接两条路各用了多久（App 里才有记录）', WIDE,
-    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z'), lastConnection: { direct: 38, public: 212 } } } }),
-  frame('diagnostics-direct-browser', '连接诊断与网络路径 · 直连开着，在浏览器里看：证书照常，最近一次连接没有记录', WIDE,
-    { diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z'), lastConnection: null } } }),
-  frame('diagnostics-direct-phone', '直连的两行 · 375 宽', { width: 375, height: 900 },
-    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: null, lastConnection: { direct: 'timeout', public: 180 } } } }),
+  frame('diagnostics-direct', '连接诊断与网络路径 · 直连开着：证书到期日；「线路测速」在测之前只有说明和按钮', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: {} } }),
+  frame('diagnostics-direct-browser', '连接诊断与网络路径 · 直连开着，在浏览器里看：证书照常，浏览器测不了速，没有「线路测速」', WIDE,
+    { diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') } } }),
+  frame('diagnostics-measured', '线路测速 · 测完：每条线路的中位和最慢，带线路名（打洞直连 · IPv6）', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { result: measured() } } }),
+  frame('diagnostics-measured-relay', '线路测速 · 走中继：带中继的区域；隧道有几次没完成', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { result: measured({
+      current: { kind: 'relay', scope: null, relayRegion: 'euw1', ok: 5, medianMs: 85, maxMs: 140, error: null },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 3, medianMs: 212, maxMs: 1430, error: 'timeout' },
+    }) } } }),
+  frame('diagnostics-measured-tunnel-only', '线路测速 · 现在没在用直连或中继（例如选了「仅 Cloudflare 隧道」）：只有隧道的数', WIDE,
+    { ...remote, diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { result: measured({ current: null }) } } }),
+  frame('diagnostics-measuring', '线路测速 · 正在测（上一次的结果留着）', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { running: true, result: measured() } } }),
+  frame('diagnostics-measure-busy', '线路测速 · 另一次还在测：一句话，可以稍后再试', WIDE,
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: new Date('2027-02-14T00:00:00Z') }, measure: { error: 'busy' } } }),
+  frame('diagnostics-direct-phone', '直连和线路测速 · 375 宽：两条都没测全，最长的样子', { width: 375, height: 1100 },
+    { ...remote, via: 'direct', diagnostics: { status, now: DESIGN_NOW, diagnostics: null, direct: { certificate: null }, measure: { result: measured({
+      current: { kind: 'relay', scope: null, relayRegion: 'euw1', ok: 3, medianMs: 85, maxMs: 1430, error: 'timeout' },
+      tunnel: { kind: 'tunnel', scope: null, relayRegion: null, ok: 2, medianMs: 212, maxMs: 2600, error: 'failed' },
+    }) } } }),
   frame('diagnostics-phone', '连接诊断与网络路径 · 375 宽', { width: 375, height: 900 }, { diagnostics: { status, now: DESIGN_NOW, diagnostics: null } }),
 ]);
 
