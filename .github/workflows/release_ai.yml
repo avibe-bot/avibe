@@ -421,7 +421,7 @@ jobs:
           path: dist/
 
   release:
-    needs: release-backstop
+    needs: [release-backstop, build-assets]
     permissions:
       actions: write
       contents: write
@@ -429,10 +429,12 @@ jobs:
     concurrency:
       group: avibe-gh-release-${{ github.event.inputs.tag || github.ref_name }}
       cancel-in-progress: false
-    # Prepare notes while the core builds; only the exact-attempt successful
-    # build below can unlock GitHub-only publication. Stable assets still
-    # belong to publish.yml and do not wait for this RC-only build.
-    if: ${{ needs.release-backstop.result == 'success' && !cancelled() }}
+    # GitHub holds this job without a runner while RC assets build. Stable
+    # release notes use publish.yml's assets; their Stage 1 build is skipped.
+    if: >-
+      ${{ !cancelled() && needs.release-backstop.result == 'success' &&
+          ((startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') && needs.build-assets.result == 'success') ||
+           (!startsWith(github.event.inputs.tag || github.ref_name, 'gh-v') && needs.build-assets.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -793,7 +795,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW_SHA: ${{ github.sha }}
         run: |
-          python release-wait/scripts/release_workflow_artifacts.py wait-build \
+          python release-wait/scripts/release_workflow_artifacts.py fetch-build \
             --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID" \
             --attempt "$GITHUB_RUN_ATTEMPT" --sha "$WORKFLOW_SHA" --destination dist
 
