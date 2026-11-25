@@ -673,10 +673,11 @@ async def test_pre_tool_use_hook_enforces_policy_and_unattributable_permission_r
     def _run_hook(raw_input: str) -> dict[str, Any]:
         return json.loads(subprocess.run(hook_cmd, shell=True, cwd=str(workspace), input=raw_input, text=True, capture_output=True, check=True).stdout)
 
-    for tool in ("schedule", "invoke_subagent", "define_subagent", "Workflow"):
+    assert {"run_workflow", "swarm"} <= set(entry["matcher"].split("|"))
+    for tool in ("schedule", "invoke_subagent", "define_subagent", "Workflow", "run_workflow", "swarm"):
         out = _run_hook(json.dumps({"hookEventName": "PreToolUse", "toolCall": {"id": "t1", "name": tool, "args": {}}}))
         assert out["decision"] == "deny" and out["reason"] == check_tool_call(tool, {}).reason
-    for tool in ("read_file", "run_command", "grep_search"):
+    for tool in ("read_file", "run_command", "grep_search", "manage_subagents", "send_message"):
         assert _run_hook(json.dumps({"hookEventName": "PreToolUse", "toolCall": {"id": "t2", "name": tool, "args": {}}})) == {"decision": "allow"}
     assert _run_hook("{not-valid-json") == {"decision": "allow"}
 

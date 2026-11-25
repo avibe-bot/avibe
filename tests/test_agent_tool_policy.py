@@ -36,6 +36,8 @@ from core.handlers import session_handler as sh
         ("CronCreate", {"cron": "0 9 * * *", "prompt": "x"}),
         ("CronCreate", {"cron": "0 9 * * *", "prompt": "x", "durable": False}),
         ("Workflow", {"script": "export const meta = {}"}),
+        ("run_workflow", {"Description": "probe", "WaitMsBeforeAsync": 10000, "Script": "await agent(...)"}),
+        ("swarm", {"action": "add", "name": "helper", "brief": "do work"}),
         ("schedule", {"DurationSeconds": 60, "Prompt": "ping"}),
         ("invoke_subagent", {"name": "helper", "prompt": "do work"}),
         ("define_subagent", {"name": "helper", "instructions": "be helpful"}),

@@ -207,6 +207,8 @@ _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyD
     "ScheduleWakeup": _check_schedule_wakeup,
     "CronCreate": _check_cron_create,
     "Workflow": _check_workflow,
+    "run_workflow": _check_workflow,
+    "swarm": _check_antigravity_subagent,
     "schedule": _check_antigravity_schedule,
     "invoke_subagent": _check_antigravity_subagent,
     "define_subagent": _check_antigravity_subagent,
@@ -223,6 +225,8 @@ _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyD
 # injected prompt says so rather than claiming a gate that is not there.
 ALWAYS_SESSION_ONLY_TOOL_NAMES: Tuple[str, ...] = (
     "Workflow",
+    "run_workflow",
+    "swarm",
     "schedule",
     "invoke_subagent",
     "define_subagent",
