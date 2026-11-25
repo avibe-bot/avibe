@@ -182,6 +182,22 @@ def test_only_master_events_can_claim_full_mode(event, ref, expected):
         assert mode_for_event(event, ref) == expected
 
 
+def test_real_unit_matrix_evidence_count_matches_pr_and_master():
+    from scripts.ci_scenario_evidence import matrix_size
+
+    job = workflow()['jobs']['unit-test-shards']
+    assert matrix_size(job, mode='PR') == 8
+    assert matrix_size(job, mode='MASTER_FULL') == 16
+
+
+def test_design_fixture_and_added_reserved_names_remain_covered():
+    for path in ('ui/design/shell/storage.ts', 'ui/design/frames/chat/fixtures.ts'):
+        assert heavy_routes(scope(path))['ui-browser-checks'] == 'run'
+    for paths in [('assets/screenshots/aux.png',), ('assets/screenshots/safe.png', 'ui/design/aux.ts')]:
+        changed = scope_of([('A', '000000', '100644', p) for p in paths], True)
+        assert set(heavy_routes(changed).values()) == {'run'}
+
+
 def workflow():
     return yaml.safe_load((ROOT / ".github/workflows/lint.yml").read_text())
 

@@ -92,7 +92,10 @@ def common_input(path: str) -> bool:
 def presentation_only(path: str) -> bool:
     """Design sources are still checked on Linux; they are not shipped native inputs."""
     return well_formed(path) and (
-        narrative_path(path) or path.startswith(("ui/design/", "design/", "frames/"))
+        narrative_path(path) or path.startswith(("design/", "frames/"))
+        # Playwright imports the design shell and shared frame fixtures, but
+        # not the frame entry points rendered only by the design canvas.
+        or (path.startswith("ui/design/frames/") and path.endswith(".design.tsx"))
         or (path.startswith(("shots/", "assets/screenshots/")) and path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")))
     )
 
@@ -172,6 +175,12 @@ def validate_plan(plan: object) -> dict:
     if plan["mode"] == "PR" and jobs["ios-shell"] != "skip":
         raise ValueError("PR iOS belongs to its separate advisory workflow until #3418 is fixed")
     return plan
+
+
+def unit_python_versions(mode: str) -> list[str]:
+    if mode not in MODES:
+        raise ValueError(f"Unsupported matrix mode: {mode}")
+    return ["3.12", "3.15"] if mode == "MASTER_FULL" else ["3.12"]
 
 
 def mode_for_event(event_name: str, ref: str) -> str:
@@ -259,6 +268,7 @@ def main() -> int:
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a", encoding="utf-8") as stream:
+                stream.write(f"unit_python={json.dumps(unit_python_versions(mode))}\n")
                 stream.write(f"mode={mode}\ndocs_only={str(plan['docs_only']).lower()}\nplan={serialized}\n")
         summary = f"## CI scope: {mode}\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in plan["jobs"].items()) + "\n"
         if scope:
