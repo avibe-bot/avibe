@@ -4441,15 +4441,10 @@ final class MobileOnboardingTests: XCTestCase {
             var transitions = 0
             let transports = [original, resetting, replacement]
                 + (0..<3).map { _ in FakeMobileAuthTransport() }
-            var otpRequests = 0
-            for transport in transports {
-                transport.requestOTPHandler = { _ in otpRequests += 1; return 60 }
-            }
-            var created = 0
             var opened: MobileRuntimeContext?
             let coordinator = makeCoordinator(
                 defaults: defaults, websiteDataStore: store, transports: transports,
-                onCreateTransport: { created += 1 }, onOpen: { opened = $0 },
+                onOpen: { opened = $0 },
                 onPrepareAccountTransition: {
                     transitions += 1
                     // The NEW reset records a retained view after the old
@@ -4482,7 +4477,6 @@ final class MobileOnboardingTests: XCTestCase {
             XCTAssertTrue(coordinator.isCurrentRuntime(runtime), operation)
             XCTAssertFalse(coordinator.isAccountSurfaceActive, operation)
             XCTAssertTrue(registry.removalAttempts.isEmpty, operation)
-            _ = (otpRequests, created)
             withExtendedLifetime(retainedView) {}
         }
     }

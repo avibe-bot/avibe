@@ -502,9 +502,9 @@ final class AccountWebsiteDataStore {
         for candidate in candidates.sorted(by: {
             $0.uuidString < $1.uuidString
         }) {
-            // Listing/removal can suspend while a reset acquires authority or
-            // records another retained view. Never use an entry-time decision
-            // to remove a store after either ownership condition has changed.
+            // Asked again before each removal: while the listing or a
+            // removal is suspended, a transition can record a view that still
+            // holds a store (`canSweep`). Never act on an entry-time decision.
             guard canSweep() else { break }
             // The store in use now is never removed, whatever rotated
             // meanwhile.
