@@ -48,8 +48,11 @@ const iphone = (extra: Partial<Device> = {}): Device => ({
   ...extra,
 });
 
+/** Avibe Desktop as it reports itself (`device.describe`): the computer's name, then the app's own
+ *  version (from its release tag, `gh-v3.2.9rc1` → `3.2.9-rc.1`) and the system's. */
+const DESKTOP_VERSION = '3.2.9-rc.1';
 const macMini: Device = {
-  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', account, client: { kind: 'desktop', version: '3.2.8', platform: 'macOS' },
+  id: 'mini', group: 'mine', kind: 'desktop', name: 'Mac mini（办公室）', account, client: { kind: 'desktop', version: DESKTOP_VERSION, platform: 'macOS 26.1' },
   online: { path: 'tunnel', ms: 120 }, signedInAt: ago(379), functions: [],
 };
 const chrome: Device = {
@@ -171,7 +174,7 @@ const signedOut: SignedOutDevice[] = [
 /** Avibe Desktop on another Mac, viewing this instance: it describes itself (`device.describe`), so every
  *  sign-in it makes here is one row, under the computer's own name. */
 const desktopApp: Device = {
-  id: 'desktop-app', group: 'mine', kind: 'desktop', name: 'Max 的 MacBook Air', account, client: { kind: 'desktop', version: '3.2.9', platform: 'macOS 26.1' },
+  id: 'desktop-app', group: 'mine', kind: 'desktop', name: 'Max 的 MacBook Air', account, client: { kind: 'desktop', version: DESKTOP_VERSION, platform: 'macOS 26.1' },
   online: { path: 'tunnel', ms: 95 }, signedInAt: ago(2 * DAY), self: true, functions: [],
 };
 /** A browser that signed in twice: each sign-in is its own row, as a browser reports nothing of itself. */
