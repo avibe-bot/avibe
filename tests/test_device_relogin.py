@@ -536,7 +536,8 @@ def test_a_new_session_that_cannot_be_issued_replaces_nothing(issuer, monkeypatc
         with get_cached_sqlite_engine().begin() as conn:
             device_registry._tombstone(conn, taken, 2**40, 0)
     real_token = remote_access.secrets.token_urlsafe
-    # Only the browser session id (24 bytes) is fixed; every other token stays random.
+    # Every 24-byte token is fixed (the browser session id, and the handshake nonce, which only has to
+    # match itself); other sizes stay random.
     monkeypatch.setattr(remote_access.secrets, "token_urlsafe", lambda n=None: taken if n == 24 else real_token(n))
     # Without an account reference to enroll, so only the insert can notice the taken id.
     ref = None if why == "sid-of-another-session" else REF_B
