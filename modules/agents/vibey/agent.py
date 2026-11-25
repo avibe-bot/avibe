@@ -1243,10 +1243,10 @@ class VibeyAgent(BaseAgent):
         builtin_agent: bool, persist: bool = True, catalog: Optional[dict] = None,
     ) -> PromptState:
         """Read, compare and publish optional prefix state off the loop, once per Turn."""
-        # Request preview is strictly read-only, including optional derived
-        # checkpoint metadata. Historical reads remain the preview's contract.
-        runtime = await self.store.load_for_run(agent.session_id) if persist else None
-        entries = runtime.entries if runtime is not None else await self.store.load(agent.session_id)
+        # Preview uses the same carry-aware prefix decisions without publishing a capsule.
+        runtime = (await self.store.load_for_run(agent.session_id) if persist
+                   else await self.store.load_for_preview(agent.session_id))
+        entries = runtime.entries
         endpoint = router.preflight.endpoint
 
         def prepare():
