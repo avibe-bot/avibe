@@ -1380,8 +1380,12 @@ def test_a_live_mission_entry_stays_and_a_finished_one_leaves_only_after_a_mind_
     assert review_mind(
         _mission("- [x] Earlier: the importer shipped", "- [x] audit the billing export: done, finance signed off"), held
     ).problems() == []
-    # The price: history dropped in the very turn a live entry is marked reads the same, and gets the repair.
+    # The price: history dropped in the very turn a live entry is marked reads the same, and gets the repair. So does
+    # a fold in the turn a live entry is marked in the very words of a finished one the mind held.
     assert review_mind(_mission("- [x] audit the billing export: done"), held).structure is not None
+    same = _mission("- [x] audit", "- [x] ship", "- [ ] audit")
+    assert review_mind(_mission("- [x] Earlier: audit completed; release shipped", "- [x] audit"), same).structure is not None
+    assert review_mind(_mission("- [x] Earlier: audit completed; release shipped", "- [x] audit: done again"), same).problems() == []
     # Entries are counted, each line as often as it stands: a live entry finished into the words of one already
     # finished is newly finished all the same.
     twice = _mission("- [x] ship", "- [ ] ship", "- [ ] audit")
@@ -1516,6 +1520,12 @@ def test_goals_past_its_limit_only_by_entries_the_turn_marked_asks_no_repair():
     # just marked under the same heading and in the same first words, is the one that has to stay.
     pair = _mind(**{"## Mission": "- [ ] audit\n  " + "q" * 400 + "\n- [x] audit", "## Workstreams": "- [ ] next"})
     assert review_mind(pair.replace("- [ ] audit", "- [x] audit"), pair, 8_000).problems() == []
+    # The line that folds held entries is not one the turn marked: an oversized fold is asked to shrink at once, and
+    # the repair counts it among what may be folded.
+    shipped = _mind(**{"## Mission": "- [x] ship\n- [ ] audit"})
+    (problem,) = review_mind(shipped.replace("- [x] ship", "- [x] Earlier: shipped\n  " + "n" * 400), shipped, 8_000).problems()
+    # 474 bytes of Goals are 119 tokens; the fold's 425 bytes are 107.
+    assert "Goals is about 119 tokens, at most 83" in problem and "(about 107 tokens of it)" in problem
     # A mind past twice its limits' sum is not kept at all (the previous one stays), so there the turn is told while
     # it can still condense: no waiver.
     assert mind_revert(8_000) == 496

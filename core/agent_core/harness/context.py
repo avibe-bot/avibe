@@ -1170,7 +1170,8 @@ def _finished(blocks: Sequence[MindBlock], before: Optional[Sequence[MindBlock]]
     """The finished entries under Mission and Workstreams, by heading, each as a line range of its block; with
     ``before``, the mind the turn started from, only those that mind did not already hold as finished under the same
     heading: the ones this turn marked. An entry is the one ``before`` held when its lines are the same, or else its
-    own line is, each held entry standing for one."""
+    own line is, each held entry standing for one; a single new entry beside held ones that are gone is their fold,
+    not a mark."""
     spans = {name: _finished_spans(body) for name, body in blocks if name in MIND_BOXED}
     if before is None:
         return spans
@@ -1196,6 +1197,11 @@ def _finished(blocks: Sequence[MindBlock], before: Optional[Sequence[MindBlock]]
                 heads[body[start].strip()] -= 1
             else:
                 marked[name].append((start, end))
+        # With held entries gone or reworded, one new finished line is their fold (``review_mind``). When it is the
+        # only new one, nothing under this heading was marked; among several it cannot be told apart, and all count
+        # as marked.
+        if len(marked[name]) == 1 and +heads:
+            marked[name] = []
     return marked
 
 
