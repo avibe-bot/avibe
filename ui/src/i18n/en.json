@@ -8525,13 +8525,13 @@
       "invalidReturn": "Not bound again: the return from avibe.bot did not pass verification, so nothing changed. Try again.",
       "refusedUnknown": "This did not complete. (code: {{code}})",
       "asNewCloud": {
-        "intro": "The Avibe this computer is bound to is deleted at avibe.bot first; then this computer can be bound as a new computer to any account.",
-        "loseAvibe": "This Avibe is deleted at avibe.bot, and remote access through {{host}} stops at once.",
+        "intro": "{{host}} is deleted at avibe.bot first, as when unbinding. This takes effect at once and cannot be undone.",
         "loseName": "{{host}} stays with the original account until {{date}}; after that someone else can claim it.",
         "loseNameDays_one": "{{host}} stays with the original account for {{count}} day; after that someone else can claim it.",
         "loseNameDays_other": "{{host}} stays with the original account for {{count}} days; after that someone else can claim it.",
         "loseNamePlain": "{{host}} stays with the original account for a while; after that someone else can claim it.",
-        "keepKeys": "Model keys and the Vault do not change."
+        "title": "Delete {{host}} and bind as a new computer?",
+        "next": "After that, this computer is bound as a new computer to the account you sign in with next at avibe.bot."
       }
     },
     "notice": {

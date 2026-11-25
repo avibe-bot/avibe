@@ -8525,13 +8525,13 @@
       "invalidReturn": "没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。",
       "refusedUnknown": "这次没有完成。（代码：{{code}}）",
       "asNewCloud": {
-        "intro": "会先在 avibe.bot 上删除这台电脑现在绑定的 Avibe，然后这台电脑可以作为一台新电脑绑定到任何账号。",
-        "loseAvibe": "avibe.bot 上的这个 Avibe 会被删除，通过 {{host}} 的远程访问立即停止。",
+        "intro": "会先在 avibe.bot 上删除 {{host}}，和解除绑定一样。立即生效，不能撤销。",
         "loseName": "{{host}} 为原来的账号保留到 {{date}}；之后别人可以领取。",
         "loseNameDays_one": "{{host}} 为原来的账号保留 {{count}} 天；之后别人可以领取。",
         "loseNameDays_other": "{{host}} 为原来的账号保留 {{count}} 天；之后别人可以领取。",
         "loseNamePlain": "{{host}} 会为原来的账号保留一段时间；之后别人可以领取。",
-        "keepKeys": "模型密钥和 Vault 都不变。"
+        "title": "删除 {{host}}，作为一台新电脑重新绑定？",
+        "next": "删除以后，这台电脑会作为一台新电脑，绑定到你接下来在 avibe.bot 登录的账号。"
       }
     },
     "notice": {

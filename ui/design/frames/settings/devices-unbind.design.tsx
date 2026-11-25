@@ -91,9 +91,9 @@ const designFrames = frames([
 
   // 7. 「作为一台新电脑重新绑定」 now deletes the old binding at avibe.bot first; where avibe.bot does
   //    not accept that (its key no longer works), a separate confirmation clears this computer only.
-  frame('as-new-cloud', '作为一台新电脑重新绑定 · 先在 avibe.bot 上删除原来的 Avibe：名字为原来的账号保留到哪天', { width: 1440, height: 1200 },
+  frame('as-new-cloud', '作为一台新电脑重新绑定 · 先在 avibe.bot 上删除原来的域名，后果和解除绑定同一套说法；之后绑定到接下来登录的账号', { width: 1440, height: 1200 },
     { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: true, releaseAt: RELEASE, holdDays: 30 } }),
-  frame('as-new-cloud-other-account', '作为一台新电脑重新绑定 · 属于另一个账号：先说是谁的，名字为那个账号保留', { width: 1440, height: 1200 },
+  frame('as-new-cloud-other-account', '作为一台新电脑重新绑定 · 属于另一个账号：先说是谁的，名字为原来的账号保留', { width: 1440, height: 1200 },
     { rebind: { state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: false, releaseAt: RELEASE, holdDays: 30 } }),
   frame('as-new-cloud-phone', '作为一台新电脑重新绑定（删除云端）· 390 宽', { ...IPHONE_17_PRO, width: 390, height: 1500 },
     { rebind: { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, canReset: true, rebindDialog: { kind: 'asNewCloud', healthConnected: true, releaseAt: RELEASE, holdDays: 30 } }),
