@@ -315,6 +315,44 @@ This is one read per resume, not polling.
 
 It does not touch anything that could lose server-side state or repeat an action: plain shells (whose process survival is not promised), uploads, and requests in flight. Those react only to their own connection's error. The action adds no retry of any request. A change of `preferred` alone triggers nothing. Old and new backends coexist.
 
+### 10a. 「线路测速」: the measurement's own path (`DirectMeasure.swift`)
+
+`direct.measure()` (`ios-app.md` section 4, capability `directMeasure`) is a
+diagnosis and nothing else: one warm-up request and five timed HTTPS
+`GET /health` round trips on one connection, for the path in use and for the
+Cloudflare tunnel, both within 30 s, one measurement at a time in the App.
+It makes no plan, takes part in no race, and changes no path, choice,
+stickiness, closure or count, under 「仅直连和中继」 too.
+
+- **The path in use** is measured through a loopback port of its own, open
+  for that measurement only. The port serves `CONNECT <the instance's
+  host>:443` and nothing else, over the App's admitted direct or relay link
+  (`DirectPathController.measurementLink`) and over nothing else: it has no
+  way to the public origin. An ephemeral URLSession of its own is routed to
+  it with no failover and one connection per host; TLS is the system's, end
+  to end to the instance, with the system's check of the instance's name.
+  With no admitted link there is no such leg (`current: null`).
+- **The tunnel** is measured by a second ephemeral URLSession with no route,
+  to the instance's public address. The two sessions share nothing.
+- **A timed sample counts** only if it ran on the connection the warm-up
+  made (the task's metrics say the connection was used again, with one
+  attempt), through the port (the metrics say a proxy, and the port has
+  seen exactly one tunnel), on the path the measurement began on
+  (selection, lease, listener, path generation and the status's `sequence`,
+  which advances at every change of the path's kind, so a path that changed
+  and changed back has changed). Anything else ends that leg as `failed`
+  with what was timed before it. Measured on macOS: URLSession sends a
+  request again on a new connection without an error when its connection is
+  cut, which is why the metrics are read and not only the result.
+- **Labels** are the link's own: `relay`, `ipv4` or `ipv6`; `local` or
+  `global` from the selected path's remote address class; and for the relay
+  its region, read from the selected path's own relay URL and only when
+  that is one of the four public relays (`use1`, `usw1`, `euc1`, `aps1`).
+  Any other relay has no region; none is taken from what was configured.
+- **Not covered by a test in CI:** the whole path through URLSession (TLS to
+  an instance through the port). The test target has no TLS server, and the
+  system sends a request for a loopback address round any route.
+
 ## 11. Tests and qualification
 
 **Automated, in `ios-shell` on the simulator, with stand-ins.** These are App-logic tests; they do not qualify WebKit:

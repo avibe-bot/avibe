@@ -1170,6 +1170,49 @@ final class DirectPathController {
         return plan
     }
 
+    /// For a measurement only (`DirectMeasure.swift`): the path reported
+    /// usable for the instance at `url`, under the conditions a plan's
+    /// direct candidate has, or nil. What it gives opens streams over that
+    /// path and says whether everything it was made under still holds. It
+    /// makes no plan and records nothing: no race, failure, stickiness,
+    /// closure or count is touched by a measurement.
+    func measurementLink(forInstanceURL url: URL) -> DirectMeasureLink? {
+        guard
+            let authority = DirectAuthority(instanceURL: url),
+            let tag = directStreamTag(for: authority),
+            let kind = currentPath
+        else {
+            return nil
+        }
+        let fence = Fence(
+            selection: selection,
+            pathGeneration: pathGeneration,
+            accountEpoch: accountEpoch
+        )
+        // The status's `sequence` advances at every change of the path's
+        // kind, so a path that changed and changed back is still a change.
+        let sequence = sequence
+        let selected = transport.pathDiagnostics.selected
+        let transport = transport
+        return DirectMeasureLink(
+            authority: authority,
+            kind: kind,
+            local: selected?.kind == kind ? selected?.local : nil,
+            relayRegion: selected?.kind == kind ? selected?.relayRegion : nil,
+            open: {
+                try await transport.openStream(for: tag)
+            },
+            isCurrent: { [weak self] in
+                guard let self else {
+                    return false
+                }
+                return self.isCurrent(fence, lease: tag.target.runtime)
+                    && self.sequence == sequence
+                    && self.currentPath == kind
+            }
+        )
+    }
+
     /// A sticky direct attempt did not answer within its bound. Plans hedge
     /// again, at once. The path is not reported as failed: no probe is
     /// started and nothing it carries is closed, so a request already

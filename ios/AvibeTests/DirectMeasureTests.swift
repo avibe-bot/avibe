@@ -1,0 +1,1039 @@
+import Network
+import XCTest
+@testable import Avibe
+
+/// 「线路测速」's transport (`DirectMeasure.swift`): the sampling rules as
+/// data, the measurement's own port against real sockets with a stand-in
+/// for the App's link, and the two sessions against a local server.
+///
+/// What cannot run here is the whole path through URLSession: TLS to an
+/// instance through the port. The test target has no TLS server identity,
+/// and the system sends a request for a loopback address round a route, so
+/// a local server cannot stand in for the instance behind the port. That
+/// path was measured by hand on macOS against a public host (the PR has the
+/// result); here its parts are held separately.
+final class DirectMeasureTests: XCTestCase {
+    private static let host = "one-app.avibe.bot"
+
+    // MARK: Sampling
+
+    private func farEnd(_ limits: DirectMeasure.Limits = .standard) -> ContinuousClock.Instant {
+        ContinuousClock.now.advanced(by: .seconds(limits.totalSeconds))
+    }
+
+    /// Runs the sampling with `answers[index]` as each request's result;
+    /// returns the result and the indexes that were asked for.
+    private func sampled(
+        limits: DirectMeasure.Limits = .standard,
+        unchanged: @escaping @Sendable (Int, Int) -> Bool = { _, _ in true },
+        _ answer: @escaping @Sendable (Int) async throws -> DirectMeasure.Sample
+    ) async -> (DirectMeasure.SampleResult, [Int]) {
+        let asked = MeasureLog<Int>()
+        let checks = MeasureCounter()
+        let result = await DirectMeasure.sample(
+            limits: limits,
+            end: farEnd(limits),
+            unchanged: { index in unchanged(index, checks.next()) }
+        ) { index in
+            asked.add(index)
+            return try await answer(index)
+        }
+        return (result, asked.values)
+    }
+
+    private func good(_ milliseconds: Int) -> DirectMeasure.Sample {
+        DirectMeasure.Sample(elapsed: .milliseconds(milliseconds), healthy: true, counts: true)
+    }
+
+    func testOneWarmUpThenFiveTimedRequestsAreTheLeg() async {
+        // The warm-up is slow, as a first request is, and is not timed.
+        let (result, asked) = await sampled { index in
+            index == 0 ? self.good(900) : self.good(10 * index)
+        }
+        XCTAssertEqual(asked, [0, 1, 2, 3, 4, 5])
+        XCTAssertEqual(result.times, [10, 20, 30, 40, 50].map { Duration.milliseconds($0) })
+        XCTAssertNil(result.error)
+        let leg = DirectMeasure.leg(.relay, scope: nil, relayRegion: "euc1", result)
+        XCTAssertEqual(
+            leg,
+            DirectMeasure.Leg(
+                kind: .relay, scope: nil, relayRegion: "euc1", ok: 5, medianMs: 30, maxMs: 50, error: nil
+            )
+        )
+    }
+
+    func testAnUnhealthyAnswerIsTheLegsErrorAndTheRestGoOn() async {
+        // Answered, but not well: not timed, and the first of them is the
+        // error. The warm-up's own health is not asked.
+        let (result, asked) = await sampled { index in
+            switch index {
+            case 0, 2, 4:
+                return DirectMeasure.Sample(elapsed: .milliseconds(5), healthy: false, counts: true)
+            default:
+                return self.good(10 * index)
+            }
+        }
+        XCTAssertEqual(asked, [0, 1, 2, 3, 4, 5])
+        XCTAssertEqual(result.times, [10, 30, 50].map { Duration.milliseconds($0) })
+        XCTAssertEqual(result.error, .failed)
+        let leg = DirectMeasure.leg(.tunnel, scope: nil, relayRegion: nil, result)
+        XCTAssertEqual(leg.ok, 3)
+        XCTAssertEqual(leg.medianMs, 30)
+        XCTAssertEqual(leg.maxMs, 50)
+        XCTAssertEqual(leg.error, .failed)
+    }
+
+    func testARequestOnAnotherConnectionEndsTheLegWithWhatWasTimedBeforeIt() async {
+        // The third timed request was sent again on a new connection, or
+        // went round the port: `counts` is false. It is not timed, and
+        // nothing after it is asked, since it would run on that connection.
+        let (result, asked) = await sampled { index in
+            index == 3
+                ? DirectMeasure.Sample(elapsed: .milliseconds(1), healthy: true, counts: false)
+                : self.good(10 * index)
+        }
+        XCTAssertEqual(asked, [0, 1, 2, 3])
+        XCTAssertEqual(result.times, [10, 20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(result.error, .failed)
+        // A warm-up that did not go the leg's way: nothing is timed at all.
+        let (none, onlyWarmUp) = await sampled { _ in
+            DirectMeasure.Sample(elapsed: .milliseconds(1), healthy: true, counts: false)
+        }
+        XCTAssertEqual(onlyWarmUp, [0])
+        XCTAssertEqual(none, DirectMeasure.SampleResult(times: [], error: .failed))
+        XCTAssertEqual(DirectMeasure.leg(.ipv4, scope: .local, relayRegion: nil, none).ok, 0)
+        XCTAssertNil(DirectMeasure.leg(.ipv4, scope: .local, relayRegion: nil, none).medianMs)
+    }
+
+    func testAChangeOfThePathEndsTheLegBeforeAndAfterARequest() async {
+        // `unchanged` is asked before and after every request: checks 0 and
+        // 1 are the warm-up's, 2 and 3 the first timed request's, and so on.
+        // Changed before the third timed request: it is never made.
+        let (before, askedBefore) = await sampled(unchanged: { _, check in check < 6 }) { index in
+            self.good(10 * index)
+        }
+        XCTAssertEqual(askedBefore, [0, 1, 2])
+        XCTAssertEqual(before.times, [10, 20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(before.error, .failed)
+        // Changed while the third timed request ran: it was made and
+        // answered, and is not timed.
+        let (during, askedDuring) = await sampled(unchanged: { _, check in check < 7 }) { index in
+            self.good(10 * index)
+        }
+        XCTAssertEqual(askedDuring, [0, 1, 2, 3])
+        XCTAssertEqual(during.times, [10, 20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(during.error, .failed)
+        // No path at all when it began.
+        let (never, askedNever) = await sampled(unchanged: { _, _ in false }) { _ in self.good(1) }
+        XCTAssertEqual(askedNever, [])
+        XCTAssertEqual(never, DirectMeasure.SampleResult(times: [], error: .failed))
+    }
+
+    func testARequestThatFailsEndsTheLegAndTheFirstErrorIsKept() async {
+        struct Refused: Error {}
+        let (result, asked) = await sampled { index in
+            if index == 4 {
+                throw Refused()
+            }
+            return self.good(10 * index)
+        }
+        XCTAssertEqual(asked, [0, 1, 2, 3, 4])
+        XCTAssertEqual(result.times.count, 3)
+        XCTAssertEqual(result.error, .failed)
+    }
+
+    func testARequestSlowerThanItsBoundEndsTheLegAsTimeout() async {
+        var limits = DirectMeasure.Limits.standard
+        limits.sampleSeconds = 0.2
+        let began = ContinuousClock.now
+        let (result, asked) = await sampled(limits: limits) { index in
+            if index == 3 {
+                // It would answer, long after its bound.
+                try await Task.sleep(for: .seconds(20))
+            }
+            return self.good(10 * index)
+        }
+        XCTAssertEqual(asked, [0, 1, 2, 3])
+        XCTAssertEqual(result.times, [10, 20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(result.error, .timeout)
+        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+        // An unhealthy answer before it is the first error, and stays it.
+        let (mixed, _) = await sampled(limits: limits) { index in
+            if index == 1 {
+                return DirectMeasure.Sample(elapsed: .milliseconds(1), healthy: false, counts: true)
+            }
+            if index == 3 {
+                try await Task.sleep(for: .seconds(20))
+            }
+            return self.good(10 * index)
+        }
+        XCTAssertEqual(mixed.times, [20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(mixed.error, .failed)
+    }
+
+    func testTheWholeMeasurementsBoundEndsALegWhateverItsRequestsDo() async {
+        // The App's bounds: five seconds a request, thirty for everything.
+        XCTAssertEqual(DirectMeasure.Limits.standard.sampleSeconds, 5)
+        XCTAssertEqual(DirectMeasure.Limits.standard.totalSeconds, 30)
+        XCTAssertEqual(DirectMeasure.samples, 5)
+        XCTAssertEqual(DirectMeasure.basis, "warm-https-health")
+
+        // Each request is within its own bound; together they are not
+        // within the measurement's. The leg ends at that bound.
+        var limits = DirectMeasure.Limits.standard
+        limits.sampleSeconds = 5
+        limits.totalSeconds = 0.7
+        let began = ContinuousClock.now
+        let (result, asked) = await sampled(limits: limits) { index in
+            try await Task.sleep(for: .milliseconds(300))
+            return self.good(10 * index)
+        }
+        let took = began.duration(to: .now)
+        XCTAssertEqual(result.error, .timeout)
+        XCTAssertLessThan(asked.count, 4)
+        XCTAssertLessThan(result.times.count, 3)
+        XCTAssertGreaterThanOrEqual(took, .milliseconds(650))
+        XCTAssertLessThan(took, .seconds(3))
+
+        // A request that does not end when it is cancelled is not waited
+        // for past the bound either.
+        limits.totalSeconds = 0.3
+        let stubborn = ContinuousClock.now
+        let held = MeasureGate()
+        let (stuck, _) = await sampled(limits: limits) { _ in
+            await held.wait()
+            return self.good(1)
+        }
+        XCTAssertEqual(stuck, DirectMeasure.SampleResult(times: [], error: .timeout))
+        XCTAssertLessThan(stubborn.duration(to: .now), .seconds(3))
+        held.open()
+    }
+
+    func testALegsNumbersAreOverTheCompletedSamplesOnly() {
+        let times = { (values: [Int]) in values.map { Duration.milliseconds($0) } }
+        // An even count: the median is between the two in the middle.
+        let four = DirectMeasure.leg(
+            .ipv6, scope: .global, relayRegion: nil,
+            DirectMeasure.SampleResult(times: times([40, 10, 30, 20]), error: .timeout)
+        )
+        XCTAssertEqual(four.ok, 4)
+        XCTAssertEqual(four.medianMs, 25)
+        XCTAssertEqual(four.maxMs, 40)
+        XCTAssertEqual(four.error, .timeout)
+        XCTAssertEqual(four.scope, .global)
+        // Fewer than all of them with no reason given is a failure, never
+        // a clean leg.
+        let short = DirectMeasure.leg(
+            .tunnel, scope: nil, relayRegion: nil,
+            DirectMeasure.SampleResult(times: times([7]), error: nil)
+        )
+        XCTAssertEqual(short.error, .failed)
+        XCTAssertEqual(short.medianMs, 7)
+        // Fractions of a millisecond are kept.
+        let fine = DirectMeasure.leg(
+            .tunnel, scope: nil, relayRegion: nil,
+            DirectMeasure.SampleResult(times: [.microseconds(1_500)], error: .failed)
+        )
+        XCTAssertEqual(fine.maxMs, 1.5)
+    }
+
+    // MARK: One at a time
+
+    @MainActor
+    func testASecondMeasurementWhileOneRunsIsBusyAtOnce() async {
+        let empty = DirectMeasure.Measurement(measuredAt: Date(timeIntervalSince1970: 1), current: nil, tunnel: nil)
+        let held = MeasureGate()
+        let started = MeasureGate()
+        let first = Task { @MainActor in
+            await DirectMeasure.exclusively {
+                started.open()
+                await held.wait()
+                return empty
+            }
+        }
+        await started.wait()
+        // While the first runs: busy, and its own work is never begun.
+        let began = ContinuousClock.now
+        let second = await DirectMeasure.exclusively {
+            XCTFail("A second measurement ran beside the first.")
+            return empty
+        }
+        XCTAssertEqual(second, .busy)
+        XCTAssertLessThan(began.duration(to: .now), .seconds(1))
+        held.open()
+        let done = await first.value
+        XCTAssertEqual(done, .measured(empty))
+        // The first is over: the next one runs.
+        let third = await DirectMeasure.exclusively { empty }
+        XCTAssertEqual(third, .measured(empty))
+    }
+
+    func testAnAddressThatIsNotAnInstancesMeasuresNothing() async {
+        // Not an HTTPS origin on the default port with a DNS name: nothing
+        // is attempted on either path, and nothing is asked of the link.
+        let link = MeasureLinkStandIn(host: Self.host)
+        for address in ["http://one-app.avibe.bot", "https://one-app.avibe.bot:8443", "https://192.0.2.7"] {
+            let measured = await DirectMeasure.measurement(
+                ofInstanceAt: URL(string: address)!,
+                link: link.link
+            )
+            XCTAssertNil(measured.current, address)
+            XCTAssertNil(measured.tunnel, address)
+        }
+        XCTAssertEqual(link.opened, 0)
+    }
+
+    // MARK: The measurement's port
+
+    /// One exchange with the port over a real socket: sends `request`,
+    /// returns everything answered until the port closes or `enough`.
+    private func ask(
+        _ port: UInt16,
+        _ request: String,
+        until enough: @escaping (String) -> Bool = { _ in false },
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> String {
+        let connection = NWConnection(
+            host: "127.0.0.1",
+            port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)),
+            using: .tcp
+        )
+        connection.start(queue: .global())
+        defer {
+            connection.cancel()
+        }
+        try await connection.sendAll(Data(request.utf8))
+        var answered = ""
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while ContinuousClock.now < deadline, !enough(answered) {
+            // A port that neither answers nor closes fails the test that
+            // asked, at this bound, instead of holding it.
+            let next = await DirectMeasure.bounded(until: deadline) {
+                try await connection.receiveChunk(maximumLength: 4096)
+            }
+            guard case .success(let chunk) = next else {
+                XCTFail("The port neither finished its answer nor closed: \(answered)", file: file, line: line)
+                break
+            }
+            answered += String(decoding: chunk.data, as: UTF8.self)
+            if chunk.isComplete {
+                break
+            }
+        }
+        return answered
+    }
+
+    /// Whether anything accepts a connection on the loopback `port` now.
+    private func accepts(_ port: UInt16) async -> Bool {
+        guard let endpoint = NWEndpoint.Port(rawValue: port) else {
+            return false
+        }
+        let connection = NWConnection(host: "127.0.0.1", port: endpoint, using: .tcp)
+        defer {
+            connection.cancel()
+        }
+        let settled = MeasureLog<Bool>()
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: settled.add(true)
+            // A refused connection waits to be tried again: nothing there.
+            case .waiting, .failed, .cancelled: settled.add(false)
+            default: break
+            }
+        }
+        connection.start(queue: .global())
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while settled.values.isEmpty, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return settled.values.first ?? false
+    }
+
+    private func connect(_ host: String, port: Int = 443) -> String {
+        "CONNECT \(host):\(port) HTTP/1.1\r\nHost: \(host):\(port)\r\n\r\n"
+    }
+
+    func testThePortServesItsInstancesHostOverTheLinkAndNothingElseOverAnything() async throws {
+        let link = MeasureLinkStandIn(host: Self.host)
+        let port = DirectMeasurePort(link: link.link)
+        let bound = try await port.start()
+        addTeardownBlock {
+            port.stop()
+        }
+
+        // Anything but `CONNECT <the host>:443` is refused, and nothing is
+        // opened for it: there is no other way out of this port than the
+        // link, and no request for another place reaches even that.
+        for (request, status) in [
+            (connect("two-app.avibe.bot"), 403),
+            (connect("sub.\(Self.host)"), 403),
+            (connect("example.com"), 403),
+            (connect(Self.host, port: 80), 403),
+            (connect("192.0.2.7"), 403),
+            ("GET http://\(Self.host)/health HTTP/1.1\r\nHost: \(Self.host)\r\n\r\n", 405),
+            ("GET /health HTTP/1.1\r\nHost: \(Self.host)\r\n\r\n", 405),
+            ("OWNER abc HTTP/1.1\r\n\r\n", 403),
+            ("nonsense\r\n\r\n", 400),
+        ] {
+            let answered = try await ask(bound, request)
+            XCTAssertTrue(answered.hasPrefix("HTTP/1.1 \(status) "), "\(request.prefix(40)): \(answered)")
+        }
+        XCTAssertEqual(port.tunnels, 0)
+        XCTAssertEqual(link.opened, 0)
+
+        // Its own host: one stream over the link, asked as the App's
+        // listener asks the instance, then opaque bytes both ways.
+        let connection = NWConnection(
+            host: "127.0.0.1",
+            port: try XCTUnwrap(NWEndpoint.Port(rawValue: bound)),
+            using: .tcp
+        )
+        connection.start(queue: .global())
+        try await connection.sendAll(Data(connect(Self.host).utf8))
+        var head = ""
+        while !head.hasSuffix("\r\n\r\n") {
+            head += String(decoding: try await connection.receiveChunk(maximumLength: 4096).data, as: UTF8.self)
+        }
+        XCTAssertEqual(head, "HTTP/1.1 200 Connection Established\r\n\r\n")
+        XCTAssertEqual(port.tunnels, 1)
+        XCTAssertEqual(link.opened, 1)
+        let stream = try XCTUnwrap(link.streams.first)
+        XCTAssertEqual(
+            String(decoding: stream.head, as: UTF8.self),
+            "CONNECT \(Self.host):443 HTTP/1.1\r\nHost: \(Self.host):443\r\n\r\n"
+        )
+        for message in ["first", "second"] {
+            try await connection.sendAll(Data(message.utf8))
+            var echoed = ""
+            while echoed.count < message.count {
+                echoed += String(
+                    decoding: try await connection.receiveChunk(maximumLength: 4096).data,
+                    as: UTF8.self
+                )
+            }
+            XCTAssertEqual(echoed, message)
+        }
+
+        // A second request for the host is a second tunnel: what a
+        // connection made anew looks like, and what ends a leg.
+        let again = try await ask(bound, connect(Self.host)) { $0.hasSuffix("\r\n\r\n") }
+        XCTAssertTrue(again.hasPrefix("HTTP/1.1 200 "), again)
+        XCTAssertEqual(port.tunnels, 2)
+        XCTAssertEqual(link.opened, 2)
+
+        // The port closes with its measurement: what it carried ends, its
+        // stream is given up, and nothing listens there afterwards.
+        port.stop()
+        let ended = try? await connection.receiveChunk(maximumLength: 16)
+        XCTAssertTrue(ended == nil || (ended?.isComplete == true && ended?.data.isEmpty == true))
+        try await eventually(timeout: .seconds(10)) { stream.isCancelled }
+        try await eventually(timeout: .seconds(10)) {
+            await self.accepts(bound) == false
+        }
+        connection.cancel()
+    }
+
+    func testThePortRefusesWhenTheLinkIsNotAsItWasOrDoesNotCarry() async throws {
+        // No longer current: refused, and the link is not asked for a
+        // stream. (The request still counts as one made.)
+        let stale = MeasureLinkStandIn(host: Self.host)
+        stale.current.set(false)
+        let stalePort = DirectMeasurePort(link: stale.link)
+        let staleBound = try await stalePort.start()
+        addTeardownBlock {
+            stalePort.stop()
+        }
+        let unavailable = try await ask(staleBound, connect(Self.host))
+        XCTAssertTrue(unavailable.hasPrefix("HTTP/1.1 503 "), unavailable)
+        XCTAssertEqual(stalePort.tunnels, 1)
+        XCTAssertEqual(stale.opened, 0)
+
+        // The link gives no stream, or the instance refuses the request, or
+        // never answers it: 502, each within the port's patience.
+        var limits = DirectMeasure.Limits.standard
+        limits.sampleSeconds = 0.5
+        for mode in [MeasureLinkStandIn.Mode.fails, .refuses, .silent] {
+            let link = MeasureLinkStandIn(host: Self.host, mode: mode)
+            let port = DirectMeasurePort(link: link.link, limits: limits)
+            let bound = try await port.start()
+            let began = ContinuousClock.now
+            let answered = try await ask(bound, connect(Self.host))
+            XCTAssertTrue(answered.hasPrefix("HTTP/1.1 502 "), "\(mode): \(answered)")
+            XCTAssertLessThan(began.duration(to: .now), .seconds(5), "\(mode)")
+            XCTAssertEqual(link.opened, 1, "\(mode)")
+            port.stop()
+            if mode != .fails {
+                let stream = try XCTUnwrap(link.streams.first)
+                try await eventually(timeout: .seconds(10)) { stream.isCancelled }
+            }
+        }
+
+        // A client that never finishes its request is not waited for.
+        let quiet = MeasureLinkStandIn(host: Self.host)
+        let quietPort = DirectMeasurePort(link: quiet.link, limits: limits)
+        let quietBound = try await quietPort.start()
+        addTeardownBlock {
+            quietPort.stop()
+        }
+        let began = ContinuousClock.now
+        let nothing = try await ask(quietBound, "CONNECT \(Self.host):443 HTTP/1.1\r\n")
+        XCTAssertEqual(nothing, "")
+        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+        XCTAssertEqual(quietPort.tunnels, 0)
+    }
+
+    // MARK: The two sessions
+
+    func testTheTwoSessionsAreEachTheirOwnAndOnlyOneHasARoute() throws {
+        let limits = DirectMeasure.Limits.standard
+        let port = try XCTUnwrap(NWEndpoint.Port(rawValue: 49_152))
+        let current = DirectMeasure.currentConfiguration(port: port, limits: limits)
+        let tunnel = DirectMeasure.tunnelConfiguration(limits: limits)
+        // The measured path's session goes to the port and nowhere else.
+        XCTAssertEqual(current.proxyConfigurations.count, 1)
+        XCTAssertEqual(current.proxyConfigurations.first?.allowFailover, false)
+        // The tunnel's has no route of the App's.
+        XCTAssertTrue(tunnel.proxyConfigurations.isEmpty)
+        for configuration in [current, tunnel] {
+            XCTAssertEqual(configuration.httpMaximumConnectionsPerHost, 1)
+            XCTAssertEqual(configuration.requestCachePolicy, .reloadIgnoringLocalAndRemoteCacheData)
+            XCTAssertNil(configuration.urlCache)
+            XCTAssertNil(configuration.httpCookieStorage)
+            XCTAssertNil(configuration.urlCredentialStorage)
+            XCTAssertFalse(configuration.httpShouldSetCookies)
+            XCTAssertFalse(configuration.waitsForConnectivity)
+            XCTAssertEqual(configuration.timeoutIntervalForRequest, limits.sampleSeconds)
+        }
+    }
+
+    func testEachSessionKeepsToOneConnectionOfItsOwnAndSaysWhenItDidNot() async throws {
+        let server = try MeasureHealthServer()
+        let health = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let limits = DirectMeasure.Limits.standard
+        let first = DirectMeasure.Requester(
+            configuration: DirectMeasure.tunnelConfiguration(limits: limits), url: health, limits: limits
+        )
+        let second = DirectMeasure.Requester(
+            configuration: DirectMeasure.tunnelConfiguration(limits: limits), url: health, limits: limits
+        )
+        addTeardownBlock {
+            first.finish()
+            second.finish()
+        }
+
+        // One session: its first request makes the connection, and every
+        // later one uses it again, with one attempt each.
+        for index in 0..<4 {
+            let observed = try await first.get()
+            XCTAssertTrue(observed.healthy, "\(index)")
+            XCTAssertEqual(observed.reused, index > 0, "\(index)")
+            XCTAssertEqual(observed.transactions, 1, "\(index)")
+            XCTAssertFalse(observed.viaProxy, "\(index)")
+            XCTAssertGreaterThan(observed.elapsed, .zero)
+        }
+        XCTAssertEqual(server.connections, 1)
+        // The other session shares nothing with it: its first request is
+        // on a connection of its own, though one to the same place is open.
+        let other = try await second.get()
+        XCTAssertFalse(other.reused)
+        XCTAssertEqual(server.connections, 2)
+        let otherAgain = try await second.get()
+        XCTAssertTrue(otherAgain.reused)
+        XCTAssertEqual(server.connections, 2)
+        XCTAssertEqual(server.requests, 6)
+
+        // The connection is closed under the session: the next request is
+        // answered all the same, and says it was not on the old connection.
+        server.closeConnections()
+        let renewed = try await first.get()
+        XCTAssertTrue(renewed.healthy)
+        XCTAssertTrue(!renewed.reused || renewed.transactions > 1, "\(renewed)")
+        XCTAssertEqual(server.connections, 3)
+
+        // Answers that are not the instance being well.
+        for (answer, why) in [
+            (MeasureHealthServer.Answer(status: 200, body: #"{"status":"degraded"}"#), "another status word"),
+            (MeasureHealthServer.Answer(status: 200, body: "ok"), "not JSON"),
+            (MeasureHealthServer.Answer(status: 503, body: #"{"status":"ok"}"#), "not 200"),
+            (
+                MeasureHealthServer.Answer(
+                    status: 200,
+                    body: #"{"status":"ok","pad":""# + String(repeating: "x", count: 9_000) + #""}"#
+                ),
+                "more than is read"
+            ),
+        ] {
+            server.answer = answer
+            let observed = try await second.get()
+            XCTAssertFalse(observed.healthy, why)
+        }
+        // A redirect is not followed: its target is never asked.
+        server.answer = MeasureHealthServer.Answer(status: 302, body: "", location: "/elsewhere")
+        let redirected = try await second.get()
+        XCTAssertFalse(redirected.healthy)
+        XCTAssertFalse(server.paths.contains("/elsewhere"))
+        XCTAssertTrue(server.paths.allSatisfy { $0 == "/health" })
+    }
+
+    func testARequestThatWentRoundThePortSaysSo() async throws {
+        // The system sends a request for a loopback address straight
+        // there, whatever route a session has (measured; it is why the
+        // port's own path cannot be driven against a local server). That
+        // makes this a request that went round the port: it is answered,
+        // and `viaProxy` is false, which is what the sampling refuses.
+        let server = try MeasureHealthServer()
+        let health = try await server.start()
+        addTeardownBlock {
+            server.stop()
+        }
+        let link = MeasureLinkStandIn(host: Self.host)
+        let port = DirectMeasurePort(link: link.link)
+        let started = try await port.start()
+        let bound = try XCTUnwrap(NWEndpoint.Port(rawValue: started))
+        addTeardownBlock {
+            port.stop()
+        }
+        let limits = DirectMeasure.Limits.standard
+        let routed = DirectMeasure.Requester(
+            configuration: DirectMeasure.currentConfiguration(port: bound, limits: limits),
+            url: health,
+            limits: limits
+        )
+        addTeardownBlock {
+            routed.finish()
+        }
+        let observed = try await routed.get()
+        XCTAssertTrue(observed.healthy)
+        XCTAssertFalse(observed.viaProxy)
+        XCTAssertEqual(port.tunnels, 0)
+        XCTAssertEqual(link.opened, 0)
+    }
+
+    // MARK: The relay's region
+
+    func testARelaysRegionIsReadFromTheSelectedPathsOwnRelayAndOnlyIfKnown() {
+        // The four public relays, as the binding reports a relay path's
+        // remote address: the relay's URL, with the root dot or without.
+        for (url, region) in [
+            ("https://use1-1.relay.n0.iroh.link./", "use1"),
+            ("https://usw1-1.relay.n0.iroh.link./", "usw1"),
+            ("https://euc1-1.relay.n0.iroh.link./", "euc1"),
+            ("https://aps1-1.relay.n0.iroh.link./", "aps1"),
+            ("https://euc1-1.relay.n0.iroh.link/", "euc1"),
+            ("https://APS1-1.relay.n0.iroh.link.", "aps1"),
+        ] {
+            XCTAssertEqual(DirectSelectedPath.relayRegion(ofRelayURL: url), region, url)
+            let path = DirectSelectedPath(isRelay: true, isIp: false, remoteAddress: url, rttMs: 80)
+            XCTAssertEqual(path?.kind, .relay, url)
+            XCTAssertEqual(path?.relayRegion, region, url)
+            XCTAssertNil(path?.local, url)
+        }
+        // Any other relay has no region: none is guessed from its name.
+        for url in [
+            "https://relay.example/",
+            "https://euc1-2.relay.n0.iroh.link./",
+            "https://euc1-1.relay.n0.iroh.link.evil.example/",
+            "https://euw1-1.relay.n0.iroh.link./",
+            "http://euc1-1.relay.n0.iroh.link./",
+            "euc1-1.relay.n0.iroh.link",
+            "",
+        ] {
+            XCTAssertNil(DirectSelectedPath.relayRegion(ofRelayURL: url), url)
+            XCTAssertNil(
+                DirectSelectedPath(isRelay: true, isIp: false, remoteAddress: url, rttMs: 1)?.relayRegion,
+                url
+            )
+        }
+        // A path to an address has none, whatever its address reads like.
+        XCTAssertNil(
+            DirectSelectedPath(isRelay: false, isIp: true, remoteAddress: "203.0.113.5:4433", rttMs: 9)?.relayRegion
+        )
+        XCTAssertNil(DirectSelectedPath(kind: .ipv4, local: false, rttMs: 9, relayRegion: "euc1").relayRegion)
+        XCTAssertNil(DirectSelectedPath(kind: .relay, local: nil, rttMs: 9).relayRegion)
+        XCTAssertEqual(
+            DirectSelectedPath(kind: .relay, local: nil, rttMs: 9, relayRegion: "use1").relayRegion,
+            "use1"
+        )
+    }
+}
+
+// MARK: Stand-ins
+
+private final class MeasureLog<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var kept: [Value] = []
+
+    var values: [Value] {
+        lock.withLock { kept }
+    }
+
+    func add(_ value: Value) {
+        lock.withLock {
+            kept.append(value)
+        }
+    }
+}
+
+private final class MeasureCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    /// 0, 1, 2, … one per call.
+    func next() -> Int {
+        lock.withLock {
+            defer {
+                count += 1
+            }
+            return count
+        }
+    }
+}
+
+private final class MeasureFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool
+
+    init(_ value: Bool) {
+        self.value = value
+    }
+
+    func get() -> Bool {
+        lock.withLock { value }
+    }
+
+    func set(_ value: Bool) {
+        lock.withLock {
+            self.value = value
+        }
+    }
+}
+
+/// Waited for until it is opened, cancelled or not; once open it stays so.
+private final class MeasureGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let open = lock.withLock { () -> Bool in
+                if !isOpen {
+                    waiting.append(continuation)
+                }
+                return isOpen
+            }
+            if open {
+                continuation.resume()
+            }
+        }
+    }
+
+    func open() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            defer {
+                self.waiting = []
+            }
+            return self.waiting
+        }
+        for continuation in waiting {
+            continuation.resume()
+        }
+    }
+}
+
+/// The App's link to an instance, for the port: every stream it opens is an
+/// instance's ingress that answers the request the listener sends and then
+/// sends back whatever it is sent.
+private final class MeasureLinkStandIn: @unchecked Sendable {
+    enum Mode: Equatable {
+        /// Answers `200`, then echoes.
+        case echoes
+        /// The link gives no stream.
+        case fails
+        /// The instance answers `403`.
+        case refuses
+        /// The instance never answers.
+        case silent
+    }
+
+    struct Unavailable: Error {}
+
+    let current = MeasureFlag(true)
+    private let lock = NSLock()
+    private var made: [MeasureInstanceStream] = []
+    private var asked = 0
+    private let mode: Mode
+    private let authority: DirectAuthority
+
+    init(host: String, mode: Mode = .echoes) {
+        self.mode = mode
+        authority = DirectAuthority(host: host)!
+    }
+
+    /// How often a stream was asked for.
+    var opened: Int {
+        lock.withLock { asked }
+    }
+
+    var streams: [MeasureInstanceStream] {
+        lock.withLock { made }
+    }
+
+    var link: DirectMeasureLink {
+        let current = current
+        return DirectMeasureLink(
+            authority: authority,
+            kind: .ipv4,
+            local: true,
+            relayRegion: nil,
+            open: { [self] in
+                try lock.withLock { () -> MeasureInstanceStream in
+                    asked += 1
+                    guard mode != .fails else {
+                        throw Unavailable()
+                    }
+                    let stream = MeasureInstanceStream(mode: mode)
+                    made.append(stream)
+                    return stream
+                }
+            },
+            isCurrent: { current.get() }
+        )
+    }
+}
+
+private final class MeasureInstanceStream: DirectByteStream, @unchecked Sendable {
+    struct Closed: Error {}
+
+    private let lock = NSLock()
+    private let mode: MeasureLinkStandIn.Mode
+    private var requestHead = Data()
+    private var answeredHead = false
+    private var outgoing: [Data] = []
+    private var reader: CheckedContinuation<Data?, Error>?
+    private var cancelled = false
+    private var finished = false
+
+    init(mode: MeasureLinkStandIn.Mode) {
+        self.mode = mode
+    }
+
+    /// The request head it was sent before anything else.
+    var head: Data {
+        lock.withLock { requestHead }
+    }
+
+    var isCancelled: Bool {
+        lock.withLock { cancelled }
+    }
+
+    func read(maxLength: Int) async throws -> Data? {
+        try await withCheckedThrowingContinuation { continuation in
+            let ready: Result<Data?, Error>? = lock.withLock {
+                if cancelled {
+                    return .failure(Closed())
+                }
+                if !outgoing.isEmpty {
+                    return .success(outgoing.removeFirst())
+                }
+                if finished {
+                    return .success(nil)
+                }
+                reader = continuation
+                return nil
+            }
+            if let ready {
+                continuation.resume(with: ready)
+            }
+        }
+    }
+
+    func write(_ data: Data) async throws {
+        let waiting: (CheckedContinuation<Data?, Error>, Data)? = try lock.withLock {
+            guard !cancelled else {
+                throw Closed()
+            }
+            let answer: Data?
+            if !answeredHead {
+                requestHead.append(data)
+                guard requestHead.range(of: Data("\r\n\r\n".utf8)) != nil else {
+                    return nil
+                }
+                answeredHead = true
+                switch mode {
+                case .echoes: answer = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
+                case .refuses: answer = Data("HTTP/1.1 403 Forbidden\r\n\r\n".utf8)
+                case .silent, .fails: answer = nil
+                }
+            } else {
+                answer = data
+            }
+            guard let answer else {
+                return nil
+            }
+            if let reader {
+                self.reader = nil
+                return (reader, answer)
+            }
+            outgoing.append(answer)
+            return nil
+        }
+        waiting?.0.resume(returning: waiting?.1)
+    }
+
+    func closeWrite() async throws {
+        let reader: CheckedContinuation<Data?, Error>? = lock.withLock {
+            finished = true
+            defer {
+                self.reader = nil
+            }
+            return outgoing.isEmpty ? self.reader : nil
+        }
+        reader?.resume(returning: nil)
+    }
+
+    func cancel() {
+        let reader: CheckedContinuation<Data?, Error>? = lock.withLock {
+            cancelled = true
+            defer {
+                self.reader = nil
+            }
+            return self.reader
+        }
+        reader?.resume(throwing: Closed())
+    }
+}
+
+/// A local `/health` over plain HTTP that keeps its connections open, and
+/// counts them.
+private final class MeasureHealthServer: @unchecked Sendable {
+    struct Answer {
+        var status = 200
+        var body = #"{"status":"ok"}"#
+        var location: String?
+    }
+
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "bot.avibe.ios.tests.measure")
+    private let lock = NSLock()
+    private var open: [NWConnection] = []
+    private var accepted = 0
+    private var asked: [String] = []
+    private var current = Answer()
+
+    init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters, on: .any)
+    }
+
+    var answer: Answer {
+        get { lock.withLock { current } }
+        set { lock.withLock { current = newValue } }
+    }
+
+    /// Connections accepted so far.
+    var connections: Int {
+        lock.withLock { accepted }
+    }
+
+    var requests: Int {
+        lock.withLock { asked.count }
+    }
+
+    /// The path of every request, in order.
+    var paths: [String] {
+        lock.withLock { asked }
+    }
+
+    func start() async throws -> URL {
+        listener.newConnectionHandler = { [weak self, queue] connection in
+            guard let self else {
+                connection.cancel()
+                return
+            }
+            self.lock.withLock {
+                self.accepted += 1
+                self.open.append(connection)
+            }
+            connection.start(queue: queue)
+            self.serve(connection, buffered: Data())
+        }
+        let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
+            let resumed = MeasureFlag(false)
+            listener.stateUpdateHandler = { [listener] state in
+                switch state {
+                case .ready:
+                    if !resumed.get() {
+                        resumed.set(true)
+                        continuation.resume(returning: listener.port?.rawValue ?? 0)
+                    }
+                case .failed(let error):
+                    if !resumed.get() {
+                        resumed.set(true)
+                        continuation.resume(throwing: error)
+                    }
+                default:
+                    break
+                }
+            }
+            listener.start(queue: queue)
+        }
+        return URL(string: "http://127.0.0.1:\(port)/health")!
+    }
+
+    func stop() {
+        listener.cancel()
+        closeConnections()
+    }
+
+    /// Closes every connection it has open, as a far end may at any time.
+    func closeConnections() {
+        let closing = lock.withLock { () -> [NWConnection] in
+            defer {
+                open = []
+            }
+            return open
+        }
+        for connection in closing {
+            connection.forceCancel()
+        }
+    }
+
+    private func serve(_ connection: NWConnection, buffered: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { [weak self] data, _, isComplete, error in
+            guard let self, error == nil else {
+                connection.cancel()
+                return
+            }
+            var buffer = buffered
+            buffer.append(data ?? Data())
+            while let end = buffer.range(of: Data("\r\n\r\n".utf8)) {
+                let head = String(decoding: buffer[..<end.lowerBound], as: UTF8.self)
+                buffer = Data(buffer[end.upperBound...])
+                let target = head.split(separator: "\r\n").first?.split(separator: " ").dropFirst().first
+                let answer = self.lock.withLock { () -> Answer in
+                    self.asked.append(target.map(String.init) ?? "")
+                    return self.current
+                }
+                var response = "HTTP/1.1 \(answer.status) Answer\r\nContent-Type: application/json\r\n"
+                    + "Content-Length: \(answer.body.utf8.count)\r\n"
+                if let location = answer.location {
+                    response += "Location: \(location)\r\n"
+                }
+                response += "\r\n" + answer.body
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in })
+            }
+            if isComplete {
+                connection.cancel()
+                return
+            }
+            self.serve(connection, buffered: buffer)
+        }
+    }
+}

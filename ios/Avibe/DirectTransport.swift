@@ -152,6 +152,11 @@ struct DirectSelectedPath: Equatable, Sendable {
     let local: Bool?
     /// The path's round-trip time in milliseconds; nil until measured.
     let rttMs: Int?
+    /// Through the relay only: the region of the relay this path runs
+    /// through, when it is one of the known public ones
+    /// (`relayRegion(ofRelayURL:)`). Nil for any other relay, and for a
+    /// path to an address. A label, never the relay's address.
+    let relayRegion: String?
 
     /// From one of the connection's paths, as the binding reports it. Nil
     /// for a path that is neither the relay nor a numeric address.
@@ -159,9 +164,13 @@ struct DirectSelectedPath: Equatable, Sendable {
         if isRelay {
             kind = .relay
             local = nil
+            // For a relay path the binding's remote address is the relay's
+            // URL: the one this path is selected on, not one configured.
+            relayRegion = Self.relayRegion(ofRelayURL: remoteAddress)
         } else if isIp, let family = DirectPathKind.family(ofSocketAddress: remoteAddress) {
             kind = family
             local = Self.isLocalNetwork(socketAddress: remoteAddress)
+            relayRegion = nil
         } else {
             return nil
         }
@@ -169,10 +178,35 @@ struct DirectSelectedPath: Equatable, Sendable {
         self.rttMs = rttMs > 0 ? Int(min(rttMs, UInt64(Int.max))) : nil
     }
 
-    init(kind: DirectPathKind, local: Bool?, rttMs: Int?) {
+    init(kind: DirectPathKind, local: Bool?, rttMs: Int?, relayRegion: String? = nil) {
         self.kind = kind
         self.local = local
         self.rttMs = rttMs
+        self.relayRegion = kind == .relay ? relayRegion : nil
+    }
+
+    /// The region label of one of the four public relays, by its URL's
+    /// host (with or without the root dot), as the desktop app names them
+    /// (`desktop/src-tauri/src/direct/measure.rs`). Nil for anything else:
+    /// a region is never guessed from a name that is not one of these.
+    static func relayRegion(ofRelayURL url: String) -> String? {
+        guard
+            let components = URLComponents(string: url),
+            components.scheme == "https",
+            var host = components.host?.lowercased()
+        else {
+            return nil
+        }
+        if host.hasSuffix(".") {
+            host.removeLast()
+        }
+        switch host {
+        case "use1-1.relay.n0.iroh.link": return "use1"
+        case "usw1-1.relay.n0.iroh.link": return "usw1"
+        case "euc1-1.relay.n0.iroh.link": return "euc1"
+        case "aps1-1.relay.n0.iroh.link": return "aps1"
+        default: return nil
+        }
     }
 
     /// Whether a numeric socket address (`a.b.c.d:port` or `[x:...:x]:port`)
