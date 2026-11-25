@@ -675,6 +675,25 @@ describe('ConnectionPage · binding again', () => {
     expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
   });
 
+  it('follows binding as a new computer whose answer was lost, and goes on to Devices once it is unbound', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: false });
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    vi.spyOn(devicesApi, 'reset').mockImplementation(async () => {
+      // It reached the instance; its answer did not reach the page.
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbound', host } });
+      throw new LostAnswer();
+    });
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '作为一台新电脑重新绑定' }));
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+    expect(readClaimMarker()).toBeNull();
+  });
+
   it('goes back to 「解除绑定」 when a confirmation lost on its way began nothing', async () => {
     vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
     vi.spyOn(devicesApi, 'unbindCommit').mockRejectedValue(new LostAnswer());

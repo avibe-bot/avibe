@@ -636,8 +636,12 @@ export function ConnectionPage() {
       } catch (error) {
         if (alive.current) {
           setRebindDialog(undefined);
-          // A lost answer is unknown: the overview read below says whether the reset began.
-          if (!(error instanceof LostAnswer)) setRebindRefused(rebindRefusal(error instanceof DevicesApiError ? error.code : undefined));
+          // A lost answer is unknown: the reads below say whether it began. Deleting first, it is
+          // followed as an unbinding this page started: a read that reports none ends it, and one
+          // reported unbound goes on to the Devices page.
+          if (error instanceof LostAnswer) {
+            if (resetAction.current === 'unbind') markUnbindPressed();
+          } else setRebindRefused(rebindRefusal(error instanceof DevicesApiError ? error.code : undefined));
         }
       } finally {
         if (alive.current) setRebindBusy(false);
