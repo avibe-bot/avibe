@@ -187,7 +187,17 @@ def test_workflow_routes_match_the_contract_and_every_producer_has_a_required_ga
     jobs = workflow()["jobs"]
     assert set(jobs) == {"engine-allocation-preflight", "changes", "master-full-backstop"} | FAST | PR_TESTS | HEAVY | GATES.keys()
     assert jobs["changes"]["needs"] == "engine-allocation-preflight"
-    assert jobs["engine-allocation-preflight"]["permissions"] == {"contents": "read", "actions": "read"}
+    preflight = jobs['engine-allocation-preflight']
+    assert preflight['permissions'] == {'contents': 'read', 'actions': 'read'}
+    assert 'if' not in preflight and all('if' not in step for step in preflight['steps'])
+    assert preflight['outputs']['checked'] == '${{ steps.preflight.outputs.checked }}'
+    check = preflight['steps'][-1]
+    assert check['id'] == 'preflight' and 'python3 -I tools/scripts/model_hub_engine_preflight.py --data ledger' in check['run']
+    witness, = [s for s in jobs['changes']['steps'] if 'CHECKED' in s.get('env', {})]
+    assert witness['env']['CHECKED'] == '${{ needs.engine-allocation-preflight.outputs.checked }}'
+    # A same-named successful job with the validation step skipped has no witness.
+    for value, expected in [('', 1), ('other merge', 1), ('merge', 0)]:
+        assert subprocess.run(['bash', '-c', witness['run']], env={'CHECKED': value, 'GITHUB_SHA': 'merge'}).returncode == expected
     leaves = {"ruff", "show-router-integration", "memory-insight-contract", "migration-release-guard", "npm-wrapper", "build-linux-artifacts"}
     for name in FAST | PR_TESTS | HEAVY:
         job = jobs[name]

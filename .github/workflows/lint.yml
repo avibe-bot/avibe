@@ -26,25 +26,27 @@ jobs:
     runs-on: ubuntu-latest
     permissions: {contents: read, actions: read}
     timeout-minutes: 60
+    outputs:
+      checked: ${{ steps.preflight.outputs.checked }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           path: ledger
           fetch-depth: 0
           sparse-checkout: patches/model-hub-engine-channel-ledger
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
         with:
           path: tools
-          ref: 535cb105d66bac23a2058a107451e97d6c8a38b1
+          ref: 9e3b178cf957ec83c50aa2923f381564a49a3927
           persist-credentials: false
       - name: Check the proposed merge tree with pinned tools and no release credentials
-        if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+        id: preflight
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -I tools/scripts/model_hub_engine_index.py preflight --data ledger
+        run: |
+          python3 -I tools/scripts/model_hub_engine_preflight.py --data ledger
+          echo "checked=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
   changes:
     needs: engine-allocation-preflight
@@ -62,6 +64,10 @@ jobs:
         with:
           # Synthetic PR merge + both parents, without downloading all history.
           fetch-depth: 2
+      - name: Require executed preflight on this merge tree
+        env:
+          CHECKED: ${{ needs.engine-allocation-preflight.outputs.checked }}
+        run: test "$CHECKED" = "$GITHUB_SHA"
       - name: Classify the complete change
         id: scope
         run: python3 scripts/ci_scope.py

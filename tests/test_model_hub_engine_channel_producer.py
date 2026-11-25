@@ -629,7 +629,7 @@ def test_each_change_is_allocated_from_the_ledger_signed_and_journaled(tmp_path)
 
     assert (withdrawn.sequence, promoted.sequence) == (3, 4)
     assert promoted.tombstone(V2) == withdrawn.tombstone(V2)
-    assert [item.manifest_bytes for item in promoted.releases] == [manifest_bytes(build=build) for build in (1, 2, 3)]
+    assert [item.manifest_bytes for item in promoted.releases] == [manifest_bytes(build=build) for build in (1, 3)]
     state = signing.state()
     assert (state.next_sequence, state.allocation.sequence, state.allocation.envelope) == (5, 4, promoted_envelope)
     assert sorted(signing.journal()) == [f"{sequence:012d}.json" for sequence in (1, 2, 3, 4)]
@@ -659,7 +659,7 @@ def test_what_the_published_index_says_is_never_the_state_a_change_is_signed_fro
     promoted = signing.payload(signing.promote(3))
 
     assert promoted.sequence == 4
-    assert promoted.tombstone(V2) is not None and [item.asset_release_tag for item in promoted.releases] == [V1, V2, V3]
+    assert promoted.tombstone(V2) is not None and [item.asset_release_tag for item in promoted.releases] == [V1, V3]
 
 
 @needs_directory_flush
@@ -907,7 +907,7 @@ def test_a_change_that_was_allocated_but_never_published_is_carried_by_the_next_
     # Sequence 3 was spent on the withdrawal and is never signed; nothing it allocated is lost.
     assert promoted.sequence == 4
     assert promoted.tombstone(V2) == channel.Tombstone(V2, V1, "regression in streaming")
-    assert [item.asset_release_tag for item in promoted.releases] == [V1, V2, V3]
+    assert [item.asset_release_tag for item in promoted.releases] == [V1, V3]
     assert sorted(signing.journal()) == [f"{sequence:012d}.json" for sequence in (1, 2, 4)]
 
 
@@ -922,7 +922,7 @@ def test_a_raised_shipped_floor_moves_the_next_sequence_up_and_never_down(tmp_pa
 
     assert (jumped.sequence, following.sequence, lowered.sequence) == (100, 101, 102)
     # Every change made on the way is still there.
-    assert len(lowered.releases) == 4 and lowered.tombstone(V2) == jumped.tombstone(V2)
+    assert len(lowered.releases) == 3 and lowered.tombstone(V2) == jumped.tombstone(V2)
 
 
 @needs_directory_flush
@@ -1327,47 +1327,25 @@ def test_every_privileged_job_follows_authorization_and_proves_approval_before_i
         assert all(str(step.get("uses", "")).startswith("actions/checkout@") for step in job["steps"][:first_run])
 
 
-def test_the_signing_job_holds_no_bucket_credential_and_the_writer_holds_neither_key_nor_ledger() -> None:
-    index = WORKFLOW.with_name("model-hub-engine-index.yml")
-    text = index.read_text(encoding="utf-8")
-    workflow = yaml.safe_load(text)
-    jobs = workflow["jobs"]
-    assert workflow[True]["push"] == {"branches": ["master"]}
-    assert set(jobs) == {"prepare", "sign", "publish"}
-    assert "concurrency" not in workflow and workflow["permissions"] == {}
-    assert {n: job["environment"] for n, job in jobs.items() if "environment" in job} == {
-        "sign": producer.SIGNER_ENVIRONMENT,
-    }
-    assert "secrets." not in json.dumps(jobs["prepare"])
-
-    def mentions(job: str, needle: str) -> bool:
-        return needle in json.dumps(jobs[job])
-
-    assert jobs["sign"]["runs-on"] == "ubuntu-latest"
-    assert mentions("sign", "secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE") and not mentions("sign", "AWS_")
-    for name in ("prepare", "publish"):
-        assert not mentions(name, "HOSTED_SIGNING_BUNDLE")
-    upload, rejected = jobs["publish"]["steps"][-2:]
-    assert rejected["if"] == "needs.prepare.outputs.rejected == 'true'" and rejected["run"] == "exit 1"
-    assert "model_hub_engine_index.py publish" in upload["run"]
-    for variable, secret in (("AWS_ACCESS_KEY_ID", "R2_ACCESS_KEY_ID"), ("AWS_SECRET_ACCESS_KEY", "R2_SECRET_ACCESS_KEY"),
-                             ("R2_ACCOUNT_ID", "R2_ACCOUNT_ID")):
-        expression = "${{ secrets." + secret + " }}"
-        assert upload["env"][variable] == expression and text.count(expression) == 1
-    assert text.count("secrets.R2_") == 3 and "secrets.MODEL_HUB_ENGINE_CHANNEL_R2_" not in text
-    assert jobs["sign"]["needs"] == "prepare" and jobs["publish"]["needs"] == ["prepare", "sign"]
-    assert "strategy" not in jobs["publish"] and "matrix.sequence" not in json.dumps(jobs["publish"])
-    assert "needs.prepare.outputs.sequences != '[]'" in jobs["sign"]["if"]
-    assert "needs.prepare.result == 'success'" in jobs["publish"]["if"]
-    assert "needs.sign.result == 'failure'" in jobs["publish"]["if"]
-    assert all(jobs[name]["env"]["AUTHORIZED_SEQUENCES"] == "${{ needs.prepare.outputs.sequences }}" for name in ("sign", "publish"))
-    for name in ("sign", "publish"):
-        tools, data, *_ = jobs[name]["steps"]
-        assert re.fullmatch("[a-f0-9]{40}", tools["with"]["ref"]) and tools["with"]["path"] == "tools"
-        assert data["with"]["path"] == "ledger" and data["with"]["fetch-depth"] == 0
-        assert not mentions(name, "download-artifact") and not mentions(name, "python3 ledger/")
-    assert all(job.get("permissions", {}).get("contents") != "write" for name, job in jobs.items() if name != "release")
-    assert mentions("sign", "needs.prepare.outputs.sequences")
+def test_snapshot_workflow_separates_signer_from_origin_and_uses_only_pinned_tools():
+    workflow = yaml.safe_load(WORKFLOW.with_name("model-hub-engine-index.yml").read_text())
+    jobs = workflow['jobs']
+    assert set(jobs) == {'inspect', 'sign', 'publish'}
+    assert workflow['concurrency']['cancel-in-progress'] is False
+    assert "HOSTED_ENABLED == 'true'" in jobs['inspect']['if']
+    assert jobs['sign']['if'] == "needs.inspect.outputs.action == 'sign'"
+    assert jobs['sign']['needs'] == 'inspect' and jobs['publish']['needs'] == ['inspect', 'sign']
+    for name, job in jobs.items():
+        tools, data, *_ = job['steps']
+        assert re.fullmatch('[0-9a-f]{40}', tools['with']['ref']) and tools['with']['path'] == 'tools'
+        assert data['with']['path'] == 'ledger' and data['with']['fetch-depth'] == 0
+        assert data['with']['ref'] == ('master' if name == 'inspect' else '${{ needs.inspect.outputs.revision }}')
+        assert 'python3 ledger/' not in json.dumps(job)
+        secret_steps = [step for step in job['steps'] if 'secrets.' in json.dumps(step)]
+        assert len(secret_steps) == 1
+        assert job.get('environment') == (producer.SIGNER_ENVIRONMENT if name == 'sign' else None)
+        assert ('secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE' in json.dumps(secret_steps)) == (name == 'sign')
+        assert ('secrets.R2_SECRET_ACCESS_KEY' in json.dumps(secret_steps)) == (name != 'sign')
 
 
 def test_the_finalizer_reads_the_artifacts_the_qualification_workflow_writes() -> None:

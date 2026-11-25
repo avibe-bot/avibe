@@ -18,17 +18,12 @@ on:
       - "core/model_hub_engine_manifest.py"
       - "scripts/ci_avault_verifier.py"
       - "scripts/model_hub_engine_hosted.py"
-      - "scripts/model_hub_engine_merge.py"
+      - "scripts/model_hub_engine_snapshot.py"
       - "scripts/model_hub_engine_index.py"
-      - "scripts/model_hub_engine_artifact.py"
+      - "scripts/model_hub_engine_preflight.py"
       - "scripts/model_hub_engine_channel.py"
-      - "tests/test_model_hub_engine_merge.py"
       - ".github/workflows/model-hub-engine-index.yml"
       - "tests/test_model_hub_engine_hosted.py"
-      - "tests/test_model_hub_engine_index_recovery.py"
-      - "tests/test_model_hub_engine_emergency.py"
-      - "scripts/model_hub_engine_emergency.py"
-      - "scripts/model_hub_engine_recovery.py"
       - ".github/workflows/model-hub-engine-channel.yml"
       - "scripts/release_asset_download.py"
       - "tests/engine_channel_support.py"
@@ -45,17 +40,12 @@ on:
       - "core/model_hub_engine_manifest.py"
       - "scripts/ci_avault_verifier.py"
       - "scripts/model_hub_engine_hosted.py"
-      - "scripts/model_hub_engine_merge.py"
+      - "scripts/model_hub_engine_snapshot.py"
       - "scripts/model_hub_engine_index.py"
-      - "scripts/model_hub_engine_artifact.py"
+      - "scripts/model_hub_engine_preflight.py"
       - "scripts/model_hub_engine_channel.py"
-      - "tests/test_model_hub_engine_merge.py"
       - ".github/workflows/model-hub-engine-index.yml"
       - "tests/test_model_hub_engine_hosted.py"
-      - "tests/test_model_hub_engine_index_recovery.py"
-      - "tests/test_model_hub_engine_emergency.py"
-      - "scripts/model_hub_engine_emergency.py"
-      - "scripts/model_hub_engine_recovery.py"
       - ".github/workflows/model-hub-engine-channel.yml"
       - "scripts/release_asset_download.py"
       - "tests/engine_channel_support.py"
@@ -122,7 +112,7 @@ jobs:
           python -m pytest tests/test_model_hub_engine_channel_avault.py tests/test_model_hub_engine_channel.py \
             -p no:cacheprovider -q -ra
 
-      - name: Rehearse a disposable hosted channel key and immutable receipt (no secrets or upload)
+      - name: Rehearse a disposable hosted channel key and current snapshot (no secrets or upload)
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-15'
         shell: bash
         run: |
@@ -138,8 +128,7 @@ jobs:
           tar -xzf "$dir/generator.tgz" -C "$dir"
           export AVIBE_TEST_HOSTED_KEYGEN="$(find "$dir" -type f -name avault)"
           test -x "$AVIBE_TEST_HOSTED_KEYGEN"
-          AVIBE_TEST_ISOLATED_ENGINE_RACE=1 python -m pytest -q tests/test_model_hub_engine_hosted.py \
-            tests/test_model_hub_engine_merge.py tests/test_model_hub_engine_index_recovery.py tests/test_model_hub_engine_emergency.py
+          python -m pytest -q tests/test_model_hub_engine_hosted.py
 
   smoke-harness:
     name: smoke-harness (${{ matrix.platform }})

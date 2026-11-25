@@ -1,178 +1,271 @@
-"""A signed channel may only spend a sequence on the exact immutable PR allocation."""
-from __future__ import annotations
-
-import hashlib
-import io
+"""A signed index can move clients only to the reviewed master snapshot."""
 import json
-import zipfile
 import os
-import re
-import subprocess
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 
-from scripts import model_hub_engine_hosted as hosted
 from scripts import model_hub_engine_index as index
-from tests.engine_channel_support import manifest_bytes
+from scripts import model_hub_engine_preflight as gate
+from scripts import model_hub_engine_snapshot as snapshot
+from tests.engine_channel_support import (ISSUED, LocalVerifier, Signer, envelope_bytes, manifest_bytes,
+                                          payload_document, release_entry, tombstone)
+
+hosted = index.hosted
+channel = hosted.channel
+A, B, C = [f'model-hub-engine-v8.0.63-{n}' for n in (1, 2, 3)]
 
 
-def commit(repo):
-    for args in (["add", "."], ["-c", "user.name=fixture", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]):
-        hosted.git(repo, *args)
-    return hosted.git(repo, "rev-parse", "HEAD").decode().strip()
+def payload(seq, builds, revoked=(), **options):
+    doc = payload_document(seq, releases=[release_entry(manifest_bytes(build=n)) for n in builds], revoked=list(revoked), **options)
+    return channel.parse_payload(json.dumps(doc, sort_keys=True, separators=(',', ':')).encode())
 
 
-def fixture(tmp_path):
-    repo = tmp_path / "data"
-    repo.mkdir()
-    hosted.git(repo, "init", "-q")
-    (repo / "before").touch()
-    before = commit(repo)
-    change = hosted.producer.Promote(manifest_bytes(), "3.2.6")
-    raw = hosted.producer.plan_payload(None, change, now=datetime(2026, 1, 1, tzinfo=timezone.utc), sequence=1)
-    path = repo / hosted.LEDGER / "0000000000000001.payload.json"
-    path.parent.mkdir(parents=True)
-    path.write_bytes(raw)
-    sha = commit(repo)
-    return repo, before, sha, path, change, raw
-
-
-@pytest.mark.parametrize("failure", ["rewrite", "deleted", "sequence_gap", "noncanonical"])
-def test_refuses_before_any_signature(tmp_path, failure):
-    repo, before, sha, path, _, raw = fixture(tmp_path)
-    if failure == "deleted":
-        path.unlink()
-    elif failure == "sequence_gap":
-        path.rename(path.with_name("0000000000000003.payload.json"))
+def commit(repo, raw):
+    path = repo / snapshot.PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if raw is None:
+        path.unlink(missing_ok=True)
     else:
-        if failure == "noncanonical":
-            hosted.git(repo, "reset", "--soft", before)
-        path.write_bytes(raw + b"\n")
+        path.write_bytes(raw)
+    hosted.git(repo, 'add', '.')
+    hosted.git(repo, '-c', 'user.name=fixture', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'fixture')
+    return hosted.git(repo, 'rev-parse', 'HEAD').decode().strip()
+
+
+def test_distinct_heads_cannot_sign_changed_three_after_failed_upload(tmp_path):
+    repo = tmp_path
+    hosted.git(repo, 'init', '-q')
+    base = commit(repo, payload(2, [1]).raw)
+    p = commit(repo, payload(3, [1, 2]).raw)
+    signer = Signer()
+    def sign_head():
+        candidate = snapshot.master_snapshot(repo, p)
+        signed = envelope_bytes(signer, candidate.raw)  # deliberately never uploaded
+        return channel.authenticate(signed, roots=signer.roots(), verifier=LocalVerifier())[1].raw
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert list(pool.map(lambda _: sign_head(), range(2))) == [payload(3, [1, 2]).raw] * 2
+    q = commit(repo, payload(3, [1, 2], issued_at=ISSUED.replace(second=1)).raw)
+    assert snapshot.revision_step(repo, base, q)[1].sequence == 3  # stale merge-base would pass
+    with pytest.raises(hosted.Error, match='higher sequence'):
+        snapshot.revision_step(repo, p, q)
+    with pytest.raises(hosted.Error, match='reused'):
+        snapshot.master_snapshot(repo, q)
+    repaired = commit(repo, payload(4, [1]).raw)
+    assert snapshot.master_snapshot(repo, repaired).sequence == 4
+
+
+@pytest.mark.parametrize('bad', ['delete', 'format', 'listed withdrawal', 'withdrawn fallback'])
+def test_invalid_snapshot_stops_at_merge_tree(tmp_path, bad):
+    hosted.git(tmp_path, 'init', '-q')
+    base = commit(tmp_path, payload(1, [1]).raw)
+    raw = {'delete': None, 'format': payload(2, [1]).raw + b'\n',
+           'listed withdrawal': payload(2, [1, 2], [tombstone(B, A)]).raw,
+           'withdrawn fallback': payload(2, [1, 2], [tombstone(B, A), tombstone(C, B)]).raw}[bad]
     with pytest.raises(hosted.Error):
-        index.records(repo, before, commit(repo))
+        snapshot.revision_step(tmp_path, base, commit(tmp_path, raw))
 
 
-@pytest.mark.skipif(not os.environ.get("AVIBE_TEST_HOSTED_KEYGEN"), reason="throwaway key only on isolated CI runner")
-def test_isolated_owner_keygen_through_signed_pr_receipt_and_identical_resume(tmp_path, monkeypatch):
-    # Only test-owned homes/stores; production root, domain payload and ledger never supplied.
-    keygen = Path(os.environ["AVIBE_TEST_HOSTED_KEYGEN"])
-    signer = Path(os.environ["AVIBE_TEST_AVAULT_VERIFIER"])
-    repo, before, sha, payload_path, change, raw = fixture(tmp_path)
-    credential = tmp_path / "private.json"
-    result = subprocess.run([os.sys.executable, "-I", hosted.__file__, "generate", "--avault", str(keygen),
-                             "--output", str(credential)], check=True, capture_output=True)
-    public = result.stdout.decode().strip()
-    assert re.fullmatch(r"0[23][0-9a-f]{64}", public) and not result.stderr
-    roots_doc = {"schema_version": 1, "sequence_floor": 1, "roots": [{"key_id": "fixture", "public_key": public}]}
-    roots = hosted.channel.parse_trust_roots(json.dumps(roots_doc).encode())
-    verifier = hosted.producer.avault_verifier(str(signer))
-    [(_, _, _, parent, payload, operation)] = index.records(repo, before, sha)
-    assert parent is None and payload.raw == raw and operation == change
-    secret = json.loads(credential.read_bytes())
-    home = tmp_path / "only-on-test-runner"
-    home.mkdir(mode=0o700)
-    hosted.avault_run(signer, ["key", "import"], home, data=json.dumps(secret["import"]).encode())
-    envelope = hosted.producer.sign_payload(raw, key_id="fixture", key_name=hosted.KEY_NAME, key_envelope=secret["envelope"],
-        roots=roots, verifier=verifier, sign=lambda request: json.loads(hosted.avault_run(signer, ["sign"], home, data=request))["signature"])
-    # Artifact loss cannot spend the same sequence on different bytes. Re-sign
-    # in a separate process, not by caching/reusing the previous signature.
-    again = hosted.producer.sign_payload(raw, key_id="fixture", key_name=hosted.KEY_NAME, key_envelope=secret["envelope"],
-        roots=roots, verifier=verifier, sign=lambda request: json.loads(hosted.avault_run(signer, ["sign"], home, data=request))["signature"])
-    assert again == envelope
-    for published in (None, envelope):
-        hosted.check_published(published, raw, None, roots, verifier)
-    # A stale writer cannot overwrite the first published allocation. Both
-    # bad signature and divergent predecessor are rejected before the CAS.
-    with pytest.raises(hosted.Error, match="diverges"):
-        hosted.check_published(envelope, b"different allocation", None, roots, verifier)
-    with pytest.raises(hosted.Error, match="superseding"):
-        index.wait_for_parent(lambda: envelope, allowed=[], parent=None, roots=roots, verifier=verifier, timeout=0)
-    index.wait_for_parent(lambda: envelope, allowed=[raw], parent=None, roots=roots, verifier=verifier, timeout=0)
-    # Tampering after signing is never authenticated as the original bytes.
-    with pytest.raises(hosted.channel.ChannelError):
-        hosted.channel.authenticate(envelope.replace(b'"fixture"', b'"wrong"'), roots=roots, verifier=verifier)
+class Bucket:
+    def __init__(self, initial=None):
+        self.initial = initial
+        self.writes = 0
+
+    def read(self):
+        return (self.initial, self.initial.hex()) if self.initial is not None else None
+
+    def replace(self, body, *, etag):
+        if etag != (self.read()[1] if self.read() else None):
+            raise hosted.Error('lost conditional write')
+        self.initial = body
+        self.writes += 1
 
 
-@pytest.mark.parametrize("bad", ["run", "sha", "attempt", "event", "repo", "expired", "ambiguous", "digest", "missing", "ok"])
-def test_artifact_wait_is_bounded_and_requires_exact_origin(bad):
-    from scripts import model_hub_engine_artifact as artifacts
+def test_retry_latest_snapshot_and_readback_without_another_signature_or_write():
+    signer = Signer()
+    roots, verifier = signer.roots(), LocalVerifier()
+    origin = envelope_bytes(signer, payload(2, [1, 2]).raw)
+    bucket = Bucket(origin)
+    current = payload(4, [1], [tombstone(B, A)])  # 3 never published
+    calls = []
+    served = [origin]
+    def artifact():
+        calls.append(current.sequence)
+        return envelope_bytes(signer, current.raw)
+    def run(role):
+        return index.writer(role, current, roots=roots, verifier=verifier, bucket=bucket, artifact=artifact,
+                            current_head=lambda: None, fetch_public=lambda: served[0])
+    assert run('inspect') == 'sign' and not calls
+    with pytest.raises(hosted.Error, match='pending'):
+        run('publish')
+    with pytest.raises(hosted.Error, match='pending'):
+        run('inspect')
+    served[0] = bucket.initial
+    assert run('inspect') == run('publish') == 'readback'
+    assert calls == [4] and bucket.writes == 1
 
-    sha, run = "f" * 40, "123"
-    name = artifacts.artifact_name(run, sha, 1, b"public fixture", attempt="1")
-    source = {"run_attempt": 2 if bad == "attempt" else 1, "head_sha": sha, "head_branch": "master", "id": 123,
-              "event": "pull_request" if bad == "event" else "push", "path": index.INDEX_WORKFLOW,
-              "repository": {"full_name": hosted.producer.REPOSITORY, "id": 100}}
-    row = {"name": name, "id": 42, "expired": bad == "expired", "digest": "" if bad == "digest" else "sha256:" + sha + "0" * 24,
-           "workflow_run": {"head_sha": "a" * 40 if bad == "sha" else sha, "id": 1 if bad == "run" else 123,
-                            "repository_id": 5 if bad == "repo" else 100}, "size_in_bytes": 10}
+
+@pytest.mark.parametrize('bad', ['older', 'same/different', 'omit B', 'retag', 'minimum', 'drop tombstone', 'tampered origin', 'incompatible fallback'])
+def test_writer_refusals_preserve_authenticated_state_and_never_request_signature(bad):
+    signer = Signer()
+    current = payload(2, [1, 2])
+    desired = payload(4, [1], [tombstone(B, A)])
+    if bad == 'older':
+        desired = payload(1, [1, 2])
+    elif bad == 'same/different':
+        desired = payload(2, [1])
+    elif bad == 'omit B':
+        desired = payload(3, [1])
+    elif bad == 'drop tombstone':
+        current = payload(3, [1], [tombstone(B, A)])
+        desired = payload(4, [1])
+    elif bad in ('retag', 'minimum', 'incompatible fallback'):
+        changed = release_entry(manifest_bytes(build=2, salt='changed' if bad == 'retag' else ''),
+                                '3.2.7' if bad == 'minimum' else '3.2.6')
+        releases = [release_entry(manifest_bytes(build=1)), changed]
+        if bad == 'incompatible fallback':
+            current = channel.parse_payload(json.dumps(payload_document(2, releases=[release_entry(manifest_bytes(build=1), '3.2.7'), changed])).encode())
+            releases = [release_entry(manifest_bytes(build=1), '3.2.7')]
+        desired = channel.parse_payload(json.dumps(payload_document(4, releases=releases,
+                                              revoked=[tombstone(B, A)] if bad == 'incompatible fallback' else [])).encode())
+    raw = envelope_bytes(Signer() if bad == 'tampered origin' else signer, current.raw)
+    bucket = Bucket(raw)
+    with pytest.raises((hosted.Error, channel.ChannelError)):
+        index.writer('inspect', desired, roots=signer.roots(), verifier=LocalVerifier(), bucket=bucket,
+                     artifact=lambda: pytest.fail('artifact read'), current_head=lambda: None, fetch_public=lambda: raw)
+    assert bucket.read()[0] == raw and bucket.writes == 0
+
+
+def test_losing_writer_cannot_overwrite_newer_origin():
+    signer = Signer()
+    current = payload(2, [1])
+    raw = envelope_bytes(signer, current.raw)
+    newer = envelope_bytes(signer, payload(4, [1, 3]).raw)
+    bucket = Bucket(raw)
+    desired = payload(3, [1, 2])
+    def race():
+        bucket.initial = newer
+    with pytest.raises(hosted.Error, match='conditional'):
+        index.writer('publish', desired, bucket=bucket, roots=signer.roots(), verifier=LocalVerifier(),
+                     current_head=race, artifact=lambda: envelope_bytes(signer, desired.raw), fetch_public=lambda: raw)
+    assert bucket.initial == newer and bucket.writes == 0
+
+
+def test_unpublished_bad_candidate_can_disappear_but_not_published_B(tmp_path, monkeypatch):
+    signer = Signer()
+    origin = payload(2, [1, 2])
+    def signed(p):
+        return channel.authenticate(envelope_bytes(signer, p.raw), roots=signer.roots(), verifier=LocalVerifier())[1]
+    def resolve(p, current):
+        return channel.resolve(p, hold=None, avibe_version='3.2.6', host_platform='linux-amd64', bundled=A, current=current)
+    hosted.git(tmp_path, 'init', '-q')
+    old = commit(tmp_path, payload(3, [1, 2, 3]).raw)
+    checked = []
+    def available(directory, work):
+        checked.append(gate.qualification.load_candidate(directory).asset_release_tag)
+        assert checked[-1] == A
+    monkeypatch.setattr(gate.qualification, 'require_published', available)
+    removed = commit(tmp_path, payload(4, [1]).raw)
+    def check(head):
+        gate.preflight(tmp_path, old, head, published=lambda: signed(origin), api=None, token=None)
+    with pytest.raises(hosted.Error, match='explicit withdrawal'):
+        check(removed)
+    assert resolve(signed(origin), B).action.value == 'keep' and checked == []
+    desired = payload(4, [1], [tombstone(B, A)])
+    head = commit(tmp_path, desired.raw)
+    check(head)
+    assert checked == [A]  # neither the withdrawn B nor never-published C is fetched
+    installed = resolve(signed(desired), B)
+    assert (installed.action.value, installed.target.asset_release_tag) == ('withdraw', A)
+    assert resolve(signed(desired), A).action.value == 'keep'
+    def missing(*_):
+        raise gate.qualification.QualificationError('missing fallback bytes')
+    monkeypatch.setattr(gate.qualification, 'require_published', missing)
+    with pytest.raises(gate.qualification.QualificationError, match='fallback'):
+        check(head)
+
+
+@pytest.mark.parametrize('bad', ['ok', 'release missing', 'mirror changed'])
+def test_preflight_checks_exact_active_archives_from_both_sources(tmp_path, monkeypatch, bad):
+    from scripts import model_hub_engine_release_guard as guard
+    from tests.test_model_hub_engine_release_guard import _manifest, _fake_download
+
+    manifest, remote, _ = _manifest(tmp_path)
+    desired = channel.parse_payload(json.dumps(payload_document(1, releases=[release_entry(manifest.read_bytes())])).encode())
+    release, = desired.releases
+    url = next(url for url in remote if url.endswith('.tar.gz'))
+    mirror = {url.replace(guard.OWNED_RELEASE_ROOT, gate.qualification.MIRROR_RELEASE_ROOT): data for url, data in remote.items()}
+    if bad == 'release missing':
+        del remote[url]
+    elif bad == 'mirror changed':
+        mirror[url.replace(guard.OWNED_RELEASE_ROOT, gate.qualification.MIRROR_RELEASE_ROOT)] = b'wrong archive'
+    monkeypatch.setattr(guard, '_download', _fake_download({**remote, **mirror}))
+    if bad == 'ok':
+        gate.check_available(release)
+    else:
+        with pytest.raises(gate.qualification.QualificationError):
+            gate.check_available(release)
+
+
+@pytest.mark.parametrize('bad', ['ok', 'payload', 'parent', 'attempt', 'missing'])
+def test_promotion_requires_evidence_bound_to_exact_merge_tree(tmp_path, monkeypatch, bad):
+    import hashlib
+    from tests.test_model_hub_engine_qualification import _record, _result, GitHub, HARNESS, AVIBE
+
+    hosted.git(tmp_path, 'init', '-q')
+    before = commit(tmp_path, None)
+    candidate = gate.qualification.load_candidate(_record(tmp_path / 'patches/model-hub-engine-candidates'))
+    doc = payload_document(1, releases=[release_entry(candidate.manifest_bytes)])
+    raw = json.dumps(doc, sort_keys=True, separators=(',', ':')).encode()
+    result = _result(candidate)
+    result['baselines'] = {}
+    receipt = {'payload_sha256': '0' * 64 if bad == 'payload' else hashlib.sha256(raw).hexdigest(),
+               'parent_sha256': '0' * 64 if bad == 'parent' else None, 'rehearsal': result}
+    path = tmp_path / gate.evidence_path(1)
+    path.parent.mkdir(parents=True)
+    if bad != 'missing':
+        path.write_text(json.dumps(receipt))
+    head = commit(tmp_path, raw)
+    github = GitHub()
     def api(path):
-        if "/artifacts?" not in path:
-            return source
-        return {"total_count": 2 if bad == "ambiguous" else 1, "artifacts": [] if bad == "missing" else [row]}
-    if bad == "ok":
-        assert artifacts.wait_for_artifact(api, run, sha, name, attempt="1", timeout=0) == (42, row["digest"])
+        if path.endswith(f"/attempts/{result['run_attempt']}"):
+            return {'run_attempt': result['run_attempt'], 'id': result['run_id'], 'status': 'completed',
+                    'conclusion': 'failure' if bad == 'attempt' else 'success'}
+        return github(path)
+    def download(cmd, **kwargs):
+        if cmd[:3] != ['gh', 'run', 'download']:
+            return original(cmd, **kwargs)
+        target = Path(cmd[-1]); target.mkdir()
+        (target / 'untrusted_rehearsal.json').write_text(json.dumps(result))
+    original = gate.subprocess.run
+    monkeypatch.setattr(gate.subprocess, 'run', download)
+    monkeypatch.setattr(gate.qualification, 'trusted_released_context', lambda *_a, **_kw: AVIBE)
+    monkeypatch.setattr(gate.qualification, 'harness_digest', lambda: HARNESS)
+    visited = []
+    monkeypatch.setattr(gate.qualification, 'build_evidence', lambda *_: visited.append('archives'))
+    monkeypatch.setattr(gate, 'check_available', lambda *_: visited.append('published'))
+    if bad == 'ok':
+        gate.preflight(tmp_path, before, head, published=lambda: None, api=api, token='fixture')
+        assert visited == ['archives', 'published']
     else:
         with pytest.raises(hosted.Error):
-            artifacts.wait_for_artifact(api, run, sha, name, attempt="1", timeout=0)
+            gate.preflight(tmp_path, before, head, published=lambda: None, api=api, token='fixture')
+        assert visited == []
 
 
-def test_batch_waits_for_each_public_readback_and_resumes_in_place(monkeypatch):
-    from types import SimpleNamespace
-
-    # Opaque authenticated fixtures here; real signature and tamper checks run
-    # separately on the disposable hosted runner. Use the real CAS/readback loop.
-    payloads = [SimpleNamespace(sequence=n, raw=bytes([n]), releases=(), revoked=()) for n in (1, 2, 3)]
-    by_bytes = {p.raw: p for p in payloads}
-    monkeypatch.setattr(index.producer, "authenticate", lambda raw, **_: by_bytes[raw])
-    monkeypatch.setattr(index.channel, "authenticate", lambda raw, **_: (SimpleNamespace(payload=raw), by_bytes[raw]))
-    events = []
-
-    class Bucket:
-        stored = None
-
-        def read(self):
-            return (self.stored, self.stored.hex()) if self.stored else None
-
-        def replace(self, body, *, etag):
-            assert etag == (self.stored.hex() if self.stored else None)
-            self.stored = body
-            events.append(("write", by_bytes[body].sequence))
-
-    bucket = Bucket()
-    failure = True
-
-    def public():
-        seq = by_bytes[bucket.stored].sequence
-        events.append(("public", seq))
-        if failure and seq == 2:
-            raise TimeoutError("public readback interrupted")
-        return bucket.stored
-
-    rows = [(None, None, None, prev, p, None) for prev, p in zip([None, *payloads[:-1]], payloads)]
-    def publish():
-        index.publish_batch(rows, bucket=bucket, roots=None, verifier=None, envelope_for=lambda p: p.raw, fetch_public=public)
-
-    with pytest.raises(TimeoutError, match="readback"):
-        publish()
-    assert events == [("write", 1), ("public", 1), ("write", 2), ("public", 2)]
-    events.clear()
-    failure = False
-    publish()
-    assert events == [("public", 2), ("write", 3), ("public", 3)]
-    events.clear()
-    publish()
-    assert events == [("public", 3)]
-
-
-def test_artifact_hash_is_checked_before_using_its_single_file():
-    from scripts import model_hub_engine_artifact as artifacts
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as archive:
-        archive.writestr("model-hub-engine.json", b"public envelope fixture")
-    raw = buf.getvalue()
-    assert artifacts.unpack(raw, "sha256:" + hashlib.sha256(raw).hexdigest()) == b"public envelope fixture"
-    with pytest.raises(hosted.Error, match="digest"):
-        artifacts.unpack(raw, "sha256:" + "0" * 64)
+@pytest.mark.skipif(not os.environ.get('AVIBE_TEST_HOSTED_KEYGEN'), reason='isolated pinned fixture binaries required')
+def test_disposable_bundle_signs_exact_snapshot(tmp_path, monkeypatch):
+    generator = Path(os.environ['AVIBE_TEST_HOSTED_KEYGEN'])
+    binary = os.environ['AVIBE_TEST_AVAULT_VERIFIER']
+    credential = tmp_path / 'private.json'
+    public = hosted.generate_bundle(generator, credential)
+    roots = channel.TrustRoots((channel.TrustRoot('fixture', public),), 1)
+    desired = payload(1, [1])
+    verifier = hosted.producer.avault_verifier(binary)
+    def sign():
+        monkeypatch.setenv('HOSTED_SIGNING_BUNDLE', credential.read_text())
+        return index.sign(desired, roots, verifier, binary)
+    a = sign()
+    assert a == sign()
+    assert channel.authenticate(a, roots=roots, verifier=verifier)[1].raw == desired.raw

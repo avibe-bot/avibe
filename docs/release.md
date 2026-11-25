@@ -291,9 +291,8 @@ follows the highest sequence it has accepted for as long as that is the
 highest it has, and only a promotion or a withdrawal produces a new one.
 
 The exact bytes of each allocation are committed by reviewed PR, before signing.
-The ledger is additive on protected `master`; artifacts and the public object
-are not allocation authority. A lost, rewritten or uncertain history is an
-operational stop. Never roll back the ledger or allocate from a backup.
+Only the current protected `master` snapshot authorizes publication. Artifacts,
+previous runs and the public object do not authorize a signature.
 
 Nothing regenerates the index from the list of GitHub releases, and
 `Mirror releases to dl.avibe.bot` refuses to write or delete that object.
@@ -317,7 +316,7 @@ Nothing regenerates the index from the list of GitHub releases, and
    only byte-checked assets in a separate trusted artifact namespace. The
    existing protected writer environment then requires explicit owner approval
    for this run and digest before publishing immutable, non-latest assets.
-4. **Promote.** After the mirror holds the release, merge the reviewed allocation PR. The index workflow verifies the designated rehearsal and published bytes before scheduling the signer. Asset publication alone never changes the index.
+4. **Promote.** After the mirror holds the release, merge the reviewed allocation PR. The PR preflight verifies the designated rehearsal and published bytes before merge. Asset publication alone never changes the index.
 
 The trusted prepare job verifies the workflow run is the intended dispatch on
 `master`, the run attempt and commit, the current reviewed candidate, the
@@ -363,7 +362,7 @@ from `untrusted_rehearsal` and no owner approval can be inferred from it.
 
 ### Operations
 
-Asset publication is independent. Promotion and withdrawal each take one allocation PR; normal delivery needs no second PR or approval. If signing or publication is interrupted, dispatch the index workflow on master with the original landing commit. It rechecks the merge authorization and uses the frozen allocation, not a later stable wheel or an expiring rehearsal artifact. It never assigns another payload to that sequence. If GitHub cannot prove the merge authorization, delivery stops.
+Asset publication is independent. Promotion and withdrawal each take one allocation PR; normal delivery needs no second PR or approval. If signing, publication or public readback is interrupted, dispatch the index workflow on master without inputs. It targets current master, not an earlier run or ledger revision.
 
 **What a client without the newest index does.** It keeps following the index
 it has. If that index lists a release that a later index withdrew, the client
@@ -397,31 +396,35 @@ restore pinned bytes but cannot promote a release or undo a withdrawal.
 
 ### Hosted signer and writer
 
-The index workflow is disabled until commissioning. Add exactly one new file at
-`patches/model-hub-engine-channel-ledger/<16-digit-sequence>.payload.json`, starting at 1.
-Use the exact bytes returned by `plan_payload`, without an extra newline. For a promotion,
-commit the reviewed rehearsal object and its payload/predecessor digests beside the allocation
-as described in the allocation PR template. Read-only preflight checks the successful attempt,
-assets, released wheels and baselines before merge. An editable PR body is not evidence.
-Existing allocations must not be modified, renamed or deleted.
+The index workflow is disabled until commissioning. Update
+`patches/model-hub-engine-channel-ledger/current.payload.json` with the complete desired
+index. Commit canonical JSON (sorted keys, compact separators, ASCII, no extra newline),
+a frozen `issued_at`, and a strictly higher sequence for any changed bytes, even if the
+previous snapshot never reached the origin. Protect master against force-push and require
+the preflight on the proposed merge tree. The signer also checks the sequence against
+master's Git revisions so a stale preflight cannot spend a sequence twice.
 
-On a master push, the job without signing or bucket credentials binds each actual ledger
-addition to the corresponding merged PR, file blob, reviewed head and required CI. A
-merge-group test is not a landing. The signer runs pinned code on a separate runner.
-The writer independently verifies the run/attempt-bound artifact, its archive digest,
-client signature and exact allocated payload. It waits for the exact predecessor,
-uses its ETag for replacement, and verifies both bucket and public bytes. No global
-concurrency group coalesces withdrawals. A denied read, failed conditional write or
-superseding version is not authority to retry without the check.
+For a promotion, include the designated rehearsal and bind its candidate, snapshot and
+base bytes as described in the PR template. Trusted preflight checks the rehearsal,
+released wheels, manifests and actual assets. It checks both download sources for every
+release the snapshot still offers, including a withdrawal's compatible fallback.
+It does not fetch an archive simply to stop offering it. An unpublished candidate can be
+removed. A published release must retain its identity or be explicitly withdrawn with a
+permanent tombstone. Temporary unlisting is unsupported: omission rejects the snapshot;
+it does not cause an installed client to roll back.
 
-An emergency withdrawal may retire intervening unpublished allocations. Its reviewed declaration names the last verified effective parent, every retired sequence and its SHA-256, and the exact withdrawal payload. The conditional write publishes the withdrawal and retires those allocations together. If a promotion has already reached the origin, even if the public cache is behind, the old withdrawal cannot overwrite it: reconcile both reads and review a new withdrawal at a fresh sequence.
-
-If historical authorization is lost, a new recovery PR may add only a binding to the original landing, sequence, payload blob and parent. Its own final head must pass preflight, review and checks and land on master. A failed or running review, network error, or mismatched binding is not new authorization.
+The writer first inspects the authenticated origin. Matching sequence and payload need
+only origin/public readback, not signing or uploading again. Otherwise a pinned isolated
+signer signs the reviewed bytes and the writer independently authenticates the envelope,
+checks current master, conditionally creates or replaces the origin object, and verifies
+origin and public bytes. A denied read, stale sequence, conflicting payload, failed CAS
+or pending public readback is not a successful publication. Dispatch again on master;
+there is no historical replay or recovery PR.
 
 **Trust boundary:** anyone who can change the master workflows is trusted with signing.
 These checks prevent accidental publication through the standard workflow; they cannot
 isolate its authors. A compromised signing key requires replacing the client trust root.
-Only the dedicated upload step uses the existing mirror repository credentials. Those
+Only the writer’s inspection and upload steps use the existing mirror repository credentials. Those
 credentials have bucket-wide write access: leakage can damage other releases, including
 the application update index and wheels, but cannot forge an engine signature. The
 exact object key is a client restriction, not a server-side permission. The ordinary

@@ -4,100 +4,46 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
-    inputs:
-      landing:
-        description: Exact first-parent master commit to recover (no new allocation)
-        required: true
-        type: string
 
-permissions: {}
+permissions: {contents: read}
+# One writer (including origin inspection) at a time. Coalescing pending
+# pushes is intentional: never replay snapshots on the way to current master.
+concurrency:
+  group: hosted-model-hub-engine-index
+  cancel-in-progress: false
+
 env:
   HOSTED_COMMISSIONED: ${{ vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED }}
 
 jobs:
-  prepare:
+  inspect:
     if: github.repository == 'avibe-bot/avibe' && github.ref == 'refs/heads/master' && vars.MODEL_HUB_ENGINE_CHANNEL_HOSTED_ENABLED == 'true'
     runs-on: ubuntu-latest
-    permissions: {contents: read, actions: read, pull-requests: read, checks: read, issues: read}
-    timeout-minutes: 90
     outputs:
-      sequences: ${{ steps.proof.outputs.sequences }}
-      rejected: ${{ steps.proof.outputs.rejected }}
+      action: ${{ steps.origin.outputs.action }}
+      revision: ${{ steps.origin.outputs.revision }}
+      attempt: ${{ steps.origin.outputs.attempt }}
     steps:
       - &tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 535cb105d66bac23a2058a107451e97d6c8a38b1
+          ref: 9e3b178cf957ec83c50aa2923f381564a49a3927
           path: tools
           persist-credentials: false
-      - &ledger
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: &checkout actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.sha }}
+          ref: master
           path: ledger
           fetch-depth: 0
-          persist-credentials: false
           sparse-checkout: vibe/model_hub_runtime/engine_channel_roots.json
           sparse-checkout-cone-mode: false
+          persist-credentials: false
       - &verifier
         name: Fetch pinned verifier
         run: python3 -I tools/scripts/ci_avault_verifier.py --output-dir "$RUNNER_TEMP/avault" > "$RUNNER_TEMP/verifier"
-      - name: Prove actual merged allocations, exact-head review, checks and rehearsal
-        id: proof
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 -I tools/scripts/model_hub_engine_index.py prepare --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
-
-  sign:
-    needs: prepare
-    if: needs.prepare.outputs.sequences != '[]'
-    env:
-      AUTHORIZED_SEQUENCES: ${{ needs.prepare.outputs.sequences }}
-    # Commission only with this environment restricted to the master branch;
-    # no manual reviewers. Do not provision a repo/org secret with the same name.
-    environment: model-hub-engine-channel-signer
-    runs-on: ubuntu-latest
-    permissions: {contents: read}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        sequence: ${{ fromJSON(needs.prepare.outputs.sequences) }}
-    steps:
-      - *tools
-      - *ledger
-      - *verifier
-      - name: Sign only the allocated bytes
-        id: signed
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          ALLOCATION_SEQUENCE: ${{ matrix.sequence }}
-          HOSTED_SIGNING_BUNDLE: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE }}
-        run: python3 -I tools/scripts/model_hub_engine_index.py sign --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: ${{ steps.signed.outputs.artifact_name }}
-          path: ${{ runner.temp }}/model-hub-engine.json
-          if-no-files-found: error
-          retention-days: 1
-
-  publish:
-    needs: [prepare, sign]
-    # A later matrix member failing to sign/upload cannot discard an earlier artifact.
-    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.sequences != '[]' && (needs.sign.result == 'success' || needs.sign.result == 'failure') }}
-    env:
-      AUTHORIZED_SEQUENCES: ${{ needs.prepare.outputs.sequences }}
-    runs-on: ubuntu-latest
-    permissions: {contents: read, actions: read}
-    # One writer per landed push. The next allocation starts only after the
-    # previous origin and public readbacks finish. Signatures may run in parallel.
-    timeout-minutes: 90
-    steps:
-      - *tools
-      - *ledger
-      - *verifier
-      - name: Verify signed allocation, conditionally write the exact index key and prove public readback
-        env:
+      - name: Writer inspects authenticated origin; identical payload only needs readback
+        id: origin
+        env: &writer
           GITHUB_TOKEN: ${{ github.token }}
           R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -105,7 +51,55 @@ jobs:
           AWS_DEFAULT_REGION: auto
           AWS_REQUEST_CHECKSUM_CALCULATION: when_required
           AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
-        run: python3 -I tools/scripts/model_hub_engine_index.py publish --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
-      - name: Report rejected suffix after delivering the authorized prefix
-        if: needs.prepare.outputs.rejected == 'true'
-        run: exit 1
+        run: |
+          python3 -I tools/scripts/model_hub_engine_index.py inspect --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
+          echo "attempt=$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+  sign:
+    needs: inspect
+    if: needs.inspect.outputs.action == 'sign'
+    runs-on: ubuntu-latest
+    environment: model-hub-engine-channel-signer
+    steps:
+      - *tools
+      - &revision
+        uses: *checkout
+        with:
+          ref: ${{ needs.inspect.outputs.revision }}
+          path: ledger
+          fetch-depth: 0
+          sparse-checkout: vibe/model_hub_runtime/engine_channel_roots.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - *verifier
+      - name: Sign only the inspected snapshot, in the same attempt
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          INSPECTED_ATTEMPT: ${{ needs.inspect.outputs.attempt }}
+          HOSTED_SIGNING_BUNDLE: ${{ secrets.MODEL_HUB_ENGINE_CHANNEL_SIGNING_BUNDLE }}
+        run: |
+          test "$GITHUB_RUN_ATTEMPT" = "$INSPECTED_ATTEMPT"
+          python3 -I tools/scripts/model_hub_engine_index.py sign --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: engine-index-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/model-hub-engine.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [inspect, sign]
+    runs-on: ubuntu-latest
+    steps:
+      - *tools
+      - *revision
+      - *verifier
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: engine-index-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/signed
+      - name: Verify the signed bytes, conditionally write, and recheck both reads
+        env: *writer
+        run: |
+          mv "$RUNNER_TEMP/signed/model-hub-engine.json" "$RUNNER_TEMP/model-hub-engine.json"
+          python3 -I tools/scripts/model_hub_engine_index.py publish --data ledger --avault "$(cat "$RUNNER_TEMP/verifier")"
