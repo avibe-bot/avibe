@@ -7,11 +7,13 @@ const renameMac = (value: unknown): unknown => {
 };
 
 /**
- * Desktop's account copy (`desktopClient.*`) names the local machine "Mac". On any
+ * Desktop's copy (under `desktopClient` and `desktopAccount`) names the local machine "Mac". On any
  * other desktop OS (Windows) that machine is a "PC". Applied to the copy itself,
  * before interpolation, so a user-supplied name such as "Amy's Mac" stays intact.
  */
 export function forDevicePlatform<T extends object>(bundle: T): T {
-  if (isApplePlatform() || !('desktopClient' in bundle)) return bundle;
-  return { ...bundle, desktopClient: renameMac(bundle.desktopClient) };
+  if (isApplePlatform()) return bundle;
+  const patched = { ...bundle } as Record<string, unknown>;
+  for (const key of ['desktopClient', 'desktopAccount']) if (key in patched) patched[key] = renameMac(patched[key]);
+  return patched as T;
 }

@@ -4,15 +4,17 @@ import LanguageDetector from 'i18next-browser-languagedetector';
 
 import en from './en.json';
 import zh from './zh.json';
+import { desktopAccountCopy } from './desktop';
 import { forDevicePlatform } from './device';
 import { I18N_OPTIONS } from './options';
 
 // Both languages, ready on import: the design canvas, the bundled mobile
-// onboarding and the tests. The Web UI entry loads one language on demand
-// instead (./app.ts).
+// onboarding, the Desktop account document and the tests, with the account
+// document's own copy (./desktop). The Web UI entry loads one language on
+// demand instead, without that copy (./app.ts).
 const resources = {
-  en: { translation: forDevicePlatform(en) },
-  zh: { translation: forDevicePlatform(zh) },
+  en: { translation: forDevicePlatform({ ...en, ...desktopAccountCopy.en }) },
+  zh: { translation: forDevicePlatform({ ...zh, ...desktopAccountCopy.zh }) },
 };
 
 i18n

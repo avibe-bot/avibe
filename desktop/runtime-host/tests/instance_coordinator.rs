@@ -160,6 +160,7 @@ impl Credentials for Private {
 }
 #[derive(Default)]
 struct View {
+    signout_reached_view: Notify,
     states: Mutex<Vec<ClientState>>,
     committed: Mutex<Vec<ClientTarget>>,
     restored: Mutex<Vec<ClientTarget>>,
@@ -211,6 +212,7 @@ impl ClientView for View {
         Ok(())
     }
     async fn signed_out(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<(), ClientError> {
+        self.signout_reached_view.notify_one();
         if self.retirement_failure.load(Ordering::SeqCst) {
             Err(ClientError::new("window_unavailable"))
         } else {
@@ -277,6 +279,170 @@ async fn action(client: &Coordinator, action: ClientAction) -> ClientReply {
             action,
         })
         .await
+}
+
+#[test]
+fn document_claim_receipts_retire_on_real_coordinator_epochs_and_do_not_revive_on_label_reuse() {
+    let f = fixture(vec![]);
+    let first = f.client.claim_document(f.client.state().generation).unwrap();
+    let old = first.caller().unwrap();
+    f.client.local_origin(Some(
+        avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:1984").unwrap(),
+    ));
+    assert!(old.check().is_err());
+    let second = f.client.claim_document(f.client.state().generation).unwrap();
+    let current = second.caller().unwrap();
+    drop(first);
+    old.retire();
+    assert!(current.check().is_ok());
+    f.client.window_destroyed();
+    assert!(current.check().is_err());
+    assert!(f.http.calls.lock().unwrap().is_empty());
+}
+
+// The real coordinator (signed in through the synthetic transport), but an
+// unadopted Runtime. No probe, helper, keychain or service is allowed here.
+#[tokio::test]
+async fn open_returns_only_a_revocable_receipt_and_cancel_does_not_queue_behind_account_io() {
+    use avibe_runtime_host::instance_client::coordinator::claims::{
+        ClaimAction, ClaimCaller, ClaimReply, ClaimRequest,
+    };
+    use avibe_runtime_host::{
+        HealthProbe, LaunchError, LoopbackOrigin, Presence, ResolvedRuntimeLauncher, RuntimeHost, RuntimeHostSettings,
+        RuntimeLauncher,
+    };
+    struct NoRuntime;
+    #[async_trait]
+    impl HealthProbe for NoRuntime {
+        async fn presence(&self, _: &LoopbackOrigin, _: Option<&str>) -> Presence {
+            panic!("unexpected probe")
+        }
+    }
+    impl RuntimeLauncher for NoRuntime {
+        fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
+            panic!("unexpected resolution")
+        }
+    }
+    async fn send<'a>(
+        f: &'a Fixture,
+        host: &RuntimeHost,
+        caller: &ClaimCaller,
+        action: ClaimAction,
+    ) -> Result<ClaimReply<'a>, ClientError> {
+        f.client
+            .claim_review(
+                host,
+                caller,
+                "en",
+                ClaimRequest {
+                    expected_generation: f.client.state().generation,
+                    action,
+                },
+            )
+            .await
+    }
+    let host = RuntimeHost::new(Arc::new(NoRuntime), Arc::new(NoRuntime), RuntimeHostSettings::default());
+    let f = fixture(vec![]);
+    let doc = f.client.claim_document(f.client.state().generation).unwrap();
+    let caller = doc.caller().unwrap();
+    assert_eq!(
+        send(&f, &host, &caller, ClaimAction::Open {}).await.err().unwrap().code,
+        "authentication_required"
+    );
+    sign_in(&f, catalog("account-a", &["one"])).await;
+    let before = f.http.calls.lock().unwrap().len();
+    let doc = f.client.claim_document(f.client.state().generation).unwrap();
+    let caller = doc.caller().unwrap();
+    let open = send(&f, &host, &caller, ClaimAction::Open {})
+        .await
+        .unwrap()
+        .deliver()
+        .unwrap()
+        .unwrap();
+    assert_eq!(open.as_object().unwrap().len(), 1);
+    let receipt = open["receipt"].as_str().unwrap().to_owned();
+    assert!(uuid::Uuid::parse_str(&receipt).is_ok());
+    assert_eq!(before, f.http.calls.lock().unwrap().len());
+    assert!(f.client.claim_document(f.client.state().generation).is_err());
+    assert!(!serde_json::to_string(&f.client.state()).unwrap().contains(&receipt));
+    let entered = Arc::new(Notify::new());
+    let (release, wait) = oneshot::channel();
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/mobile/session", Reply::Held(wait, entered.clone())));
+    let client = f.client.clone();
+    let blocked = tokio::spawn(async move { action(&client, ClientAction::RefreshInstances).await });
+    entered.notified().await;
+    let cancel = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        send(
+            &f,
+            &host,
+            &caller,
+            ClaimAction::Cancel {
+                receipt: receipt.clone(),
+            },
+        ),
+    )
+    .await
+    .expect("cancel waited for HTTP");
+    // The admitted ordinary transaction retired this receipt before its GET.
+    assert_eq!(cancel.err().unwrap().code, "stale_generation");
+    assert!(send(
+        &f,
+        &host,
+        &caller,
+        ClaimAction::Read {
+            receipt: receipt.clone()
+        }
+    )
+    .await
+    .is_err());
+    release
+        .send(response(200, catalog("account-a", &["one"]), None))
+        .ok()
+        .unwrap();
+    assert!(blocked.await.unwrap().ok);
+    let next = f.client.claim_document(f.client.state().generation).unwrap();
+    let current = next.caller().unwrap();
+    let open = send(&f, &host, &current, ClaimAction::Open {})
+        .await
+        .unwrap()
+        .deliver()
+        .unwrap()
+        .unwrap();
+    let new = open["receipt"].as_str().unwrap().to_owned();
+    assert_ne!(new, receipt);
+    // A delayed message from the same still-loaded page may be admitted with
+    // today's caller, not the caller originally paired with its old receipt.
+    assert!(send(
+        &f,
+        &host,
+        &current,
+        ClaimAction::Cancel {
+            receipt: receipt.clone()
+        }
+    )
+    .await
+    .is_err());
+    assert!(send(&f, &host, &current, ClaimAction::Read { receipt }).await.is_err());
+    assert!(current.monitoring());
+    let failed = send(&f, &host, &current, ClaimAction::Read { receipt: new.clone() })
+        .await
+        .unwrap();
+    // There is no adopted Runtime. The refusal is private, and the ticket remains
+    // single-use while the shell rechecks its caller before delivering the error.
+    assert!(send(&f, &host, &current, ClaimAction::Read { receipt: new })
+        .await
+        .is_err());
+    assert_eq!(
+        serde_json::to_value(failed.deliver().unwrap_err()).unwrap(),
+        json!({"code":"local_runtime_upgrade_required"})
+    );
+    assert!(!current.monitoring());
+    assert_eq!(f.http.calls.lock().unwrap().len(), before + 1);
 }
 
 // A4 requires current local proof, including failure after a successful read.
@@ -562,6 +728,26 @@ async fn update_actions_cannot_overtake_an_account_operation_and_escape_fences_c
     assert_eq!(epoch.check().unwrap_err().code, "stale_generation");
 }
 
+fn code_start() -> (&'static str, Reply) {
+    (
+        "/api/auth/first-party/start",
+        Reply::Ready(response(
+            200,
+            json!({"transaction":"t".repeat(43)}),
+            Some("__Host-avibe-sign-in-start=fixture; Secure; HttpOnly; Path=/; SameSite=Lax; Max-Age=600"),
+        )),
+    )
+}
+fn code_bound() -> (&'static str, Reply) {
+    (
+        "/api/auth/first-party/email-code",
+        Reply::Ready(response(
+            200,
+            json!({"bound":true}),
+            Some("avibe_session=bound; Secure; HttpOnly; Path=/"),
+        )),
+    )
+}
 fn first_factor() -> Vec<(&'static str, Reply)> {
     vec![
         (
@@ -569,10 +755,8 @@ fn first_factor() -> Vec<(&'static str, Reply)> {
             ok(json!({"supabase_url":"https://fixture.supabase.test","supabase_anon_key":"public-fixture"})),
         ),
         ("/auth/v1/otp", ok(json!({}))),
-        (
-            "/auth/v1/verify",
-            ok(json!({"access_token":"private-provider","refresh_token":"private-refresh"})),
-        ),
+        code_start(),
+        code_bound(),
     ]
 }
 fn signed_in() -> Value {
@@ -766,7 +950,7 @@ async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
         ] {
             let mut replies = first_factor();
             replies.push((
-                "/api/desktop/session",
+                "/api/mobile/session",
                 Reply::Ready(response(
                     200,
                     signed_in(),
@@ -778,7 +962,7 @@ async fn startup_restore_continues_only_after_local_lifecycle_invalidation() {
                 action(
                     &f.client,
                     ClientAction::RequestOtp {
-                        email: "saved@example.test".into()
+                        email: "xiaoming@example.test".into()
                     }
                 )
                 .await
@@ -879,7 +1063,7 @@ async fn signout_during_session_establishment_discards_late_cookie_and_stops_enr
     let (release, held) = oneshot::channel();
     let entered = Arc::new(Notify::new());
     let mut replies = first_factor();
-    replies.push(("/api/desktop/session", Reply::Held(held, entered.clone())));
+    replies.push(("/api/mobile/session", Reply::Held(held, entered.clone())));
     let f = fixture(replies);
     assert!(
         action(
@@ -926,7 +1110,7 @@ async fn cancel_during_catalog_refresh_never_sends_remote_authorization() {
     let mut replies = first_factor();
     replies.extend([
         (
-            "/api/desktop/session",
+            "/api/mobile/session",
             Reply::Ready(response(
                 200,
                 signed_in(),
@@ -976,7 +1160,7 @@ async fn cancel_during_catalog_refresh_never_sends_remote_authorization() {
 async fn second_factor_blocks_enrollment_and_direct_totp_material_never_broadcasts() {
     let mut replies = first_factor();
     replies.extend([
-        ("/api/desktop/session",Reply::Ready(response(403,json!({
+        ("/api/mobile/session",Reply::Ready(response(403,json!({
             "error":"two_factor_required","email":"xiaoming@example.test","gate":"enroll","methods":["totp"]
         }),Some("avibe_session=first-factor-private; Secure; HttpOnly; Path=/")))),
         ("/api/two-factor/totp/setup",ok(json!({"token":"private-enrollment-token","uri":"otpauth://fixture","qrSvg":"<svg/>","secret":"private-seed"}))),
@@ -1021,49 +1205,65 @@ async fn second_factor_blocks_enrollment_and_direct_totp_material_never_broadcas
 // logout must erase that key even when it captured no committed account ID.
 #[tokio::test]
 async fn signout_owns_and_erases_a_first_credential_write_before_public_commit() {
-    let mut replies = first_factor();
-    replies.push((
-        "/api/desktop/session",
-        Reply::Ready(response(
-            200,
-            signed_in(),
-            Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
-        )),
-    ));
-    let f = fixture(replies);
-    assert!(
-        action(
-            &f.client,
-            ClientAction::RequestOtp {
-                email: "xiaoming@example.test".into()
+    for drop_logout_waiter in [false, true] {
+        let mut replies = first_factor();
+        replies.push((
+            "/api/mobile/session",
+            Reply::Ready(response(
+                200,
+                signed_in(),
+                Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
+            )),
+        ));
+        let f = fixture(replies);
+        assert!(
+            action(
+                &f.client,
+                ClientAction::RequestOtp {
+                    email: "xiaoming@example.test".into()
+                }
+            )
+            .await
+            .ok
+        );
+        let (entered, writing) = oneshot::channel();
+        let (release, receiver) = std::sync::mpsc::channel();
+        *f.private.1.lock().unwrap() = Some((entered, receiver));
+        let client = f.client.clone();
+        let verification =
+            tokio::spawn(async move { action(&client, ClientAction::VerifyOtp { code: "123456".into() }).await });
+        writing.await.unwrap();
+        assert!(f.client.state().account.identity.is_none());
+        assert!(!f.private.0.lock().unwrap().is_empty());
+        let client = f.client.clone();
+        let logout = tokio::spawn(async move { action(&client, ClientAction::SignOut { intent_id: None }).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while f.client.state().account.status != AccountStatus::SignedOut {
+                tokio::task::yield_now().await;
             }
-        )
+        })
         .await
-        .ok
-    );
-    let (entered, writing) = oneshot::channel();
-    let (release, receiver) = std::sync::mpsc::channel();
-    *f.private.1.lock().unwrap() = Some((entered, receiver));
-    let client = f.client.clone();
-    let verification =
-        tokio::spawn(async move { action(&client, ClientAction::VerifyOtp { code: "123456".into() }).await });
-    writing.await.unwrap();
-    assert!(f.client.state().account.identity.is_none());
-    assert!(!f.private.0.lock().unwrap().is_empty());
-    let client = f.client.clone();
-    let logout = tokio::spawn(async move { action(&client, ClientAction::SignOut { intent_id: None }).await });
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        while f.client.state().account.status != AccountStatus::SignedOut {
-            tokio::task::yield_now().await;
+        .unwrap();
+        if drop_logout_waiter {
+            // Sign-out has fenced the account but the credential writer is still
+            // blocked. Its eventual erasure AND native store retirement are owed.
+            logout.abort();
+            assert!(logout.await.unwrap_err().is_cancelled());
+            release.send(()).unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                f.view.signout_reached_view.notified(),
+            )
+            .await
+            .unwrap();
+        } else {
+            release.send(()).unwrap();
+            assert!(logout.await.unwrap().ok);
         }
-    })
-    .await
-    .unwrap();
-    release.send(()).unwrap();
-    assert_eq!(verification.await.unwrap().error.unwrap().code, "stale_generation");
-    assert!(logout.await.unwrap().ok);
-    assert!(f.private.0.lock().unwrap().is_empty());
-    assert!(f.store.load("unused").unwrap().account_id.is_none());
+        assert_eq!(verification.await.unwrap().error.unwrap().code, "stale_generation");
+        assert!(f.private.0.lock().unwrap().is_empty());
+        assert!(f.store.load("unused").unwrap().account_id.is_none());
+    }
 }
 
 #[tokio::test]
@@ -1091,7 +1291,7 @@ async fn local_escape_reaches_its_view_owner_after_lifecycle_during_credential_i
     for superseded in [false, true] {
         let mut replies = first_factor();
         replies.push((
-            "/api/desktop/session",
+            "/api/mobile/session",
             Reply::Ready(response(
                 200,
                 signed_in(),
@@ -1103,7 +1303,7 @@ async fn local_escape_reaches_its_view_owner_after_lifecycle_during_credential_i
             action(
                 &f.client,
                 ClientAction::RequestOtp {
-                    email: "held@example.test".into()
+                    email: "xiaoming@example.test".into()
                 }
             )
             .await
@@ -1227,10 +1427,15 @@ async fn local_escape_reaches_its_view_owner_after_lifecycle_during_credential_i
 // race the same way. Neither may leave credentials from an uncommitted epoch.
 #[tokio::test]
 async fn cancellation_rolls_back_unpublished_credential_writes() {
-    for (refresh_existing, erase_failure) in [(false, false), (true, false), (false, true)] {
+    for (refresh_existing, erase_failure, drop_waiter) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (true, false, true),
+    ] {
         let mut replies = first_factor();
         replies.push((
-            "/api/desktop/session",
+            "/api/mobile/session",
             Reply::Ready(response(
                 200,
                 signed_in(),
@@ -1294,15 +1499,23 @@ async fn cancellation_rolls_back_unpublished_credential_writes() {
         })
         .await
         .unwrap();
-        release.send(()).unwrap();
-        assert_eq!(
-            verification.await.unwrap().error.unwrap().code,
-            if erase_failure {
-                "credentials_unavailable"
-            } else {
-                "stale_generation"
-            }
-        );
+        // Cancelling the invoke is different from an epoch change. The actual
+        // OS writer must still own rollback and exclude the escaped account.
+        if drop_waiter {
+            verification.abort();
+            assert!(verification.await.unwrap_err().is_cancelled());
+            release.send(()).unwrap();
+        } else {
+            release.send(()).unwrap();
+            assert_eq!(
+                verification.await.unwrap().error.unwrap().code,
+                if erase_failure {
+                    "credentials_unavailable"
+                } else {
+                    "stale_generation"
+                }
+            );
+        }
         let cancelled = cancel.await.unwrap();
         if erase_failure {
             assert_eq!(cancelled.error.unwrap().code, "credentials_unavailable");
@@ -1332,7 +1545,7 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
     ] {
         let mut replies = first_factor();
         replies.push((
-            "/api/desktop/session",
+            "/api/mobile/session",
             Reply::Ready(response(
                 200,
                 signed_in(),
@@ -1430,26 +1643,16 @@ async fn restore_rejects_expired_or_different_account_and_erases_owned_credentia
     }
 }
 
-// A second catalog fetch follows successful registration. Its failure must not
-// consume the only recovery-code response after TOTP enrollment succeeded.
+// TOTP recovery codes are one-time account material. Even with a reachable local Runtime,
+// finishing authentication is not permission to prepare, allocate a hostname or start a claim.
 #[tokio::test]
-async fn recovery_codes_survive_catalog_failure_after_local_registration() {
+async fn totp_completion_returns_codes_without_registering_this_computer() {
     let mut replies = first_factor();
-    let descriptor = json!({"schema_version":1,"installation_id":"installation","device_name":"小明的 Mac",
-        "binding_revision":"revision","pairing":{"instance_id":"local-1","backend_url":"https://avibe.bot","public_url":"https://local.avibe.bot"},
-        "remote_access":{"configured_enabled":false,"requested":false,"running":false},"enrollment":null});
     replies.extend([
-        ("/api/desktop/session", Reply::Ready(response(403,json!({"error":"two_factor_required","email":"xiaoming@example.test","gate":"enroll","methods":["totp"]}),None))),
+        ("/api/mobile/session", Reply::Ready(response(403,json!({"error":"two_factor_required","email":"xiaoming@example.test","gate":"enroll","methods":["totp"]}),None))),
         ("/api/two-factor/totp/setup",ok(json!({"token":"private-token","uri":"otpauth://fixture","qrSvg":"<svg/>","secret":"private-seed"}))),
         ("/api/two-factor/totp",ok(json!({"method":{"id":"totp-1","kind":"totp","name":"Authenticator","createdAt":"2026-11-13","lastUsedAt":null},"recoveryCodes":["one-time-code"]}))),
         ("/api/mobile/session",ok(signed_in())),
-        ("/api/mobile/session",ok(signed_in())),
-        ("/api/desktop/local-instance",ok(descriptor.clone())),
-        ("/api/csrf-token",Reply::Ready(response(200,json!({"csrf_token":"csrf"}),Some("vibe_csrf_token=csrf; Path=/")))),
-        ("/api/desktop/local-instance/prepare",ok(json!({"local":descriptor,"operation_id":"operation"}))),
-        ("/api/desktop/instances/ensure-local",ok(json!({"outcome":"already_paired","owner_match":true,"instance_id":"local-1"}))),
-        ("/api/desktop/local-instance",ok(descriptor)),
-        ("/api/mobile/session",Reply::Ready(response(503,json!({"error":"unavailable"}),None))),
     ]);
     let f = fixture(replies);
     f.client.local_origin(Some(
@@ -1482,6 +1685,16 @@ async fn recovery_codes_survive_catalog_failure_after_local_registration() {
     assert!(!serde_json::to_string(&*f.view.states.lock().unwrap())
         .unwrap()
         .contains("one-time-code"));
+    assert!(f.http.replies.lock().unwrap().is_empty());
+    assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
+    let count = f.http.calls.lock().unwrap().len();
+    assert!(!action(&f.client, ClientAction::RetryEnrollment).await.ok);
+    let calls = f.http.calls.lock().unwrap();
+    assert_eq!(calls.len(), count);
+    assert!(!calls.iter().any(|path| path.contains("local-instance")
+        || path.contains("ensure-local")
+        || path.contains("/claims")
+        || path.contains("/pair")));
 }
 
 fn catalog(account: &str, ids: &[&str]) -> Value {
@@ -1506,18 +1719,17 @@ fn order(client: &Coordinator) -> Vec<String> {
         .collect()
 }
 async fn sign_in(f: &Fixture, session: Value) {
+    let email = session["account"]["email"].as_str().unwrap().to_owned();
     f.http.replies.lock().unwrap().extend(first_factor());
     f.http.replies.lock().unwrap().push_back((
-        "/api/desktop/session",
+        "/api/mobile/session",
         Reply::Ready(response(
             200,
             session,
             Some("avibe_session=private-account; Secure; HttpOnly; Path=/"),
         )),
     ));
-    let email = ClientAction::RequestOtp {
-        email: "order@example.test".into(),
-    };
+    let email = ClientAction::RequestOtp { email };
     assert!(action(&f.client, email).await.ok);
     assert!(
         action(&f.client, ClientAction::VerifyOtp { code: "123456".into() })
@@ -2262,8 +2474,8 @@ async fn rejected_password_keeps_the_previous_first_factor_usable() {
         replies.truncate(2);
         if factor {
             replies.extend([
-                ("/auth/v1/verify", ok(json!({"access_token":"a","refresh_token":"r"}))),
-                ("/api/desktop/session", Reply::Ready(response(403,json!({"error":"two_factor_required","email":"old@example.test","gate":"challenge","methods":["totp"]}),Some("old_factor=private; Path=/; Secure; HttpOnly")))),
+                code_start(), code_bound(),
+                ("/api/mobile/session", Reply::Ready(response(403,json!({"error":"two_factor_required","email":"xiaoming@example.test","gate":"challenge","methods":["totp"]}),Some("old_factor=private; Path=/; Secure; HttpOnly")))),
             ]);
         }
         replies.extend([
@@ -2278,9 +2490,10 @@ async fn rejected_password_keeps_the_previous_first_factor_usable() {
             ]);
         } else {
             replies.extend([
-                ("/auth/v1/verify", ok(json!({"access_token":"a","refresh_token":"r"}))),
+                code_start(),
+                code_bound(),
                 (
-                    "/api/desktop/session",
+                    "/api/mobile/session",
                     Reply::Ready(response(
                         200,
                         signed_in(),
@@ -2294,7 +2507,7 @@ async fn rejected_password_keeps_the_previous_first_factor_usable() {
             action(
                 &f.client,
                 ClientAction::RequestOtp {
-                    email: "old@example.test".into()
+                    email: "xiaoming@example.test".into()
                 }
             )
             .await
@@ -2373,13 +2586,14 @@ async fn a_refused_resend_keeps_the_code_already_sent() {
             ("/auth/v1/otp", ok(json!({}))),
             ("/api/config/auth", auth_config()),
             ("/auth/v1/otp", refusal),
-            ("/auth/v1/verify", ok(json!({"access_token":"a","refresh_token":"r"}))),
-            ("/api/desktop/session", account_session()),
+            code_start(),
+            code_bound(),
+            ("/api/mobile/session", account_session()),
         ]);
-        assert!(action(&f.client, email("old@example.test")).await.ok);
+        assert!(action(&f.client, email("xiaoming@example.test")).await.ok);
         let before = f.client.state();
         let seen = f.view.states.lock().unwrap().len();
-        let resend = action(&f.client, email("old@example.test")).await;
+        let resend = action(&f.client, email("xiaoming@example.test")).await;
         assert!(!resend.ok);
         assert_eq!(
             serde_json::to_value(&resend.state.account).unwrap(),

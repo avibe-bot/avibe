@@ -135,8 +135,9 @@ export type ClaimProblem =
 export type Reach =
   /** Not bound, in a browser: one action, the name is chosen at avibe.bot. */
   | { state: 'off'; surface: 'browser'; busy?: boolean; problem?: ClaimProblem }
-  /** The Desktop App on this computer: its own account sign-in is the sign-in. */
-  | { state: 'off'; surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
+  /** The Desktop App on this computer: one action, which asks the shell for its claim dialog (the
+   *  App's own sign-in if needed, then the name). `busy`: that request was just sent. */
+  | { state: 'off'; surface: 'desktop'; busy?: boolean }
   /** Turning on. `waiting`: the request is open and not approved at avibe.bot yet; it can be
    *  cancelled. `retrying`: open, and the instance is trying avibe.bot again after it could not be
    *  reached or asked to wait. Otherwise avibe.bot approved and this computer is binding. */
@@ -152,8 +153,6 @@ export type Reach =
   /** The state could not be read. */
   | { state: 'unknown' };
 
-/** Whether the name typed for the domain is free. `taken` never suggests another name. */
-export type NameState = 'free' | 'taken';
 
 export type AddKind = 'iphone' | 'android' | 'computer';
 /** `remove`: sign the open device out. `health-off`: turn the open device's Health off.
@@ -174,6 +173,8 @@ export type DirectPreference = {
   mode: 'automatic' | 'tunnel' | 'direct';
   /** The shell put `from` back to `automatic` by itself because it could not connect. */
   reverted: null | { at: string; reason: 'unreachable'; from: 'tunnel' | 'direct' };
+  /** The App takes the choice only after it is opened again. */
+  pendingRelaunch?: boolean;
 };
 
 export type TunnelSetting = 'protocol' | 'ipFamily' | 'outbound';

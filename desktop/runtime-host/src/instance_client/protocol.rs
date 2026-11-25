@@ -423,21 +423,26 @@ impl SignInProvider {
 pub struct ClientError {
     pub code: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub retry_after_seconds: Option<u8>,
+    pub retry_after_seconds: Option<u64>,
+    // Keep the monotonic admission deadline private; the wire carries whole seconds.
+    #[serde(skip)]
+    pub(super) retry_until: Option<tokio::time::Instant>,
 }
 impl ClientError {
     pub fn new(code: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             retry_after_seconds: None,
+            retry_until: None,
         }
     }
     pub fn pending(code: &str, delay: &serde_json::Value) -> Self {
-        let delay = delay.as_u64().filter(|n| (1..=60).contains(n)).map(|n| n as u8);
+        let delay = delay.as_u64().filter(|n| (1..=60).contains(n));
         if delay.is_some() {
             Self {
                 code: code.to_owned(),
                 retry_after_seconds: delay,
+                retry_until: None,
             }
         } else {
             Self::new("invalid_response")
@@ -549,6 +554,7 @@ pub fn account_view(url: &Url, owned_bundle_origin: &Url) -> Option<&'static str
     }
     match view.as_deref().unwrap_or("account") {
         "account" => Some("account"),
+        "claim" => Some("claim"),
         "instances" => Some("instances"),
         "setup-complete" => Some("setup-complete"),
         "sign-out" => Some("sign-out"),
@@ -570,6 +576,7 @@ pub fn presentation_view(url: &Url) -> Option<&'static str> {
     }
     match url.path() {
         "/account" => Some("account"),
+        "/claim" => Some("claim"),
         "/instances" => Some("instances"),
         "/setup-complete" => Some("setup-complete"),
         "/sign-out" => Some("sign-out"),

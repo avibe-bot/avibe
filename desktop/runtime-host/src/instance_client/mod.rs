@@ -4,6 +4,7 @@ pub mod coordinator;
 pub mod enrollment;
 pub mod instance_update;
 pub mod loopback;
+pub mod machine;
 pub mod protocol;
 pub mod selection;
 pub mod storage;

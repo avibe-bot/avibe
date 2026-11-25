@@ -1,12 +1,13 @@
 import type { ParseKeys, TFunctionReturn } from 'i18next';
 import type {} from './i18next';
 import type en from './en.json';
+import type accountEn from './desktop/en.json';
 import type { TranslationPaths } from './resourceTypes';
 
 /** Text leaves that resolve without count. Native t also accepts plural families with count. */
 type ResourceTextKey = {
-  [K in keyof TranslationPaths<typeof en>]: TranslationPaths<typeof en>[K] extends string ? K : never;
-}[keyof TranslationPaths<typeof en>];
+  [K in keyof TranslationPaths<typeof en & typeof accountEn>]: TranslationPaths<typeof en & typeof accountEn>[K] extends string ? K : never;
+}[keyof TranslationPaths<typeof en & typeof accountEn>];
 type TextKey<K extends ParseKeys> = K extends unknown
   ? [TFunctionReturn<'translation', K, { returnObjects: false }>] extends [never] ? never
     : TFunctionReturn<'translation', K, { returnObjects: false }> extends string ? K : never
