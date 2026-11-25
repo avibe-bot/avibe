@@ -18,6 +18,11 @@ import XCTest
 /// and what WebKit still holds when the test bundle ends is printed with its
 /// age. It is not a failure: the App itself never needs a store removed at
 /// once (its sweep keeps a store listed until WebKit drops it).
+///
+/// WebKit's answer to a removal itself waits for that process: in the
+/// teardown of tests that had passed it took up to eight minutes. So a
+/// removal is waited for at most `removalAnswer`; one not answered by then
+/// is treated as WebKit's own hold.
 @MainActor
 enum FixtureStoreRemoval {
     /// A store WebKit still listed, with the reason WebKit gave.
@@ -47,8 +52,15 @@ enum FixtureStoreRemoval {
     ) async -> StillRegistered? {
         await retryHeldByWebKit()
         var lastError: Error?
+        var unanswered = false
         for attempt in 0..<50 {
-            lastError = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            guard let answer = await boundedRemoval(identifier) else {
+                // WebKit has not answered: it holds the store until a web
+                // process of its own for it exits, which has taken minutes.
+                unanswered = true
+                break
+            }
+            lastError = answer.error
             if await !registered().contains(identifier) {
                 heldByWebKit[identifier] = nil
                 print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true")
@@ -59,10 +71,12 @@ enum FixtureStoreRemoval {
             }
         }
         let alive = ownersAlive()
-        if !alive, isHeldByWebKitAlone(lastError) {
+        if !alive, unanswered || isHeldByWebKitAlone(lastError) {
             leaveToLaterRemovals(identifier)
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
-                + "WebKit still holds it: left to a later removal")
+                + (unanswered
+                    ? "WebKit did not answer within \(removalAnswer): left to a later removal"
+                    : "WebKit still holds it: left to a later removal"))
             return nil
         }
         print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false")
@@ -76,7 +90,10 @@ enum FixtureStoreRemoval {
     /// message says so.
     static func retryHeldByWebKit() async {
         for (identifier, since) in heldByWebKit {
-            let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            // A try in passing, not a wait: not answered within a second,
+            // it is still WebKit's and tried again next time.
+            guard let answer = await boundedRemoval(identifier, within: .seconds(1)) else { continue }
+            let error = answer.error
             let age = Int(Date().timeIntervalSince(since))
             if await !registered().contains(identifier) {
                 heldByWebKit[identifier] = nil
@@ -89,6 +106,48 @@ enum FixtureStoreRemoval {
                         + "and not for WebKit's own hold: \(identifier); error=\(String(describing: error))"
                 )
             }
+        }
+    }
+
+    /// What WebKit answered a removal: `nil` when it did not answer within
+    /// `removalAnswer`. Its completion comes only once a web process of its
+    /// own for the store has exited; on CI that took up to eight minutes,
+    /// in the teardown of tests that had passed.
+    static let removalAnswer: Duration = .seconds(10)
+
+    private struct RemovalAnswer {
+        let error: Error?
+    }
+
+    private static func boundedRemoval(
+        _ identifier: UUID,
+        within bound: Duration = removalAnswer
+    ) async -> RemovalAnswer? {
+        await withCheckedContinuation { continuation in
+            let first = FirstAnswer(continuation)
+            Task { @MainActor in
+                let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+                first.settle(RemovalAnswer(error: error))
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: bound)
+                first.settle(nil)
+            }
+        }
+    }
+
+    /// The first of the removal's answer and the bound.
+    @MainActor
+    private final class FirstAnswer {
+        private var continuation: CheckedContinuation<RemovalAnswer?, Never>?
+
+        init(_ continuation: CheckedContinuation<RemovalAnswer?, Never>) {
+            self.continuation = continuation
+        }
+
+        func settle(_ answer: RemovalAnswer?) {
+            continuation?.resume(returning: answer)
+            continuation = nil
         }
     }
 
