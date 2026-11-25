@@ -1394,6 +1394,20 @@ process on the CI runtime can start without leaving account operations
 unbounded. Request and best-effort logout deadlines remain independently
 bounded.
 
+Under XCTest the App is only the unit tests' host (`LaunchServices`): it
+builds a model that starts nothing (no avibe.bot, keychain, notification,
+direct-path or lifecycle work), and no Health sync or App Lock. Every
+fixture shares the host's main thread, so live work there once held every
+fixture's WebView. From the first App fixture on, a test-only watchdog
+prints each main-thread hold over one second with the test it fell in
+(`[main-thread watchdog]` in the run log).
+
+The App calls the notification center only on one serial queue off the main
+thread (`NotificationCenterQueue`), in call order; the delegate and the
+authorization prompt are the exceptions. Some of its calls wait for the
+system's notification service, and one such call on the main thread held
+the CI simulator's App for 120 s.
+
 Runtime teardown has one ownership rule: once an account, instance, or logout
 transition invalidates a runtime controller, no callback may recreate or use
 its primary or child WebView. Delegate, bridge, KVO, observer, delayed-work,
