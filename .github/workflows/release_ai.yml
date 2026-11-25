@@ -21,6 +21,21 @@ on:
         required: false
         type: string
         default: "200"
+      unverified_job:
+        description: "RC only: the one full-backstop job that never got a runner (exact job name)"
+        required: false
+        type: string
+        default: ""
+      unverified_reason:
+        description: "RC only: why that job is accepted unverified"
+        required: false
+        type: string
+        default: ""
+      unverified_go:
+        description: "RC only: Product's go for this exception, quoted"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -38,6 +53,7 @@ jobs:
       source_sha: ${{ steps.verify.outputs.source_sha }}
       run_id: ${{ steps.verify.outputs.run_id }}
       run_attempt: ${{ steps.verify.outputs.run_attempt }}
+      unverified_line: ${{ steps.verify.outputs.unverified_line }}
     permissions:
       actions: read
       # An RC is proven from its pull request's check runs.
@@ -57,6 +73,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          RELEASE_UNVERIFIED_JOB: ${{ github.event.inputs.unverified_job }}
+          RELEASE_UNVERIFIED_REASON: ${{ github.event.inputs.unverified_reason }}
+          RELEASE_UNVERIFIED_GO: ${{ github.event.inputs.unverified_go }}
         run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
 
   resolve-show-runtime-ref:
@@ -716,6 +735,7 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
+          UNVERIFIED_LINE: ${{ needs.release-backstop.outputs.unverified_line }}
         run: |
           set -euo pipefail
           SOURCE_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
@@ -773,6 +793,11 @@ jobs:
             echo "Prepending silent-update markers (current + legacy) to the generated release notes."
             { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md; } > release.md.tmp
             mv release.md.tmp release.md
+          fi
+
+          # The RC's one accepted unverified job, as the release gate printed it.
+          if [ -n "$UNVERIFIED_LINE" ] && ! grep -qF "$UNVERIFIED_LINE" release.md; then
+            printf '\n\n%s\n' "$UNVERIFIED_LINE" >> release.md
           fi
 
           READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} run=${GITHUB_RUN_ID} -->"
@@ -888,13 +913,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
           SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
+          UNVERIFIED_JOB: ${{ github.event.inputs.unverified_job }}
+          UNVERIFIED_REASON: ${{ github.event.inputs.unverified_reason }}
+          UNVERIFIED_GO: ${{ github.event.inputs.unverified_go }}
         shell: bash
         run: |
           set -euo pipefail
+          # Stage 2 re-checks the same single exception; it accepts no other.
           if ! gh workflow run desktop-release.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref master \
             -f tag="$RELEASE_TAG" \
-            -f source_sha="$SOURCE_SHA"; then
+            -f source_sha="$SOURCE_SHA" \
+            -f unverified_job="$UNVERIFIED_JOB" \
+            -f unverified_reason="$UNVERIFIED_REASON" \
+            -f unverified_go="$UNVERIFIED_GO"; then
             echo "::warning::Could not dispatch desktop Stage 2; rerun desktop-release.yml for $RELEASE_TAG." >&2
           fi

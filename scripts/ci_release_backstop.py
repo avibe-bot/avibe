@@ -46,6 +46,25 @@ class BackstopProof:
 
 
 @dataclass(frozen=True)
+class UnverifiedJob:
+    """An RC's one named job that never ran, accepted with a reason and Product's go."""
+
+    job: str
+    reason: str
+    go: str
+
+    def line(self) -> str:
+        return f"not verified in this RC: {self.job} \u2014 {self.reason} (go: {self.go})"
+
+
+@dataclass(frozen=True)
+class UnverifiedProof:
+    run_id: int
+    source_sha: str
+    unverified: UnverifiedJob
+
+
+@dataclass(frozen=True)
 class PullRequestProof:
     source_sha: str
     pull_number: int
@@ -207,6 +226,45 @@ def _backstop(api: GitHubApi, source_sha: str) -> tuple[BackstopProof | None, st
     return None, *state
 
 
+def _never_ran(job: dict[str, Any]) -> bool:
+    """Queued with no runner, or cancelled before any runner picked it up."""
+    if job.get("runner_id") or job.get("steps"):
+        return False
+    if job.get("status") in {"queued", "waiting", "pending", "requested"}:
+        return True
+    return job.get("status") == "completed" and job.get("conclusion") == "cancelled"
+
+
+def _accept_unverified(api: GitHubApi, source_sha: str, unverified: UnverifiedJob) -> UnverifiedProof:
+    """Accept the exact-SHA full run when its only gap is the named job, and that job never ran."""
+    reasons: list[str] = []
+    for run in _candidate_runs(api, source_sha):
+        run_id = run.get("id")
+        if not isinstance(run_id, int) or isinstance(run_id, bool):
+            continue
+        jobs = _jobs(api, run_id)
+        named = [job for job in jobs if job.get("name") == unverified.job]
+        others = [job for job in jobs if job.get("name") not in {unverified.job, TERMINAL_JOB}]
+        gaps = sorted(
+            str(job.get("name"))
+            for job in others
+            if not (job.get("status") == "completed" and job.get("conclusion") in PASSING_CHECK_CONCLUSIONS)
+        )
+        if len(named) != 1:
+            reasons.append(f"run {run_id}: no single job named {unverified.job!r}")
+        elif not _never_ran(named[0]):
+            reasons.append(f"run {run_id}: {unverified.job!r} ran ({named[0].get('conclusion') or named[0].get('status')})")
+        elif gaps:
+            reasons.append(f"run {run_id}: other jobs are not green: {', '.join(gaps)}")
+        else:
+            return UnverifiedProof(run_id=run_id, source_sha=source_sha, unverified=unverified)
+    detail = "; ".join(reasons) or "no full master run exists at this SHA"
+    raise ReleaseBackstopError(
+        f"The RC exception for {unverified.job!r} does not apply at {source_sha}: {detail}. "
+        "It accepts exactly one named job that never ran, with every other job green."
+    )
+
+
 def prove_backstop(api: GitHubApi, *, tag: str) -> BackstopProof:
     return prove_backstop_sha(api, source_sha=resolve_tag_sha(api, tag))
 
@@ -365,11 +423,32 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
 
 
 def prove_release(
-    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False
-) -> BackstopProof | PullRequestProof:
+    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, unverified: UnverifiedJob | None = None
+) -> BackstopProof | PullRequestProof | UnverifiedProof:
+    if unverified is not None:
+        if not RC_TAG_RE.fullmatch(tag):
+            raise ReleaseBackstopError(f"An unverified-job exception applies only to gh-vX.Y.ZrcN tags, not {tag}")
+        source_sha = resolve_tag_sha(api, tag)
+        proof, _state, _run_id = _backstop(api, source_sha)
+        return proof if proof is not None else _accept_unverified(api, source_sha, unverified)
     if rc_pull_request_gate and RC_TAG_RE.fullmatch(tag):
         return prove_rc_pull_request(api, tag=tag)
     return prove_backstop(api, tag=tag)
+
+
+_EXCEPTION_FIELD_LIMITS = {"job": 200, "reason": 300, "go": 500}
+
+
+def _unverified_from(job: str, reason: str, go: str) -> UnverifiedJob | None:
+    values = {"job": job.strip(), "reason": reason.strip(), "go": go.strip()}
+    if not any(values.values()):
+        return None
+    for name, value in values.items():
+        if not value:
+            raise ReleaseBackstopError("An unverified-job exception needs the job, a reason and the go, all three")
+        if len(value) > _EXCEPTION_FIELD_LIMITS[name] or any(ord(ch) < 32 for ch in value) or "<!--" in value or "-->" in value:
+            raise ReleaseBackstopError(f"The exception's {name} must be one plain line of at most {_EXCEPTION_FIELD_LIMITS[name]} characters")
+    return UnverifiedJob(**values)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -384,6 +463,10 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="gate a gh-vX.Y.ZrcN tag on its pull request's required checks instead of the full backstop",
     )
+    # The plain override: one named job that never got a runner, on an RC tag only.
+    parser.add_argument("--unverified-job", default=os.environ.get("RELEASE_UNVERIFIED_JOB", ""))
+    parser.add_argument("--unverified-reason", default=os.environ.get("RELEASE_UNVERIFIED_REASON", ""))
+    parser.add_argument("--unverified-go", default=os.environ.get("RELEASE_UNVERIFIED_GO", ""))
     return parser
 
 
@@ -391,15 +474,29 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         api = GitHubApi(args.repository, args.token)
+        unverified = _unverified_from(args.unverified_job, args.unverified_reason, args.unverified_go)
         if args.source_sha is not None:
+            if unverified is not None:
+                raise ReleaseBackstopError("An unverified-job exception is checked against a tag, not a bare SHA")
             proof = prove_backstop_sha(api, source_sha=args.source_sha)
         else:
-            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate)
+            proof = prove_release(
+                api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate, unverified=unverified
+            )
     except ReleaseBackstopError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
     outputs = [f"source_sha={proof.source_sha}"]
-    if isinstance(proof, BackstopProof):
+    if isinstance(proof, UnverifiedProof):
+        line = proof.unverified.line()
+        print(f"Full master run {proof.run_id} at {proof.source_sha} is green except one job that never ran.")
+        print(f"::warning::{line}")
+        outputs.append(f"unverified_line={line}")
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as handle:
+                handle.write(f"{line}\n")
+    elif isinstance(proof, BackstopProof):
         print(f"Exact full master backstop verified for {proof.source_sha} (run {proof.run_id}, event {proof.event}).")
     else:
         print(
@@ -416,7 +513,9 @@ def main(argv: list[str] | None = None) -> int:
     # The RC path already inspected the backstop for reporting. Reuse only that
     # existing successful proof; pending/missing/red RCs incur no new discovery
     # requests and never wait for the backstop just to build their UI.
-    full_backstop = proof if isinstance(proof, BackstopProof) else proof.full_backstop
+    full_backstop = (
+        proof if isinstance(proof, BackstopProof) else None if isinstance(proof, UnverifiedProof) else proof.full_backstop
+    )
     if full_backstop is not None:
         outputs.extend([f"run_id={full_backstop.run_id}", f"run_attempt={full_backstop.run_attempt}"])
     github_output = os.environ.get("GITHUB_OUTPUT")

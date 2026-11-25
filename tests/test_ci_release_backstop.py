@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -500,3 +501,100 @@ def test_no_release_stage_opts_in_to_the_rc_gate(workflow: str) -> None:
 
     assert "--rc-pull-request-gate" not in step["run"].split()
     assert "--tag" in step["run"].split()
+
+
+# The plain override: one named job that never got a runner, RC tags only.
+UNVERIFIED = gate.UnverifiedJob(job="web-fetch-macos / web-fetch-runtime (macos-15, 3.12)", reason="no macOS runner",
+                                go="Product: ok to ship without it")
+
+
+def _gap_job(*, status: str = "queued", conclusion: str | None = None, ran: bool = False) -> dict[str, Any]:
+    job = {"name": UNVERIFIED.job, "status": status, "conclusion": conclusion}
+    if ran:
+        job.update(runner_id=42, steps=[{"name": "Set up job", "conclusion": "success"}])
+    return job
+
+
+def _gap_api(*jobs: dict[str, Any], run: dict[str, Any] | None = None) -> FakeApi:
+    run = run or _run(status="in_progress", conclusion=None)
+    return FakeApi(runs=[run], jobs={1: [_job(name="ruff"), *jobs, _job(status="queued", conclusion=None)]})
+
+
+@pytest.mark.parametrize(
+    "api",
+    [
+        _gap_api(_gap_job()),
+        _gap_api(_gap_job(status="completed", conclusion="cancelled"), run=_run(conclusion="cancelled")),
+    ],
+    ids=["queued-without-runner", "cancelled-before-start"],
+)
+def test_rc_exception_accepts_one_named_job_that_never_ran(api: FakeApi) -> None:
+    proof = gate.prove_release(api, tag=RC_TAG, unverified=UNVERIFIED)
+
+    assert proof == gate.UnverifiedProof(run_id=1, source_sha=SOURCE_SHA, unverified=UNVERIFIED)
+
+
+@pytest.mark.parametrize(
+    ("api", "tag", "message"),
+    [
+        (_gap_api(_gap_job(status="completed", conclusion="failure", ran=True)), RC_TAG, "ran (failure)"),
+        (_gap_api(_gap_job(status="completed", conclusion="cancelled", ran=True)), RC_TAG, "ran (cancelled)"),
+        (_gap_api(_gap_job(), _job(name="unit-tests", conclusion="failure")), RC_TAG, "other jobs are not green: unit-tests"),
+        (_gap_api(_gap_job(), _job(name="ios-shell", status="queued", conclusion=None)), RC_TAG, "not green: ios-shell"),
+        (_gap_api(_job(name="something-else", status="queued", conclusion=None)), RC_TAG, "no single job named"),
+        (FakeApi(runs=[], jobs={}), RC_TAG, "no full master run exists"),
+        (_gap_api(_gap_job()), TAG, "only to gh-vX.Y.ZrcN tags"),
+    ],
+    ids=["it-failed", "it-ran-then-cancelled", "two-jobs-red", "two-jobs-missing", "wrong-name", "no-run", "stable-tag"],
+)
+def test_rc_exception_refuses_anything_but_one_never_ran_job(api: FakeApi, tag: str, message: str) -> None:
+    with pytest.raises(gate.ReleaseBackstopError, match=re.escape(message)):
+        gate.prove_release(api, tag=tag, unverified=UNVERIFIED)
+
+
+def test_rc_exception_is_unused_when_the_full_backstop_is_green() -> None:
+    proof = gate.prove_release(FakeApi(runs=[_run()], jobs={1: [_job()]}), tag=RC_TAG, unverified=UNVERIFIED)
+
+    assert proof == gate.BackstopProof(run_id=1, source_sha=SOURCE_SHA, event="push", run_attempt=2)
+
+
+@pytest.mark.parametrize(
+    ("job", "reason", "go"),
+    [("ruff", "", "go"), ("ruff", "why", ""), ("", "why", "go"), ("ruff", "why\nnext", "go"), ("ruff", "why", "a --> b")],
+)
+def test_rc_exception_needs_all_three_plain_fields(job: str, reason: str, go: str) -> None:
+    with pytest.raises(gate.ReleaseBackstopError):
+        gate._unverified_from(job, reason, go)
+
+
+def test_rc_exception_prints_the_line_for_the_summary_and_notes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    github_output, summary = tmp_path / "github-output", tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(github_output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("RELEASE_UNVERIFIED_JOB", UNVERIFIED.job)
+    monkeypatch.setenv("RELEASE_UNVERIFIED_REASON", UNVERIFIED.reason)
+    monkeypatch.setenv("RELEASE_UNVERIFIED_GO", UNVERIFIED.go)
+    monkeypatch.setattr(gate, "GitHubApi", lambda repository, token: _gap_api(_gap_job()))
+
+    assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", RC_TAG]) == 0
+
+    line = f"not verified in this RC: {UNVERIFIED.job} \u2014 {UNVERIFIED.reason} (go: {UNVERIFIED.go})"
+    assert github_output.read_text(encoding="utf-8") == f"source_sha={SOURCE_SHA}\nunverified_line={line}\n"
+    assert summary.read_text(encoding="utf-8") == f"{line}\n"
+    assert f"::warning::{line}" in capsys.readouterr().out
+
+
+def test_both_release_stages_carry_the_same_single_exception() -> None:
+    stage1 = yaml.safe_load((WORKFLOWS / "release_ai.yml").read_text(encoding="utf-8"))
+    stage2 = yaml.safe_load((WORKFLOWS / "desktop-release.yml").read_text(encoding="utf-8"))
+    names = ("unverified_job", "unverified_reason", "unverified_go")
+    for workflow in (stage1, stage2):
+        assert set(names) <= set(workflow[True]["workflow_dispatch"]["inputs"])
+        (step,) = [s for s in workflow["jobs"]["release-backstop"]["steps"] if "ci_release_backstop.py" in s.get("run", "")]
+        assert {f"RELEASE_{name.upper()}" for name in names} <= set(step["env"])
+    release_steps = stage1["jobs"]["release"]["steps"]
+    (dispatch,) = [s for s in release_steps if s.get("name") == "Dispatch desktop Stage 2"]
+    assert all(f'-f {name}="${name.upper()}"' in dispatch["run"] for name in names)
+    assert any("UNVERIFIED_LINE" in s.get("env", {}) and "$UNVERIFIED_LINE" in s.get("run", "") for s in release_steps)

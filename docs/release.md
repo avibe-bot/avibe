@@ -52,6 +52,18 @@ GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
   --repository avibe-bot/avibe --source-sha <sha>
 ```
 
+**The one RC exception.** When exactly one full-backstop job never got a
+runner, an RC may still ship with Product's go. Dispatch `Release (AI Notes)`
+for the RC tag with `unverified_job` (the exact job name), `unverified_reason`
+and `unverified_go` (her go, quoted). The gate then accepts the tag's own full
+run only if that named job never ran (queued with no runner, or cancelled before
+a runner took it) and every other job is green. It refuses if the job ran and
+failed, if any other job is missing or red, or for any stable tag. The run
+summary and the RC's notes print
+`not verified in this RC: <job> — <reason> (go: <quote>)`, and desktop Stage 2
+re-checks the same exception that Stage 1 passes it. A stable release never
+takes the exception.
+
 `ci_release_backstop.py` still has an `--rc-pull-request-gate` option, which
 reports whether an RC tag's merged pull request passed `master`'s required
 checks. No release workflow on current `master` passes it; Stage 1 as defined
