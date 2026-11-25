@@ -59,7 +59,9 @@ export type DesktopClientState = {
   catalog: { status: 'idle' | 'loading' | 'ready' | 'error'; instances: Instance[] };
   /** Display proof for the committed remote; never used to authorize a switch. */
   current_instance?: Instance | null;
-  local: { name: string; instance_id?: string | null; slug?: string | null; remote_access_url?: string | null; remote_access: 'off' | 'starting' | 'on' | 'unavailable' };
+  local: { name: string; instance_id?: string | null; slug?: string | null; remote_access_url?: string | null; remote_access: 'off' | 'starting' | 'on' | 'unavailable';
+    /** Avibe on this computer is too old to say what it is bound to: 升级并重试 on its row. */
+    runtime_too_old?: boolean };
   desktop: { version: string; update: DesktopUpdateState };
   /** Null while the committed connection is local. Never in the Workbench projection. */
   instance_update: InstanceUpdateState | null;
@@ -93,6 +95,8 @@ export type DesktopClientAction =
   | { type: 'refresh_instances' }
   | { type: 'retry_enrollment' }
   | { type: 'retry_local_remote_access' }
+  /** 升级并重试 on this computer's row: what 版本与更新 does for Avibe on this computer. */
+  | { type: 'upgrade_local_runtime' }
   | { type: 'select_instance'; instance_id: string }
   | { type: 'decide_consent'; approve: boolean }
   | { type: 'cancel' }

@@ -1,6 +1,6 @@
 import { createContext, useContext, type ReactNode } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
-import { Check, Laptop, TriangleAlert } from 'lucide-react';
+import { Check, Laptop, LoaderCircle, TriangleAlert } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -33,6 +33,8 @@ export type ComputerBinding =
   | { state: 'unknown' }
   /** Something only the person can do, that no button here does for them. */
   | { state: 'upgrade' }
+  /** Avibe on this computer is too old for this (`local_runtime_too_old`): 升级并重试 does it here. */
+  | { state: 'tooOld' }
   /** Cannot be bound from here, and no press changes that: write to support. */
   | { state: 'unavailable' }
   | { state: 'repair' }
@@ -102,6 +104,20 @@ export function ThisComputerLine({ binding, busy = false, onBind, onRefresh, onU
   </div>;
 }
 
+/** ui/design: desktop/upgrade-retry/instances-*. Under this computer's row in Instances, while Avibe on
+ *  it is too old to say what it is bound to: one line and 升级并重试 (owner, 2026-11-25). */
+export function LocalTooOldLine({ phase, onUpgrade }: { phase?: 'running' | 'failed'; onUpgrade: () => void }) {
+  const { t } = useTranslation();
+  const running = phase === 'running';
+  return <div data-local-too-old className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-edge px-4 py-3">
+    <p className="min-w-0 flex-1 text-sm leading-6 text-muted [overflow-wrap:anywhere]">
+      {running ? <span role="status" className="flex items-center gap-2"><LoaderCircle className="size-4 shrink-0 motion-safe:animate-spin" />{t('desktopAccount.bind.upgrading')}</span>
+        : t(phase === 'failed' ? 'desktopAccount.bind.upgradeFailed' : 'desktopAccount.bind.needsUpdate')}
+    </p>
+    <Button variant="brand" size="sm" className="shrink-0" disabled={running} onClick={onUpgrade}>{t('desktopAccount.bind.upgradeAndRetry')}</Button>
+  </div>;
+}
+
 export type EligibleName = { prefix: string; host: string };
 /** Why a step could not go on, as one sentence; never a raw code. */
 export type BindProblem = 'unreachable' | 'signedOut' | 'rateLimited' | 'expired' | 'busy' | 'notResponding' | 'changed' | 'codeInvalid' | 'lost' | 'reauth' | 'storage' | 'unavailable' | 'unknown';
@@ -140,6 +156,9 @@ export type BindStep =
   /** The claim view found a binding it cannot bind over: the card's sentence and its one button. */
   | { kind: 'notHere'; reason: 'otherAccount' | 'unknown' | 'repair' | 'pending' }
   | { kind: 'upgrade' }
+  /** Avibe on this computer is too old to name or read this computer: one sentence and 升级并重试.
+   *  `running`: the upgrade is on its way; `failed`: it did not finish, or left it still too old. */
+  | { kind: 'tooOld'; phase?: 'running' | 'failed' }
   | { kind: 'problem'; problem: BindProblem };
 
 export type BindDialogProps = {
@@ -167,6 +186,8 @@ export type BindDialogProps = {
   signIn?: ReactNode;
   /** The document must not leave (an authenticator setup finishing): no close, no Escape. */
   holding?: boolean;
+  /** 升级并重试: upgrade Avibe on this computer, then do the step again. */
+  onUpgrade?: () => void;
   /** False in a claim view whose one review was sent: a problem's way on is closing. */
   restartable?: boolean;
   /** `notHere`: observe again (「再看一次」), and sign in with the account the binding is under. */
@@ -203,7 +224,7 @@ export function BindDialog(props: BindDialogProps) {
   </Dialog>;
 }
 
-function BindDialogBody({ signIn, restartable = true, onCheckAgain, onSignInOther, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
+function BindDialogBody({ signIn, onUpgrade, restartable = true, onCheckAgain, onSignInOther, step, account, busy = false, onNameChange, onPick, onConfirm, onSendCode, onCodeChange, onSubmitCode, onBeginSetup, onSavedCodes, onFactorStep, onPasskey, onRestart, onRecover, onUpdates, onClose }: BindDialogProps) {
   const { t, i18n } = useTranslation();
   const language = i18n.resolvedLanguage ?? i18n.language;
 
@@ -321,6 +342,20 @@ function BindDialogBody({ signIn, restartable = true, onCheckAgain, onSignInOthe
             {t(step.reason === 'otherAccount' ? 'desktopAccount.bind.signInOther' : 'desktopAccount.bind.checkAgain')}
           </Button>
         </>)}
+    </>;
+  }
+
+  if (step.kind === 'tooOld') {
+    const running = step.phase === 'running';
+    // About this computer, in plain words: no alert, no red, one state (owner, 2026-11-25).
+    return <>
+      {title(t('desktopAccount.bind.title'))}
+      <p className="text-sm leading-6">{t(step.phase === 'failed' ? 'desktopAccount.bind.upgradeFailed' : 'desktopAccount.bind.upgrade')}</p>
+      {running && <p role="status" className="mt-3 flex items-center gap-2 text-sm text-muted"><LoaderCircle className="size-4 motion-safe:animate-spin" />{t('desktopAccount.bind.upgrading')}</p>}
+      <div className="mt-6 flex flex-wrap justify-end gap-3">
+        <Button variant="ghost" disabled={running} onClick={onClose}>{t('desktopAccount.continueLocal')}</Button>
+        <Button variant="brand" disabled={running} onClick={onUpgrade}>{t('desktopAccount.bind.upgradeAndRetry')}</Button>
+      </div>
     </>;
   }
 
