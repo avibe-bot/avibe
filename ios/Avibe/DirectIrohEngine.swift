@@ -106,11 +106,28 @@ protocol DirectIrohConnection: AnyObject, Sendable {
     /// can tell.
     var selectedPathDetail: DirectSelectedPath? { get }
 
+    /// One read of the selected path, now: what tells it from every other,
+    /// and its labels, from the same look at the connection's paths. Nil
+    /// when none is selected.
+    var selectedPathRead: DirectSelectedPathRead? { get }
+
     /// Calls `onChange` with the selected path whenever the connection's
     /// paths change. Nil when the binding cannot watch.
     func watchSelectedPath(
         _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
     ) -> (any DirectPathWatch)?
+}
+
+/// The path a connection has selected, as one read of it found it.
+struct DirectSelectedPathRead: Equatable, Sendable {
+    /// What tells this path from every other the connection may select:
+    /// its kind with its far address, or with its relay. For comparing two
+    /// reads only (`DirectPathMark`); it stays in the transport and is
+    /// never shown, sent or logged.
+    let identity: String
+    /// The path's kind, class and round trip. Nil for a path that is
+    /// neither through the relay nor to a numeric address.
+    let labels: DirectSelectedPath?
 }
 
 /// A running watch; `stop` ends it.
@@ -125,6 +142,15 @@ extension DirectIrohConnection {
 
     var selectedPathDetail: DirectSelectedPath? {
         selectedPath.map { DirectSelectedPath(kind: $0, local: nil, rttMs: nil) }
+    }
+
+    var selectedPathRead: DirectSelectedPathRead? {
+        selectedPath.map {
+            DirectSelectedPathRead(
+                identity: $0.rawValue,
+                labels: DirectSelectedPath(kind: $0, local: nil, rttMs: nil)
+            )
+        }
     }
 
     /// Calls `onChange` with the selected path whenever the connection's
@@ -465,6 +491,16 @@ final class DirectIrohAuthority: @unchecked Sendable {
         let now = clock()
         return lock.withLock {
             !isRevoked && now < deadline && suspensions == admittedSuspensions
+        }
+    }
+
+    /// Whether the answer the path was admitted under still holds at this
+    /// moment: read from the clock, whether or not the timer that ends the
+    /// path at its deadline has run yet. It changes nothing.
+    var isWithinDeadline: Bool {
+        let now = clock()
+        return lock.withLock {
+            !isRevoked && now < deadline
         }
     }
 
