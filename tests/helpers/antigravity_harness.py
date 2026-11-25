@@ -61,8 +61,16 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def make_acp_capabilities(*, fork: bool = True, image: bool = True, logout: bool = True) -> dict[str, Any]:
-    session_caps: dict[str, Any] = {"resume": {}, "list": {}, "close": {}, "additionalDirectories": {}}
+def make_acp_capabilities(
+    *,
+    fork: bool = True,
+    image: bool = True,
+    logout: bool = True,
+    additional_directories: bool = True,
+) -> dict[str, Any]:
+    session_caps: dict[str, Any] = {"resume": {}, "list": {}, "close": {}}
+    if additional_directories:
+        session_caps["additionalDirectories"] = {}
     if fork:
         session_caps["fork"] = {}
     caps: dict[str, Any] = {

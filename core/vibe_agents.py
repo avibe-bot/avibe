@@ -2097,18 +2097,27 @@ def parse_agent_file(path: Path, *, backend: str) -> AgentImportCandidate:
     name = str(header.get("name") or path.stem).strip()
     description = header.get("description")
     model = header.get("model")
-    reasoning_effort = header.get("reasoning_effort") or header.get("reasoningEffort")
+    effort_keys = (
+        ("reasoning_effort", "reasoningEffort", "thought_level", "thoughtLevel")
+        if backend == "antigravity"
+        else ("reasoning_effort", "reasoningEffort")
+    )
+    reasoning_effort = next(
+        (cleaned for key in effort_keys if (cleaned := _clean_optional(header.get(key))) is not None),
+        None,
+    )
+    consumed_keys = {"name", "description", "model", *effort_keys}
     metadata = {
         key: value
         for key, value in header.items()
-        if key not in {"name", "description", "model", "reasoning_effort", "reasoningEffort"}
+        if key not in consumed_keys
     }
     return AgentImportCandidate(
         name=name,
         backend=backend,
         description=str(description).strip() if description else None,
         model=str(model).strip() if model else None,
-        reasoning_effort=str(reasoning_effort).strip() if reasoning_effort else None,
+        reasoning_effort=reasoning_effort,
         system_prompt=body or None,
         source="file",
         source_ref=str(path),
