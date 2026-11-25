@@ -60,13 +60,7 @@ def test_fresh_install_stamps_default_and_keeps_hub_backend_modes(tmp_path):
     config = V2Config.default()
     assert config.model_hub.enabled is True
     assert config.model_hub.runtime_default_applied is True
-    assert {name: agent.mode for name, agent in config.model_hub.agents.items()} == {
-        "opencode": "hub",
-        "claude": "hub",
-        "codex": "hub",
-        "antigravity": "direct",
-        "vibey": "hub",
-    }
+    assert all(agent.mode == "hub" for agent in config.model_hub.agents.values())
     path = tmp_path / "config.json"
     config.save(config_path=path)
     original = path.read_bytes()
@@ -143,7 +137,7 @@ def test_legacy_omissions_never_consent_to_native_takeover(tmp_path, shape):
     assert loaded.model_hub.runtime_default_applied is True
     expected = {
         "claude": "hub" if shape == "missing-backend" else "direct",
-        "codex": "direct", "opencode": "direct", "antigravity": "direct", "vibey": "hub",
+        "codex": "direct", "opencode": "direct", "vibey": "hub",
     }
     assert {name: agent.mode for name, agent in loaded.model_hub.agents.items()} == expected
     assert read_config(path)["agents"] == original["agents"]

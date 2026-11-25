@@ -483,7 +483,7 @@
         "additionalProperties": false,
         "properties": {
           "backend": {
-            "enum": ["claude", "codex", "opencode", "antigravity", "vibey"]
+            "enum": ["claude", "codex", "opencode", "vibey"]
           },
           "menu_model": {
             "type": "string",

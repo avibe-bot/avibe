@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from config.v2_compat import to_app_config
-from config.v2_config import AntigravityConfig, ModelHubConfig, V2Config
+from config.v2_config import (
+    MODEL_HUB_BACKENDS,
+    AntigravityConfig,
+    ModelHubConfig,
+    V2Config,
+    hub_supply_block,
+)
 from core.handlers.model_hub.events import BoundedEventLog
 from core.handlers.model_hub.resolver import resolve_model_hub_turn
 from core.handlers.model_hub.service import ModelHubError, ModelHubService
@@ -87,8 +93,7 @@ def test_antigravity_config_upgrade_and_downgrade_compatibility(tmp_path: Path):
     fresh.save(config_path)
     raw = json.loads(config_path.read_text(encoding="utf-8"))
 
-    # Default Direct-only Antigravity entry is omitted from persisted model_hub.agents
-    # so older releases never reject an unknown model_hub.agents key on downgrade.
+    # Antigravity is excluded from Model Hub entirely.
     assert "antigravity" not in raw["model_hub"]["agents"]
     assert "antigravity" in raw["agents"]
 
@@ -98,7 +103,7 @@ def test_antigravity_config_upgrade_and_downgrade_compatibility(tmp_path: Path):
     loaded = V2Config.load(config_path)
     assert loaded.load_warnings == ()
     assert loaded.agents.antigravity.enabled is False
-    assert loaded.model_hub.agents["antigravity"].mode == "direct"
+    assert "antigravity" not in loaded.model_hub.agents
 
     # Malformed agents.antigravity.auto_update recovers that field alone and keeps other fields.
     raw["agents"]["antigravity"] = {
@@ -114,9 +119,14 @@ def test_antigravity_config_upgrade_and_downgrade_compatibility(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_model_hub_treats_antigravity_as_direct_only(tmp_path: Path):
+async def test_model_hub_excludes_antigravity_and_keeps_it_direct(tmp_path: Path):
+    assert "antigravity" not in MODEL_HUB_BACKENDS
     hub_config = ModelHubConfig()
-    assert hub_config.agents["antigravity"].mode == "direct"
+    assert "antigravity" not in hub_config.agents
+    assert hub_supply_block("antigravity", hub_config) is None
+    assert hub_supply_block("antigravity", ModelHubConfig(enabled=False)) is None
+    assert hub_supply_block("antigravity", None) is None
+
     resolution = resolve_model_hub_turn(hub_config, "antigravity", "gemini-4-neon")
     assert resolution.channel == "direct"
     assert resolution.source is None
@@ -139,6 +149,7 @@ async def test_model_hub_treats_antigravity_as_direct_only(tmp_path: Path):
         adapter=object(),  # type: ignore[arg-type]
         events=BoundedEventLog(tmp_path / "events.json"),
     )
+    assert "antigravity" not in {agent["backend"] for agent in service.list_agents()}
     with pytest.raises(ModelHubError) as exc_info:
         await service.set_agent_mode("antigravity", "hub")
     assert exc_info.value.code == "mode_switch_blocked"

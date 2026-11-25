@@ -544,8 +544,8 @@ def resolve_model_hub_turn(
     """Annotate the effective route without changing its membership or tier."""
 
     requested_model = str(requested_model or "").strip()
-    agent = config.agents[backend]
-    if agent.mode == "direct":
+    agent = config.agents.get(backend)
+    if agent is None or agent.mode == "direct":
         return ModelHubTurnResolution(
             backend=backend,
             channel="direct",

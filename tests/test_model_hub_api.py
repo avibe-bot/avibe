@@ -17,9 +17,9 @@ from urllib.parse import quote
 import pytest
 from jsonschema import Draft7Validator, FormatChecker
 from referencing import Registry, Resource
-from modules.agents.catalog import AGENT_BACKENDS
 
 from config.v2_config import (
+    MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
     ModelHubConfig,
@@ -4277,7 +4277,7 @@ def test_backend_catalog_preserves_requested_insertion_position_for_a_new_model(
     ]
 
 
-@pytest.mark.parametrize("backend", AGENT_BACKENDS)
+@pytest.mark.parametrize("backend", MODEL_HUB_BACKENDS)
 def test_backend_catalog_allows_editing_a_persisted_legacy_long_id(tmp_path, backend):
     service, store, _adapter = _service(tmp_path)
     legacy_id = "legacy-" + "模型🧪/e\u0301" * 3000
@@ -4326,7 +4326,7 @@ def test_backend_catalog_allows_a_persisted_legacy_claude_alias_to_round_trip(
     assert response["agent"]["catalog_models"][1]["display_name"] == "Unrelated edit"
 
 
-@pytest.mark.parametrize("backend", AGENT_BACKENDS)
+@pytest.mark.parametrize("backend", MODEL_HUB_BACKENDS)
 def test_backend_catalog_rejects_a_new_unencodable_id(tmp_path, backend):
     service, _store, _adapter = _service(tmp_path)
     baseline = service.backend_catalog_models(backend)
@@ -4342,7 +4342,7 @@ def test_backend_catalog_rejects_a_new_unencodable_id(tmp_path, backend):
     assert raised.value.code == "backend_model_id_invalid"
 
 
-@pytest.mark.parametrize("backend", AGENT_BACKENDS)
+@pytest.mark.parametrize("backend", MODEL_HUB_BACKENDS)
 @pytest.mark.parametrize(
     "identifier", ["x" * 257, "模型🧪/e\u0301" * 3000, "x" * 17000],
     ids=("past-former-bound", "long-unicode", "past-lexical-budget"),
@@ -4673,7 +4673,6 @@ def test_agents_endpoint_projects_cli_presence_from_runtime(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     assert {backend: agent["cli_present"] for backend, agent in agents.items()} == {
-        "antigravity": False,
         "claude": True,
         "codex": True,
         "opencode": False,
@@ -4691,7 +4690,6 @@ def test_agents_endpoint_projects_backend_enablement(tmp_path):
     agents = {agent["backend"]: agent for agent in service.list_agents()}
 
     assert {backend: agent["backend_enabled"] for backend, agent in agents.items()} == {
-        "antigravity": False,
         "claude": True,
         "codex": False,
         "opencode": False,
@@ -5091,7 +5089,6 @@ def test_agents_endpoint_projects_each_enabled_named_agent_live(tmp_path):
         "codex": "gpt-5.3-codex",
     }.get(backend)
     service.named_agents_override = lambda backend: {
-        "antigravity": [],
         "claude": [("pm", "claude-sonnet-4-6"), ("reviewer", "claude-opus-4-6")],
         "codex": [("codex", "gpt-5.3-codex")],
         "opencode": [],

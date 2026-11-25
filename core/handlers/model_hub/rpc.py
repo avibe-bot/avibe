@@ -1,11 +1,12 @@
 """Allowlisted RPC surface for the controller-owned Model Hub service."""
 
 from __future__ import annotations
-from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
 import asyncio
 from typing import Any
 from weakref import WeakKeyDictionary
+
+from config.v2_config import MODEL_HUB_NATIVE_BACKENDS
 
 from .service import BackendName, ModelHubError, ModelHubService
 from .usage import USAGE_DEFAULT_WINDOW_DAYS
@@ -67,7 +68,7 @@ async def _refresh_payload_backend(
     service: ModelHubService,
     backend: object,
 ) -> None:
-    if backend in NATIVE_CLI_BACKENDS:
+    if backend in MODEL_HUB_NATIVE_BACKENDS:
         await _refresh_agent_presence(service, (backend,))
 
 
@@ -126,7 +127,7 @@ async def dispatch_model_hub_rpc(
     if operation == "agent_model_candidates":
         service.request_inventory_refresh()
         backend = payload.get("backend")
-        if backend in NATIVE_CLI_BACKENDS:
+        if backend in MODEL_HUB_NATIVE_BACKENDS:
             await _refresh_agent_presence(service, (backend,))
             if backend != "opencode":
                 await service.reconcile_builtin_models((backend,))

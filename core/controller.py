@@ -17,12 +17,13 @@ from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_AGENT_PROGRESS_STYLE,
+    MODEL_HUB_NATIVE_BACKENDS,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
 from modules.agents.service import AgentService
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, default_cli_for_backend
+from modules.agents.catalog import AGENT_BACKENDS, default_cli_for_backend
 from modules.claude_client import ClaudeClient
 from modules.session_manager import SessionManager
 from modules.settings_manager import SettingsManager, MultiSettingsManager
@@ -395,7 +396,7 @@ class Controller:
 
         store = self.vibe_agent_store
         selections = []
-        for backend in sorted(NATIVE_CLI_BACKENDS):
+        for backend in sorted(MODEL_HUB_NATIVE_BACKENDS):
             agent = store.get_builtin_default_agent_for_backend(backend)
             model = str(getattr(agent, "model", None) or "").strip()
             if model:
@@ -3172,7 +3173,7 @@ class Controller:
             backends: tuple[str, ...] | None = None,
         ) -> None:
             nonlocal cli_presence, next_cli_presence_generation
-            selected_backends = backends or tuple(sorted(NATIVE_CLI_BACKENDS))
+            selected_backends = backends or tuple(sorted(MODEL_HUB_NATIVE_BACKENDS))
             with cli_presence_lock:
                 next_cli_presence_generation += 1
                 generation = next_cli_presence_generation

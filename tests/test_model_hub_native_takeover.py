@@ -478,9 +478,7 @@ def test_invalid_journal_does_not_start_engine_or_admit_native_backends(monkeypa
     path.chmod(0o600)
     with pytest.raises(ModelHubError):
         asyncio.run(service.recover_runtime_intent())
-    from modules.agents.catalog import NATIVE_CLI_BACKENDS
-
-    assert service.migration_blocked_backends == set(NATIVE_CLI_BACKENDS)
+    assert service.migration_blocked_backends == {"claude", "codex", "opencode"}
     assert adapter.activated == []
 
 

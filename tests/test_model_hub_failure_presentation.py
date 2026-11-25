@@ -9,6 +9,7 @@ import aiohttp
 import pytest
 
 from config.v2_config import (
+    MODEL_HUB_BACKENDS,
     ModelHubBackendModelConfig,
     ModelHubRouteConfig,
     ModelHubRouteHopConfig,
@@ -27,7 +28,6 @@ from core.handlers.model_hub.provenance import (
 )
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
-from modules.agents.catalog import AGENT_BACKENDS
 from modules.agents.model_hub import ModelHubRuntimeRouter, bind_launch
 from modules.im import MessageContext
 from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _outcome
@@ -56,7 +56,7 @@ def unavailable(tmp_path, backend="codex"):
     )
 
 
-@pytest.mark.parametrize("backend", [b for b in AGENT_BACKENDS if b != "antigravity"])
+@pytest.mark.parametrize("backend", MODEL_HUB_BACKENDS)
 @pytest.mark.parametrize("platform", ["avibe", "slack"])
 @pytest.mark.parametrize("language", ["en", "zh"])
 async def test_shared_failure_uses_exact_hub_copy_and_preserves_terminal_evidence(
