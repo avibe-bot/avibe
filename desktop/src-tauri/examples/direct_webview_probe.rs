@@ -364,6 +364,9 @@ self.addEventListener('fetch', (event) => {
     pub struct Proxy {
         pub port: u16,
         asked: Arc<Mutex<Vec<Asked>>>,
+        /// The browser's side of every tunnel it carries, to end them.
+        tunnels: Arc<Mutex<Vec<TcpStream>>>,
+        stopped: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Proxy {
@@ -374,14 +377,37 @@ self.addEventListener('fetch', (event) => {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("proxy port");
             let port = listener.local_addr().expect("proxy address").port();
             let asked = Arc::new(Mutex::new(Vec::new()));
-            let log = asked.clone();
+            let tunnels = Arc::new(Mutex::new(Vec::new()));
+            let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (log, kept, ended) = (asked.clone(), tunnels.clone(), stopped.clone());
             thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
-                    let (log, target) = (log.clone(), target.clone());
-                    thread::spawn(move || serve_proxy(stream, &target, upstream, &log));
+                    // Stopped: the port closes with the listener.
+                    if ended.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    let (log, target, kept) = (log.clone(), target.clone(), kept.clone());
+                    thread::spawn(move || serve_proxy(stream, &target, upstream, &log, &kept));
                 }
             });
-            Self { port, asked }
+            Self {
+                port,
+                asked,
+                tunnels,
+                stopped,
+            }
+        }
+
+        /// Gone, as a session's listener is when its client is dropped: the
+        /// port is closed, and every tunnel through it ends.
+        pub fn stop(&self) {
+            self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Wakes the accept loop, which then lets go of the port.
+            let _ = TcpStream::connect((Ipv4Addr::LOCALHOST, self.port));
+            for tunnel in self.tunnels.lock().expect("tunnels").drain(..) {
+                let _ = tunnel.shutdown(Shutdown::Both);
+            }
+            thread::sleep(Duration::from_millis(100));
         }
 
         pub fn asked(&self) -> Vec<Asked> {
@@ -393,7 +419,13 @@ self.addEventListener('fetch', (event) => {
         }
     }
 
-    fn serve_proxy(mut browser: TcpStream, served: &str, upstream: Option<u16>, log: &Mutex<Vec<Asked>>) {
+    fn serve_proxy(
+        mut browser: TcpStream,
+        served: &str,
+        upstream: Option<u16>,
+        log: &Mutex<Vec<Asked>>,
+        tunnels: &Mutex<Vec<TcpStream>>,
+    ) {
         use base64::{engine::general_purpose::STANDARD, Engine};
         let _ = browser.set_read_timeout(Some(Duration::from_secs(10)));
         let Some((head, early)) = read_head(&mut browser) else {
@@ -448,6 +480,9 @@ self.addEventListener('fetch', (event) => {
         let (Ok(mut browser_read), Ok(mut upstream_write)) = (browser.try_clone(), upstream.try_clone()) else {
             return;
         };
+        if let Ok(kept) = browser.try_clone() {
+            tunnels.lock().expect("tunnels").push(kept);
+        }
         let up = thread::spawn(move || {
             let _ = std::io::copy(&mut browser_read, &mut upstream_write);
             let _ = upstream_write.shutdown(Shutdown::Write);
@@ -979,6 +1014,7 @@ mod macos_probe {
                     SocketAddrV4::new(Ipv4Addr::LOCALHOST, naming.port),
                     name,
                     password,
+                    true,
                 );
                 view
             })
@@ -1013,6 +1049,7 @@ mod macos_probe {
             SocketAddrV4::new(Ipv4Addr::LOCALHOST, proxy.port),
             USERNAME,
             PASSWORD,
+            true,
         );
         proxy.forget();
         instance.forget();
@@ -1098,6 +1135,7 @@ mod macos_probe {
                 SocketAddrV4::new(Ipv4Addr::LOCALHOST, listener.port),
                 USERNAME,
                 PASSWORD,
+                true,
             )
         };
         let through_listener = || {
@@ -1206,6 +1244,7 @@ mod macos_probe {
                 SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
                 USERNAME,
                 PASSWORD,
+                true,
             );
             let before = keeping.accepted();
             let loaded = load(&view, &format!("http://{reachable}/"), "kept");
@@ -1230,6 +1269,88 @@ mod macos_probe {
             );
         }
 
+        // The same two listeners under a route that allows no failover, as
+        // the shell routes a direct-only instance ("the direct path and the
+        // relay only"): the page does not load, a request from a page that
+        // is already there fails, and the host is never connected to by
+        // itself. A third: the listener is there when the page loads and
+        // gone afterwards, as when a session's client is dropped.
+        for (name, port, asked_of) in [
+            (
+                "without-failover-the-page-does-not-load-when-the-listener-answers-502",
+                refusing.port,
+                Some(&refusing),
+            ),
+            (
+                "without-failover-the-page-does-not-load-when-the-listener-is-gone",
+                gone,
+                None,
+            ),
+        ] {
+            let view = new_webview(mtm);
+            let installed = install_route(
+                &view,
+                mtm,
+                REACHABLE,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, port),
+                USERNAME,
+                PASSWORD,
+                false,
+            );
+            let (before, asked_before) = (keeping.accepted(), asked_of.map(|proxy| proxy.asked().len()));
+            let loaded = load(&view, &format!("http://{reachable}/"), "kept");
+            pump_until(Duration::from_millis(500), || false);
+            let straight = keeping.accepted() - before;
+            let refused = asked_of
+                .zip(asked_before)
+                .map(|(proxy, before)| proxy.asked().len() - before);
+            report.case(
+                name,
+                installed && !loaded && straight == 0 && refused.is_none_or(|count| count >= 1),
+                json!({
+                    "installed": installed, "loaded": loaded,
+                    "connections_straight_to_the_host": straight, "listener_asked_and_refused": refused,
+                }),
+            );
+        }
+        {
+            let serving = Proxy::start(reachable.clone(), Some(keeping.port));
+            let view = new_webview(mtm);
+            let installed = install_route(
+                &view,
+                mtm,
+                REACHABLE,
+                SocketAddrV4::new(Ipv4Addr::LOCALHOST, serving.port),
+                USERNAME,
+                PASSWORD,
+                false,
+            );
+            let loaded = load(&view, &format!("http://{reachable}/"), "kept");
+            let answered = request(&view);
+            let through = serving.asked().len();
+            // The listener goes, with every connection through it.
+            serving.stop();
+            let before = keeping.accepted();
+            let mut after = Vec::new();
+            for _ in 0..3 {
+                pump_until(Duration::from_millis(300), || false);
+                after.push(request(&view));
+            }
+            // Another page of the host, so that the one already there
+            // cannot pass for it.
+            let reloaded = load(&view, &format!("http://{reachable}/after"), "kept");
+            let straight = keeping.accepted() - before;
+            report.case(
+                "without-failover-a-loaded-page-fails-once-its-listener-is-gone",
+                installed && loaded && answered && through >= 1 && !after.contains(&true) && !reloaded && straight == 0,
+                json!({
+                    "installed": installed, "loaded": loaded, "request_answered": answered,
+                    "through_listener": through, "requests_after": after, "reloaded": reloaded,
+                    "connections_straight_to_the_host": straight,
+                }),
+            );
+        }
+
         // 16. Two routed windows of one instance at one listener, each with
         //     a credential of its own, as the shell routes them. The
         //     listener closes the tunnels of one, as it does for that
@@ -1250,6 +1371,7 @@ mod macos_probe {
                     SocketAddrV4::new(Ipv4Addr::LOCALHOST, shared.port),
                     name,
                     password,
+                    true,
                 );
                 view
             })
@@ -1485,16 +1607,16 @@ mod windows_probe {
         let request = Request::new(&origin, ENDPOINT).expect("a valid request");
         let mut report = Report { failed: 0 };
 
-        let argument = route_argument(ROUTED, listener);
+        let argument = route_argument(ROUTED, listener, true);
         report.case(
             "the-route-argument-holds-one-host-and-no-credential",
             argument.as_deref().is_some_and(|argument| {
                 argument.starts_with("--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,")
                     && !argument.contains(PASSWORD)
                     && !argument.contains(&STANDARD.encode(PASSWORD))
-            }) && route_argument("Instance.Example", listener).is_none()
-                && route_argument("a\" || true || \"", listener).is_none()
-                && route_argument("", listener).is_none(),
+            }) && route_argument("Instance.Example", listener, true).is_none()
+                && route_argument("a\" || true || \"", listener, true).is_none()
+                && route_argument("", listener, true).is_none(),
             json!({ "made": argument.is_some() }),
         );
         let Some(argument) = argument else { return report.failed };
@@ -1728,10 +1850,10 @@ mod windows_probe {
         let naming = Naming::start();
         let naming_listener = SocketAddrV4::new(Ipv4Addr::LOCALHOST, naming.port);
         let mut named = Vec::new();
-        let mut made = route_argument(ROUTED, naming_listener).is_some();
+        let mut made = route_argument(ROUTED, naming_listener, true).is_some();
         for (name, password, _) in WINDOWS {
             let folder = std::env::temp_dir().join(format!("avibe-direct-webview-probe-{name}-{}", std::process::id()));
-            let argument = route_argument(ROUTED, naming_listener).unwrap_or_default();
+            let argument = route_argument(ROUTED, naming_listener, true).unwrap_or_default();
             match new_webview(&folder, argument, true) {
                 Ok((controller, view)) => {
                     made &= answer_listener_challenge(&view, naming_listener, name, password).is_ok();
@@ -1847,11 +1969,152 @@ mod windows_probe {
             json!({ "here": here, "private": private }),
         );
 
+        // 12. The route of a direct-only instance ("the direct path and the
+        //     relay only") names the listener alone, with no `DIRECT` after
+        //     it. Measured on a host WebView2 reaches by itself, as it
+        //     reaches an instance on the tunnel: this computer's own
+        //     address (a loopback name is never sent to a proxy). A plain
+        //     socket there counts every connection made straight to it; no
+        //     certificate is needed to see one arrive.
+        //     - With `DIRECT` and the listener gone, the host is connected
+        //       to: the count works, and it is what the choice forbids.
+        //     - Without it, the host is never connected to: not when the
+        //       listener is gone, and not when it answers 502.
+        match Straight::start() {
+            None => report.case(
+                "without-failover-nothing-goes-straight-to-the-host",
+                false,
+                json!({ "error": "this computer has no address of its own to measure on" }),
+            ),
+            Some(straight) => {
+                let host = straight.address.to_string();
+                let target = format!("{host}:{}", straight.port);
+                let gone = {
+                    let unused = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("a free port");
+                    SocketAddrV4::new(Ipv4Addr::LOCALHOST, unused.local_addr().expect("its address").port())
+                };
+                let refusing = Proxy::start(target.clone(), Some(gone.port()));
+                let refusing_at = SocketAddrV4::new(Ipv4Addr::LOCALHOST, refusing.port);
+                let mut folders = Vec::new();
+                for (name, listener, failover, refuses) in [
+                    (
+                        "with-failover-the-host-is-reached-when-the-listener-is-gone",
+                        gone,
+                        true,
+                        false,
+                    ),
+                    (
+                        "without-failover-nothing-goes-straight-to-the-host-when-the-listener-is-gone",
+                        gone,
+                        false,
+                        false,
+                    ),
+                    (
+                        "without-failover-nothing-goes-straight-to-the-host-when-the-listener-answers-502",
+                        refusing_at,
+                        false,
+                        true,
+                    ),
+                ] {
+                    let folder =
+                        std::env::temp_dir().join(format!("avibe-direct-webview-probe-{name}-{}", std::process::id()));
+                    let argument = route_argument(&host, listener, failover).unwrap_or_default();
+                    let made = new_webview(&folder, argument.clone(), true);
+                    folders.push(folder);
+                    let Ok((routed_controller, routed)) = made else {
+                        report.case(name, false, json!({ "error": "no WebView2" }));
+                        continue;
+                    };
+                    let answering =
+                        !refuses || answer_listener_challenge(&routed, listener, USERNAME, PASSWORD).is_ok();
+                    let before = straight.accepted();
+                    refusing.forget();
+                    navigate(&routed, &format!("https://{target}/"));
+                    let refused = || {
+                        refusing
+                            .asked()
+                            .iter()
+                            .filter(|asked| asked.target == target && asked.credential == "right")
+                            .count()
+                    };
+                    let ok = if failover {
+                        // Until the host has been connected to by itself.
+                        pump_until(WAIT, || straight.accepted() > before)
+                    } else {
+                        // Until the listener has refused, where one is
+                        // there to; then long enough for a connection that
+                        // went round it to be seen.
+                        let asked = !refuses || pump_until(WAIT, || refused() >= 1);
+                        pump_until(Duration::from_secs(5), || false);
+                        asked && straight.accepted() == before
+                    };
+                    report.case(
+                        name,
+                        !argument.is_empty() && answering && ok,
+                        json!({
+                            "route": !argument.is_empty(), "answering": answering,
+                            "connections_straight_to_the_host": straight.accepted() - before,
+                            "listener_asked_and_refused": refuses.then(refused),
+                        }),
+                    );
+                    // SAFETY: A single-threaded apartment; done with this WebView.
+                    let _ = unsafe { routed_controller.Close() };
+                }
+                pump_until(Duration::from_millis(500), || false);
+                for folder in folders {
+                    let _ = std::fs::remove_dir_all(&folder);
+                }
+            }
+        }
+
         // SAFETY: A single-threaded apartment; the probe is done with the WebView.
         let _ = unsafe { controller.Close() };
         pump_until(Duration::from_millis(500), || false);
         let _ = std::fs::remove_dir_all(&folder);
         let _ = std::fs::remove_dir_all(&private_folder);
         report.failed
+    }
+
+    /// A socket on this computer's own address (not a loopback one) that
+    /// counts the connections made to it and answers none.
+    struct Straight {
+        address: Ipv4Addr,
+        port: u16,
+        accepted: std::sync::Arc<std::sync::Mutex<usize>>,
+    }
+
+    impl Straight {
+        /// `None` when this computer has no address of its own.
+        fn start() -> Option<Self> {
+            // The address a packet to anywhere else would leave from. No
+            // packet is sent: a UDP socket only chooses its route.
+            let chooser = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+            chooser.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+            let std::net::IpAddr::V4(address) = chooser.local_addr().ok()?.ip() else {
+                return None;
+            };
+            if address.is_loopback() || address.is_unspecified() || address.is_link_local() {
+                return None;
+            }
+            let listener = std::net::TcpListener::bind((address, 0)).ok()?;
+            let port = listener.local_addr().ok()?.port();
+            let accepted = std::sync::Arc::new(std::sync::Mutex::new(0));
+            let count = accepted.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    *count.lock().expect("accepted") += 1;
+                    drop(stream);
+                }
+            });
+            Some(Self {
+                address,
+                port,
+                accepted,
+            })
+        }
+
+        fn accepted(&self) -> usize {
+            *self.accepted.lock().expect("accepted")
+        }
     }
 }

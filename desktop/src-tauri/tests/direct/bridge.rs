@@ -1,6 +1,6 @@
 use super::{
     bridge::{self, Ledger, Message, Method, Request, Told},
-    choices::Mode,
+    choices::{Mode, Reason, Reverted},
     AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath,
 };
 use serde_json::{json, Value};
@@ -124,12 +124,35 @@ fn a_hand_over_is_answered_in_the_phones_words() {
         json!({ "closed": 0, "kept": 0, "skipped": "other_documents" })
     );
     assert_eq!(
-        bridge::preference(Mode::Tunnel),
-        json!({ "mode": "tunnel", "reverted": null })
+        bridge::preference(Mode::Tunnel, None),
+        json!({ "mode": "tunnel", "pendingRelaunch": false, "reverted": null })
     );
     assert_eq!(
-        bridge::preference(Mode::Automatic),
-        json!({ "mode": "automatic", "reverted": null })
+        bridge::preference(Mode::Automatic, None),
+        json!({ "mode": "automatic", "pendingRelaunch": false, "reverted": null })
+    );
+    // "The direct path and the relay only": the choice's own word, which is
+    // not the status's `preferred`.
+    assert_eq!(
+        bridge::preference(Mode::Direct, None),
+        json!({ "mode": "direct", "pendingRelaunch": false, "reverted": null })
+    );
+    // Set back by the app itself: when, why, and from which choice, as the
+    // phone App says it.
+    assert_eq!(
+        bridge::preference(
+            Mode::Automatic,
+            Some(Reverted {
+                at: 1_795_000_000_000,
+                reason: Reason::Unreachable,
+                from: Mode::Direct,
+            })
+        ),
+        json!({
+            "mode": "automatic",
+            "pendingRelaunch": false,
+            "reverted": { "at": 1_795_000_000_000u64, "reason": "unreachable", "from": "direct" },
+        })
     );
 }
 
@@ -154,7 +177,11 @@ fn a_request_is_read_only_with_the_windows_token() {
     );
     // Not a choice the app has, a method it does not answer, or a
     // parameter a method does not take.
-    assert_eq!(request("direct.setPreference", json!({ "mode": "direct" })), None);
+    assert_eq!(
+        request("direct.setPreference", json!({ "mode": "direct" })),
+        Some(Method::SetPreference(Mode::Direct))
+    );
+    assert_eq!(request("direct.setPreference", json!({ "mode": "relay" })), None);
     assert_eq!(request("direct.setPreference", json!({})), None);
     assert_eq!(request("direct.handover", json!({ "mode": "tunnel" })), None);
     assert_eq!(request("direct.status", json!({})), None);
@@ -206,7 +233,7 @@ fn a_request_is_read_only_with_the_windows_token() {
 fn a_delivery_runs_only_in_the_instances_own_top_document() {
     let state = Message::State {
         status: Ledger::default().status(),
-        choice: Told::new(Mode::Automatic, 4),
+        choice: Told::new(Mode::Automatic, None, 4),
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &state);
     assert!(script.starts_with(
@@ -232,25 +259,31 @@ fn the_choice_of_path_is_delivered_with_its_order() {
     // keeps the newest by `preferenceOrder`, whichever arrives first.
     let state = Message::State {
         status: Ledger::default().status(),
-        choice: Told::new(Mode::Tunnel, 4),
+        choice: Told::new(Mode::Tunnel, None, 4),
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &state);
     assert!(
-        script.contains(r#""preference":{"mode":"tunnel","reverted":null},"preferenceOrder":4"#),
+        script
+            .contains(r#""preference":{"mode":"tunnel","pendingRelaunch":false,"reverted":null},"preferenceOrder":4"#),
         "{script}"
     );
     let reply = Message::Reply {
         id: "7c1e-a".to_owned(),
-        result: bridge::preference(Mode::Automatic),
-        choice: Some(Told::new(Mode::Automatic, 5)),
+        result: bridge::preference(Mode::Automatic, None),
+        choice: Some(Told::new(Mode::Automatic, None, 5)),
     };
     let script = bridge::delivery("https://one-app.avibe.bot", &reply);
     assert!(
-        script.contains(r#""preference":{"mode":"automatic","reverted":null},"preferenceOrder":5"#),
+        script.contains(
+            r#""preference":{"mode":"automatic","pendingRelaunch":false,"reverted":null},"preferenceOrder":5"#
+        ),
         "{script}"
     );
     // The order is beside the choice, never inside what `direct.preference()` answers.
-    assert_eq!(Told::new(Mode::Tunnel, 9).preference, bridge::preference(Mode::Tunnel));
+    assert_eq!(
+        Told::new(Mode::Tunnel, None, 9).preference,
+        bridge::preference(Mode::Tunnel, None)
+    );
 }
 
 #[test]
@@ -263,6 +296,6 @@ fn the_bridge_script_is_given_the_token_and_the_version_as_data() {
     for word in ["127.0.0.1", "password", "Proxy-Authorization", "__TAURI"] {
         assert!(!script.contains(word), "{word}");
     }
-    assert!(script.contains("capabilities: Object.freeze({ direct: 3, directPreference: 1 })"));
+    assert!(script.contains("capabilities: Object.freeze({ direct: 3, directPreference: 2 })"));
     assert!(script.contains("platform: 'desktop'"));
 }

@@ -109,6 +109,10 @@ pub fn answer(
     });
 }
 
+/// Routing here is given at creation: a window that may not load without a
+/// route has one to nothing in its arguments (`shell::blocked`).
+pub fn block(_: &AppHandle, _: String, _: String, _: std::net::SocketAddrV4, _: impl Fn() -> bool + Send + 'static) {}
+
 /// What was kept for a window that has closed is dropped.
 pub fn forget_closed(open: impl Fn(&str) -> bool) {
     if let Ok(mut answering) = ANSWERING.lock() {
@@ -120,12 +124,15 @@ pub fn arguments(host: &str, material: &Material) -> Option<String> {
     Some(super::window_arguments(&webview_windows::route_argument(
         host,
         material.proxy,
+        !material.exclusive,
     )?))
 }
 
 /// The route of an open window cannot be taken off: when its client is
 /// dropped the listener's port closes, and the route's own `DIRECT` carries
-/// the window on the tunnel. What is taken off, before that, is the answer
+/// the window on the tunnel. (A direct-only instance's route has no
+/// `DIRECT`: its window then fails, until the instance is opened again.)
+/// What is taken off, before that, is the answer
 /// to the listener's challenge, so the credential leaves the window with
 /// the session.
 ///
