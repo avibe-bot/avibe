@@ -1411,3 +1411,35 @@ def test_update_state_without_backend_attempts_loads_released_fields(monkeypatch
     assert state.last_activity_at == 1767225600.0
     assert state.backend_auto_update_attempts == loaded
     assert state.backend_releases_seen == {}
+
+
+@pytest.mark.parametrize(
+    ("observed_version", "observed_status"),
+    [("0.5.0", "ok"), ("0.4.0", "broken")],
+)
+def test_restore_backend_fails_when_readback_version_or_status_mismatches(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, observed_version, observed_status
+):
+    """_restore_backend must verify post-restore status and exact version before returning 'restored'."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
+
+    runtime_reads = iter(
+        [
+            {"ok": True, "status": "broken", "current_version": None},
+            {"ok": True, "status": observed_status, "current_version": observed_version},
+        ]
+    )
+    monkeypatch.setattr("vibe.api.get_backend_runtime", lambda _name: next(runtime_reads))
+    install_calls = []
+    monkeypatch.setattr(
+        "vibe.api.install_agent",
+        lambda name, version=None: install_calls.append((name, version)) or {"ok": True},
+    )
+
+    outcome = asyncio.run(checker._restore_backend("antigravity", "0.4.0"))
+
+    assert install_calls == [("antigravity", "0.4.0")]
+    assert outcome == "failed"

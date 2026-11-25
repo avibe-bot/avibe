@@ -1233,3 +1233,211 @@ def test_resolve_cli_path_maps_default_cli_agy_to_published_desktop_antigravity(
     _write_native(external)
     stale_desktop_path = root / "antigravity" / "releases" / "stale" / "bin" / binary_name
     assert resolve_cli_path(str(stale_desktop_path), include_npm_global=False) == expected
+
+
+def _build_antigravity_archive(archive_path: Path, binary_name: str) -> str:
+    import hashlib
+    import io
+    import tarfile
+
+    content = (b"MZ\x00\x00" if os.name == "nt" else b"\x7fELF") + b"0" * 64
+    with tarfile.open(archive_path, "w:gz") as tf:
+        info = tarfile.TarInfo(name=f"bin/{binary_name}")
+        info.size = len(content)
+        info.mode = 0o755
+        tf.addfile(info, io.BytesIO(content))
+    return hashlib.sha256(archive_path.read_bytes()).hexdigest()
+
+
+def test_desktop_antigravity_pinned_version_fetches_tag_and_activates(monkeypatch, tmp_path):
+    """Pinned Antigravity archive install fetches /releases/tags/v<ver> (never /releases/latest)."""
+    import urllib.error
+
+    runtime = tmp_path / "runtime" / "1.0.0" / "digest"
+    runtime.mkdir(parents=True)
+    env = {
+        "AVIBE_DESKTOP_RUNTIME_ROOT": str(runtime),
+        "AVIBE_DESKTOP_BACKENDS_ROOT": str(tmp_path / "backends"),
+        "PATH": str(tmp_path / "external-bin"),
+    }
+    asset_name = f"agy_cli_{desktop_backends._release_archive_platform_tag('antigravity')}.tar.gz"
+    exe_name = "agy.exe" if os.name == "nt" else "agy"
+    archive = tmp_path / asset_name
+    digest = _build_antigravity_archive(archive, exe_name)
+    release_payload = {
+        "tag_name": "v0.4.0",
+        "assets": [
+            {
+                "name": asset_name,
+                "browser_download_url": f"https://github.com/google-antigravity/antigravity-cli/releases/download/v0.4.0/{asset_name}",
+                "digest": f"sha256:{digest}",
+            }
+        ],
+    }
+
+    class _FakeResp:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self, _n: int = -1) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    requested_urls: list[str] = []
+
+    def fake_urlopen(request, timeout=None):
+        del timeout
+        requested_urls.append(request.full_url)
+        if request.full_url.endswith("/releases/tags/v0.4.0"):
+            return _FakeResp(json.dumps(release_payload).encode("utf-8"))
+        raise urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(desktop_backends.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(
+        desktop_backends,
+        "_download_release_asset",
+        lambda _url, dest, **_kw: dest.write_bytes(archive.read_bytes()),
+    )
+    monkeypatch.setattr(
+        desktop_backends,
+        "_run_command",
+        lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, "0.4.0\n", ""),
+    )
+
+    activated: list[str] = []
+    result = desktop_backends.install_desktop_backend(
+        "antigravity",
+        base_env=env,
+        activate=activated.append,
+        version="0.4.0",
+    )
+
+    assert requested_urls == [
+        "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/tags/v0.4.0"
+    ]
+    assert all("/releases/latest" not in url for url in requested_urls)
+    assert result.version == "0.4.0"
+    assert activated == [result.path]
+    assert desktop_backends.resolve_published_desktop_backend("antigravity", env) == result.path
+
+    with pytest.raises(desktop_backends.DesktopBackendError) as invalid:
+        desktop_backends.install_desktop_backend("antigravity", base_env=env, version="../0.4.0")
+    assert invalid.value.code == "invalid_version"
+
+
+def test_desktop_antigravity_pinned_version_fails_closed_on_probe_mismatch(monkeypatch, tmp_path):
+    """Pinned archive install must fail closed before publishing when probed version mismatches."""
+    runtime = tmp_path / "runtime" / "1.0.0" / "digest"
+    runtime.mkdir(parents=True)
+    env = {
+        "AVIBE_DESKTOP_RUNTIME_ROOT": str(runtime),
+        "AVIBE_DESKTOP_BACKENDS_ROOT": str(tmp_path / "backends"),
+        "PATH": str(tmp_path / "external-bin"),
+    }
+    asset_name = f"agy_cli_{desktop_backends._release_archive_platform_tag('antigravity')}.tar.gz"
+    exe_name = "agy.exe" if os.name == "nt" else "agy"
+    archive = tmp_path / asset_name
+    digest = _build_antigravity_archive(archive, exe_name)
+    release_payload = {
+        "tag_name": "v0.4.0",
+        "assets": [
+            {
+                "name": asset_name,
+                "browser_download_url": f"https://github.com/google-antigravity/antigravity-cli/releases/download/v0.4.0/{asset_name}",
+                "digest": f"sha256:{digest}",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(desktop_backends, "_fetch_github_release", lambda _repo, **_kw: release_payload)
+    monkeypatch.setattr(
+        desktop_backends,
+        "_download_release_asset",
+        lambda _url, dest, **_kw: dest.write_bytes(archive.read_bytes()),
+    )
+    monkeypatch.setattr(
+        desktop_backends,
+        "_run_command",
+        lambda cmd, **_kw: subprocess.CompletedProcess(cmd, 0, "0.5.0\n", ""),
+    )
+
+    activated: list[str] = []
+    with pytest.raises(desktop_backends.DesktopBackendError) as raised:
+        desktop_backends.install_desktop_backend(
+            "antigravity",
+            base_env=env,
+            activate=activated.append,
+            version="0.4.0",
+        )
+
+    assert raised.value.code == "version_mismatch"
+    assert activated == []
+    backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "antigravity"
+    assert not (backend_root / "current.json").exists()
+    assert list(backend_root.glob("releases/*")) == []
+    assert list(backend_root.glob(".staging-*")) == []
+
+
+@pytest.mark.parametrize("mode", ["existing", "fresh", "broken"])
+def test_non_desktop_antigravity_refuses_pinned_version(monkeypatch, tmp_path, mode):
+    """Non-desktop agy update and script installers must refuse pinned versions without executing."""
+    from config.v2_config import V2Config
+    from vibe import api
+    from vibe.cli_repair import RepairSource
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    cfg = V2Config.default()
+    cfg.agents.antigravity.cli_path = "agy"
+    cfg.save()
+
+    executed: list[list[str]] = []
+    monkeypatch.setattr(
+        api,
+        "_run_install_command",
+        lambda _n, cmd, *_a, **_kw: executed.append(list(cmd)) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda _p: False)
+
+    existing = str(tmp_path / "agy")
+    if mode == "existing":
+        monkeypatch.setattr(api, "resolve_cli_path", lambda name: existing if name == "agy" else f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            api,
+            "detect_cli",
+            lambda _p, _b: {"found": True, "path": existing, "status": "ok", "version": "0.5.0", "reason": None},
+        )
+    elif mode == "broken":
+        monkeypatch.setattr(api, "resolve_cli_path", lambda name: existing if name == "agy" else f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            api,
+            "detect_cli",
+            lambda _p, _b: {"found": True, "path": existing, "status": "broken", "version": None, "reason": "broken"},
+        )
+        monkeypatch.setattr(
+            api,
+            "identify_repair_source",
+            lambda _name, _sel: RepairSource(kind="native", destination=existing),
+        )
+    else:
+        monkeypatch.setattr(
+            api,
+            "resolve_cli_path",
+            lambda name: f"/usr/bin/{name}" if name in {"curl", "bash", "powershell"} else None,
+        )
+        monkeypatch.setattr(
+            api,
+            "detect_cli",
+            lambda _p, _b: {"found": False, "path": None, "status": "missing", "version": None, "reason": "not_found"},
+        )
+
+    result = api.install_agent("antigravity", version="0.4.0")
+
+    assert result["ok"] is False
+    assert result["code"] == "pinned_version_unsupported"
+    assert executed == []

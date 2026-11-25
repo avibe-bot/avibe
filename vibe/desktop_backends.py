@@ -74,6 +74,7 @@ MAX_CHECKSUM_BYTES = 256 * 1024
 NPM_REGISTRY = "https://registry.npmjs.org/"
 GITHUB_API_RELEASES_BASE = "https://api.github.com/repos"
 _SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_REQUESTED_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
 _ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar.xz", ".zip")
 _ANTIGRAVITY_ARCHIVE_PLATFORMS: dict[tuple[str, str], str] = {
     ("darwin", "arm64"): "mac_arm64",
@@ -287,12 +288,35 @@ def desktop_backend_subprocess_environment(
     return environment
 
 
+def _normalize_requested_version(version: str | None) -> str | None:
+    if version is None:
+        return None
+    if not isinstance(version, str):
+        raise DesktopBackendError(
+            "Requested desktop backend version must be a string.",
+            code="invalid_version",
+        )
+    normalized = version.strip()
+    if (
+        not normalized
+        or ".." in normalized
+        or not _REQUESTED_VERSION_RE.fullmatch(normalized)
+        or not normalized.lstrip("vV")
+    ):
+        raise DesktopBackendError(
+            f"Invalid requested desktop backend version: {version!r}",
+            code="invalid_version",
+        )
+    return normalized
+
+
 def install_desktop_backend(
     backend: str,
     *,
     base_env: Mapping[str, str] | None = None,
     activate: ActivationCallback | None = None,
     timeout_seconds: float = DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS,
+    version: str | None = None,
 ) -> DesktopBackendInstallResult:
     """Install or update one backend and atomically publish its descriptor.
 
@@ -307,6 +331,7 @@ def install_desktop_backend(
             f"Unknown desktop backend: {backend}",
             code="unknown_backend",
         )
+    requested_version = _normalize_requested_version(version)
     toolchain = desktop_backend_toolchain(base_env, backend=backend)
     if toolchain is None:
         raise DesktopBackendError(
@@ -326,13 +351,14 @@ def install_desktop_backend(
     try:
         staging.mkdir(mode=0o700)
         if spec.install_kind == "release_archive":
-            version, executable, output = _stage_release_archive_backend(
+            installed_version, executable, output = _stage_release_archive_backend(
                 backend,
                 spec,
                 staging=staging,
                 toolchain=toolchain,
                 base_env=base_env,
                 timeout_seconds=timeout_seconds,
+                version=requested_version,
             )
         else:
             assert toolchain.node is not None and toolchain.npm_cli is not None
@@ -340,6 +366,7 @@ def install_desktop_backend(
             global_config = staging / "npm-global.conf"
             user_config.write_text("", encoding="utf-8")
             global_config.write_text("", encoding="utf-8")
+            package_spec = f"{spec.package}@{requested_version}" if requested_version is not None else spec.package
             command = [
                 str(toolchain.node),
                 str(toolchain.npm_cli),
@@ -353,9 +380,9 @@ def install_desktop_backend(
                 "--no-audit",
                 "--no-fund",
                 f"--registry={NPM_REGISTRY}",
-                spec.package,
+                package_spec,
             ]
-            logger.info("Installing desktop backend package %s", spec.package)
+            logger.info("Installing desktop backend package %s", package_spec)
             completed = _run_command(
                 command,
                 cwd=staging,
@@ -374,7 +401,15 @@ def install_desktop_backend(
             global_config.unlink(missing_ok=True)
 
             package_dir = staging / "node_modules" / Path(*spec.package_path)
-            version = _installed_package_version(package_dir, spec.package)
+            installed_version = _installed_package_version(package_dir, spec.package)
+            if (
+                requested_version is not None
+                and installed_version.strip().lstrip("vV") != requested_version.lstrip("vV")
+            ):
+                raise DesktopBackendError(
+                    f"Installed {backend} version {installed_version} does not match requested version {requested_version}.",
+                    code="version_mismatch",
+                )
             executable = _installed_native_executable(backend, spec, staging, package_dir)
             runtime_paths = _backend_runtime_path_entries(backend, executable, root=staging)
             _verify_backend_executable(
@@ -400,7 +435,7 @@ def install_desktop_backend(
             "schema_version": CURRENT_DESCRIPTOR_SCHEMA_VERSION,
             "backend": backend,
             "package": spec.package,
-            "version": version,
+            "version": installed_version,
             "executable": relative_executable,
         }
         descriptor_path = backend_root / "current.json"
@@ -424,7 +459,7 @@ def install_desktop_backend(
         return DesktopBackendInstallResult(
             backend=backend,
             package=spec.package,
-            version=version,
+            version=installed_version,
             path=str(published_executable),
             output=output,
         )
@@ -534,30 +569,65 @@ def _validate_release_url(url: str) -> str:
     return url
 
 
-def _fetch_github_release(repo: str, *, timeout_seconds: float) -> dict[str, Any]:
-    url = _validate_release_url(f"{GITHUB_API_RELEASES_BASE}/{repo}/releases/latest")
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "Avibe-Desktop-Installer",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=min(timeout_seconds, 30.0)) as resp:  # noqa: S310
-            raw = resp.read(MAX_CHECKSUM_BYTES * 4)
-        payload = json.loads(raw.decode("utf-8"))
-    except (urllib.error.URLError, OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise DesktopBackendError(
-            f"Failed to fetch release metadata for {repo}: {exc}",
-            code="archive_download_failed",
-        ) from exc
-    if not isinstance(payload, dict):
-        raise DesktopBackendError(
-            f"Invalid release metadata for {repo}.",
-            code="archive_download_failed",
+def _fetch_github_release(
+    repo: str,
+    *,
+    version: str | None = None,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    normalized = _normalize_requested_version(version)
+    if normalized is None:
+        urls = [_validate_release_url(f"{GITHUB_API_RELEASES_BASE}/{repo}/releases/latest")]
+    else:
+        bare = normalized.lstrip("vV")
+        candidate_tags: list[str] = []
+        for tag in (f"v{bare}", bare, normalized):
+            if tag and tag not in candidate_tags:
+                candidate_tags.append(tag)
+        urls = [
+            _validate_release_url(
+                f"{GITHUB_API_RELEASES_BASE}/{repo}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+            )
+            for tag in candidate_tags
+        ]
+
+    last_not_found: Exception | None = None
+    for url in urls:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Avibe-Desktop-Installer",
+            },
         )
-    return payload
+        try:
+            with urllib.request.urlopen(request, timeout=min(timeout_seconds, 30.0)) as resp:  # noqa: S310
+                raw = resp.read(MAX_CHECKSUM_BYTES * 4)
+            payload = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if normalized is not None and exc.code == 404:
+                last_not_found = exc
+                continue
+            raise DesktopBackendError(
+                f"Failed to fetch release metadata for {repo}: {exc}",
+                code="archive_download_failed",
+            ) from exc
+        except (urllib.error.URLError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DesktopBackendError(
+                f"Failed to fetch release metadata for {repo}: {exc}",
+                code="archive_download_failed",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise DesktopBackendError(
+                f"Invalid release metadata for {repo}.",
+                code="archive_download_failed",
+            )
+        return payload
+
+    raise DesktopBackendError(
+        f"Release {normalized} was not found for {repo}.",
+        code="archive_download_failed",
+    ) from last_not_found
 
 
 def _fetch_text_asset(url: str, *, timeout_seconds: float) -> str:
@@ -882,9 +952,10 @@ def _stage_release_archive_backend(
     toolchain: DesktopBackendToolchain,
     base_env: Mapping[str, str] | None,
     timeout_seconds: float,
+    version: str | None = None,
 ) -> tuple[str, Path, str | None]:
     logger.info("Installing desktop backend release archive %s", spec.package)
-    release = _fetch_github_release(spec.package, timeout_seconds=timeout_seconds)
+    release = _fetch_github_release(spec.package, version=version, timeout_seconds=timeout_seconds)
     asset_name, download_url, expected_sha256 = _select_release_archive_asset(
         backend,
         release,
@@ -907,8 +978,18 @@ def _stage_release_archive_backend(
         env=_backend_command_environment(toolchain, base_env, backend=backend),
     )
     raw_tag = str(release.get("tag_name") or "").strip().lstrip("vV")
-    version = raw_tag if raw_tag and len(raw_tag) <= 128 else probed_version
-    return version, executable, f"Installed {asset_name} ({version})"
+    if version is not None:
+        expected_bare = version.lstrip("vV")
+        probed_bare = probed_version.strip().lstrip("vV")
+        if probed_bare != expected_bare or (raw_tag and raw_tag != expected_bare):
+            raise DesktopBackendError(
+                f"Installed {backend} version {probed_version} does not match requested version {version}.",
+                code="version_mismatch",
+            )
+        resolved_version = probed_version
+    else:
+        resolved_version = raw_tag if raw_tag and len(raw_tag) <= 128 else probed_version
+    return resolved_version, executable, f"Installed {asset_name} ({resolved_version})"
 
 
 def _prepend_path_entries(environment: dict[str, str], paths: tuple[Path, ...]) -> None:
