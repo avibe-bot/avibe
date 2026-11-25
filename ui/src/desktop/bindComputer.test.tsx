@@ -774,6 +774,10 @@ it('an accepted sign-in shown as Continue and cancelled is offered again in the 
 
 // 升级并重试 (owner, 2026-11-25): Avibe on this computer is too old for the claim protocol.
 const TOO_OLD = refuse('local_runtime_too_old');
+/** desktop_client_request's reply to upgrade_local_runtime. */
+const upgradeReply = (outcome: 'upgraded' | 'desktop_update' | string, state: DesktopClientState = signedIn) => outcome === 'upgraded' || outcome === 'desktop_update'
+  ? { ...replies.success, state: { ...state, revision: state.revision + 1 }, ok: true, result: { type: 'local_runtime_upgrade', state: outcome } }
+  : { ...replies.success, state: { ...state, revision: state.revision + 1 }, ok: false, error: { code: outcome } };
 describe('upgrade and retry', () => {
   it('says one plain sentence about this computer, with 升级并重试 first and 继续使用本机 second', async () => {
     mount({ observe_current_binding: TOO_OLD });
@@ -790,35 +794,35 @@ describe('upgrade and retry', () => {
     let observes = 0;
     const page = mount({
       observe_current_binding: () => { observes += 1; if (observes === 1) throw { code: 'local_runtime_too_old' }; return { state: 'no_published_binding' }; },
-      upgrade_local_runtime: () => new Promise((resolve) => { finish = resolve; }),
+      'client:upgrade_local_runtime': () => new Promise((resolve) => { finish = resolve; }),
       open: { receipt: 'r' }, read: review(NEW('xiaoming')),
     });
     fireEvent.click(await screen.findByRole('button', { name: copy.upgradeAndRetry }));
     await screen.findByText(copy.upgrading);
     expect((screen.getByRole('button', { name: copy.upgradeAndRetry }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByRole('button', { name: en.desktopAccount.continueLocal }) as HTMLButtonElement).disabled).toBe(true);
-    await act(async () => { finish({ state: 'upgraded' }); });
+    await act(async () => { finish(upgradeReply('upgraded')); });
     await screen.findByText(en.domainField.free);
-    expect(page.types().filter((type) => type !== 'inspect')).toEqual(['observe_current_binding', 'upgrade_local_runtime', 'observe_current_binding', 'open', 'read']);
+    expect(page.types().filter((type) => type !== 'inspect')).toEqual(['observe_current_binding', 'client:upgrade_local_runtime', 'observe_current_binding', 'open', 'read']);
   });
 
   it.each(['local_runtime_upgrade_failed', 'local_runtime_upgrade_timed_out', 'local_runtime_still_too_old'])('says it did not upgrade (%s), with the same button', async (code) => {
-    const page = mount({ observe_current_binding: TOO_OLD, upgrade_local_runtime: refuse(code) });
+    const page = mount({ observe_current_binding: TOO_OLD, 'client:upgrade_local_runtime': upgradeReply(code) });
     fireEvent.click(await screen.findByRole('button', { name: copy.upgradeAndRetry }));
     await screen.findByText(copy.upgradeFailed);
     expect(screen.queryByRole('alert')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: copy.upgradeAndRetry }));
-    await waitFor(() => expect(page.types().filter((type) => type === 'upgrade_local_runtime')).toHaveLength(2));
+    await waitFor(() => expect(page.types().filter((type) => type === 'client:upgrade_local_runtime')).toHaveLength(2));
   });
 
   it('an upgrade that leaves it still too old says it did not upgrade', async () => {
-    mount({ observe_current_binding: TOO_OLD, upgrade_local_runtime: { state: 'upgraded' } });
+    mount({ observe_current_binding: TOO_OLD, 'client:upgrade_local_runtime': upgradeReply('upgraded') });
     fireEvent.click(await screen.findByRole('button', { name: copy.upgradeAndRetry }));
     await screen.findByText(copy.upgradeFailed);
   });
 
   it('a Desktop-managed Avibe is upgraded by the App\'s own update', async () => {
-    mount({ observe_current_binding: TOO_OLD, upgrade_local_runtime: { state: 'desktop_update' } });
+    mount({ observe_current_binding: TOO_OLD, 'client:upgrade_local_runtime': upgradeReply('desktop_update') });
     fireEvent.click(await screen.findByRole('button', { name: copy.upgradeAndRetry }));
     // The App's own update view, in place of the dialog.
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
@@ -838,10 +842,19 @@ describe('upgrade and retry', () => {
     expect(row.closest('[data-this-computer]')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: copy.upgradeAndRetry }));
     await screen.findByText(copy.upgrading);
-    await act(async () => { answer({ ...replies.success, state: { ...signedIn, revision: signedIn.revision + 1 }, ok: false, error: { code: 'local_runtime_upgrade_failed' } }); });
+    await act(async () => { answer(upgradeReply('local_runtime_upgrade_failed', tooOld)); });
     await screen.findByText(copy.upgradeFailed);
     // Told on the row, not as an error on the page.
     expect(screen.queryByRole('alert')).toBeNull();
+    expect(page.types()).toEqual(['client:upgrade_local_runtime']);
+  });
+
+  it('in Instances, once upgraded the row reads as usual, with nothing done again', async () => {
+    const tooOld = { ...signedIn, local: { ...signedIn.local, instance_id: null, runtime_too_old: true } } as DesktopClientState;
+    const page = mount({ 'client:upgrade_local_runtime': upgradeReply('upgraded') }, tooOld, 'instances');
+    fireEvent.click(await screen.findByRole('button', { name: copy.upgradeAndRetry }));
+    await waitFor(() => expect(screen.queryByText(copy.needsUpdate)).toBeNull());
+    expect(screen.queryByText(copy.upgradeFailed)).toBeNull();
     expect(page.types()).toEqual(['client:upgrade_local_runtime']);
   });
 

@@ -172,6 +172,9 @@ export function factorCode(method: 'totp' | 'recovery', typed: string): string |
   return typed.trim() && typed.length <= 32 ? typed : null;
 }
 
+/** What native answered to 升级并重试 (`upgrade_local_runtime`). */
+export type LocalUpgrade = 'upgraded' | 'desktop_update' | 'failed';
+
 export function useDesktopClaim(state: DesktopClientState | null, enabled: boolean, mode: 'account' | 'claim' = 'account') {
   const claimView = mode === 'claim';
   const generation = state?.generation ?? 0;
@@ -451,25 +454,31 @@ export function useDesktopClaim(state: DesktopClientState | null, enabled: boole
     }
   }, [inspect, observe, start]);
   /** 升级并重试: native upgrades Avibe on this computer (as 版本与更新 does) and answers when it is
-   *  back; then the step is done again from the start, observing first. A failure, or an upgrade
-   *  that left it still too old, says one sentence with the same button. A Desktop-managed Avibe
-   *  is upgraded by updating the App itself. */
+   *  back (`upgrade`, desktop_client_request); then the step is done again from the start,
+   *  observing first, once the newer state has rendered. A failure, a timeout or still too old
+   *  says one sentence with the same button. A Desktop-managed Avibe opens the App's own update. */
   const [upgraded, setUpgraded] = useState(false);
-  const upgradeLocal = useCallback((openUpdates: () => void) => run(async () => {
+  const [retryTick, setRetryTick] = useState(0);
+  const upgradeLocal = useCallback((upgrade: () => Promise<LocalUpgrade>, openUpdates: () => void) => run(async () => {
     setStep({ kind: 'tooOld', phase: 'running' });
-    const reply = await call('desktop_claim_review', { type: 'upgrade_local_runtime' });
-    if (!reply) return;
-    const state = reply.ok ? str(reply.value?.state) : null;
-    if (state === 'desktop_update') { setStep({ kind: 'tooOld' }); openUpdates(); return; }
-    // local_runtime_upgrade_failed, _timed_out, _still_too_old, or anything else: one sentence.
-    if (state !== 'upgraded') { setStep({ kind: 'tooOld', phase: 'failed' }); return; }
+    const mine = epoch.current;
+    const answer = await upgrade();
+    if (mine !== epoch.current) return;
+    if (answer === 'desktop_update') { setStep({ kind: 'tooOld' }); openUpdates(); return; }
+    if (answer !== 'upgraded') { setStep({ kind: 'tooOld', phase: 'failed' }); return; }
     setUpgraded(true);
     reset();
     // The flow it was in has ended (the ref follows the step only after the next render).
     flowOpen.current = false;
     setOpened(false);
-    await begin();
-  }), [run, call, reset, begin, setStep]);
+    setRetryTick((tick) => tick + 1);
+  }), [run, reset, setStep]);
+  // After the state native answered with has rendered (a new generation drops older replies).
+  const beginRef = useRef(begin);
+  useLayoutEffect(() => { beginRef.current = begin; });
+  useEffect(() => {
+    if (retryTick > 0) void beginRef.current();
+  }, [retryTick]);
 
   // Once per document, the first time it is signed in: never again on a re-show, a reconnect, a
   // changed generation or a state event. The shell opens a new document for each request.
