@@ -8477,21 +8477,8 @@
       "asNew": {
         "whose": "这台电脑绑定的 Avibe 属于另一个账号（{{hint}}）。",
         "whosePlain": "这台电脑绑定的 Avibe 属于另一个账号。",
-        "intro": "这台电脑会忘掉它现在绑定的 Avibe，之后可以作为一台新电脑绑定到任何账号。",
-        "lose": "你会失去：",
-        "loseAccess": "通过 {{host}} 的远程访问立即停止。",
-        "loseDevices": "所有远程设备都会退出登录，发给这些设备的通知也会停止。",
-        "losePeople": "你授权过的人都会失去访问权限；新的绑定一开始只有所有者自己。",
-        "loseLinks": "已经发出去的链接（展示页、文件）全部失效。",
-        "loseHealth": "已同步的健康数据会删除，要在 iPhone 上重新连接健康。",
-        "loseName": "{{host}} 不会跟着这台电脑走。怎样把名字拿回来，这一步之后会显示。",
-        "keep": "你会保留：",
-        "keepAll": "这台电脑上的一切：会话、文件、Agent 和设置。在这台电脑上打开的页面照常可用。",
-        "unchanged": "这一步不会改变：",
-        "unchangedAvibe": "avibe.bot 上的那个 Avibe 不会被删除。它如果还在，名字仍然归它，只是再也连不到这台电脑。如果它属于别的账号，对方不会收到任何通知。",
-        "unchangedCredentials": "不会更换任何凭证：隧道凭证、模型密钥、Vault 都不变。",
-        "copiedData": "如果这台电脑上的 Avibe 数据可能被人整个复制走过，还要在 avibe.bot 上删除原来的 Avibe：在那之前，拿到副本的人仍然可以用它。",
-        "irreversible": "这一步不能撤销。"
+        "refusedLead": "avibe.bot 没有接受这次删除：这台电脑保存的钥匙已经不能用了。",
+        "localAction": "只清除这台电脑上的绑定"
       },
       "resetDoneTitle": "这台电脑已不再绑定",
       "resetDone": "完成。这台电脑不再绑定任何 Avibe，电脑上的内容原样保留。",
@@ -8509,10 +8496,49 @@
       "inBrowser": "重新绑定会在这台电脑的浏览器里继续。",
       "openInBrowser": "在浏览器里打开",
       "invalidReturn": "没有重新绑定：从 avibe.bot 回来的这一步没有通过验证，什么都没有改变。请再试一次。",
-      "refusedUnknown": "这次没有完成。（代码：{{code}}）"
+      "refusedUnknown": "这次没有完成。（代码：{{code}}）",
+      "asNewCloud": {
+        "intro": "会先在 avibe.bot 上删除 {{host}}，和解除绑定一样。立即生效。下面丢掉的这些不能复原。",
+        "loseName": "{{host}} 为原来的账号保留到 {{date}}；之后别人可以领取。",
+        "loseNameDays_one": "{{host}} 为原来的账号保留 {{count}} 天；之后别人可以领取。",
+        "loseNameDays_other": "{{host}} 为原来的账号保留 {{count}} 天；之后别人可以领取。",
+        "loseNamePlain": "{{host}} 会为原来的账号保留一段时间；之后别人可以领取。",
+        "title": "删除 {{host}}，作为一台新电脑重新绑定？",
+        "next": "删除以后，这台电脑会作为一台新电脑，绑定到你接下来在 avibe.bot 登录的账号。"
+      },
+      "asNewLocal": {
+        "title": "只清除这台电脑上的绑定？",
+        "untouched": "这一步不会动 avibe.bot 上的任何东西。",
+        "next": "清除以后，这台电脑会作为一台新电脑，绑定到你接下来在 avibe.bot 登录的账号。"
+      }
     },
     "notice": {
       "dismiss": "知道了"
+    },
+    "unbind": {
+      "action": "解除绑定",
+      "confirmTitle": "解除 {{host}} 的绑定？",
+      "confirmLead": "立即生效。下面丢掉的这些不能复原。",
+      "lostRemote": "所有设备的远程访问马上结束，已登录的设备都会退出。",
+      "lostAccess": "别人对这个 Avibe 的访问权限、已配对的手机连接和推送都会删掉，不能复原。",
+      "lostHealth": "这台电脑上已同步的健康数据会清掉，之后要在 iPhone 上重新连接健康。",
+      "nameKept": "{{host}} 在你的账号下保留到 {{date}}，这期间可以在这台或别的电脑上领回。",
+      "nameKeptDays_one": "{{host}} 在你的账号下保留 {{count}} 天，这期间可以在这台或别的电脑上领回。",
+      "nameKeptDays_other": "{{host}} 在你的账号下保留 {{count}} 天，这期间可以在这台或别的电脑上领回。",
+      "nameKeptPlain": "{{host}} 会在你的账号下保留一段时间，这期间可以在这台或别的电脑上领回。",
+      "kept": "这台电脑上的工作区和对话都留着。",
+      "wayBack": "以后要再用，按「开启远程访问」。",
+      "lostHealthNamed": "{{computer}} 上已同步的健康数据会清掉，之后要在 iPhone 上重新连接健康。",
+      "nameKeptNamed": "{{host}} 在你的账号下保留到 {{date}}，这期间可以在 {{computer}} 或别的电脑上领回。",
+      "nameKeptDaysNamed_one": "{{host}} 在你的账号下保留 {{count}} 天，这期间可以在 {{computer}} 或别的电脑上领回。",
+      "nameKeptDaysNamed_other": "{{host}} 在你的账号下保留 {{count}} 天，这期间可以在 {{computer}} 或别的电脑上领回。",
+      "nameKeptPlainNamed": "{{host}} 会在你的账号下保留一段时间，这期间可以在 {{computer}} 或别的电脑上领回。",
+      "keptNamed": "{{computer}} 上的工作区和对话都留着。",
+      "wayBackRemoteNamed": "你现在用的这台设备会马上断开。要再开启，得在 {{computer}} 上按「开启远程访问」。",
+      "unbinding": "正在解除绑定，会自动继续。",
+      "done": "这台电脑已解除绑定",
+      "notChanged": "没有解除绑定，什么都没变。avibe.bot 不允许在这里解除这个 Avibe 的绑定；远程访问的开关恢复到了按下之前。",
+      "thatComputer": "运行 Avibe 的那台电脑"
     }
   },
   "domainField": {

@@ -113,7 +113,38 @@ export type DevicesSnapshot = {
   signedOut: SignedOutDevice[];
   bulk: 'other_sessions' | 'all_remote' | null;
   proxyAccess?: ProxyAccess;
+  /** 「解除绑定」 as the instance reports it to the owner (`unbind`, for the current binding only). */
+  unbind?: UnbindReport;
 };
+
+/** `unbinding`: running, continues by itself. `unbound`: done. `notUnbound`: avibe.bot refused it,
+ *  as not eligible or because this computer's key no longer works. `repair`: only this computer can
+ *  sort it out. */
+export type UnbindReport =
+  | { state: 'unbinding' | 'repair' }
+  /** Done: the name it had and until when it stays the account's, where the instance says. */
+  | { state: 'unbound'; host?: string; releaseAt?: string }
+  | { state: 'notUnbound'; reason: 'ineligible' | 'invalidCredential' };
+
+export function unbindFromWire(raw: unknown): UnbindReport | undefined {
+  const body = record(raw);
+  switch (body.state) {
+    case 'unbinding':
+      return { state: 'unbinding' };
+    case 'unbound': {
+      const host = text(body.host) ?? undefined;
+      const releaseAt = instant(body.release_at) ?? undefined;
+      return { state: 'unbound', ...(host ? { host } : {}), ...(releaseAt ? { releaseAt } : {}) };
+    }
+    case 'reset_repair_required':
+      return { state: 'repair' };
+    case 'not_unbound':
+      return body.reason_code === 'ineligible' ? { state: 'notUnbound', reason: 'ineligible' }
+        : body.reason_code === 'invalid_credential' ? { state: 'notUnbound', reason: 'invalidCredential' } : undefined;
+    default:
+      return undefined;
+  }
+}
 
 export function devicesFromWire(raw: unknown): DevicesSnapshot {
   const body = record(raw);
@@ -130,6 +161,7 @@ export function devicesFromWire(raw: unknown): DevicesSnapshot {
     signedOut: list(body.recent_sign_outs).map(signedOutFromWire).filter((each): each is SignedOutDevice => each !== null),
     bulk: body.bulk_action === 'other_sessions' || body.bulk_action === 'all_remote' ? body.bulk_action : null,
     proxyAccess: proxyAccessFromWire(body.unauthenticated_proxy_access),
+    unbind: unbindFromWire(body.unbind),
   };
 }
 

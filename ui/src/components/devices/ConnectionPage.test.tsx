@@ -37,6 +37,7 @@ function mount(path = '/settings/remote-access/connection', remote = false) {
         <Routes>
           <Route path="/settings/remote-access/connection" element={<><ConnectionPage /><Where /></>} />
           <Route path="/settings/remote-access/connection/address" element={<><ConnectionPage /><Where /></>} />
+          <Route path="/settings/remote-access" element={<Where />} />
         </Routes>
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
@@ -601,23 +602,191 @@ describe('ConnectionPage · binding again', () => {
     vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' });
     vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'other_account' });
     const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: true });
+    mount();
+
+    expect(await screen.findByText(said('属于另一个账号（m***@gmail.com）'))).toBeTruthy();
+    // Not the browser that started the attempt: nothing to press.
+    expect(screen.queryByRole('button', { name: '作为一台新电脑重新绑定' })).toBeNull();
+    expect(preview).not.toHaveBeenCalled();
+  });
+
+  it('after avibe.bot refused deleting first because this computer\'s key no longer works, asks separately to clear this computer only', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'notUnbound', reason: 'invalidCredential' } });
+    const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-2', healthConnected: false });
     const reset = vi.spyOn(devicesApi, 'reset').mockResolvedValue('unpaired');
     writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
     mount();
 
-    expect(await screen.findByText(said('属于另一个账号（m***@gmail.com）'))).toBeTruthy();
+    await waitFor(() => expect(devicesApi.devices).toHaveBeenCalled());
     fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
     const dialog = await screen.findByRole('dialog');
-    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1'));
-    // Whose Avibe it is comes first, then what is discarded; the copied-data sentence is the reset's own.
-    expect(dialog.textContent).toContain('这台电脑绑定的 Avibe 属于另一个账号（m***@gmail.com）。');
-    expect(dialog.textContent).toContain('你授权过的人都会失去访问权限');
-    expect(dialog.textContent).toContain('已同步的健康数据会删除');
-    expect(dialog.textContent).toContain('还要在 avibe.bot 上删除原来的 Avibe：在那之前，拿到副本的人仍然可以用它。');
-    expect(reset).not.toHaveBeenCalled();
-    fireEvent.click(within(dialog).getByRole('button', { name: '作为一台新电脑重新绑定' }));
-    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1'));
+    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1', 'localAfterRefusal'));
+    expect(dialog.textContent).toContain('avibe.bot 没有接受这次删除：这台电脑保存的钥匙已经不能用了。');
+    expect(dialog.textContent).toContain('这一步不会动 avibe.bot 上的任何东西。');
+    fireEvent.click(within(dialog).getByRole('button', { name: '只清除这台电脑上的绑定' }));
+    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-2', 'localAfterRefusal'));
     expect(await screen.findByText(said('完成。这台电脑不再绑定任何 Avibe，电脑上的内容原样保留。'))).toBeTruthy();
+  });
+
+  it('binding as a new computer deletes the binding at avibe.bot first, saying so as unbinding does', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    const preview = vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: false });
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    const reset = vi.spyOn(devicesApi, 'reset').mockImplementation(async () => {
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbinding' } });
+      return 'unbinding';
+    });
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
+    const dialog = await screen.findByRole('dialog');
+    await waitFor(() => expect(preview).toHaveBeenCalledWith('rebind-1', 'unbind'));
+    expect(dialog.textContent).toContain(`会先在 avibe.bot 上删除 ${host}，和解除绑定一样。`);
+    expect(dialog.textContent).toContain('所有设备的远程访问马上结束');
+    expect(dialog.textContent).toContain('绑定到你接下来在 avibe.bot 登录的账号');
+    fireEvent.click(within(dialog).getByRole('button', { name: '作为一台新电脑重新绑定' }));
+    await waitFor(() => expect(reset).toHaveBeenCalledWith('rebind-1', 'reset-1', 'unbind'));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    // The claim stays this tab's: a refusal after it is asked about here.
+    expect(readClaimMarker()).toMatchObject({ kind: 'rebind', id: 'rebind-1' });
+  });
+
+  it('unbinds from 连接方式: preview, one confirmation, then the instance carries on', async () => {
+    const preview = vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    // Accepted: the instance reports it at once.
+    const commit = vi.spyOn(devicesApi, 'unbindCommit').mockImplementation(async () => {
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbinding' } });
+    });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    await waitFor(() => expect(preview).toHaveBeenCalled());
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain(`解除 ${host} 的绑定？`);
+    expect(commit).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole('button', { name: '解除绑定' }));
+    await waitFor(() => expect(commit).toHaveBeenCalledWith('unbind-1'));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+  });
+
+  it('follows binding as a new computer whose answer was lost, and goes on to Devices once it is unbound', async () => {
+    vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'previewReset').mockResolvedValue({ confirmationId: 'reset-1', healthConnected: false });
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    vi.spyOn(devicesApi, 'reset').mockImplementation(async () => {
+      // It reached the instance; its answer did not reach the page.
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbound', host } });
+      throw new LostAnswer();
+    });
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-1', at: Date.now() });
+    mount();
+
+    fireEvent.click(await screen.findByRole('button', { name: '作为一台新电脑重新绑定' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '作为一台新电脑重新绑定' }));
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+    expect(readClaimMarker()).toBeNull();
+  });
+
+  it('goes on to the Devices page when the end was read before the confirmation\'s answer arrived', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    let answer: () => void = () => undefined;
+    vi.spyOn(devicesApi, 'unbindCommit').mockImplementation(() => new Promise<void>((resolve) => {
+      // It went through at once; the page reads that before this answer arrives.
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbound', host } });
+      answer = resolve;
+    }));
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '解除绑定' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(31_000); });
+    expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access/connection');
+    await act(async () => { answer(); });
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+    vi.useRealTimers();
+  });
+
+  it('sets aside a device read begun before the press that answers after a newer one', async () => {
+    vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const before = { devices: [], unlinkedHealth: [], signedOut: [], bulk: null };
+    let slow: (value: typeof before) => void = () => undefined;
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue(before);
+    vi.spyOn(devicesApi, 'unbindCommit').mockImplementation(async () => {
+      devices.mockResolvedValue({ ...before, unbind: { state: 'unbinding' } });
+    });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    const dialog = await screen.findByRole('dialog');
+    // A read begun now (before the press) answers only after the press's own read.
+    devices.mockImplementationOnce(() => new Promise((resolve) => { slow = resolve; }));
+    window.dispatchEvent(new Event('focus'));
+    fireEvent.click(within(dialog).getByRole('button', { name: '解除绑定' }));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    await act(async () => { slow(before); });
+    expect(screen.getByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+  });
+
+  it('goes back to 「解除绑定」 when a confirmation lost on its way began nothing', async () => {
+    vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    vi.spyOn(devicesApi, 'unbindCommit').mockRejectedValue(new LostAnswer());
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '解除绑定' }));
+    // The read after it reports no unbinding: nothing began, and the page says so.
+    expect(await screen.findByText(said('没有完成，请再试一次。'))).toBeTruthy();
+    expect(screen.getByRole('button', { name: '解除绑定' })).toBeTruthy();
+    expect(screen.queryByText(said('正在解除绑定，会自动继续。'))).toBeNull();
+  });
+
+  it('once an unbinding it started has ended, goes on to the Devices page', async () => {
+    vi.spyOn(devicesApi, 'unbindPreview').mockResolvedValue('unbind-1');
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    vi.spyOn(devicesApi, 'unbindCommit').mockImplementation(async () => {
+      devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbinding' } });
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: '解除绑定' }));
+    expect(await screen.findByText(said('正在解除绑定，会自动继续。'))).toBeTruthy();
+
+    devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'unbound', host } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toBe('/settings/remote-access'));
+    vi.useRealTimers();
+  });
+
+  it('says a preview that did not go through, and lets 「解除绑定」 be pressed again', async () => {
+    vi.spyOn(devicesApi, 'unbindPreview').mockRejectedValue(new DevicesApiError(409, 'operation_in_progress', {}));
+    vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: '解除绑定' }));
+    expect(await screen.findByText(said('没有完成，请再试一次。'))).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: '解除绑定' })).toBeTruthy();
+  });
+
+  it('says what the instance reports about an unbinding: refused as not eligible, or left for this computer', async () => {
+    const devices = vi.spyOn(devicesApi, 'devices').mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'notUnbound', reason: 'ineligible' } });
+    const { unmount } = mount();
+    expect(await screen.findByText(said('没有解除绑定，什么都没变。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+    unmount();
+
+    devices.mockResolvedValue({ devices: [], unlinkedHealth: [], signedOut: [], bulk: null, unbind: { state: 'repair' } });
+    mount();
+    expect(await screen.findByText(said('这台电脑的绑定记录有问题，这一页处理不了。请在这台电脑的终端运行 vibe remote rebind。'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
   });
 
   it('points to the terminal command for a binding record this page cannot handle', async () => {

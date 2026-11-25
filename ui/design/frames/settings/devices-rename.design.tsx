@@ -164,12 +164,6 @@ const designFrames = frames([
   // Its dialogs.
   rebind('rebind-confirm', '重新绑定 · 确认：完成后旧的设备密钥作废，地址通常不变；数据被整个复制过的话该怎么办', MID, { state: 'ready' }, { rebindDialog: { kind: 'confirm' } }),
   rebind('rebind-confirm-phone', '重新绑定 · 确认 · 375 宽', PHONE, { state: 'ready' }, { rebindDialog: { kind: 'confirm' } }),
-  rebind('rebind-as-new', '作为一台新电脑重新绑定 · 确认：会失去什么、保留什么、不会改变什么', { width: 1440, height: 1200 },
-    { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, { canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true } }),
-  rebind('rebind-as-new-other-account', '作为一台新电脑重新绑定 · 属于另一个账号：先说是谁的', { width: 1440, height: 1200 },
-    { state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' }, { canReset: true, rebindDialog: { kind: 'asNew', healthConnected: false } }),
-  rebind('rebind-as-new-phone', '作为一台新电脑重新绑定 · 375 宽', { width: 375, height: 1500 },
-    { state: 'asNewOffered', reason: 'predecessor_unrecoverable' }, { canReset: true, rebindDialog: { kind: 'asNew', healthConnected: true } }),
   rebind('rebind-reset-done', '重置完成：不再绑定；怎样把原来的名字拿回来', MID, { state: 'unpaired' },
     { host: undefined, address: null, rebindDialog: { kind: 'resetDone', oldHost: host } }),
   rebind('rebind-bound', '重新绑定完成：所有远程设备都要重新登录', MID, { state: 'ready' }, { rebindDialog: { kind: 'bound', disposition: 'existing', host } }),
