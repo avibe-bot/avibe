@@ -1297,3 +1297,20 @@ async def test_model_effort_maps_to_offered_level_or_runs_without_thinking(effor
             return {}
     applied = await apply_model_and_effort(Peer(), "sid", options, model="model-beta", effort="xhigh", current_model="model-beta", default_effort=None)
     assert applied.effort == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steered", [False, True])
+@pytest.mark.parametrize("reply_after_stop", [False, True])
+async def test_complete_latest_reply_wins_concurrent_stop(tmp_path, steered, reply_after_stop):
+    async with make_agent_harness(tmp_path, server_config={"completeOnCancel": True, "completionTextOnCancel": "finished answer" if reply_after_stop else None}) as h:
+        req, target, task, session, _ = await _start_steer_chain(h)
+        if steered:
+            assert (await h.agent.steer_active_turn(_chain_steer(h, target), target)).outcome == SteerOutcome.ACCEPTED
+        if not reply_after_stop:
+            await _chain_control(session, "chunk", text="finished answer")
+        assert await h.agent.handle_stop(req)
+        await asyncio.wait_for(task, 3)
+        results = h.controller.events("result")
+        assert len(results) == 1 and results[0][1] == "finished answer"
+        assert results[0][2]["output"].settled_by != SETTLED_BY_STOPPED

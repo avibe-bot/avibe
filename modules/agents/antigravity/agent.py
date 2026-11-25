@@ -1263,7 +1263,11 @@ class AntigravityAgent(BaseAgent):
             return
 
         turn = session.active_turn
-        if turn is None or turn.settled or turn.cancelled:
+        if turn is None or turn.settled:
+            return
+        # A completed reply may arrive while session/cancel is in flight. Keep its
+        # text until the newest native result decides completed versus stopped.
+        if turn.cancelled and not isinstance(update, AcpMessageChunkUpdate):
             return
 
         turn.prompt_accepted = True
@@ -1822,7 +1826,9 @@ class AntigravityAgent(BaseAgent):
             await _mark_fork_handoff_delivered()
             raw_stop_reason = response.get("stopReason")
             stop_reason = raw_stop_reason.strip() if isinstance(raw_stop_reason, str) else ""
-            if turn.cancelled or stop_reason == "cancelled":
+            if stop_reason == "end_turn" and "".join(turn.reply_chunks).strip():
+                await self._settle_turn_done(session, turn)
+            elif turn.cancelled or stop_reason == "cancelled":
                 await self._settle_turn_stopped(turn)
             elif stop_reason == "end_turn":
                 await self._settle_turn_done(session, turn)
@@ -1863,6 +1869,16 @@ class AntigravityAgent(BaseAgent):
                 session.turn_started_at = None
                 session.last_activity = time.monotonic()
 
+    @staticmethod
+    def _complete_latest_reply(turn: _ActiveTurn) -> bool:
+        prompt = turn.prompt_task
+        if prompt is None or not prompt.done() or prompt.cancelled() or not "".join(turn.reply_chunks).strip():
+            return False
+        try:
+            return prompt.result().get("stopReason") == "end_turn"
+        except Exception:
+            return False
+
     async def handle_stop(self, request: AgentRequest) -> bool:
         runtime_key = self.runtime_turn_key(request)
         session = self._sessions.get(runtime_key)
@@ -1871,6 +1887,9 @@ class AntigravityAgent(BaseAgent):
             return False
 
         turn = session.active_turn
+        if self._complete_latest_reply(turn):
+            await self._settle_turn_done(session, turn)
+            return True
         turn.cancelled = True
         deadline = time.monotonic() + _STOP_CANCEL_GRACE_SECONDS
         prompt_task = turn.prompt_task
@@ -1909,7 +1928,10 @@ class AntigravityAgent(BaseAgent):
                     if not prompt_task.cancelled():
                         raise
 
-        await self._settle_turn_stopped(turn)
+        if self._complete_latest_reply(turn):
+            await self._settle_turn_done(session, turn)
+        else:
+            await self._settle_turn_stopped(turn)
         return True
 
     # ------------------------------------------------------------------

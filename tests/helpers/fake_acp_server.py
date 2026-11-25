@@ -178,7 +178,9 @@ class FakeAcpServer:
         if "id" not in msg:
             if method == "session/cancel" and (chain := self._steer_chains.get(str(params.get("sessionId")))):
                 self._steer_resolved.add(chain[-1])
-                self._send_result(chain[-1], {"stopReason": "cancelled"})
+                if self._config.get("completionTextOnCancel"):
+                    self._send_text(str(params["sessionId"]), self._config["completionTextOnCancel"])
+                self._send_result(chain[-1], {"stopReason": "end_turn" if self._config.get("completeOnCancel") else "cancelled"})
             if method == "session/cancel" and (ev := self._active_cancels.get(str(params.get("sessionId") or ""))):
                 ev.set()
             return
@@ -201,6 +203,8 @@ class FakeAcpServer:
                             self._send_error(previous, -32603, "late superseded failure")
                         else:
                             self._send_result(previous, {"stopReason": "end_turn"})
+            elif action == "chunk":
+                self._send_text(sid, str(params["text"]))
             elif action == "finish":
                 self._send_update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "chain-tool", "status": "completed"})
                 self._send_update(sid, {"sessionUpdate": "usage_update", "used": 150, "size": 128000})
