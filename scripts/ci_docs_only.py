@@ -22,7 +22,8 @@ ROOT_DOCS = frozenset({
 # Installed CLI documentation is executable contract input. All plans stay
 # full: tests also glob plan prose, so a list of individual exceptions cannot
 # safely describe that boundary. AGENTS.md has a dedicated lightweight check.
-CONTRACT_DOCS = frozenset({"docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md"})
+CLI_CONTRACT_DOCS = frozenset({"docs/CLI.md", "docs/CLI_ZH.md", "docs/COMMANDS.md", "docs/COMMANDS_ZH.md"})
+CONTRACT_DOCS = CLI_CONTRACT_DOCS | {"docs/INSTALL_FOR_AI.md", "docs/INSTALL_FOR_AI_ZH.md"}
 # Built-in Skill publication compares directory identities. Windows DirEntry
 # listings zero those identities, so that path must run on the real Windows job.
 # CLI mutations served by the control channel resolve caller paths and the

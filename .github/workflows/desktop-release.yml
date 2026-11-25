@@ -47,22 +47,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RC_RUNNER_EXCEPTION: ${{ inputs.rc_runner_exception }}
           RELEASE_TAG: ${{ inputs.tag }}
-        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate
-      - name: Verify the Stage 1 notes record the same runner exception
-        if: inputs.rc_runner_exception != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.tag }}
-          RC_RUNNER_EXCEPTION: ${{ inputs.rc_runner_exception }}
-        run: |
-          python - <<'PY'
-          import json, os, subprocess
-          from scripts.ci_protected_rc import exception_note
-          body = json.loads(subprocess.check_output(['gh', 'release', 'view', os.environ['RELEASE_TAG'], '--repo', os.environ['GITHUB_REPOSITORY'], '--json', 'body']))['body']
-          expected = exception_note(os.environ['RC_RUNNER_EXCEPTION'])
-          if expected not in body.splitlines():
-              raise SystemExit('This exception must be recorded in the release notes by Stage 1 first.')
-          PY
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate --stage-two
       - name: Confirm Stage 1 source when supplied
         if: inputs.source_sha != ''
         env:

@@ -502,6 +502,7 @@ def test_only_the_github_release_stages_opt_in_to_the_rc_gate(workflow: str, rc_
     job = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))["jobs"]["release-backstop"]
     (step,) = [step for step in job["steps"] if "ci_release_backstop.py" in step.get("run", "")]
 
+    assert ("--stage-two" in step["run"].split()) is (workflow == "desktop-release.yml")
     assert ("--rc-pull-request-gate" in step["run"].split()) is rc_pull_request_gate
     if rc_pull_request_gate:
         assert job["permissions"] == {

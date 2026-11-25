@@ -10,17 +10,15 @@ import html
 import subprocess
 from pathlib import Path
 
-from scripts.ci_docs_only import narrative_path
+from scripts.ci_docs_only import CLI_CONTRACT_DOCS, narrative_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 # The terminal flags of the ordinary PR are not substitutes for native evidence.
 # Select producers, not their fan-in gates: one lost runner also makes its
 # aggregators red. The independent approved exception applies to a producer only.
-IDENTITY = frozenset(
-    {"show-router-integration", "windows-control-ipc", "ui-browser-checks (3)"}
-    | {f"unit-tests (Python 3.12, {shard}/8)" for shard in range(8)}
-)
+UNIT = frozenset(f"unit-tests (Python 3.12, {shard}/8)" for shard in range(8))
+IDENTITY = UNIT | frozenset({"show-router-integration", "windows-control-ipc", "ui-browser-checks (3)"})
 NATIVE = frozenset(
     {
         f"model-hub-lifecycle-native ({runner})"
@@ -52,7 +50,10 @@ def required_jobs(paths: set[str]) -> set[str]:
     for path in paths:
         if narrative_path(path):
             continue
-        if path.startswith("storage/"):
+        if path in CLI_CONTRACT_DOCS:
+            # The planner can move the CLI and harness contract tests between shards.
+            jobs.update(UNIT)
+        elif path.startswith("storage/"):
             # MigrationFileLock is used by the real native Model Hub installer.
             # Storage is shared: do not infer unaffected producers from its directory.
             jobs.update(ALL)

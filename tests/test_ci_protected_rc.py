@@ -17,12 +17,17 @@ CANCELLED = {"status": "completed", "conclusion": "cancelled", "runner_id": 0, "
 
 
 class ParentApi:
+    def __init__(self, notes):
+        self.notes = notes
+
     def get(self, path):
+        if path == f'releases/tags/{TAG}':
+            return {'tag_name': TAG, 'draft': False, 'body': self.notes}
         assert path == f"commits/{SHA}"
         return {"parents": [{"sha": PARENT}]}
 
 
-def prove(monkeypatch, *, job=None, waiver="", other=None, parent=GREEN, files=("docs/guide.md",)):
+def prove(monkeypatch, *, job=None, waiver="", other=None, parent=GREEN, files=("docs/guide.md",), stage_two=False, notes=''):
     wanted = {JOB, "migration-release-guard"}
     monkeypatch.setattr(gate, "_checked_range", lambda *a: wanted)
     monkeypatch.setattr(
@@ -38,13 +43,33 @@ def prove(monkeypatch, *, job=None, waiver="", other=None, parent=GREEN, files=(
         ),
     )
     monkeypatch.setattr(policy, "touched", lambda base, tip: set(files))
-    gate._verify_protected(ParentApi(), TAG, SHA, waiver)
+    gate._verify_protected(ParentApi(notes), TAG, SHA, waiver, stage_two=stage_two)
 
 
 def test_exact_evidence_or_single_unassigned_exception(monkeypatch):
     prove(monkeypatch, job=GREEN)
     prove(monkeypatch, job=CANCELLED, waiver=f"{JOB} | no runner | approved for this RC")
-    prove(monkeypatch, job=GREEN, waiver=f"{JOB} | no runner | previously approved for this RC")
+    value = f"{JOB} | no runner | previously approved for this RC"
+    with pytest.raises(gate.ReleaseBackstopError, match='one non-green'):
+        prove(monkeypatch, job=GREEN, waiver=value)
+    with pytest.raises(gate.ReleaseBackstopError, match='published Stage 1'):
+        prove(monkeypatch, job=GREEN, waiver=value, stage_two=True, notes=policy.exception_note(value + ' other'))
+    prove(monkeypatch, job=GREEN, waiver=value, stage_two=True, notes=policy.exception_note(value))
+    with pytest.raises(gate.ReleaseBackstopError, match='one non-green'):
+        prove(monkeypatch, job=GREEN, other=CANCELLED, waiver=value, stage_two=True, notes=policy.exception_note(value))
+
+
+def test_no_parent_waiver_for_mutable_published_predecessor(monkeypatch):
+    with pytest.raises(gate.ReleaseBackstopError, match='predecessor identity'):
+        prove(monkeypatch, job=GREEN, other=CANCELLED, waiver='migration-release-guard | no runner | go')
+
+
+@pytest.mark.parametrize('name', ['CLI', 'CLI_ZH', 'COMMANDS', 'COMMANDS_ZH'])
+def test_cli_contract_docs_follow_consumers_across_shard_rebalancing(name):
+    paths = {f'docs/{name}.md'}
+    assert not policy.narrative_path(next(iter(paths)))
+    assert policy.required_jobs(paths) == policy.UNIT
+    assert all(policy.inputs_changed(shard, paths) for shard in policy.UNIT)
 
 
 @pytest.mark.parametrize(

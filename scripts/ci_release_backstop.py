@@ -390,7 +390,7 @@ def _named_jobs(api: GitHubApi, sha: str) -> dict[str, dict[str, Any]]:
     return jobs
 
 
-def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str) -> None:
+def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str, *, stage_two: bool = False) -> None:
     wanted = _checked_range(api, tag, sha)
     if not wanted and not waiver:
         return
@@ -409,16 +409,23 @@ def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str) -> None:
             or any(not ch.isprintable() for ch in waiver)):
         raise ReleaseBackstopError('Expected one job | reason | verbatim Product approval on one line')
     name, _reason, _approval = fields
-    if not missing and name in wanted:
-        # The same SHA now has strictly stronger proof. Stage 2 independently
-        # checks this historical waiver against the published Stage 1 notes.
-        return
+    if stage_two:
+        release = api.get(f"releases/tags/{urllib.parse.quote(tag, safe='')}")
+        if not (isinstance(release, dict) and release.get('tag_name') == tag and release.get('draft') is False
+                and isinstance(release.get('body'), str) and protected.exception_note(waiver) in release['body'].splitlines()):
+            raise ReleaseBackstopError('Stage 2 requires the identical exception recorded in the published Stage 1 notes')
+        if not missing and name in wanted:
+            return  # Historical waiver, now superseded by exact-source clean evidence.
     if missing != [name]:
         raise ReleaseBackstopError('Exception must name exactly the one non-green protected job')
     job = jobs.get(name, {})
     if (job.get('status') != 'completed' or job.get('conclusion') != 'cancelled' or
             job.get('runner_id') != 0 or job.get('runner_name') != '' or job.get('steps') != []):
         raise ReleaseBackstopError('Exception requires a cancelled job with no runner and no steps')
+    if name in protected.MIGRATIONS:
+        # This job resolves a published predecessor wheel at execution time. A
+        # green parent job does not attest its tag/digest, even with identical Git inputs.
+        raise ReleaseBackstopError('Migration predecessor identity is not proven by a parent job; fresh success required')
     commit = api.get(f'commits/{sha}')
     parents = commit.get('parents') if isinstance(commit, dict) else None
     if not isinstance(parents, list) or len(parents) != 1 or not isinstance(parents[0], dict):
@@ -432,13 +439,13 @@ def _verify_protected(api: GitHubApi, tag: str, sha: str, waiver: str) -> None:
         raise ReleaseBackstopError('Parent job must pass and candidate changes must not reach its inputs')
 
 
-def prove_rc_pull_request(api: GitHubApi, *, tag: str, candidate: str | None = None, waiver: str = '') -> PullRequestProof:
+def prove_rc_pull_request(api: GitHubApi, *, tag: str, candidate: str | None = None, waiver: str = '', stage_two: bool = False) -> PullRequestProof:
     """Use the same proof before tag creation and at both publication stages."""
     source_sha = _sha(candidate, context='RC candidate') if candidate else resolve_tag_sha(api, tag)
     _require_on_master(api, source_sha)
     pull_number, head_sha, merged_at = _merged_pull(api, source_sha)
     _require_green_checks(api, pull_number=pull_number, head_sha=head_sha, merged_at=merged_at)
-    _verify_protected(api, tag, source_sha, waiver)
+    _verify_protected(api, tag, source_sha, waiver, stage_two=stage_two)
     try:
         full_backstop, backstop, run_id = _backstop(api, source_sha)
     except ReleaseBackstopError:
@@ -454,10 +461,10 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str, candidate: str | None = N
 
 
 def prove_release(
-    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, waiver: str = ''
+    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, waiver: str = '', stage_two: bool = False
 ) -> BackstopProof | PullRequestProof:
     if rc_pull_request_gate and RC_TAG_RE.fullmatch(tag):
-        return prove_rc_pull_request(api, tag=tag, waiver=waiver)
+        return prove_rc_pull_request(api, tag=tag, waiver=waiver, stage_two=stage_two)
     if waiver:
         raise ReleaseBackstopError('Runner exception is only valid for a GitHub-only RC')
     return prove_backstop(api, tag=tag)
@@ -476,6 +483,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="gate a gh-vX.Y.ZrcN tag on its pull request's required checks instead of the full backstop",
     )
+    parser.add_argument('--stage-two', action='store_true', help='Verify any forwarded exception against published Stage 1 notes')
     return parser
 
 
@@ -493,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ReleaseBackstopError('No exception for a full backstop')
             proof = prove_backstop_sha(api, source_sha=args.source_sha)
         else:
-            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate, waiver=waiver)
+            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate, waiver=waiver, stage_two=args.stage_two)
     except ReleaseBackstopError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
