@@ -246,6 +246,15 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         set { lock.withLock { storedDetail = newValue } }
     }
 
+    private var storedIdentity: String?
+
+    /// Which path is selected, as the binding tells one from another: by
+    /// its kind alone until a test names it.
+    var selectedPathIdentity: String? {
+        get { lock.withLock { storedIdentity ?? storedPath?.rawValue } }
+        set { lock.withLock { storedIdentity = newValue } }
+    }
+
     private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
 
     func watchSelectedPath(

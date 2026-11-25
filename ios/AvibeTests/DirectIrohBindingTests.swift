@@ -65,6 +65,43 @@ final class DirectIrohBindingTests: XCTestCase {
         try await close(pair)
     }
 
+    /// What a measurement's mark of the path rests on (`DirectPathMark`):
+    /// the real binding's watch of a connection's paths reports, and its
+    /// first report needs no change of the paths, since the binding reports
+    /// the state as it is when it first looks; and a selected path can be
+    /// told from another by something that stays the same between two reads.
+    func testRealBindingsPathWatchReportsAndASelectedPathIsNamedTheSameTwice() async throws {
+        let pair = try await makePair()
+        defer {
+            pair.client.close()
+        }
+        let reports = PathReportCount()
+        let watch = try XCTUnwrap(pair.client.watchSelectedPath { _ in reports.note() })
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while reports.count == 0, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertGreaterThanOrEqual(reports.count, 1)
+
+        // Whether a loopback connection has a selected path this soon is
+        // the binding's business: either way is said, and only a selected
+        // path is asked for its name.
+        while pair.client.selectedPath == nil, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        if pair.client.selectedPath != nil {
+            let named = try XCTUnwrap(pair.client.selectedPathIdentity)
+            XCTAssertTrue(named.hasPrefix("address "))
+            XCTAssertEqual(pair.client.selectedPathIdentity, named)
+        }
+        print(
+            "[iOS fixture] stage=measure the real binding's path watch reported \(reports.count) time(s);"
+                + " a path was selected: \(pair.client.selectedPath != nil)"
+        )
+        watch.stop()
+        try await close(pair)
+    }
+
     func testRealBindingPendingConnectEndsWhenEndpointCloses() async throws {
         let peer = try await makePeer()
         let binding = DirectIrohBinding()
@@ -401,6 +438,21 @@ final class DirectIrohBindingTests: XCTestCase {
             throw DirectIrohError.noLaunchKey
         }
         return Peer(endpoint: endpoint, id: id, address: address)
+    }
+
+    private final class PathReportCount: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reports = 0
+
+        var count: Int {
+            lock.withLock { reports }
+        }
+
+        func note() {
+            lock.withLock {
+                reports += 1
+            }
+        }
     }
 
     private static func failure<Value>(of outcome: Result<Value, Error>) -> Error? {

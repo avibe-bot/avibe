@@ -332,23 +332,57 @@ stickiness, closure or count, under 「仅直连和中继」 too.
   it with no failover and one connection per host; TLS is the system's, end
   to end to the instance, with the system's check of the instance's name.
   With no admitted link there is no such leg (`current: null`).
+- **The port is bounded** apart from the App's listener, since anything on
+  the device can reach it while a measurement runs. It holds at most four
+  connections at once, whatever they have sent; one beyond that is closed
+  unread, with no task of its own. It opens one stream over the link in its
+  whole life, for the first request for its host. A second such request is
+  refused and counted, which ends the leg: it is the session's connection
+  made anew, or someone else. The link is asked whether it is still current
+  before the stream is opened and again after the instance has answered,
+  before the client is told `200` or any byte it sent early is sent on.
 - **The tunnel** is measured by a second ephemeral URLSession with no route,
   to the instance's public address. The two sessions share nothing.
 - **A timed sample counts** only if it ran on the connection the warm-up
   made (the task's metrics say the connection was used again, with one
   attempt), through the port (the metrics say a proxy, and the port has
-  seen exactly one tunnel), on the path the measurement began on
-  (selection, lease, listener, path generation and the status's `sequence`,
-  which advances at every change of the path's kind, so a path that changed
-  and changed back has changed). Anything else ends that leg as `failed`
-  with what was timed before it. Measured on macOS: URLSession sends a
-  request again on a new connection without an error when its connection is
-  cut, which is why the metrics are read and not only the result.
+  had exactly one request for its host), on the path the measurement began
+  on. Anything else ends that leg as `failed` with what was timed before
+  it. Measured on macOS: URLSession sends a request again on a new
+  connection without an error when its connection is cut, which is why the
+  metrics are read and not only the result.
+- **The path the measurement began on** is asked before every request and
+  after its body: the selection, lease, listener and path generation a
+  plan's direct candidate needs, the status's `sequence`, and the
+  transport's mark of the path (`DirectPathMark`). The mark changes when
+  the transport's connection does, when a read finds another path selected
+  than the read before (another relay, or another address of the same
+  family, is another path), and with every report from the binding's watch
+  of the connection's paths, whatever the report says. The last is for a
+  path that changed and changed back: the binding reports the paths as they
+  are when it looks, so such a change may show as a report that names the
+  path there was before, and as nothing else. The report is counted where
+  the binding makes it, not a turn of the main actor later. Only counts
+  leave the transport; which path it is stays there.
+  - What this costs: a report about another path of the connection (one
+    opened or closed while the selected one stayed) ends the leg as
+    `failed` too. Measuring again is the remedy.
+  - What it does not see: a change the binding has not reported by the
+    time the request's body has been read. If the path is then the one it
+    was, the sample counts. Nothing the App can read tells that case from
+    no change.
+- **Time** is the continuous clock's. A request is not begun at or after its
+  bound or the measurement's, and a result that arrives at or after it is
+  `timeout`, whichever of the request and the timer the scheduler ran
+  first. The session's own request timeout is `timeout` as well; any other
+  failure of the connection, the name or the certificate is `failed`.
 - **Labels** are the link's own: `relay`, `ipv4` or `ipv6`; `local` or
   `global` from the selected path's remote address class; and for the relay
   its region, read from the selected path's own relay URL and only when
-  that is one of the four public relays (`use1`, `usw1`, `euc1`, `aps1`).
-  Any other relay has no region; none is taken from what was configured.
+  that is the URL of one of the four public relays a dial may use (`use1`,
+  `usw1`, `euc1`, `aps1`), letter case, the root dot and a written default
+  port aside. Another port or path on such a host, and any other relay, has
+  no region; none is taken from what was configured.
 - **Not covered by a test in CI:** the whole path through URLSession (TLS to
   an instance through the port). The test target has no TLS server, and the
   system sends a request for a loopback address round any route.

@@ -1177,10 +1177,12 @@ final class DirectPathController {
     /// makes no plan and records nothing: no race, failure, stickiness,
     /// closure or count is touched by a measurement.
     func measurementLink(forInstanceURL url: URL) -> DirectMeasureLink? {
+        let transport = transport
         guard
             let authority = DirectAuthority(instanceURL: url),
             let tag = directStreamTag(for: authority),
-            let kind = currentPath
+            let kind = currentPath,
+            let mark = transport.pathMark
         else {
             return nil
         }
@@ -1190,10 +1192,17 @@ final class DirectPathController {
             accountEpoch: accountEpoch
         )
         // The status's `sequence` advances at every change of the path's
-        // kind, so a path that changed and changed back is still a change.
+        // kind this controller hears of. The transport's mark is finer: it
+        // also changes with another path of the same kind (another relay,
+        // another address), and with any report from the watch of the
+        // connection's paths, which is all a change that went back leaves.
         let sequence = sequence
         let selected = transport.pathDiagnostics.selected
-        let transport = transport
+        // The labels were read between two equal marks: they are that
+        // path's.
+        guard transport.pathMark == mark else {
+            return nil
+        }
         return DirectMeasureLink(
             authority: authority,
             kind: kind,
@@ -1209,6 +1218,7 @@ final class DirectPathController {
                 return self.isCurrent(fence, lease: tag.target.runtime)
                     && self.sequence == sequence
                     && self.currentPath == kind
+                    && transport.pathMark == mark
             }
         )
     }

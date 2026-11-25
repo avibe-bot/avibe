@@ -210,6 +210,105 @@ final class DirectMeasureTests: XCTestCase {
         held.open()
     }
 
+    func testNothingIsBegunOrTakenAtOrAfterItsDeadline() async {
+        // A deadline that has passed: the work is not begun, and the
+        // answer is `timeout`, every time and not as the scheduler has it.
+        let begun = MeasureCounter()
+        for past in [Duration.zero, .milliseconds(1), .seconds(5)] {
+            let deadline = ContinuousClock.now - past
+            let late = await DirectMeasure.bounded(until: deadline) { () -> Int in
+                _ = begun.next()
+                return 1
+            }
+            XCTAssertEqual(late, .failure(.timeout), "\(past)")
+        }
+        XCTAssertEqual(begun.next(), 0)
+
+        // Work that ends after its deadline, without ever waiting, gives
+        // `timeout` whichever of it and the timer is run first; and so
+        // does work that fails then.
+        struct Refused: Error {}
+        for fails in [false, true] {
+            let deadline = ContinuousClock.now.advanced(by: .milliseconds(50))
+            let overran = await DirectMeasure.bounded(until: deadline) { () -> Int in
+                while ContinuousClock.now < deadline.advanced(by: .milliseconds(20)) {}
+                if fails {
+                    throw Refused()
+                }
+                return 1
+            }
+            XCTAssertEqual(overran, .failure(.timeout), "\(fails)")
+        }
+
+        // In time: the work's own result.
+        let far = ContinuousClock.now.advanced(by: .seconds(30))
+        let done = await DirectMeasure.bounded(until: far) { 7 }
+        XCTAssertEqual(done, .success(7))
+        let failed = await DirectMeasure.bounded(until: far) { () -> Int in throw Refused() }
+        XCTAssertEqual(failed, .failure(.failed))
+
+        // The measurement's bound has passed when a leg's turn comes: no
+        // request is made, and the leg says `timeout`.
+        let asked = MeasureLog<Int>()
+        let result = await DirectMeasure.sample(
+            limits: .standard,
+            end: ContinuousClock.now,
+            unchanged: { _ in true }
+        ) { index in
+            asked.add(index)
+            return self.good(1)
+        }
+        XCTAssertEqual(result, DirectMeasure.SampleResult(times: [], error: .timeout))
+        XCTAssertEqual(asked.values, [])
+    }
+
+    func testARequestTheSystemTimedOutIsATimeoutAndAnyOtherFailureIsNot() async {
+        let far = ContinuousClock.now.advanced(by: .seconds(30))
+        // The session's own request timeout, as the system reports it,
+        // in either of the forms it is thrown in.
+        let timedOut: [Error] = [
+            URLError(.timedOut),
+            NSError(domain: NSURLErrorDomain, code: NSURLErrorTimedOut),
+        ]
+        for error in timedOut {
+            let result = await DirectMeasure.bounded(until: far) { () -> Int in throw error }
+            XCTAssertEqual(result, .failure(.timeout), "\(type(of: error))")
+        }
+        // The connection, the name, the certificate: failures.
+        for code in [
+            URLError.Code.cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet,
+            .cannotFindHost, .secureConnectionFailed, .serverCertificateUntrusted,
+            .serverCertificateHasBadDate, .cancelled,
+        ] {
+            let result = await DirectMeasure.bounded(until: far) { () -> Int in throw URLError(code) }
+            XCTAssertEqual(result, .failure(.failed), "\(code.rawValue)")
+        }
+
+        // In a leg: the request the system timed out ends it as `timeout`,
+        // with what was timed before it.
+        let (result, asked) = await sampled { index in
+            if index == 3 {
+                throw URLError(.timedOut)
+            }
+            return self.good(10 * index)
+        }
+        XCTAssertEqual(asked, [0, 1, 2, 3])
+        XCTAssertEqual(result.times, [10, 20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(result.error, .timeout)
+        // An earlier sample's error is the leg's, and stays it.
+        let (mixed, _) = await sampled { index in
+            if index == 1 {
+                return DirectMeasure.Sample(elapsed: .milliseconds(1), healthy: false, counts: true)
+            }
+            if index == 3 {
+                throw URLError(.timedOut)
+            }
+            return self.good(10 * index)
+        }
+        XCTAssertEqual(mixed.times, [20].map { Duration.milliseconds($0) })
+        XCTAssertEqual(mixed.error, .failed)
+    }
+
     func testALegsNumbersAreOverTheCompletedSamplesOnly() {
         let times = { (values: [Int]) in values.map { Duration.milliseconds($0) } }
         // An even count: the median is between the two in the middle.
@@ -286,43 +385,112 @@ final class DirectMeasureTests: XCTestCase {
 
     // MARK: The measurement's port
 
-    /// One exchange with the port over a real socket: sends `request`,
-    /// returns everything answered until the port closes or `enough`.
-    private func ask(
+    private struct ReadEnded: Error {}
+
+    /// A connection to the loopback `port`, once it is made.
+    private func connected(
         _ port: UInt16,
-        _ request: String,
-        until enough: @escaping (String) -> Bool = { _ in false },
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> NWConnection {
+        let connection = NWConnection(
+            host: "127.0.0.1",
+            port: try XCTUnwrap(NWEndpoint.Port(rawValue: port), file: file, line: line),
+            using: .tcp
+        )
+        let settled = MeasureLog<Bool>()
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready: settled.add(true)
+            case .waiting, .failed, .cancelled: settled.add(false)
+            default: break
+            }
+        }
+        connection.start(queue: .global())
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while settled.values.isEmpty, ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard settled.values.first == true else {
+            connection.cancel()
+            XCTFail("No connection to the port was made.", file: file, line: line)
+            throw ReadEnded()
+        }
+        return connection
+    }
+
+    /// Reads from `connection` until `enough` says so of what was read.
+    /// Every wait has a bound, and the end of the connection before
+    /// `enough` is a failure: a peer that sends too little, open or
+    /// closed, fails the test that asked instead of holding it.
+    private func read(
+        _ connection: NWConnection,
+        until enough: (String) -> Bool,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws -> String {
-        let connection = NWConnection(
-            host: "127.0.0.1",
-            port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)),
-            using: .tcp
-        )
-        connection.start(queue: .global())
-        defer {
-            connection.cancel()
-        }
-        try await connection.sendAll(Data(request.utf8))
-        var answered = ""
+        var read = ""
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
-        while ContinuousClock.now < deadline, !enough(answered) {
-            // A port that neither answers nor closes fails the test that
-            // asked, at this bound, instead of holding it.
+        while !enough(read) {
             let next = await DirectMeasure.bounded(until: deadline) {
                 try await connection.receiveChunk(maximumLength: 4096)
             }
             guard case .success(let chunk) = next else {
-                XCTFail("The port neither finished its answer nor closed: \(answered)", file: file, line: line)
-                break
+                XCTFail("Nothing more came within the bound, after: \(read)", file: file, line: line)
+                throw ReadEnded()
             }
-            answered += String(decoding: chunk.data, as: UTF8.self)
-            if chunk.isComplete {
-                break
+            read += String(decoding: chunk.data, as: UTF8.self)
+            if chunk.isComplete, !enough(read) {
+                XCTFail("The connection ended before what was expected, after: \(read)", file: file, line: line)
+                throw ReadEnded()
             }
         }
-        return answered
+        return read
+    }
+
+    /// Everything `connection` is sent until its far end closes it. A far
+    /// end that neither goes on nor closes fails the test that asked.
+    private func readToEnd(
+        _ connection: NWConnection,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> String {
+        var read = ""
+        let deadline = ContinuousClock.now.advanced(by: .seconds(10))
+        while true {
+            let next = await DirectMeasure.bounded(until: deadline) {
+                try await connection.receiveChunk(maximumLength: 4096)
+            }
+            switch next {
+            case .success(let chunk):
+                read += String(decoding: chunk.data, as: UTF8.self)
+                if chunk.isComplete {
+                    return read
+                }
+            case .failure(.failed):
+                // Closed hard instead of ended: closed all the same.
+                return read
+            case .failure(.timeout):
+                XCTFail("The port neither went on nor closed, after: \(read)", file: file, line: line)
+                return read
+            }
+        }
+    }
+
+    /// One exchange with the port over a real socket: sends `request`,
+    /// returns everything answered until the port closes.
+    private func ask(
+        _ port: UInt16,
+        _ request: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> String {
+        let connection = try await connected(port, file: file, line: line)
+        defer {
+            connection.cancel()
+        }
+        try await connection.sendAll(Data(request.utf8))
+        return await readToEnd(connection, file: file, line: line)
     }
 
     /// Whether anything accepts a connection on the loopback `port` now.
@@ -385,17 +553,9 @@ final class DirectMeasureTests: XCTestCase {
 
         // Its own host: one stream over the link, asked as the App's
         // listener asks the instance, then opaque bytes both ways.
-        let connection = NWConnection(
-            host: "127.0.0.1",
-            port: try XCTUnwrap(NWEndpoint.Port(rawValue: bound)),
-            using: .tcp
-        )
-        connection.start(queue: .global())
+        let connection = try await connected(bound)
         try await connection.sendAll(Data(connect(Self.host).utf8))
-        var head = ""
-        while !head.hasSuffix("\r\n\r\n") {
-            head += String(decoding: try await connection.receiveChunk(maximumLength: 4096).data, as: UTF8.self)
-        }
+        let head = try await read(connection) { $0.hasSuffix("\r\n\r\n") }
         XCTAssertEqual(head, "HTTP/1.1 200 Connection Established\r\n\r\n")
         XCTAssertEqual(port.tunnels, 1)
         XCTAssertEqual(link.opened, 1)
@@ -406,22 +566,21 @@ final class DirectMeasureTests: XCTestCase {
         )
         for message in ["first", "second"] {
             try await connection.sendAll(Data(message.utf8))
-            var echoed = ""
-            while echoed.count < message.count {
-                echoed += String(
-                    decoding: try await connection.receiveChunk(maximumLength: 4096).data,
-                    as: UTF8.self
-                )
-            }
+            let echoed = try await read(connection) { $0.count >= message.count }
             XCTAssertEqual(echoed, message)
         }
 
-        // A second request for the host is a second tunnel: what a
-        // connection made anew looks like, and what ends a leg.
-        let again = try await ask(bound, connect(Self.host)) { $0.hasSuffix("\r\n\r\n") }
-        XCTAssertTrue(again.hasPrefix("HTTP/1.1 200 "), again)
+        // A second request for the host is what a connection made anew
+        // looks like, and what ends a leg: it is counted and refused, and
+        // no second stream is opened over the link for it. The first
+        // tunnel goes on.
+        let again = try await ask(bound, connect(Self.host))
+        XCTAssertTrue(again.hasPrefix("HTTP/1.1 503 "), again)
         XCTAssertEqual(port.tunnels, 2)
-        XCTAssertEqual(link.opened, 2)
+        XCTAssertEqual(link.opened, 1)
+        try await connection.sendAll(Data("third".utf8))
+        let still = try await read(connection) { $0.count >= 5 }
+        XCTAssertEqual(still, "third")
 
         // The port closes with its measurement: what it carried ends, its
         // stream is given up, and nothing listens there afterwards.
@@ -470,6 +629,22 @@ final class DirectMeasureTests: XCTestCase {
             }
         }
 
+        // A stream that the link gives only after the port stopped waiting
+        // for it is given up when it comes, not left open with no one on it.
+        let delay = MeasureGate()
+        let slow = MeasureLinkStandIn(host: Self.host, delay: delay)
+        let slowPort = DirectMeasurePort(link: slow.link, limits: limits)
+        let slowBound = try await slowPort.start()
+        addTeardownBlock {
+            slowPort.stop()
+        }
+        let waited = try await ask(slowBound, connect(Self.host))
+        XCTAssertTrue(waited.hasPrefix("HTTP/1.1 502 "), waited)
+        XCTAssertTrue(slow.streams.isEmpty)
+        delay.open()
+        try await eventually(timeout: .seconds(10)) { slow.streams.first?.isCancelled == true }
+        XCTAssertEqual(slow.opened, 1)
+
         // A client that never finishes its request is not waited for.
         let quiet = MeasureLinkStandIn(host: Self.host)
         let quietPort = DirectMeasurePort(link: quiet.link, limits: limits)
@@ -482,6 +657,121 @@ final class DirectMeasureTests: XCTestCase {
         XCTAssertEqual(nothing, "")
         XCTAssertLessThan(began.duration(to: .now), .seconds(8))
         XCTAssertEqual(quietPort.tunnels, 0)
+    }
+
+    func testThePortHoldsAFewConnectionsAndGivesOneOfThemAStream() async throws {
+        var limits = DirectMeasure.Limits.standard
+        XCTAssertEqual(limits.portConnections, 4)
+        // Long enough that nothing here is closed for being slow: what is
+        // closed below is closed by the limit.
+        limits.sampleSeconds = 120
+        let link = MeasureLinkStandIn(host: Self.host)
+        let port = DirectMeasurePort(link: link.link, limits: limits)
+        let bound = try await port.start()
+        addTeardownBlock {
+            port.stop()
+        }
+
+        // As many connections as the port holds, none of which has sent
+        // anything: each is held, waiting for its request.
+        var held: [NWConnection] = []
+        for _ in 0..<limits.portConnections {
+            held.append(try await connected(bound))
+        }
+        let all = held
+        addTeardownBlock {
+            for connection in all {
+                connection.cancel()
+            }
+        }
+
+        // One more is closed at once and unread: with a handler it would
+        // have been answered `200` and given a stream for what it sent.
+        for _ in 0..<3 {
+            let excess = try await connected(bound)
+            let began = ContinuousClock.now
+            try? await excess.sendAll(Data(connect(Self.host).utf8))
+            let answered = await readToEnd(excess)
+            excess.cancel()
+            XCTAssertEqual(answered, "")
+            XCTAssertLessThan(began.duration(to: .now), .seconds(9))
+        }
+        XCTAssertEqual(port.tunnels, 0)
+        XCTAssertEqual(link.opened, 0)
+
+        // The connections it holds are served: the measurement's own
+        // request, on one of them, gets the one stream.
+        try await held[0].sendAll(Data(connect(Self.host).utf8))
+        let head = try await read(held[0]) { $0.hasSuffix("\r\n\r\n") }
+        XCTAssertEqual(head, "HTTP/1.1 200 Connection Established\r\n\r\n")
+        try await held[0].sendAll(Data("ping".utf8))
+        let echoed = try await read(held[0]) { $0.count >= 4 }
+        XCTAssertEqual(echoed, "ping")
+        XCTAssertEqual(port.tunnels, 1)
+        XCTAssertEqual(link.opened, 1)
+
+        // The same request on another of them: counted, refused, and the
+        // link is not asked for a second stream.
+        try await held[1].sendAll(Data(connect(Self.host).utf8))
+        let refused = await readToEnd(held[1])
+        XCTAssertTrue(refused.hasPrefix("HTTP/1.1 503 "), refused)
+        XCTAssertEqual(port.tunnels, 2)
+        XCTAssertEqual(link.opened, 1)
+
+        // That one has ended, so there is room for one again: a new
+        // connection is read and answered, as soon as the port has seen
+        // the end of the other.
+        try await eventually(timeout: .seconds(10)) {
+            guard let next = try? await self.connected(bound) else {
+                return false
+            }
+            defer {
+                next.cancel()
+            }
+            try? await next.sendAll(Data("nonsense\r\n\r\n".utf8))
+            return await self.readToEnd(next).hasPrefix("HTTP/1.1 400 ")
+        }
+        XCTAssertEqual(link.opened, 1)
+    }
+
+    func testThePortAsksAgainWhetherTheLinkIsAsItWasBeforeItAnswersTheClient() async throws {
+        // The instance holds its answer to the port's request. `revoked`:
+        // meanwhile the link stops being the one the measurement began on
+        // (the App's listener failed, say; the transport keeps its
+        // streams). Then the answer comes.
+        for revoked in [true, false] {
+            let link = MeasureLinkStandIn(host: Self.host, mode: .held)
+            let port = DirectMeasurePort(link: link.link)
+            let bound = try await port.start()
+            let connection = try await connected(bound)
+            // The request, and bytes the client sends before any answer.
+            try await connection.sendAll(Data((connect(Self.host) + "early").utf8))
+            try await eventually(timeout: .seconds(10)) {
+                link.streams.first?.hasRequest == true
+            }
+            let stream = try XCTUnwrap(link.streams.first)
+            XCTAssertEqual(link.opened, 1)
+            link.current.set(!revoked)
+            stream.release()
+
+            if revoked {
+                // No `200`, none of the client's bytes sent on, and the
+                // stream, which carried nothing yet, given up.
+                let answered = await readToEnd(connection)
+                XCTAssertTrue(answered.hasPrefix("HTTP/1.1 503 "), answered)
+                XCTAssertFalse(answered.contains(" 200 "), answered)
+                try await eventually(timeout: .seconds(10)) { stream.isCancelled }
+                XCTAssertEqual(stream.payload, Data())
+            } else {
+                // The same exchange with the link unchanged: answered, and
+                // the early bytes go on (the stand-in sends them back).
+                let answered = try await read(connection) { $0.hasSuffix("early") }
+                XCTAssertEqual(answered, "HTTP/1.1 200 Connection Established\r\n\r\nearly")
+                XCTAssertEqual(stream.payload, Data("early".utf8))
+            }
+            connection.cancel()
+            port.stop()
+        }
     }
 
     // MARK: The two sessions
@@ -641,12 +931,36 @@ final class DirectMeasureTests: XCTestCase {
             ("https://aps1-1.relay.n0.iroh.link./", "aps1"),
             ("https://euc1-1.relay.n0.iroh.link/", "euc1"),
             ("https://APS1-1.relay.n0.iroh.link.", "aps1"),
+            // The default port, written out, is the same place.
+            ("https://usw1-1.relay.n0.iroh.link.:443/", "usw1"),
+            ("HTTPS://use1-1.relay.n0.iroh.link:443", "use1"),
         ] {
             XCTAssertEqual(DirectSelectedPath.relayRegion(ofRelayURL: url), region, url)
             let path = DirectSelectedPath(isRelay: true, isIp: false, remoteAddress: url, rttMs: 80)
             XCTAssertEqual(path?.kind, .relay, url)
             XCTAssertEqual(path?.relayRegion, region, url)
             XCTAssertNil(path?.local, url)
+        }
+        // Every relay a dial may use has a region, and they are four.
+        XCTAssertEqual(
+            DirectTrialRelay.publicTrialRelayURLs.map { DirectSelectedPath.relayRegion(ofRelayURL: $0) },
+            ["use1", "usw1", "euc1", "aps1"]
+        )
+        // Another port or path on a relay's host is another service, and a
+        // URL with more to it than the relay's own root is not that relay.
+        for url in [
+            "https://euc1-1.relay.n0.iroh.link.:8443/",
+            "https://euc1-1.relay.n0.iroh.link:80/",
+            "https://euc1-1.relay.n0.iroh.link./relay",
+            "https://euc1-1.relay.n0.iroh.link.//",
+            "https://euc1-1.relay.n0.iroh.link./?region=use1",
+            "https://euc1-1.relay.n0.iroh.link./#use1",
+            "https://user@euc1-1.relay.n0.iroh.link./",
+            "https://user:word@euc1-1.relay.n0.iroh.link./",
+            "https://euc1-1.relay.n0.iroh.link../",
+            "wss://euc1-1.relay.n0.iroh.link./",
+        ] {
+            XCTAssertNil(DirectSelectedPath.relayRegion(ofRelayURL: url), url)
         }
         // Any other relay has no region: none is guessed from its name.
         for url in [
@@ -775,6 +1089,9 @@ private final class MeasureLinkStandIn: @unchecked Sendable {
         case refuses
         /// The instance never answers.
         case silent
+        /// The instance answers `200` when the test releases it, then
+        /// echoes.
+        case held
     }
 
     struct Unavailable: Error {}
@@ -785,9 +1102,13 @@ private final class MeasureLinkStandIn: @unchecked Sendable {
     private var asked = 0
     private let mode: Mode
     private let authority: DirectAuthority
+    /// When set, a stream is given only once this is open, however long
+    /// that is and whether or not the one who asked still waits.
+    private let delay: MeasureGate?
 
-    init(host: String, mode: Mode = .echoes) {
+    init(host: String, mode: Mode = .echoes, delay: MeasureGate? = nil) {
         self.mode = mode
+        self.delay = delay
         authority = DirectAuthority(host: host)!
     }
 
@@ -808,7 +1129,8 @@ private final class MeasureLinkStandIn: @unchecked Sendable {
             local: true,
             relayRegion: nil,
             open: { [self] in
-                try lock.withLock { () -> MeasureInstanceStream in
+                await delay?.wait()
+                return try lock.withLock { () -> MeasureInstanceStream in
                     asked += 1
                     guard mode != .fails else {
                         throw Unavailable()
@@ -830,6 +1152,8 @@ private final class MeasureInstanceStream: DirectByteStream, @unchecked Sendable
     private let mode: MeasureLinkStandIn.Mode
     private var requestHead = Data()
     private var answeredHead = false
+    private var heldAnswer: Data?
+    private var sentOn = Data()
     private var outgoing: [Data] = []
     private var reader: CheckedContinuation<Data?, Error>?
     private var cancelled = false
@@ -846,6 +1170,33 @@ private final class MeasureInstanceStream: DirectByteStream, @unchecked Sendable
 
     var isCancelled: Bool {
         lock.withLock { cancelled }
+    }
+
+    /// Whether the whole request head has reached it.
+    var hasRequest: Bool {
+        lock.withLock { answeredHead }
+    }
+
+    /// Everything it was sent after the request head.
+    var payload: Data {
+        lock.withLock { sentOn }
+    }
+
+    /// `held` only: the instance answers now.
+    func release() {
+        let waiting: (CheckedContinuation<Data?, Error>, Data)? = lock.withLock {
+            guard let answer = heldAnswer, !cancelled else {
+                return nil
+            }
+            heldAnswer = nil
+            if let reader {
+                self.reader = nil
+                return (reader, answer)
+            }
+            outgoing.append(answer)
+            return nil
+        }
+        waiting?.0.resume(returning: waiting?.1)
     }
 
     func read(maxLength: Int) async throws -> Data? {
@@ -885,8 +1236,12 @@ private final class MeasureInstanceStream: DirectByteStream, @unchecked Sendable
                 case .echoes: answer = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
                 case .refuses: answer = Data("HTTP/1.1 403 Forbidden\r\n\r\n".utf8)
                 case .silent, .fails: answer = nil
+                case .held:
+                    heldAnswer = Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8)
+                    answer = nil
                 }
             } else {
+                sentOn.append(data)
                 answer = data
             }
             guard let answer else {

@@ -224,6 +224,24 @@ final class DirectIrohTransport {
         case renewal
     }
 
+    /// How often a connection's path watch has reported. Counted on
+    /// whichever thread the binding reports on, so that a read sees a
+    /// report as soon as it was made and not a turn of the main actor later.
+    private final class PathReports: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reports = 0
+
+        var count: Int {
+            lock.withLock { reports }
+        }
+
+        func note() {
+            lock.withLock {
+                reports += 1
+            }
+        }
+    }
+
     /// One endpoint and one connection, for one accepted answer.
     private final class Session {
         let id: Int
@@ -244,6 +262,12 @@ final class DirectIrohTransport {
         /// that reports changes.
         var lastPath: DirectPathKind?
         var pathWatch: (any DirectPathWatch)?
+        /// For a measurement's fence (`pathMark`): how often the watch has
+        /// reported, counted where it reports; which path a read last found
+        /// selected; and how often a read found another than the one before.
+        let pathReports = PathReports()
+        var markedPath: String?
+        var pathMoves = 0
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link, authority: DirectIrohAuthority) {
             self.id = id
@@ -1278,7 +1302,10 @@ final class DirectIrohTransport {
     /// runs on (relay, IPv4, IPv6) while the session is current and usable.
     private func watchPath(of session: Session) {
         let id = session.id
+        let reports = session.pathReports
         session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind in
+            // Every report, whatever it says (`DirectPathMark`).
+            reports.note()
             Task { @MainActor [weak self] in
                 self?.pathDidChange(to: kind, session: id)
             }
@@ -1457,6 +1484,31 @@ extension DirectIrohTransport: DirectTransporting {
         // Read apart from `current`: kept only while the two agree.
         let selected = connection?.selectedPathDetail.flatMap { $0.kind == current ? $0 : nil }
         return DirectPathDiagnostics(current: current, attempts: attempts, selected: selected)
+    }
+
+    /// A mark of the path the usable session's connection runs on now
+    /// (`DirectPathMark`). Reading it is how a change of the selected path
+    /// that the watch has not reported yet is found, so each read is kept:
+    /// a path found to be another one than at the read before stays counted
+    /// if it changes back.
+    var pathMark: DirectPathMark? {
+        // Without a watch there are no reports to count.
+        guard let session, session.isUsable, session.pathWatch != nil else {
+            return nil
+        }
+        let path = session.link.connection.selectedPathIdentity
+        if path != session.markedPath {
+            session.markedPath = path
+            session.pathMoves += 1
+        }
+        guard path != nil else {
+            return nil
+        }
+        return DirectPathMark(
+            connection: session.id,
+            reports: session.pathReports.count,
+            moves: session.pathMoves
+        )
     }
 
     func select(

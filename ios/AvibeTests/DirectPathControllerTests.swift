@@ -297,12 +297,34 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(again.kind, .relay)
         XCTAssertTrue(again.isCurrent())
 
+        // What this controller is not told: the transport's watch of the
+        // connection's paths reported, and the path is of the same kind as
+        // before. That is all a change that went back leaves behind, and
+        // all another relay of the same kind does. The link taken before
+        // it is no longer the one that was measured.
+        XCTAssertEqual(harness.transport.pathMark, DirectPathMark(connection: 1, reports: 0, moves: 0))
+        harness.transport.pathMark = DirectPathMark(connection: 1, reports: 1, moves: 0)
+        XCTAssertFalse(again.isCurrent())
+        let reported = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertTrue(reported.isCurrent())
+        harness.transport.pathMark = DirectPathMark(connection: 1, reports: 1, moves: 1)
+        XCTAssertFalse(reported.isCurrent())
+        let moved = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertTrue(moved.isCurrent())
+        // Another connection of the transport's, or none it can mark.
+        harness.transport.pathMark = DirectPathMark(connection: 2, reports: 1, moves: 1)
+        XCTAssertFalse(moved.isCurrent())
+        harness.transport.pathMark = nil
+        XCTAssertNil(harness.controller.measurementLink(forInstanceURL: one))
+        harness.transport.pathMark = DirectPathMark(connection: 2, reports: 1, moves: 1)
+
         // On an address: its class is the selected path's own, and only
         // when that reading is of the same kind of path.
         harness.transport.currentPath = .ipv4
         harness.transport.selectedPath = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 3)
         harness.transport.report(.pathChanged(.ipv4), for: target)
         XCTAssertFalse(again.isCurrent())
+        XCTAssertFalse(moved.isCurrent())
         let direct = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
         XCTAssertEqual(direct.kind, .ipv4)
         XCTAssertEqual(direct.local, true)
@@ -2508,6 +2530,9 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor var selectedPath: DirectSelectedPath?
     /// How often the stand-in says it checked its path again.
     @MainActor var counts = DirectPathCounts.zero
+    /// The mark the stand-in gives its connection's path
+    /// (`DirectPathMark`); nil as a transport that cannot watch.
+    @MainActor var pathMark: DirectPathMark? = DirectPathMark(connection: 1, reports: 0, moves: 0)
 
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics {

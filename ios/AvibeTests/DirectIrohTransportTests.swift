@@ -802,6 +802,74 @@ final class DirectIrohTransportTests: XCTestCase {
         XCTAssertNil(harness.transport.pathDiagnostics.selected)
     }
 
+    /// The mark a measurement fences on (`DirectPathMark`), at the
+    /// transport's side of the binding: every report of the watch changes
+    /// it, a report that names the same kind of path included, and so does
+    /// a read that finds another path of the same kind selected.
+    func testThePathsMarkChangesWithEveryReportAndWithAnotherPathOfTheSameKind() async throws {
+        let harness = Harness()
+        // No connection: nothing to mark.
+        XCTAssertNil(harness.transport.pathMark)
+        let endpoint = harness.engine.prepare()
+        let connection = harness.makeConnection(answers: [DirectIrohFakeConnection.established])
+        connection.selectedPath = .relay
+        connection.selectedPathIdentity = "relay one"
+        endpoint.connection.resolve(connection)
+        harness.rendezvous.answer(
+            DirectIrohFixtures.ready(
+                generation: "boot:1", client: harness.engine.key.endpointID, addresses: [], relay: Self.relayA
+            )
+        )
+        harness.select()
+        try await eventually("the path comes up") { harness.reports == [.usable(generation: "boot:1")] }
+
+        // Read again with nothing in between: the same mark.
+        let first = try XCTUnwrap(harness.transport.pathMark)
+        XCTAssertEqual(harness.transport.pathMark, first)
+
+        // The watch reports, and the path it names is of the kind it was:
+        // what a change that went back leaves, since the binding reports
+        // the state as it is when it looks. The mark has changed at once,
+        // before the main actor has heard of the report, and nothing is
+        // reported to the controller for it.
+        connection.movePath(to: .relay)
+        let afterReport = try XCTUnwrap(harness.transport.pathMark)
+        XCTAssertNotEqual(afterReport, first)
+        XCTAssertEqual(harness.transport.pathMark, afterReport)
+
+        // Another relay, with no report yet: the same kind, another path.
+        connection.selectedPathIdentity = "relay two"
+        let afterMove = try XCTUnwrap(harness.transport.pathMark)
+        XCTAssertNotEqual(afterMove, afterReport)
+        // Back on the first relay: it stays a change, for every mark taken
+        // before it.
+        connection.selectedPathIdentity = "relay one"
+        let back = try XCTUnwrap(harness.transport.pathMark)
+        XCTAssertNotEqual(back, afterMove)
+        XCTAssertNotEqual(back, afterReport)
+        XCTAssertNotEqual(back, first)
+
+        // No path selected: no mark, and the one after it is a new one.
+        connection.selectedPath = nil
+        connection.selectedPathIdentity = nil
+        XCTAssertNil(harness.transport.pathMark)
+        connection.selectedPath = .relay
+        connection.selectedPathIdentity = "relay one"
+        XCTAssertNotEqual(try XCTUnwrap(harness.transport.pathMark), back)
+
+        // Only a change of the kind is reported to the controller: the
+        // report that named the same kind was none for it.
+        connection.selectedPathIdentity = nil
+        connection.movePath(to: .ipv4)
+        try await eventually("the change of kind is reported") {
+            harness.reports == [.usable(generation: "boot:1"), .pathChanged(.ipv4)]
+        }
+
+        // The connection is given up: nothing to mark.
+        harness.transport.deselect()
+        XCTAssertNil(harness.transport.pathMark)
+    }
+
     /// Only the class of the far end's address leaves the binding: local
     /// (private, shared address space, unique-local, link-local) or not. Zero round trip is
     /// "not measured".

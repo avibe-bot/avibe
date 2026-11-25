@@ -26,6 +26,10 @@ import Network
 //   reconnection, a request that went round the port, or a change of the
 //   path ends that leg: what is left would be another connection's or
 //   another path's numbers.
+// - The port holds a few connections at most and opens one stream over the
+//   link in its whole life: the measurement's. Whatever else on this
+//   device reaches the port gets no handler beyond those few and no stream
+//   at all.
 
 /// The App's admitted direct or relay link to one instance, for a
 /// measurement only (`DirectPathController.measurementLink`).
@@ -42,8 +46,8 @@ struct DirectMeasureLink: Sendable {
     /// Opens one stream over the link. Throws when the link is gone.
     let open: @Sendable () async throws -> any DirectByteStream
     /// Whether the selection, lease, listener and path this was made under
-    /// are all still the same, with no change of the path in between, a
-    /// change that went back included.
+    /// are all still the same, with no report of a change of the
+    /// connection's paths in between (`DirectPathMark`).
     let isCurrent: @MainActor @Sendable () -> Bool
 }
 
@@ -65,6 +69,9 @@ enum DirectMeasure {
         var chunkBytes = 64 * 1024
         /// The largest `/health` body read.
         var bodyBytes = 8192
+        /// The most connections the port holds at once, whatever they have
+        /// sent. A measurement needs one.
+        var portConnections = 4
 
         static let standard = Limits()
     }
@@ -210,11 +217,18 @@ enum DirectMeasure {
         defer {
             port.stop()
         }
+        let started = await bounded(until: end) { try await port.start() }
         guard
-            let bound = await bounded(until: end, { try await port.start() }).value,
+            case .success(let bound) = started,
             let endpoint = NWEndpoint.Port(rawValue: bound)
         else {
-            return leg(kind, scope: scope, relayRegion: region, SampleResult(times: [], error: .failed))
+            // Out of time is `timeout` here too; a port that could not be
+            // bound is `failed`.
+            var failure = Failure.failed
+            if case .failure(let reason) = started {
+                failure = reason
+            }
+            return leg(kind, scope: scope, relayRegion: region, SampleResult(times: [], error: failure))
         }
         let requester = Requester(
             configuration: currentConfiguration(port: endpoint, limits: limits),
@@ -274,8 +288,9 @@ enum DirectMeasure {
     /// The warm-up and the timed requests of one path, one after another.
     ///
     /// - `request(index)` makes the request; index 0 is the warm-up. Each
-    ///   has `limits.sampleSeconds`, and none runs past `end`: a request
-    ///   that takes longer ends the leg as `timeout`.
+    ///   has `limits.sampleSeconds`, and none runs past `end` or is begun
+    ///   at or after it: a request that takes longer, or whose turn comes
+    ///   too late, ends the leg as `timeout`.
     /// - `unchanged(index)` is asked before and after every request. `false`
     ///   ends the leg as `failed`, with what was timed before it.
     /// - A request that throws, or that did not run on the leg's connection,
@@ -345,20 +360,35 @@ enum DirectMeasure {
         )
     }
 
-    /// `work`'s result, or `timeout` at `deadline`, whichever comes first.
-    /// The wait ends at the deadline even if `work` does not end when it is
-    /// cancelled: it is cancelled then and left to finish by itself.
+    /// `work`'s result if it ended before `deadline`, else `timeout`.
+    ///
+    /// - The deadline is a point on the continuous clock, and the clock is
+    ///   what decides: `work` is not begun at or after it, and a result
+    ///   that arrives at or after it is `timeout`, whichever of the work
+    ///   and the timer the scheduler ran first.
+    /// - The wait ends at the deadline even if `work` does not end when it
+    ///   is cancelled: it is cancelled then and left to finish by itself.
+    /// - `work` reporting that its own request timed out is `timeout` too;
+    ///   any other error is `failed`.
     static func bounded<Value: Sendable>(
         until deadline: ContinuousClock.Instant,
         _ work: @escaping @Sendable () async throws -> Value
     ) async -> Result<Value, Failure> {
+        let clock = ContinuousClock()
+        guard clock.now < deadline else {
+            return .failure(.timeout)
+        }
         let settled = Settled<Result<Value, Failure>>()
         let working = Task {
+            let result: Result<Value, Failure>
             do {
-                settled.resume(.success(try await work()))
+                result = .success(try await work())
+            } catch let error as URLError where error.code == .timedOut {
+                result = .failure(.timeout)
             } catch {
-                settled.resume(.failure(.failed))
+                result = .failure(.failed)
             }
+            settled.resume(clock.now < deadline ? result : .failure(.timeout))
         }
         let timing = Task {
             try? await Task.sleep(until: deadline, clock: .continuous)
@@ -579,8 +609,10 @@ final class DirectMeasurePort: @unchecked Sendable {
         self.limits = limits
     }
 
-    /// How many requests for the link's host it has accepted so far. A
-    /// measurement's requests all run in the first one's tunnel.
+    /// How many requests for the link's host it has had so far. A
+    /// measurement's requests all run in the first one's tunnel, and only
+    /// the first is given a stream: a second is a connection made anew, or
+    /// someone else, and is refused.
     var tunnels: Int {
         lock.withLock { tunnelCount }
     }
@@ -602,13 +634,11 @@ final class DirectMeasurePort: @unchecked Sendable {
         guard kept else {
             throw CancellationError()
         }
-        listener.newConnectionHandler = { [weak self, queue] connection in
+        listener.newConnectionHandler = { [weak self] connection in
             guard let self else {
                 connection.cancel()
                 return
             }
-            // Started inside the handler, as the App's listener does.
-            connection.start(queue: queue)
             self.accept(connection)
         }
         return try await withTaskCancellationHandler {
@@ -661,12 +691,17 @@ final class DirectMeasurePort: @unchecked Sendable {
         }
     }
 
+    /// Takes `connection` if the port has room for it, and closes it at
+    /// once if not: a connection beyond `limits.portConnections` is never
+    /// started, read or given a task. Called in the listener's handler.
     private func accept(_ connection: NWConnection) {
         let id = UUID()
         let accepted = lock.withLock { () -> Bool in
-            guard !stopped else {
+            guard !stopped, serving.count < limits.portConnections else {
                 return false
             }
+            // Started inside the handler, as the App's listener does.
+            connection.start(queue: queue)
             // Kept before it can end, so its end always finds it.
             serving[id] = Task { [weak self] in
                 await self?.serve(connection)
@@ -686,9 +721,12 @@ final class DirectMeasurePort: @unchecked Sendable {
         }
     }
 
-    private func noteTunnel() {
+    /// Counts a request for the link's host. `true` for the first one the
+    /// port has had, which alone may open a stream over the link.
+    private func noteTunnel() -> Bool {
         lock.withLock {
             tunnelCount += 1
+            return tunnelCount == 1
         }
     }
 
@@ -725,14 +763,28 @@ final class DirectMeasurePort: @unchecked Sendable {
                 return
             }
         }
-        noteTunnel()
+        // One stream over the link for the whole measurement. A second
+        // request is counted, which ends the leg, and opens nothing.
+        guard noteTunnel() else {
+            try? await connection.sendAll(DirectConnectWire.refusal(503))
+            return
+        }
         // Only over the link the measurement was started with, as it was.
         guard await link.isCurrent() else {
             try? await connection.sendAll(DirectConnectWire.refusal(503))
             return
         }
         let link = link
-        guard let stream = await DirectMeasure.bounded(until: patience, { try await link.open() }).value else {
+        // A stream that comes after its wait was given up is given up too,
+        // whenever it comes: the one stream is never left open unused.
+        let late = LateStream()
+        let opening = await DirectMeasure.bounded(until: patience) { () -> any DirectByteStream in
+            let stream = try await link.open()
+            late.arrived(stream)
+            return stream
+        }
+        guard let stream = opening.value else {
+            late.abandon()
             try? await connection.sendAll(DirectConnectWire.refusal(502))
             return
         }
@@ -761,6 +813,14 @@ final class DirectMeasurePort: @unchecked Sendable {
         }
         guard case .success(let leftover?) = answer else {
             try? await connection.sendAll(DirectConnectWire.refusal(502))
+            return
+        }
+        // The link may have stopped being the one this began under while
+        // the instance was answering. Nothing has been said to the client
+        // and none of its bytes sent on: asked again before either.
+        guard await link.isCurrent() else {
+            stream.cancel()
+            try? await connection.sendAll(DirectConnectWire.refusal(503))
             return
         }
         do {
@@ -813,6 +873,36 @@ final class DirectMeasurePort: @unchecked Sendable {
                 stream.cancel()
                 connection.cancel()
             }
+        }
+    }
+
+    private final class LateStream: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stream: (any DirectByteStream)?
+        private var abandoned = false
+
+        func arrived(_ stream: any DirectByteStream) {
+            let unwanted = lock.withLock { () -> Bool in
+                guard !abandoned else {
+                    return true
+                }
+                self.stream = stream
+                return false
+            }
+            if unwanted {
+                stream.cancel()
+            }
+        }
+
+        func abandon() {
+            let held: (any DirectByteStream)? = lock.withLock {
+                abandoned = true
+                defer {
+                    self.stream = nil
+                }
+                return self.stream
+            }
+            held?.cancel()
         }
     }
 
