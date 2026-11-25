@@ -1087,6 +1087,7 @@ session_turns = Table(
         "and control_successor_turn_id is null)",
         name="ck_session_turns_control_shape",
     ),
+    Index("ix_session_turns_session_outcome", "session_id", "terminal_outcome", "id"),
     Index("ix_session_turns_session_created", "session_id", "created_at", "id"),
     Index(
         "ix_session_turns_recovery_owner",

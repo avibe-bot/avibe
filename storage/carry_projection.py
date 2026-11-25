@@ -99,17 +99,17 @@ class CarryProjection:
         return replacement
 
 
-# Scan only this session's IDs in its existing covering queue index. Fetch a history by
-# primary key only for a matching carry ID, never for an ordinary delivery. A predecessor's
+# Seek only failed Turns, then their deliveries and exact child PKs. Successful
+# history adds no rows to this read. A predecessor's
 # id is immediate; original_id in the event refers instead to the root of a chain.
 _CARRY_EDGES = text("""
     SELECT d.id, d.message_id, m.context_seq, json_extract(e.value,'$.at') AS created
-    FROM message_deliveries AS ids INDEXED BY ix_message_deliveries_session_state
-    CROSS JOIN message_deliveries AS c ON c.id=ids.id
-    CROSS JOIN message_deliveries AS d ON d.id=substr(ids.id,1,length(ids.id)-6) AND d.session_id=ids.session_id
+    FROM session_turns AS t INDEXED BY ix_session_turns_session_outcome
+    CROSS JOIN message_deliveries AS d INDEXED BY ix_message_deliveries_turn ON d.turn_id=t.id AND d.session_id=t.session_id
+    CROSS JOIN message_deliveries AS c ON c.id=d.id || '~carry' AND c.session_id=t.session_id
     CROSS JOIN messages AS m ON m.id=d.message_id AND m.session_id=d.session_id
     CROSS JOIN json_each(c.delivery_history_json,'$.events') AS e
-    WHERE ids.session_id=:member AND ids.id GLOB '*~carry' AND m.context_seq IS NOT NULL
+    WHERE t.session_id=:member AND t.terminal_outcome='failed' AND m.context_seq IS NOT NULL
     AND (:bound IS NULL OR m.context_seq<=:bound)
     AND json_extract(e.value,'$.kind')='turn_carry'
     AND json_extract(e.value,'$.reason') IN ('failed','failed_user')
