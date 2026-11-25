@@ -67,6 +67,10 @@ export type ShowPageVoiceDictationInput = {
   nativeCapture?: boolean | { adopt: string };
   /** When the press that started this take began (`Date.now()`), for the capture trace. */
   pressedAt?: number;
+  /** A microphone the press opened while it was held (components/voice/useHoldToTalk), so the
+   *  take records from the moment it starts: used instead of opening one. Nothing was recorded
+   *  from it before; the take owns it from here, and closes it if it does not use it. */
+  stream?: Promise<MediaStream>;
   /** In the iOS App, why the App did not follow the press this take came from (the trace's
    *  `holdMiss`; lib/nativeVoiceHold). */
   holdMiss?: HoldMiss;
@@ -201,7 +205,12 @@ export class ShowPageVoiceDictation {
   }
 
   async start(): Promise<void> {
-    if (!desktopVoiceLock.current(this.lockToken)) { this.abort(); throw cancelledError(); }
+    const opened = this.input.stream;
+    let used = false;
+    const closeUnused = () => {
+      if (opened && !used) void opened.then((stream) => stream.getTracks().forEach((track) => track.stop()), () => undefined);
+    };
+    if (!desktopVoiceLock.current(this.lockToken)) { closeUnused(); this.abort(); throw cancelledError(); }
     if (this.pipeline || this.stream) throw new Error('show page voice dictation already started');
     const captureClaim = this.input.captureClaim ?? claimVoiceCapture(() => {
       try {
@@ -221,7 +230,14 @@ export class ShowPageVoiceDictation {
       let stream: MediaStream;
       try {
         // A take the App records opens no microphone in the page.
-        stream = this.input.nativeCapture ? emptyVoiceStream() : await this.dependencies.getUserMedia();
+        if (this.input.nativeCapture) {
+          closeUnused();
+          stream = emptyVoiceStream();
+        }
+        else if (opened) {
+          used = true;
+          stream = await opened;
+        } else stream = await this.dependencies.getUserMedia();
       } catch (error) {
         // The microphone never opened: refused, missing, or held by something else.
         this.trace.micSettled(requestedAt, error);
@@ -336,6 +352,7 @@ export class ShowPageVoiceDictation {
       // Every take is logged once, however its start ended: refused, cancelled (released while
       // its microphone was granted), or failed. A pipeline that started has logged it already.
       void this.trace.finishWithInputDevices(error instanceof VoiceTranscriptionError && error.code === 'cancelled' ? 'cancelled' : 'failed');
+      closeUnused();
       this.abortController.abort();
       this.realtime?.abort();
       this.stream?.getTracks().forEach((track) => track.stop());

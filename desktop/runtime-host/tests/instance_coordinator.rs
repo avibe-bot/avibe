@@ -28,6 +28,10 @@ struct Http {
     replies: Mutex<VecDeque<(&'static str, Reply)>>,
     calls: Mutex<Vec<String>>,
     cookies: Mutex<Vec<String>>,
+    /// Each instance sign-out: its method, `Origin`, CSRF header and cookies.
+    logouts: Mutex<Vec<[String; 4]>>,
+    /// Instance sign-outs find no network.
+    offline: AtomicBool,
 }
 #[async_trait]
 impl Transport for Http {
@@ -66,6 +70,25 @@ impl Transport for Http {
         }
         if request.method == reqwest::Method::DELETE {
             return Ok(response(200, json!({}), None));
+        }
+        if path == "/auth/logout" {
+            let header = |name: &str| {
+                request
+                    .headers
+                    .get(name)
+                    .map(|value| value.to_str().unwrap().to_owned())
+                    .unwrap_or_default()
+            };
+            self.logouts.lock().unwrap().push([
+                request.method.to_string(),
+                header("origin"),
+                header("x-vibe-csrf-token"),
+                header("cookie"),
+            ]);
+            if self.offline.load(Ordering::SeqCst) {
+                return Err(ClientError::new("network_unavailable"));
+            }
+            return Ok(response(200, json!({"ok": true}), None));
         }
         let (expected, reply) = self
             .replies
@@ -224,6 +247,8 @@ fn fixture_in(root: tempfile::TempDir, replies: Vec<(&'static str, Reply)>) -> F
         replies: Mutex::new(replies.into()),
         calls: Mutex::new(vec![]),
         cookies: Mutex::new(vec![]),
+        logouts: Mutex::new(vec![]),
+        offline: AtomicBool::new(false),
     });
     let private = Arc::new(Private::default());
     let view = Arc::new(View::default());
@@ -2070,21 +2095,15 @@ async fn a_held_install_allows_reads_and_its_late_reply_changes_nothing() {
             .code,
         "busy"
     );
-    // The user leaves and opens the same instance again: a new sign-in, a new
-    // section. The old reply then arrives.
+    // The user leaves and opens the same instance again: its sign-in goes on
+    // (`kept.rs`), in a new section. The old reply then arrives.
     let old_generation = f.client.state().generation;
     assert!(action(&f.client, ClientAction::ReturnLocal).await.ok);
     assert!(f.client.state().instance_update.is_none());
-    let mut ready = ready("account-a", "one");
-    ready.headers.append(
-        SET_COOKIE,
-        "vibe_csrf_token=csrf-from-instance; Secure; Path=/".parse().unwrap(),
-    );
-    f.http
-        .replies
-        .lock()
-        .unwrap()
-        .extend(selection(&catalog("account-a", &["one"]), "one", Reply::Ready(ready)));
+    f.http.replies.lock().unwrap().extend([
+        ("/api/mobile/session", ok(catalog("account-a", &["one"]))),
+        ("/api/session", ok(identity(true))),
+    ]);
     assert!(select(&f, "one").await.ok);
     let fresh = update(&f);
     let revision = f.client.state().revision;
@@ -2746,4 +2765,167 @@ async fn failed_selection_persistence_never_publishes_success_or_recency() {
     );
     assert!(!f._root.path().join("instance-recency.json").exists());
     assert_eq!(order(&f.client), ["one", "two"]);
+}
+
+/// The requests made since `from`, and the cookies each sent.
+fn since(f: &Fixture, from: usize) -> (Vec<String>, Vec<String>) {
+    (
+        f.http.calls.lock().unwrap()[from..].to_vec(),
+        f.http.cookies.lock().unwrap()[from..].to_vec(),
+    )
+}
+
+/// Opening an instance again in the same run (from the list, back from this
+/// computer, or when the path choice opens it again) goes on with the sign-in
+/// it has: the instance is asked again before anything is shown, and no new
+/// sign-in is made, so the instance lists no new device. A cookie the
+/// instance sets meanwhile is the one sent next time.
+#[tokio::test]
+async fn opening_an_instance_again_in_one_run_goes_on_with_its_sign_in() {
+    let f = selected_for_update().await;
+    for (leave_first, sent) in [(false, "instance-only"), (true, "rotated-by-instance")] {
+        if leave_first {
+            assert!(action(&f.client, ClientAction::ReturnLocal).await.ok);
+        }
+        let from = f.http.calls.lock().unwrap().len();
+        let committed = f.view.committed.lock().unwrap().len();
+        let mut again = ready("account-a", "one");
+        again.headers.append(
+            SET_COOKIE,
+            "__Host-vibe_remote_session=rotated-by-instance; Secure; HttpOnly; Path=/"
+                .parse()
+                .unwrap(),
+        );
+        f.http.replies.lock().unwrap().extend([
+            ("/api/mobile/session", ok(catalog("account-a", &["one"]))),
+            ("/api/session", Reply::Ready(again)),
+        ]);
+        let reply = select(&f, "one").await;
+        assert!(reply.ok, "{:?}", reply.error);
+        let (calls, cookies) = since(&f, from);
+        assert_eq!(
+            calls,
+            ["/api/mobile/session", "/api/session"],
+            "leave first: {leave_first}"
+        );
+        assert!(
+            cookies[1].contains(&format!("__Host-vibe_remote_session={sent}")),
+            "{cookies:?}"
+        );
+        assert_eq!(f.view.committed.lock().unwrap().len(), committed + 1);
+        assert!(matches!(
+            &f.client.state().connection.committed,
+            ClientTarget::Remote { instance_id, .. } if instance_id == "one"
+        ));
+    }
+    assert!(f.http.replies.lock().unwrap().is_empty());
+}
+
+/// A kept sign-in the instance no longer takes as this account's there (it
+/// expired or was signed out, the instance was bound again, or it answers for
+/// another account or instance) is let go, and the opening signs in anew;
+/// that new sign-in is then the one kept.
+#[tokio::test]
+async fn a_kept_sign_in_the_instance_no_longer_takes_is_replaced_by_a_new_one() {
+    let refusals: Vec<(&str, Response)> = vec![
+        (
+            "expired or signed out",
+            response(200, json!({"remote": true, "authenticated": false}), None),
+        ),
+        (
+            "refused",
+            response(401, json!({"error": "authentication_required"}), None),
+        ),
+        ("another account", ready("account-b", "one")),
+        ("bound again", ready("account-a", "another-binding")),
+    ];
+    for (case, refusal) in refusals {
+        let f = selected_for_update().await;
+        let session = catalog("account-a", &["one"]);
+        let from = f.http.calls.lock().unwrap().len();
+        let reads = f.view.cookie_reads.load(Ordering::SeqCst);
+        let mut replies = vec![
+            ("/api/mobile/session", ok(session.clone())),
+            ("/api/session", Reply::Ready(refusal)),
+        ];
+        replies.extend(
+            selection(&session, "one", Reply::Ready(ready("account-a", "one")))
+                .into_iter()
+                .skip(1),
+        );
+        f.http.replies.lock().unwrap().extend(replies);
+        let reply = select(&f, "one").await;
+        assert!(reply.ok, "{case}: {:?}", reply.error);
+        let (calls, _) = since(&f, from);
+        assert_eq!(
+            calls,
+            [
+                "/api/mobile/session",
+                "/api/session",
+                "/auth/login",
+                "/api/desktop/instance-authorization",
+                "/auth/callback",
+                "/api/session"
+            ],
+            "{case}"
+        );
+        // The instance's page was asked once for a newer cookie; it had none.
+        assert_eq!(f.view.cookie_reads.load(Ordering::SeqCst), reads + 1, "{case}");
+        // The new sign-in is kept.
+        let from = f.http.calls.lock().unwrap().len();
+        f.http.replies.lock().unwrap().extend([
+            ("/api/mobile/session", ok(session.clone())),
+            ("/api/session", Reply::Ready(ready("account-a", "one"))),
+        ]);
+        assert!(select(&f, "one").await.ok, "{case}");
+        assert_eq!(since(&f, from).0, ["/api/mobile/session", "/api/session"], "{case}");
+    }
+}
+
+/// Signing out signs each instance sign-in of this run out of its instance,
+/// as its page would (`Origin`, CSRF), and keeps none of them, whether or not
+/// the instance can be reached. The next account opens the instance with a
+/// sign-in of its own.
+#[tokio::test]
+async fn signing_out_ends_the_kept_sign_ins_even_offline() {
+    for offline in [false, true] {
+        let f = selected_for_update().await;
+        f.http.offline.store(offline, Ordering::SeqCst);
+        assert!(action(&f.client, ClientAction::SignOut { intent_id: None }).await.ok);
+        assert_eq!(f.client.state().account.status, AccountStatus::SignedOut);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while f.http.logouts.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the instance sign-out was attempted");
+        let logouts = f.http.logouts.lock().unwrap().clone();
+        assert_eq!(logouts.len(), 1, "{logouts:?}");
+        let [method, origin, csrf, cookies] = &logouts[0];
+        assert_eq!(
+            (method.as_str(), origin.as_str(), csrf.as_str()),
+            ("POST", "https://one.avibe.bot", "csrf-from-instance")
+        );
+        assert!(
+            cookies.contains("__Host-vibe_remote_session=instance-only"),
+            "{cookies}"
+        );
+        assert!(!cookies.contains("private-account"), "{cookies}");
+
+        let other = catalog("account-b", &["one"]);
+        sign_in(&f, other.clone()).await;
+        let from = f.http.calls.lock().unwrap().len();
+        f.http
+            .replies
+            .lock()
+            .unwrap()
+            .extend(selection(&other, "one", Reply::Ready(ready("account-b", "one"))));
+        let reply = select(&f, "one").await;
+        assert!(reply.ok, "offline {offline}: {:?}", reply.error);
+        assert!(
+            since(&f, from).0.contains(&"/auth/callback".to_owned()),
+            "offline {offline}"
+        );
+    }
 }

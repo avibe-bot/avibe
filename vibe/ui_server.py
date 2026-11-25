@@ -9916,6 +9916,9 @@ def remote_access_auth_callback():
             device_headers=request.headers,
             account_session_ref=verified_reference(claims),
             account_enroll_before=callback_started + remote_access.OAUTH_HANDSHAKE_TTL_SECONDS,
+            # The session this browser already holds, proved only by its own cookie on this request.
+            previous=remote_access.same_browser_session(
+                config, request.cookies.get(remote_access.SESSION_COOKIE_NAME), str(claims.get("sub", ""))),
         )
     except AccountSessionSignedOut:
         return _oauth_callback_error_response('account_session_signed_out', next_target=next_target, status=403)

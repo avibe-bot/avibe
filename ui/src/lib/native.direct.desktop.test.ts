@@ -87,7 +87,7 @@ const state = (
     path,
     ...(scope ? { path_scope: scope } : {}),
   },
-  preference: { mode: 'automatic', reverted: null },
+  preference: { mode: 'automatic', pendingRelaunch: false, reverted: null },
 });
 
 afterEach(() => {
@@ -240,49 +240,87 @@ describe('the desktop direct bridge', () => {
     await load(state(1, null));
     const bridge = window.avibeNative!;
 
-    await expect(bridge.call('direct.preference')).resolves.toEqual({ mode: 'automatic', reverted: null });
+    await expect(bridge.call('direct.preference')).resolves.toEqual({ mode: 'automatic', pendingRelaunch: false, reverted: null });
     expect(requests).toHaveLength(0);
 
-    await expect(bridge.call('direct.setPreference', { mode: 'direct' })).rejects.toMatchObject({
+    // Not a choice the app has.
+    await expect(bridge.call('direct.setPreference', { mode: 'relay' })).rejects.toMatchObject({
       code: 'invalid_argument',
     });
     expect(requests).toHaveLength(0);
     const changed = bridge.call('direct.setPreference', { mode: 'tunnel' });
     expect(requests[0]).toMatchObject({ method: 'direct.setPreference', params: { mode: 'tunnel' } });
     deliver({
-      preference: { mode: 'tunnel', reverted: null },
-      reply: { id: requests[0].id, result: { mode: 'tunnel', reverted: null } },
+      preference: { mode: 'tunnel', pendingRelaunch: false, reverted: null },
+      reply: { id: requests[0].id, result: { mode: 'tunnel', pendingRelaunch: false, reverted: null } },
     });
-    await expect(changed).resolves.toEqual({ mode: 'tunnel', reverted: null });
-    await expect(bridge.call('direct.preference')).resolves.toEqual({ mode: 'tunnel', reverted: null });
+    await expect(changed).resolves.toEqual({ mode: 'tunnel', pendingRelaunch: false, reverted: null });
+    await expect(bridge.call('direct.preference')).resolves.toEqual({ mode: 'tunnel', pendingRelaunch: false, reverted: null });
   });
 
   it('keeps the newest choice of path, whichever delivery arrives first', async () => {
-    await load({ ...state(1, null), preference: { mode: 'automatic', reverted: null }, preferenceOrder: 3 });
+    await load({ ...state(1, null), preference: { mode: 'automatic', pendingRelaunch: false, reverted: null }, preferenceOrder: 3 });
     const bridge = window.avibeNative!;
     const choice = () => bridge.call('direct.preference');
 
     // The user chose the tunnel: the answer to that carries the newer order.
-    deliver({ preference: { mode: 'tunnel', reverted: null }, preferenceOrder: 4 });
-    await expect(choice()).resolves.toEqual({ mode: 'tunnel', reverted: null });
+    deliver({ preference: { mode: 'tunnel', pendingRelaunch: false, reverted: null }, preferenceOrder: 4 });
+    await expect(choice()).resolves.toEqual({ mode: 'tunnel', pendingRelaunch: false, reverted: null });
     // A state that was read before the choice arrives after it: its status
     // is taken, its older choice is not.
-    deliver({ ...state(2, 'relay'), preference: { mode: 'automatic', reverted: null }, preferenceOrder: 3 });
-    await expect(choice()).resolves.toEqual({ mode: 'tunnel', reverted: null });
+    deliver({ ...state(2, 'relay'), preference: { mode: 'automatic', pendingRelaunch: false, reverted: null }, preferenceOrder: 3 });
+    await expect(choice()).resolves.toEqual({ mode: 'tunnel', pendingRelaunch: false, reverted: null });
     await expect(bridge.call('direct.status')).resolves.toMatchObject({ sequence: 2, path: 'relay' });
     // The same order again is the same choice; a newer one replaces it.
-    deliver({ preference: { mode: 'tunnel', reverted: null }, preferenceOrder: 4 });
-    deliver({ preference: { mode: 'automatic', reverted: null }, preferenceOrder: 5 });
-    await expect(choice()).resolves.toEqual({ mode: 'automatic', reverted: null });
+    deliver({ preference: { mode: 'tunnel', pendingRelaunch: false, reverted: null }, preferenceOrder: 4 });
+    deliver({ preference: { mode: 'automatic', pendingRelaunch: false, reverted: null }, preferenceOrder: 5 });
+    await expect(choice()).resolves.toEqual({ mode: 'automatic', pendingRelaunch: false, reverted: null });
     expect(requests).toHaveLength(0);
+  });
+
+  it('offers the third choice, and tells the page of a choice that changes while it is open', async () => {
+    await load({ ...state(1, null), preference: { mode: 'automatic', pendingRelaunch: false, reverted: null }, preferenceOrder: 3 });
+    const bridge = window.avibeNative!;
+    // `directPreference` 2: "direct and relay only" can be chosen.
+    expect(bridge.capabilities).toMatchObject({ direct: 3, directPreference: 2 });
+    const heard: unknown[] = [];
+    const told: unknown[] = [];
+    const listen = (event: Event) => heard.push((event as CustomEvent).detail);
+    window.addEventListener('avibe:native:direct.preferenceChanged', listen);
+    const stop = bridge.on('direct.preferenceChanged', (choice: unknown) => told.push(choice));
+    try {
+      // The first choice a document is given is read, not announced.
+      expect(heard).toEqual([]);
+
+      const chosen = bridge.call('direct.setPreference', { mode: 'direct' });
+      expect(requests[0]).toMatchObject({ method: 'direct.setPreference', params: { mode: 'direct' } });
+      const direct = { mode: 'direct', pendingRelaunch: false, reverted: null };
+      deliver({ preference: direct, preferenceOrder: 4, reply: { id: requests[0].id, result: direct } });
+      await expect(chosen).resolves.toEqual(direct);
+      expect(heard).toEqual([direct]);
+
+      // The app set it back itself: when, why and from which choice.
+      const reverted = { mode: 'automatic', pendingRelaunch: false, reverted: { at: 1795000000000, reason: 'unreachable', from: 'direct' } };
+      deliver({ preference: reverted, preferenceOrder: 5 });
+      expect(heard).toEqual([direct, reverted]);
+      await expect(bridge.call('direct.preference')).resolves.toEqual(reverted);
+      // The same choice again, and an older one arriving late, announce nothing.
+      deliver({ preference: reverted, preferenceOrder: 6 });
+      deliver({ preference: direct, preferenceOrder: 4 });
+      expect(heard).toEqual([direct, reverted]);
+      expect(told).toEqual(heard);
+    } finally {
+      window.removeEventListener('avibe:native:direct.preferenceChanged', listen);
+      stop();
+    }
   });
 
   it('asks the shell for the choice when none was delivered', async () => {
     await load();
     const asked = window.avibeNative!.call('direct.preference');
     expect(requests[0]).toMatchObject({ method: 'direct.preference' });
-    deliver({ reply: { id: requests[0].id, result: { mode: 'tunnel', reverted: null } } });
-    await expect(asked).resolves.toEqual({ mode: 'tunnel', reverted: null });
+    deliver({ reply: { id: requests[0].id, result: { mode: 'tunnel', pendingRelaunch: false, reverted: null } } });
+    await expect(asked).resolves.toEqual({ mode: 'tunnel', pendingRelaunch: false, reverted: null });
   });
 
   it('is not installed over a bridge that is already there', () => {

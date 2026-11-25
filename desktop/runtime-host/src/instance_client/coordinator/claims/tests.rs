@@ -135,3 +135,18 @@ fn the_direct_review_command_has_separate_receipt_and_decision_inputs() {
         assert!(serde_json::from_value::<ClaimRequest>(input).is_err());
     }
 }
+
+#[test]
+fn cancel_accepts_only_the_active_receipt() {
+    let mut claims = Claims::default();
+    // Nothing active: refused, as before the `is_none_or` form.
+    assert_eq!(claims.cancel(Uuid::new_v4()).unwrap_err().code, changed().code);
+    let receipt = claims.reserve(account()).unwrap();
+    // Another receipt: refused, and the active one is kept.
+    assert_eq!(claims.cancel(Uuid::new_v4()).unwrap_err().code, changed().code);
+    assert!(claims.active.as_ref().is_some_and(|a| a.receipt == receipt));
+    // Its own receipt: accepted and retired.
+    claims.cancel(receipt).unwrap();
+    assert!(claims.active.is_none());
+    assert_eq!(claims.cancel(receipt).unwrap_err().code, changed().code);
+}

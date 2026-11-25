@@ -49,6 +49,32 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe('LanguageSwitcher keeps only what the reader picks', () => {
+  beforeEach(() => window.localStorage.clear());
+
+  it('keeps a pick of another language', async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+
+    await user.click(screen.getByRole('button', { name: 'language.en' }));
+    await user.click(screen.getByRole('option', { name: 'language.zh' }));
+
+    expect(window.localStorage.getItem('i18nextLng')).toBe('zh');
+  });
+
+  it('keeps a pick of the language already on screen, without changing or saving anything else', async () => {
+    const user = userEvent.setup();
+    renderSwitcher();
+
+    await user.click(screen.getByRole('button', { name: 'language.en' }));
+    await user.click(screen.getByRole('option', { name: 'language.en' }));
+
+    expect(window.localStorage.getItem('i18nextLng')).toBe('en');
+    expect(i18n.changeLanguage).not.toHaveBeenCalled();
+    expect(api.mutateConfig).not.toHaveBeenCalled();
+  });
+});
+
 describe('LanguageSwitcher role-aware persistence', () => {
   it('keeps a member browser preference without reading or writing the instance default', async () => {
     authorization.capabilities.can_manage_instance = false;

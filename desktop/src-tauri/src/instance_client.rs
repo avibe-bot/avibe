@@ -463,6 +463,7 @@ pub(crate) fn init(app: &AppHandle, bundle: &Url) -> Result<(), ClientError> {
         .map_err(failure)?
         .join("instance-client.json");
     let mut store = ConnectionStore::new(path);
+    crate::device_description::prepare(app);
     let device_name = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| app.package_info().name.clone());
@@ -498,7 +499,7 @@ pub(crate) fn init(app: &AppHandle, bundle: &Url) -> Result<(), ClientError> {
             store,
             local_origin: app.state::<Shell>().active_origin.clone(),
         },
-        Arc::new(HttpTransport::new()?),
+        Arc::new(HttpTransport::new(&app.package_info().version.to_string())?),
         credentials,
         Arc::new(crate::instance_passkeys::NativePasskeys::new(app.clone())),
     );
@@ -2814,6 +2815,30 @@ impl NativeView {
         crate::refresh_native_controls(&self.app, None);
     }
 }
+impl NativeView {
+    /// Tells the committed view of another computer's instance who this
+    /// computer is, while its document is at a Workbench route. A candidate,
+    /// a retired view, an account page, a Show page or any other document of
+    /// the instance is told nothing. A page mounted before the commit hears
+    /// it at the commit's publication; every later load, at its own.
+    fn describe_device(&self, view: &Webview) {
+        let remote = self.presentation.lock().expect("presentation").remote.clone();
+        let disposable = self
+            .views
+            .lock()
+            .expect("views")
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.label == view.label() && runtime.disposable);
+        let Ok(url) = view.url() else { return };
+        if !crate::device_description::admits(remote.as_ref(), disposable && is_current_runtime(view), &url) {
+            return;
+        }
+        if let Some(script) = crate::device_description::delivery(&self.app, &url) {
+            let _ = view.eval(script);
+        }
+    }
+}
 #[async_trait]
 impl ClientView for NativeView {
     /// The committed instance's WebView store, read back for exactly its origin.
@@ -2880,6 +2905,7 @@ impl ClientView for NativeView {
             if let Some(runtime) = runtime_webview(&self.app) {
                 // Runtime receives only the minimal projection even while retained.
                 let _ = runtime.eval(self.script(false, None));
+                self.describe_device(&runtime);
             }
             if let Some(account) = active_webview(&self.app) {
                 let client = self.app.state::<Client>();

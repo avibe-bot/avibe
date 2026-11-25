@@ -149,16 +149,18 @@ interface AvibeNative {
 | `files` | `files.read({token})` → bytes for a picked or shared file | - |
 | [`direct`](remote-direct-ios.md) | `direct.status()` → `{preferred: "tunnel" \| "direct", sequence: number, closure: number}`, and for the selected instance's host, for diagnosis, `path` (`"relay" \| "ipv4" \| "ipv6" \| null`) and `attempts` (the last five: offered and local candidate counts by family, and the result; no address or identity). Read-only, no parameters. Version 2 adds `direct.handover()` → `{closed, kept, skipped?}`, no parameters (remote-direct-ios.md section 7). Version 3: `path` is also carried by `direct.transportChanged` when known, a change of it advances `sequence`, and the status adds `connections` (the last five CONNECT races: `direct` and `public` as ms or `none`/`failed`/`timeout`/`cancelled`, `winner`, `path`, `sticky`) and `losses` (the last five closes of direct relays for a path that is gone: `cause` (`lost`/`generation_replaced`/`background`), `relays`, `last_byte_ms`, `path`). With `path`, for display, the status may add `path_scope` (`"local"` when the selected path's remote address is private, shared address space (100.64/10), unique-local or link-local, else `"global"`; never for the relay) and `rtt_ms` (that path's measured round trip); neither is in the event, and a change of either is not a change of the status. For diagnosis it may also add `counts`, since the instance was selected: `verifications` (times a usable path was suspended to be checked again), `probes` (`path_update`, `candidate_failed`, `renewal`), `dials`, `path_updates` (updates of the system's network path acted on) and `path_updates_ignored` (updates that changed nothing the transport depends on). Numbers only; not in the event, and no change of the status. For a host that has a route it may also add `listener_faults`: the last five times the App's own local proxy could not be bound or checked (`step`: `bind`/`waiting`/`ownership`/`deadline`/`socket`, and when known `code`, an error number, and `background_seconds`, how long the App had been away); not in the event, and no change of the status. | `direct.transportChanged({preferred, sequence, closure})` |
 | `directPreference` | This device's path choice for the instance of the asking page, kept by the App per account and instance (the instance's Devices › Connection page). `direct.preference()` → `{mode: "automatic" \| "tunnel" \| "direct", reverted: null \| {at: <ms since epoch>, reason: "unreachable", from: "tunnel" \| "direct"}}`, no parameters. `direct.setPreference({mode})` takes exactly `mode`, `"automatic"` or `"tunnel"`, and from version 2 also `"direct"` (any other value is refused with `invalid_argument`, so later modes keep the shape), and answers the same object with `reverted: null`; a change of mode reopens the instance at the page's URL after the answer. `"tunnel"` (Cloudflare tunnel only): opens of that instance still prepare the route (a host loaded once without one keeps WebKit's pooled public connections on the store, so a later Automatic could not take effect), but select nothing, so nothing dials, every plan has only the public candidate, and nothing hands over. Version 2 adds `"direct"` (direct and relay only): the open connects through the Cloudflare tunnel once, then uses only direct and the relay. The page offers it only where the shell says version 2 and the instance has direct turned on. If an open under `"tunnel"` or `"direct"` runs out of time or its document fails to load, while the device has a network, avibe.bot lists the instance online and the listener has not failed, the App sets the mode back to `"automatic"` once (it stays so until chosen again), records `reverted` with the mode it left in `from`, and opens the instance again. A `reverted` without `from` (a shell before version 2) was `"tunnel"`. From version 2 the answer and the event also carry `pendingRelaunch: true \| false`: the App takes the choice only after it is opened again (always `false` on Desktop); the page then says so under the option. A stored mode this build does not know reads as `"automatic"`. Only in an App with a direct transport. | `direct.preferenceChanged({mode, reverted})` when the App sets it back itself |
+| `directMeasure` | On demand, for Devices › Connection › diagnostics: `direct.measure()` → `{measuredAt: <ms since epoch>, basis: "warm-https-health", samples: 5, current: MeasureLeg \| null, tunnel: MeasureLeg \| null}`, no parameters. For each path the shell opens one connection to the instance, makes one untimed warm-up request, then 5 timed HTTPS `GET /health` round trips on that connection (setup is not included). `current` is the direct or relay path in use for this instance, or `null` when there is none; `tunnel` is the public origin through Cloudflare, measured whatever the choice (a deliberate measurement: it changes no selection, stickiness or hand-over), `null` only when it could not be attempted. `MeasureLeg` = `{kind: "relay" \| "ipv4" \| "ipv6" \| "tunnel", scope: "local" \| "global" \| null, relayRegion: string \| null, ok, medianMs, maxMs, error: "failed" \| "timeout" \| null}`. 5 s per sample, 30 s in all; a second call while one runs rejects with `{code: "busy"}`. No addresses, ports, endpoint IDs or certificate details; nothing is stored or sent off the device. The App and the desktop app. | - |
 
-**The desktop app** answers `direct` (version 3) and `directPreference`, and
-nothing else, in the windows it opens for another computer's instance: that
+**The desktop app** answers `direct` (version 3), `directPreference` and
+`directMeasure`, and nothing else, in the windows it opens for another computer's instance: that
 instance's view in the main window, and the app windows opened from it. The
 object there has `platform: "desktop"`, which the Web UI accepts for `direct`
-and `directPreference` only; in every other respect such a page is not in a
-native shell. Devices › Connection reads and writes the choice through the
-same bridge as the status (`ui/src/lib/nativeDirectChoice.ts`). An instance
-whose address the direct path does not serve gets no bridge. What differs
-from the phone App:
+and `directPreference` and `directMeasure` only; in every other respect such a
+page is not in a native shell. Devices › Connection reads and writes the
+choice, and measures, through the same bridge as the status
+(`ui/src/lib/nativeDirectChoice.ts`, `ui/src/lib/nativeDirectMeasure.ts`). An
+instance whose address the direct path does not serve gets no bridge. What
+differs from the phone App:
 
 - The status is the window's own. `preferred` is `"direct"` only while that
   window has a session's route and the session's client prefers a direct
@@ -181,7 +183,15 @@ from the phone App:
   newest: a delivery that arrives late does not put an older choice back.
 - `direct.setPreference` changes the choice the app's own 「连接方式」 menu
   shows. Between `"automatic"` and `"tunnel"` it reloads nothing; choosing
-  `"direct"`, or leaving it, reopens the instance. The desktop app sets a
+  `"direct"`, or leaving it, reopens the instance at once and brings the new
+  view back to the URL the old one showed (the instance's first page when
+  the old view was not showing the instance). The new view has new browsing
+  data: a draft's text is there again when the page had saved it on the
+  instance, and what only the old view held is not (the last moment's
+  typing, text typed while the instance could not be reached, files
+  attached to an unsent message). Nothing waits for the app to
+  be opened again, so `pendingRelaunch`, which its answers and events carry
+  as the App's do, is always `false`. The desktop app sets a
   choice back itself only from `"direct"` (`reverted.from` is always
   `"direct"`), never from `"tunnel"`. From `directPreference` version 2 it
   delivers `direct.preferenceChanged` as the window event

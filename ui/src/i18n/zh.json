@@ -3367,11 +3367,7 @@
       "familyIpv4": "IPv4",
       "familyIpv6": "IPv6",
       "withDetail": "{{path}} · {{detail}}",
-      "legMs": "{{ms}} ms",
-      "legNone": "—",
-      "legFailed": "失败",
-      "legCancelled": "未用上",
-      "legTimeout": "超时"
+      "legMs": "{{ms}} ms"
     },
     "interfaceOption": "{{name}} · {{address}}",
     "manualRetryAt": "可在 {{time}} 再次优化。",
@@ -8117,7 +8113,10 @@
       "unattributedHint": "这些设备还在接收通知，但认不出属于哪个账号。可以逐台停止。",
       "signOutAllRemote": "退出所有远程设备",
       "online": "在线",
-      "unknown": "现在读不到设备列表。"
+      "unknown": "现在读不到设备列表。",
+      "signedInToday": "今天 {{time}} 登录",
+      "signedInYesterday": "昨天 {{time}} 登录",
+      "signedInDated": "{{date}} 登录"
     },
     "client": {
       "versioned": "{{name}} {{version}}",
@@ -8236,7 +8235,9 @@
       "signedIn": "{{device}} 登录",
       "signedOut": "{{device}} 已被退出",
       "remoteAccessOn": "远程访问已开启",
-      "formerDevice": "一台已不在列表里的设备",
+      "formerSignedIn": "一台已不在列表里的设备登录",
+      "formerSignedOut": "一台已不在列表里的设备已被退出",
+      "formerSignedOutBy": "一台已不在列表里的设备已被退出 · 由 {{actor}} 操作",
       "signedOutBy": "{{device}} 已被退出 · 由 {{actor}} 操作",
       "day": "{{day}}",
       "days": "{{from}} 至 {{to}}",
@@ -8247,6 +8248,7 @@
       "alarmLabelled": "创建闹钟「{{label}}」",
       "reminderLabelled": "创建提醒「{{label}}」",
       "confirmedOn": "{{what}}，已在 {{device}} 上确认",
+      "formerConfirmedOn": "{{what}}，已在一台已不在列表里的设备上确认",
       "remoteAccessOff": "远程访问已关闭",
       "earlier": "更早的活动"
     },
@@ -8339,9 +8341,6 @@
       "directCertificate": "直连证书",
       "validUntil": "有效期至 {{date}}",
       "noCertificate": "没有有效的证书",
-      "lastConnection": "最近一次连接",
-      "lastConnectionLegs": "直连 {{direct}} / Cloudflare {{public}}",
-      "lastConnectionNone": "这台设备没有记录",
       "directOnly": "仅直连和中继",
       "directOnlyHint": "建立连接时经过一次 Cloudflare 隧道，之后只走直连和中继。",
       "choiceHintDesktop": "这个选择只管这台设备。选「仅直连和中继」后连不上，Avibe Desktop 会自己改回「自动」。",
@@ -8354,7 +8353,25 @@
       "choiceRevertedDirectDesktopToday": "「仅直连和中继」今天 {{time}} 连不上，Avibe Desktop 已自己改回「自动」。",
       "choiceRevertedDirectDesktopYesterday": "「仅直连和中继」昨天 {{time}} 连不上，Avibe Desktop 已自己改回「自动」。",
       "choiceRevertedDirectDesktopDated": "「仅直连和中继」{{date}} {{time}} 连不上，Avibe Desktop 已自己改回「自动」。",
-      "directOnlyRelaunch": "重新打开 App 后生效。"
+      "directOnlyRelaunch": "重新打开 App 后生效。",
+      "measure": {
+        "title": "线路测速",
+        "run": "测速",
+        "running": "正在测速…",
+        "lead": "从这台设备经当前线路和 Cloudflare 隧道各发 5 次小请求，比较往返时间（不含建立连接）。",
+        "value": "中位 {{median}} · 最慢 {{max}}",
+        "partial": "{{value}}（{{samples}} 次中 {{ok}} 次完成）",
+        "failed": "没有完成：连接失败",
+        "timedOut": "没有完成：超时",
+        "directOrRelay": "直连或中继",
+        "noCurrent": "现在没有在用",
+        "notMeasured": "没能测",
+        "atToday": "今天 {{time}} 测得",
+        "atYesterday": "昨天 {{time}} 测得",
+        "atDated": "{{date}} {{time}} 测得",
+        "busy": "另一次测速还在进行，请稍后再试。",
+        "unreadable": "这次测速没有结果，可以再测一次。"
+      }
     },
     "rename": {
       "title": "更改域名",
@@ -8460,7 +8477,8 @@
       "desktop": "Avibe Desktop",
       "browser": "浏览器",
       "homeScreen": "主屏幕 App",
-      "other": "设备"
+      "other": "设备",
+      "unrecognized": "未识别的客户端"
     },
     "unlinkedHealth": {
       "title": "未对应到设备的健康连接",
@@ -8586,6 +8604,10 @@
     "taken": "已被占用",
     "reclaim": "你用过的",
     "checking": "检查中…",
-    "invalid": "只能用小写字母、数字和连字符"
+    "invalid": "只能用小写字母、数字和连字符",
+    "short": "至少 2 个字符",
+    "long": "最多 46 个字符",
+    "hyphenEnds": "不能以连字符开头或结尾",
+    "doubleHyphen": "第 3、4 个字符不能都是连字符"
   }
 }

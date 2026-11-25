@@ -127,5 +127,20 @@ const kindNameKeys = {
   other: 'devices.kindName.other',
 } as const satisfies Record<ClientKind, TranslationKey>;
 
+/** No name of its own, and a kind that says nothing more than "something signed in". */
+export const unrecognized = (device: Pick<Device, 'name' | 'client'>) =>
+  device.name === null && (device.client.kind === 'browser' || device.client.kind === 'other');
+
 /** A device's name: its own when it reported one, else what kind of device it is. */
-export const deviceName = (t: TFunction, device: Pick<Device, 'name' | 'client'>) => device.name ?? t(kindNameKeys[device.client.kind]);
+export const deviceName = (t: TFunction, device: Pick<Device, 'name' | 'client'>) =>
+  device.name ?? t(unrecognized(device) ? 'devices.kindName.unrecognized' : kindNameKeys[device.client.kind]);
+
+/** 「今天 09:41 登录」, 「11月24日 登录」: what tells unnamed rows apart. */
+export function signedInText(t: TFunction, iso: string, language: string, now: number = Date.now()): string | null {
+  const parts = timeParts(iso, language, now);
+  if (!parts) return null;
+  const { time, date, day } = parts;
+  if (day === 'today') return t('devices.list.signedInToday', { time });
+  if (day === 'yesterday') return t('devices.list.signedInYesterday', { time });
+  return t('devices.list.signedInDated', { date });
+}

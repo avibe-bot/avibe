@@ -203,7 +203,7 @@ impl Claims {
     }
     fn cancel(&mut self, receipt: Uuid) -> Result<()> {
         self.expire();
-        if !self.active.as_ref().is_some_and(|a| a.receipt == receipt) {
+        if self.active.as_ref().is_none_or(|a| a.receipt != receipt) {
             return Err(changed());
         }
         self.retire(); // also fences a review already handed back to the shell but not yet delivered

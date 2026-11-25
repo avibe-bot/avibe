@@ -383,7 +383,9 @@ it('a recovery code native cannot take is marked wrong in place: nothing sent, t
     .toEqual({ type: 'submit_factor_code', receipt: 'r', submission: 's', method: 'recovery', code: 'abcde-12345' }));
 });
 
-it.each(['a', 'ab--cd', `${'a'.repeat(47)}`, '-ab', 'ab-'])('keeps %s in the field and never checks it', async (typed) => {
+it.each<[string, keyof typeof en.domainField]>([
+  ['a', 'short'], ['ab--cd', 'doubleHyphen'], [`${'a'.repeat(47)}`, 'long'], ['-ab', 'hyphenEnds'], ['ab-', 'hyphenEnds'], ['max well', 'invalid'],
+])('keeps %s in the field, says why, and never checks it', async (typed, reason) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
   await opened();
@@ -393,7 +395,21 @@ it.each(['a', 'ab--cd', `${'a'.repeat(47)}`, '-ab', 'ab-'])('keeps %s in the fie
   await act(async () => { vi.advanceTimersByTime(1000); });
   expect(page.types().filter((type) => type === 'check')).toHaveLength(checks);
   expect((screen.getByRole('textbox') as HTMLInputElement).value).toBe(typed);
-  expect(screen.getByText(en.domainField.invalid)).toBeTruthy();
+  expect(screen.getByText(en.domainField[reason])).toBeTruthy();
+  expect((screen.getByRole('button', { name: copy.confirm }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it('an emptied name says nothing, is never checked, and cannot be bound', async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  const page = mount({ open: { receipt: 'r' }, read: review(NEW('xiaoming')) });
+  await opened();
+  await screen.findByText(en.domainField.free);
+  const checks = page.types().filter((type) => type === 'check').length;
+  fireEvent.change(screen.getByRole('textbox'), { target: { value: '' } });
+  await act(async () => { vi.advanceTimersByTime(1000); });
+  expect(page.types().filter((type) => type === 'check')).toHaveLength(checks);
+  expect(document.querySelector('[data-domain-field] [role="status"]')?.textContent).toBe('');
+  expect((screen.getByRole('button', { name: copy.confirm }) as HTMLButtonElement).disabled).toBe(true);
 });
 
 it('a resumed sign-in that still needs saving keeps its new receipt for the next press', async () => {

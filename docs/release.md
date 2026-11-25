@@ -166,14 +166,7 @@ predecessor compatibility. All distribution assertions remain: the three fresh
 full-dependency installation checks run concurrently in separate processes,
 temporary homes and virtual environments, not shared installed environments.
 
-The RC publisher prepares notes after the gate while packaging runs, then
-waits for `build-assets` in the **same workflow run and attempt** to succeed.
-It verifies and downloads that attempt's immutable artifact and rechecks the
-remote tag before publication. Failure, cancellation, stale artifacts, or a
-30-minute wait timeout cannot publish. To retry this path, rerun all jobs;
-reusing a previous attempt's successful build is intentionally rejected. Only
-the publisher has write permissions. Preparing it early consumes runner time
-while it waits; desktop signing and Stage 2 are unchanged.
+The RC publisher starts only after `build-assets` has finished successfully; queued builds do not occupy a publishing runner or start an artifact-wait timer. It then prepares notes, verifies the producer and immutable artifact in the **same workflow run and attempt**, and rechecks the remote tag. A failed, cancelled, missing or inherited build cannot publish. To retry, rerun all jobs, not just the publisher. Stable notes still run when the RC-only build is skipped. Only the publisher has write permissions; Stage 2 already waits for its desktop build and signing jobs by dependency.
 
 GitHub-only pre-releases use the `gh-vX.Y.ZrcN` format, such as
 `gh-v2.2.8rc2`, so they remain distinct from PyPI-triggering `v*` tags. They

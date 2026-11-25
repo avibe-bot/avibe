@@ -193,7 +193,7 @@ impl FactorChallenge {
             || result.token.len() > 4096
             || o["rpId"] != "avibe.bot"
             || o["userVerification"] != "required"
-            || !o["challenge"].as_str().is_some_and(|s| !s.is_empty())
+            || o["challenge"].as_str().is_none_or(str::is_empty)
             || !o["allowCredentials"].as_array().is_some_and(|ids| {
                 !ids.is_empty()
                     && ids.len() <= 100

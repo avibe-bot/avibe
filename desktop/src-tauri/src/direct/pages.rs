@@ -10,12 +10,12 @@
 //! A routed window has a registration of its own with its session's
 //! listener (`registered.rs`), kept here: its credential is what the window
 //! presents, and its page's hand-over closes that window's connections only.
-use super::{choose, direct, lock, Direct};
+use super::{choose, direct, lock, perform, Direct};
 use crate::direct::{
     bridge::{self, Ledger, Message, Method, Request, Told},
     registered::Registered,
     rendezvous::origin_of,
-    Client, HandoverResult, PathStatus, WindowRegistration,
+    Client, Handover, HandoverResult, PathStatus, PreferredPath, WindowRegistration,
 };
 use crate::instance_client;
 use std::{
@@ -44,6 +44,9 @@ const UNMADE: Duration = Duration::from_secs(60);
 struct Live {
     paths: watch::Receiver<PathStatus>,
     registered: Registered,
+    /// The session's own handle on its listener, for what is asked of the
+    /// whole session and not of one window.
+    handover: Handover,
 }
 
 #[derive(Default)]
@@ -97,16 +100,65 @@ pub(super) fn session_started(app: &AppHandle, state: &Arc<Direct>, session: u64
         Live {
             paths: paths.clone(),
             registered: Registered::new(client.handover()),
+            handover: client.handover(),
         },
     );
     let app = app.clone();
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
-        // Ends with the client.
-        while paths.changed().await.is_ok() {
+        // Ends with the client. The wiring hears every change too: for a
+        // direct-only session, a link that came up or went, and the
+        // connections the listener failed for want of one.
+        loop {
+            let status = *paths.borrow_and_update();
+            let linked = matches!(status.preferred, PreferredPath::Direct(_));
+            let effects = lock(&state.wiring).path(
+                session,
+                linked,
+                status.sequence,
+                status.strict_failures,
+                tokio::time::Instant::now(),
+            );
+            for effect in effects {
+                perform(&app, &state, effect).await;
+            }
             refresh(&app, &state, false);
+            state.wake.notify_one();
+            if paths.changed().await.is_err() {
+                break;
+            }
         }
     });
+}
+
+/// Makes the session's listener direct-only (`only`) or lets it serve the
+/// tunnel again. Turning it on closes every tunnel connection the listener
+/// carries, the busy ones too, and refuses the ones still being made: a
+/// window keeps its connections across a reload, so one left open would go
+/// on carrying its page with no new connection for the listener to refuse.
+/// Returns how many it closed.
+pub(super) fn direct_only(state: &Arc<Direct>, session: u64, only: bool) -> usize {
+    let Some(handover) = lock(&state.pages)
+        .sessions
+        .get(&session)
+        .map(|live| live.handover.clone())
+    else {
+        return 0;
+    };
+    handover.set_direct_only(only);
+    if only {
+        handover.close_public()
+    } else {
+        0
+    }
+}
+
+/// How many tunnel connections the session's listener still carries for
+/// its windows; `None` when its client is gone.
+pub(super) fn public_legs(state: &Arc<Direct>, session: u64) -> Option<usize> {
+    let pages = lock(&state.pages);
+    let live = pages.sessions.get(&session)?;
+    Some(live.registered.public_legs())
 }
 
 /// A window of the session has just been routed: its own registration with
@@ -175,7 +227,7 @@ fn push(app: &AppHandle, state: &Arc<Direct>, label: &str, always: bool) {
         let mut pages = lock(&state.pages);
         let Pages { windows, sessions } = &mut *pages;
         let Some(page) = windows.get_mut(label) else { return };
-        let (routed, (mode, order)) = {
+        let (routed, (mode, reverted, order)) = {
             let wiring = lock(&state.wiring);
             (wiring.routed_by(label), wiring.choice(&page.account, &page.origin))
         };
@@ -193,7 +245,7 @@ fn push(app: &AppHandle, state: &Arc<Direct>, label: &str, always: bool) {
             &page.origin,
             &Message::State {
                 status: page.ledger.status(),
-                choice: Told::new(mode, order),
+                choice: Told::new(mode, reverted, order),
             },
         )
     };
@@ -239,8 +291,8 @@ fn act(view: &Webview, url: &url::Url) {
     }
     match request.method {
         Method::Preference => {
-            let (mode, order) = lock(&state.wiring).choice(&account, &origin);
-            let choice = Told::new(mode, order);
+            let (mode, reverted, order) = lock(&state.wiring).choice(&account, &origin);
+            let choice = Told::new(mode, reverted, order);
             let reply = Message::Reply {
                 id: request.id,
                 result: choice.preference.clone(),
@@ -249,7 +301,8 @@ fn act(view: &Webview, url: &url::Url) {
             answer(app, label, &origin, reply);
         }
         Method::SetPreference(mode) => {
-            let choice = Told::new(mode, choose(app, &state, &account, &origin, mode));
+            // A choice someone makes stands as made: nothing is set back.
+            let choice = Told::new(mode, None, choose(app, &state, &account, &origin, mode));
             let reply = Message::Reply {
                 id: request.id,
                 result: choice.preference.clone(),

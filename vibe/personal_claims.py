@@ -220,6 +220,7 @@ class _Flow:
         self.admitted_owner = admitted_owner
         self._cleanup_client = None
         self._decline_attempted = False
+        self._declined_upstream = False
         self.mode, self.locale, self.origin = mode, locale, origin
         self.expected, self.confirm, self.show = expected, confirm, show
         self.lock = threading.Condition()
@@ -253,6 +254,22 @@ class _Flow:
                 raise ClaimError("invalid_return")
             self._browser = self._proof = None
             self.returned = True
+            self.lock.notify_all()
+
+    def declined_by_return(self, origin, browser, state):
+        """avibe.bot sent this browser back after the person cancelled there.
+
+        The same browser nonce and state proof as a return; it can only end this claim.
+        """
+        with self.lock:
+            if (not self.ticket or self.mode != "redirect" or self.origin != origin or self.cancelled or self.returned
+                    or self.view["state"] not in ("pending", "waiting") or time.time() >= self.ticket.deadline
+                    or not self._browser or not self._proof or not _matches(self._browser, browser) or not _matches(self._proof, state)):
+                raise ClaimError("invalid_return")
+            self._browser = self._proof = None
+            self._declined_upstream = self._decline_attempted = True  # avibe.bot already declined it
+            self.cancelled = True
+            self.update("cancelling")
             self.lock.notify_all()
 
     def cancel(self):
@@ -339,8 +356,9 @@ class _Flow:
             try:
                 if self.cancelled:
                     # Desktop releases machine admission before best-effort decline I/O
-                    # (run's outer finally, _decline_if_live).
-                    if self.mode != "desktop":
+                    # (run's outer finally, _decline_if_live). A cancel avibe.bot already
+                    # declined and returned (redirect only) sends nothing more.
+                    if self.mode != "desktop" and not self._declined_upstream:
                         self._decline_attempted = True
                         try:
                             client.decline(ticket)
@@ -728,9 +746,15 @@ class RedirectClaims:
             cookie_name = "avibe_rebind_browser"
         data = dict(fields)
         nonces = [value for name, value in cookies if name == cookie_name]
+        if data.get("outcome") == "declined":
+            # Cancelled at avibe.bot: the same shape for both kinds, never a callback token.
+            expected = {"claim_id", "state", "outcome"}
         if len(fields) != len(expected) or set(data) != expected or data["claim_id"] != claim_id or len(nonces) != 1:
             raise ClaimError("invalid_return")
-        flow.callback(origin, nonces[0], data["state"], token=data.get("callback_token"))
+        if "outcome" in data:
+            flow.declined_by_return(origin, nonces[0], data["state"])
+        else:
+            flow.callback(origin, nonces[0], data["state"], token=data.get("callback_token"))
         return cookie_name
 
     def callback(self, claim_id, origin, browser, state):
