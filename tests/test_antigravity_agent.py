@@ -476,7 +476,7 @@ async def test_streaming_updates_usage_permissions_and_single_turn_end(tmp_path:
         assert len(tools) == 1 and any("diff: hello.py" in tc[1] and "print('new')" in tc[1] for tc in tools)
         assert len(res) == 1 and res[0][1] == "Updated hello.py." and h.controller.token_notes == [(req.context, 1200)]
 
-        for prompt, expected in (("request_permission", "permission:reject_once"), ("request_unknown", "unknown_req_error:-32601")):
+        for prompt, expected in (("request_permission", "permission:allow_once"), ("request_unknown", "unknown_req_error:-32601")):
             h.controller.emitted.clear()
             await h.agent.handle_message(make_request(message=prompt, workdir=h.workdir))
             assert h.controller.events("result")[0][1] == expected
@@ -717,26 +717,15 @@ async def test_pre_tool_use_hook_enforces_policy_and_unattributable_permission_r
         active_turn=SimpleNamespace(native_session_id="sess-1", settled=False, cancelled=False),
     )
     opts = [{"optionId": "allow_once", "kind": "allow_once"}, {"optionId": "reject_once", "kind": "reject_once"}]
-    for tool_call in (
-        {"toolCallId": "tc-unreg", "name": "read_file", "rawInput": {"path": "a.py"}},
-        {"toolCallId": "tc-title", "title": "Edit config file"},
-        None,
-        {},
-        {"toolCallId": "tc-1"},
-        {"toolCallId": "tc-1", "name": "   "},
-        {"toolCallId": "tc-1", "name": "unknown"},
-        {"toolCallId": "tc-1", "name": "schedule"},
-    ):
-        params: dict[str, Any] = {"sessionId": "sess-1", "options": opts, **({"toolCall": tool_call} if tool_call is not None else {})}
-        assert await agent._handle_server_request(active_session, "session/request_permission", params) == {"outcome": {"outcome": "selected", "optionId": "reject_once"}}  # type: ignore[arg-type]
-
-    for inactive_turn in (None, SimpleNamespace(native_session_id="sess-1", settled=True, cancelled=False)):
-        inactive_session = SimpleNamespace(native_session_id="sess-1", retired=False, active_turn=inactive_turn)
-        assert await agent._handle_server_request(inactive_session, "session/request_permission", {"sessionId": "sess-1", "toolCall": {"toolCallId": "tc-idle", "name": "read_file"}, "options": opts}) == {"outcome": {"outcome": "selected", "optionId": "reject_once"}}  # type: ignore[arg-type]
-
-    assert await agent._handle_server_request(active_session, "session/request_permission", {"sessionId": "sess-1", "toolCall": {"toolCallId": "tc-always", "name": "read_file"}, "options": [{"optionId": "allow_once", "kind": "allow_once"}, {"optionId": "reject_always", "kind": "reject_always"}]}) == {"outcome": {"outcome": "selected", "optionId": "reject_always"}}  # type: ignore[arg-type]
-    assert await agent._handle_server_request(active_session, "session/request_permission", {"sessionId": "sess-1", "toolCall": {"toolCallId": "tc-2", "name": "read_file"}, "options": [{"optionId": "m", "kind": "mystery_kind"}]}) == {"outcome": {"outcome": "cancelled"}}  # type: ignore[arg-type]
-    assert await agent._handle_server_request(active_session, "session/request_permission", {"sessionId": "sess-1", "toolCall": {"toolCallId": "tc-3", "name": "read_file"}, "options": [{"optionId": "allow_once", "kind": "allow_once"}]}) == {"outcome": {"outcome": "cancelled"}}  # type: ignore[arg-type]
+    active_session.spec = SimpleNamespace(command=("agy", "acp", "--dangerously-skip-permissions"))
+    params = {"sessionId": "sess-1", "toolCall": {"toolCallId": "tc", "title": "Edit config file"}, "options": opts}
+    assert await agent._handle_server_request(active_session, "session/request_permission", params) == {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
+    for bad in ({**params, "toolCall": {}}, {**params, "options": []}, {**params, "sessionId": "wrong"}, {**params, "options": [{"optionId": "m", "kind": "mystery"}]}):
+        with pytest.raises(AcpRpcError) as error:
+            await agent._handle_server_request(active_session, "session/request_permission", bad)
+        assert error.value.code == -32602
+    active_session.active_turn = None
+    assert await agent._handle_server_request(active_session, "session/request_permission", params) == {"outcome": {"outcome": "cancelled"}}
 
 
 @pytest.mark.asyncio

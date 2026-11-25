@@ -1200,49 +1200,25 @@ class AntigravityAgent(BaseAgent):
             raise AcpRpcError(JSONRPC_METHOD_NOT_FOUND, f"Method not found: {method}")
 
         req_session_id = params.get("sessionId")
+        tool_call, options = params.get("toolCall"), params.get("options")
         if (
-            isinstance(req_session_id, str)
-            and session.native_session_id
-            and req_session_id != session.native_session_id
+            not isinstance(req_session_id, str) or req_session_id != session.native_session_id
+            or not isinstance(tool_call, Mapping) or not isinstance(tool_call.get("toolCallId"), str)
+            or not tool_call["toolCallId"].strip()
+            or not isinstance(options, list) or not options
+            or any(not isinstance(option, Mapping) or option.get("kind") not in {
+                "allow_once", "allow_always", "reject_once", "reject_always",
+            } or not isinstance(option.get("optionId"), str) or not option["optionId"].strip() for option in options)
         ):
-            raise AcpRpcError(-32602, f"Permission request session mismatch: {req_session_id}")
-
-        active_turn = getattr(session, "active_turn", None)
-        has_active_turn = (
-            not getattr(session, "retired", False)
-            and active_turn is not None
-            and not active_turn.settled
-            and not active_turn.cancelled
-            and (not req_session_id or req_session_id == active_turn.native_session_id)
-        )
-
-        tool_call = params.get("toolCall")
-        tool_name = ""
-        if isinstance(tool_call, Mapping):
-            tool_name = str(tool_call.get("name") or tool_call.get("toolName") or "").strip()
-
-        logger.warning(
-            "Rejecting unexpected Antigravity ACP session/request_permission "
-            "(session_id=%s, has_active_turn=%s, tool_name=%r)",
-            req_session_id or session.native_session_id,
-            has_active_turn,
-            tool_name or None,
-        )
-
-        options = params.get("options")
-        if not isinstance(options, list) or not options:
+            raise AcpRpcError(-32602, "Invalid session/request_permission shape")
+        turn = session.active_turn
+        execution = "--dangerously-skip-permissions" in session.spec.command
+        if not execution or session.retired or turn is None or turn.settled or turn.cancelled:
             return {"outcome": {"outcome": "cancelled"}}
-
-        for kind in ("reject_once", "reject_always"):
-            for option in options:
-                if not isinstance(option, Mapping):
-                    continue
-                if option.get("kind") == kind:
-                    option_id = option.get("optionId")
-                    if isinstance(option_id, str) and option_id:
-                        return {"outcome": {"outcome": "selected", "optionId": option_id}}
-
-        return {"outcome": {"outcome": "cancelled"}}
+        for option in options:
+            if option["kind"] == "allow_once":
+                return {"outcome": {"outcome": "selected", "optionId": option["optionId"]}}
+        raise AcpRpcError(-32602, "Managed permission request has no allow-once option")
 
     async def _handle_notification(
         self,
