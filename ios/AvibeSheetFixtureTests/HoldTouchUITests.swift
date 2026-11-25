@@ -217,8 +217,16 @@ final class HoldTouchUITests: XCTestCase {
         XCTAssertEqual(label(beginning: "state="), "state=idle", facts())
         // The page named no surface while the sheet was up: the App followed nothing.
         XCTAssertEqual(kept(), "none")
-        web.buttons["Close sheet"].tap()
-        XCTAssertTrue(waitFor("surfaces=input+plain"), facts())
+        // Right after the long press a tap can reach no element at all (a loaded runner, 11-25: the
+        // page recorded no pointer or touch end for it, and the sheet stayed open): tap again while
+        // the sheet is still there, until the page names the input again.
+        var closed = false
+        for _ in 0..<3 where !closed {
+            let close = web.buttons["Close sheet"]
+            if close.exists { close.tap() }
+            closed = waitFor("surfaces=input+plain", timeout: 4)
+        }
+        XCTAssertTrue(closed, facts())
     }
 
     // MARK: A hold
