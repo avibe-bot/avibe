@@ -30,16 +30,30 @@ enum FixtureStoreRemoval {
         let identifier: UUID
         let ownersAlive: Bool
         let error: Error?
+        /// WebKit did not answer the removal within `removalAnswer`.
+        var unanswered = false
 
         var description: String {
             "Fixture store still registered: \(identifier); something of the test still holds it: "
                 + "\(ownersAlive); error=\(String(describing: error))"
+                + (unanswered ? "; WebKit did not answer the removal within \(removalAnswer)" : "")
         }
     }
 
     /// Stores WebKit alone still held when their test removed them, and
     /// since when.
     private static var heldByWebKit: [UUID: Date] = [:]
+    /// Stores whose removal WebKit has not answered yet. That call goes on:
+    /// it removes the store whenever WebKit answers, in whatever test runs
+    /// then.
+    private static var unansweredRemovals: Set<UUID> = []
+
+    /// Stores that may still disappear during a later test, by WebKit's
+    /// hand: held by WebKit, or with a removal not yet answered. A test that
+    /// checks the App never removed someone else's store leaves these out.
+    static var leftToWebKit: Set<UUID> {
+        Set(heldByWebKit.keys).union(unansweredRemovals)
+    }
     private static var bundleEnd: BundleEnd?
 
     /// Removes `identifier`. `nil` when WebKit no longer lists it, or when
@@ -79,8 +93,9 @@ enum FixtureStoreRemoval {
                     : "WebKit still holds it: left to a later removal"))
             return nil
         }
-        print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false")
-        return StillRegistered(identifier: identifier, ownersAlive: alive, error: lastError)
+        print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false"
+            + (unanswered ? ", WebKit did not answer within \(removalAnswer)" : ""))
+        return StillRegistered(identifier: identifier, ownersAlive: alive, error: lastError, unanswered: unanswered)
     }
 
     /// One try for each store WebKit still held at an earlier removal. A
@@ -90,11 +105,21 @@ enum FixtureStoreRemoval {
     /// message says so.
     static func retryHeldByWebKit() async {
         for (identifier, since) in heldByWebKit {
+            let age = Int(Date().timeIntervalSince(since))
+            // An earlier removal still waits on WebKit: no second one, only
+            // a look whether it is gone.
+            if unansweredRemovals.contains(identifier) {
+                if await !registered().contains(identifier) {
+                    heldByWebKit[identifier] = nil
+                    print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                        + "\(age) s after its test")
+                }
+                continue
+            }
             // A try in passing, not a wait: not answered within a second,
             // it is still WebKit's and tried again next time.
             guard let answer = await boundedRemoval(identifier, within: .seconds(1)) else { continue }
             let error = answer.error
-            let age = Int(Date().timeIntervalSince(since))
             if await !registered().contains(identifier) {
                 heldByWebKit[identifier] = nil
                 print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
@@ -127,11 +152,23 @@ enum FixtureStoreRemoval {
             let first = FirstAnswer(continuation)
             Task { @MainActor in
                 let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
-                first.settle(RemovalAnswer(error: error))
+                if first.settle(RemovalAnswer(error: error)) {
+                    return
+                }
+                // A late answer: the store may be gone now.
+                unansweredRemovals.remove(identifier)
+                if heldByWebKit[identifier] != nil, await !registered().contains(identifier) {
+                    let age = heldByWebKit[identifier].map { Int(Date().timeIntervalSince($0)) } ?? 0
+                    heldByWebKit[identifier] = nil
+                    print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                        + "\(age) s after its test, when WebKit answered")
+                }
             }
             Task { @MainActor in
                 try? await Task.sleep(for: bound)
-                first.settle(nil)
+                if first.settle(nil) {
+                    unansweredRemovals.insert(identifier)
+                }
             }
         }
     }
@@ -145,9 +182,13 @@ enum FixtureStoreRemoval {
             self.continuation = continuation
         }
 
-        func settle(_ answer: RemovalAnswer?) {
-            continuation?.resume(returning: answer)
-            continuation = nil
+        /// Whether this was the first.
+        @discardableResult
+        func settle(_ answer: RemovalAnswer?) -> Bool {
+            guard let continuation else { return false }
+            continuation.resume(returning: answer)
+            self.continuation = nil
+            return true
         }
     }
 

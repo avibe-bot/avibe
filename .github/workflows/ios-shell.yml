@@ -161,6 +161,7 @@ jobs:
             -parallel-testing-enabled NO \
             -resultBundlePath "$RUNNER_TEMP/AvibeTests.xcresult" \
             -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 600 \
             -maximum-test-execution-time-allowance 600 \
             CODE_SIGNING_ALLOWED=NO \
             test
