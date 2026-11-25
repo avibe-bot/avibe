@@ -115,7 +115,13 @@ export function optimizeNote(t: TFunction, optimize: OptimizeState | undefined):
 }
 
 /** How long a name given up by unbinding stays the account's, and where it can be taken back. */
-export function unbindNameKeptText(t: TFunction, host: string, date?: string, holdDays?: number): string {
+export function unbindNameKeptText(t: TFunction, host: string, date?: string, holdDays?: number, computer?: string): string {
+  // From another device the computer is named, never 「这台」.
+  if (computer) {
+    if (date) return t('devices.unbind.nameKeptNamed', { host, date, computer });
+    if (typeof holdDays === 'number') return t('devices.unbind.nameKeptDaysNamed', { host, count: holdDays, computer });
+    return t('devices.unbind.nameKeptPlainNamed', { host, computer });
+  }
   if (date) return t('devices.unbind.nameKept', { host, date });
   if (typeof holdDays === 'number') return t('devices.unbind.nameKeptDays', { host, count: holdDays });
   return t('devices.unbind.nameKeptPlain', { host });

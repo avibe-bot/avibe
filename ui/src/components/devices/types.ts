@@ -372,6 +372,9 @@ export type UnbindState =
  *  says. */
 export type UnbindConfirmState = {
   remote: boolean;
+  /** The computer's name as the Devices page lists it. Pressed from another device, the sentences
+   *  name the computer rather than say 「这台电脑」 / 「那台电脑」. */
+  computer?: string;
   healthConnected: boolean;
   releaseAt?: string;
   holdDays?: number;

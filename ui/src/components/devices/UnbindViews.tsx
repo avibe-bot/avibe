@@ -40,10 +40,12 @@ export function UnbindConfirm({ host, confirm, onConfirm, onCancel }: {
   host: string; confirm: UnbindConfirmState; onConfirm?: () => void; onCancel?: () => void;
 }) {
   const { t, i18n } = useTranslation();
+  // From another device, 「这台电脑」 would be the phone in hand: the computer is named.
+  const computer = confirm.remote ? confirm.computer : undefined;
   const lost = [
     t('devices.unbind.lostRemote'),
     t('devices.unbind.lostAccess'),
-    ...(confirm.healthConnected ? [t('devices.unbind.lostHealth')] : []),
+    ...(confirm.healthConnected ? [computer ? t('devices.unbind.lostHealthNamed', { computer }) : t('devices.unbind.lostHealth')] : []),
   ];
   const date = confirm.releaseAt ? longDay(confirm.releaseAt, i18n.language) : undefined;
   return (
@@ -62,15 +64,18 @@ export function UnbindConfirm({ host, confirm, onConfirm, onCancel }: {
           ))}
           <li className="flex gap-2.5">
             <Check className="mt-1 size-3.5 shrink-0 text-mint-ink" />
-            <span><KeptTail fill text={unbindNameKeptText(t, host, date, confirm.holdDays)} /></span>
+            <span><KeptTail fill text={unbindNameKeptText(t, host, date, confirm.holdDays, computer)} /></span>
           </li>
           <li className="flex gap-2.5">
             <Check className="mt-1 size-3.5 shrink-0 text-mint-ink" />
-            <span><KeptTail fill text={t('devices.unbind.kept')} /></span>
+            <span><KeptTail fill text={computer ? t('devices.unbind.keptNamed', { computer }) : t('devices.unbind.kept')} /></span>
           </li>
         </ul>
         <p className={`rounded-lg px-3.5 py-2.5 text-[12px] leading-relaxed ${confirm.remote ? 'border border-gold/40 bg-gold/10 text-foreground' : 'bg-field/60 text-muted'}`}>
-          <KeptTail fill text={t(confirm.remote ? 'devices.unbind.wayBackRemote' : 'devices.unbind.wayBack')} />
+          <KeptTail
+            fill
+            text={computer ? t('devices.unbind.wayBackRemoteNamed', { computer }) : t(confirm.remote ? 'devices.unbind.wayBackRemote' : 'devices.unbind.wayBack')}
+          />
         </p>
         <DialogFooter>
           <Button variant="ghost" onClick={onCancel}>{t('common.cancel')}</Button>

@@ -25,8 +25,10 @@ const base: ConnectionPageViewProps = {
   host, address, rebind: { state: 'ready' }, unbind: { state: 'ready' },
 };
 const away: Partial<ConnectionPageViewProps> = { remote: true, via: 'tunnel', rebind: { state: 'remote' } };
+/** The computer by the name the Devices page lists it under. */
+const COMPUTER = 'Max 的 MacBook Pro';
 const confirm = (remote: boolean, extra: Partial<NonNullable<ConnectionPageViewProps['unbindConfirm']>> = {}) => ({
-  remote, healthConnected: true, releaseAt: RELEASE, holdDays: 30, ...extra,
+  remote, computer: COMPUTER, healthConnected: true, releaseAt: RELEASE, holdDays: 30, ...extra,
 });
 
 const WIDE = { width: 1440, height: 1000 };
@@ -66,7 +68,7 @@ const designFrames = frames([
   // 2. The confirmation: what ends, what is removed for good, what stays, and the way back.
   frame('confirm', '确认框 · 在这台电脑上按：丢掉什么、名字保留到哪天、工作区留着、回来的路是「开启远程访问」', WIDE, { unbindConfirm: confirm(false) }),
   frame('confirm-phone', '确认框 · 在这台电脑上按 · 390 宽', PHONE, { unbindConfirm: confirm(false) }),
-  frame('confirm-remote', '确认框 · 从远程设备上按：多一句，这台设备会马上断开，要回到那台电脑上开启', WIDE, { ...away, unbindConfirm: confirm(true) }),
+  frame('confirm-remote', '确认框 · 从远程设备上按：电脑一律叫它的名字；多一句，这台设备会马上断开，要回到那台电脑上开启', WIDE, { ...away, unbindConfirm: confirm(true) }),
   frame('confirm-remote-phone', '确认框 · 从远程设备（iPhone App）上按 · 390 宽', PHONE, { ...away, unbindConfirm: confirm(true) }, { app: true }),
   frame('confirm-no-health', '确认框 · 没有同步过健康数据：少一条', WIDE, { unbindConfirm: confirm(false, { healthConnected: false }) }),
   frame('confirm-no-date', '确认框 · 实例没给日子：说保留天数，不编日期', WIDE, { unbindConfirm: confirm(false, { releaseAt: undefined }) }),
