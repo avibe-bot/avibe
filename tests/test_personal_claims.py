@@ -529,6 +529,7 @@ def test_cancel_and_return_require_current_browser_and_claim(claim_peer, owner_b
     response = _start(client, origin, environ)
     assert response.status_code == 201, response.get_json()
     assert claim_peer.calls[0][1]["return_origin"] == origin
+    assert claim_peer.calls[0][1]["cancel_return"] is True  # avibe.bot may bring a cancel back here
     body = response.get_json()
     nonce = response.headers["Set-Cookie"].split(";")[0]
     url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
@@ -602,3 +603,39 @@ def test_other_account_refusal_reaches_the_starter_only_and_keeps_the_installati
 
     state_dir = paths.get_state_dir()
     assert not [p for p in state_dir.rglob("*") if p.is_file() and b"b@example.test" in p.read_bytes()]
+
+
+def test_cancel_at_avibe_bot_returns_an_ordinary_claim_as_cancelled(claim_peer, owner_browser):
+    origin, environ = owner_browser
+    client, stranger = ui_server.app.test_client(), ui_server.app.test_client()
+    body = _start(client, origin, environ).get_json()
+    url = "/remote/claim/callback?claim_id=" + body["claim_id"] + "&state=" + callback_proof(body)
+
+    def back(c, u):
+        return c.get(u, base_url=origin, environ_base=environ)
+
+    _assert_bad_return(back(stranger, url + "&outcome=declined"))  # another browser cannot cancel it
+    _assert_bad_return(back(client, url + "&outcome=accepted"))
+    calls = len(claim_peer.calls)
+    assert back(client, url + "&outcome=declined").headers["Location"] == "/settings/remote-access"
+    flow = claims.redirect_claims._get(body["claim_id"])
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view["state"] == "declined", timeout=5)
+    view = client.get("/api/remote-access/claims/" + body["claim_id"], base_url=origin, environ_base=environ).get_json()
+    assert (view["state"], view["code"]) == ("declined", "declined")
+    assert len(claim_peer.calls) == calls  # declined there already: no decline, no accept
+    _assert_bad_return(back(client, url))
+
+
+def test_local_cancel_still_retries_a_decline_after_a_transient_failure(claim_peer, owner_browser):
+    origin, environ = owner_browser
+    client = ui_server.app.test_client()
+    body = _start(client, origin, environ).get_json()
+    claim_peer.outcomes += [(503, {}, None), (200, {"status": "declined"}, None)]
+    path = "/api/remote-access/claims/" + body["claim_id"]
+    assert client.post(path + "/cancel", base_url=origin, environ_base=environ, json={},
+                       headers=csrf_headers(client, origin)).status_code == 200
+    flow = claims.redirect_claims._get(body["claim_id"])
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view["state"] == "declined", timeout=5)
+    assert claim_peer.decisions == ["decline", "decline"]  # retried, not reported after the 503

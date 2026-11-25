@@ -154,3 +154,10 @@ def test_v2_never_retries_as_v1(issuer, ack, code):
     with pytest.raises(ClaimError):
         start(client)
     assert len(peer.calls) == 1 and 'predecessor' in peer.calls[0][1]
+
+
+@pytest.mark.parametrize('mode', ['redirect', 'link'])
+def test_only_a_returning_start_declares_cancel_return(issuer, mode):
+    peer, _ = issuer
+    start(ClaimsClient('https://avibe.bot'), mode=mode)
+    assert peer.calls[0][1].get('cancel_return') is (True if mode == 'redirect' else None)
