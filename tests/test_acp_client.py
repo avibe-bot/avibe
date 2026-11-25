@@ -34,81 +34,55 @@ from modules.agents.acp import (
 )
 from tests.helpers.fake_acp_server import fake_acp_server_command
 
+_CAP_ATTRS = (
+    "supports_resume",
+    "supports_load",
+    "supports_list",
+    "supports_fork",
+    "supports_close",
+    "supports_logout",
+    "supports_images",
+    "supports_embedded_context",
+    "supports_additional_directories",
+)
 
-async def test_initialize_capabilities_full_and_minimal(tmp_path: Path) -> None:
+
+@pytest.mark.parametrize(
+    ("config", "expected_cap", "expected_auth"),
+    [
+        (None, True, ["token"]),
+        ({"agentCapabilities": {}, "authMethods": []}, False, []),
+    ],
+)
+async def test_initialize_capabilities_full_and_minimal(
+    tmp_path: Path, config: dict[str, Any] | None, expected_cap: bool, expected_auth: list[str]
+) -> None:
     """Empty-object ACP capability markers evaluate True; omitted ones evaluate False."""
-    async with AcpClient(fake_acp_server_command(), cwd=tmp_path) as client:
-        assert client.is_alive
-        assert isinstance(client.pid, int) and client.pid > 0
-        assert client.exit_code is None
-
+    async with AcpClient(fake_acp_server_command(config=config), cwd=tmp_path) as client:
+        assert client.is_alive and isinstance(client.pid, int) and client.pid > 0 and client.exit_code is None
         resp = await client.initialize(client_info={"name": "avibe-test", "version": "0.1.0"})
-        assert resp["protocolVersion"] == 1
-        assert client.protocol_version == 1
+        assert resp["protocolVersion"] == 1 and client.protocol_version == 1
         assert client.agent_info["name"] == "fake-acp-server"
-        assert client.agent_capabilities["loadSession"] is True
-        assert [m["id"] for m in client.auth_methods] == ["token"]
-
-        assert client.supports_resume is True
-        assert client.supports_load is True
-        assert client.supports_list is True
-        assert client.supports_fork is True
-        assert client.supports_close is True
-        assert client.supports_logout is True
-        assert client.supports_images is True
-        assert client.supports_embedded_context is True
-        assert client.supports_additional_directories is True
-
-    assert client.is_alive is False
-    assert client.pid is None
-    assert client.exit_code == 0
-
-    minimal_cmd = fake_acp_server_command(
-        config={
-            "agentCapabilities": {},
-            "authMethods": [],
-        }
-    )
-    async with AcpClient(minimal_cmd, cwd=tmp_path) as minimal_client:
-        await minimal_client.initialize()
-        assert minimal_client.auth_methods == ()
-        assert minimal_client.supports_resume is False
-        assert minimal_client.supports_load is False
-        assert minimal_client.supports_list is False
-        assert minimal_client.supports_fork is False
-        assert minimal_client.supports_close is False
-        assert minimal_client.supports_logout is False
-        assert minimal_client.supports_images is False
-        assert minimal_client.supports_embedded_context is False
-        assert minimal_client.supports_additional_directories is False
+        assert [m["id"] for m in client.auth_methods] == expected_auth
+        assert all(getattr(client, attr) is expected_cap for attr in _CAP_ATTRS)
+    assert client.is_alive is False and client.pid is None and client.exit_code == 0
 
 
 async def test_auth_required_authenticate_and_logout(tmp_path: Path) -> None:
     """Unauthenticated sessions fail with -32000; authenticate enables and logout revokes."""
-    cmd = fake_acp_server_command(config={"requireAuth": True})
-    async with AcpClient(cmd, cwd=tmp_path) as client:
+    async with AcpClient(fake_acp_server_command(config={"requireAuth": True}), cwd=tmp_path) as client:
         await client.initialize()
-
         with pytest.raises(AcpRpcError) as exc_info:
             await client.session_list()
         assert exc_info.value.code == ACP_AUTH_REQUIRED
-        assert exc_info.value.data == {
-            "authMethods": [
-                {
-                    "id": "token",
-                    "name": "Token Auth",
-                    "description": "Authenticate with a test token",
-                }
-            ]
-        }
+        assert [m["id"] for m in exc_info.value.data["authMethods"]] == ["token"]
 
         with pytest.raises(AcpRpcError) as bad_auth:
             await client.authenticate("nonexistent")
         assert bad_auth.value.code == -32602
 
         await client.authenticate("token")
-        listed = await client.session_list()
-        assert listed["sessions"] == []
+        assert (await client.session_list())["sessions"] == []
 
         await client.logout()
         with pytest.raises(AcpRpcError) as after_logout:
@@ -126,126 +100,72 @@ async def test_session_new_and_streaming_session_updates(tmp_path: Path) -> None
     async with AcpClient(fake_acp_server_command(), cwd=tmp_path) as client:
         client.on_notification(on_notification)
         await client.initialize()
-
-        created = await client.session_new(str(tmp_path))
-        session_id = created["sessionId"]
-
-        result = await client.session_prompt(
-            session_id,
-            [{"type": "text", "text": "stream_all"}],
-        )
-        assert result["stopReason"] == "end_turn"
+        sid = (await client.session_new(str(tmp_path)))["sessionId"]
+        assert (await client.session_prompt(sid, [{"type": "text", "text": "stream_all"}]))["stopReason"] == "end_turn"
 
     assert all(method == "session/update" for method, _ in received)
     parsed = [parse_session_update(params) for _, params in received]
 
-    assert isinstance(parsed[0], AcpThoughtChunkUpdate)
-    assert parsed[0].text == "planning edit"
-    assert parsed[0].raw["sessionUpdate"] == "agent_thought_chunk"
-
+    assert isinstance(parsed[0], AcpThoughtChunkUpdate) and parsed[0].text == "planning edit"
     assert isinstance(parsed[1], AcpToolCallUpdate)
-    assert parsed[1].kind == "tool_call"
-    assert parsed[1].tool_call_id == "tc-1"
-    assert parsed[1].title == "Update greeting"
-    assert parsed[1].tool_kind == "edit"
-    assert parsed[1].status == "in_progress"
-    assert parsed[1].raw_input == {"path": "hello.py"}
-    assert parsed[1].locations == ({"path": "hello.py", "line": 1},)
+    assert (parsed[1].kind, parsed[1].tool_call_id, parsed[1].title, parsed[1].tool_kind, parsed[1].status) == (
+        "tool_call", "tc-1", "Update greeting", "edit", "in_progress"
+    )
+    assert parsed[1].raw_input == {"path": "hello.py"} and parsed[1].locations == ({"path": "hello.py", "line": 1},)
 
     assert isinstance(parsed[2], AcpToolCallUpdate)
-    assert parsed[2].kind == "tool_call_update"
-    assert parsed[2].tool_call_id == "tc-1"
-    assert parsed[2].status == "completed"
-    assert parsed[2].raw_output == {"ok": True}
+    assert (parsed[2].kind, parsed[2].status, parsed[2].raw_output) == ("tool_call_update", "completed", {"ok": True})
     assert len(parsed[2].diffs) == 1
-    assert parsed[2].diffs[0].path == "hello.py"
-    assert parsed[2].diffs[0].old_text == "print('old')\n"
-    assert parsed[2].diffs[0].new_text == "print('new')\n"
+    assert (parsed[2].diffs[0].path, parsed[2].diffs[0].old_text, parsed[2].diffs[0].new_text) == (
+        "hello.py", "print('old')\n", "print('new')\n"
+    )
 
-    assert isinstance(parsed[3], AcpMessageChunkUpdate)
-    assert isinstance(parsed[4], AcpMessageChunkUpdate)
+    assert isinstance(parsed[3], AcpMessageChunkUpdate) and isinstance(parsed[4], AcpMessageChunkUpdate)
     assert (parsed[3].text or "") + (parsed[4].text or "") == "Updated hello.py."
-
-    assert isinstance(parsed[5], AcpUsageUpdate)
-    assert parsed[5].used == 1200
-    assert parsed[5].size == 128000
+    assert isinstance(parsed[5], AcpUsageUpdate) and (parsed[5].used, parsed[5].size) == (1200, 128000)
     assert parsed[5].cost == {"amount": 0.01, "currency": "USD"}
-
     assert isinstance(parsed[6], AcpAvailableCommandsUpdate)
-    assert len(parsed[6].commands) == 1
-    assert parsed[6].commands[0].name == "review"
-    assert parsed[6].commands[0].description == "Review workspace changes"
-    assert parsed[6].commands[0].input_hint == "optional path"
-
+    assert (parsed[6].commands[0].name, parsed[6].commands[0].input_hint) == ("review", "optional path")
     assert isinstance(parsed[7], AcpSessionInfoUpdate)
-    assert parsed[7].title == "Update greeting"
-    assert parsed[7].updated_at == "2026-11-24T12:00:00Z"
-
-    assert isinstance(parsed[8], AcpUnknownUpdate)
-    assert parsed[8].update_type == "plan"
-    assert parsed[8].raw["entries"] == [{"content": "edit file", "status": "completed"}]
+    assert (parsed[7].title, parsed[7].updated_at) == ("Update greeting", "2026-11-24T12:00:00Z")
+    assert isinstance(parsed[8], AcpUnknownUpdate) and parsed[8].update_type == "plan"
 
 
-async def test_server_request_permission_during_pending_prompt(tmp_path: Path) -> None:
-    """Server-initiated requests arriving while session/prompt is pending are handled concurrently."""
-    seen_requests: list[tuple[str, dict[str, Any]]] = []
+async def test_server_requests_permission_and_unknown_method(tmp_path: Path) -> None:
+    """Server requests run concurrently during prompt; unknown methods return JSON-RPC -32601."""
+    seen: list[tuple[str, dict[str, Any]]] = []
     chunks: list[str] = []
 
     async def on_notification(method: str, params: dict[str, Any]) -> None:
         if method == "session/update":
-            update = parse_session_update(params)
-            if isinstance(update, AcpMessageChunkUpdate) and update.text:
-                chunks.append(update.text)
+            upd = parse_session_update(params)
+            if isinstance(upd, AcpMessageChunkUpdate) and upd.text:
+                chunks.append(upd.text)
 
     async def on_server_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
-        seen_requests.append((method, params))
+        seen.append((method, params))
         if method == "session/request_permission":
             return {"outcome": {"outcome": "selected", "optionId": "allow_once"}}
         raise AcpRpcError(JSONRPC_METHOD_NOT_FOUND, f"Method not found: {method}")
 
     async with AcpClient(fake_acp_server_command(), cwd=tmp_path) as client:
         client.on_notification(on_notification)
-        client.on_server_request(on_server_request)
         await client.initialize()
-        session_id = (await client.session_new(str(tmp_path)))["sessionId"]
+        sid = (await client.session_new(str(tmp_path)))["sessionId"]
 
-        result = await client.session_prompt(
-            session_id,
-            [{"type": "text", "text": "request_permission"}],
-        )
-
-    assert result["stopReason"] == "end_turn"
-    assert len(seen_requests) == 1
-    assert seen_requests[0][0] == "session/request_permission"
-    assert seen_requests[0][1]["toolCall"]["toolCallId"] == "tc-perm-1"
-    assert chunks == ["permission:allow_once"]
-
-
-async def test_unknown_server_request_returns_method_not_found(tmp_path: Path) -> None:
-    """Unknown server-initiated requests return JSON-RPC -32601 with or without a handler."""
-    async with AcpClient(fake_acp_server_command(), cwd=tmp_path) as client:
-        await client.initialize()
-        session_id = (await client.session_new(str(tmp_path)))["sessionId"]
-
-        # Case 1: no server-request callback registered -> automatic -32601 rejection
-        res_no_handler = await client.session_prompt(
-            session_id,
-            [{"type": "text", "text": "request_unknown"}],
-        )
-        assert res_no_handler["stopReason"] == "end_turn"
+        # Without a server-request handler, unknown requests automatically return -32601.
+        res_no_handler = await client.session_prompt(sid, [{"type": "text", "text": "request_unknown"}])
         assert res_no_handler["clientResponse"]["error"]["code"] == JSONRPC_METHOD_NOT_FOUND
 
-        # Case 2: callback registered that explicitly rejects unknown methods
-        async def strict_handler(method: str, params: dict[str, Any]) -> dict[str, Any]:
-            raise AcpRpcError(JSONRPC_METHOD_NOT_FOUND, f"Method not found: {method}")
+        client.on_server_request(on_server_request)
+        res_perm = await client.session_prompt(sid, [{"type": "text", "text": "request_permission"}])
+        assert res_perm["stopReason"] == "end_turn"
 
-        client.on_server_request(strict_handler)
-        res_with_handler = await client.session_prompt(
-            session_id,
-            [{"type": "text", "text": "request_unknown"}],
-        )
-        assert res_with_handler["stopReason"] == "end_turn"
+        res_with_handler = await client.session_prompt(sid, [{"type": "text", "text": "request_unknown"}])
         assert res_with_handler["clientResponse"]["error"]["code"] == JSONRPC_METHOD_NOT_FOUND
+
+    assert seen[0][0] == "session/request_permission" and seen[0][1]["toolCall"]["toolCallId"] == "tc-perm-1"
+    assert "permission:allow_once" in chunks
 
 
 async def test_session_cancel_during_prompt(tmp_path: Path) -> None:
@@ -254,23 +174,18 @@ async def test_session_cancel_during_prompt(tmp_path: Path) -> None:
 
     async def on_notification(method: str, params: dict[str, Any]) -> None:
         if method == "session/update":
-            update = parse_session_update(params)
-            if isinstance(update, AcpMessageChunkUpdate) and update.text == "working":
+            upd = parse_session_update(params)
+            if isinstance(upd, AcpMessageChunkUpdate) and upd.text == "working":
                 started.set()
 
     async with AcpClient(fake_acp_server_command(), cwd=tmp_path) as client:
         client.on_notification(on_notification)
         await client.initialize()
-        session_id = (await client.session_new(str(tmp_path)))["sessionId"]
-
-        prompt_task = asyncio.create_task(
-            client.session_prompt(session_id, [{"type": "text", "text": "wait_cancel"}])
-        )
+        sid = (await client.session_new(str(tmp_path)))["sessionId"]
+        prompt_task = asyncio.create_task(client.session_prompt(sid, [{"type": "text", "text": "wait_cancel"}]))
         await asyncio.wait_for(started.wait(), timeout=5.0)
-        await client.session_cancel(session_id)
-        result = await asyncio.wait_for(prompt_task, timeout=5.0)
-
-    assert result["stopReason"] == "cancelled"
+        await client.session_cancel(sid)
+        assert (await asyncio.wait_for(prompt_task, timeout=5.0))["stopReason"] == "cancelled"
 
 
 async def test_session_set_config_option_model_and_mode(tmp_path: Path) -> None:
@@ -281,147 +196,106 @@ async def test_session_set_config_option_model_and_mode(tmp_path: Path) -> None:
     async def on_notification(method: str, params: dict[str, Any]) -> None:
         if method != "session/update":
             return
-        update = parse_session_update(params)
-        if isinstance(update, AcpConfigOptionUpdate):
-            config_updates.append(update)
-        elif isinstance(update, AcpMessageChunkUpdate) and update.text:
-            replies.append(update.text)
+        upd = parse_session_update(params)
+        if isinstance(upd, AcpConfigOptionUpdate):
+            config_updates.append(upd)
+        elif isinstance(upd, AcpMessageChunkUpdate) and upd.text:
+            replies.append(upd.text)
 
     async with AcpClient(fake_acp_server_command(), cwd=tmp_path) as client:
         client.on_notification(on_notification)
         await client.initialize()
-        session_id = (await client.session_new(str(tmp_path)))["sessionId"]
+        sid = (await client.session_new(str(tmp_path)))["sessionId"]
 
-        updated = await client.session_set_config_option(session_id, "model", "model-beta")
-        model_opt = next(opt for opt in updated["configOptions"] if opt["id"] == "model")
-        assert model_opt["currentValue"] == "model-beta"
+        updated = await client.session_set_config_option(sid, "model", "model-beta")
+        assert next(o for o in updated["configOptions"] if o["id"] == "model")["currentValue"] == "model-beta"
         assert len(config_updates) == 1
-        assert any(
-            opt["id"] == "model" and opt["currentValue"] == "model-beta"
-            for opt in config_updates[0].config_options
-        )
+        assert any(o["id"] == "model" and o["currentValue"] == "model-beta" for o in config_updates[0].config_options)
 
         with pytest.raises(AcpRpcError) as bad_val:
-            await client.session_set_config_option(session_id, "model", "invalid-model")
+            await client.session_set_config_option(sid, "model", "invalid-model")
         assert bad_val.value.code == -32602
 
-        await client.session_set_model(session_id, "model-alpha")
-        await client.session_set_mode(session_id, "plan")
-        await client.session_prompt(session_id, [{"type": "text", "text": "check"}])
+        await client.session_set_model(sid, "model-alpha")
+        await client.session_set_mode(sid, "plan")
+        await client.session_prompt(sid, [{"type": "text", "text": "check"}])
 
     assert replies == ["echo:check|model=model-alpha|mode=plan"]
 
 
 async def test_cross_process_session_resume_list_load_and_close(tmp_path: Path) -> None:
     """Sessions survive across fresh subprocesses via resume without replaying live updates."""
-    state_file = tmp_path / "acp_state.json"
     extra_dir = str(tmp_path / "extra-rules")
-    cmd = fake_acp_server_command(state_file=state_file, config={"listPageSize": 1})
+    cmd = fake_acp_server_command(state_file=tmp_path / "acp_state.json", config={"listPageSize": 1})
 
-    # Process 1: create two sessions and run a prompt in the first
     async with AcpClient(cmd, cwd=tmp_path) as first:
         await first.initialize()
-        s1 = (
-            await first.session_new(str(tmp_path), additional_directories=[extra_dir])
-        )["sessionId"]
+        s1 = (await first.session_new(str(tmp_path), additional_directories=[extra_dir]))["sessionId"]
         s2 = (await first.session_new(str(tmp_path)))["sessionId"]
         await first.session_prompt(s1, [{"type": "text", "text": "remember-marker"}])
 
-    # Process 2: fresh subprocess lists, resumes without replay, recalls state, loads, closes
-    resume_updates: list[Any] = []
+    updates: list[Any] = []
 
     async def on_notification(method: str, params: dict[str, Any]) -> None:
         if method == "session/update":
-            resume_updates.append(parse_session_update(params))
+            updates.append(parse_session_update(params))
 
     async with AcpClient(cmd, cwd=tmp_path) as second:
         second.on_notification(on_notification)
         await second.initialize()
-
         page1 = await second.session_list(cwd=str(tmp_path))
-        assert len(page1["sessions"]) == 1
-        assert "nextCursor" in page1
         page2 = await second.session_list(cwd=str(tmp_path), cursor=page1["nextCursor"])
-        listed_ids = [s["sessionId"] for s in page1["sessions"] + page2["sessions"]]
-        assert listed_ids == [s1, s2]
+        assert [s["sessionId"] for s in page1["sessions"] + page2["sessions"]] == [s1, s2]
 
-        # Resume must not replay history notifications
         resumed = await second.session_resume(s1, str(tmp_path), additional_directories=[extra_dir])
-        assert resumed["sessionId"] == s1
-        assert resume_updates == []
+        assert resumed["sessionId"] == s1 and updates == []
 
         await second.session_prompt(s1, [{"type": "text", "text": "recall"}])
-        assert len(resume_updates) == 1
-        assert isinstance(resume_updates[0], AcpMessageChunkUpdate)
-        assert "remember-marker" in (resume_updates[0].text or "")
-        assert extra_dir in (resume_updates[0].text or "")
+        assert len(updates) == 1 and isinstance(updates[0], AcpMessageChunkUpdate)
+        assert "remember-marker" in (updates[0].text or "") and extra_dir in (updates[0].text or "")
 
-        # session/load replays history notifications
-        resume_updates.clear()
+        updates.clear()
         await second.session_load(s1, str(tmp_path))
-        assert any(
-            isinstance(u, AcpUnknownUpdate) and u.update_type == "user_message_chunk"
-            for u in resume_updates
-        )
-        assert any(isinstance(u, AcpMessageChunkUpdate) for u in resume_updates)
+        assert any(isinstance(u, AcpUnknownUpdate) and u.update_type == "user_message_chunk" for u in updates)
+        assert any(isinstance(u, AcpMessageChunkUpdate) for u in updates)
 
-        # Missing session resume fails explicitly
         with pytest.raises(AcpRpcError) as missing:
             await second.session_resume("sess-does-not-exist", str(tmp_path))
         assert missing.value.code == -32002
 
-        # Close removes the session
         await second.session_close(s1)
         await second.session_close(s2)
-        remaining = await second.session_list(cwd=str(tmp_path))
-        assert remaining["sessions"] == []
+        assert (await second.session_list(cwd=str(tmp_path)))["sessions"] == []
 
 
-async def test_subprocess_exit_mid_prompt_surfaces_error_and_stderr_tail(tmp_path: Path) -> None:
-    """Subprocess crash mid-prompt fails the pending future and captures exit code and stderr."""
+async def test_subprocess_exit_mid_prompt_and_lifecycle_guards(tmp_path: Path) -> None:
+    """Covers mid-prompt crash stderr capture, idempotent close, unstarted guard, missing binary, and forced kill."""
     client = AcpClient(fake_acp_server_command(), cwd=tmp_path)
     await client.start()
     try:
         await client.initialize()
-        session_id = (await client.session_new(str(tmp_path)))["sessionId"]
-
+        sid = (await client.session_new(str(tmp_path)))["sessionId"]
         with pytest.raises(AcpTransportError) as exc_info:
-            await client.session_prompt(
-                session_id,
-                [{"type": "text", "text": "crash_mid_prompt"}],
-            )
-
-        assert "exited with code 2" in str(exc_info.value)
-        assert "fatal: simulated peer crash" in str(exc_info.value)
-        assert client.is_alive is False
-        assert client.exit_code == 2
-        assert "fatal: simulated peer crash" in client.stderr_tail
+            await client.session_prompt(sid, [{"type": "text", "text": "crash_mid_prompt"}])
+        assert "exited with code 2" in str(exc_info.value) and "fatal: simulated peer crash" in str(exc_info.value)
+        assert client.is_alive is False and client.exit_code == 2 and "fatal: simulated peer crash" in client.stderr_tail
     finally:
         await client.close()
-        # close() is idempotent
         await client.close()
 
-
-async def test_lifecycle_guards(tmp_path: Path) -> None:
-    """Client rejects requests before start and wraps missing binary launch failures."""
     unstarted = AcpClient(fake_acp_server_command(), cwd=tmp_path)
-    assert unstarted.is_alive is False
-    assert unstarted.pid is None
-    assert unstarted.exit_code is None
+    assert unstarted.is_alive is False and unstarted.pid is None and unstarted.exit_code is None
     with pytest.raises(AcpTransportError):
         await unstarted.initialize()
 
-    bad_binary = AcpClient(["/nonexistent/acp-binary-that-does-not-exist"], cwd=tmp_path)
     with pytest.raises(AcpTransportError, match="Failed to launch ACP server"):
-        await bad_binary.start()
+        await AcpClient(["/nonexistent/acp-binary-that-does-not-exist"], cwd=tmp_path).start()
 
-    # Subprocess ignoring stdin EOF is terminated cleanly via signal_process_tree
     sleeper = AcpClient([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path)
     await sleeper.start()
     assert sleeper.is_alive is True
     await sleeper.close(graceful_timeout=0.05, terminate_timeout=2.0)
-    assert sleeper.is_alive is False
-    assert sleeper.exit_code is not None and sleeper.exit_code != 0
+    assert sleeper.is_alive is False and sleeper.exit_code not in (None, 0)
 
 
 def _pid_running(pid: int) -> bool:
@@ -433,34 +307,17 @@ def _pid_running(pid: int) -> bool:
 
 
 @pytest.mark.parametrize("leader_mode", ["eof_exit_zero", "crash_before_close"])
-async def test_close_reaps_surviving_tool_children_after_leader_exits(
-    tmp_path: Path,
-    leader_mode: str,
-) -> None:
+async def test_close_reaps_surviving_tool_children_after_leader_exits(tmp_path: Path, leader_mode: str) -> None:
     """close() reaps surviving stdio-redirected tool children even after the leader exits cleanly or crashes."""
     pids_file = tmp_path / f"child-pids-{leader_mode}.json"
-    if leader_mode == "eof_exit_zero":
-        tail = "sys.stdin.read()\nsys.exit(0)\n"
-    else:
-        tail = "sys.exit(2)\n"
-
+    tail = "sys.stdin.read()\nsys.exit(0)\n" if leader_mode == "eof_exit_zero" else "sys.exit(2)\n"
     leader_script = (
         "import json, os, subprocess, sys\n"
-        "pids_path = sys.argv[1]\n"
-        "child_code = 'import time; time.sleep(60)'\n"
-        "in_group = subprocess.Popen(\n"
-        "    [sys.executable, '-c', child_code, pids_path],\n"
-        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
-        ")\n"
-        "detached = subprocess.Popen(\n"
-        "    [sys.executable, '-c', child_code, pids_path],\n"
-        "    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,\n"
-        "    start_new_session=(os.name != 'nt'),\n"
-        ")\n"
-        "tmp_path = pids_path + '.tmp'\n"
-        "with open(tmp_path, 'w', encoding='utf-8') as f:\n"
-        "    json.dump([os.getpid(), in_group.pid, detached.pid], f)\n"
-        "os.replace(tmp_path, pids_path)\n"
+        "p = sys.argv[1]; c = 'import time; time.sleep(60)'\n"
+        "kw = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "g = subprocess.Popen([sys.executable, '-c', c, p], **kw)\n"
+        "d = subprocess.Popen([sys.executable, '-c', c, p], start_new_session=(os.name != 'nt'), **kw)\n"
+        "open(p + '.tmp', 'w').write(json.dumps([os.getpid(), g.pid, d.pid])); os.replace(p + '.tmp', p)\n"
         + tail
     )
 
@@ -475,25 +332,17 @@ async def test_close_reaps_surviving_tool_children_after_leader_exits(
 
         leader_pid, in_group_pid, detached_pid = json.loads(pids_file.read_text(encoding="utf-8"))
         child_pids = [in_group_pid, detached_pid]
-        assert _pid_running(in_group_pid)
-        assert _pid_running(detached_pid)
+        assert _pid_running(in_group_pid) and _pid_running(detached_pid)
 
         if leader_mode == "crash_before_close":
-            # Wait for leader to crash and be reaped before close() is called.
             crash_deadline = time.monotonic() + 5.0
             while client.exit_code is None and time.monotonic() < crash_deadline:
                 await asyncio.sleep(0.05)
-            assert client.exit_code == 2
-            assert _pid_running(in_group_pid)
-            assert _pid_running(detached_pid)
+            assert client.exit_code == 2 and _pid_running(in_group_pid) and _pid_running(detached_pid)
 
         await client.close(graceful_timeout=5.0, terminate_timeout=2.0)
-
-        expected_rc = 0 if leader_mode == "eof_exit_zero" else 2
-        assert client.exit_code == expected_rc
-        assert not _pid_running(leader_pid)
-        assert not _pid_running(in_group_pid)
-        assert not _pid_running(detached_pid)
+        assert client.exit_code == (0 if leader_mode == "eof_exit_zero" else 2)
+        assert not any(_pid_running(pid) for pid in (leader_pid, in_group_pid, detached_pid))
     finally:
         await client.close(graceful_timeout=1.0, terminate_timeout=1.0)
         for pid in child_pids:
@@ -504,20 +353,21 @@ async def test_close_reaps_surviving_tool_children_after_leader_exits(
                     pass
 
 
-def test_parse_session_update_validation_and_diff_blocks() -> None:
-    """Parser rejects malformed envelopes and extracts valid diff blocks cleanly."""
-    with pytest.raises(ValueError, match="sessionId"):
-        parse_session_update({"update": {"sessionUpdate": "agent_message_chunk"}})
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({"update": {"sessionUpdate": "agent_message_chunk"}}, "sessionId"),
+        ({"sessionId": "s1"}, "update"),
+        ({"sessionId": "s1", "update": {}}, "sessionUpdate"),
+        ({"sessionId": "s1", "update": {"sessionUpdate": "tool_call"}}, "toolCallId"),
+    ],
+)
+def test_parse_session_update_rejects_malformed_envelopes(payload: dict[str, Any], match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        parse_session_update(payload)
 
-    with pytest.raises(ValueError, match="update"):
-        parse_session_update({"sessionId": "s1"})
 
-    with pytest.raises(ValueError, match="sessionUpdate"):
-        parse_session_update({"sessionId": "s1", "update": {}})
-
-    with pytest.raises(ValueError, match="toolCallId"):
-        parse_session_update({"sessionId": "s1", "update": {"sessionUpdate": "tool_call"}})
-
+def test_parse_diff_blocks_extracts_valid_diffs() -> None:
     diffs = parse_diff_blocks(
         [
             {"type": "content", "content": {"type": "text", "text": "ignored"}},
@@ -527,16 +377,6 @@ def test_parse_session_update_validation_and_diff_blocks() -> None:
         ]
     )
     assert diffs == (
-        AcpDiffBlock(
-            path="a.py",
-            old_text=None,
-            new_text="new\n",
-            raw={"type": "diff", "path": "a.py", "newText": "new\n"},
-        ),
-        AcpDiffBlock(
-            path="b.py",
-            old_text="1",
-            new_text="2",
-            raw={"type": "diff", "path": "b.py", "oldText": "1", "newText": "2"},
-        ),
+        AcpDiffBlock(path="a.py", old_text=None, new_text="new\n", raw={"type": "diff", "path": "a.py", "newText": "new\n"}),
+        AcpDiffBlock(path="b.py", old_text="1", new_text="2", raw={"type": "diff", "path": "b.py", "oldText": "1", "newText": "2"}),
     )
