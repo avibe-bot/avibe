@@ -1399,7 +1399,7 @@ builds a model that starts nothing (no avibe.bot, keychain, notification,
 direct-path or lifecycle work), and no Health sync or App Lock. Every
 fixture shares the host's main thread, so live work there once held every
 fixture's WebView. From the first App fixture on, a test-only watchdog
-prints each main-thread hold over one second with the test it fell in
+prints each main-thread hold over one second with the test it fell in, and keeps printing while it lasts
 (`[main-thread watchdog]` in the run log).
 
 The App calls the notification center only on one serial queue off the main

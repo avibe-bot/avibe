@@ -355,8 +355,10 @@ enum WebKitReadinessError: Error {
 }
 
 /// Prints every time the main thread does not answer for over a second, with
-/// the test running when it stopped answering and when it answered again:
-/// `[main-thread watchdog] blocked 2.4 s, from <test> to <test>`.
+/// the test running when it stopped answering: `[main-thread watchdog] held
+/// over 1 s in <test>` at once, again every 10 s while it lasts, and
+/// `[main-thread watchdog] blocked 2.4 s, from <test> to <test>` when it
+/// ends. A hold that never ends is still in the log.
 ///
 /// Every App fixture's WebView callbacks, timers and deadlines run on the
 /// main thread, so a hold there looks like a page that never loads (the
@@ -387,6 +389,8 @@ final class MainThreadWatchdog: NSObject, XCTestObservation, @unchecked Sendable
         guard first else {
             return
         }
+        // Started from inside a test, whose start was already announced.
+        setTest("(the test that started the watchdog)")
         XCTestObservationCenter.shared.addTestObserver(self)
         let thread = Thread { [self] in self.watch() }
         thread.name = "main-thread watchdog"
@@ -421,7 +425,13 @@ final class MainThreadWatchdog: NSObject, XCTestObservation, @unchecked Sendable
             DispatchQueue.main.async { answered.signal() }
             if answered.wait(timeout: .now() + Self.threshold) == .timedOut {
                 let from = test()
-                answered.wait()
+                print("[main-thread watchdog] held over 1 s in \(from)")
+                while answered.wait(timeout: .now() + 10) == .timedOut {
+                    print(
+                        "[main-thread watchdog] still held after "
+                            + "\(Int(Date().timeIntervalSince(sent))) s, now in \(test())"
+                    )
+                }
                 let seconds = Date().timeIntervalSince(sent)
                 print(
                     "[main-thread watchdog] blocked \(String(format: "%.1f", seconds)) s, "

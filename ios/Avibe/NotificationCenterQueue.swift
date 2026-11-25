@@ -26,13 +26,15 @@ final class NotificationCenterQueue: @unchecked Sendable {
     }
 
     /// Runs `work` after every call submitted before it, off the main thread.
-    func run(_ work: @escaping () -> Void) {
+    /// `@Sendable`, so a closure written on the main actor is not taken to be
+    /// isolated to it.
+    func run(_ work: @escaping @Sendable () -> Void) {
         queue.async(execute: work)
     }
 
     /// What `work` answers through its completion, after every call
     /// submitted before it.
-    func value<T>(_ work: @escaping (@escaping (T) -> Void) -> Void) async -> T {
+    func value<T>(_ work: @escaping @Sendable (@escaping @Sendable (T) -> Void) -> Void) async -> T {
         await withCheckedContinuation { continuation in
             queue.async {
                 work { continuation.resume(returning: $0) }

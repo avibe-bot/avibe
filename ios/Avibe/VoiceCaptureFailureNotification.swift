@@ -38,10 +38,10 @@ enum VoiceCaptureFailureNotification {
 
     /// What the notices need of the notification center. `system` is the
     /// App's own; each call is made on `NotificationCenterQueue`.
-    struct Center {
-        var add: (UNNotificationRequest, _ failure: String) -> Void
+    struct Center: Sendable {
+        var add: @Sendable (UNNotificationRequest, _ failure: String) -> Void
         /// Removes these identifiers, pending and shown.
-        var remove: ([String]) -> Void
+        var remove: @Sendable ([String]) -> Void
 
         static let system = Center(
             add: { request, failure in

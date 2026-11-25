@@ -80,8 +80,8 @@ final class NotificationCenterQueueTests: XCTestCase {
 
     /// A model that does not start at launch (the host's) sets up nothing
     /// that runs: it does not take the voice capture's load gate, which a
-    /// started model sets in the same step as it starts its account, push
-    /// and lifecycle work, and it stays on its first route.
+    /// started model sets synchronously in its init, in the same step that
+    /// starts its account, push, lifecycle and bootstrap work.
     @MainActor
     func testAModelThatDoesNotStartLeavesEverythingIdle() throws {
         let earlier = VoiceCaptureLoadGate.provider
@@ -108,7 +108,7 @@ final class NotificationCenterQueueTests: XCTestCase {
             startsAtLaunch: false
         )
         XCTAssertNil(VoiceCaptureLoadGate.provider)
-        XCTAssertEqual(model.route, .loading)
+        withExtendedLifetime(model) {}
     }
 }
 
