@@ -1581,8 +1581,12 @@ final class AppModel: ObservableObject {
             // Then the stores left behind are removed, started and not waited
             // for: WebKit answers a removal only once the store's own web
             // process has exited, and the open (open-first included) has
-            // started its own WebView by now. Sweeps run one after another.
-            websiteDataStore.startSweep()
+            // started its own WebView by now. Sweeps run one after another,
+            // and none removes a store a view still holds (one the bootstrap
+            // rotated away from while its page lived).
+            websiteDataStore.startSweep(canSweep: { [weak self] in
+                self?.sessionCoordinator.canSweepStores ?? false
+            })
             return
         }
         sessionCoordinator.activateAccountSurface()
@@ -1615,8 +1619,12 @@ final class AppModel: ObservableObject {
         // Then the stores left behind are removed, started and not waited
         // for: WebKit answers a removal only once the store's own web
         // process has exited, and the open (open-first included) has
-        // started its own WebView by now. Sweeps run one after another.
-        websiteDataStore.startSweep()
+        // started its own WebView by now. Sweeps run one after another,
+        // and none removes a store a view still holds (one the bootstrap
+        // rotated away from while its page lived).
+        websiteDataStore.startSweep(canSweep: { [weak self] in
+            self?.sessionCoordinator.canSweepStores ?? false
+        })
     }
 
     /// After an open-first's session check: push work the open started was

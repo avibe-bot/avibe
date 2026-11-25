@@ -5965,6 +5965,44 @@ final class MobileOnboardingTests: XCTestCase {
         XCTAssertTrue(registry.identifiers.contains(store.identifier))
     }
 
+    /// A transition that rotates while a view still holds the old store
+    /// leaves it; a later sweep gated as the launch's is (`canSweepStores`)
+    /// removes nothing while that view lives, and removes it once it is gone.
+    func testALaterSweepLeavesAStoreAViewStillHolds() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let old = store.identifier
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        var heldView: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+        let barrier = WebsiteDataStoreReleaseBarrier(webViews: [try XCTUnwrap(heldView)])
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults, websiteDataStore: store,
+            transports: (0..<4).map { _ in FakeMobileAuthTransport() },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return transitions == 1 ? [barrier] : []
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        _ = try await coordinator.logout()
+        XCTAssertNotEqual(store.identifier, old)
+        XCTAssertFalse(coordinator.canSweepStores)
+        await store.startSweep(canSweep: { coordinator.canSweepStores }).value
+        XCTAssertTrue(registry.removalAttempts.isEmpty)
+        XCTAssertTrue(registry.identifiers.contains(old))
+
+        heldView = nil
+        XCTAssertTrue(await barrier.waitForRelease())
+        XCTAssertTrue(coordinator.canSweepStores)
+        await store.startSweep(canSweep: { coordinator.canSweepStores }).value
+        XCTAssertEqual(registry.removalAttempts, [old])
+        XCTAssertFalse(registry.identifiers.contains(old))
+    }
+
     /// A removal that took over a second is kept, in milliseconds, for the
     /// next rendezvous request; one an answered request carried goes.
     func testASlowStoreRemovalIsKeptForTheNextRendezvous() async throws {

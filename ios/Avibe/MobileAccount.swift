@@ -809,6 +809,14 @@ final class MobileSessionCoordinator {
         case pushLogout(UUID, resetting: Bool)
     }
 
+    /// Whether a store sweep may remove stores now: no view recorded at an
+    /// account transition still holds one. A transition that rotates while
+    /// such a view lives leaves the old store for a later sweep, and every
+    /// sweep asks this before each removal.
+    var canSweepStores: Bool {
+        pendingStoreReleaseBarriers.allSatisfy(\.isReleased)
+    }
+
     var isAccountSurfaceActive: Bool {
         transport != nil
     }
