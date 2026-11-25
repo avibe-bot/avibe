@@ -67,14 +67,18 @@ export const RECENT_ACTIVITY_LIMIT = 5;
 /** One activity entry, in the page's own words. A device no longer listed is said as such. */
 export function activityText(t: TFunction, language: string, item: DeviceActivity): string {
   const { event } = item;
-  const device = item.device ?? t('devices.activity.formerDevice');
+  // A device no longer listed has its own sentences: in Chinese a name is set off by a space, a phrase is not.
+  const device = item.device;
   switch (event.kind) {
     case 'signedIn':
-      return t('devices.activity.signedIn', { device });
+      return device ? t('devices.activity.signedIn', { device }) : t('devices.activity.formerSignedIn');
     case 'signedOut':
-      return event.actor
-        ? t('devices.activity.signedOutBy', { device, actor: event.actor })
-        : t('devices.activity.signedOut', { device });
+      if (event.actor) {
+        return device
+          ? t('devices.activity.signedOutBy', { device, actor: event.actor })
+          : t('devices.activity.formerSignedOutBy', { actor: event.actor });
+      }
+      return device ? t('devices.activity.signedOut', { device }) : t('devices.activity.formerSignedOut');
     case 'healthRead': {
       const data = healthText(t, language, event.data);
       const days = event.fromDay === event.toDay
