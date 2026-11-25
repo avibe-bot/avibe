@@ -204,7 +204,7 @@ def workflow():
 
 def test_workflow_routes_match_the_contract_and_every_producer_has_a_required_gate():
     jobs = workflow()["jobs"]
-    assert set(jobs) == {"changes", "master-full-backstop"} | FAST | PR_TESTS | HEAVY | GATES.keys()
+    assert set(jobs) == {"changes", "master-full-backstop", "fast-gate", "sensitive-proof", "advisory-ios"} | FAST | PR_TESTS | HEAVY | GATES.keys()
     leaves = {"ruff", "show-router-integration", "memory-insight-contract", "migration-release-guard", "npm-wrapper", "build-linux-artifacts"}
     for name in FAST | PR_TESTS | HEAVY:
         job = jobs[name]
@@ -212,13 +212,13 @@ def test_workflow_routes_match_the_contract_and_every_producer_has_a_required_ga
         needs = job.get("needs")
         assert "changes" in ([needs] if isinstance(needs, str) else needs)
         if name == "scenario-evidence":
-            assert job["if"] == "always() && needs.changes.result == 'success' && fromJSON(needs.changes.outputs.plan).jobs['scenario-evidence'] == 'run'"
+            assert job["if"] == "always() && needs.changes.result == 'success' && fromJSON(needs.changes.outputs.dispatch_jobs)['scenario-evidence'] == 'run'"
         else:
-            assert job["if"] == f"fromJSON(needs.changes.outputs.plan).jobs['{name}'] == 'run'"
+            assert job["if"] == f"fromJSON(needs.changes.outputs.dispatch_jobs)['{name}'] == 'run'"
         assert name in leaves or any(name in members for members in GATES.values())
     for name, producers in GATES.items():
         assert set(jobs[name]["needs"]) == {"changes", *producers}
-        assert jobs[name]["if"] == "always()"
+        assert jobs[name]["if"] == "always() && needs.changes.outputs.portfolio != 'true'"
         step, = [s for s in jobs[name]["steps"] if "run" in s]
         assert step["run"] == f"python3 scripts/ci_scope.py --gate {name}"
         assert step["env"] == {"NEEDS_JSON": "${{ toJSON(needs) }}"}
@@ -238,7 +238,7 @@ def test_real_workflow_gate_command_enforces_the_event_mode(tmp_path, mode):
     assert result.returncode == 1 and "expected success" in result.stdout
 
 
-def test_backstop_coalesces_whole_reusable_workflow_without_cancelling_running_master():
+def test_full_master_workflow_batches_pending_runs():
     data = workflow()
     assert data[True]["push"] == {"branches": ["master"]}
     assert "workflow_dispatch" in data[True]
@@ -248,23 +248,9 @@ def test_backstop_coalesces_whole_reusable_workflow_without_cancelling_running_m
     }
     for filename in ("ios-shell.yml", "desktop-shell.yml", "web-fetch-runtime.yml"):
         called = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
-        if filename == "ios-shell.yml":
-            assert set(called[True]) == {"workflow_call", "pull_request"}
-            assert called["concurrency"] == {
-                "group": "ios-shell-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}",
-                "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
-            }
-            assert called["jobs"]["route"]["if"] == "github.event_name == 'pull_request'"
-            simulator = called["jobs"]["simulator"]
-            assert simulator["needs"] == "route"
-            assert simulator["if"] == (
-                "!cancelled() && (github.event_name != 'pull_request' || "
-                "(needs.route.result == 'success' && needs.route.outputs.ios == 'run'))"
-            )
-            assert not simulator.get("continue-on-error")
-        else:
-            assert set(called[True]) == {"workflow_call"}
-            assert "concurrency" not in called
+        assert set(called[True]) == {"workflow_call"}
+        assert "concurrency" not in called
+    assert data['jobs']['advisory-ios']['if'] == "needs.changes.outputs.advisory_ios == 'run'"
     for name in ("ios-shell", "desktop-shell", "web-fetch-runtime", "web-fetch-macos"):
         call = data["jobs"][name]
         assert call["uses"].startswith("./.github/workflows/")
@@ -329,6 +315,20 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     plan = json.loads(outputs["plan"])
     assert plan["docs_only"] is docs and outputs["docs_only"] == str(docs).lower()
     assert plan["jobs"]["ios-shell"] == "skip"
+    assert outputs['advisory_ios'] == ios and outputs['portfolio'] == 'false'
+    output.unlink()
+    enabled = {**env, 'FAST_PR_ENABLED': 'true', 'RUNNER_TEMP': str(tmp_path)}
+    result = subprocess.run(command, cwd=repo, env=enabled, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    routed = dict(line.split('=', 1) for line in output.read_text().splitlines())
+    from scripts.ci_fast_pr import LINUX
+    extras = {'ios/Avibe/NavigationPolicy.swift': {'ios-shell'},
+              'scripts/ci_scope.py': {'manifest-consistency'},
+              '.github/PULL_REQUEST_TEMPLATE.md': {'manifest-consistency'}}.get(path, set())
+    assert routed['portfolio'] == 'true' and routed['sensitive'] == str(bool(extras)).lower()
+    assert {k for k, v in json.loads(routed['dispatch_jobs']).items() if v == 'run'} == LINUX | extras
+    assert json.loads(routed['unit_shards']) == list(range(16))
+    assert routed['advisory_ios'] == 'skip'
     output.unlink()
     result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -351,6 +351,60 @@ def test_native_ui_listener_changes_run_on_all_three_operating_systems(path):
 @pytest.mark.parametrize("path", ["vibe/ui_server.py", "vibe/desktop_runtime.py"])
 def test_listener_consumers_alone_do_not_trigger_install_regressions(path):
     assert make_plan("PR", scope(path))["jobs"]["install-upgrade-shards"] == "skip"
+
+
+def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
+    from scripts.ci_fast_pr import LINUX, selected
+
+    assert selected(scope('unknown/area', 'ui/src/App.tsx')) == (set(), LINUX)
+    groups, jobs = selected(scope('core/auth.py', 'storage/alembic/env.py', 'uv.lock'))
+    assert groups == {'identity', 'migration', 'shared'}
+    assert jobs == LINUX | {'ui-browser-checks', 'windows-control-ipc', 'install-upgrade-shards', 'manifest-consistency'}
+    rename = scope_of([('D', '100644', '000000', 'storage/vault_data.py'), ('A', '000000', '100644', 'docs/b.md')], True)
+    assert 'vault' in selected(rename)[0]
+    with pytest.raises(ValueError):
+        selected(full('unknown diff', False))
+
+
+@pytest.mark.parametrize('path,group,proof', [
+    ('vibe/model_hub_runtime/cliproxyapi_manifest.json', 'engine-wire', 'model-hub-hosted-wire'),
+    ('core/control_ipc.py', 'identity', 'windows-control-ipc'),
+    ('core/private_fs.py', 'identity', 'windows-control-ipc'),
+    ('tests/test_control_ipc.py', 'identity', 'windows-control-ipc'),
+    ('scripts/desktop_release.py', 'desktop', 'desktop-shell'),
+    ('ui/src/components/workbench/Composer.tsx', 'desktop', 'desktop-shell'),
+    ('ui/src/components/workbench/MentionEditor.tsx', 'desktop', 'desktop-shell'),
+    ('ui/src/components/voice/ComposerHold.tsx', 'desktop', 'desktop-shell'),
+    ('ui/e2e/voice-shortcut/fixture.tsx', 'desktop', 'desktop-shell'),
+    ('assets/mascot/cloud-tuanzi-v2.png', 'ios', 'ios-shell'),
+    ('packaging/iroh-apple/release.json', 'ios', 'ios-shell'),
+    ('storage/compatibility.py', 'migration', 'install-upgrade-shards'),
+])
+def test_indirect_sensitive_inputs_require_the_consuming_producer(path, group, proof):
+    from scripts.ci_fast_pr import selected
+
+    groups, jobs = selected(scope(path, 'docs/guide.md'))
+    assert group in groups and proof in jobs
+    assert proof in workflow()['jobs']['sensitive-proof']['needs']
+
+
+@pytest.mark.parametrize('gate', ['fast-gate', 'sensitive-proof'])
+def test_portfolio_aggregate_rejects_missing_cancelled_skipped_or_red(gate):
+    from scripts.ci_fast_pr import LINUX, EXTRA, verify
+
+    jobs = LINUX if gate == 'fast-gate' else EXTRA
+    dispatch = dict.fromkeys(jobs, 'run')
+    needs = {name: {'result': 'success'} for name in jobs}
+    if gate == 'sensitive-proof':
+        needs.update({name: {'result': 'skipped'} for name in GATES})
+    needs['changes'] = {'result': 'success', 'outputs': {'portfolio': 'true', 'dispatch_jobs': json.dumps(dispatch)}}
+    assert set(workflow()['jobs'][gate]['needs']) == set(needs)
+    verify(gate, needs)
+    for status in ('failure', 'cancelled', 'skipped', ''):
+        with pytest.raises(ValueError):
+            verify(gate, {**needs, min(jobs): {'result': status}})
+    with pytest.raises(ValueError):
+        verify(gate, {k: v for k, v in needs.items() if k != min(jobs)})
 
 
 def test_check_results_never_accepts_absent_results():
