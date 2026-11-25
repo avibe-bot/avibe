@@ -416,7 +416,8 @@ is written, so projection stays a pure function of the rows:
   In Goals, every entry under `## Mission` and `## Workstreams` starts with a box: `- [ ]` while it is live (in
   progress, waiting, or owed), `- [x]` once it is finished (done, withdrawn, or replaced). Waiting is live: an entry
   whose work is done but whose answer, approval, or confirmation is still owed, by the user or by anyone, keeps its
-  empty box. A live entry is never deleted or merged. One that finishes has its box checked where it stands and stays for that checkpoint; the
+  empty box, and only the answer itself, or the user dropping the matter, ends the wait; the turn's own decision to
+  stop waiting does not. A live entry is never deleted or merged. One that finishes has its box checked where it stands and stays for that checkpoint; the
   entries a mind already kept as `- [x]` are history, and the next checkpoint folds them into one short line under
   their heading (`- [x] Earlier: ...`), whose oldest names drop off as it grows; before an entry is folded, whatever in
   it still binds (an agreement, a condition the user set, an obligation with a date) moves to Agreements or onto a
