@@ -27,6 +27,7 @@
         "version": {
           "const": 1
         },
+        "carry_render": {"type": "object", "description": "Internal per-member rendering receipt used for carry projection; never sent as model text."},
         "message": {
           "$ref": "message.schema.json#/definitions/UserMessage",
           "description": "The input exactly as sent, including the rendered time and identity prefix and attachments."
@@ -58,6 +59,7 @@
           ],
           "additionalProperties": false,
           "properties": {
+            "carry_projection": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
             "tokens": {
               "type": "integer",
               "minimum": 0,
@@ -193,6 +195,7 @@
           "minimum": 1,
           "description": "`context_seq` of the first unit kept verbatim."
         },
+        "carry_projection": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "kept_inputs": {
           "type": "array",
           "items": {

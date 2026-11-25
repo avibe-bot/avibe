@@ -336,7 +336,7 @@ class _Attempt:
     purpose: Literal["conversation", "side_turn"]
     message: Optional[AssistantMessage]
     # Only a conversation response needs the size of the request it answered, never its history.
-    request_facts: Optional[dict[str, int]] = None
+    request_facts: Optional[dict[str, int | str]] = None
     error: Optional[ProviderError] = None
     committed: bool = False
     audited: bool = False
@@ -1206,6 +1206,8 @@ class Agent:
                             self._validate_response(admitted, after=after)
                             if purpose == "conversation" and self.context is not None:
                                 self._attempts[-1].request_facts = request_facts(request)
+                                if self._carry_projection:
+                                    self._attempts[-1].request_facts["carry_projection"] = self._carry_projection
                         yield terminal, tools
                         return
                 finally:

@@ -222,6 +222,52 @@ def test_repeated_carry_suppresses_occurrences_not_matching_text_or_future_fork_
     assert [r.row_id for r in asyncio.run(transcript.load_for_preview("child_frozen")).entries] == [unrelated, report]
 
 
+def test_new_carry_invalidates_only_usage_anchors_measured_on_a_different_prefix(managers):
+    from core.agent_core.harness.context import last_anchor
+    from core.agent_core.harness.projection import context_view
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from tests.test_agent_transcript import _assistant, _user
+
+    manager, _, engine, _, _ = managers
+    sid = "ses_fsm"
+    transcript = SQLiteTranscriptStore(engine)
+    failed, _ = asyncio.run(_activate(manager, text="ask"))
+    report = _merge(manager, "large report")
+    asyncio.run(transcript.consume_input(sid, report, _user("large report")))
+    response = asyncio.run(transcript.append_response(sid, _assistant("noted"), final=False, request={"tokens": 5000}))
+    with engine.begin() as conn:
+        _end(conn, failed, kind="server")
+    runtime = asyncio.run(transcript.load_for_run(sid))
+    assert response.row_id in {r.row_id for r in runtime.entries}
+    assert last_anchor(runtime.entries, context_view(runtime.entries)) is None
+    asyncio.run(transcript.append_response(sid, _assistant("fresh"), final=True,
+                request={"tokens": 35, "carry_projection": runtime.carry_projection}))
+    fresh = asyncio.run(transcript.load_for_run(sid)).entries
+    assert last_anchor(fresh, context_view(fresh)) is not None
+
+
+def test_clean_checkpoint_does_not_reconstruct_historical_carried_inputs(managers, monkeypatch):
+    from storage.agent_transcript import SQLiteTranscriptStore
+    from storage.carry_projection import CarryProjection
+    from tests.test_agent_transcript import COMPACTION, _user
+
+    manager, _, engine, _, _ = managers
+    sid = "ses_fsm"
+    transcript = SQLiteTranscriptStore(engine)
+    failed, _ = asyncio.run(_activate(manager, text="ask"))
+    report = _merge(manager, "historical bytes")
+    asyncio.run(transcript.consume_input(sid, report, _user("historical bytes")))
+    with engine.begin() as conn:
+        _end(conn, failed, kind="server")
+    epoch = asyncio.run(transcript.load_for_preview(sid)).carry_projection
+    asyncio.run(transcript.append_payload(sid, "compaction", {
+        **COMPACTION, "first_kept_seq": 2, "summarized_to_seq": 1, "carry_projection": epoch,
+    }))
+    asyncio.run(transcript.load_for_run(sid))  # Certify once.
+    monkeypatch.setattr(CarryProjection, "_survivor", lambda *a: pytest.fail("discarded payload reloaded"))
+    assert asyncio.run(transcript.load_for_preview(sid)).carry_projection == epoch
+
+
 def test_late_acceptance_of_report_after_stop_starts_it_once(managers):
     """The Turn and its last queue drain are over; the carried report still starts (#4010 review)."""
     manager, other, engine, _, starts = managers

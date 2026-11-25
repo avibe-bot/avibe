@@ -206,7 +206,7 @@ def _count(value: Any) -> bool:
 
 
 #: ``ModelResponse.request``: what C-9 records about the request a response answered.
-_REQUEST_FACTS = _object({"tokens": _count})
+_REQUEST_FACTS = _object({"tokens": _count}, {"carry_projection": _string})
 _PAYLOAD_SHAPES: dict[str, Check] = {
     "compaction": _object(
         {
