@@ -127,7 +127,10 @@ def prune(conn, now):
         if type(value) is int and value <= now:
             expired.append(key)
     if expired:
-        conn.execute(state_meta.delete().where(state_meta.c.key.in_(expired)))
+        from storage.device_account_signout import OWNER_SIGNED_OUT_PREFIX
+        # A session's owner sign-out mark goes with its tombstone.
+        marks = [OWNER_SIGNED_OUT_PREFIX + key[len(REVOKED_BROWSER_SESSION_KEY_PREFIX):] for key in expired]
+        conn.execute(state_meta.delete().where(state_meta.c.key.in_(expired + marks)))
     if len(page) == 32:
         marker = insert(state_meta).values(key=cursor_key, value_json=json.dumps(page[-1].key), updated_at=str(now))
         conn.execute(
@@ -151,6 +154,11 @@ def prune(conn, now):
 
 class SessionNotRegistered(RuntimeError):
     """A fresh session could not be recorded under its own new id: it must not be issued."""
+
+
+# What `record_session` returns when, instead of recording a session, it finished an owner's
+# sign-out of the browser's old session.
+ENDED = "ended"
 
 
 def _tombstoned(conn, sid, now):
@@ -238,9 +246,15 @@ def _hand_over(conn, binding, subject, old, new_sid, identity, role, cap, now):
 
 
 def record_session(binding, identity, role, metadata, *, expires_at, now, fresh, epoch=None, reference=None,
-                   account_enroll_before=None, previous=None):
+                   account_enroll_before=None, previous=None, owner_signed_out=None):
     """Record a session. A fresh one may replace `previous`, the same browser's own live session
-    (proved by its cookie on this very request), and returns ``(old sid, Health cleanup)`` then."""
+    (proved by its cookie on this very request), and returns ``(old sid, Health cleanup)`` then.
+
+    `owner_signed_out` is the id of the signed-out session this request's own cookie names. If
+    the owner's "sign out this device" ended it and that has not been finished yet, and this
+    sign-in is the owner's (``reference`` is only ever the owner's), no session is recorded: the
+    mark is used up, avibe.bot's sign-out of this exact account session is queued, and ``ENDED``
+    is returned. The old tombstone stays as it is."""
     from storage.remote_access_authorization_service import REVOKED_BROWSER_SESSION_KEY_PREFIX
 
     sid, subject = identity["browser_session_id"], identity["sub"]
@@ -267,6 +281,16 @@ def record_session(binding, identity, role, metadata, *, expires_at, now, fresh,
         # A new session has an id of its own: never the one it replaces, never a signed-out one.
         if fresh and ((previous and previous["sid"] == sid) or _tombstoned(conn, sid, locked_now)):
             raise SessionNotRegistered('session_not_registered')
+        if fresh and owner_signed_out and reference and epoch:
+            from storage.device_account_signout import AccountSessionSignedOut, OWNER_SIGNED_OUT_PREFIX, revoke_late
+            # The existing refusal comes first, unchanged.
+            if account_enroll_before is not None and int(time.time()) >= account_enroll_before:
+                raise AccountSessionSignedOut('account_session_signed_out')
+            # Used once: a sign-in that comes back with the same old cookie later is an ordinary one.
+            if conn.execute(state_meta.delete().where(
+                    state_meta.c.key == OWNER_SIGNED_OUT_PREFIX + owner_signed_out)).rowcount == 1:
+                revoke_late(conn, epoch=epoch, subject=subject, reference=reference, now=locked_now)
+                return ENDED
         old = _replaced(conn, binding, subject, previous, locked_now) if fresh else None
         source = "session"
         key = device_key(binding, subject, source, sid)
@@ -490,7 +514,7 @@ def revoke_sid(conn, sid, expiry, now):
 
 
 def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_epoch=None, delegate=False, receipt_scope=None,
-             prepare=None):
+             prepare=None, by_owner=False):
     """One atomic selection + revocation; None device means the caller's bulk scope.
 
     ``prepare(conn)`` runs first inside the same transaction, while the rows this
@@ -585,6 +609,17 @@ def sign_out(binding, subject, *, owner, caller, device_id, now, lifetime, host_
                     where=cast(state_meta.c.value_json, Integer) < cast(tombstones.excluded.value_json, Integer),
                 )
             )
+            if by_owner:
+                # The owner's own "sign out this device" of a session with no account reference, whose
+                # avibe.bot sign-in it could not end: one later owner sign-in from this browser may
+                # finish it (`record_session`). Lives as long as the tombstone.
+                from storage.device_account_signout import OWNER_SIGNED_OUT_PREFIX
+                mark = literal(OWNER_SIGNED_OUT_PREFIX) + sessions.c.session_id
+                unreferenced = ~select(account_refs.c.sid).where(account_refs.c.sid == sessions.c.session_id).exists()
+                conn.execute(insert(state_meta).from_select(
+                    ["key", "value_json", "updated_at"],
+                    stmt.with_only_columns(mark, cast(expiry, String), literal(str(now))).where(unreferenced),
+                ).on_conflict_do_nothing(index_elements=["key"]))
             from storage.models import device_session_extensions as ext
             selected_ids = stmt.with_only_columns(sessions.c.session_id)
             conn.execute(account_refs.delete().where(account_refs.c.sid.in_(selected_ids)))
