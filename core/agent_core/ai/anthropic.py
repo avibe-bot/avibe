@@ -957,6 +957,7 @@ class AnthropicAdapter(ProviderAdapter):
                         gateway=self._gateway,
                         session=None if continuations else session,
                         parent=parent,
+                        carry_projection=observation.carry_projection,
                         repair=observation.ordinary_retry or bool(prepared.hosted_render_omitted),
                         ordinary=replay,
                     )
@@ -1128,6 +1129,7 @@ class AnthropicAdapter(ProviderAdapter):
                                         next_trial,
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
+                                        observation.carry_projection,
                                     ),
                                 )
                         else:
