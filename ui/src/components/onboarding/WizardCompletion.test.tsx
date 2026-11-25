@@ -1193,6 +1193,29 @@ describe('AUTH-SETUP-170 Desktop completion handoff', () => {
     expect(mock.api.mutateConfig).toHaveBeenCalledExactlyOnceWith(FINISH_EN);
     expect(seeds()).toHaveLength(seedCount);
   });
+  it('offers the Desktop the remote-access step on an unbound computer, in place of setup-complete', async () => {
+    desktop();
+    mock.api.remoteAccessStatus.mockResolvedValue({ ok: true, enabled: false, paired: false, running: false });
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: false, paired: false, running: false } as never);
+    const claim = vi.spyOn(devicesApi, 'startClaim');
+    const assign = vi.fn();
+    vi.stubGlobal('location', { ...window.location, assign });
+    mock.models.listSources.mockResolvedValue([]);
+    render(<MemoryRouter initialEntries={['/setup']}><I18nextProvider i18n={i18n}><Routes>
+      <Route path="/setup" element={<Wizard />} /><Route path="/setup/remote-access" element={<SetupRemoteAccess />} />
+      <Route path="/" element={<Destination />} /></Routes></I18nextProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Get started' }));
+    fireEvent.click(await screen.findByRole('button', { name: en.onboarding.providers.later }));
+    const turnOn = await screen.findByRole('button', { name: en.devices.reach.turnOn });
+    expect(mock.presentDesktop).not.toHaveBeenCalled();
+    fireEvent.click(turnOn);
+    // The shell's claim dialog, not avibe.bot: only the locale goes with it; asked once.
+    expect(assign).toHaveBeenCalledExactlyOnceWith('avibe://desktop/claim?locale=en');
+    expect((turnOn as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(turnOn);
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(claim).not.toHaveBeenCalled();
+  });
   it('keeps a remote Runtime completion local to that Runtime', async () => {
     desktop('remote'); fireEvent.click(await setup());
     expect(await screen.findByTestId('destination')).toBeTruthy();

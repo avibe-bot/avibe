@@ -6,11 +6,76 @@ use std::{collections::BTreeMap, fs, io::Write, path::PathBuf, sync::Arc};
 /// Bound per account; older entries fall back to server order.
 const RECENT_LIMIT: usize = 64;
 
-/// Scoped, in-memory undo for the coordinator's existing credential/selection commit.
-/// Never serialize or log this object. Some OS stores can checkpoint a root without decrypting it.
+/// A fresh read of a present, recognized root. A Windows manifest identifies the
+/// generation, not just its decoded bytes. Never serialize or log either.
+pub struct CredentialReadback {
+    bytes: Vec<u8>,
+    prior: bool,
+    attempted: bool,
+}
+fn unavailable() -> ClientError {
+    ClientError::new("credentials_unavailable")
+}
+impl CredentialReadback {
+    pub fn from_root(
+        root: Vec<u8>,
+        prior: Option<&[u8]>,
+        attempted: Option<&[u8]>,
+        decode: impl FnOnce(Vec<u8>) -> Result<Vec<u8>, ClientError>,
+    ) -> Result<Self, ClientError> {
+        let prior = prior == Some(root.as_slice());
+        let attempted = attempted == Some(root.as_slice());
+        if !prior && !attempted {
+            return Err(unavailable());
+        }
+        Ok(Self {
+            bytes: decode(root)?,
+            prior,
+            attempted,
+        })
+    }
+    pub(crate) fn into_prior(self) -> Result<Vec<u8>, ClientError> {
+        if self.prior {
+            Ok(self.bytes)
+        } else {
+            Err(unavailable())
+        }
+    }
+    pub fn is_prior(&self, bytes: &[u8]) -> bool {
+        self.prior && self.bytes.as_slice() == bytes
+    }
+    pub fn is_attempted(&self, bytes: &[u8]) -> bool {
+        self.attempted && self.bytes.as_slice() == bytes
+    }
+}
+
+/// Scoped, in-memory undo. Ordinary sign-in can checkpoint and restore an opaque
+/// root without decoding it. Only same-key adoption additionally requires observe.
 pub trait CredentialWrite: Send {
+    /// Read back through this handle, never reopen a platform lock it already owns.
+    fn observe(&self) -> Result<CredentialReadback, ClientError>;
     fn publish(&mut self, bytes: &[u8]) -> Result<(), ClientError>;
-    fn rollback(self: Box<Self>) -> Result<(), ClientError>;
+    fn restore_root(&mut self) -> Result<(), ClientError>;
+    fn rollback(mut self: Box<Self>) -> Result<(), ClientError> {
+        self.restore_root()
+    }
+    /// A same-key narrow publication has a readable prior jar. Never restore it over
+    /// an absent or unrelated root, or accept the setter's return as proof of undo.
+    fn rollback_existing(mut self: Box<Self>, prior: &[u8], attempted: &[u8]) -> Result<(), ClientError> {
+        let current = self.observe()?;
+        if current.is_prior(prior) {
+            return Ok(());
+        }
+        if !current.is_attempted(attempted) {
+            return Err(unavailable());
+        }
+        let _ = self.restore_root();
+        if self.observe()?.is_prior(prior) {
+            Ok(())
+        } else {
+            Err(unavailable())
+        }
+    }
 }
 
 pub trait Credentials: Send + Sync + 'static {
@@ -23,7 +88,7 @@ pub trait Credentials: Send + Sync + 'static {
             store: self,
             id: id.into(),
             prior,
-            attempted: false,
+            attempted: None,
         }))
     }
 }
@@ -32,15 +97,19 @@ struct OrdinaryWrite<T: Credentials + ?Sized> {
     store: Arc<T>,
     id: String,
     prior: Option<Vec<u8>>,
-    attempted: bool,
+    attempted: Option<Vec<u8>>,
 }
 impl<T: Credentials + ?Sized> CredentialWrite for OrdinaryWrite<T> {
+    fn observe(&self) -> Result<CredentialReadback, ClientError> {
+        let root = self.store.read(&self.id)?.ok_or_else(unavailable)?;
+        CredentialReadback::from_root(root, self.prior.as_deref(), self.attempted.as_deref(), Ok)
+    }
     fn publish(&mut self, bytes: &[u8]) -> Result<(), ClientError> {
-        self.attempted = true;
+        self.attempted = Some(bytes.to_vec());
         self.store.write(&self.id, bytes)
     }
-    fn rollback(self: Box<Self>) -> Result<(), ClientError> {
-        if !self.attempted {
+    fn restore_root(&mut self) -> Result<(), ClientError> {
+        if self.attempted.is_none() {
             return Ok(());
         }
         match &self.prior {

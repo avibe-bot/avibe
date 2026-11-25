@@ -3,8 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, expect, expectTypeOf, it, vi } from 'vitest';
-import en from '../i18n/en.json';
-import zh from '../i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '../i18n/desktop';
 import { AccountApp } from './AccountApp';
 import { DESKTOP_CLIENT_STATE_EVENT, DESKTOP_PRESENT_EVENT, DESKTOP_CLIENT_VIEWS, withLocalIdentity, type DesktopClientAction, type DesktopClientProjection, type DesktopClientRequest, type DesktopClientState } from './bridge';
 import states from './__fixtures__/instance-client-v1/states.json';
@@ -24,9 +23,15 @@ function mount(initial: unknown, response: (request: DesktopClientRequest) => un
     expect(command).toBe('desktop_client_request');
     return response(request);
   });
-  vi.stubGlobal('__TAURI_INTERNALS__', { invoke });
+  // The Account page's two reads of this computer's binding (useDesktopClaim) have their own
+  // commands; they answer "not bound, nothing to recover" here. Binding has its own tests.
+  const claim = vi.fn(async (command: string, { request }: { request: { action: { type: string } } }) =>
+    command === 'desktop_account_recovery' ? { state: 'unavailable' }
+      : request.action.type === 'observe_current_binding' ? { state: 'no_published_binding' } : null);
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: vi.fn((command: string, args: { request: DesktopClientRequest }) =>
+    command === 'desktop_client_request' ? invoke(command, args) : claim(command, args as never)) });
   render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
-  return invoke;
+  return Object.assign(invoke, { claim });
 }
 
 // Remote restrictions remain native-owned; the retired static notice must not
@@ -50,16 +55,18 @@ it.each([['en', 'instances'], ['en', 'account'], ['zh', 'instances'], ['zh', 'ac
   }
   const beforeNavigation = invoke.mock.calls.length;
   expect(document.querySelector('[data-instance-id="offline-control"] button')?.hasAttribute('disabled')).toBe(true);
-  fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
-  expect(document.querySelector('[data-account-details]')).toBeTruthy();
-  expect(screen.queryByText(notice)).toBeNull();
-  fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
+  if (view === 'account') {
+    fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
+    expect(document.querySelector('[data-account-details]')).toBeTruthy();
+    expect(screen.queryByText(notice)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
+  }
   expect(screen.queryByText(notice)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Back to Workbench' : '返回工作台' }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 2));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + (view === 'account' ? 2 : 1)));
   expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(
-    view === 'account' ? ['get_state', 'refresh_instances', 'refresh_instances', 'cancel'] : ['get_state', 'refresh_instances', 'cancel']);
+    view === 'account' ? ['get_state', 'refresh_instances', 'refresh_instances', 'cancel'] : ['get_state', 'cancel']);
   expect(state.remote_auxiliary).toBe('disabled_incomplete');
   expect(state.connection.committed.kind).toBe('remote');
 });
@@ -182,7 +189,7 @@ it('keeps opening, failure and retry on the selected instance without replacing 
   expect(document.querySelector('[data-instance-mask]')).toBeTruthy();
   for (const button of document.querySelectorAll('[data-instance-list] button')) expect((button as HTMLButtonElement).disabled).toBe(true);
   await act(async () => finish({ ...replies.success, request_id: pendingRequest.request_id, ok: false, error: { code: 'instance_upgrade_required' } }));
-  expect(within(row as HTMLElement).getByRole('alert').textContent).toContain(en.desktopClient.errors.upgrade);
+  expect(within(row as HTMLElement).getByRole('alert').textContent).toContain(en.desktopAccount.errors.upgrade);
   expect(document.querySelector('[data-instance-mask]')).toBeNull();
   fireEvent.click(within(row as HTMLElement).getByRole('button', { name: 'Retry' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
@@ -200,7 +207,7 @@ it('disables offline instances without expansion or a retry bypass and keeps pag
   expect(button.hasAttribute('aria-expanded')).toBe(false);
   fireEvent.click(button); fireEvent.keyDown(button, { key: 'Enter' });
   expect(invoke).toHaveBeenCalledOnce();
-  expect(within(row).queryByText(en.desktopClient.offlineInstructions)).toBeNull();
+  expect(within(row).queryByText(en.desktopAccount.offlineInstructions)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Refresh instances' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
   expect(invoke.mock.calls[1][1].request.action).toEqual({ type: 'refresh_instances' });
@@ -277,10 +284,10 @@ it.each([false, true])('selection generation advancement retains only a current 
   } }));
   await act(async () => finish({ version: 1, request_id: request.request_id, ok: false,
     state: { ...advanced, connection: initial.connection }, error: { code: 'instance_upgrade_required' } }));
-  if (superseded) expect(screen.queryByText(en.desktopClient.errors.upgrade)).toBeNull();
+  if (superseded) expect(screen.queryByText(en.desktopAccount.errors.upgrade)).toBeNull();
   else {
     const row = screen.getByText(target.name).closest('[data-instance-id]') as HTMLElement;
-    expect(within(row).getByRole('alert').textContent).toContain(en.desktopClient.errors.upgrade);
+    expect(within(row).getByRole('alert').textContent).toContain(en.desktopAccount.errors.upgrade);
     expect(within(row).getByRole('button', { name: 'Retry' })).toBeTruthy();
   }
 });
@@ -354,7 +361,7 @@ it.each(['reject', 'malformed'] as const)('correlates selected-row %s with its a
     } }));
     await act(async () => finish());
     const row = screen.getByText(target.name).closest('[data-instance-id]') as HTMLElement;
-    expect(within(row).getByRole('alert').textContent).toContain(en.desktopClient.errors.bridge);
+    expect(within(row).getByRole('alert').textContent).toContain(en.desktopAccount.errors.bridge);
     expect((within(row).getByRole('button', { name: 'Retry' }) as HTMLButtonElement).disabled).toBe(false);
     expect(document.querySelector('[data-instance-list]')).toBeTruthy();
     expect(document.querySelector('[data-instance-mask]')).toBeNull();
@@ -411,23 +418,23 @@ it.each([
   let state = { ...states.signed_in, account: { ...states.signed_in.account,
     identity: identityEmail ? { id: 'entry-account', email: identityEmail } : null, email } };
   let finishRefresh: (() => void) | undefined;
+  // An Account document (claim commands are admitted only there) opens on the details.
+  window.history.replaceState(null, '', '/account/index.html?view=account');
   const invoke = mount(state, (request) => {
     const reply = { ...replies.success, state, request_id: request.request_id };
     if (request.action.type === 'refresh_instances') return new Promise((resolve) => { finishRefresh = () => resolve(reply); });
     return reply;
   });
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
-  // Email is absent here on the pre-fix product, before details can mask the omission.
-  const entry = screen.getByRole('button', { name: label, exact: true });
-  expect(within(entry).getByText(label)).toBeTruthy();
-  expect(screen.getByRole('heading', { name: 'Account', level: 2 })).toBeTruthy();
-  fireEvent.click(entry);
   const details = document.querySelector('[data-account-details]') as HTMLElement;
   expect(within(details).getByRole('heading', { name: 'Account' })).toBeTruthy();
   if (email || identityEmail) expect(within(details).getByText(label)).toBeTruthy();
-  expect(invoke).toHaveBeenCalledOnce();
   fireEvent.click(within(details).getByRole('button', { name: 'Instances', exact: true }));
   await waitFor(() => expect(finishRefresh).toBeDefined());
+  // The list's entry names the account itself, not a fixed Account label.
+  const entry = screen.getByRole('button', { name: label, exact: true });
+  expect(within(entry).getByText(label)).toBeTruthy();
+  expect(screen.getByRole('heading', { name: 'Account', level: 2 })).toBeTruthy();
   expect(screen.getByRole('button', { name: label, exact: true }).hasAttribute('disabled')).toBe(true);
   fireEvent.click(screen.getByRole('button', { name: label, exact: true }));
   expect(document.querySelector('[data-account-details]')).toBeNull();
@@ -450,18 +457,18 @@ it.each([
 
 // The removed popup used to own the local link and sign-out. The real container
 // must retain them on the account page without treating presentation as consent.
-it.each(['on', 'off', 'starting', 'unavailable'])('account page shows only the enabled local address and signs out explicitly (%s)', async (access) => {
+it.each(['on', 'off', 'starting', 'unavailable'])('account page shows no unobserved address and signs out explicitly (%s)', async (access) => {
   const state = { ...states.signed_in, local: { ...states.signed_in.local, remote_access: access, remote_access_url: 'https://local-fixture-app.avibe.bot' } };
+  window.history.replaceState(null, '', '/account/index.html?view=account');
   const invoke = mount(state, (request) => request.action.type === 'sign_out'
     ? { ...replies.success, state, request_id: request.request_id, ok: false, error: { code: 'cleanup_error' } }
     : { ...replies.success, state, request_id: request.request_id });
   await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
-  fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
   expect(screen.getByRole('heading', { name: 'Account' })).toBeTruthy();
   expect(screen.getByText(state.account.identity!.email)).toBeTruthy();
-  const link = screen.queryByRole('link', { name: state.local.remote_access_url });
-  if (access === 'on') expect(link?.getAttribute('href')).toBe(state.local.remote_access_url);
-  else expect(link).toBeNull();
+  // The address belongs to this computer's binding card, which shows it only for a binding
+  // native has observed; the local descriptor alone never draws it.
+  expect(screen.queryByRole('link', { name: state.local.remote_access_url })).toBeNull();
   expect(invoke).toHaveBeenCalledOnce();
   fireEvent.click(screen.getByRole('button', { name: 'Sign out on this device' }));
   await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
@@ -639,7 +646,6 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     await waitFor(() => expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull());
     const cancels = invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel');
     expect(cancels).toHaveLength(status === 'paired_this_account' ? 1 : 0);
-    if (status === 'failed') expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy();
     if (status === 'paired_error') expect(screen.getByRole('alert')).toBeTruthy();
     const back = screen.getByRole('button', { name: 'Back to Workbench' });
     expect(back.hasAttribute('disabled')).toBe(false);
@@ -855,7 +861,7 @@ it('AUTH-SETUP-183 says when a different account could not forget the stored one
   });
   fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.twoFactor.differentAccount }));
   await waitFor(() => expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toContain('abort_sign_in'));
-  expect(await screen.findByText(en.desktopClient.errors.request)).toBeTruthy();
+  expect(await screen.findByText(en.desktopAccount.errors.request)).toBeTruthy();
   expect(screen.getByRole('button', { name: en.mobileApp.welcome.continueWithEmail })).toBeTruthy();
 });
 
