@@ -567,18 +567,28 @@ describe('useHoldToTalk', () => {
       return track;
     };
     const opened = () => vi.mocked(navigator.mediaDevices.getUserMedia).mock.calls.length;
+    const mouse = () => mount({ gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}) });
+    /** What this page knows of the microphone, forgotten as a hold the microphone refused forgets
+     *  it (earlier tests leave it known). Asks nothing of the device itself. */
+    const forgetMicrophone = async (el: HTMLElement) => {
+      pipeline.startError = new DOMException('Blocked', 'NotAllowedError');
+      await holdFor(el);
+      up(el);
+      await flush();
+      pipeline.startError = null;
+    };
 
-    it('opens it 50 ms into a finger\'s press and hands it to the take at the hold, opening nothing then', async () => {
+    it('opens it 150 ms into a press and hands it to the take at the hold, opening nothing then', async () => {
       const track = openStream();
       const el = await mount();
       down(el);
-      await elapse(49);
+      await elapse(149);
       expect(opened()).toBe(0);
       await elapse(1);
       await flush();
       expect(opened()).toBe(1);
       expect(pipeline.takes).toHaveLength(0);
-      await elapse(150);
+      await elapse(50);
       await flush();
       // The hold: the take starts on the open microphone, and nothing new is asked of the device.
       expect(pipeline.takes).toHaveLength(1);
@@ -592,7 +602,7 @@ describe('useHoldToTalk', () => {
       const track = openStream();
       const el = await mount();
       down(el);
-      await elapse(120);
+      await elapse(170);
       await flush();
       expect(opened()).toBe(1);
       up(el);
@@ -604,7 +614,7 @@ describe('useHoldToTalk', () => {
 
       // A press that moved off is given back to the page, and closes it too.
       down(el);
-      await elapse(100);
+      await elapse(170);
       await flush();
       move(el, 470);
       await flush();
@@ -612,10 +622,12 @@ describe('useHoldToTalk', () => {
       expect(pipeline.takes).toHaveLength(0);
     });
 
-    it('opens nothing for a click: a mouse waits 150 ms', async () => {
+    it('opens nothing for an ordinary tap or click', async () => {
       openStream();
-      // The composer's and a Bot's numbers.
-      const el = await mount({ gesture: (pointerType) => (pointerType === 'mouse' ? MOUSE_HOLD_GESTURE : {}) });
+      const el = await mouse();
+      down(el);
+      await elapse(130);
+      up(el);
       down(el, 500, 'mouse');
       await elapse(130);
       up(el);
@@ -623,6 +635,7 @@ describe('useHoldToTalk', () => {
       await elapse(400);
       expect(opened()).toBe(0);
 
+      // A mouse held past it opens it, and its hold takes it.
       down(el, 500, 'mouse');
       await elapse(150);
       await flush();
@@ -636,37 +649,52 @@ describe('useHoldToTalk', () => {
 
     it('opens nothing during a press unless the microphone is known to be allowed', async () => {
       openStream();
+      const el = await mount();
+      await forgetMicrophone(el);
       // The question this hold brings up is refused, so this page has no allowed answer after it.
       vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValueOnce(new DOMException('Blocked', 'NotAllowedError'));
       pipeline.permission = 'prompt';
-      const el = await mount();
       down(el);
-      await elapse(150);
+      await elapse(170);
       await flush();
       // The question stays the hold's, as before: it comes at the hold, not during the press.
       expect(opened()).toBe(0);
-      await elapse(50);
+      await elapse(30);
       await flush();
       expect(opened()).toBe(1);
       expect(hold.outcome).toBe('denied');
 
       pipeline.permission = 'denied';
       down(el);
-      await elapse(150);
+      await elapse(170);
       await flush();
       expect(opened()).toBe(1);
     });
 
-    it('on Desktop, opens it during a press only once a take in this page has opened it', async () => {
+    // WebKit on iOS can ask again after Allow, even where it answers `granted`.
+    it('in a browser on iOS, opens nothing during a press', async () => {
+      const agent = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15');
+      try {
+        openStream();
+        const el = await mount();
+        down(el);
+        await elapse(190);
+        await flush();
+        expect(opened()).toBe(0);
+        await elapse(10);
+        await flush();
+        expect(pipeline.takes).toHaveLength(1);
+        expect(pipeline.takes[0].input.stream).toBeUndefined();
+      } finally {
+        agent.mockRestore();
+      }
+    });
+
+    it('on Desktop, opens it during a press only while a take in this page has opened it', async () => {
       Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
       openStream();
       const el = await mount();
-      // A take that could not open the microphone: this page knows of none that opened.
-      pipeline.startError = new DOMException('Blocked', 'NotAllowedError');
-      await holdFor(el);
-      up(el);
-      await flush();
-      pipeline.startError = null;
+      await forgetMicrophone(el);
       expect(opened()).toBe(0);
 
       // Desktop cannot read the Mac's permission: the first take opens its own, at the hold.
@@ -685,9 +713,38 @@ describe('useHoldToTalk', () => {
 
       // After it, a press opens it ahead of the hold.
       down(el);
-      await elapse(50);
+      await elapse(150);
       await flush();
       expect(opened()).toBe(1);
+      up(el);
+      await flush();
+
+      // Refused there (withdrawn in System Settings): the page no longer knows it allowed.
+      vi.mocked(navigator.mediaDevices.getUserMedia).mockRejectedValueOnce(new DOMException('Blocked', 'NotAllowedError'));
+      down(el);
+      await elapse(150);
+      await flush();
+      expect(opened()).toBe(2);
+      up(el);
+      await flush();
+      down(el);
+      await elapse(170);
+      await flush();
+      expect(opened()).toBe(2);
+    });
+
+    it('opens nothing for a surface gone while the permission was still being read', async () => {
+      openStream();
+      let answer!: (status: { state: PermissionState }) => void;
+      vi.mocked(navigator.permissions.query).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve as typeof answer; }));
+      const el = await mount();
+      down(el);
+      await elapse(150);
+      await flush();
+      cleanup();
+      await act(async () => answer({ state: 'granted' }));
+      await flush();
+      expect(opened()).toBe(0);
     });
 
     it('in the iOS App, leaves the microphone to the App', async () => {

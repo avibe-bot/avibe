@@ -23,7 +23,7 @@ import {
   registerHoldSurface,
   type HoldMiss,
 } from '../../lib/nativeVoiceHold';
-import { IS_APPLE } from '../../lib/platform';
+import { IS_APPLE, isIosDevice } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
 import { requestVoiceInputStream } from '../../lib/voiceInput';
 import type { VoiceContextSource } from '../../lib/voiceContext';
@@ -81,8 +81,9 @@ export type HoldGesture = {
 };
 
 /** A finger (owner decision, 2026-11-04): the microphone opens at 200 ms; a surface that draws the
- *  press's progress shows it from 100 ms. The device is started from 50 ms, as the iOS App does. */
-export const HOLD_GESTURE: HoldGesture = { holdMs: 200, ringDelayMs: 100, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60, micAfterMs: 50 };
+ *  press's progress shows it from 100 ms. In a page the device is started from 150 ms, as for a
+ *  mouse: an ordinary tap is down longer than 50 ms, and would show the microphone in use. */
+export const HOLD_GESTURE: HoldGesture = { holdMs: 200, ringDelayMs: 100, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60, micAfterMs: 150 };
 /** A mouse holds longer than a finger, so a slow click or a trackpad press never opens the
  *  microphone: 350 ms, with the ring from 100 ms (owner decision, 2026-11-04); leaving the held
  *  box (or Esc) cancels (ui/design: composer/hold-desktop/b-pressing). Every surface a mouse can
@@ -1016,19 +1017,27 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
    *  brings up a permission question (that stays the hold's, which records on the next one). */
   const openMic = useCallback(async (startedAt: number, permission: Promise<PermissionState | null>) => {
     const state = await permission.catch(() => null);
+    // The surface may have gone while the permission was read: its cleanup closed what it had.
+    if (!mounted.current) return;
     const current = press.current;
     if (!current || current.startedAt !== startedAt || current.reached || current.mic) return;
     if (availableRef.current !== true || voiceConsentForPress() !== 'granted') return;
     if (!desktopVoiceLock.allowed() || isVoiceCaptureActive()) return;
-    // Allowed: the browser says so, or (where it cannot tell, as on Desktop, or keeps saying
-    // `prompt`, as iOS Safari can) the microphone already opened in this page.
-    const allowed = state === 'granted'
-      || (state === 'prompt' && allowedOnAsk)
-      || (state === null && (micOpenedHere || allowedOnAsk));
+    // WebKit on iOS can ask again even after Allow (after about a minute idle, or while it keeps
+    // answering `prompt`): there a request is the hold's alone.
+    if (isIosDevice()) return;
+    // Allowed: the browser says so, or (where it cannot tell, as on Desktop) the microphone
+    // already opened in this page.
+    const allowed = state === 'granted' || (state === null && (micOpenedHere || allowedOnAsk));
     if (!allowed) return;
     const mic = requestVoiceInputStream();
-    // Refused or failed: the take started on it at the hold says so.
-    mic.catch(() => undefined);
+    // Refused or failed: the take started on it at the hold says so. A refusal also means this
+    // page no longer knows the microphone allowed (withdrawn in the system's settings).
+    mic.catch((error: unknown) => {
+      if (microphoneFailure(error) !== 'denied') return;
+      micOpenedHere = false;
+      allowedOnAsk = false;
+    });
     current.mic = mic;
   }, []);
 
