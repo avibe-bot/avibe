@@ -489,22 +489,14 @@ def test_missing_attempt_disables_reuse_without_changing_gate_acceptance(attempt
     assert proof.full_backstop.run_attempt == 0
 
 
-@pytest.mark.parametrize(
-    ("workflow", "rc_pull_request_gate"),
-    [("publish.yml", False), ("release_ai.yml", True), ("desktop-release.yml", True)],
-)
-def test_only_the_github_release_stages_opt_in_to_the_rc_gate(workflow: str, rc_pull_request_gate: bool) -> None:
-    # PyPI publication keeps the full backstop for every tag it is given. The
-    # stages that opt in must be able to read pull requests and check runs, or
-    # every RC fails closed.
+@pytest.mark.parametrize("workflow", ["publish.yml", "release_ai.yml", "desktop-release.yml"])
+def test_no_release_stage_opts_in_to_the_rc_gate(workflow: str) -> None:
+    # Every release stage, RC or stable, requires the full master backstop at
+    # the tag's exact SHA: ordinary PRs no longer run the native and browser
+    # legs, so a green pull request is not full proof. The RC gate stays in the
+    # script for reading state by hand only.
     job = yaml.safe_load((WORKFLOWS / workflow).read_text(encoding="utf-8"))["jobs"]["release-backstop"]
     (step,) = [step for step in job["steps"] if "ci_release_backstop.py" in step.get("run", "")]
 
-    assert ("--rc-pull-request-gate" in step["run"].split()) is rc_pull_request_gate
-    if rc_pull_request_gate:
-        assert job["permissions"] == {
-            "actions": "read",
-            "checks": "read",
-            "contents": "read",
-            "pull-requests": "read",
-        }
+    assert "--rc-pull-request-gate" not in step["run"].split()
+    assert "--tag" in step["run"].split()

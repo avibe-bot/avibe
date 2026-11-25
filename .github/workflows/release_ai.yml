@@ -52,12 +52,12 @@ jobs:
           # dispatch/tag input through the API and never trusts a workflow
           # context SHA as the release source.
           ref: ${{ github.ref }}
-      - name: Require the full master backstop, or an RC's green pull request
+      - name: Require the full master backstop at the tag's exact SHA
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
 
   resolve-show-runtime-ref:
     needs: release-backstop
