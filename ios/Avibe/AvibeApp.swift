@@ -14,6 +14,29 @@ extension Notification.Name {
     )
 }
 
+/// What the App starts at launch.
+///
+/// Under XCTest the App is the unit tests' host. Its tests build their own
+/// models, each with stand-ins; a live model here would share their main
+/// thread while it reads avibe.bot, the keychain and the notification center
+/// for real (on CI it once held that thread for 120 s and every fixture's
+/// WebView waited). So the host starts none of it: no live model, no Health
+/// sync, no App Lock.
+struct LaunchServices: Equatable {
+    /// The model reads avibe.bot, opens the selected instance and starts
+    /// the direct path; otherwise it only exists.
+    var liveModel: Bool
+    var healthSync: Bool
+    var appLock: Bool
+
+    static func forProcess(runningTests: Bool) -> LaunchServices {
+        LaunchServices(liveModel: !runningTests, healthSync: !runningTests, appLock: !runningTests)
+    }
+
+    /// This process's.
+    static let current = forProcess(runningTests: AvibeAppDelegate.isRunningTests)
+}
+
 final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     UNUserNotificationCenterDelegate
 {
@@ -79,7 +102,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
     ) -> Bool {
         UNUserNotificationCenter.current().delegate = self
         // Before any scene draws: a locked App opens behind its lock (docs/plans/app-lock.md).
-        if !Self.isRunningTests {
+        if LaunchServices.current.appLock {
             MainActor.assumeIsolated { AppLockController.shared.start() }
         }
         VoiceCaptureLaunch.markLaunched()
@@ -89,7 +112,7 @@ final class AvibeAppDelegate: NSObject, UIApplicationDelegate,
             ShowShareCoordinator.shared.cleanAtLaunch()
             await VoiceCaptureController.shared.endLeftoversAtLaunch()
             await VoiceCaptureController.shared.restoreOutbox()
-            if !Self.isRunningTests { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
+            if LaunchServices.current.healthSync { await Self.healthSync.resume(foreground: Self.applicationIsForeground) }
         }
         return true
     }
@@ -159,14 +182,21 @@ struct AvibeApp: App {
 
     init() {
         let source = DirectRendezvousWebViewSource()
-        let transport = DirectIrohTransport(
-            engine: DirectIrohBinding(),
-            fetchRendezvous: source.fetch
-        )
-        let model = AppModel(
-            directTransport: transport,
-            healthSync: AvibeAppDelegate.isRunningTests ? nil : AvibeAppDelegate.healthSync
-        )
+        let services = LaunchServices.current
+        let model: AppModel
+        if services.liveModel {
+            let transport = DirectIrohTransport(
+                engine: DirectIrohBinding(),
+                fetchRendezvous: source.fetch
+            )
+            model = AppModel(
+                directTransport: transport,
+                healthSync: services.healthSync ? AvibeAppDelegate.healthSync : nil
+            )
+        } else {
+            // The test host: a model that starts nothing (`LaunchServices`).
+            model = AppModel(startsAtLaunch: false)
+        }
         source.appModel = model
         directRendezvousSource = source
         _appModel = StateObject(wrappedValue: model)
