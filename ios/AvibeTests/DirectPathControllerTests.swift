@@ -363,12 +363,35 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertFalse(failed.controller.routeOwner.isExcluded(one, store: failed.websiteDataStore.identifier))
         XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .held)
         XCTAssertNotNil(failed.controller.listenerRecovery)
-        let before = failed.controller.listenerFailures.count
+        // Identical failures in one foreground stay deliberately share a diagnostic
+        // row. Observe the retry completion callback, not the number of rows.
+        let before = failed.availabilityChanges
         failed.controller.retryListenerNow()
-        try await eventually { failed.controller.listenerFailures.count > before }
+        try await eventually { failed.availabilityChanges > before }
+        XCTAssertEqual(failed.controller.listenerFailures.map(\.step), [.deadline])
         XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .held)
         failed.controller.setDirectOnly(false, forInstanceURL: url)
         XCTAssertEqual(failed.controller.loadGate(forInstanceURL: url), .open)
+    }
+
+    @MainActor
+    func testForegroundRetryPublishesTheDeferredFirstRouteBeforeRuntimeDidOpen() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        _ = try harness.coordinator.selectInstance(id: "instance-1")
+        let pending = try XCTUnwrap(harness.lastOpened)
+        let url = pending.instance.url
+        harness.controller.setDirectOnly(true, forInstanceURL: url)
+        harness.enterBackground()
+        await harness.controller.prepareRoute(for: pending) { harness.coordinator.isCurrentRuntime(pending) }
+        XCTAssertEqual(harness.controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertFalse(harness.controller.routeOwner.routes(one, store: harness.websiteDataStore.identifier))
+        harness.enterForeground()
+        try await eventually { harness.controller.loadGate(forInstanceURL: url) == .open }
+        XCTAssertTrue(harness.controller.routeOwner.routes(one, store: harness.websiteDataStore.identifier))
+        XCTAssertTrue(harness.transport.selections.isEmpty)
+        harness.controller.runtimeDidOpen(pending)
+        XCTAssertEqual(harness.transport.selections.count, 1)
     }
 
     @MainActor
