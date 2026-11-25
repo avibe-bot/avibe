@@ -378,6 +378,10 @@ class SQLiteTranscriptStore:
                     "body_text_block": rendered.body_text_block,
                     "files": [list(item) for item in rendered.files],
                 }
+            if rendered is not None and rendered.handoff_chars:
+                # Even a singleton can be carried: acceptance already spent the
+                # switch marker, so its host context cannot be rebuilt on retry.
+                model.setdefault("carry_render", {})["handoff_chars"] = rendered.handoff_chars
             if seq is not None:
                 # A replay may supply the decoded canonical message, without transient render bookkeeping.
                 committed = content.get("model") or {}

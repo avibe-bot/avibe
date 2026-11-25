@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
+import hashlib
 import json
 from typing import Any
 
@@ -25,6 +26,7 @@ class RenderedInput(UserMessage):
     """
 
     header: str = ""
+    handoff_chars: int = 0
     body_text_block: bool = True
     # (uploaded token, index in the canonical images OR exact rendered file line)
     files: tuple[tuple[str, int | str], ...] = ()
@@ -86,7 +88,41 @@ def _legacy_parts(rendered: str, display: str, count: int, sep: str):
     return parts if all(part.strip() for part in parts) else None
 
 
-def _legacy(original: UserMessage, content: dict, meta: dict, ids: list[str], session: str):
+def _handoff_from_header(header: str) -> str:
+    # Only pass a header already isolated from the member body. A handoff quotes
+    # conversation literally; a quoted end-marker need not be its boundary.
+    end = "\n[End of Avibe handoff]"
+    if header.startswith("[Avibe handoff]\n") and end + "\n\n" in header:
+        return header[: header.rindex(end + "\n\n") + len(end)]
+    return ""
+
+
+def host_only_input(
+    original: UserMessage, model_payload: dict, *, legacy_dispatch: str | None = None
+) -> UserMessage | None:
+    """A fully removed occurrence's host-authored backend handoff, if present.
+
+    The receipt names a range of canonical text; the preceding blocks are Env/fork
+    context. Never parse a delimiter in a member's words to identify a handoff.
+    """
+    render = model_payload.get("carry_render") or {}
+    blocks = [b for b in original.content if isinstance(b, TextBlock)]
+    if not blocks or not blocks[-1].text:
+        return None
+    text = blocks[-1].text
+    header = render.get("header", "")
+    if not header and legacy_dispatch and text.endswith(legacy_dispatch):
+        # Released singleton initial inputs have no render receipt. Only look
+        # before the exact Turn dispatch; the body itself can forge every marker.
+        header = text.removesuffix(legacy_dispatch)
+    size = render.get("handoff_chars", 0)
+    handoff = text[:size] if size else _handoff_from_header(header)
+    if not handoff or not blocks[-1].text.startswith(handoff + "\n\n"):
+        return None
+    return UserMessage((*blocks[:-1], TextBlock(handoff)))
+
+
+def _legacy(original: UserMessage, content: dict, meta: dict, ids: list[str], session: str, digests: dict):
     """Only split the released renderer's ordered batch, never search for text to remove.
 
     Check both independent joins (display uses newline, scheduled dispatch uses a
@@ -122,7 +158,10 @@ def _legacy(original: UserMessage, content: dict, meta: dict, ids: list[str], se
         parts = display.split(sep)
     if len(parts) != len(ids) or not all(p.strip() for p in parts) or not rendered.endswith(sep.join(parts)):
         return None
+    if any(hashlib.sha256(part.encode()).hexdigest() != digests.get(i) for i, part in zip(ids, parts)):
+        return None  # Newline counts cannot distinguish a multiline sibling plus an empty member.
     header = rendered.removesuffix(sep.join(parts))
+    handoff = _handoff_from_header(header)
     # Merely ending with the display text isn't sufficient evidence: a custom
     # dispatch prompt could add an instruction just before that text.
     from storage.message_deliveries import TURN_CARRY_LINES
@@ -133,7 +172,8 @@ def _legacy(original: UserMessage, content: dict, meta: dict, ids: list[str], se
     allowed.update(f"[{line}]" for line in TURN_CARRY_LINES.values())
     allowed.add(f"[Harness: {merged_label}]")
     if any(
-        line not in allowed and not (line.startswith("[Now: ") and line.endswith("]")) for line in header.splitlines()
+        line not in allowed and not (line.startswith("[Now: ") and line.endswith("]"))
+        for line in header.removeprefix(handoff + "\n\n").splitlines()
     ):
         return None
     return (
@@ -173,12 +213,13 @@ def surviving_input(
     model = content.get("model") or {}
     render = model.get("carry_render") or {}
     histories = conn.execute(
-        select(message_deliveries.c.id, message_deliveries.c.delivery_history_json).where(
-            message_deliveries.c.message_id == message_id
-        )
+        select(
+            message_deliveries.c.id, message_deliveries.c.delivery_history_json, message_deliveries.c.dispatch_sha256
+        ).where(message_deliveries.c.message_id == message_id)
     )
-    members, envelopes = {}, {}
-    for i, history in histories:
+    members, envelopes, digests = {}, {}, {}
+    for i, history, digest in histories:
+        digests[i] = digest
         for event in json.loads(history)["events"]:
             if "carry_member" in event:
                 members[i] = event["carry_member"]
@@ -189,7 +230,7 @@ def surviving_input(
         header = render.get("header", "")
         sep = "\n\n---\n\n" if meta.get("merged_harness_sources") else "\n"
     else:
-        legacy = _legacy(original, content, meta, ids, row["session_id"])
+        legacy = _legacy(original, content, meta, ids, row["session_id"], digests)
         if legacy is None:
             # A released acceptance can still hold each original envelope. This is
             # positive per-Delivery evidence even when the text contains separators.
@@ -243,7 +284,12 @@ def surviving_input(
 
     hints = {f"[{s['hint']}]" for s in survivors if s["hint"]}
     carry = TURN_CARRY_LINES.get(str(meta.get("turn_carry") or ""))
+    size = render.get("handoff_chars", 0)
+    handoff = header[:size] if size else _handoff_from_header(header)
+    if handoff:
+        header = header.removeprefix(handoff + "\n\n")
     lines = [
+        *([handoff + "\n"] if handoff else []),
         f"[Harness: {label}]",
         *(
             line

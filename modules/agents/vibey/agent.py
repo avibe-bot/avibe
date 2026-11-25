@@ -1937,10 +1937,13 @@ class VibeyAgent(BaseAgent):
             )
         rendered = self.render_input(body, metadata)
         content = ([text_block(rendered)] if rendered or not images else []) + images
-        if outcomes or (metadata and metadata.harness_source):
+        handoff = (metadata.handoff or "").rstrip() if metadata else ""
+        if outcomes or (metadata and (metadata.harness_source or handoff)):
             from storage.carry_members import RenderedInput
 
-            return RenderedInput(tuple(content), header=rendered.removesuffix(body),
+            header = rendered.removesuffix(body)
+            return RenderedInput(tuple(content), header=header,
+                                 handoff_chars=len(handoff) if header.startswith(handoff + "\n\n") else 0,
                                  body_text_block=bool(rendered or not images), files=tuple(outcomes))
         return UserMessage(content=tuple(content))
 
