@@ -82,6 +82,7 @@ WORKFLOW_PATH = ".github/workflows/model-hub-engine-channel.yml"
 INDEX_KEY = "index/model-hub-engine.json"
 INDEX_CACHE_CONTROL = "public, max-age=60"
 SIGNER_ENVIRONMENT = "model-hub-engine-channel-signer"
+ASSET_APPROVAL_ENVIRONMENT = "model-hub-engine-asset-approval"
 WRITER_ENVIRONMENT = "model-hub-engine-channel-writer"
 #: Which events may start each operation, and whether the run needs a required
 #: reviewer's approval. Every operation is a manual dispatch with approval.
@@ -841,6 +842,8 @@ def authorize(
     """Stop unless this run may use ``environment`` for a privileged step of ``operation``."""
 
     load_trust_roots()
+    if operation == 'release' and environment != ASSET_APPROVAL_ENVIRONMENT:
+        raise ProducerError('asset publication requires its dedicated owner approval environment')
     policy = OPERATION_POLICY.get(operation)
     if policy is None:
         raise ProducerError(f"{operation!r} is not an operation of the channel workflow")
@@ -1045,7 +1048,7 @@ def _build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     authorize_parser = commands.add_parser("authorize", help="Prove this run may use a protected environment.")
-    authorize_parser.add_argument("--environment", required=True, choices=[SIGNER_ENVIRONMENT, WRITER_ENVIRONMENT])
+    authorize_parser.add_argument("--environment", required=True, choices=[SIGNER_ENVIRONMENT, ASSET_APPROVAL_ENVIRONMENT, WRITER_ENVIRONMENT])
     authorize_parser.add_argument("--operation", required=True)
     authorize_parser.add_argument("--require-approval", action="store_true")
 

@@ -51,8 +51,21 @@ def master_snapshot(repo, head):
     return current
 
 
+def compatible_withdrawals(known, desired):
+    for withdrawal in desired.revoked:
+        if known and known.tombstone(withdrawal.asset_release_tag) == withdrawal:
+            continue
+        target = known and known.release(withdrawal.asset_release_tag)
+        # Without a listed minimum the tag may have shipped in the earliest
+        # channel-capable Avibe. Never infer a newer minimum from today's wheel.
+        minimum = target.minimum if target else hosted.channel.FIRST_CHANNEL_AVIBE_VERSION
+        if desired.release(withdrawal.rollback_to).minimum > minimum:
+            raise hosted.Error('rollback target needs a newer Avibe than an affected client')
+
+
 def transition(current, desired):
     """Return sign or readback. Only authenticated published facts are permanent."""
+    compatible_withdrawals(current, desired)
     if current is None:
         return 'sign'
     if current.raw == desired.raw:
@@ -65,6 +78,4 @@ def transition(current, desired):
             withdrawal = desired.tombstone(release.asset_release_tag)
             if not withdrawal:
                 raise hosted.Error('removing a published release requires an explicit withdrawal')
-            if desired.release(withdrawal.rollback_to).minimum > release.minimum:
-                raise hosted.Error('rollback target needs a newer Avibe')
     return 'sign'

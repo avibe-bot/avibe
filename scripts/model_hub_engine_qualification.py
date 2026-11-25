@@ -640,9 +640,9 @@ def run_identity_problems(result: Mapping[str, Any], *, api: Callable[[str], Any
     run_id, attempt = result.get("run_id"), result.get("run_attempt")
     if type(run_id) is not int or type(attempt) is not int:
         return ["the rehearsal names no run"]
-    run = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}")
+    run = api(f"/repos/{REPOSITORY}/actions/runs/{run_id}/attempts/{attempt}")
     if not isinstance(run, dict):
-        return ["GitHub has no such rehearsal run"]
+        return ["GitHub has no such rehearsal attempt"]
     expected = {
         "id": run_id,
         "run_attempt": attempt,

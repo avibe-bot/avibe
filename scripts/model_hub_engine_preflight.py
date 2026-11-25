@@ -58,7 +58,10 @@ def qualify_promotion(repo, commit, release, parent, payload, *, published, api,
         if (reviewed.manifest_bytes, reviewed.min_avibe_version) != (release.manifest_bytes, release.min_avibe_version):
             raise hosted.Error("candidate differs from allocation")
         for name in (qualification.UNTRUSTED_REHEARSAL_ARTIFACT, qualification.UNTRUSTED_ASSETS_ARTIFACT):
-            subprocess.run(["gh", "run", "download", run, "--repo", producer.REPOSITORY, "--name", name, "--dir", str(tmp / name)],
+            # The first attempt keeps its historical name. Later full attempts
+            # must not shadow it when preflight is verifying an older receipt.
+            artifact = name if attempt == 1 else f'{name}-attempt-{attempt}'
+            subprocess.run(["gh", "run", "download", run, "--repo", producer.REPOSITORY, "--name", artifact, "--dir", str(tmp / name)],
                            check=True, env={"GH_TOKEN": token, "PATH": os.environ["PATH"], "HOME": directory})
         result = json.loads((tmp / qualification.UNTRUSTED_REHEARSAL_ARTIFACT / "untrusted_rehearsal.json").read_bytes())
         if json.dumps(result, sort_keys=True) != json.dumps(frozen, sort_keys=True):
@@ -74,18 +77,53 @@ def preflight(repo, base, head, *, published, api, token):
     old, desired = snapshot.revision_step(repo, base, head)
     if desired is None or (old and desired.raw == old.raw):
         return
-    current = published()
-    snapshot.transition(current, desired)
+    withdrawal_only = (old and any(not old.tombstone(w.asset_release_tag) for w in desired.revoked)
+                       and all(old.release(r.asset_release_tag) == r for r in desired.releases))
+    # An emergency withdrawal needs no rehearsal baseline. Do not depend on
+    # a possibly unavailable CDN index; the writer enforces published facts
+    # against authenticated origin, before its conditional PUT.
+    current = None if withdrawal_only else published()
+    if not withdrawal_only:
+        snapshot.transition(current, desired)
+    snapshot.compatible_withdrawals(old, desired)
     for release in desired.releases:
         # Either the base tree qualified these exact bytes or the authenticated
         # index already offers them. Otherwise qualification is mandatory.
         if not any(p and p.release(release.asset_release_tag) == release for p in (old, current)):
             qualify_promotion(repo, head, release, old, desired, published=current, api=api, token=token)
         qualification.require_listed_assets(release)
-    for withdrawal in desired.revoked:
-        target = old and old.release(withdrawal.asset_release_tag)
-        if target and desired.release(withdrawal.rollback_to).minimum > target.minimum:
-            raise hosted.Error('rollback target needs a newer Avibe')
+
+
+def merge_base(repo, kind, event, head):
+    """Bind the checked-out merge to its event head and actual base tree."""
+    def sha(value):
+        if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{40}', value):
+            raise hosted.Error('missing merge identities')
+        return value
+
+    if hosted.git(repo, 'rev-parse', 'HEAD').decode().strip() != sha(head):
+        raise hosted.Error('checkout differs from the event merge')
+    if kind == 'merge_group':
+        group = event['merge_group']
+        base = sha(group['base_sha'])
+        if sha(group['head_sha']) != head or base.encode() not in hosted.git(repo, 'rev-list', '--first-parent', head).splitlines()[1:]:
+            raise hosted.Error('unrelated merge group base or head')
+        return base
+    if kind != 'pull_request':
+        raise hosted.Error('unsupported preflight event')
+    pr = event['pull_request']
+    parents = hosted.git(repo, 'show', '-s', '--format=%P', head).decode().split()
+    if len(parents) != 2 or parents[1] != sha(pr['head']['sha']):
+        raise hosted.Error('merge tree does not contain this PR head as its second parent')
+    actual, _ = parents
+    # GitHub can construct the synthetic merge after capturing the PR event.
+    # Only accept forward progress on the target branch, not an unrelated tree.
+    recorded = sha(pr['base']['sha'])
+    target = 'refs/remotes/origin/' + pr['base']['ref']
+    if (recorded.encode() not in hosted.git(repo, 'rev-list', '--first-parent', actual).splitlines() or
+            actual.encode() not in hosted.git(repo, 'rev-list', '--first-parent', target).splitlines()):
+        raise hosted.Error('merge parent is not forward progress on the event base branch')
+    return actual
 
 
 def main():
@@ -96,11 +134,7 @@ def main():
     kind, head = os.environ['GITHUB_EVENT_NAME'], os.environ['GITHUB_SHA']
     if kind in ('push', 'workflow_dispatch'):
         return
-    base = event['pull_request']['base']['sha'] if kind == 'pull_request' else event['merge_group']['base_sha']
-    if not all(re.fullmatch('[0-9a-f]{40}', s) for s in (base, head)):
-        raise hosted.Error('missing merge identities')
-    if hosted.git(args.data, 'rev-parse', head + '^1').decode().strip() != base:
-        raise hosted.Error('preflight requires the actual proposed merge tree')
+    base = merge_base(args.data, kind, event, head)
     token = os.environ['GITHUB_TOKEN']
 
     def published():
