@@ -336,8 +336,9 @@ export function ConnectionPageView({
 }: ConnectionPageViewProps) {
   const { t, i18n } = useTranslation();
   const unbindBusy = unbind?.state === 'unbinding' || unbind?.state === 'needsRepair';
-  // While an unbinding runs, the tunnel's own settings and 「优化线路」 have nothing to act on.
-  const unbinding = unbind?.state === 'unbinding';
+  // While an unbinding runs or is left for this computer to sort out, the tunnel's own settings and
+  // 「优化线路」 have nothing to act on.
+  const unbinding = unbindBusy;
   const shell = (children: ReactNode) => (
     <SettingsPageShell title={t('devices.connection.title')} subtitle={t('devices.connection.subtitle')} activeTab="remote-access">
       <BackToDevices onBack={actions.onBack} />
@@ -379,7 +380,8 @@ export function ConnectionPageView({
                 {t('devices.connection.changeDomain')}
               </Button>
             )}
-            {(unbind?.state === 'ready' || unbind?.state === 'notChanged') && (
+            {/* Refused as not eligible, it is not offered again: nothing here would change that. */}
+            {unbind?.state === 'ready' && (
               <Button variant="ghost" size="compact" className="text-destructive-ink" onClick={actions.onUnbind}>
                 {t('devices.unbind.action')}
               </Button>

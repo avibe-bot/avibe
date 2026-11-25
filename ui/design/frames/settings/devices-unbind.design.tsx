@@ -84,11 +84,11 @@ const designFrames = frames([
   devices('done-phone', '完成 · 390 宽', PHONE, { unbind: { state: 'done', host, releaseAt: RELEASE } }),
 
   // 5. Nothing changed: the reason, and remote access is as it was before.
-  frame('not-changed', '什么都没变 · avibe.bot 说不合资格：远程访问的开关恢复到按下之前（钥匙失效走已有的「绑定被拒」那一屏）', PAGE, { unbind: { state: 'notChanged' } }),
+  frame('not-changed', '什么都没变 · avibe.bot 说不合资格：远程访问的开关恢复到按下之前，不再给「解除绑定」（钥匙失效走已有的「绑定被拒」那一屏）', PAGE, { unbind: { state: 'notChanged' } }),
   frame('ineligible', '实例说不能在这里解除绑定：没有入口，和「更改域名」一样', PAGE, { unbind: { state: 'ineligible' } }),
 
   // 6. Only this computer can sort it out: the page's existing sentence, no new one.
-  frame('needs-repair', '需要在这台电脑上处理 · 复用已有的那句（vibe remote rebind 这时只清本机）；按钮都收起', PAGE, { unbind: { state: 'needsRepair' } }),
+  frame('needs-repair', '需要在这台电脑上处理 · 复用已有的那句（vibe remote rebind 这时只清本机）；按钮、隧道设置和「优化线路」都收起', PAGE, { unbind: { state: 'needsRepair' } }),
 
   // 7. 「作为一台新电脑重新绑定」 now deletes the old binding at avibe.bot first; where avibe.bot does
   //    not accept that (its key no longer works), a separate confirmation clears this computer only.

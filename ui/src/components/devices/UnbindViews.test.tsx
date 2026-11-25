@@ -81,3 +81,23 @@ describe('RebindDialogs · binding as a new computer, once pressed', () => {
     }
   });
 });
+
+describe('ConnectionPageView · 「解除绑定」 after it', () => {
+  it('is not offered again once refused as not eligible, and puts the tunnel settings away while it needs repair', async () => {
+    const { ConnectionPageView } = await import('./ConnectionPageView');
+    const props = {
+      load: 'ready' as const,
+      connection: { settings: { transport_protocol: 'auto' as const, auto_recovery: true, optimization_profile: 'balanced' as const, edge_ip_version: 'auto' as const, edge_bind_address: '' }, interfaces: [], direct: 'ready' as const },
+      tunnel: { state: 'up' as const, ms: 120 }, remote: false, host,
+    };
+    const { unmount } = render(<ConnectionPageView {...props} unbind={{ state: 'notChanged' }} />);
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+    expect(screen.getByText(said('没有解除绑定，什么都没变。'))).toBeTruthy();
+    unmount();
+
+    render(<ConnectionPageView {...props} unbind={{ state: 'needsRepair' }} />);
+    expect(screen.queryByText('Cloudflare 隧道设置')).toBeNull();
+    expect(screen.queryByRole('button', { name: /优化线路/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: '解除绑定' })).toBeNull();
+  });
+});
