@@ -32,7 +32,7 @@ import {
 } from './rules';
 import type {
   AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, ProxyAccess, Reach,
-  SignedOutDevice, UnlinkedHealth,
+  UnlinkedHealth,
 } from './types';
 
 const functionKeys = {
@@ -101,9 +101,6 @@ export type DevicesPageViewProps = DevicesPageActions & {
    *  every remote device. Null: nothing to sign out in bulk. */
   bulk?: 'other_sessions' | 'all_remote' | null;
   unlinkedHealth?: UnlinkedHealth[];
-  /** Devices signed out lately, each with what avibe.bot did about its account sign-in. */
-  signedOut?: SignedOutDevice[];
-  /** The answer of a sign-out just made on this page. */
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
   /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
@@ -577,23 +574,8 @@ function UnlinkedHealthPanel({ items, onDisconnect }: { items: UnlinkedHealth[];
   );
 }
 
-/** Devices signed out lately: their names, and nothing more (owner, 2026-11-25). */
-function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
-  const { t } = useTranslation();
-  return (
-    <SettingsPanel title={t('devices.signedOut.title')}>
-      {rows.map((row) => (
-        <div key={row.id} className="flex items-center gap-3 border-b border-border px-5 py-3 last:border-b-0">
-          <LogOut className="size-4 shrink-0 text-muted" />
-          <div className="min-w-0 flex-1 text-[13px] font-medium text-foreground">{row.device ?? t('devices.kindName.unrecognized')}</div>
-        </div>
-      ))}
-    </SettingsPanel>
-  );
-}
-
 export function DevicesPageView({
-  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
+  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [],
   unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
   const { t } = useTranslation();
@@ -785,7 +767,6 @@ export function DevicesPageView({
       )}
 
       {unlinkedHealth.length > 0 && <UnlinkedHealthPanel items={unlinkedHealth} onDisconnect={actions.onDisconnectHealth} />}
-      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} />}
 
       {owner && latest.length > 0 && (
         <SettingsPanel

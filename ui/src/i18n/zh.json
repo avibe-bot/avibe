@@ -8488,7 +8488,6 @@
       "disconnect": "断开"
     },
     "signedOut": {
-      "title": "最近退出的设备",
       "toast": "已退出「{{device}}」",
       "toastOthers": "已退出其他设备"
     },

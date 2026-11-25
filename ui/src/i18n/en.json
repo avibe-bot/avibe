@@ -8488,7 +8488,6 @@
       "disconnect": "Disconnect"
     },
     "signedOut": {
-      "title": "Recently signed out",
       "toast": "Signed out {{device}}",
       "toastOthers": "Signed out the other devices"
     },
