@@ -17,6 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from modules.agents import acp
+from modules.agents.antigravity.models import (
+    AntigravityModelSelectionError,
+    apply_model_and_effort,
+    has_model_config_option,
+    validate_model_selection_receipt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -231,7 +237,7 @@ def _probe_context(
     if mode == "gemini-api-key":
         return mode, env, bool(api_key), (None if api_key else "missing_api_key")
     if mode == "agent-platform":
-        return mode, env, adc_present, (None if adc_present else "adc_missing")
+        return mode, env, adc_present, None
     return mode, env, False, None
 
 
@@ -280,8 +286,6 @@ async def probe_antigravity_passive_status(
     mode, env, local_creds, missing = _probe_context(config, base_env, auth_mode)
     if missing == "missing_api_key":
         return _passive_status(error="missing_api_key")
-    if missing == "adc_missing":
-        return _passive_status(error="adc_missing", adc_command=ANTIGRAVITY_ADC_LOGIN_COMMAND)
 
     try:
         resolved_binary = await asyncio.to_thread(resolve_antigravity_cli_path, binary)
@@ -310,7 +314,10 @@ async def probe_antigravity_passive_status(
             if is_auth_err and mode == "gemini-api-key"
             else ("not_logged_in" if is_auth_err else f"acp_error_{err.code}")
         )
-        return _passive_status(credentials_present=local_creds, uncertain=not is_auth_err, error=error)
+        extra: dict[str, Any] = {}
+        if mode == "agent-platform" and is_auth_err and not local_creds:
+            extra["adc_command"] = ANTIGRAVITY_ADC_LOGIN_COMMAND
+        return _passive_status(credentials_present=local_creds, uncertain=not is_auth_err, error=error, **extra)
     except (acp.AcpTransportError, FileNotFoundError, OSError, asyncio.TimeoutError) as err:
         detail = str(err)
         return _passive_status(
@@ -365,27 +372,33 @@ def _default_classify_failure(_stdout: str, stderr: str, auth_mode: str) -> str:
 
 
 async def _apply_probe_model(client: acp.AcpClient, session_id: str, session: Mapping[str, Any], model: str) -> None:
-    model_opt_id = next(
-        (
-            opt["id"]
-            for opt in (session.get("configOptions") or ())
-            if isinstance(opt, Mapping)
-            and (opt.get("id") == "model" or opt.get("category") == "model")
-            and isinstance(opt.get("id"), str)
-            and opt["id"]
-        ),
-        None,
+    raw_options = session.get("configOptions")
+    config_options = (
+        tuple(dict(item) for item in raw_options if isinstance(item, Mapping))
+        if isinstance(raw_options, list)
+        else ()
     )
-    if model_opt_id is None:
-        await client.session_set_model(session_id, model)
-        return
-    try:
-        await client.session_set_config_option(session_id, model_opt_id, model)
-    except acp.AcpRpcError as err:
-        if err.code == acp.JSONRPC_METHOD_NOT_FOUND:
-            await client.session_set_model(session_id, model)
-        else:
-            raise
+    if has_model_config_option(config_options):
+        try:
+            await apply_model_and_effort(
+                client,
+                session_id,
+                config_options,
+                model=model,
+                effort=None,
+                force_reapply=True,
+            )
+            return
+        except AntigravityModelSelectionError as exc:
+            if not (
+                exc.reason == "model_rejected"
+                and isinstance(exc.__cause__, acp.AcpRpcError)
+                and exc.__cause__.code == acp.JSONRPC_METHOD_NOT_FOUND
+            ):
+                raise
+
+    resp = await client.session_set_model(session_id, model)
+    validate_model_selection_receipt(resp, model)
 
 
 async def run_antigravity_connection_probe(
@@ -419,13 +432,6 @@ async def run_antigravity_connection_probe(
 
     if missing == "missing_api_key":
         return _result(False, error="invalid_credentials", detail="Gemini API key is not configured.")
-    if missing == "adc_missing":
-        return _result(
-            False,
-            error="not_logged_in",
-            detail=f"Application Default Credentials not found. Run: {ANTIGRAVITY_ADC_LOGIN_COMMAND}",
-            login_command=ANTIGRAVITY_ADC_LOGIN_COMMAND,
-        )
 
     chunks: list[str] = []
 
@@ -452,7 +458,18 @@ async def run_antigravity_connection_probe(
                 if not session_id:
                     return _result(False, error="session_create_failed", detail="ACP session/new returned no sessionId.")
                 await _apply_probe_model(client, session_id, session, model)
-                await client.session_prompt(session_id, [{"type": "text", "text": "Hi"}], timeout=timeout)
+                prompt_result = await client.session_prompt(session_id, [{"type": "text", "text": "Hi"}], timeout=timeout)
+                raw_stop_reason = prompt_result.get("stopReason") if isinstance(prompt_result, Mapping) else None
+                stop_reason = raw_stop_reason.strip() if isinstance(raw_stop_reason, str) else ""
+                if stop_reason != "end_turn":
+                    return _result(
+                        False,
+                        error="incomplete_response",
+                        detail=(
+                            "Antigravity ACP prompt did not complete normally "
+                            f"(stopReason={stop_reason or 'missing'})."
+                        ),
+                    )
                 response_text = "".join(chunks).strip()
                 if not response_text:
                     return _result(False, error="empty_response", detail="Antigravity ACP prompt returned no response text.")
@@ -469,15 +486,38 @@ async def run_antigravity_connection_probe(
         return await asyncio.wait_for(_execute(), timeout=timeout)
     except asyncio.TimeoutError:
         return _result(False, error="timed_out")
+    except AntigravityModelSelectionError as exc:
+        return _result(False, error=exc.reason, detail=str(exc)[:600])
     except acp.AcpRpcError as err:
         detail = f"{err.code}: {err.message}"
+        is_auth_err = err.code == acp.ACP_AUTH_REQUIRED or classify_antigravity_auth_error(err.message)
         error = (
             ("invalid_credentials" if auth_mode == "gemini-api-key" else "not_logged_in")
-            if err.code == acp.ACP_AUTH_REQUIRED
+            if is_auth_err
             else classifier("", detail, auth_mode)
         )
-        return _result(False, error=error, detail=detail[:600])
+        if is_auth_err:
+            state["authenticated"] = False
+        extra: dict[str, Any] = {}
+        if auth_mode == "agent-platform" and not local_creds and (is_auth_err or error == "not_logged_in"):
+            extra["login_command"] = ANTIGRAVITY_ADC_LOGIN_COMMAND
+        return _result(False, error=error, detail=detail[:600], **extra)
     except (acp.AcpTransportError, FileNotFoundError, OSError) as err:
         detail = str(err).strip()
-        error = "cli_not_found" if _is_cli_not_found(err, detail) else classifier("", detail, auth_mode)
-        return _result(False, error=error, detail=detail[:600])
+        is_missing = _is_cli_not_found(err, detail)
+        is_auth_err = not is_missing and classify_antigravity_auth_error(detail)
+        error = (
+            "cli_not_found"
+            if is_missing
+            else (
+                ("invalid_credentials" if auth_mode == "gemini-api-key" else "not_logged_in")
+                if is_auth_err
+                else classifier("", detail, auth_mode)
+            )
+        )
+        if is_auth_err:
+            state["authenticated"] = False
+        extra = {}
+        if auth_mode == "agent-platform" and not local_creds and (is_auth_err or error == "not_logged_in"):
+            extra["login_command"] = ANTIGRAVITY_ADC_LOGIN_COMMAND
+        return _result(False, error=error, detail=detail[:600], **extra)

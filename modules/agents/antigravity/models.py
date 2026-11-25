@@ -191,7 +191,68 @@ def extract_current_model_and_effort(
 def has_model_config_option(config_options: Sequence[Mapping[str, Any]]) -> bool:
     """Return True when ``config_options`` advertises a selectable ``model`` option."""
     model_option = _find_config_option(config_options, categories=("model",), ids=("model",))
-    return model_option is not None and isinstance(model_option.get("id"), str)
+    return (
+        model_option is not None
+        and isinstance(model_option.get("id"), str)
+        and bool(model_option["id"].strip())
+    )
+
+
+def validate_model_selection_receipt(
+    response: Mapping[str, Any] | None,
+    expected_model: str,
+    *,
+    model_option_id: str | None = None,
+) -> tuple[dict[str, Any], ...]:
+    """Validate any model receipt returned by ACP model-selection RPCs.
+
+    Checks ``configOptions``, ``currentModelId``/``current_model_id``,
+    ``modelId``/``model_id``, and ``models.currentModelId`` against
+    ``expected_model``, raising ``AntigravityModelSelectionError`` with
+    ``reason="model_mismatch"`` if any returned receipt contradicts it.
+    Returns normalized ``configOptions`` if present, otherwise ``()``.
+    """
+    if not isinstance(response, Mapping):
+        return ()
+
+    updated = _normalize_config_options(response.get("configOptions"))
+    option_ids = (model_option_id, "model") if model_option_id else ("model",)
+    if updated:
+        returned_model_opt = _find_config_option(
+            updated,
+            categories=("model",),
+            ids=option_ids,
+        )
+        if returned_model_opt is not None:
+            confirmed_model = _option_current_value(returned_model_opt)
+            if confirmed_model is not None and confirmed_model != expected_model:
+                raise AntigravityModelSelectionError(
+                    f"Antigravity applied model {confirmed_model!r} instead of requested {expected_model!r}.",
+                    reason="model_mismatch",
+                    config_options=updated,
+                )
+
+    candidates: list[Any] = [
+        response.get("currentModelId"),
+        response.get("current_model_id"),
+        response.get("modelId"),
+        response.get("model_id"),
+    ]
+    raw_models = response.get("models")
+    if isinstance(raw_models, Mapping):
+        candidates.append(raw_models.get("currentModelId"))
+        candidates.append(raw_models.get("current_model_id"))
+
+    for raw_confirmed in candidates:
+        confirmed = _clean_optional(raw_confirmed)
+        if confirmed is not None and confirmed != expected_model:
+            raise AntigravityModelSelectionError(
+                f"Antigravity applied model {confirmed!r} instead of requested {expected_model!r}.",
+                reason="model_mismatch",
+                config_options=updated or None,
+            )
+
+    return updated
 
 
 def _with_option_current_value(
@@ -228,7 +289,11 @@ async def _set_model_option(
             f"Antigravity rejected model {selected_model!r}: {exc.message}",
             reason="model_rejected",
         ) from exc
-    updated = _normalize_config_options(resp.get("configOptions"))
+    updated = validate_model_selection_receipt(
+        resp,
+        selected_model,
+        model_option_id=model_option_id,
+    )
     if not updated:
         return (
             _with_option_current_value(
@@ -239,19 +304,6 @@ async def _set_model_option(
             ),
             False,
         )
-    returned_model_opt = _find_config_option(
-        updated,
-        categories=("model",),
-        ids=(model_option_id, "model"),
-    )
-    if returned_model_opt is not None:
-        confirmed_model = _option_current_value(returned_model_opt)
-        if confirmed_model is not None and confirmed_model != selected_model:
-            raise AntigravityModelSelectionError(
-                f"Antigravity applied model {confirmed_model!r} instead of requested {selected_model!r}.",
-                reason="model_mismatch",
-                config_options=updated,
-            )
     return updated, True
 
 

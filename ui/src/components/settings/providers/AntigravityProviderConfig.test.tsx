@@ -166,8 +166,11 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     }));
   });
 
-  it('hides the ADC terminal command on Agent Platform when ADC is already detected', async () => {
-    renderProvider({ auth_mode: 'agent-platform', authenticated: true, credentials_present: true, gcp_project: 'prod-agent-proj', gcp_location: 'global', adc_present: true });
+  it.each([
+    ['local ADC file', { adc_present: true, credentials_present: true }],
+    ['metadata-server / attached SA ADC', { adc_present: false, credentials_present: false }],
+  ])('hides the ADC terminal command on Agent Platform when authenticated via %s', async (_label, patch) => {
+    renderProvider({ auth_mode: 'agent-platform', authenticated: true, gcp_project: 'prod-agent-proj', gcp_location: 'global', ...patch });
     expect(await screen.findByText(B.antigravityAdcPresent)).toBeTruthy();
     expect(screen.queryByText(B.antigravityAdcCommandHint)).toBeNull();
     expect(screen.queryByText(ADC_CMD)).toBeNull();
@@ -196,11 +199,14 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     expect(screen.queryByText(B.antigravityEnterpriseTerminalTitle)).toBeNull();
   });
 
-  it('completes BackendConnectionDialog when Agent Platform save confirms authenticated ADC', async () => {
+  it.each([
+    ['local ADC file', { adc_present: true, credentials_present: true }],
+    ['metadata-server / attached SA ADC', { adc_present: false, credentials_present: false }],
+  ])('completes BackendConnectionDialog when Agent Platform save confirms authenticated %s', async (_label, patch) => {
     mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'external', ready: true }));
     mockAuth(
-      { auth_mode: 'agent-platform', authenticated: true, credentials_present: true, adc_present: true, gcp_project: 'ready-proj', gcp_location: 'global', error: null },
-      { adc_present: true },
+      { auth_mode: 'agent-platform', authenticated: true, gcp_project: 'ready-proj', gcp_location: 'global', error: null, ...patch },
+      { adc_present: patch.adc_present },
     );
     const dialog = renderDialog('api_key');
     await selectAgentPlatformCompact();
@@ -214,7 +220,7 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
       'Agent Platform saves without ADC (and connects once refresh confirms ADC)', 'api_key' as const,
       () => {
         mock.api.getBackendConnection.mockResolvedValue(connection({ auth: 'none', ready: false }));
-        mockAuth({ auth_mode: 'agent-platform', authenticated: false, adc_present: false, gcp_project: 'prod-agent-proj', gcp_location: 'us-central1', error: 'adc_missing' });
+        mockAuth({ auth_mode: 'agent-platform', authenticated: false, adc_present: false, gcp_project: 'prod-agent-proj', gcp_location: 'us-central1', error: 'not_logged_in' });
       },
       async () => {
         await selectAgentPlatformCompact();

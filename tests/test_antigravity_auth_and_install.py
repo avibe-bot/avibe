@@ -33,9 +33,13 @@ from core.agent_auth_service import (
     logout_antigravity_via_acp,
     probe_antigravity_passive_status,
 )
+from modules.agents import acp
 from modules.agents.antigravity import AntigravityAgent
 from modules.agents.antigravity import agent as agy_agent_module
-from modules.agents.antigravity.auth import extract_antigravity_oauth_url
+from modules.agents.antigravity.auth import (
+    extract_antigravity_oauth_url,
+    run_antigravity_connection_probe,
+)
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
 from modules.agents.native_sessions.service import AgentNativeSessionService
 from modules.im import MessageContext
@@ -324,14 +328,46 @@ async def test_api_key_save_authenticate_and_remove_never_touches_gemini_dir(fak
 async def test_agent_platform_adc_detection_and_gcp_settings(fake_agy: FakeAgyAuthFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api, "restart_backend", lambda *_a, **_kw: {"ok": True})
     fake_agy.set_state(authenticated=False)
-    fake_agy.set_config({"require_gcp_project": True})
+    fake_agy.set_config({"acp_config": {"requireAuthMethod": "oauth-personal"}})
     fake_agy.clear_logs()
 
     saved = api.save_antigravity_auth({"auth_mode": "agent-platform", "gcp_project": "my-gcp-project", "gcp_location": "us-central1"})
     assert (saved["ok"], saved["adc_present"], saved["adc_command"]) == (True, False, ANTIGRAVITY_ADC_LOGIN_COMMAND)
 
+    cfg = V2Config.load().agents.antigravity
+    rejected_passive = await probe_antigravity_passive_status(str(fake_agy.binary), config=cfg)
+    assert (rejected_passive["authenticated"], rejected_passive["credentials_present"], rejected_passive["error"], rejected_passive["adc_command"]) == (
+        False, False, "not_logged_in", ANTIGRAVITY_ADC_LOGIN_COMMAND
+    )
+    assert fake_agy.rpc_methods() == ["initialize", "authenticate"]
+
+    fake_agy.clear_logs()
+    rejected_conn = await run_antigravity_connection_probe(binary=str(fake_agy.binary), cwd=str(tmp_path), model="gemini-4-neon", config=cfg)
+    assert (rejected_conn["ok"], rejected_conn["authenticated"], rejected_conn["error"], rejected_conn["login_command"]) == (
+        False, False, "not_logged_in", ANTIGRAVITY_ADC_LOGIN_COMMAND
+    )
+    assert fake_agy.rpc_methods() == ["initialize", "authenticate"]
+
     no_adc = await api.get_antigravity_auth_async()
-    assert (no_adc["authenticated"], no_adc["credentials_present"], no_adc["adc_present"], no_adc["adc_command"]) == (False, False, False, ANTIGRAVITY_ADC_LOGIN_COMMAND)
+    assert (no_adc["authenticated"], no_adc["credentials_present"], no_adc["adc_present"], no_adc["adc_command"], no_adc["error"]) == (
+        False, False, False, ANTIGRAVITY_ADC_LOGIN_COMMAND, "not_logged_in"
+    )
+
+    # Metadata server / attached service account: no local ADC file, but official `agy` authenticates `agent-platform`.
+    fake_agy.set_state(authenticated=False)
+    fake_agy.set_config({"require_gcp_project": True})
+    fake_agy.clear_logs()
+    meta_passive = await probe_antigravity_passive_status(str(fake_agy.binary), config=cfg)
+    assert (meta_passive["ok"], meta_passive["authenticated"], meta_passive["credentials_present"], meta_passive["error"]) == (True, True, True, None)
+    assert fake_agy.rpc_methods() == ["initialize", "authenticate", "session/list"]
+
+    fake_agy.clear_logs()
+    meta_conn = await run_antigravity_connection_probe(binary=str(fake_agy.binary), cwd=str(tmp_path), model="gemini-4-neon", config=cfg)
+    assert (meta_conn["ok"], meta_conn["authenticated"], meta_conn["credentials_present"], meta_conn["inference_verified"]) == (True, True, True, True)
+    assert fake_agy.rpc_methods()[:3] == ["initialize", "authenticate", "session/new"]
+
+    meta_api = await api.get_antigravity_auth_async()
+    assert (meta_api["authenticated"], meta_api["active_auth_mode"], meta_api["adc_present"], meta_api["error"]) == (True, "agent-platform", False, None)
 
     adc_file = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
     adc_file.parent.mkdir(parents=True, exist_ok=True)
@@ -348,6 +384,119 @@ async def test_agent_platform_adc_detection_and_gcp_settings(fake_agy: FakeAgyAu
     assert (with_adc["authenticated"], with_adc["credentials_present"], with_adc["active_auth_mode"]) == (True, True, "agent-platform")
     acp_env = [inv for inv in fake_agy.invocations() if inv["argv"][:1] == ["acp"]][-1]["env"]
     assert (acp_env["GOOGLE_CLOUD_PROJECT"], acp_env["GOOGLE_CLOUD_LOCATION"]) == ("my-gcp-project", "us-central1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case_id", "config_opts", "set_opt_behavior", "set_model_resp", "prompt_result", "expected_error", "expect_prompt"),
+    [
+        (
+            "config_option_model_mismatch",
+            [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}, {"value": "gemini-4-carbon"}]}],
+            {"configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-carbon", "options": [{"value": "gemini-4-neon"}, {"value": "gemini-4-carbon"}]}]},
+            {},
+            {"stopReason": "end_turn"},
+            "model_mismatch",
+            False,
+        ),
+        (
+            "set_model_fallback_mismatch",
+            [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}, {"value": "gemini-4-carbon"}]}],
+            "method_not_found",
+            {"currentModelId": "gemini-4-carbon"},
+            {"stopReason": "end_turn"},
+            "model_mismatch",
+            False,
+        ),
+        (
+            "stop_reason_max_tokens",
+            [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+            {"configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}]},
+            {},
+            {"stopReason": "max_tokens"},
+            "incomplete_response",
+            True,
+        ),
+        (
+            "stop_reason_missing",
+            [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+            {"configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}]},
+            {},
+            {},
+            "incomplete_response",
+            True,
+        ),
+    ],
+)
+async def test_connection_probe_validates_model_receipt_and_end_turn_stop_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
+    config_opts: list[dict[str, Any]],
+    set_opt_behavior: Any,
+    set_model_resp: dict[str, Any],
+    prompt_result: dict[str, Any],
+    expected_error: str,
+    expect_prompt: bool,
+) -> None:
+    del case_id
+    observed = {"prompt_called": False, "closed": False}
+
+    class _StubAcpClient:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            self.supports_close = True
+            self._notify: Any = None
+
+        async def __aenter__(self) -> _StubAcpClient:
+            return self
+
+        async def __aexit__(self, *_exc: Any) -> None:
+            return None
+
+        def on_notification(self, cb: Any) -> None:
+            self._notify = cb
+
+        async def initialize(self, **_kw: Any) -> dict[str, Any]:
+            return {"protocolVersion": 1}
+
+        async def authenticate(self, _method_id: str) -> dict[str, Any]:
+            return {}
+
+        async def session_new(self, _cwd: str, **_kw: Any) -> dict[str, Any]:
+            return {"sessionId": "sess-probe-1", "configOptions": config_opts}
+
+        async def session_set_config_option(self, _sid: str, _cid: str, _val: Any) -> dict[str, Any]:
+            if set_opt_behavior == "method_not_found":
+                raise acp.AcpRpcError(acp.JSONRPC_METHOD_NOT_FOUND, "Method not found")
+            return dict(set_opt_behavior)
+
+        async def session_set_model(self, _sid: str, _model: str) -> dict[str, Any]:
+            return dict(set_model_resp)
+
+        async def session_prompt(self, _sid: str, _blocks: Any, **_kw: Any) -> dict[str, Any]:
+            observed["prompt_called"] = True
+            if self._notify is not None:
+                await self._notify(
+                    "session/update",
+                    {"sessionId": "sess-probe-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial reply"}}},
+                )
+            return dict(prompt_result)
+
+        async def session_close(self, _sid: str) -> dict[str, Any]:
+            observed["closed"] = True
+            return {}
+
+    monkeypatch.setattr(acp, "AcpClient", _StubAcpClient)
+    res = await run_antigravity_connection_probe(
+        binary="/fake/agy",
+        cwd=str(tmp_path),
+        model="gemini-4-neon",
+        config=AntigravityConfig(auth_mode="oauth-personal"),
+    )
+    assert (res["ok"], res["authenticated"], res["catalog_available"], res["inference_verified"], res["error"]) == (
+        False, True, True, False, expected_error
+    )
+    assert observed == {"prompt_called": expect_prompt, "closed": True}
 
 
 def test_classify_auth_error_and_env_command_guards() -> None:
