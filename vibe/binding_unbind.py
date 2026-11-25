@@ -49,21 +49,23 @@ def classify_receipt(status: int, body: bytes, operation: str, *, accepted: bool
     """
     if not valid_operation(operation):
         return 'repair'
-    # Proves nothing about admission: rate limits, any 5xx, redirects and an old
-    # service's 404 are all retried with the same operation and key.
-    if status == 429 or status == 404 or 300 <= status < 400 or status >= 500:
-        return 'retry'
-    if len(body) > 4096:
+    # Response table v2.2: what is not the issuer's own JSON proves nothing about
+    # admission, so it is retried with the same operation and key. Rate limits and
+    # redirects, and any reply without a JSON object (gateway pages, an old
+    # service's HTML 404, a truncated body), are such answers.
+    if status == 429 or 300 <= status < 400 or len(body) > 4096:
         return 'retry'
     try:
         data = json.loads(body.decode('utf-8'), object_pairs_hook=_unique_object)
     except _DuplicateField:
         return 'repair'  # Parsed JSON that names a field twice: ambiguous, never acted on or resent.
     except (UnicodeError, ValueError, RecursionError):
-        return 'retry'  # Not the issuer's JSON: an intermediary or a truncated reply.
+        return 'retry'
     if not isinstance(data, dict):
         return 'retry'
-    # From here on the issuer answered with well-formed JSON; outside the contract it needs local attention.
+    if status == 503 and data == {'error': 'unbind_unavailable'}:
+        return 'retry'
+    # From here on the issuer answered with a JSON object; outside the contract it needs local attention.
     if status == 200 and data == {'status': 'unbound', 'operation_id': operation}:
         return 'unbound'
     if status == 202 and data == {'status': 'pending', 'operation_id': operation}:

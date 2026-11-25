@@ -186,7 +186,7 @@ def test_rejected_unbind_restores_intent_without_connecting_or_sending(reset_hos
     assert workspace.read_text() == 'keep' and local._installation_id() is not None
 
 
-@pytest.mark.parametrize('reply', ['lose_first_response', 'other_503', 'html_502', 'wrong_op_200'])
+@pytest.mark.parametrize('reply', ['lose_first_response', 'html_404', 'html_502', 'wrong_op_200'])
 def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, monkeypatch, reply):
     import http.client
     import json
@@ -216,12 +216,11 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
             first = len(posts) == 1
             if reply == 'lose_first_response' and first:
                 raise http.client.RemoteDisconnected()
-            if reply == 'html_502' and first:
-                return SimpleNamespace(status=502, read=lambda size: b'<html>bad gateway</html>',
+            if reply in ('html_502', 'html_404') and first:
+                # A gateway page, or an old service without the route: not the issuer's answer.
+                return SimpleNamespace(status=502 if reply == 'html_502' else 404, read=lambda size: b'<html>x</html>',
                                        getheader=lambda key: {'Content-Type': 'text/html'}.get(key))
-            if reply == 'other_503' and first:
-                status, data = 503, {'error': 'unbind_unavailable', 'extra': 1}
-            elif reply == 'wrong_op_200':
+            if reply == 'wrong_op_200':
                 status, data = 200, {'status': 'unbound', 'operation_id': '41d8da35-78cd-43e9-b016-f29971164963'}
             else:
                 status, data = 200, {'status': 'unbound', **json.loads(posts[-1][0])}
@@ -236,7 +235,7 @@ def test_worker_replays_only_transport_loss_not_protocol_failure(pairing_host, m
     op = reset._read()['operation']
     assert remote._drive_pending_pairing()[0]
     first = unbind.device_state(V2Config.load())['state']
-    # Lost replies, gateway pages and off-contract 5xx prove nothing: the same request goes again.
+    # Lost replies and pages that are not the issuer's prove nothing: the same request goes again.
     assert first == ('reset_repair_required' if reply == 'wrong_op_200' else 'unbinding')
     assert V2Config.load().remote_access.vibe_cloud.instance_id == 'inst_A'
     assert remote._drive_pending_pairing()[0]
