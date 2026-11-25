@@ -136,17 +136,6 @@ export function RebindRow({ state, canReset, needsBrowser, open, actions }: {
   );
 }
 
-function List({ title, items }: { title: string; items: Array<string | null> }) {
-  return (
-    <div>
-      <div className="text-[12px] font-semibold text-foreground">{title}</div>
-      <ul className="mt-1 flex list-disc flex-col gap-1 pl-4 text-[12px] leading-relaxed text-muted">
-        {items.filter((each): each is string => each !== null).map((item) => <li key={item}><KeptTail text={item} /></li>)}
-      </ul>
-    </div>
-  );
-}
-
 export function RebindDialogs({ dialog, state, host, busy, actions }: {
   dialog: RebindDialog;
   state: RebindState;
@@ -220,7 +209,7 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
   // avibe.bot did not accept deleting the old binding: its key no longer works (the record is gone,
   // or was taken over elsewhere). A separate question: clear this computer only, touching nothing at
   // avibe.bot, then bind as a new computer. Offered at the computer only, as binding again is.
-  if (dialog.kind === 'asNew' && dialog.afterRefusal) {
+  if (dialog.kind === 'asNewLocal') {
     return (
       <Dialog open onOpenChange={(open) => { if (!busy) close(open); }}>
         <DialogContent
@@ -241,45 +230,6 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
           <DialogFooter>
             <Button variant="ghost" disabled={busy} onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
             <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNew.localAction')}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    );
-  }
-  if (dialog.kind === 'asNew') {
-    const other = state.state === 'asNewOffered' && state.reason === 'other_account';
-    const hint = state.state === 'asNewOffered' ? state.hint : undefined;
-    return (
-      <Dialog open onOpenChange={close}>
-        <DialogContent className="max-w-xl content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
-          <DialogHeader>
-            <DialogTitle className="text-balance">{t('devices.rebind.asNewAction')}</DialogTitle>
-            <DialogDescription>
-              {/* Whose Avibe it is comes first when it is another account's: the masked hint, nothing more. */}
-              {other && <><KeptTail text={hint ? t('devices.rebind.asNew.whose', { hint }) : t('devices.rebind.asNew.whosePlain')} /><br /></>}
-              <KeptTail text={t('devices.rebind.asNew.intro')} />
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-3 rounded-lg bg-field px-4 py-3">
-            <List
-              title={t('devices.rebind.asNew.lose')}
-              items={[
-                t('devices.rebind.asNew.loseAccess', { host: domain }),
-                t('devices.rebind.asNew.loseDevices'),
-                t('devices.rebind.asNew.losePeople'),
-                t('devices.rebind.asNew.loseLinks'),
-                dialog.healthConnected ? t('devices.rebind.asNew.loseHealth') : null,
-                t('devices.rebind.asNew.loseName', { host: domain }),
-              ]}
-            />
-            <List title={t('devices.rebind.asNew.keep')} items={[t('devices.rebind.asNew.keepAll')]} />
-            <List title={t('devices.rebind.asNew.unchanged')} items={[t('devices.rebind.asNew.unchangedAvibe'), t('devices.rebind.asNew.unchangedCredentials')]} />
-          </div>
-          <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={t('devices.rebind.asNew.copiedData')} /></p>
-          <p className="text-[13px] font-medium text-foreground">{t('devices.rebind.asNew.irreversible')}</p>
-          <DialogFooter>
-            <Button variant="ghost" onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
-            <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNewAction')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

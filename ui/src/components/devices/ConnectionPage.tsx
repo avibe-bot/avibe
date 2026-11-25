@@ -585,7 +585,7 @@ export function ConnectionPage() {
         resetConfirmation.current = answer.confirmationId;
         setRebindDialog(action === 'unbind'
           ? { kind: 'asNewCloud', healthConnected: answer.healthConnected, releaseAt: address?.releaseAtIfChangedNow, holdDays: address?.holdDays }
-          : { kind: 'asNew', healthConnected: answer.healthConnected, afterRefusal: action === 'localAfterRefusal' || undefined });
+          : { kind: 'asNewLocal', healthConnected: answer.healthConnected });
       } catch (error) {
         if (alive.current) setRebindRefused(rebindRefusal(error instanceof DevicesApiError ? error.code : undefined));
         await readRebind();

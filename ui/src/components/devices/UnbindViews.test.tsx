@@ -70,7 +70,7 @@ describe('RebindDialogs · binding as a new computer, once pressed', () => {
     const state = { state: 'asNewOffered', reason: 'predecessor_unrecoverable' } as const;
     for (const dialog of [
       { kind: 'asNewCloud', healthConnected: true, holdDays: 30 } as const,
-      { kind: 'asNew', healthConnected: true, afterRefusal: true } as const,
+      { kind: 'asNewLocal', healthConnected: true } as const,
     ]) {
       const onRebindClose = vi.fn();
       const { unmount } = render(<RebindDialogs dialog={dialog} state={state} host={host} busy actions={{ onRebindClose }} />);
