@@ -67,6 +67,7 @@ class Parent:
     trial: bootstrap.Trial | None = None
     terminal_mark: bool = False
     pinned_drop_block: bool = False
+    carry_projection: str = ""
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
@@ -349,6 +350,7 @@ async def plan_send(
     repair: bool = False,
     ordinary: str | None = None,
     preview: bool = False,
+    carry_projection: str = "",
 ) -> Attempt:
     route = route_key(ep, gateway)
     if not ordinary:
@@ -356,6 +358,8 @@ async def plan_send(
             ordinary = "side_or_pause"
         elif gateway and (not ep.source_id or ep.portable):
             ordinary = "unbound_source"
+        elif parent is not None and parent.carry_projection != carry_projection:
+            ordinary = "carry_projection_changed"
         elif repair:
             ordinary = "history_repair"
         elif failed_routes.get(route, 0) > time.monotonic():

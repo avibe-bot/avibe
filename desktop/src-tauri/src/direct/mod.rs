@@ -12,6 +12,10 @@ mod connect;
 #[path = "../../tests/direct/windows_credentials.rs"]
 mod credential_tests;
 mod credentials;
+mod dead_end;
+#[cfg(test)]
+#[path = "../../tests/direct/dead_end.rs"]
+mod dead_end_tests;
 pub use credentials::WindowRegistration;
 pub use quiet::PublicCensus;
 #[cfg(test)]
@@ -57,6 +61,9 @@ mod strict;
 #[path = "../../tests/direct/strict.rs"]
 mod strict_tests;
 // muda builds macOS menus only on the main thread, which a test never runs on.
+#[cfg(test)]
+#[path = "../../tests/direct/direct_only.rs"]
+mod direct_only_tests;
 #[cfg(all(test, windows))]
 #[path = "../../tests/direct/menu.rs"]
 mod menu_tests;

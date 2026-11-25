@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate } from 'react-router-dom';
 
+import { cleanDomainName } from '@/components/domainName';
 import type { RemoteAccessStatus, TunnelConnectivityDiagnostics, TunnelNetworkInterface } from '@/context/ApiContext';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { hasDesktopClient } from '@/desktop/bridge';
@@ -18,7 +19,8 @@ import {
 } from '@/lib/nativeDirectChoice';
 import { onPageReactivated } from '@/lib/pageActivity';
 import { openLinkInNewContext } from '@/lib/pwaNavigation';
-import { deviceUsing, directCertificateDate, lastConnectionLegs } from '@/lib/remoteAccessDirect';
+import { measureNativeDirect, nativeDirectMeasureAvailable, type DirectMeasurement } from '@/lib/nativeDirectMeasure';
+import { deviceUsing, directCertificateDate } from '@/lib/remoteAccessDirect';
 import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview } from './api';
 import { clearClaimMarker, returnRefusal } from './claimFlow';
@@ -87,6 +89,8 @@ export function ConnectionPage() {
   const [refused, setRefused] = useState<SwitchRefusal | undefined>();
   const [sending, setSending] = useState<ConnectionSetting | undefined>();
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  // 「测速」: this device's shell measures; the result lives only in this page.
+  const [measurement, setMeasurement] = useState<{ running?: boolean; result?: DirectMeasurement; error?: 'busy' | 'failed' }>({});
   const [diagnostics, setDiagnostics] = useState<TunnelConnectivityDiagnostics | null>(null);
   const [diagnosing, setDiagnosing] = useState(false);
   const [diagnosticsError, setDiagnosticsError] = useState<string | undefined>();
@@ -402,6 +406,14 @@ export function ConnectionPage() {
     })();
   };
 
+  const runMeasure = () => {
+    setMeasurement((current) => ({ result: current.result, running: true }));
+    void measureNativeDirect().then((answer) => {
+      if (!alive.current) return;
+      setMeasurement((current) => (typeof answer === 'string' ? { result: current.result, error: answer } : { result: answer }));
+    });
+  };
+
   const runDiagnostics = () => {
     setDiagnosing(true);
     setDiagnosticsError(undefined);
@@ -628,9 +640,8 @@ export function ConnectionPage() {
       diagnostics={diagnosticsOpen ? {
         status, diagnostics, running: diagnosing, error: diagnosticsError, now,
         // Direct's own details only while direct is on.
-        direct: status?.direct?.enabled
-          ? { certificate: directCertificateDate(status.direct.certificate_not_after, now), lastConnection: lastConnectionLegs(nativePath) }
-          : undefined,
+        direct: status?.direct?.enabled ? { certificate: directCertificateDate(status.direct.certificate_not_after, now) } : undefined,
+        measure: nativeDirectMeasureAvailable() ? measurement : undefined,
       } : undefined}
       host={owner ? host : undefined}
       // A change still being followed with its dialog closed is said in the domain's row even
@@ -653,11 +664,12 @@ export function ConnectionPage() {
       onOpenDiagnostics={() => setDiagnosticsOpen(true)}
       onCloseDiagnostics={() => setDiagnosticsOpen(false)}
       onRunDiagnostics={runDiagnostics}
+      onMeasure={runMeasure}
       onChangeDomain={() => go(CONNECTION_ADDRESS_PATH)}
       onShowCleanup={(retired: RetiredName) => setStep({ step: 'cleanup', retired })}
       onRenameNameChange={(name) => {
         renameRun.current += 1;
-        setStep({ step: 'form', name: name.trim().toLowerCase() });
+        setStep({ step: 'form', name: cleanDomainName(name) });
       }}
       onRenameContinue={renameContinue}
       onRenameConfirm={renameConfirm}

@@ -181,3 +181,29 @@ def test_cancel_before_return_reads_as_cancelled(machine, decline):
     view = browser.get(ROOT + '/' + ident, base_url=ORIGIN).get_json()
     assert (view['state'], view['code']) == ('declined', 'declined')
     assert sum('decline' in body for _, body in peer.calls) == 1 and not redeemed
+
+
+def test_cancel_at_avibe_bot_returns_here_as_cancelled(machine):
+    peer, redeemed = machine
+    browser = ui_server.app.test_client()
+    hdr = csrf_headers(browser)
+    body = browser.post(ROOT, base_url=ORIGIN, headers=hdr, json={}).get_json()
+    assert peer.calls[0][1]['cancel_return'] is True and 'predecessor' in peer.calls[0][1]
+    ident = body['claim_id']
+    base = '/remote/claim/callback?claim_id=' + ident + '&state=' + callback_proof(body)
+    calls = len(peer.calls)
+    for bad in ('&outcome=declined&callback_token=' + 'A' * 43, '&outcome=refused', '&outcome=declined&outcome=declined'):
+        assert browser.get(base + bad, base_url=ORIGIN).headers['Location'].endswith('claim_error=invalid_return')
+    forged = '/remote/claim/callback?claim_id=' + ident + '&state=wrong&outcome=declined'
+    assert browser.get(forged, base_url=ORIGIN).headers['Location'].endswith('claim_error=invalid_return')
+    flow = claims.rebind_claims._get(ident)
+    assert flow.view['state'] == 'pending'
+    assert browser.get(base + '&outcome=declined', base_url=ORIGIN).headers['Location'] == '/settings/remote-access'
+    with flow.lock:
+        assert flow.lock.wait_for(lambda: flow.view['state'] == 'declined', timeout=5)
+    view = browser.get(ROOT + '/' + ident, base_url=ORIGIN).get_json()
+    assert (view['state'], view['code']) == ('declined', 'declined')
+    # Declined at avibe.bot already: nothing more is sent or redeemed, and a late return is refused.
+    assert len(peer.calls) == calls and not redeemed
+    late = browser.get(base + '&callback_token=' + 'A' * 43, base_url=ORIGIN)
+    assert late.headers['Location'].endswith('claim_error=invalid_return')

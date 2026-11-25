@@ -199,7 +199,11 @@ fn shows(view: &ICoreWebView2, origin: &str) -> bool {
 ///
 /// D2 must not wire Windows until the public-fallback/system-proxy rule is
 /// settled (see D1c).
-pub fn route_argument(host: &str, proxy: SocketAddrV4) -> Option<String> {
+///
+/// `failover`: with `false` the PAC names the listener alone for the host,
+/// with no `; DIRECT` after it: a direct-only instance's window shows a
+/// failure when the listener cannot be reached, never the tunnel.
+pub fn route_argument(host: &str, proxy: SocketAddrV4, failover: bool) -> Option<String> {
     let plain = !host.is_empty()
         && host.len() <= 253
         && host
@@ -208,10 +212,11 @@ pub fn route_argument(host: &str, proxy: SocketAddrV4) -> Option<String> {
     if !plain {
         return None;
     }
+    let after = if failover { "; DIRECT" } else { "" };
     let script = format!(
         "function FindProxyForURL(url, host) {{ \
          if (host === \"{host}\" && (url.lastIndexOf(\"https:\", 0) === 0 || url.lastIndexOf(\"wss:\", 0) === 0)) \
-         return \"PROXY {proxy}; DIRECT\"; return \"DIRECT\"; }}"
+         return \"PROXY {proxy}{after}\"; return \"DIRECT\"; }}"
     );
     Some(format!(
         "--proxy-pac-url=data:application/x-ns-proxy-autoconfig;base64,{}",

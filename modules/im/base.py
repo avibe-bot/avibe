@@ -23,6 +23,7 @@ class FileAttachment:
     content: Optional[bytes] = None  # Downloaded file content
     local_path: Optional[str] = None  # Local path after download
     size: Optional[int] = None  # File size in bytes
+    media_token: Optional[str] = None  # Session-scoped upload identity, before model snapshotting
 
 
 @dataclass

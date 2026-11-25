@@ -69,8 +69,16 @@ def account_native(tmp_path, request):
                     status = 429 if grant == "rate" else 400
                     value = {"error_code": "invalid_credentials" if grant == "invalid" else "unexpected",
                              "error_description": "secret-should-never-reach-reply"}
-            elif path == "/auth/v1/verify":
-                value = {"access_token": "synthetic-access", "refresh_token": "synthetic-refresh"}
+            elif path == "/api/auth/first-party/start":
+                assert headers["origin"] == "https://avibe.bot" and "authorization" not in headers
+                assert body == {"kind": "email_code", "email": "user@example.test"}
+                value = {"transaction": "t" * 43}
+                cookie = "__Host-avibe-sign-in-start=fixture; Secure; HttpOnly; Path=/; SameSite=Lax; Max-Age=600"
+            elif path == "/api/auth/first-party/email-code":
+                assert headers["origin"] == "https://avibe.bot" and "authorization" not in headers
+                assert "__Host-avibe-sign-in-start=fixture" in headers.get("cookie", "")
+                assert body == {"transaction": "t" * 43, "email": "user@example.test", "code": "123456"}
+                value, cookie = {"bound": True}, "account=synthetic; Path=/; Secure; HttpOnly"
             elif path == "/auth/v1/otp":
                 value = {}
             elif path == "/api/desktop/session":

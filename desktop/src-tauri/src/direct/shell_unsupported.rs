@@ -19,6 +19,7 @@ pub fn install(
 ) {
 }
 pub fn answer(_: &AppHandle, _: String, _: Material, _: WindowRegistration, _: impl Fn() -> bool + Send + 'static) {}
+pub fn block(_: &AppHandle, _: String, _: String, _: std::net::SocketAddrV4, _: impl Fn() -> bool + Send + 'static) {}
 pub fn forget_closed(_: impl Fn(&str) -> bool) {}
 pub fn arguments(_: &str, _: &Material) -> Option<String> {
     None

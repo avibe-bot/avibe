@@ -145,3 +145,18 @@ describe('AppShell route policy', () => {
     expect(inAppChatPath('https://alex-app.avibe.bot/chat/session-456')).toBeNull();
   });
 });
+
+describe('the Desktop shell route file', () => {
+  // desktop/src-tauri/src/device_description.rs tells only a document at a Workbench route who
+  // the computer is. A route added here and not there would never report; one removed here and
+  // kept there would describe a document that is no longer the Workbench.
+  it('lists exactly the Workbench routes, without the catch-all', () => {
+    const file = JSON.parse(
+      readFileSync(new URL('../../../desktop/src-tauri/src/workbench-routes.json', import.meta.url), 'utf8'),
+    ) as { exact: string[]; dynamic: string[] };
+    const sorted = (routes: readonly string[]) => [...new Set(routes)].sort();
+    expect(sorted(file.exact)).toEqual(sorted(APPLICATION_ROUTE_PATHS.filter((path) => path !== '*')));
+    expect(file.exact).toHaveLength(new Set(file.exact).size);
+    expect(file.dynamic).toEqual([...APPLICATION_DYNAMIC_ROUTE_PATHS]);
+  });
+});

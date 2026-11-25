@@ -12,12 +12,16 @@
 //!
 //! What crosses is the path's kind, two counters and the choice of path. No
 //! address, peer, relay, host, or anything of the listener's.
-use super::{choices::Mode, AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath};
+use super::{
+    choices::{Mode, Reason, Reverted},
+    AddressFamily, HandoverResult, PathStatus, PreferredPath, SelectedPath,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
 
 const PAGE_BRIDGE: &str = include_str!("page_bridge.js");
+const PAGE_DELIVERY: &str = include_str!("page_delivery.js");
 /// The longest request the shell reads.
 const MAX_REQUEST: usize = 1024;
 
@@ -107,14 +111,33 @@ fn word(family: AddressFamily) -> &'static str {
     }
 }
 
-/// `direct.preference()`. The desktop app never sets a choice back itself.
-pub fn preference(mode: Mode) -> Value {
+fn mode_word(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Automatic => "automatic",
+        Mode::Tunnel => "tunnel",
+        Mode::Direct => "direct",
+    }
+}
+
+/// `direct.preference()`, and what `direct.preferenceChanged` carries: the
+/// choice, and the app's own setting-back of it while that stands, in the
+/// phone App's shape with the choice it was set back `from`. `mode` here is
+/// the choice ("direct": the direct path and the relay only), not the path
+/// in use, which is `direct.status().preferred`. `pendingRelaunch` is the
+/// phone App's word for a choice that waits for the App to be opened again;
+/// here a choice takes effect by reopening the instance, at once, so it is
+/// always false.
+pub fn preference(mode: Mode, reverted: Option<Reverted>) -> Value {
     json!({
-        "mode": match mode {
-            Mode::Automatic => "automatic",
-            Mode::Tunnel => "tunnel",
-        },
-        "reverted": null,
+        "mode": mode_word(mode),
+        "pendingRelaunch": false,
+        "reverted": reverted.map(|reverted| json!({
+            "at": reverted.at,
+            "reason": match reverted.reason {
+                Reason::Unreachable => "unreachable",
+            },
+            "from": mode_word(reverted.from),
+        })),
     })
 }
 
@@ -132,6 +155,7 @@ pub fn handover(result: &HandoverResult) -> Value {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Method {
     Handover,
+    Measure,
     Preference,
     SetPreference(Mode),
 }
@@ -140,6 +164,9 @@ pub enum Method {
 #[derive(Debug, PartialEq, Eq)]
 pub struct Request {
     pub id: String,
+    /// The mark of the document that asked: its answer is handed to that
+    /// document and to no other (`delivery`).
+    pub document: String,
     pub method: Method,
 }
 
@@ -148,6 +175,7 @@ pub struct Request {
 struct Wire {
     token: String,
     id: String,
+    document: String,
     method: String,
     #[serde(default)]
     params: Params,
@@ -176,16 +204,21 @@ impl Request {
             return None;
         }
         let wire: Wire = serde_json::from_str(&pairs[0].1).ok()?;
-        if !same(wire.token.as_bytes(), token.as_bytes()) || !id(&wire.id) {
+        if !same(wire.token.as_bytes(), token.as_bytes()) || !id(&wire.id) || !id(&wire.document) {
             return None;
         }
         let method = match (wire.method.as_str(), wire.params.mode) {
             ("direct.handover", None) => Method::Handover,
+            ("direct.measure", None) => Method::Measure,
             ("direct.preference", None) => Method::Preference,
             ("direct.setPreference", Some(mode)) => Method::SetPreference(mode),
             _ => return None,
         };
-        Some(Self { id: wire.id, method })
+        Some(Self {
+            id: wire.id,
+            document: wire.document,
+            method,
+        })
     }
 }
 
@@ -210,9 +243,9 @@ pub struct Told {
 }
 
 impl Told {
-    pub fn new(mode: Mode, order: u64) -> Self {
+    pub fn new(mode: Mode, reverted: Option<Reverted>, order: u64) -> Self {
         Self {
-            preference: preference(mode),
+            preference: preference(mode, reverted),
             order,
         }
     }
@@ -222,44 +255,60 @@ impl Told {
 pub enum Message {
     /// The window's state, on every load and every change.
     State { status: Value, choice: Told },
-    /// The answer to one request, and the choice of path when it asked
-    /// about that.
+    /// The answer to one request of the document `document`, and the
+    /// choice of path when it asked about that.
     Reply {
         id: String,
+        document: String,
         result: Value,
         choice: Option<Told>,
+    },
+    /// One request of the document `document` is refused, with the reason
+    /// as a word: the page's call is rejected with `{code}`.
+    Refusal {
+        id: String,
+        document: String,
+        code: &'static str,
     },
 }
 
 /// The script that delivers `message` to the document of `origin` in the
 /// window's top frame, and to no other document: a navigation can commit
-/// between the shell's look at the window and this script's run. A state
-/// that arrives before the bridge is kept for it; an answer has no one to
-/// wait for.
+/// between the shell's look at the window and this script's run
+/// (`page_delivery.js`). A state that arrives before the bridge is kept for
+/// it. An answer or a refusal is for the document that asked, by its mark:
+/// a document that has taken that one's place is handed nothing.
 pub fn delivery(origin: &str, message: &Message) -> String {
-    let (body, early) = match message {
+    let (asker, body, early) = match message {
         Message::State { status, choice } => (
+            None,
             json!({ "status": status, "preference": choice.preference, "preferenceOrder": choice.order }),
             true,
         ),
-        Message::Reply { id, result, choice } => {
+        Message::Reply {
+            id,
+            document,
+            result,
+            choice,
+        } => {
             let mut body = json!({ "reply": { "id": id, "result": result } });
             if let Some(choice) = choice {
                 body["preference"] = choice.preference.clone();
                 body["preferenceOrder"] = json!(choice.order);
             }
-            (body, false)
+            (Some(document), body, false)
         }
-    };
-    let keep = if early {
-        "else window.__AVIBE_DIRECT_EARLY__=m;"
-    } else {
-        ""
+        Message::Refusal { id, document, code } => (
+            Some(document),
+            json!({ "reply": { "id": id, "error": { "code": code } } }),
+            false,
+        ),
     };
     format!(
-        "(()=>{{if(window.self!==window.top||window.location.origin!=={})return;const m={};const d=window.__AVIBE_DIRECT_DELIVER__;if(typeof d==='function')d(m);{}}})();",
+        "({PAGE_DELIVERY})({},{},{},{});",
         json!(origin),
+        json!(asker),
         body,
-        keep
+        early
     )
 }

@@ -25,7 +25,8 @@ sha2.workspace = true
 thiserror.workspace = true
 tempfile = "3"
 # net + io-util: the one-transaction loopback listener for provider sign-in.
-tokio = { workspace = true, features = ["sync", "net", "io-util"] }
+# process: private stdin/stdout claim helper, never the bootstrap receipt stream.
+tokio = { workspace = true, features = ["sync", "net", "io-util", "process", "macros"] }
 url.workspace = true
 uuid = { version = "1", features = ["v4"] }
 zip.workspace = true

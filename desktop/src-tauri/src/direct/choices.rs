@@ -1,9 +1,16 @@
 //! This computer's choice of path to one instance, per account and instance
 //! (the instance's "Devices › Connection" page, "this device"): automatic
-//! (the direct path when it can, otherwise the Cloudflare tunnel), or the
-//! Cloudflare tunnel only. Kept on this computer only, as the iPhone App
-//! keeps its own (`ios/Avibe/DirectPathPreference.swift`): by account ID and
-//! instance origin, automatic entries not kept.
+//! (the direct path when it can, otherwise the Cloudflare tunnel), the
+//! Cloudflare tunnel only, or the direct path and the relay only. Kept on
+//! this computer only, as the iPhone App keeps its own
+//! (`ios/Avibe/DirectPathPreference.swift`): by account ID and instance
+//! origin. An automatic entry is kept only while it says that the app set
+//! the choice back itself.
+//!
+//! `Mode::Direct` is the choice, not a path: "the direct path and the relay
+//! only". What a window's connections use right now is the core's
+//! `PreferredPath`, which a page reads as `direct.status().preferred`
+//! (`tunnel` or `direct`). The two share a word and nothing else.
 //!
 //! The same file remembers which instances have answered a rendezvous for
 //! this account before. That fact is an account ID and an origin: no secret,
@@ -20,17 +27,37 @@ pub enum Mode {
     #[default]
     Automatic,
     Tunnel,
+    /// The direct path and the relay only: never the tunnel once a direct
+    /// link is up (`wiring.rs` has the rules).
+    Direct,
 }
 
-/// One kept choice. `reverted` is the iPhone App's record of having set the
-/// choice back to automatic itself; the Desktop App never does (it cannot
-/// reach on a direct path an instance it cannot reach on the tunnel), so it
-/// is always absent here. It is kept in the shape so both read alike.
+/// The app set the choice back to automatic itself. The Desktop App does so
+/// only from `Mode::Direct`, when the instance could not be reached on a
+/// direct path or the relay: it never sets "Cloudflare tunnel only" back,
+/// because it cannot reach on a direct path an instance it cannot reach on
+/// the tunnel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reverted {
+    /// Milliseconds since the Unix epoch, as the iPhone App writes it.
+    pub at: u64,
+    pub reason: Reason,
+    /// The choice it was set back from.
+    pub from: Mode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reason {
+    Unreachable,
+}
+
+/// One kept choice.
 #[derive(Serialize, Deserialize)]
 struct Choice {
     mode: Mode,
     #[serde(default)]
-    reverted: Option<serde_json::Value>,
+    reverted: Option<Reverted>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -78,27 +105,49 @@ impl Choices {
         }
     }
 
-    pub fn mode(&self, account: &str, origin: &str) -> Mode {
+    /// An entry this build cannot read (a later mode, or a record of a
+    /// reversion it does not know) is no entry: automatic, set back by
+    /// nobody.
+    fn choice(&self, account: &str, origin: &str) -> Option<Choice> {
         self.stored
             .choices
             .get(&entry(account, origin))
             .and_then(|value| serde_json::from_value::<Choice>(value.clone()).ok())
+    }
+
+    pub fn mode(&self, account: &str, origin: &str) -> Mode {
+        self.choice(account, origin)
             .map_or(Mode::Automatic, |choice| choice.mode)
     }
 
-    /// Keeps the choice. It applies for this run even when it cannot be saved.
+    /// The app's own setting-back of this choice, while it stands: until the
+    /// next choice made for the instance.
+    pub fn reverted(&self, account: &str, origin: &str) -> Option<Reverted> {
+        self.choice(account, origin)
+            .filter(|choice| choice.mode == Mode::Automatic)
+            .and_then(|choice| choice.reverted)
+    }
+
+    /// Keeps the choice someone made. It applies for this run even when it
+    /// cannot be saved. Whatever the app had set back is forgotten.
     pub fn set(&mut self, account: &str, origin: &str, mode: Mode) {
+        self.keep(account, origin, mode, None);
+    }
+
+    /// The app sets the choice back to automatic itself, and keeps why.
+    pub fn revert(&mut self, account: &str, origin: &str, reverted: Reverted) {
+        self.keep(account, origin, Mode::Automatic, Some(reverted));
+    }
+
+    fn keep(&mut self, account: &str, origin: &str, mode: Mode, reverted: Option<Reverted>) {
         let key = entry(account, origin);
-        match mode {
-            Mode::Automatic => {
-                self.stored.choices.remove(&key);
-            }
-            Mode::Tunnel => {
-                let choice = Choice { mode, reverted: None };
-                self.stored
-                    .choices
-                    .insert(key, serde_json::to_value(choice).expect("choice JSON"));
-            }
+        if mode == Mode::Automatic && reverted.is_none() {
+            self.stored.choices.remove(&key);
+        } else {
+            let choice = Choice { mode, reverted };
+            self.stored
+                .choices
+                .insert(key, serde_json::to_value(choice).expect("choice JSON"));
         }
         self.save();
     }

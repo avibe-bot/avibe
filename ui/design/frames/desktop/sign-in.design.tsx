@@ -1,7 +1,6 @@
 import { DesktopSignIn } from '@/desktop/DesktopSignIn';
 import type { DesktopClientState } from '@/desktop/bridge';
-import en from '@/i18n/en.json';
-import zh from '@/i18n/zh.json';
+import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { SIGN_IN_PROVIDERS, type SignInMethods } from '@/sign-in/types';
 import { frames, type FrameSpec } from '../../frame';
 import { copyFor } from './instances-fixtures';

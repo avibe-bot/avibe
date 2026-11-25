@@ -206,6 +206,25 @@ def _pre_registry_cookie(config, issued_cookie):
     return remote_access._encode_session_cookie(config.remote_access.vibe_cloud.session_secret, payload)
 
 
+def test_desktop_sign_ins_that_describe_themselves_list_as_one_computer(install):
+    # Each opening of an instance in the Desktop app signs in afresh, with the app's User-Agent on
+    # the callback; its view of the instance then reports the computer (device_description.rs).
+    def sign_in():
+        return client(remote_access.make_session_cookie(
+            install, "member@test.invalid", "member", session_claims=_session_claims(install, role="member"),
+            device_headers={"User-Agent": "AvibeDesktop/0.4.2"},
+        ))
+
+    first, second = sign_in(), sign_in()
+    rows = listing(first)["mine"]
+    assert [(row["kind"], row["display_name"]) for row in rows] == [("desktop_app", "Avibe Desktop")] * 2
+    computer = dict(kind="desktop_app", display_name="Studio Mac", app_version="0.4.2", system_version="macOS 26.1")
+    for each in (first, second):
+        assert report(each, "3f" * 32, **computer).get_json() == {"ok": True}
+    (row,) = listing(first)["mine"]
+    assert {key: row[key] for key in computer} == computer
+
+
 def test_bulk_fence_covers_unseen_and_racing_legacy_cookie_preserves_caller(install):
     caller = login(install, "member", "member")
     known = login(install, "member", "member")

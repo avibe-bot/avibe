@@ -9,7 +9,7 @@ import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -183,14 +183,7 @@ class InboundAttachmentMaterializer:
                 except OSError:
                     size = None
             return (
-                FileAttachment(
-                    name=attachment.name,
-                    mimetype=attachment.mimetype,
-                    url=attachment.url,
-                    content=attachment.content,
-                    local_path=attachment.local_path,
-                    size=size,
-                ),
+                replace(attachment, size=size),
                 None,
             )
 
@@ -270,6 +263,7 @@ class InboundAttachmentMaterializer:
                 mimetype=mimetype,
                 local_path=str(final_path),
                 size=size,
+                media_token=attachment.media_token,
             )
             outcome = snapshot, LeasedAttachmentRecord(
                 name=name,

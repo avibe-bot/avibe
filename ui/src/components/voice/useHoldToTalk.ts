@@ -23,8 +23,9 @@ import {
   registerHoldSurface,
   type HoldMiss,
 } from '../../lib/nativeVoiceHold';
-import { IS_APPLE } from '../../lib/platform';
+import { IS_APPLE, isIosDevice } from '../../lib/platform';
 import { ShowPageVoiceDictation } from '../../lib/showPageVoiceDictation';
+import { requestVoiceInputStream } from '../../lib/voiceInput';
 import type { VoiceContextSource } from '../../lib/voiceContext';
 import { micErrorName, VoiceCaptureTrace } from '../../lib/voiceCaptureTrace';
 import type { VoiceTakeKeep } from '../../lib/voiceTakeKeeper';
@@ -73,11 +74,16 @@ export type HoldGesture = {
   cancelPx: number;
   /** Below this (slide-up) or within this of the bounds (leave), an armed take disarms. */
   uncancelPx: number;
+  /** When a press held this long opens the microphone, so the take records from `holdMs` on
+   *  instead of waiting for the device then. Nothing is recorded before `holdMs`; a press that
+   *  ends first closes it. Long enough that an ordinary tap or click ends before it. */
+  micAfterMs: number;
 };
 
 /** A finger (owner decision, 2026-11-04): the microphone opens at 200 ms; a surface that draws the
- *  press's progress shows it from 100 ms. */
-export const HOLD_GESTURE: HoldGesture = { holdMs: 200, ringDelayMs: 100, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60 };
+ *  press's progress shows it from 100 ms. In a page the device is started from 150 ms, as for a
+ *  mouse: an ordinary tap is down longer than 50 ms, and would show the microphone in use. */
+export const HOLD_GESTURE: HoldGesture = { holdMs: 200, ringDelayMs: 100, slopPx: 10, cancel: 'slide-up', cancelPx: 80, uncancelPx: 60, micAfterMs: 150 };
 /** A mouse holds longer than a finger, so a slow click or a trackpad press never opens the
  *  microphone: 350 ms, with the ring from 100 ms (owner decision, 2026-11-04); leaving the held
  *  box (or Esc) cancels (ui/design: composer/hold-desktop/b-pressing). Every surface a mouse can
@@ -89,6 +95,9 @@ export const MOUSE_HOLD_GESTURE: Partial<HoldGesture> = {
   cancel: 'leave',
   cancelPx: 16,
   uncancelPx: 0,
+  // An ordinary click is down about 80 to 130 ms: started later than that, the device is rarely
+  // opened by one (the Mac shows it in use), and on Desktop it is open by 350 ms in most holds.
+  micAfterMs: 150,
 };
 /** A take shorter than this is a slip, not a message. */
 export const HOLD_MIN_TAKE_MS = 500;
@@ -144,6 +153,8 @@ type Press = {
   frame: number;
   /** Stops the window following a press the element has not captured (a mouse before `holdMs`). */
   unfollow: (() => void) | null;
+  /** Stops the window hearing a finger's moves, release and cancel, which it does for the whole press. */
+  ends: (() => void) | null;
   /** The iOS App follows this press (lib/nativeVoiceHold): its word is waited for a moment past
    *  `holdMs` before the page recognises the hold itself. */
   followed: boolean;
@@ -155,6 +166,9 @@ type Press = {
   taken: boolean;
   /** A mouse (or trackpad) press: the App times a finger, and its word is not for this one. */
   mouse: boolean;
+  /** The microphone this press opened at `micAfterMs`, until its take takes it at the hold. */
+  mic: Promise<MediaStream> | null;
+  micTimer: ReturnType<typeof setTimeout> | null;
 };
 
 /** What the gesture reads from a pointer event, React's or the window's. */
@@ -248,6 +262,15 @@ const cancelFeedback = () => {
 // answering `prompt` to the permission query after that, which would turn every later press
 // into another ask that never records; the stream it handed over is the better answer.
 let allowedOnAsk = false;
+// A take in this page opened the microphone: where the page cannot read the permission (Desktop
+// cannot tell the Mac's own), a press may open it before the hold. Only a hold brings up a question.
+let micOpenedHere = false;
+
+const stopStream = (stream: MediaStream) => stream.getTracks().forEach((track) => track.stop());
+/** Closes a microphone a press opened and no take used. */
+const closeMic = (mic: Promise<MediaStream> | null) => {
+  if (mic) void mic.then(stopStream, () => undefined);
+};
 
 let surfaceCount = 0;
 
@@ -385,6 +408,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     clearTimeout(current.timer);
     cancelAnimationFrame(current.frame);
     current.unfollow?.();
+    current.ends?.();
+    if (current.micTimer) clearTimeout(current.micTimer);
+    closeMic(current.mic);
+    current.mic = null;
     releasing.current = true;
     try {
       if (current.element.hasPointerCapture?.(current.pointerId)) current.element.releasePointerCapture(current.pointerId);
@@ -513,6 +540,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (!current.started) {
       // The microphone never opened while the press was still on: refused, or no microphone.
       allowedOnAsk = false;
+      micOpenedHere = false;
       end(microphoneFailure(error));
       return;
     }
@@ -536,6 +564,14 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     const startupAsk = isDesktopShell() ? Symbol('capture-start') : null;
     if (startupAsk) permissionAsk.current = startupAsk;
     const keep = latest.current.keep?.();
+    const pageMic = !adopt && !(granted && hasNativeVoiceCapture());
+    // The microphone the press opened is this take's from here: it records from now on.
+    const opened = pageMic ? press.current?.mic ?? null : null;
+    if (press.current) {
+      if (press.current.micTimer) clearTimeout(press.current.micTimer);
+      press.current.micTimer = null;
+      if (opened) press.current.mic = null;
+    }
     const dictation = new ShowPageVoiceDictation({
       entry: 'hold',
       pressedAt,
@@ -546,6 +582,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       before: '',
       after: '',
       context: latest.current.context?.(),
+      ...(opened ? { stream: opened } : {}),
       maxFileBytes: maxFileBytes.current,
       ...(keep ? { keep: { ...keep, intent: 'send' as const } } : {}),
       onLiveChange: (live) => {
@@ -585,6 +622,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
         return;
       }
       current.started = true;
+      if (pageMic) micOpenedHere = true;
       // The take runs from here: setup time is not speech, so it cannot carry a slip past the
       // minimum. A take the App began has been recording since touch-down: it runs from its cue.
       if (!adopt) current.startedAt = Date.now();
@@ -923,6 +961,10 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       clearTimeout(press.current.timer);
       cancelAnimationFrame(press.current.frame);
       press.current.unfollow?.();
+      press.current.ends?.();
+      if (press.current.micTimer) clearTimeout(press.current.micTimer);
+      closeMic(press.current.mic);
+      press.current.mic = null;
     }
   }, []);
 
@@ -970,6 +1012,35 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     if (press.current && event.pointerId === press.current.pointerId) systemTook();
   }, [systemTook]);
 
+  /** At `micAfterMs` into a press: open the microphone, so the take records from the hold on.
+   *  Only where a take may record and the microphone is known to be allowed: a press never
+   *  brings up a permission question (that stays the hold's, which records on the next one). */
+  const openMic = useCallback(async (startedAt: number, permission: Promise<PermissionState | null>) => {
+    const state = await permission.catch(() => null);
+    // The surface may have gone while the permission was read: its cleanup closed what it had.
+    if (!mounted.current) return;
+    const current = press.current;
+    if (!current || current.startedAt !== startedAt || current.reached || current.mic) return;
+    if (availableRef.current !== true || voiceConsentForPress() !== 'granted') return;
+    if (!desktopVoiceLock.allowed() || isVoiceCaptureActive()) return;
+    // WebKit on iOS can ask again even after Allow (after about a minute idle, or while it keeps
+    // answering `prompt`): there a request is the hold's alone.
+    if (isIosDevice()) return;
+    // Allowed: the browser says so, or (where it cannot tell, as on Desktop) the microphone
+    // already opened in this page.
+    const allowed = state === 'granted' || (state === null && (micOpenedHere || allowedOnAsk));
+    if (!allowed) return;
+    const mic = requestVoiceInputStream();
+    // Refused or failed: the take started on it at the hold says so. A refusal also means this
+    // page no longer knows the microphone allowed (withdrawn in the system's settings).
+    mic.catch((error: unknown) => {
+      if (microphoneFailure(error) !== 'denied') return;
+      micOpenedHere = false;
+      allowedOnAsk = false;
+    });
+    current.mic = mic;
+  }, []);
+
   const onPointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (!desktopVoiceLock.allowed() || press.current) return;
     handled.current = false;
@@ -987,6 +1058,7 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
     handled.current = true;
     const element = event.currentTarget;
     let unfollow: (() => void) | null = null;
+    let ends: (() => void) | null = null;
     if (event.pointerType === 'mouse') {
       // A mouse press stays the browser's until it becomes a hold: its mouseup and click reach
       // what was pressed, so an editor places and shows its caret as on any click. The element
@@ -1005,6 +1077,20 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       } catch {
         // Without capture the hold still works while the pointer stays on the element.
       }
+      // The window hears a finger's moves, release and cancel too: WebKit can lose the capture
+      // during a slide without saying so, and from then on they go to wherever the finger is
+      // (seen in the iOS hold smoke: pointer-up on the body, no lost-capture), which the element
+      // never hears. A slide up to cancel is judged by those moves, so they count as well. Both
+      // paths are safe to run for one event: a move changes nothing it already changed, and the
+      // first to end the press clears it, so the other does nothing.
+      window.addEventListener('pointermove', onPointerMove, true);
+      window.addEventListener('pointerup', onPointerUp, true);
+      window.addEventListener('pointercancel', onPointerCancel, true);
+      ends = () => {
+        window.removeEventListener('pointermove', onPointerMove, true);
+        window.removeEventListener('pointerup', onPointerUp, true);
+        window.removeEventListener('pointercancel', onPointerCancel, true);
+      };
     }
     // The App's own capture needs no audio context of the page's.
     if (!hasNativeVoiceCapture()) void prewarmVoiceCapture().catch(() => undefined);
@@ -1036,16 +1122,25 @@ export function useHoldToTalk(options: HoldToTalkOptions) {
       timer: setTimeout(() => void holdReached(), holdMs + (followed ? NATIVE_HOLD_GRACE_MS : 0)),
       frame: requestAnimationFrame(tick),
       unfollow,
+      ends,
       followed,
       ...(miss ? { miss } : {}),
       reached: false,
       taken: false,
       mouse: event.pointerType === 'mouse',
+      mic: null,
+      micTimer: null,
     };
+    // The App records its own takes; in a page, the device is started while the press is held,
+    // where a take may record: nothing about the microphone is asked before this account's yes.
+    if (!hasNativeVoiceCapture() && availableRef.current === true && voiceConsentForPress() === 'granted') {
+      const permission = permissionState();
+      press.current.micTimer = setTimeout(() => void openMic(startedAt, permission), gesture.micAfterMs);
+    }
     setOutcome(null);
     setProgress(0);
     toPhase('pressing');
-  }, [holdReached, onPointerCancel, onPointerMove, onPointerUp, surfaceId, toPhase]);
+  }, [holdReached, onPointerCancel, onPointerMove, onPointerUp, openMic, surfaceId, toPhase]);
 
   const onLostPointerCapture = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (releasing.current) return;

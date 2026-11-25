@@ -105,20 +105,6 @@ export type SignedOutDevice = {
   results: AccountResult[];
 };
 
-/** The answer of a sign-out just made. `healthCleanupPending`: a conditional clean-up of synced
- *  Health data is not confirmed yet (it does not say the device had any). */
-export type SignOutNotice = {
-  device: string | null;
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-  healthCleanupPending: boolean;
-  /** The signed-out row showed Health on this page. */
-  hadHealth: boolean;
-  /** The row listed what the device does and Health was not among it: nothing is said about
-   *  Health's clean-up, which cannot concern it. */
-  withoutHealth?: boolean;
-};
-
 /** Why a claim (turning remote access on) did not go through: the local outcome names of
  *  `personal-installation-claims-runtime.md`, and `unknown` with the raw code for the rest. */
 export type ClaimProblem =
@@ -135,8 +121,9 @@ export type ClaimProblem =
 export type Reach =
   /** Not bound, in a browser: one action, the name is chosen at avibe.bot. */
   | { state: 'off'; surface: 'browser'; busy?: boolean; problem?: ClaimProblem }
-  /** The Desktop App on this computer: its own account sign-in is the sign-in. */
-  | { state: 'off'; surface: 'desktop'; account: string | null; name: string; nameState?: NameState }
+  /** The Desktop App on this computer: one action, which asks the shell for its claim dialog (the
+   *  App's own sign-in if needed, then the name). `busy`: that request was just sent. */
+  | { state: 'off'; surface: 'desktop'; busy?: boolean }
   /** Turning on. `waiting`: the request is open and not approved at avibe.bot yet; it can be
    *  cancelled. `retrying`: open, and the instance is trying avibe.bot again after it could not be
    *  reached or asked to wait. Otherwise avibe.bot approved and this computer is binding. */
@@ -152,8 +139,6 @@ export type Reach =
   /** The state could not be read. */
   | { state: 'unknown' };
 
-/** Whether the name typed for the domain is free. `taken` never suggests another name. */
-export type NameState = 'free' | 'taken';
 
 export type AddKind = 'iphone' | 'android' | 'computer';
 /** `remove`: sign the open device out. `health-off`: turn the open device's Health off.

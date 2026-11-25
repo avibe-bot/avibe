@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useApi } from '../context/ApiContext';
 import { useInstanceAuthorization } from '../context/InstanceAuthorizationContext';
 import { useToast } from '../context/ToastContext';
-import { APP_LANGUAGES } from '../i18n/options';
+import { APP_LANGUAGES, rememberLanguageChoice } from '../i18n/options';
 import { setConfigField } from './configMutations';
 import { useLatestRef } from './useLatestRef';
 
@@ -193,7 +193,10 @@ export const selectLanguage = (held: LanguageHost, code: string): Promise<void> 
   operation.latest = pick;
   // The pick they can see is the one they made, whatever the save does next —
   // and it retires any older failure, including for a user who persists nothing.
+  // It is also the only language this browser keeps: one it merely detected is
+  // never stored (src/i18n/options.ts).
   ask(host, operation, code);
+  rememberLanguageChoice(code);
   // Whether this pick is an instance decision at all is settled here, by the
   // authority the user held while making it, and never revisited: a member
   // changing their own interface is choosing something local, so authority
@@ -225,6 +228,9 @@ export const adoptPersistedLanguage = (held: LanguageHost, code: unknown): void 
   if (operation.picks > 0) return;
   if (code === becoming(host)) return;
   ask(host, operation, code);
+  // The instance's saved language is a stored choice, not a detection: keep it
+  // so the next load starts in it rather than in the browser's language.
+  rememberLanguageChoice(code);
 };
 
 /**
@@ -273,9 +279,14 @@ export const useLanguageSelection = (): LanguageSelection => {
     void Promise.resolve(i18n.loadLanguages([...APP_LANGUAGES])).catch(() => undefined);
   }, [i18n]);
 
-  const select = (code: string): Promise<void> => (
-    code === becoming(instanceOf(i18n)) ? Promise.resolve() : selectLanguage(i18n, code)
-  );
+  const select = (code: string): Promise<void> => {
+    if (code !== becoming(instanceOf(i18n))) return selectLanguage(i18n, code);
+    // Picking the language already on screen changes nothing here, but it is
+    // still the reader's choice: from now on this browser keeps it instead of
+    // following its environment.
+    rememberLanguageChoice(code);
+    return Promise.resolve();
+  };
 
   return { languages, current, select };
 };

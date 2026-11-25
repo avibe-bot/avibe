@@ -38,6 +38,8 @@ def describe(headers: Mapping[str, str]) -> dict:
         ),
         None,
     )
+    # A web view with no browser marker (an in-app or embedded view) still says its engine.
+    engine = "WebKit" if browser is None and "AppleWebKit/" in ua else None
     system = next(
         (
             name
@@ -53,10 +55,13 @@ def describe(headers: Mapping[str, str]) -> dict:
         ),
         None,
     )
-    native = re.search(r"\bAvibe(iOS|Desktop)/([0-9.]+)", ua)
-    kind = ("iphone_app" if native[1] == "iOS" else "desktop_app") if native else "browser"
+    # The whole version, a pre-release suffix included (3.2.9-rc.1); it ends at a space or a parenthesis.
+    native = re.search(r"\bAvibe(iOS|Desktop)/([0-9][0-9A-Za-z.+-]{0,63})", ua)
+    # Only a recognized browser is called one; anything else is a client the page cannot name.
+    kind = ("iphone_app" if native[1] == "iOS" else "desktop_app") if native else "browser" if browser else "unknown"
+    client = browser or engine
     label = {"iphone_app": "Avibe · iPhone", "desktop_app": "Avibe Desktop"}.get(kind) or (
-        f"{browser} · {system}" if browser and system else browser or system
+        f"{client} · {system}" if client and system else client or system
     )
     return dict(kind=kind, display_name=label, app_version=native[2] if native else None, system_version=None)
 

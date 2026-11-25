@@ -19,6 +19,12 @@
   const handlers = new Map();
   const pending = new Map();
   let asking = false;
+  // This document's mark. It goes with every request, and the shell hands
+  // the answer to the document that bears it and to no other: one that has
+  // taken this one's place in the window gets nothing of what this one
+  // asked.
+  const mark = crypto.randomUUID();
+  Object.defineProperty(window, '__AVIBE_DIRECT_DOCUMENT__', { value: mark });
 
   const emit = (event, payload) => {
     for (const handler of Array.from(handlers.get(event) ?? [])) {
@@ -34,8 +40,18 @@
     if (!message || typeof message !== 'object') return;
     const order = typeof message.preferenceOrder === 'number' ? message.preferenceOrder : 0;
     if (message.preference && typeof message.preference === 'object' && order >= preferenceOrder) {
+      // The page hears a choice that changed while it was open (the app's
+      // menu, another window, or the app setting it back itself), as the
+      // phone App tells it: a window event. Not the first one it is given,
+      // which it reads with `direct.preference()`.
+      const changed = preference !== null && JSON.stringify(preference) !== JSON.stringify(message.preference);
       preference = message.preference;
       preferenceOrder = order;
+      if (changed) {
+        const detail = { ...preference };
+        emit('direct.preferenceChanged', detail);
+        window.dispatchEvent(new CustomEvent('avibe:native:direct.preferenceChanged', { detail }));
+      }
     }
     const next = message.status;
     if (next && typeof next === 'object' && (status === null || next.sequence > status.sequence)) {
@@ -49,7 +65,11 @@
       const request = pending.get(reply.id);
       pending.delete(reply.id);
       clearTimeout(request.timer);
-      request.resolve(reply.result);
+      if (reply.error && typeof reply.error === 'object') {
+        request.reject({ code: String(reply.error.code), message: 'The app refused the request.' });
+      } else {
+        request.resolve(reply.result);
+      }
     }
   };
 
@@ -65,7 +85,9 @@
     }, true);
   }
 
-  const ask = (method, params) => new Promise((resolve, reject) => {
+  // `patience`: how long the shell may take. A measurement is bounded by the
+  // shell at 30 s, so it is waited for a little longer than that.
+  const ask = (method, params, patience = 10000) => new Promise((resolve, reject) => {
     if (pending.size >= 16) {
       reject({ code: 'unavailable', message: 'Too many requests are waiting for the app.' });
       return;
@@ -74,10 +96,10 @@
     const timer = setTimeout(() => {
       pending.delete(id);
       reject({ code: 'unavailable', message: 'The app did not answer.' });
-    }, 10000);
-    pending.set(id, { resolve, timer });
+    }, patience);
+    pending.set(id, { resolve, reject, timer });
     const link = document.createElement('a');
-    link.href = `avibe-app://direct?request=${encodeURIComponent(JSON.stringify({ token, id, method, params }))}`;
+    link.href = `avibe-app://direct?request=${encodeURIComponent(JSON.stringify({ token, id, document: mark, method, params }))}`;
     (document.body ?? document.documentElement).append(link);
     if (asksBeforeLeaving) {
       asking = true;
@@ -94,9 +116,11 @@
         return preference ? Promise.resolve({ ...preference }) : ask(method, {});
       case 'direct.handover':
         return ask(method, {});
+      case 'direct.measure':
+        return ask(method, {}, 35000);
       case 'direct.setPreference':
-        if (params?.mode !== 'automatic' && params?.mode !== 'tunnel') {
-          return Promise.reject({ code: 'invalid_argument', message: 'The mode is automatic or tunnel.' });
+        if (params?.mode !== 'automatic' && params?.mode !== 'tunnel' && params?.mode !== 'direct') {
+          return Promise.reject({ code: 'invalid_argument', message: 'The mode is automatic, tunnel or direct.' });
         }
         return ask(method, { mode: params.mode });
       default:
@@ -116,7 +140,7 @@
       contract: 1,
       platform: 'desktop',
       shellVersion: version,
-      capabilities: Object.freeze({ direct: 3, directPreference: 1 }),
+      capabilities: Object.freeze({ direct: 3, directPreference: 2, directMeasure: 1 }),
       call,
       on,
     }),

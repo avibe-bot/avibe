@@ -6,7 +6,7 @@ import math
 import secrets
 import time
 
-from sqlalchemy import select
+from sqlalchemy import case, select
 
 from core.mobile_health_contract import METRICS, MobileError
 from storage.db import get_cached_sqlite_engine
@@ -70,11 +70,17 @@ def queue_disconnect(conn, binding, subject, device, *, sids, remove_pairing, co
     condition = (links.c.code_hash.is_not(None) & links.c.issuer_sid.in_(sids))
     if remove_pairing:
         condition |= links.c.linked_at.is_not(None) & links.c.code_hash.is_(None)
+        if not codes_only:
+            # A code left for codes-only cleanup (a browser that signed in again) may already
+            # have paired in the private store: an unpair of this device takes it with it.
+            condition |= links.c.cleanup_pending == 2
     scope = (links.c.binding == binding, links.c.subject == subject, links.c.device_id == device, condition)
     # Caller owns the main DB write lock. This also works on SQLite before RETURNING.
     targets = list(conn.scalars(select(links.c.mobile_id).where(*scope)))
     if targets:
-        conn.execute(links.update().where(*scope).values(cleanup_pending=2 if codes_only else 1, ticket_hash=None))
+        # A full unpair (1) is never lowered to codes-only (2).
+        intent = case((links.c.cleanup_pending == 1, 1), else_=2) if codes_only else 1
+        conn.execute(links.update().where(*scope).values(cleanup_pending=intent, ticket_hash=None))
     return targets
 
 
