@@ -13,7 +13,6 @@ from typing import Any
 from config.paths import get_state_dir
 from core.anthropic_thread_errors import thread_error_fields
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
-from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
 
 BETA = "message-threads-2026-08-12"
@@ -60,11 +59,9 @@ class Parent:
     count: int
     history: bytes
     assistant: bytes
-    message_id: str | None  # None: ordinary warm witness, never a server parent.
-    tokens: int
+    message_id: str | None  # None: ordinary full witness, never a server parent.
+    tokens: int | None  # Only a server parent needs a size for delta admission.
     expires: float
-    reads: int = 0
-    trial: bootstrap.Trial | None = None
     terminal_mark: bool = False
     pinned_drop_block: bool = False
     carry_projection: str = ""
@@ -80,7 +77,7 @@ def parent_entry(session: str | None, *, claim: bool) -> tuple[Parent | None, st
         return None, "no_session"
     entry = parents.pop(session, None) if claim else parents.get(session)
     if isinstance(entry, Parent):
-        return entry, "bound" if entry.message_id else "warm_full"
+        return entry, "bound" if entry.message_id else "full_witness"
     return None, entry or "no_local_entry"
 
 
@@ -199,20 +196,8 @@ class Attempt:
     fixed: bytes
     history: bytes
     record: dict
-    capture_warm: bool
-    trial: bootstrap.Trial | None
+    capture_witness: bool
     pinned_drop_block: bool = False
-
-    async def check_reads(self, route: bytes, reads: int) -> None:
-        if self.trial is None:
-            return
-        self.record["bootstrap_observed_reads"] = reads
-        if reads * 100 < self.trial.reads * MIN_USAGE_PERCENT:
-            self.record["bootstrap_outcome"] = "bootstrap_read_loss"
-            saved = await asyncio.to_thread(bootstrap.settle, route, self.trial, "bootstrap_read_loss")
-            if saved != "bootstrap_read_loss":
-                self.record["bootstrap_ledger"] = saved
-            self.trial = None
 
 
 def _cache_plan(full: dict) -> tuple[str | None, int | None]:
@@ -237,7 +222,8 @@ def _cache_plan(full: dict) -> tuple[str | None, int | None]:
             offset += 1
     if static + len(marks) <= 3:
         return None, None
-    if len(marks) != 2 or static != 2:
+    if (len(marks) != 2 or static != 2 or marks[0][1] == marks[1][1]
+            or any(full["messages"][index]["role"] != "user" for _, index in marks)):
         return "preserve_cache_breakpoints", None
     if offset > 20 or marks[-1][0] - marks[0][0] >= 20:
         return "preserve_cache_breakpoints", marks[0][1]
@@ -349,7 +335,6 @@ async def plan_send(
     parent: Parent | None,
     repair: bool = False,
     ordinary: str | None = None,
-    preview: bool = False,
     carry_projection: str = "",
 ) -> Attempt:
     route = route_key(ep, gateway)
@@ -364,7 +349,7 @@ async def plan_send(
             ordinary = "history_repair"
         elif failed_routes.get(route, 0) > time.monotonic():
             ordinary = "route_cooldown"
-    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary, preview=preview)
+    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary)
 
 
 def prepare(
@@ -374,8 +359,6 @@ def prepare(
     parent: Parent | None,
     route: bytes,
     ordinary: str | None,
-    *,
-    preview: bool = False,
 ) -> Attempt:
     full = wire.body
     msgs = full["messages"]
@@ -400,9 +383,8 @@ def prepare(
         cache_reason, omitted_mark = _cache_plan(full)
         if cache_reason == "native_history":
             ordinary = cache_reason
-    warm = False
-    trial = None
-    capture_warm = False
+    matched_append = False
+    capture_witness = False
     mode = "full" if ordinary or (get_state_dir() / "disable-message-threads").exists() else "create"
     if mode == "full":
         reason = ordinary or "disabled"
@@ -420,26 +402,24 @@ def prepare(
             or message_digest([msgs[n]]) != parent.assistant
         ):
             reason = "history_changed"
-        elif parent.tokens < MIN_PARENT_TOKENS:
-            reason = "small_parent"
         else:
+            matched_append = True
             suffix = msgs[n + 1 :]
             # Encoded bytes bound text, not the tokens billed for decoded pixels. Never rely on the
             # usage heuristic for a suffix containing images, including a tool's returned images.
             if _contains_image(suffix):
                 mode, reason = "full", "image_delta"
+            elif parent.message_id is None:
+                pass  # A full-history create neither restores parent tokens nor needs a small suffix.
+            elif parent.tokens is None or parent.tokens < MIN_PARENT_TOKENS:
+                reason = "small_parent"
             elif budget_reason := _continuation_budget(full, suffix, parent.tokens):
                 reason = budget_reason
-            elif parent.message_id is None:
-                warm = parent.reads > 0
-            elif parent.trial is not None and not bootstrap.owns(route, parent.trial):
-                mode, reason = "full", "bootstrap_stale"
-            elif parent.terminal_mark and parent.trial is None and not _reaches_parent_mark(msgs[n], suffix):
+            elif parent.terminal_mark and not _reaches_parent_mark(msgs[n], suffix):
                 mode, reason = "full", "terminal_marker_out_of_reach"
-                capture_warm = omitted_mark is not None
+                capture_witness = omitted_mark is not None
             else:
                 mode = "continue"
-                trial = parent.trial
                 body = {k: v for k, v in full.items() if k not in ("system", "tools")}
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
     # Only a create actually sends the marker-stripped full history. For a verified delta,
@@ -449,11 +429,11 @@ def prepare(
     )
     if mode == "create" and cache_reason:
         reason = cache_reason
-        if warm and omitted_mark is not None:
-            trial, reason = bootstrap.reserve(route, parent.reads, preview)
-        if trial is None:
+        if matched_append and omitted_mark is not None:
+            reason = "full_history_create"
+        else:
             mode = "full"
-            capture_warm = omitted_mark is not None
+            capture_witness = omitted_mark is not None
     if mode == "create":
         body = {**full, "thread": {"type": "create"}}
         if omitted_mark is not None:
@@ -490,17 +470,14 @@ def prepare(
     record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
     if delta_rejection and delta_rejection != reason:
         record["delta_rejection"] = delta_rejection
-    if trial:
-        record.update(bootstrap_baseline_reads=trial.reads, bootstrap_prior_proven=trial.proven)
     return Attempt(
         replace(wire, headers=headers, body=body),
         mode,
         reason,
         parent,
         fixed,
-        message_digest(msgs) if mode != "full" or capture_warm else b"",
+        message_digest(msgs) if mode != "full" or capture_witness else b"",
         record,
-        capture_warm,
-        trial,
+        capture_witness,
         pinned_drop_block,
     )

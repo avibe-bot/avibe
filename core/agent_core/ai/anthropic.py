@@ -401,7 +401,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if speculative and self._gateway and not served_as_pinned() and event_type != "message_start":
                         yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                         return
-                    if (speculative or (attempt and attempt.capture_warm)) and lossless:
+                    if (speculative or (attempt and attempt.capture_witness)) and lossless:
                         lossless = shape.accepts(event_type, chunk)
                     if (
                         attempt
@@ -461,8 +461,6 @@ class AnthropicAdapter(ProviderAdapter):
                         if speculative and self._gateway and not served_as_pinned():
                             yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                             return
-                        if attempt and attempt.trial:
-                            await attempt.check_reads(route, response_usage.cache_read_tokens if response_usage else 0)
                         if attempt and attempt.mode == "continue":
                             total = (
                                 (
@@ -473,7 +471,8 @@ class AnthropicAdapter(ProviderAdapter):
                                 if response_usage
                                 else 0
                             )
-                            if attempt.prior is None or total * 100 < attempt.prior.tokens * threads.MIN_USAGE_PERCENT:
+                            if (attempt.prior is None or attempt.prior.tokens is None
+                                    or total * 100 < attempt.prior.tokens * threads.MIN_USAGE_PERCENT):
                                 yield assembler.error("thread_usage_mismatch", kind="invalid_request")
                                 return
                         start_usage = message.get("usage")
@@ -1064,9 +1063,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
                         elif isinstance(event, Done):
                             message = event.message
-                            if attempt and attempt.trial:
-                                await attempt.check_reads(route, message.usage.cache_read_tokens if message.usage else 0)
-                            if attempt and (speculative or attempt.capture_warm) and session:
+                            if attempt and (speculative or attempt.capture_witness) and session:
                                 if speculative and not response_id:
                                     veto = "missing_or_invalid_message_id"
                                 elif not message_stopped:
@@ -1075,14 +1072,10 @@ class AnthropicAdapter(ProviderAdapter):
                                     veto = shape.veto
                                 elif message.stop_reason not in ("stop", "tool_use"):
                                     veto = "ineligible_stop"
-                                elif not message.usage:
+                                elif speculative and message.usage is None:
                                     veto = "missing_usage"
                                 elif self._gateway and not served_as_pinned():
                                     veto = "unverified_origin"
-                                elif attempt.record.get("bootstrap_outcome") == "bootstrap_read_loss":
-                                    veto = "bootstrap_read_loss"
-                                elif attempt.capture_warm and not message.usage.cache_read_tokens:
-                                    veto = "cold_full"
                                 else:
                                     veto = None
                                 assistant_hash = None if veto else await asyncio.to_thread(_replayable_digest, message)
@@ -1091,28 +1084,11 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield event
                                     continue
                                 u = message.usage
-                                if attempt.mode == "continue" and attempt.trial:
-                                    if 0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]:
-                                        attempt.record["bootstrap_outcome"] = "retained_smaller"
-                                        trial = attempt.trial
-
-                                        async def accept_trial() -> None:
-                                            await asyncio.to_thread(threads.bootstrap.settle, route, trial, "bootstrap_proven")
-
-                                        observation.after_commit = accept_trial
-                                    else:
-                                        attempt.record["bootstrap_outcome"] = await asyncio.to_thread(
-                                            threads.bootstrap.settle, route, attempt.trial, "bootstrap_no_byte_saving"
-                                        )
                                 if threads.claims.get(session) is not claim:
                                     binding("superseded")
                                     yield event
                                     continue
-                                attempt.record["binding"] = "warm_full" if attempt.capture_warm else "bound"
-                                next_trial = None
-                                if attempt.mode == "create" and attempt.trial:
-                                    next_trial = replace(attempt.trial, reads=max(attempt.trial.reads, u.cache_read_tokens))
-                                    attempt.record["bootstrap_outcome"] = "awaiting_continuation"
+                                attempt.record["binding"] = "full_witness" if attempt.capture_witness else "bound"
                                 threads.remember(
                                     threads.parents,
                                     session,
@@ -1123,10 +1099,9 @@ class AnthropicAdapter(ProviderAdapter):
                                         attempt.history,
                                         assistant_hash,
                                         response_id if speculative else None,
-                                        u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens,
+                                        (u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens)
+                                        if speculative and u is not None else None,
                                         time.monotonic() + threads.PARENT_SECONDS,
-                                        u.cache_read_tokens,
-                                        next_trial,
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
                                         observation.carry_projection,
