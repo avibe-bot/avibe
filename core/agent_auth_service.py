@@ -2145,6 +2145,16 @@ class AgentAuthService:
         if flow is None:
             return
 
+        if backend == "antigravity":
+            self._consume_antigravity_text(flow, text)
+            if flow.url and not flow.login_prompt_sent:
+                flow.login_prompt_sent = True
+                instructions = self._t("command.setup.antigravityInstructions", url=flow.url)
+                if flow.auth_method == "oauth-personal":
+                    instructions = f"{self._t('command.setup.antigravityPersonalNotice')}\n\n{instructions}"
+                await self._send_message(flow.context, instructions)
+            return
+
         clean = sanitize_process_output(text)
         if not clean:
             return
@@ -2174,25 +2184,6 @@ class AgentAuthService:
         compact = re.sub(r"\s+", "", clean).lower()
 
         if backend == "claude":
-            return
-
-        if backend == "antigravity":
-            flow.pty_output_buffer = (flow.pty_output_buffer + text)[-16384:]
-            if not flow.url:
-                extracted = extract_antigravity_oauth_url(flow.pty_output_buffer)
-                if extracted:
-                    flow.url = extracted
-                    flow.awaiting_code = True
-            if not flow.login_prompt_sent and ANTIGRAVITY_CODE_PROMPT_RE.search(
-                sanitize_process_output(flow.pty_output_buffer)
-            ):
-                flow.awaiting_code = True
-            if flow.url and not flow.login_prompt_sent:
-                flow.login_prompt_sent = True
-                instructions = self._t("command.setup.antigravityInstructions", url=flow.url)
-                if flow.auth_method == "oauth-personal":
-                    instructions = f"{self._t('command.setup.antigravityPersonalNotice')}\n\n{instructions}"
-                await self._send_message(flow.context, instructions)
             return
 
         maybe_code = CODEX_DEVICE_CODE_RE.search(clean)
@@ -4436,26 +4427,26 @@ class AgentAuthService:
             self._close_flow_pty(flow)
 
     @staticmethod
-    def _consume_antigravity_web_text(flow: WebAuthFlow, text: str, *, eof: bool = False) -> None:
-        if text:
-            flow.pty_output_buffer = (flow.pty_output_buffer + text)[-16384:]
-            clean = sanitize_process_output(text)
-            if clean:
-                flow.last_status_text = clean
+    def _consume_antigravity_text(
+        flow: AgentAuthFlow | WebAuthFlow, text: str, *, eof: bool = False,
+    ) -> None:
+        # PTY read boundaries need not coincide with lines. Display filtering
+        # must never discard URL separators before the raw stream is parsed.
+        flow.pty_output_buffer = (flow.pty_output_buffer + text)[-16384:]
+        if clean := sanitize_process_output(text):
+            flow.last_status_text = clean
         if not flow.url:
-            extracted = extract_antigravity_oauth_url(flow.pty_output_buffer, eof=eof)
-            if extracted:
-                flow.url = extracted
-                flow.awaiting_code = True
-                flow.callback_kind = "code"
-                if flow.state == "starting":
-                    flow.state = "awaiting_code"
-        if flow.state == "starting" and ANTIGRAVITY_CODE_PROMPT_RE.search(
-            sanitize_process_output(flow.pty_output_buffer)
-        ):
+            flow.url = extract_antigravity_oauth_url(flow.pty_output_buffer, eof=eof)
+        if flow.url or ANTIGRAVITY_CODE_PROMPT_RE.search(sanitize_process_output(flow.pty_output_buffer)):
             flow.awaiting_code = True
+
+    @staticmethod
+    def _consume_antigravity_web_text(flow: WebAuthFlow, text: str, *, eof: bool = False) -> None:
+        AgentAuthService._consume_antigravity_text(flow, text, eof=eof)
+        if flow.awaiting_code:
             flow.callback_kind = "code"
-            flow.state = "awaiting_code"
+            if flow.state == "starting":
+                flow.state = "awaiting_code"
 
     async def _wait_for_antigravity_completion_web(self, flow: WebAuthFlow) -> None:
         def _with_fallback(detail: str) -> str:

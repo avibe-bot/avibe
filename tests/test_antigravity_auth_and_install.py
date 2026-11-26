@@ -530,7 +530,8 @@ async def test_maybe_emit_auth_recovery_message_branches_for_antigravity(fake_ag
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("method", "shows_notice"), [("oauth-personal", True), ("oauth-business", False)])
-async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_only(fake_agy: FakeAgyAuthFixture, method: str, shows_notice: bool) -> None:
+@pytest.mark.parametrize("terminator", ["\r\n", " ", "\x1b[0m"])
+async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_only(fake_agy: FakeAgyAuthFixture, method: str, shows_notice: bool, terminator: str) -> None:
     service, ctx = _make_auth_service(), MessageContext(user_id="u1", channel_id="c1", platform="slack")
     service._send_message = AsyncMock()
     service.controller._get_settings_key = lambda context: context.channel_id
@@ -540,7 +541,13 @@ async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_
     )
     service._flow_registry.put(flow, flow_key=service._make_flow_key(ctx, "antigravity"))
 
-    await service._handle_process_text(ctx, "antigravity", "Open https://accounts.google.com/o/oauth2/auth?client_id=agy&state=s1\n")
+    url = "https://accounts.google.com/o/oauth2/auth?client_id=agy&state=s1"
+    await service._handle_process_text(ctx, "antigravity", "Open " + url)
+    assert flow.url is None and service._send_message.await_count == 0
+    await service._handle_process_text(ctx, "antigravity", terminator)
+    assert flow.url == url and flow.awaiting_code
+    await service._handle_process_text(ctx, "antigravity", "Enter code: ")
+    assert flow.url == url and service._send_message.await_count == 1
 
     sent = service._send_message.await_args.args[1]
     notice = service._t("command.setup.antigravityPersonalNotice")
