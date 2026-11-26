@@ -50,20 +50,7 @@
   },
   "show": {
     "systemEntry": {
-      "defaultTitle": "Show Page",
-      "cta": "Add to Home Screen or Dock",
-      "iosCta": "Add to Home Screen",
-      "macCta": "Add to Dock",
-      "title": "Add this Show Page",
-      "iosTitle": "Add to Home Screen",
-      "macTitle": "Add to Dock",
-      "iosBody": "In Safari, tap Share, then Add to Home Screen.",
-      "macBody": "In Safari, click the Share button or open the File menu, then choose Add to Dock.",
-      "otherBody": "Open this page in Safari, then use Share or File to add it.",
-      "copyLink": "Copy link",
-      "copied": "Link copied",
-      "close": "Close",
-      "collapse": "Collapse guidance"
+      "defaultTitle": "Show Page"
     },
     "event": {
       "acceptanceUnknown": "The Show event may still be processing. It was not replayed locally.",
