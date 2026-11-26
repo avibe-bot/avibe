@@ -71,7 +71,11 @@ def test_notes_shell_appends_the_rc_override_line_once_before_the_ready_marker(t
     line = "not verified in this RC: `web-fetch-macos` \u2014 `no runner $(touch pwned) \\n %s` (go: `ok`)"
     notes = workspace / "release.md"
     # Generated Markdown can end inside an open comment or fence, and can quote a marker.
-    notes.write_text("# Release\n\n<!-- avibe:rc-unverified source=x sha256=y -->\n\n<!-- unclosed\n```\n", encoding="utf-8")
+    notes.write_text(
+        "<!-- avibe:update-notification=none -->\n<!-- avibe:update-notification=none, still open\n# Release\n\n"
+        "<!-- avibe:rc-unverified source=x sha256=y -->\n\n<!-- unclosed\n```\n",
+        encoding="utf-8",
+    )
     for _ in range(2):
         result = subprocess.run(
             ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
@@ -83,7 +87,9 @@ def test_notes_shell_appends_the_rc_override_line_once_before_the_ready_marker(t
     digest = hashlib.sha256(line.encode()).hexdigest()
     assert f"{line}\n<!-- avibe:rc-unverified source={source} sha256={digest} -->\n" in text
     assert text.count("<!-- avibe:rc-unverified ") == 1
-    assert text.index(line) < text.index("# Release") < text.index("<!-- unclosed")
+    # A complete silent marker may stay first; an incomplete marker-prefixed comment may not.
+    assert text.index("<!-- avibe:update-notification=none -->\n") < text.index(line)
+    assert text.index(line) < text.index("still open") < text.index("# Release") < text.index("<!-- unclosed")
     assert text.rstrip().endswith(f"<!-- avibe:release-notes=ready source={source} run=42 -->")
     assert not (workspace / "pwned").exists()
 

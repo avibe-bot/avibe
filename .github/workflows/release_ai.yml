@@ -808,7 +808,7 @@ jobs:
             # markers), so an unclosed block in the generated body cannot hide or garble it.
             UNVERIFIED_MARKER="<!-- avibe:rc-unverified source=${SOURCE_SHA} sha256=${LINE_SHA256} -->" \
               awk 'BEGIN { done = 0 }
-                   !done && $0 !~ /^<!-- (avibe|vibe-remote):update-notification/ && $0 != "" {
+                   !done && $0 != "<!-- avibe:update-notification=none -->" && $0 != "<!-- vibe-remote:update-notification=none -->" && $0 != "" {
                      print ENVIRON["UNVERIFIED_LINE"]; print ENVIRON["UNVERIFIED_MARKER"]; print ""; done = 1
                    }
                    { print }
