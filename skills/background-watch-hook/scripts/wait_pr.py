@@ -1551,7 +1551,7 @@ def _startup_failure_exit_code(error: Any) -> int:
     retrying those would poll forever without ever succeeding.
     """
 
-    return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else 1
+    return RETRY_EXIT_CODE if isinstance(error, InitialRequestRetriesExhausted) else error.exit_code
 
 
 def _watch_identity(
@@ -2731,6 +2731,8 @@ def main() -> int:
         )
         return 2
 
+    start = time.monotonic()
+    quota_deadline = start + args.timeout if args.timeout > 0 else float("inf")
     token_fingerprint = _token_fingerprint(token)
     viewer_login = None
     if args.pr is not None and not args.include_self_comments:
@@ -2744,6 +2746,7 @@ def main() -> int:
             viewer_result = retry_initial_request(
                 lambda: get_authenticated_login(token, raise_on_error=True),
                 description="GitHub viewer lookup",
+                quota_deadline=quota_deadline,
                 unauthenticated=token is None,
             )
             if viewer_result.error is not None:
@@ -2760,8 +2763,6 @@ def main() -> int:
     base_interval = max(args.interval, 1.0)
     effective_interval = base_interval
     settle_seconds = max(args.settle, 0.0)
-
-    start = time.monotonic()
 
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
@@ -2808,6 +2809,7 @@ def main() -> int:
     initial_request = retry_initial_request(
         _fetch_initial_state,
         description="initial GitHub PR state request",
+        quota_deadline=quota_deadline,
         unauthenticated=token is None,
     )
     if initial_request.error is not None:
@@ -3677,6 +3679,7 @@ def main() -> int:
                     ci_max_pages=args.max_pages,
                 ),
                 unauthenticated=token is None,
+                quota_deadline=quota_deadline,
             )
         else:
             poll_request = github_request(
@@ -3687,6 +3690,7 @@ def main() -> int:
                     cache=cache,
                 ),
                 unauthenticated=token is None,
+                quota_deadline=quota_deadline,
             )
         if poll_request.error is not None:
             print(f"GitHub polling failed: {poll_request.error}", file=sys.stderr)
@@ -3696,7 +3700,7 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 continue
-            return 1
+            return poll_request.error.exit_code
         if poll_request.value is None:
             print("GitHub polling completed without a result", file=sys.stderr)
             return 1

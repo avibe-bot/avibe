@@ -6,11 +6,21 @@ import json
 import re
 import shlex
 import urllib.error
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+
+@contextmanager
+def _advance_on_sleep(module):
+    clock = 0.0
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+    with patch.object(module.time, "monotonic", side_effect=lambda: clock), patch.object(module.time, "sleep", side_effect=advance):
+        yield
 
 
 def _load_module():
@@ -2266,8 +2276,7 @@ def test_fresh_pr_watch_baselines_existing_review_threads() -> None:
         patch.object(module, "_fetch_state", return_value=(state, 1)) as fetch,
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "monotonic", side_effect=[0.0, 1.0]),
-        patch.object(module.time, "sleep", side_effect=AssertionError("must not wait")),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -5853,7 +5862,7 @@ def test_explicit_pr_replay_does_not_replay_unrelated_completed_ci(with_comment)
         patch.object(module, "_fetch_state", return_value=(state, 2)),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "monotonic", side_effect=[0, 2]),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI",
@@ -5994,7 +6003,7 @@ def test_partial_manual_initialization_resets_observation_with_its_ci_baseline(
         patch.object(module, "_fetch_state", return_value=(state, 2)),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "monotonic", side_effect=[0, 2]),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--branch", "feature",

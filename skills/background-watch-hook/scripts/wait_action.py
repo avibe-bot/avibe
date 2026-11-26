@@ -18,6 +18,7 @@ from _github_wait_common import (  # noqa: E402
     AUTHENTICATION_HINT,
     NO_EVENT_EXIT_CODE,
     NO_EVENT_MARKER,
+    ResponseCache,
     get_token,
     github_request,
     min_interval_for_unauthenticated,
@@ -120,6 +121,8 @@ def main() -> int:
     effective_interval = base_interval
     success_conclusions = _parse_success_conclusions(args.success_conclusion)
     start = time.monotonic()
+    quota_deadline = start + args.timeout if args.timeout > 0 else float("inf")
+    cache = ResponseCache()
     selected: dict[str, list[dict[str, Any]]] = {workflow: [] for workflow in args.workflow}
     first_successful_fetch = True
 
@@ -143,21 +146,23 @@ def main() -> int:
                 branch=args.branch,
                 head_sha=args.sha,
                 max_pages=args.max_pages,
+                cache=cache,
             )
 
         request_result = (
             retry_initial_request(
                 _fetch_runs,
                 description="initial GitHub Actions request",
+                quota_deadline=quota_deadline,
                 unauthenticated=token is None,
             )
             if first_poll
-            else github_request(_fetch_runs, unauthenticated=token is None)
+            else github_request(_fetch_runs, unauthenticated=token is None, quota_deadline=quota_deadline)
         )
         if request_result.error is not None:
             print(str(request_result.error), file=sys.stderr)
             if first_poll or not request_result.error.retryable:
-                return 1
+                return request_result.error.exit_code
             print(
                 "Retryable GitHub request failure during polling; continuing in this watch",
                 file=sys.stderr,

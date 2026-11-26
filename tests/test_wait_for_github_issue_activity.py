@@ -120,7 +120,7 @@ def test_fetch_issue_comment_state_stops_after_cursor() -> None:
         },
     ]
 
-    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None):
+    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, cache=None):
         assert "issues/24/comments?sort=created&direction=desc" in base_url
         assert stop_after_id == 302
         return comments, 2
@@ -155,7 +155,7 @@ def test_fetch_new_issue_state_tracks_raw_cursor_and_request_count() -> None:
         },
     ]
 
-    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None):
+    def _fake_list_paginated_with_count(base_url, token, *, stop_after_id=None, max_pages=None, cache=None):
         assert "issues?state=all" in base_url
         assert stop_after_id == 401
         assert max_pages is None
@@ -178,7 +178,7 @@ def test_main_uses_raw_issue_cursor_for_new_issue_paging() -> None:
     module = _load_module()
     calls: list[int | None] = []
 
-    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         calls.append((stop_after_id, max_pages))
         if len(calls) == 1:
             return (
@@ -235,7 +235,7 @@ def test_main_uses_since_raw_issue_cursor_for_initial_new_issue_fetch() -> None:
     module = _load_module()
     calls: list[int | None] = []
 
-    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         calls.append((stop_after_id, max_pages))
         return (
             {
@@ -285,7 +285,7 @@ def test_main_uses_since_issue_cursor_for_initial_new_issue_fetch_without_raw_cu
     module = _load_module()
     calls: list[tuple[int | None, int | None]] = []
 
-    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         calls.append((stop_after_id, max_pages))
         return (
             {
@@ -333,7 +333,7 @@ def test_main_bootstraps_new_issue_watch_from_first_page_only() -> None:
     module = _load_module()
     calls: list[tuple[int | None, int | None]] = []
 
-    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         calls.append((stop_after_id, max_pages))
         if len(calls) == 1:
             return ({"issues": [], "raw_issue_cursor": 401}, 1)
@@ -374,7 +374,7 @@ def test_main_uses_since_issue_comment_cursor_for_initial_issue_fetch() -> None:
     module = _load_module()
     calls: list[int | None] = []
 
-    def _fake_fetch_issue_comment_state(repo, issue_number, token, *, stop_after_id=None):
+    def _fake_fetch_issue_comment_state(repo, issue_number, token, *, stop_after_id=None, cache=None):
         calls.append(stop_after_id)
         return (
             {
@@ -421,7 +421,7 @@ def test_main_reduces_unauthenticated_new_issue_interval_after_bootstrap() -> No
     fetch_calls: list[int | None] = []
     sleep_calls: list[float] = []
 
-    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None):
+    def _fake_fetch_new_issue_state(repo, token, *, stop_after_id=None, max_pages=None, cache=None):
         fetch_calls.append((stop_after_id, max_pages))
         if len(fetch_calls) == 1:
             return ({"issues": [], "raw_issue_cursor": 0}, 50)
@@ -493,7 +493,7 @@ def test_main_returns_retry_exit_code_for_retryable_initial_issue_http_error() -
         rc = module.main()
 
     assert rc == 75
-    assert "GitHub API error: 503 Service Unavailable" in stderr.getvalue()
+    assert "GitHub HTTP 503 Service Unavailable" in stderr.getvalue()
 
 
 def test_main_returns_terminal_exit_code_for_non_retryable_initial_issue_http_error() -> None:
@@ -511,7 +511,20 @@ def test_main_returns_terminal_exit_code_for_non_retryable_initial_issue_http_er
         rc = module.main()
 
     assert rc == 1
-    assert "GitHub API error: 404 Not Found" in stderr.getvalue()
+    assert "GitHub HTTP 404 Not Found" in stderr.getvalue()
+
+
+def test_issue_comments_still_report_when_optional_viewer_is_forbidden(capsys) -> None:
+    module = _load_module()
+    denied = urllib.error.HTTPError("https://example.invalid/user", 403, "Forbidden", {}, None)
+    with (
+        patch.object(module, "get_token", return_value="installation-token"),
+        patch.object(module, "get_authenticated_login", side_effect=denied),
+        patch.object(module, "_fetch_issue_comment_state", return_value=({"issue_comments": [{"id": 123}]}, 1)),
+        patch("sys.argv", ["wait_issue.py", "--repo", "owner/repo", "--issue", "24", "--catch-up"]),
+    ):
+        assert module.main() == 0
+    assert "issue_comment #123" in capsys.readouterr().out
 
 
 def test_main_returns_retry_exit_code_for_initial_issue_network_error() -> None:
@@ -529,4 +542,4 @@ def test_main_returns_retry_exit_code_for_initial_issue_network_error() -> None:
         rc = module.main()
 
     assert rc == 75
-    assert "GitHub network error: temporary network failure" in stderr.getvalue()
+    assert "GitHub network failure: temporary network failure" in stderr.getvalue()

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import http.client
 import importlib.util
+import io
 import json
 import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import pytest
 
 
 def _load_module():
@@ -118,6 +121,101 @@ def test_unauthenticated_rate_limit_is_terminal() -> None:
     assert result.error is not None
     assert result.error.retryable is False
     assert result.error.status_code == 429
+
+
+@pytest.mark.parametrize(("code", "headers", "body", "delays"), [
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1090"}, "", [93]),
+    (429, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1090"}, "", [93]),
+    (403, {"X-RateLimit-Remaining": "0"}, "", [60]),
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "999"}, "", [60]),
+    (429, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "bad"}, "", [60]),
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "9000"}, "", [3900]),
+    (403, {"Retry-After": "10"}, "", [10, 20, 40, 80]),
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1010", "Retry-After": "300"}, "", [300, 600]),
+    (429, {"Retry-After": "3000"}, "", [3000, 3900]),
+    (403, {}, "You have exceeded a secondary rate limit.", [60, 120]),
+    (403, {}, "Resource not accessible by integration", []),
+])
+def test_quota_recovery(code, headers, body, delays):
+    module = _load_module()
+    def refusal():
+        return urllib.error.HTTPError("https://example.invalid", code, "refused", headers,
+                                      io.BytesIO(json.dumps({"message": body}).encode()))
+    request = Mock(side_effect=[refusal() for _ in (delays or [0])] + ["recovered"])
+    with (
+        patch.object(module.time, "sleep") as sleep,
+        patch.object(module.time, "time", return_value=1000),
+        patch.object(module.random, "uniform", return_value=3),
+    ):
+        result = module.retry_initial_request(request, description="poll", quota_deadline=float("inf"))
+    assert [call.args[0] for call in sleep.call_args_list] == delays
+    if delays:
+        assert result.value == "recovered"
+    else:
+        assert not result.error.retryable
+        assert result.error.exit_code == 1
+
+
+def test_quota_recovery_respects_cycle_deadline():
+    module = _load_module()
+    error = urllib.error.HTTPError("https://example.invalid", 403, "refused", {"Retry-After": "100"}, None)
+    with patch.object(module.time, "monotonic", return_value=95), patch.object(module.time, "sleep") as sleep:
+        result = module.github_request(lambda: (_ for _ in ()).throw(error), quota_deadline=100)
+    sleep.assert_called_once_with(5)
+    assert result.error.exit_code == 124
+
+
+def test_graphql_quota_recovery_rejects_partial_data_and_bounds_retried_pages():
+    module = _load_module()
+    throttled = _FakeResponse({"errors": [{"type": "RATE_LIMITED"}], "data": {"partial": True}})
+    throttled.headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1006"}
+    clock = 0.0
+    requests = []
+
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def transport(request, timeout):
+        requests.append(timeout)
+        if len(requests) == 1:
+            return throttled
+        # Simulate a response taking longer than its remaining wall-clock budget.
+        advance(4)
+        return _FakeResponse({"data": {"late": True}})
+
+    def fetch():
+        module.github_graphql("query { a }", {}, "token")
+        return module.github_graphql("query { b }", {}, "token")
+
+    with (
+        patch.object(module.time, "time", return_value=1000),
+        patch.object(module.random, "uniform", return_value=1),
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+        patch.object(module.time, "sleep", side_effect=advance),
+        patch.object(module.urllib.request, "urlopen", side_effect=transport),
+    ):
+        result = module.github_request(fetch, quota_deadline=10)
+    assert result.error.exit_code == 124
+    assert requests == [10, 3]  # no next page after the deadline
+
+
+def test_quota_then_transient_failure_cannot_restart_startup_budget():
+    module = _load_module()
+    clock = 0.0
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+    operation = Mock(side_effect=[
+        urllib.error.HTTPError("https://example.invalid", 429, "slow down", {"Retry-After": "9"}, None),
+        urllib.error.HTTPError("https://example.invalid", 503, "temporarily unavailable", {}, None),
+        "late success",
+    ])
+    with patch.object(module.time, "monotonic", side_effect=lambda: clock), patch.object(module.time, "sleep", side_effect=advance):
+        result = module.retry_initial_request(operation, description="snapshot", quota_deadline=10)
+    assert clock == 10
+    assert result.error.exit_code == 124
+    assert operation.call_count == 2
 
 
 def test_http_incomplete_read_is_transient() -> None:

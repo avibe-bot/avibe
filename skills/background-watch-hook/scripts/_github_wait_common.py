@@ -7,12 +7,14 @@ import http.client
 import json
 import math
 import os
+import random
 import shutil
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any, Callable, Generic, TypeVar
 
@@ -56,6 +58,8 @@ AUTHENTICATION_HINT = (
 )
 RETRYABLE_HTTP_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 INITIAL_REQUEST_MAX_ATTEMPTS = 3
+MAX_QUOTA_WAIT = 65 * 60
+DEFAULT_QUOTA_WAIT = 60
 INITIAL_REQUEST_BACKOFF_SECONDS = 1.0
 NOT_MODIFIED_STATUS = 304
 # GitHub compares timestamps at one-second resolution, and a bot that posts a
@@ -65,6 +69,7 @@ NOT_MODIFIED_STATUS = 304
 SINCE_REWIND_SECONDS = 2
 
 _MISSING = object()
+_request_deadline: ContextVar[float] = ContextVar("github_request_deadline", default=math.inf)
 _T = TypeVar("_T")
 
 
@@ -72,6 +77,7 @@ class GitHubRequestError(RuntimeError):
     """Base class for failures classified at the GitHub request boundary."""
 
     retryable = False
+    exit_code = 1
 
     def __init__(self, message: str, *, status_code: int | None = None) -> None:
         super().__init__(message)
@@ -82,6 +88,52 @@ class GitHubTransientError(GitHubRequestError):
     """A network or retryable HTTP failure that a bounded waiter may retry."""
 
     retryable = True
+
+
+class GitHubRateLimit(GitHubTransientError):
+    def __init__(self, code: int, primary: float, secondary: int) -> None:
+        kind = "secondary" if secondary else "primary"
+        super().__init__(f"GitHub HTTP {code} {kind} rate limit", status_code=code)
+        self.primary = primary
+        self.secondary = secondary
+
+
+class GitHubRequestTimeout(GitHubRequestError):
+    exit_code = 124
+
+
+def _quota_error(code: int, headers: Any, *, secondary: bool, rate_limited: bool = False) -> GitHubRateLimit | None:
+    headers = {k.lower(): v for k, v in (headers or {}).items()}
+    primary_wait = 0.0
+    if headers.get("x-ratelimit-remaining", "").strip() == "0":
+        try:
+            until_reset = int(headers.get("x-ratelimit-reset", "")) - time.time()
+        except (ValueError, OverflowError):
+            until_reset = 0
+        primary_wait = until_reset + random.uniform(1, 5) if until_reset > 0 else DEFAULT_QUOTA_WAIT
+
+    retry_after = headers.get("retry-after")
+    secondary_wait = 0
+    if secondary or retry_after is not None or (not primary_wait and (code == 429 or rate_limited)):
+        try:
+            secondary_wait = int(retry_after or "")
+        except ValueError:
+            pass
+        if secondary_wait <= 0:
+            secondary_wait = DEFAULT_QUOTA_WAIT
+    if primary_wait or secondary_wait:
+        return GitHubRateLimit(code, primary_wait, secondary_wait)
+    return None
+
+
+def _request_timeout() -> float:
+    deadline = _request_deadline.get()
+    if deadline == math.inf:
+        return REQUEST_TIMEOUT_SECONDS
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise GitHubRequestTimeout("Timed out during GitHub request")
+    return min(remaining, REQUEST_TIMEOUT_SECONDS)
 
 
 class GitHubTerminalError(GitHubRequestError):
@@ -130,6 +182,14 @@ def _classify_github_exception(
                 f"GitHub unauthenticated polling hit a rate limit. {AUTHENTICATION_HINT}",
                 status_code=code,
             )
+        if code in {403, 429}:
+            try:
+                secondary = b"secondary rate limit" in err.read(8192).lower()
+            except (OSError, http.client.HTTPException):
+                secondary = False
+            limited = _quota_error(code, err.headers, secondary=secondary)
+            if limited is not None:
+                return limited
         error_type = GitHubTransientError if code in RETRYABLE_HTTP_STATUS_CODES else GitHubTerminalError
         return error_type(f"GitHub HTTP {code} {reason}", status_code=code)
     if isinstance(err, (urllib.error.URLError, TimeoutError, ConnectionError, OSError)):
@@ -151,15 +211,37 @@ def github_request(
     operation: Callable[[], _T],
     *,
     unauthenticated: bool = False,
+    quota_deadline: float | None = None,
 ) -> GitHubRequestResult[_T]:
-    """Run one GitHub operation through the transient/terminal taxonomy."""
+    """Retry quota failures in place up to the monotonic deadline (None: no wait).
 
-    try:
-        return GitHubRequestResult(value=operation())
-    except Exception as err:  # noqa: BLE001 - this is the classification boundary
-        return GitHubRequestResult(
-            error=_classify_github_exception(err, unauthenticated=unauthenticated)
-        )
+    Unbounded watches pass infinity. Settle probes leave waiting disabled: a
+    report already in hand must not be delayed by quota recovery.
+    """
+    multiplier = 1
+    deadline = math.inf if quota_deadline is None else quota_deadline
+    while True:
+        budget = _request_deadline.set(deadline)
+        try:
+            _request_timeout()  # Includes outer startup retries and successive viewer/state reads.
+            value = operation()
+            _request_timeout()  # Reject a late snapshot, even after the final page.
+            return GitHubRequestResult(value=value)
+        except Exception as err:  # noqa: BLE001 - this is the classification boundary
+            if deadline != math.inf and time.monotonic() >= deadline:
+                return GitHubRequestResult(error=GitHubRequestTimeout("Timed out during GitHub request"))
+            error = _classify_github_exception(err, unauthenticated=unauthenticated)
+        finally:
+            _request_deadline.reset(budget)
+        if not isinstance(error, GitHubRateLimit) or quota_deadline is None:
+            return GitHubRequestResult(error=error)
+        delay = min(MAX_QUOTA_WAIT, max(error.primary, error.secondary * multiplier))
+        multiplier = min(MAX_QUOTA_WAIT, multiplier * 2) if error.secondary else 1
+        remaining = max(0.0, quota_deadline - time.monotonic())
+        print(f"{error}; waiting {min(delay, remaining):.1f}s", file=sys.stderr)
+        time.sleep(min(delay, remaining))
+        if delay >= remaining or time.monotonic() >= quota_deadline:
+            return GitHubRequestResult(error=GitHubRequestTimeout("Timed out waiting for GitHub rate limit reset"))
 
 
 def retry_initial_request(
@@ -167,11 +249,12 @@ def retry_initial_request(
     *,
     description: str,
     unauthenticated: bool = False,
+    quota_deadline: float | None = None,
 ) -> GitHubRequestResult[_T]:
     """Retry initial network and retryable HTTP failures with bounded backoff."""
 
     for attempt in range(1, INITIAL_REQUEST_MAX_ATTEMPTS + 1):
-        result = github_request(operation, unauthenticated=unauthenticated)
+        result = github_request(operation, unauthenticated=unauthenticated, quota_deadline=quota_deadline)
         if result.succeeded or result.error is None or not result.error.retryable:
             return result
         failure = str(result.error)
@@ -183,6 +266,8 @@ def retry_initial_request(
                 )
             )
         delay = INITIAL_REQUEST_BACKOFF_SECONDS * (2 ** (attempt - 1))
+        if quota_deadline is not None:
+            delay = min(delay, max(0.0, quota_deadline - time.monotonic()))
         print(
             f"Transient {description} failure on attempt {attempt}/{INITIAL_REQUEST_MAX_ATTEMPTS}: "
             f"{failure}; retrying in {delay:.1f}s",
@@ -292,7 +377,7 @@ def github_get(url: str, token: str | None, *, cache: ResponseCache | None = Non
         request.add_header("If-None-Match", etag)
 
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(request, timeout=_request_timeout()) as response:
             payload = json.loads(response.read().decode("utf-8"))
             if cache is not None:
                 cache.downloaded += 1
@@ -319,12 +404,24 @@ def github_graphql(query: str, variables: dict[str, Any], token: str) -> dict[st
     request.add_header("Content-Type", "application/json")
     request.add_header("User-Agent", "background-watch-hook/0.1.0")
     request.add_header("Authorization", f"Bearer {token}")
-    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+    with urllib.request.urlopen(request, timeout=_request_timeout()) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, dict):
         raise RuntimeError("GitHub GraphQL returned an unexpected payload")
     if payload.get("errors"):
-        raise RuntimeError(f"GitHub GraphQL error: {payload['errors']}")
+        errors = payload["errors"]
+        # GraphQL can throttle a query inside HTTP 200. Do not accept partial
+        # data or turn unrelated permission/schema errors into infinite retries.
+        if isinstance(errors, list) and all(
+            isinstance(e, dict) and (e.get("type") == "RATE_LIMITED" or "secondary rate limit" in str(e.get("message", "")).lower())
+            for e in errors
+        ):
+            limited = _quota_error(200, response.headers, secondary=any(
+                "secondary rate limit" in str(e.get("message", "")).lower() for e in errors
+            ), rate_limited=True)
+            if limited is not None:
+                raise limited
+        raise RuntimeError(f"GitHub GraphQL error: {errors}")
     data = payload.get("data")
     if not isinstance(data, dict):
         raise RuntimeError("GitHub GraphQL response has no data object")
@@ -370,14 +467,6 @@ def later_since(previous: str | None, items: list[dict[str, Any]]) -> str | None
     if previous and previous >= candidate:
         return previous
     return candidate
-
-
-def is_retryable_http_error(err: urllib.error.HTTPError) -> bool:
-    try:
-        code = int(err.code)
-    except Exception:
-        return False
-    return code in RETRYABLE_HTTP_STATUS_CODES
 
 
 def get_authenticated_login(
