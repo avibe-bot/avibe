@@ -17,6 +17,8 @@ sys.path.insert(0, str(ROOT))
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
 from core.processing_indicator import ProcessingIndicatorService
+# Keep SQLAlchemy's Cython traversal enums loaded when the stub loader restores sys.modules.
+from storage.db import get_cached_sqlite_engine
 
 
 def _load_message_handler_class():
@@ -1451,7 +1453,6 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         from config.v2_sessions import SessionsStore
         from core.services import sessions as sessions_service
         from modules.agents.antigravity.models import record_antigravity_live_models
-        from storage.db import get_cached_sqlite_engine
         from vibe import api
 
         cfg = V2Config.default()
