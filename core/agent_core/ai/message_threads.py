@@ -6,12 +6,14 @@ import asyncio
 import hashlib
 import json
 import time
+import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any
 
 from config.paths import get_state_dir
 from core.anthropic_thread_errors import thread_error_fields
+from core import anthropic_thread_engine as thread_engine
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
 from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
@@ -68,6 +70,23 @@ class Parent:
     terminal_mark: bool = False
     pinned_drop_block: bool = False
     carry_projection: str = ""
+    engine_version: str | None = None
+
+
+class StreamOwner:
+    """Only the running stream holds a strong reference."""
+
+
+def publish_parent(session: str, parent: Parent) -> None:
+    remember(parents, session, parent)
+    if parent.trial and parent.trial.lease:
+        ref = weakref.ref(parent)
+
+        def available() -> bool:
+            node = ref()
+            return node is not None and parents.get(session) is node and node.expires > time.monotonic()
+
+        parent.trial.lease.handoff(available)
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
@@ -75,10 +94,15 @@ parents: OrderedDict[str, Parent | str] = OrderedDict()
 claims: OrderedDict[str, object] = OrderedDict()
 
 
-def parent_entry(session: str | None, *, claim: bool) -> tuple[Parent | None, str]:
+def parent_entry(session: str | None, *, claim: bool, owner: StreamOwner | None = None) -> tuple[Parent | None, str]:
     if not session:
         return None, "no_session"
-    entry = parents.pop(session, None) if claim else parents.get(session)
+    entry = parents.get(session)
+    if claim:
+        if owner and isinstance(entry, Parent) and entry.trial and entry.trial.lease:
+            # Transfer BEFORE removing the entry: no observable ownerless gap.
+            entry.trial.lease.handoff(weakref.ref(owner))
+        parents.pop(session, None)
     if isinstance(entry, Parent):
         return entry, "bound" if entry.message_id else "warm_full"
     return None, entry or "no_local_entry"
@@ -351,6 +375,7 @@ async def plan_send(
     ordinary: str | None = None,
     preview: bool = False,
     carry_projection: str = "",
+    lease: bootstrap.Lease | None = None,
 ) -> Attempt:
     route = route_key(ep, gateway)
     if not ordinary:
@@ -364,7 +389,7 @@ async def plan_send(
             ordinary = "history_repair"
         elif failed_routes.get(route, 0) > time.monotonic():
             ordinary = "route_cooldown"
-    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary, preview=preview)
+    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary, preview=preview, lease=lease)
 
 
 def prepare(
@@ -376,6 +401,7 @@ def prepare(
     ordinary: str | None,
     *,
     preview: bool = False,
+    lease: bootstrap.Lease | None = None,
 ) -> Attempt:
     full = wire.body
     msgs = full["messages"]
@@ -450,7 +476,7 @@ def prepare(
     if mode == "create" and cache_reason:
         reason = cache_reason
         if warm and omitted_mark is not None:
-            trial, reason = bootstrap.reserve(route, parent.reads, preview)
+            trial, reason = bootstrap.reserve(route, parent.reads, preview, version=parent.engine_version if gateway else None, lease=lease)
         if trial is None:
             mode = "full"
             capture_warm = omitted_mark is not None
@@ -477,6 +503,8 @@ def prepare(
         betas.append(BETA)
         if gateway:
             headers[PIN_SOURCE_HEADER] = ep.source_id
+            if trial and trial.version:
+                headers[thread_engine.HEADER] = trial.version
             if _header_value(ep.model_id):
                 headers.setdefault(PIN_MODEL_HEADER, ep.model_id)
             if mode == "continue":

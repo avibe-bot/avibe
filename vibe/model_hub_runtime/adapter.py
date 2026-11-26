@@ -25,6 +25,7 @@ from config.v2_config import (
     KEYLESS_EXA_SOURCE_ID,
     normalize_model_hub_base_url,
 )
+from core import anthropic_thread_engine as thread_engine
 from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from core.handlers.model_hub.adapter import (
     ApiKeyModelsCheck,
@@ -2007,6 +2008,10 @@ class CLIProxyEngineAdapter:
                 await self._ensure_installed_lifecycle()
             value = await run_owned_in_thread(self.lifecycle.journal.load)
             await run_owned_in_thread(self.lifecycle.project_legacy, value)
+
+    def thread_engine_version(self) -> str | None:
+        # Only the lifecycle owner confirms which verified release it actually launched.
+        return thread_engine.launched_version(self.lifecycle.running_release) if self.lifecycle else None
 
     def engine_release(self) -> str:
         from core.handlers.model_hub.hosted_tools import UNKNOWN_ENGINE_RELEASE
@@ -4072,6 +4077,7 @@ class CLIProxyEngineAdapter:
                     )
                 )
             admitted_engine_release = await run_owned_in_thread(self.engine_release)
+            thread_version = self.thread_engine_version() if origin == "vibey" else None
             transport_lease = self._engine_admission.retain()
             release = self._acquire_transport(transport_lease)
             request_sent = self._hold_unsent_request()
@@ -4102,6 +4108,7 @@ class CLIProxyEngineAdapter:
                 silence_bound_s=PROVIDER_SILENCE_TIMEOUT_S if origin == "vibey" else None,
             )
             handle.engine_release = admitted_engine_release
+            handle.thread_engine_version = thread_version
             transport_lease.abort = getattr(handle, "withdraw", handle.close_stream)
             if handle.outcome_available and engine_disowned_call(await handle.outcome()):
                 # The engine's last health check vouches for it no longer: the

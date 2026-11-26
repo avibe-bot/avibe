@@ -1891,6 +1891,7 @@ async def drive_sse_stream(
     translate: WireTranslator,
     refused: Callable[[ProviderError], bool] | None = None,
     on_send: Callable[[int], None] | None = None,
+    on_response_headers: Callable[[Mapping[str, str]], None] | None = None,
     on_http_error: Callable[[int, str], None] | None = None,
     bound_pin_handback: bool = False,
 ) -> AsyncIterator[Any]:
@@ -2050,6 +2051,8 @@ async def drive_sse_stream(
                     if resolved_origin is None:
                         candidate = assembler.aborted(cancel.reason)
                     else:
+                        if on_response_headers:
+                            on_response_headers(response.headers)
                         assembler.set_origin(
                             resolved_origin.origin,
                             resolved_origin.verified,

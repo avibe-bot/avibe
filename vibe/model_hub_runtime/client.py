@@ -456,6 +456,7 @@ class EngineInvokeHandle:
         self._close_lock = asyncio.Lock()
         self._stream_closed = False
         self.engine_release: str | None = None
+        self.thread_engine_version: str | None = None
         self._withdrawn = False
 
     def withdraw(self) -> Awaitable[None]:

@@ -196,8 +196,197 @@ async def test_only_committed_conversation_delta_earns_exemption(rejected):
     assert modes == ["full", "create", "continue"]
     assert len([r for r in store.rows["session"] if r.kind == "response"]) == (3 if rejected else 4)
     assert threads.bootstrap.reserve(threads.route_key(ep, False), 22000, preview=True)[1] == (
-        "bootstrap_pending" if rejected else "bootstrap_recheck"
+        "bootstrap_trial" if rejected else "bootstrap_recheck"
     )
+
+
+@pytest.mark.parametrize("orphan", ["expired", "evicted", "mismatched_claim"])
+async def test_only_orphaned_pending_allows_another_charged_warm_create(orphan, monkeypatch):
+    import time
+    from types import SimpleNamespace
+    from core.agent_core.ai import message_threads as threads
+
+    now = [time.monotonic()]
+    monkeypatch.setattr(threads, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr("core.agent_core.ai.anthropic.time", threads.time)
+    monkeypatch.setenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", "2")
+    first = replace(_request(messages=long_history()), thread_observation=ThreadObservation("owner"))
+    fresh = replace(first, thread_observation=ThreadObservation("challenger"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: served(22000))) as client:
+        adapter = AnthropicAdapter(client)
+        follow = await send(adapter, await send(adapter, first))
+        if orphan == "expired":
+            now[0] += threads.PARENT_SECONDS - 1
+        warm = await send(adapter, fresh)
+        assert "thread" not in (await preview_wire_request(warm, session_id="challenger")).wire.body
+        if orphan == "expired":
+            now[0] += 1
+        elif orphan == "evicted":
+            threads.parents.pop("owner")
+        else:
+            await send(adapter, replace(follow, messages=long_history()))
+        preview = await preview_wire_request(warm, session_id="challenger")
+        assert preview.wire.body.get("thread") == {"type": "create"}
+        await send(adapter, warm)
+        assert warm.thread_observation.attempts[0]["reason"] == "bootstrap_trial"
+        assert threads.bootstrap._state.used == 2
+
+
+@pytest.mark.parametrize("phase", ["create", "claim", "continue", "commit"])
+async def test_live_pair_never_looks_orphaned_across_parent_timeout(phase, monkeypatch):
+    import asyncio
+    import time
+    from types import SimpleNamespace
+    from core.agent_core.ai import message_threads as threads
+
+    now = [time.monotonic()]
+    clock = SimpleNamespace(monotonic=lambda: now[0])
+    monkeypatch.setattr(threads, "time", clock)
+    monkeypatch.setattr("core.agent_core.ai.anthropic.time", clock)
+    started, resume = asyncio.Event(), asyncio.Event()
+
+    async def handle(wire):
+        if json.loads(wire.content).get("thread", {}).get("type") == phase:
+            started.set()
+            await resume.wait()
+        return served(22000)
+
+    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("active"))
+    route = threads.route_key(req.endpoint, False)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        warm = await send(adapter, req)
+        if phase == "create":
+            pending = asyncio.create_task(send(adapter, warm))
+        else:
+            follow = await send(adapter, warm)
+            if phase == "claim":
+                plan = threads.plan_send
+
+                async def pause(*args, **kwargs):
+                    started.set()
+                    await resume.wait()
+                    return await plan(*args, **kwargs)
+
+                monkeypatch.setattr(threads, "plan_send", pause)
+            pending = asyncio.create_task(send(adapter, follow))
+        if phase == "commit":
+            await pending  # Adapter closed; only the candidate awaiting commit remains.
+        else:
+            await asyncio.wait_for(started.wait(), 2)
+        try:
+            now[0] += threads.PARENT_SECONDS + 1
+            assert threads.bootstrap.reserve(route, 100, False)[1] == "bootstrap_pending"
+        finally:
+            resume.set()
+            await pending
+        if phase == "commit":
+            await follow.thread_observation.after_commit()
+            assert threads.bootstrap.reserve(route, 100, True)[1] == "bootstrap_recheck"
+        if phase == "claim":
+            assert threads.bootstrap.reserve(route, 100, True)[1] == "bootstrap_trial"
+
+
+def test_orphan_replacement_is_ticket_local_and_never_restores_prior_proof():
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    a, b = b"A" * 32, b"B" * 32
+    original, _ = ledger.reserve(a, 100, False)
+    ledger.settle(a, original, "bootstrap_proven")
+    active = [True]
+    recheck, reason = ledger.reserve(a, 100, False, lease=ledger.Lease(lambda: active[0]))
+    other, _ = ledger.reserve(b, 100, False)
+    assert reason == "bootstrap_recheck" and ledger._state.used == 2
+    active[0] = False
+    fresh, reason = ledger.reserve(a, 100, False)
+    assert reason == "bootstrap_trial" and ledger._state.used == 3
+    assert ledger.owns(b, other) and ledger.owns(a, fresh)
+    assert ledger.settle(a, recheck, "bootstrap_proven") == "bootstrap_stale"
+    assert ledger.settle(a, recheck, "bootstrap_read_loss") == "bootstrap_read_loss"
+    assert ledger.settle(a, fresh, "bootstrap_proven") == "bootstrap_stale"
+    assert ledger.owns(b, other)
+
+
+def test_committed_versioned_proof_survives_restart_but_not_loss(monkeypatch):
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    monkeypatch.setenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", "1")
+    route = b"A" * 32
+    trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
+    assert ledger.settle(route, trial, "bootstrap_proven") == "bootstrap_proven"
+    monkeypatch.setattr(ledger, "_state", None)
+    for other, version in ((route, None), (route, "8.1.2"), (b"B" * 32, "8.0.63")):
+        assert ledger.reserve(other, 100, True, version=version)[1] == "bootstrap_daily_limit"
+    current, reason = ledger.reserve(route, 100, False, version="8.0.63")
+    assert reason == "bootstrap_recheck"
+    ledger.settle(route, current, "bootstrap_read_loss")
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_read_loss"
+
+
+@pytest.mark.parametrize("damage", ["busy", "missing_hint", "bad_count", "bad_version", "duplicate_hint"])
+def test_partial_or_ambiguous_snapshot_cannot_restore_any_proof(monkeypatch, damage):
+    import sqlite3
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    route = b"A" * 32
+    trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
+    ledger.settle(route, trial, "bootstrap_proven")
+    monkeypatch.setattr(ledger, "_state", None)
+    with sqlite3.connect(get_state_dir() / "message-thread-bootstrap.sqlite") as db:
+        if damage == "busy":
+            db.execute("BEGIN EXCLUSIVE")
+        else:
+            db.execute(
+                {
+                    "missing_hint": "DELETE FROM hint",
+                    "bad_count": "UPDATE hint SET used=-1",
+                    "bad_version": "INSERT INTO proof VALUES (zeroblob(32), 'unknown')",
+                    "duplicate_hint": "INSERT INTO hint SELECT 2, day, used, loss, until FROM hint",
+                }[damage]
+            )
+            db.commit()
+        assert ledger.reserve(route, 100, True, version="8.0.63")[1] == "bootstrap_trial"
+
+
+def test_successful_proof_revocation_is_not_republished_by_stale_unrelated_writer(monkeypatch):
+    import sqlite3
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    route = b"A" * 32
+    trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
+    ledger.settle(route, trial, "bootstrap_proven")
+    first_process = ledger._state
+    monkeypatch.setattr(ledger, "_state", None)
+    ledger.reserve(b"B" * 32, 100, False)  # Initialize a separate controller from the shared snapshot.
+    ledger.settle(route, trial, "bootstrap_read_loss")
+    monkeypatch.setattr(ledger, "_state", first_process)
+    ledger.reserve(b"C" * 32, 100, False)
+    with sqlite3.connect(get_state_dir() / "message-thread-bootstrap.sqlite") as db:
+        assert db.execute("SELECT count(*) FROM proof").fetchone() == (0,)
+
+
+def test_busy_recheck_and_loss_keep_live_cooldown_but_cannot_revoke_old_disk_proof(monkeypatch):
+    import sqlite3
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    route = b"A" * 32
+    trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
+    ledger.settle(route, trial, "bootstrap_proven")
+    path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    with sqlite3.connect(path) as db:
+        db.execute("BEGIN EXCLUSIVE")
+        trial, reason = ledger.reserve(route, 100, False, version="8.0.63")
+        assert reason == "bootstrap_recheck"
+        assert ledger.settle(route, trial, "bootstrap_read_loss") == "bootstrap_read_loss"
+        assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_read_loss"
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_recheck"
+    monkeypatch.setattr(ledger, "_state", None)  # Successful recheck precharge consumed the durable exemption.
+    assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_trial"
 
 
 def test_local_budget_loss_and_proof_survive_failed_snapshot_writes(monkeypatch, tmp_path):

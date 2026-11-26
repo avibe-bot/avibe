@@ -1161,6 +1161,8 @@ class Agent:
                                           if isinstance(terminal, Done) and request.thread_observation else None),
                         )
                     )
+                    if request.thread_observation:
+                        request.thread_observation.after_commit = None
                     relieve = (
                         purpose == "conversation"
                         and self.context is not None
@@ -1260,6 +1262,10 @@ class Agent:
             failure = error
             raise
         finally:
+            # The caller has left the only scope in which it can still commit this answer,
+            # even on cancellation. Audit records must not retain a live bootstrap capability.
+            for item in self._attempts[first:]:
+                item.after_commit = None
             if not aborted:
                 # Invariant 4: the ledger, not each exit path, keeps the usage of attempts that did not become a
                 # response row: a retry, a relief, a usage-only terminal, a refusal at admission, a failed commit.
