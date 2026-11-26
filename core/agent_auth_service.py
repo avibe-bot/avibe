@@ -1110,8 +1110,7 @@ class AgentAuthService:
                 resolved_backend,
                 self._t(
                     "command.setup.loginInProgress",
-                    vendor=err.vendor,
-                    backend=resolved_backend,
+                    backend=resolved_backend.capitalize(),
                 ),
             )
             return
@@ -1450,10 +1449,10 @@ class AgentAuthService:
         if backend == "claude":
             return "anthropic"
         if backend == "antigravity":
-            return "gemini"
+            return "google"
         return (provider or "opencode").strip().lower()
 
-    def _claim_shared_native_flow(
+    async def _claim_shared_native_flow(
         self,
         backend: str,
         *,
@@ -1462,13 +1461,22 @@ class AgentAuthService:
     ) -> None:
         """Claim the one shared native-login path before any provider spawn."""
         vendor = self._native_vendor_for_flow(backend, provider)
-        for flow in self._flows_by_id.values():
+        for flow in list(self._flows_by_id.values()):
             if (
                 getattr(flow, "native_cli", False)
                 and getattr(flow, "state", "starting") not in {"success", "failed", "cancelled"}
                 and flow.backend == backend
                 and (backend != "opencode" or flow.provider == provider)
             ):
+                if (
+                    isinstance(flow, WebAuthFlow)
+                    and flow.source_id in {None, owner_ref}
+                    and not flow.native_closing
+                    and not flow.cancel_requested
+                ):
+                    await finish_native_operation(self._terminate_web_flow(flow, final_state="cancelled"))
+                    self._flow_registry.drop(flow)
+                    continue
                 raise BackendLoginInProgressError(
                     vendor,
                     backend,
@@ -1540,23 +1548,19 @@ class AgentAuthService:
                 if existing is not None:
                     await self._terminate_flow(existing)
 
-            lease = self._acquire_native_lease(backend, source_id=owner_ref, new_source=new_source)
-            try:
-                provider = provider_id
-                if backend == "opencode" and context is not None:
-                    provider = await self._resolve_opencode_provider(context)
-                native_cli = backend != "opencode" or not (
-                    context is not None and self._supports_direct_opencode_api_key_setup(provider)
+            provider = provider_id
+            if backend == "opencode" and context is not None:
+                provider = await self._resolve_opencode_provider(context)
+            native_cli = backend != "opencode" or not (
+                context is not None and self._supports_direct_opencode_api_key_setup(provider)
+            )
+            if native_cli:
+                await self._claim_shared_native_flow(
+                    backend,
+                    provider=provider,
+                    owner_ref=owner_ref,
                 )
-                if native_cli:
-                    self._claim_shared_native_flow(
-                        backend,
-                        provider=provider,
-                        owner_ref=owner_ref,
-                    )
-            except BaseException:
-                lease.release()
-                raise
+            lease = self._acquire_native_lease(backend, source_id=owner_ref, new_source=new_source)
 
             flow_id = uuid.uuid4().hex[:12]
             if context is None:
