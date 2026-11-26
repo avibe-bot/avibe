@@ -75,6 +75,8 @@ export const APPLICATION_ROUTE_PATHS = [
   '/settings/diagnostics/logs',
   '/settings/logs',
   '/settings/access',
+  '/settings/experimental',
+  '/settings/experimental/source-filter',
   '/remote-access',
   '/doctor',
   '/doctor/logs',

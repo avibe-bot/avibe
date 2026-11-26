@@ -30,15 +30,14 @@ function useSourceFilter() {
   const [status, setStatus] = useState<SourceFilterStatus | null>(null);
   const [error, setError] = useState(false);
   const [saving, setSaving] = useState(false);
-  const refresh = useCallback(async () => {
-    try {
-      setStatus(await sourceFilterApi.get());
-      setError(false);
-    } catch {
-      setError(true);
-    }
+  useEffect(() => {
+    let live = true;
+    sourceFilterApi.get().then(
+      (next) => { if (live) { setStatus(next); setError(false); } },
+      () => { if (live) setError(true); },
+    );
+    return () => { live = false; };
   }, []);
-  useEffect(() => { void refresh(); }, [refresh]);
   const setEnabled = useCallback(async (enabled: boolean) => {
     setSaving(true);
     try {
@@ -50,7 +49,7 @@ function useSourceFilter() {
       setSaving(false);
     }
   }, []);
-  return { status, error, saving, refresh, setEnabled };
+  return { status, error, saving, setEnabled };
 }
 
 export const SettingsExperimentalPage: React.FC = () => {

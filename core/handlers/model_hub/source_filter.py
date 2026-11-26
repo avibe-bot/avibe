@@ -105,6 +105,12 @@ class HookAnswer:
     response: Optional[dict[str, Any]]
 
 
+def _hook_error_code(error: Mapping[str, Any]) -> Optional[str]:
+    """The ``code`` of a hook's own output error: the owner's script output, not a provider error envelope."""
+
+    return _code(error["code"]) if "code" in error else None
+
+
 def _code(value: object) -> Optional[str]:
     if isinstance(value, str) and 0 < len(value) <= 64 and value[0].isalpha() and set(value) <= _CODE_CHARS:
         return value
@@ -357,7 +363,7 @@ def search_record(output: Mapping[str, Any], *, attempts: object = None) -> dict
             "error": error["message"][:HOSTED_ERROR_MAX_CHARS],
             "sources": _sources(partial) if isinstance(partial, dict) else [],
         }
-        if (code := _code(error.get("code"))) is not None:
+        if (code := _hook_error_code(error)) is not None:
             record["error_code"] = code
     if isinstance(attempts, list):
         record["attempts"] = attempts
@@ -385,7 +391,7 @@ def fetch_record_for(output: Mapping[str, Any], *, requested_url: str, attempts:
         error = output["error"]
         url = requested_url[:_FETCH_URL_MAX]
         message = error["message"][:_FETCH_ERROR_MAX]
-        raw = {"status": "failed", "error": message, "content": message, "error_code": _code(error.get("code"))}
+        raw = {"status": "failed", "error": message, "content": message, "error_code": _hook_error_code(error)}
     record = fetch_record(raw, requested_url=url)
     if isinstance(attempts, list):
         record["attempts"] = attempts
