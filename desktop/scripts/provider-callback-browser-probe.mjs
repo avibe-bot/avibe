@@ -124,6 +124,10 @@ try {
         : scenario === 'server-error' ? 'serverError' : 'accountConflict';
       await callbackPage.getByRole('heading', {name:catalog.desktopBootstrap.providerCallback[terminalKey],exact:true}).waitFor();
       responseBody = await callbackPage.locator('body').innerText();
+      if (terminalKey === 'accountConflict') {
+        assert(responseBody.includes(catalog.desktopBootstrap.providerCallback.accountConflictNext));
+        assert(!responseBody.includes(catalog.desktopBootstrap.providerCallback.retry));
+      }
       assert.equal(await callbackPage.evaluate(() => window.__unsafe), undefined);
       assert.equal(await callbackPage.getByRole('link').getAttribute('href'), 'avibe://open');
       await callbackPage.screenshot({path:path.join(out,`${locale}-${scenario}-browser.png`)});

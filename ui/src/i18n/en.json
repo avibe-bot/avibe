@@ -199,7 +199,7 @@
       "error": "Update failed — retry"
     },
     "providerError": {
-      "accountConflict": "This email is linked to multiple accounts. Choose another sign-in method or contact support.",
+      "accountConflict": "This email is linked to more than one account. Use another way to sign in.",
       "serverError": "The sign-in service could not complete the request. Retry or choose another method.",
       "denied": "Permission to sign in was not granted. Retry or choose another method.",
       "timedOut": "Sign-in timed out. Please try again.",
@@ -216,6 +216,7 @@
       "denied": "Permission to sign in was not granted.",
       "emailUnverified": "Verify your email with your sign-in provider first.",
       "retry": "Return to Avibe to retry or choose another sign-in method.",
+      "accountConflictNext": "Go back to Avibe and use another way to sign in.",
       "details": "Details",
       "openApp": "Open Avibe"
     }

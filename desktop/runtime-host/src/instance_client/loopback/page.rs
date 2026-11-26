@@ -18,6 +18,7 @@ pub struct CallbackCopy {
     pub denied: String,
     pub email_unverified: String,
     pub retry: String,
+    pub account_conflict_next: String,
     pub details: String,
     pub open_app: String,
 }
@@ -68,7 +69,12 @@ pub(super) fn result(copy: &CallbackCopy, result: &ResultPage) -> String {
                 "provider_email_unverified" => &copy.email_unverified,
                 _ => &copy.failed,
             };
-            (reason, copy.retry.as_str(), failure.description.as_deref())
+            let next = if failure.code == "provider_account_conflict" {
+                &copy.account_conflict_next
+            } else {
+                &copy.retry
+            };
+            (reason, next.as_str(), failure.description.as_deref())
         }
     };
     render(copy, title, explanation, detail, false)
@@ -98,4 +104,30 @@ details{{margin:1.5rem 0;color:#52606d;font-size:.85rem;overflow-wrap:anywhere}}
         escape(explanation),
         escape(&copy.open_app),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance_client::loopback::ProviderFailure;
+
+    #[test]
+    fn account_conflict_offers_another_method_without_suggesting_a_retry() {
+        let copy = CallbackCopy {
+            retry: "Retry or choose another method".into(),
+            account_conflict_next: "Use another method".into(),
+            ..Default::default()
+        };
+        let conflict = result(
+            &copy,
+            &ResultPage::Failed(ProviderFailure::from_code("provider_account_conflict")),
+        );
+        assert!(conflict.contains(&copy.account_conflict_next));
+        assert!(!conflict.contains(&copy.retry));
+        let server = result(
+            &copy,
+            &ResultPage::Failed(ProviderFailure::from_code("provider_server_error")),
+        );
+        assert!(server.contains(&copy.retry));
+    }
 }

@@ -199,7 +199,7 @@
       "error": "更新失败，可重试"
     },
     "providerError": {
-      "accountConflict": "这个邮箱关联了多个账号。请换一种登录方式，或联系支持。",
+      "accountConflict": "这个邮箱关联了多个账号。请换一种登录方式。",
       "serverError": "登录服务未能完成请求。请重试，或换一种登录方式。",
       "denied": "此次登录未获得授权。请重试，或换一种登录方式。",
       "timedOut": "登录已超时，请重试。",
@@ -216,6 +216,7 @@
       "denied": "此次登录未获得授权。",
       "emailUnverified": "请先在登录服务中验证邮箱。",
       "retry": "请回到 Avibe 重试，或换一种登录方式。",
+      "accountConflictNext": "请回到 Avibe，换一种登录方式。",
       "details": "详细信息",
       "openApp": "打开 Avibe"
     }
