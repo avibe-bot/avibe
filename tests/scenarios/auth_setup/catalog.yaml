@@ -1408,7 +1408,12 @@ scenarios:
       - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: signs in with an email code on the same steps"
       - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: drops a verification an account change ended while it ran"
       - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: drops a verification an account change ended while it ran"
-      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus focuses desktop code entry with touch=false, accepts paste, and stays editable after clearing"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus focuses desktop code entry with touch=true, accepts paste, and stays editable after clearing"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus focuses ios code entry with touch=false, accepts paste, and stays editable after clearing"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus restores focus after a busy verification fails without stealing it on ordinary rerenders"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus waits for an initially busy step to unlock before focusing"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus does not open the iOS/touch keyboard on entry or retry, but still accepts a tap and paste"
     reason: >-
       #3946 moved the sign-in steps into ui/src/sign-in, reached through one
       adapter per app. The matrix runs every case against both adapters: the
