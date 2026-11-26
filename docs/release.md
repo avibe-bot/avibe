@@ -79,6 +79,9 @@ still ship with Product's go:
    not green on an RC, it honours an exception only if this exact tag's
    published notes carry that one line with Stage 1's marker for the same
    source and line digest. Prose that merely quotes the format does not count.
+   The marker guards against accidental prose, not against people who can
+   edit release notes: they can also dispatch Stage 1, so they are trusted as
+   release operators.
 
 There is no recheck at publication. If the named job later runs and fails, that
 is fixed forward in the next RC.

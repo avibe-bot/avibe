@@ -551,8 +551,9 @@ def test_override_is_refused_for_a_stable_tag() -> None:
     [
         ("ruff", "", "go"), ("ruff", "why", ""), ("", "why", "go"), ("ruff", "why\nnext", "go"), ("ruff", "why", "a `b` c"),
         ("ruff", "<!-- avibe:update-notification=none -->", "go"),
+        ("ruff", "why\u2028next", "go"), ("ruff", "why", "a\u0085b"),
     ],
-    ids=["no-reason", "no-go", "no-job", "two-lines", "backtick", "release-control-comment"],
+    ids=["no-reason", "no-go", "no-job", "two-lines", "backtick", "release-control-comment", "line-separator", "next-line"],
 )
 def test_override_needs_all_three_plain_fields(job: str, reason: str, go: str) -> None:
     with pytest.raises(gate.ReleaseBackstopError):
@@ -652,3 +653,21 @@ def test_stage2_never_reads_notes_for_a_red_stable_tag(monkeypatch: pytest.Monke
 
     assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", TAG, "--unverified-from-notes"]) == 1
     assert not any(path.startswith("releases/") for path, _ in api.calls)
+
+
+def test_stage2_resolves_the_tag_once_for_marker_and_proof(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    api = NotesApi(body=f"{LINE}\n{_marker()}", **_red())
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setattr(gate, "GitHubApi", lambda repository, token: api)
+
+    assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", RC_TAG, "--unverified-from-notes"]) == 0
+    # One resolution for the plain proof attempt, one shared by the marker and the override proof.
+    assert sum(path.startswith("git/ref/tags/") for path, _ in api.calls) == 2
+
+
+def test_stage1_line_round_trips_through_stage2() -> None:
+    unverified = gate._unverified_from("web-fetch-macos", "粘贴的 reason — ok", "她说：可以")
+    line = unverified.line()
+    api = NotesApi(body=f"# Notes\n{line}\n{_marker(line)}\n", **_red())
+
+    assert gate.unverified_from_notes(api, RC_TAG, SOURCE_SHA) == unverified

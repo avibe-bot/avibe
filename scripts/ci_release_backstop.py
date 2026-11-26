@@ -398,12 +398,13 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
 
 
 def prove_release(
-    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, unverified: UnverifiedJob | None = None
+    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, unverified: UnverifiedJob | None = None,
+    source_sha: str | None = None,
 ) -> BackstopProof | PullRequestProof | UnverifiedProof:
     if unverified is not None:
         if not RC_TAG_RE.fullmatch(tag):
             raise ReleaseBackstopError(f"An unverified-job exception applies only to gh-vX.Y.ZrcN tags, not {tag}")
-        source_sha = resolve_tag_sha(api, tag)
+        source_sha = source_sha or resolve_tag_sha(api, tag)
         proof, state, run_id = _backstop(api, source_sha)
         # The attestation replaces the verdict, green or not; the report keeps the observed state.
         if proof is not None:
@@ -424,7 +425,11 @@ def _unverified_from(job: str, reason: str, go: str) -> UnverifiedJob | None:
     for name, value in values.items():
         if not value:
             raise ReleaseBackstopError("An unverified-job exception needs the job, a reason and the go, all three")
-        if len(value) > _EXCEPTION_FIELD_LIMITS[name] or any(ord(ch) < 32 or ch in "`<>" for ch in value):
+        if (
+            len(value) > _EXCEPTION_FIELD_LIMITS[name]
+            or value.splitlines() != [value]  # Unicode line separators too, as Stage 2 reads lines.
+            or any(ord(ch) < 32 or ch in "`<>" for ch in value)
+        ):
             # No backticks (literal rendering) and no angle brackets (release-control comments).
             raise ReleaseBackstopError(
                 f"The exception's {name} must be one plain line of at most {_EXCEPTION_FIELD_LIMITS[name]} "
@@ -433,8 +438,13 @@ def _unverified_from(job: str, reason: str, go: str) -> UnverifiedJob | None:
     return UnverifiedJob(**values)
 
 
-def unverified_from_notes(api: GitHubApi, tag: str) -> UnverifiedJob | None:
-    """Read the one override Stage 1 wrote and bound into this exact tag's published notes, if any."""
+def unverified_from_notes(api: GitHubApi, tag: str, source_sha: str) -> UnverifiedJob | None:
+    """Read the one override Stage 1 wrote and bound into this exact tag's published notes, if any.
+
+    Trust boundary (Product's decision D): Stage 1 is the only writer of this marker. Anyone
+    who can edit release notes can also dispatch Stage 1, so release editors are trusted the
+    same as release operators; the marker guards against accidental prose, not against them.
+    """
     release = api.get(f"releases/tags/{urllib.parse.quote(tag, safe='')}")
     body = release.get("body") if isinstance(release, dict) else None
     lines = body.splitlines() if isinstance(body, str) else []
@@ -446,7 +456,7 @@ def unverified_from_notes(api: GitHubApi, tag: str) -> UnverifiedJob | None:
         raise ReleaseBackstopError(f"The notes for {tag} carry more than one unverified-job marker")
     index, marker = markers[0]
     source, digest = marker.groups()
-    if source != resolve_tag_sha(api, tag):
+    if source != source_sha:
         raise ReleaseBackstopError(f"The unverified-job marker in {tag}'s notes names another source")
     line = lines[index - 1] if index > 0 else ""
     match = NOTES_LINE_RE.fullmatch(line)
@@ -495,10 +505,14 @@ def main(argv: list[str] | None = None) -> int:
                 proof = prove_release(api, tag=args.tag)
             except ReleaseBackstopError:
                 # Only a red RC consults its notes; a green or stable tag never reads them.
-                unverified = unverified_from_notes(api, args.tag) if RC_TAG_RE.fullmatch(args.tag) else None
+                if not RC_TAG_RE.fullmatch(args.tag):
+                    raise
+                # Resolve once: the marker, the backstop report and the proof name the same commit.
+                source_sha = resolve_tag_sha(api, args.tag)
+                unverified = unverified_from_notes(api, args.tag, source_sha)
                 if unverified is None:
                     raise
-                proof = prove_release(api, tag=args.tag, unverified=unverified)
+                proof = prove_release(api, tag=args.tag, unverified=unverified, source_sha=source_sha)
         elif args.source_sha is not None:
             if unverified is not None:
                 raise ReleaseBackstopError("An unverified-job exception is checked against a tag, not a bare SHA")
