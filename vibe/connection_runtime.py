@@ -40,9 +40,11 @@ def delegated_direct_change(authority, enabled):
             if config.remote_access.vibe_cloud.direct != enabled:
                 cs.journal.supersede(config, {'direct'})
                 cs.journal.begin(config, 'direct', enabled)
-                config.remote_access.vibe_cloud.direct = enabled
+                config.remote_access.vibe_cloud.set_path_choice("direct", enabled)
                 config.save()
                 cs.journal.finish(cs.journal.load(config), 'applied', 'delegated_cli')
+            elif config.remote_access.vibe_cloud.set_path_choice('direct', enabled):
+                config.save()  # a reaffirmed default is now an explicit choice
             return {'ok': True, 'accepted': False}
         expected = cs.binding(config)
         origin = tunnel.origin_service_for_pairing(config)
@@ -185,6 +187,8 @@ def prepare(actor, key, new):
             old = state['operation'] or {}
             if old.get('setting') == key and old['state'] != 'restoring':
                 raise cs.ConnectionError('connection_change_busy')
+            if key in cs.SWITCHES and config.remote_access.vibe_cloud.set_path_choice(cs.FIELDS[key], new):
+                config.save()  # provenance only; no transport operation or pin cancellation
             return None  # reaffirming a value does not cancel an in-flight pin retry
         if key in cs.SWITCHES:
             _switch_gate(actor, config, key, new)
@@ -274,7 +278,7 @@ def apply(actor, reservation):
                 _bound(actor, config)
                 cs.journal.applying(config, op_id)
                 _switch_gate(actor, config, key, new)
-                setattr(config.remote_access.vibe_cloud, cs.FIELDS[key], new)
+                config.remote_access.vibe_cloud.set_path_choice(cs.FIELDS[key], new)
                 config.save()
                 cs.journal.finish(cs.journal.load(config), 'applied', 'saved')
                 direct_lifecycle.notify_config_changed(config)

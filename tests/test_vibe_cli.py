@@ -4788,6 +4788,7 @@ def test_remote_direct_install_is_explicit_and_never_loads_or_changes_pairing(mo
 
 def test_remote_direct_status_loads_persisted_choice(monkeypatch, capsys):
     config = v2_config.V2Config.default()
+    config.remote_access.vibe_cloud.set_path_choice("direct", False)
     config.save()
     loaded = []
     def status(config):
@@ -4814,7 +4815,8 @@ def test_cmd_remote_direct_on_writes_setting_without_restart(monkeypatch, capsys
     import config.v2_config as v2_config
 
     saved = []
-    config = SimpleNamespace(remote_access=SimpleNamespace(vibe_cloud=SimpleNamespace(direct=False)))
+    config = v2_config.V2Config.default()
+    config.remote_access.vibe_cloud.set_path_choice("direct", False)
 
     def fake_update(mutator):
         mutator(config)

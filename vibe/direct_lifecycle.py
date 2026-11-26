@@ -85,6 +85,8 @@ def _report_fields(state: str, reason: str, certificate_error: str | None) -> di
         return fields
     if state == "installing":
         return {"direct_state": "installing"}
+    if reason == "executable_not_found":
+        return {"direct_state": "install_failed", "direct_reason": "spawn"}
     if reason in {"transport_install_failed", "transport_start_failed"}:
         # A start exception can be the ingress, the child, or its handshake.
         # Do not claim a spawn/hash/download cause without producer evidence.
@@ -223,6 +225,7 @@ class DirectAccessLifecycle:
         self._opt_in_generation = 0
         self._install_at = 0.0
         self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
+        self._install_reason = "other"
         self._install_failed = False
         self._binary: str | None = None
         self._binary_valid_until = 0.0
@@ -248,6 +251,7 @@ class DirectAccessLifecycle:
         self._request_sequence = 0
         self._last_response_sequence = 0
         self._certificate_result: CertificateResult | None = None
+        self._certificate_retry_delay = INSTALL_RETRY_INITIAL_SECONDS
         self._poll_at: float | None = 0.0
         self._retry_cancelled = False
         self._cancelled_retry_used = False
@@ -255,6 +259,8 @@ class DirectAccessLifecycle:
         self._supervisor: Any = None
         self._resource_generation: int | None = None
         self._failed_generation: int | None = None
+        self._next_start = 0.0
+        self._start_delay = INSTALL_RETRY_INITIAL_SECONDS
         self._state_lock = threading.Lock()
         self._settled_generation: int | None = None
         self._status = DirectAccessStatus(False, "disabled", "setting_off")
@@ -296,6 +302,8 @@ class DirectAccessLifecycle:
             self._generation += 1
             self._settled_generation = None
         self._failed_generation = None
+        self._start_delay = INSTALL_RETRY_INITIAL_SECONDS
+        self._next_start = 0.0
         self._resource_generation = None
         # A worker from the retired generation can have replaced the on-disk
         # chain before its result is fenced. Never restart from cached old paths:
@@ -372,6 +380,8 @@ class DirectAccessLifecycle:
         else:
             traversal = result.get("public_traversal_allowed") is True and bool(ticket.signature[-1])
             if traversal != self._public_traversal_allowed:
+                self._clear_binary()
+                self._next_binary_check = 0.0
                 # A change of policy retires the published endpoint and fences
                 # already-started work; this report still renews ordinary direct.
                 self._invalidate()
@@ -486,30 +496,38 @@ class DirectAccessLifecycle:
                     self._config_read_task = None
             await asyncio.sleep(CONFIG_POLL_INTERVAL_SECONDS)
 
-    def _install_pin(self, generation: int, signature: tuple[Any, ...]) -> tuple[int, bool | None]:
+    def _install_pin(self, generation: int, signature: tuple[Any, ...]) -> tuple[int, bool | None, str]:
         from core.direct_transport_runtime import DirectTransportRuntimeManager
         from core.managed_runtime import omit_managed_runtime_log_details
 
         try:
             if _config_signature(self._config_loader()) != signature:
-                return generation, None
+                return generation, None, "other"
         except Exception:
-            return generation, None
+            return generation, None, "other"
         with self._state_lock:
             if self._shutdown or generation != self._generation:
-                return generation, None
+                return generation, None, "other"
         # An admitted download may finish after OFF; never use its returned path.
         logger.info("Direct transport install reason=transport_installing")
+        reason = "other"
         try:
             with omit_managed_runtime_log_details():
-                ok = DirectTransportRuntimeManager().ensure().get("ok") is True
+                result = DirectTransportRuntimeManager().ensure()
+                ok = result.get("ok") is True
+                reason = {
+                    "direct-transport_archive_checksum_mismatch": "integrity",
+                    "direct-transport_binary_checksum_mismatch": "integrity",
+                    "direct-transport_archive_download_failed": "download",
+                    "direct-transport_manifest_download_failed": "download",
+                }.get(result.get("reason"), "other")
         except Exception:
             ok = False
         if ok:
             logger.info("Direct transport install succeeded")
         else:
             logger.warning("Direct transport install reason=transport_install_failed")
-        return generation, ok
+        return generation, ok, reason
 
     def _resolve_binary(self, generation: int, started: float, config: V2Config) -> tuple[int, float, str | None, bool]:
         binary = None
@@ -542,8 +560,9 @@ class DirectAccessLifecycle:
                 return
             task, self._install_task = self._install_task, None
             if not task.cancelled():
-                generation, ok = task.result()
+                generation, ok, reason = task.result()
                 if ok is False and generation >= self._opt_in_generation:
+                    self._install_reason = reason
                     self._install_failed = True
                     self._install_at = self._loop.time() + self._install_delay
                     self._install_delay = min(self._install_delay * 2, INSTALL_RETRY_MAX_SECONDS)
@@ -575,8 +594,13 @@ class DirectAccessLifecycle:
                 or not _is_paired(config) or managed_direct_hostname(config) is None
                 or self._loop.time() < self._next_binary_check):
             return
+        binary_config = copy.deepcopy(config)
+        if not self._public_traversal_allowed:
+            # A LAN-only grant needs only the ordinary pin capabilities. Never
+            # edit the persisted user preference to inspect a different policy.
+            binary_config.remote_access.vibe_cloud.public_relay_trial = False
         self._binary_task = asyncio.create_task(asyncio.to_thread(
-            self._resolve_binary, self._generation, self._loop.time(), copy.deepcopy(config),
+            self._resolve_binary, self._generation, self._loop.time(), binary_config,
         ), name="direct-binary-observation")
         self._binary_task.add_done_callback(self._binary_check_done)
 
@@ -649,7 +673,7 @@ class DirectAccessLifecycle:
                 # or escape into Web UI startup/heartbeat handling.
                 with contextlib.suppress(Exception):
                     await self._stop_direct("lifecycle_error")
-                self._failed_generation = self._generation
+                self._back_off_start(self._generation)
                 self._set_state("error", "lifecycle_error")
                 logger.warning("Direct access lifecycle transition failed")
             if self._shutdown:
@@ -658,6 +682,12 @@ class DirectAccessLifecycle:
                 await asyncio.wait_for(self._wake.wait(), timeout=TICK_SECONDS)
             except asyncio.TimeoutError:
                 pass
+
+    def _back_off_start(self, generation: int) -> None:
+        if self._generation == generation:
+            self._failed_generation = generation
+            self._next_start = self._loop.time() + self._start_delay
+            self._start_delay = min(INSTALL_RETRY_MAX_SECONDS, self._start_delay * 2)
 
     async def _reconcile(self) -> None:
         self._refresh_binary_observation()
@@ -669,7 +699,9 @@ class DirectAccessLifecycle:
         if self._resource_generation != self._generation:
             await self._stop_direct("generation_changed")
         if self._failed_generation == self._generation:
-            return
+            if self._loop.time() < self._next_start:
+                return
+            self._failed_generation = None
         if self._poll_at is not None and time.time() >= self._poll_at and self._poll_task is None:
             self._schedule_poll()
         if not _certificate_usable(self._certificate_result):
@@ -694,13 +726,15 @@ class DirectAccessLifecycle:
                 return
             except Exception:
                 await self._stop_direct("transport_start_failed")
-                self._failed_generation = generation
+                self._back_off_start(generation)
                 self._set_state("error", "transport_start_failed")
                 return
             finally:
                 self._start_task = None
         if self._supervisor is not None:
             diagnostics = self._supervisor.status
+            if diagnostics.endpoint_id:
+                self._start_delay = INSTALL_RETRY_INITIAL_SECONDS
             self._set_state(
                 "running" if diagnostics.endpoint_id else "starting",
                 "published" if diagnostics.endpoint_id else (diagnostics.reason or "transport_starting"),
@@ -838,6 +872,15 @@ class DirectAccessLifecycle:
                 return
         self._certificate_result = result
         self._poll_at = getattr(result, "next_poll_at", None)
+        if (not result.ready and result.status == "failed" and result.last_error_code in
+                {"acme_rate_limited", "backend_unavailable", "dns_challenge_visibility_timeout"}):
+            # Only a definitively failed, retryable order, never one still in
+            # cleanup. Do not bring a provider's Retry-After forward.
+            self._retry_cancelled = True
+            self._poll_at = max(self._poll_at or 0, time.time() + self._certificate_retry_delay)
+            self._certificate_retry_delay = min(self._certificate_retry_delay * 2, INSTALL_RETRY_MAX_SECONDS)
+        elif result.ready:
+            self._certificate_retry_delay = INSTALL_RETRY_INITIAL_SECONDS
         if getattr(result, "status", None) == "cancelled" and not self._cancelled_retry_used:
             self._cancelled_retry_used = True
             self._retry_cancelled = True
@@ -893,6 +936,10 @@ class DirectAccessLifecycle:
                 self._settled_generation = self._generation
             self._reported_generation = self._generation
             self._reported_fields = _report_fields(state, reason, getattr(self._certificate_result, "last_error_code", None))
+            if self._permission_allowed is False and self._permission_reason in {"permission_denied", "permission_expired"}:
+                self._reported_fields = _report_fields("waiting-permission", self._permission_reason, None)
+            elif reason == "transport_install_failed":
+                self._reported_fields["direct_reason"] = self._install_reason
             self._status = DirectAccessStatus(
                 enabled=bool(self._signature and self._signature[0]), state=state, reason=reason,
                 certificate_not_after=getattr(self._certificate_result, "certificate_not_after", None),

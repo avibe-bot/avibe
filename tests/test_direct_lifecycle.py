@@ -165,13 +165,39 @@ async def _permission(owner, config, allowed=True, **fields):
 def test_setting_default_legacy_config_and_roundtrip():
     config = _config(direct=False)
     config.save()
-    payload = json.loads(paths.get_config_path().read_text())
-    assert payload["remote_access"]["vibe_cloud"]["direct"] is False
-    del payload["remote_access"]["vibe_cloud"]["direct"]
-    assert V2Config.from_payload(payload).remote_access.vibe_cloud.direct is False
-    config.remote_access.vibe_cloud.direct = True
+    path = paths.get_config_path()
+    payload = json.loads(path.read_text())
+    cloud = payload["remote_access"]["vibe_cloud"]
+    assert cloud["direct"] is False and cloud["direct_choice"] == "off"
+    assert V2Config.load().remote_access.vibe_cloud.direct is False
+    # The released writer emitted false even for an untouched choice. It left
+    # no provenance; migration intentionally interprets that shape as default.
+    del cloud["direct_choice"]
+    path.write_text(json.dumps(payload))
+    migrated = V2Config.load()
+    assert migrated.remote_access.vibe_cloud.direct is True
+    assert migrated.remote_access.vibe_cloud.direct_choice == "default"
+    assert V2Config.default().remote_access.vibe_cloud.direct is True
+    migrated.remote_access.vibe_cloud.set_path_choice("direct", False)
+    migrated.save()
+    assert V2Config.load().remote_access.vibe_cloud.direct is False
+
+
+def test_generic_save_preserves_host_choices_and_does_not_expose_markers():
+    from vibe import api
+
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.set_path_choice('direct', False)
+    cloud.set_path_choice('public_relay_trial', False)
     config.save()
-    assert V2Config.load().remote_access.vibe_cloud.direct is True
+    projection = api.config_to_payload(config)['remote_access']['vibe_cloud']
+    assert 'direct_choice' not in projection and 'public_relay_choice' not in projection
+    api.save_config({'remote_access': {'vibe_cloud': {'direct': False, 'public_relay_trial': False,
+                    'direct_choice': 'default', 'public_relay_choice': 'on'}}}, generic_remote_access=True)
+    restored = V2Config.load().remote_access.vibe_cloud
+    assert not restored.direct and not restored.public_relay_trial
+    assert restored.direct_choice == restored.public_relay_choice == 'off'
 
 
 def test_direct_toggle_does_not_reconcile_or_change_tunnel_identity():
@@ -220,8 +246,8 @@ async def test_off_is_literal_no_listener_child_order_or_file(reports, monkeypat
     assert set(paths.get_state_dir().rglob("*")) == before
 
 
-@pytest.mark.parametrize("bad_pin", ["pending", "tampered"])
-async def test_failed_auto_install_backs_off_without_starting(reports, published, monkeypatch, bad_pin):
+@pytest.mark.parametrize("bad_pin,reason", [("pending", "other"), ("tampered", "integrity"), ("unavailable", "download")])
+async def test_failed_auto_install_backs_off_without_starting(reports, published, monkeypatch, bad_pin, reason):
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
     payload, manifest, downloads, sources = published
@@ -230,7 +256,10 @@ async def test_failed_auto_install_backs_off_without_starting(reports, published
         manifest.write_text(json.dumps(payload))
     else:
         source = sources[payload["archives"]["linux-x64"]["url"]]
-        source.write_bytes(b"x" * source.stat().st_size)
+        if bad_pin == "unavailable":
+            source.unlink()  # hermetic fetch_to_path fails before returning an archive
+        else:
+            source.write_bytes(b"x" * source.stat().st_size)
     attempts = []
     ensure = DirectTransportRuntimeManager.ensure
     def counted(manager):
@@ -245,6 +274,9 @@ async def test_failed_auto_install_backs_off_without_starting(reports, published
         await _permission(owner, config)
         await _wait(lambda: len(attempts) >= 2 and owner.status().reason == "transport_install_failed" and owner._install_task is None)
         assert attempts[1] - attempts[0] >= 0.3
+        assert owner.report_fields(owner.runtime_status_request(config)) == {
+            "direct_state": "install_failed", "direct_reason": reason,
+        }
         assert not cert.calls and rv.endpoint is None and "supervisor_start" not in calls
         assert DirectTransportRuntimeManager().resolve_binary() is None
         assert not downloads if bad_pin == "pending" else len(downloads) == 2
@@ -389,7 +421,7 @@ async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_
             policies.append(relay_policy)
 
     async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, _, rv):
-        await _permission(owner, config)
+        await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "transport-not-installed")
         assert not policies
         await _permission(owner, config, False)
@@ -680,6 +712,43 @@ async def test_start_stop_order_and_renewal_from_client_deadline(reports):
         assert rv.endpoint is None and rv.reason == "setting_off"
         assert not reports[-1][0].remote_access.vibe_cloud.direct
         assert reports[-1][1]["event"] == "direct_paths_disabled"
+
+
+@pytest.mark.parametrize("error,coarse", [("acme_rate_limited", "rate_limited"),
+                                        ("backend_unavailable", "provider"),
+                                        ("dns_challenge_visibility_timeout", "timeout")])
+async def test_retryable_certificate_failure_preserves_tunnel_and_provider_deadline(reports, monkeypatch, error, coarse):
+    monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.05)
+    config = _config()
+    deadline = time.time() + 0.65
+    cert = FakeCertificateClient([CertificateResult("failed", last_error_code=error, next_poll_at=deadline)])
+    async with _owner(config, reports, cert=cert) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.report_fields(owner.runtime_status_request(config)).get("direct_state") == "certificate_failed")
+        assert owner.report_fields(owner.runtime_status_request(config))["direct_reason"] == coarse
+        assert rv.endpoint is None and "supervisor_start" not in calls and config.remote_access.vibe_cloud.enabled
+        assert owner._poll_at >= deadline
+        await _wait(lambda: owner.status().state == "running")
+        assert cert.calls[-1]["retry"] is True and time.time() >= deadline
+
+
+async def test_start_error_backs_off_then_publishes_without_tunnel_change(reports, monkeypatch):
+    monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.2)
+    attempts = []
+    class RetrySupervisor(FakeSupervisor):
+        async def start(self):
+            attempts.append(time.monotonic())
+            if len(attempts) == 1:
+                raise OSError("private details must not be reported")
+            await super().start()
+    config = _config()
+    async with _owner(config, reports, supervisor_type=RetrySupervisor) as (owner, _, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().reason == "transport_start_failed")
+        assert owner.report_fields(owner.runtime_status_request(config)) == {"direct_state": "install_failed", "direct_reason": "other"}
+        assert config.remote_access.vibe_cloud.enabled and not rv.endpoint
+        await _wait(lambda: owner.status().state == "running")
+        assert len(attempts) == 2 and attempts[1] - attempts[0] >= 0.2
 
 
 async def test_permission_denial_missing_field_and_resume_stop_serving(reports):

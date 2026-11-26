@@ -1764,6 +1764,7 @@ def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     config = _config()
     cloud = config.remote_access.vibe_cloud
+    cloud.set_path_choice("direct", False)
     cloud.backend_url = "https://backend.test"
     cloud.instance_secret = "instance-secret"
     config.save()
@@ -1793,6 +1794,7 @@ def test_report_runtime_status_posts_to_backend(monkeypatch, tmp_path) -> None:
                 "cloudflared_found": True,
                 "expected_origin_service": "http://127.0.0.1:5123",
                 "direct_paths_enabled": False,
+                "direct_state": "off_by_user",
                 "observed_origin_service": "http://127.0.0.1:5123",
             },
             5.0,

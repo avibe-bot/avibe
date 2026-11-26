@@ -112,6 +112,13 @@ def test_paused_ticks_do_not_restart_first_sample_deadline(rig):
     assert cs.value(V2Config.load(), 'direct') is True
 
 
+def test_reaffirming_direct_default_persists_choice_without_switching(rig):
+    assert V2Config.load().remote_access.vibe_cloud.direct_choice == 'default'
+    assert cr.prepare(rig.actor, 'direct', True) is None
+    assert V2Config.load().remote_access.vibe_cloud.direct_choice == 'on'
+    assert not cs.journal.path.exists()
+
+
 def test_one_fresh_success_only_for_this_connector(rig):
     sample = SimpleNamespace(successes=(False, True, False))
     cr.observe_public_path(rig.cfg, rig.active, True, sample, rig.clock[0])

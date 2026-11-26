@@ -1842,6 +1842,8 @@ def runtime_status_payload(config: V2Config | None = None, event: str = "heartbe
         "expected_origin_service": origin_service_for_pairing(config),
         "direct_paths_enabled": bool(config.remote_access.vibe_cloud.direct),
     }
+    if payload["direct_paths_enabled"] is False:
+        payload["direct_state"] = "off_by_user"
     if observed_origin_service:
         payload["observed_origin_service"] = observed_origin_service
     quality = current.get("tunnel_quality")
