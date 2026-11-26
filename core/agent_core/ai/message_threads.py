@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import time
-import weakref
 from collections import OrderedDict
 from dataclasses import dataclass, replace
 from typing import Any
@@ -14,7 +13,6 @@ from typing import Any
 from config.paths import get_state_dir
 from core.anthropic_thread_errors import thread_error_fields
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
-from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
 
 BETA = "message-threads-2026-08-12"
@@ -64,27 +62,11 @@ class Parent:
     message_id: str | None  # None: ordinary warm witness, never a server parent.
     tokens: int
     expires: float
-    reads: int = 0
-    trial: bootstrap.Trial | None = None
+    reads: int | None = None
+    warm_create: bool = False  # Only this verified child of the immediately preceding warm full.
     terminal_mark: bool = False
     pinned_drop_block: bool = False
     carry_projection: str = ""
-
-
-class StreamOwner:
-    """Only the running stream holds a strong reference."""
-
-
-def publish_parent(session: str, parent: Parent) -> None:
-    remember(parents, session, parent)
-    if parent.trial:
-        ref = weakref.ref(parent)
-
-        def available() -> bool:
-            node = ref()
-            return node is not None and parents.get(session) is node and node.expires > time.monotonic()
-
-        parent.trial.lease.handoff(available)
 
 
 # Only bounded hashes and opaque ids, never prompts or credentials. Missing/evicted entries cost one full upload.
@@ -92,15 +74,10 @@ parents: OrderedDict[str, Parent | str] = OrderedDict()
 claims: OrderedDict[str, object] = OrderedDict()
 
 
-def parent_entry(session: str | None, *, claim: bool, owner: StreamOwner | None = None) -> tuple[Parent | None, str]:
+def parent_entry(session: str | None, *, claim: bool) -> tuple[Parent | None, str]:
     if not session:
         return None, "no_session"
-    entry = parents.get(session)
-    if claim:
-        if owner and isinstance(entry, Parent) and entry.trial:
-            # Transfer BEFORE removing the entry: no observable ownerless gap.
-            entry.trial.lease.handoff(weakref.ref(owner))
-        parents.pop(session, None)
+    entry = parents.pop(session, None) if claim else parents.get(session)
     if isinstance(entry, Parent):
         return entry, "bound" if entry.message_id else "warm_full"
     return None, entry or "no_local_entry"
@@ -222,17 +199,29 @@ class Attempt:
     history: bytes
     record: dict
     capture_warm: bool
-    trial: bootstrap.Trial | None
     pinned_drop_block: bool = False
+    reported_reads: int | None = None
 
-    async def check_reads(self, route: bytes, reads: int) -> None:
-        if self.trial is None:
+    def observe_usage(self, raw) -> None:
+        # Missing counters are unknown, not zero. Start and delta may report different fields.
+        if not isinstance(raw, dict):
             return
-        self.record["bootstrap_observed_reads"] = reads
-        if reads * 100 < self.trial.reads * MIN_USAGE_PERCENT:
-            self.record["bootstrap_outcome"] = "bootstrap_read_loss"
-            await asyncio.to_thread(bootstrap.measured_loss, route)
-            self.trial = None
+        reads = raw.get("cache_read_input_tokens")
+        if type(reads) is int and reads >= 0:
+            self.reported_reads = reads
+            if self.mode == "create":
+                self.record["create_cache_reads"] = reads
+        if self.mode != "create":
+            return
+        writes = raw.get("cache_creation_input_tokens")
+        if type(writes) is int and writes >= 0:
+            self.record["create_cache_writes"] = writes
+        detail = raw.get("cache_creation")
+        if isinstance(detail, dict):
+            for ttl in ("5m", "1h"):
+                count = detail.get(f"ephemeral_{ttl}_input_tokens")
+                if type(count) is int and count >= 0:
+                    self.record.setdefault("create_cache_writes_by_ttl", {})[ttl] = count
 
 
 def _cache_plan(full: dict) -> tuple[str | None, int | None]:
@@ -369,9 +358,7 @@ async def plan_send(
     parent: Parent | None,
     repair: bool = False,
     ordinary: str | None = None,
-    preview: bool = False,
     carry_projection: str = "",
-    lease: bootstrap.Lease | None = None,
 ) -> Attempt:
     route = route_key(ep, gateway)
     if not ordinary:
@@ -385,7 +372,7 @@ async def plan_send(
             ordinary = "history_repair"
         elif failed_routes.get(route, 0) > time.monotonic():
             ordinary = "route_cooldown"
-    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary, preview=preview, lease=lease)
+    return await asyncio.to_thread(prepare, wire, ep, gateway, parent, route, ordinary)
 
 
 def prepare(
@@ -395,9 +382,6 @@ def prepare(
     parent: Parent | None,
     route: bytes,
     ordinary: str | None,
-    *,
-    preview: bool = False,
-    lease: bootstrap.Lease | None = None,
 ) -> Attempt:
     full = wire.body
     msgs = full["messages"]
@@ -423,7 +407,7 @@ def prepare(
         if cache_reason == "native_history":
             ordinary = cache_reason
     warm = False
-    trial = None
+    prior_reads = None
     capture_warm = False
     mode = "full" if ordinary or (get_state_dir() / "disable-message-threads").exists() else "create"
     if mode == "full":
@@ -443,8 +427,10 @@ def prepare(
         ):
             reason = "history_changed"
         elif parent.tokens < MIN_PARENT_TOKENS:
+            prior_reads = parent.reads
             reason = "small_parent"
         else:
+            prior_reads = parent.reads
             suffix = msgs[n + 1 :]
             # Encoded bytes bound text, not the tokens billed for decoded pixels. Never rely on the
             # usage heuristic for a suffix containing images, including a tool's returned images.
@@ -453,15 +439,12 @@ def prepare(
             elif budget_reason := _continuation_budget(full, suffix, parent.tokens):
                 reason = budget_reason
             elif parent.message_id is None:
-                warm = parent.reads > 0
-            elif parent.trial is not None and not bootstrap.owns(route, parent.trial):
-                mode, reason = "full", "bootstrap_stale"
-            elif parent.terminal_mark and parent.trial is None and not _reaches_parent_mark(msgs[n], suffix):
+                warm = bool(parent.reads)
+            elif parent.terminal_mark and not parent.warm_create and not _reaches_parent_mark(msgs[n], suffix):
                 mode, reason = "full", "terminal_marker_out_of_reach"
                 capture_warm = omitted_mark is not None
             else:
                 mode = "continue"
-                trial = parent.trial
                 body = {k: v for k, v in full.items() if k not in ("system", "tools")}
                 body.update(messages=suffix, thread={"type": "continue", "previous_message_id": parent.message_id})
     # Only a create actually sends the marker-stripped full history. For a verified delta,
@@ -472,8 +455,8 @@ def prepare(
     if mode == "create" and cache_reason:
         reason = cache_reason
         if warm and omitted_mark is not None:
-            trial, reason = bootstrap.reserve(route, parent.reads, preview, lease=lease)
-        if trial is None:
+            reason = "warm_bootstrap"
+        else:
             mode = "full"
             capture_warm = omitted_mark is not None
     if mode == "create":
@@ -512,8 +495,10 @@ def prepare(
     record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
     if delta_rejection and delta_rejection != reason:
         record["delta_rejection"] = delta_rejection
-    if trial:
-        record["bootstrap_baseline_reads"] = trial.reads
+    if mode == "create":
+        record.update(route_hash=route.hex(), model=ep.model_id)
+        if prior_reads is not None:
+            record["prior_cache_reads"] = prior_reads
     return Attempt(
         replace(wire, headers=headers, body=body),
         mode,
@@ -523,6 +508,5 @@ def prepare(
         message_digest(msgs) if mode != "full" or capture_warm else b"",
         record,
         capture_warm,
-        trial,
         pinned_drop_block,
     )

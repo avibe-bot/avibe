@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import time
-import weakref
 import json
 import logging
 import re
@@ -237,8 +236,7 @@ class AnthropicAdapter(ProviderAdapter):
         observation = request.thread_observation
         session = observation.session_id if observation else None
         # Claim before the first await: two requests can never continue the same response.
-        owner = threads.StreamOwner()
-        parent, parent_state = threads.parent_entry(session, claim=True, owner=owner)
+        parent, parent_state = threads.parent_entry(session, claim=True)
         claim = object()
         if session:
             threads.remember(threads.claims, session, claim)
@@ -463,8 +461,8 @@ class AnthropicAdapter(ProviderAdapter):
                         if speculative and self._gateway and not served_as_pinned():
                             yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                             return
-                        if attempt and attempt.trial:
-                            await attempt.check_reads(route, response_usage.cache_read_tokens if response_usage else 0)
+                        if attempt:
+                            attempt.observe_usage(message.get("usage"))
                         if attempt and attempt.mode == "continue":
                             total = (
                                 (
@@ -873,6 +871,8 @@ class AnthropicAdapter(ProviderAdapter):
                                     _refusal_detail(delta.get("stop_details")) if stop_reason == "refusal" else None
                                 )
                         response_usage = _anthropic_usage(usage, current=response_usage)
+                        if attempt:
+                            attempt.observe_usage(usage)
                         assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
                             response_counts = reported_counts(usage.get("server_tool_use"), bound=None)
@@ -962,7 +962,6 @@ class AnthropicAdapter(ProviderAdapter):
                         carry_projection=observation.carry_projection,
                         repair=observation.ordinary_retry or bool(prepared.hosted_render_omitted),
                         ordinary=replay,
-                        lease=threads.bootstrap.Lease(weakref.ref(owner)),
                     )
                     wire = attempt.wire
 
@@ -1067,8 +1066,6 @@ class AnthropicAdapter(ProviderAdapter):
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
                         elif isinstance(event, Done):
                             message = event.message
-                            if attempt and attempt.trial:
-                                await attempt.check_reads(route, message.usage.cache_read_tokens if message.usage else 0)
                             if attempt and (speculative or attempt.capture_warm) and session:
                                 if speculative and not response_id:
                                     veto = "missing_or_invalid_message_id"
@@ -1082,8 +1079,6 @@ class AnthropicAdapter(ProviderAdapter):
                                     veto = "missing_usage"
                                 elif self._gateway and not served_as_pinned():
                                     veto = "unverified_origin"
-                                elif attempt.record.get("bootstrap_outcome") == "bootstrap_read_loss":
-                                    veto = "bootstrap_read_loss"
                                 elif attempt.capture_warm and not message.usage.cache_read_tokens:
                                     veto = "cold_full"
                                 else:
@@ -1098,24 +1093,9 @@ class AnthropicAdapter(ProviderAdapter):
                                     binding("superseded")
                                     yield event
                                     continue
-                                if attempt.mode == "continue" and attempt.trial:
-                                    attempt.record["bootstrap_outcome"] = (
-                                        "retained_smaller" if 0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]
-                                        else "bootstrap_no_byte_saving"
-                                    )
-                                    trial = attempt.trial
-
-                                    async def accept_trial() -> None:
-                                        await asyncio.to_thread(threads.bootstrap.complete, route, trial)
-
-                                    observation.after_commit = accept_trial
-                                    trial.lease.handoff(weakref.ref(accept_trial))
                                 attempt.record["binding"] = "warm_full" if attempt.capture_warm else "bound"
-                                next_trial = None
-                                if attempt.mode == "create" and attempt.trial:
-                                    next_trial = replace(attempt.trial, reads=max(attempt.trial.reads, u.cache_read_tokens))
-                                    attempt.record["bootstrap_outcome"] = "awaiting_continuation"
-                                threads.publish_parent(
+                                threads.remember(
+                                    threads.parents,
                                     session,
                                     threads.Parent(
                                         route,
@@ -1126,8 +1106,8 @@ class AnthropicAdapter(ProviderAdapter):
                                         response_id if speculative else None,
                                         u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens,
                                         time.monotonic() + threads.PARENT_SECONDS,
-                                        u.cache_read_tokens,
-                                        next_trial,
+                                        attempt.reported_reads,
+                                        attempt.reason == "warm_bootstrap",
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
                                         observation.carry_projection,

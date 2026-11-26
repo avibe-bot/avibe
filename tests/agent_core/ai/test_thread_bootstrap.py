@@ -1,5 +1,5 @@
 """Admission measured at HTTP: an unsent full body's cache markers do not describe its delta.
-A risky long create, unlike a delta, must earn its exception with paired cache/byte evidence.
+A warm create is bound to its own request; cache read changes are measurements, not admission state.
 """
 
 import json
@@ -14,16 +14,6 @@ from core.agent_core.ai.provider import Done, ThreadObservation
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import AssistantMessage, Origin, TextBlock, UserMessage
 from tests.agent_core.ai.test_anthropic_prompt_cache import SUCCESS, _breakpoints, _request
-
-
-@pytest.fixture(autouse=True)
-def isolated_controller(monkeypatch):
-    from core.agent_core.ai import thread_bootstrap as ledger
-
-    from weakref import WeakValueDictionary
-
-    monkeypatch.setattr(ledger, "_pending", WeakValueDictionary())
-    monkeypatch.setattr(ledger.thread_read_loss, "_live", {})
 
 
 def user(text):
@@ -92,6 +82,95 @@ async def test_seven_independent_warm_routes_can_create_without_writing_state():
     assert not (get_state_dir() / "message-thread-bootstrap.sqlite").exists()
 
 
+async def test_repeated_low_read_creates_are_observations_not_route_stops():
+    observed = []
+
+    def handle(wire):
+        mode = json.loads(wire.content).get("thread", {}).get("type", "full")
+        observed.append(mode)
+        response = served(100 if mode == "create" else 22000)
+        return httpx.Response(
+            200,
+            text=response.text.replace(
+                '"input_tokens":23000', '"input_tokens":23000,"cache_creation_input_tokens":1234'
+            ),
+        )
+
+    base = _request(messages=long_history())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        for i in range(3):
+            req = replace(base, thread_observation=ThreadObservation(f"dip-{i}"))
+            warm = await send(adapter, req)
+            follow = await send(adapter, warm)
+            await send(adapter, follow)
+            facts = warm.thread_observation.attempts[0]
+            assert (
+                facts.get("prior_cache_reads"),
+                facts.get("create_cache_reads"),
+                facts.get("create_cache_writes"),
+            ) == (22000, 100, 1234)
+    assert observed == ["full", "create", "continue"] * 3
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["missing", "locked"])
+async def test_independent_warm_creates_ignore_pending_parent_and_retired_store(legacy, monkeypatch):
+    import sqlite3
+    from contextlib import ExitStack, closing
+    from config.paths import get_state_dir
+
+    path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    base = _request(messages=long_history())
+    with ExitStack() as stack:
+        if legacy:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            db = stack.enter_context(closing(sqlite3.connect(path)))
+            db.execute("CREATE TABLE hint(id INTEGER PRIMARY KEY, day INTEGER, used INTEGER, loss BLOB, until REAL)")
+            db.commit()
+            db.execute("BEGIN EXCLUSIVE")
+
+        def no_ledger(*args, **kwargs):
+            pytest.fail("retired bootstrap metadata was opened")
+
+        monkeypatch.setattr(sqlite3, "connect", no_ledger)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: served(22000))) as client:
+            adapter = AnthropicAdapter(client)
+            for session in ("owner-a", "owner-b"):
+                warm = await send(adapter, replace(base, thread_observation=ThreadObservation(session)))
+                predicted = await preview_wire_request(warm, session_id=session)
+                await send(adapter, warm)  # The previous Session still owns its unused parent.
+                assert predicted.wire.body.get("thread") == {"type": "create"}
+                assert warm.thread_observation.attempts[0]["mode"] == "create"
+        assert path.exists() == legacy
+
+
+async def test_non_bootstrap_create_observes_only_reported_comparable_counters():
+    # Small valid parent: another ordinary create, not a continuation and not a long bootstrap.
+    count = 0
+
+    def handle(_wire):
+        nonlocal count
+        count += 1
+        text = served(120 if count == 1 else 0).text.replace('"input_tokens":23000', '"input_tokens":10')
+        if count == 2:
+            text = text.replace(
+                '"cache_read_input_tokens":0', '"cache_read_input_tokens":0,"cache_creation_input_tokens":42'
+            )
+        return httpx.Response(200, text=text)
+
+    first = replace(_request(messages=(user("small"),)), thread_observation=ThreadObservation("short"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        follow = await send(adapter, first)
+        await send(adapter, follow)
+    one, two = first.thread_observation.attempts[0], follow.thread_observation.attempts[0]
+    assert one["mode"] == two["mode"] == "create" and two["reason"] == "small_parent"
+    assert "prior_cache_reads" not in one and "create_cache_writes" not in one
+    assert (two["prior_cache_reads"], two["create_cache_reads"], two["create_cache_writes"]) == (120, 0, 42)
+    assert two["route_hash"] == one["route_hash"] and two["model"] == first.endpoint.model_id
+    assert two["body_bytes"] > 0 and two["ordinary_baseline_bytes"] == two["full_bytes"]
+
+
 async def test_verified_delta_ignores_distant_ordinary_markers():
     bodies = []
 
@@ -127,259 +206,6 @@ async def test_actual_terminal_mark_needs_reachable_delta_lookup(blocks, expecte
     if expected == "full":
         assert req.thread_observation.attempts[0]["reason"] == "terminal_marker_out_of_reach"
         assert len(_breakpoints(bodies[-1])) == 4
-
-
-@pytest.mark.parametrize("loss", [None, "create", "continue"])
-async def test_bootstrap_measures_create_and_next_accepted_delta(loss, monkeypatch):
-    bodies = []
-
-    def handle(wire):
-        body = json.loads(wire.content)
-        bodies.append(body)
-        return served(19000 if loss and body.get("thread", {}).get("type") == loss else 22000)
-
-    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("probe"))
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        adapter = AnthropicAdapter(client)
-        warm = await send(adapter, req)
-        for _ in range(2):
-            preview = await preview_wire_request(warm, session_id="probe")
-            assert preview.wire.body.get("thread") == {"type": "create"}
-        follow = await send(adapter, warm)
-        assert warm.thread_observation.attempts[0]["parent_state"] == "warm_full"
-        assert warm.thread_observation.attempts[0]["binding"] == (
-            "bootstrap_read_loss" if loss == "create" else "bound"
-        )
-        assert bodies[-1] == preview.wire.body and len(_breakpoints(bodies[-1])) == 3
-        assert len(_breakpoints(bodies[0])) == 4
-        assert warm.thread_observation.attempts[0]["bootstrap_outcome"] == (
-            "bootstrap_read_loss" if loss == "create" else "awaiting_continuation"
-        )
-        await send(adapter, follow)
-        if loss != "create":
-            assert bodies[-1]["thread"]["type"] == "continue"
-            facts = follow.thread_observation.attempts[0]
-            assert facts["body_bytes"] < facts["full_bytes"]
-            assert facts["bootstrap_outcome"] == ("bootstrap_read_loss" if loss else "retained_smaller")
-            if not loss:
-                from core.agent_core.ai import message_threads as threads
-
-                route = threads.route_key(req.endpoint, False)
-                assert threads.bootstrap.reserve(route, 22000, preview=True)[1] == "bootstrap_pending"
-                await follow.thread_observation.after_commit()
-        fresh = replace(req, thread_observation=ThreadObservation("another"))
-        another = await send(adapter, fresh)
-        await send(adapter, another)
-        if loss:
-            assert "thread" not in bodies[-1]
-            assert another.thread_observation.attempts[0]["reason"] == "bootstrap_read_loss"
-        else:
-            assert bodies[-1]["thread"]["type"] == "create"
-
-
-@pytest.mark.parametrize("rejected", [True, False])
-async def test_agent_commit_or_rejection_releases_only_the_measured_pair(rejected):
-    from core.agent_core.ai import message_threads as threads
-    from tests.agent_core.agent.test_compaction import SELECTION, make_agent, reader, run
-    from tests.agent_core.fakes import InMemoryTranscriptStore
-
-    store = InMemoryTranscriptStore()
-    first, prior, _ = long_history()
-    await store.consume_input("session", "old", first)
-    await store.append_response("session", prior, final=True, replied=True)
-    ep = _request().endpoint
-    modes = []
-
-    def handle(wire):
-        modes.append(json.loads(wire.content).get("thread", {}).get("type", "full"))
-        text = served(22000).text.replace('"input_tokens":23000', '"input_tokens":1')
-        if modes[-1] == "create":
-            text = many_blocks(text, 24)  # This otherwise-unreachable lookup is the authorized paired measurement.
-        if rejected and modes[-1] == "continue":
-            text = text.replace(
-                '"type":"text","text":""', '"type":"thinking","thinking":"","signature":"signed"'
-            ).replace('"type":"text_delta","text":"ok"', '"type":"thinking_delta","thinking":"private"')
-        return httpx.Response(200, text=text)
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        agent = make_agent(
-            AnthropicAdapter(client),
-            store=store,
-            selection=replace(
-                SELECTION,
-                endpoint=ep,
-                capabilities=replace(SELECTION.capabilities, context_window=200000, input_limit=190000),
-            ),
-            system="fixed",
-            tools=(reader("r"),),
-        )
-        for turn in ("warm", "trial", "delta"):
-            await run(agent, value=turn, row=turn)
-    assert modes == ["full", "create", "continue"]
-    assert len([r for r in store.rows["session"] if r.kind == "response"]) == (3 if rejected else 4)
-    assert threads.bootstrap.reserve(threads.route_key(ep, False), 22000, preview=True)[1] == "bootstrap_trial"
-
-
-@pytest.mark.parametrize("orphan", ["expired", "evicted", "mismatched_claim"])
-async def test_only_orphaned_pending_allows_another_warm_create(orphan, monkeypatch):
-    import time
-    from types import SimpleNamespace
-    from core.agent_core.ai import message_threads as threads
-
-    now = [time.monotonic()]
-    monkeypatch.setattr(threads, "time", SimpleNamespace(monotonic=lambda: now[0]))
-    monkeypatch.setattr("core.agent_core.ai.anthropic.time", threads.time)
-    first = replace(_request(messages=long_history()), thread_observation=ThreadObservation("owner"))
-    fresh = replace(first, thread_observation=ThreadObservation("challenger"))
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: served(22000))) as client:
-        adapter = AnthropicAdapter(client)
-        follow = await send(adapter, await send(adapter, first))
-        if orphan == "expired":
-            now[0] += threads.PARENT_SECONDS - 1
-        warm = await send(adapter, fresh)
-        assert "thread" not in (await preview_wire_request(warm, session_id="challenger")).wire.body
-        if orphan == "expired":
-            now[0] += 1
-        elif orphan == "evicted":
-            threads.parents.pop("owner")
-        else:
-            await send(adapter, replace(follow, messages=long_history()))
-        preview = await preview_wire_request(warm, session_id="challenger")
-        assert preview.wire.body.get("thread") == {"type": "create"}
-        await send(adapter, warm)
-        assert warm.thread_observation.attempts[0]["reason"] == "bootstrap_trial"
-
-
-@pytest.mark.parametrize("phase", ["create", "claim", "continue", "commit"])
-async def test_live_pair_never_looks_orphaned_across_parent_timeout(phase, monkeypatch):
-    import asyncio
-    import time
-    from types import SimpleNamespace
-    from core.agent_core.ai import message_threads as threads
-
-    now = [time.monotonic()]
-    clock = SimpleNamespace(monotonic=lambda: now[0])
-    monkeypatch.setattr(threads, "time", clock)
-    monkeypatch.setattr("core.agent_core.ai.anthropic.time", clock)
-    started, resume = asyncio.Event(), asyncio.Event()
-
-    async def handle(wire):
-        if json.loads(wire.content).get("thread", {}).get("type") == phase:
-            started.set()
-            await resume.wait()
-        return served(22000)
-
-    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("active"))
-    route = threads.route_key(req.endpoint, False)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        adapter = AnthropicAdapter(client)
-        warm = await send(adapter, req)
-        if phase == "create":
-            pending = asyncio.create_task(send(adapter, warm))
-        else:
-            follow = await send(adapter, warm)
-            if phase == "claim":
-                plan = threads.plan_send
-
-                async def pause(*args, **kwargs):
-                    started.set()
-                    await resume.wait()
-                    return await plan(*args, **kwargs)
-
-                monkeypatch.setattr(threads, "plan_send", pause)
-            pending = asyncio.create_task(send(adapter, follow))
-        if phase == "commit":
-            await pending  # Adapter closed; only the candidate awaiting commit remains.
-        else:
-            await asyncio.wait_for(started.wait(), 2)
-        try:
-            now[0] += threads.PARENT_SECONDS + 1
-            assert threads.bootstrap.reserve(route, 100, False)[1] == "bootstrap_pending"
-        finally:
-            resume.set()
-            await pending
-        if phase == "commit":
-            await follow.thread_observation.after_commit()
-            assert threads.bootstrap.reserve(route, 100, True)[1] == "bootstrap_trial"
-        if phase == "claim":
-            assert threads.bootstrap.reserve(route, 100, True)[1] == "bootstrap_trial"
-
-
-def test_stale_completion_does_not_release_another_pair_or_route():
-    from core.agent_core.ai import thread_bootstrap as ledger
-
-    a, b = b"a" * 32, b"b" * 32
-    active = [True]
-    old, _ = ledger.reserve(a, 100, False, lease=ledger.Lease(lambda: active[0]))
-    other, _ = ledger.reserve(b, 100, False)
-    active[0] = False
-    new, reason = ledger.reserve(a, 100, False)
-    assert reason == "bootstrap_trial"
-    ledger.complete(a, old)
-    assert ledger.owns(a, new) and ledger.owns(b, other)
-    ledger.complete(a, new)
-    assert ledger.reserve(a, 100, True)[1] == "bootstrap_trial" and ledger.owns(b, other)
-
-
-def test_all_active_measured_stops_survive_restart_without_ids(monkeypatch):
-    import sqlite3
-    from types import SimpleNamespace
-    from config.paths import get_state_dir
-    from core.agent_core.ai import thread_bootstrap as ledger
-
-    now = [100_000.0]
-    stops = ledger.thread_read_loss
-    monkeypatch.setattr(stops, "time", SimpleNamespace(time=lambda: now[0]))
-    a, b, c = (bytes([i]) * 32 for i in range(3))
-    ledger.measured_loss(a)
-    now[0] += 10
-    ledger.measured_loss(b)
-    monkeypatch.setattr(stops, "_live", {})
-    for route in (a, b):
-        assert ledger.reserve(route, 100, True)[1] == ledger.reserve(route, 100, False)[1] == "bootstrap_read_loss"
-    assert ledger.reserve(c, 100, False)[1] == "bootstrap_trial"
-    path = get_state_dir() / "message-thread-bootstrap.sqlite"
-    with sqlite3.connect(path) as db:
-        assert db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("route_loss",)]
-        assert [col[1] for col in db.execute("PRAGMA table_info(route_loss)")] == ["route", "until"]
-        assert set(db.execute("SELECT route FROM route_loss")) == {(a,), (b,)}
-    now[0] += stops.DAY - 10
-    assert ledger.reserve(a, 100, True)[1] == "bootstrap_trial"
-    assert ledger.reserve(b, 100, True)[1] == "bootstrap_read_loss"
-
-
-async def test_warm_preview_and_send_respect_readable_legacy_loss_without_writing():
-    import sqlite3
-    import time
-    from config.paths import get_state_dir
-    from core.agent_core.ai import message_threads as threads
-
-    bodies = []
-
-    def handle(wire):
-        bodies.append(json.loads(wire.content))
-        return served(22000)
-
-    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("legacy-loss"))
-    route = threads.route_key(req.endpoint, False)
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        adapter = AnthropicAdapter(client)
-        warm = await send(adapter, req)
-        path = get_state_dir() / "message-thread-bootstrap.sqlite"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(path) as writer:
-            writer.execute(
-                "CREATE TABLE hint(id INTEGER PRIMARY KEY, day INTEGER, used INTEGER, loss BLOB, until REAL)"
-            )
-            writer.execute("INSERT INTO hint VALUES (1,0,999,?,?)", (route, time.time() + 600))
-            writer.commit()
-            writer.execute("BEGIN IMMEDIATE")
-            before = path.read_bytes()
-            preview = await preview_wire_request(warm, session_id="legacy-loss")
-            assert len(bodies) == 1 and path.read_bytes() == before
-            await send(adapter, warm)
-            assert preview.wire.body == bodies[-1] and "thread" not in bodies[-1]
-            assert warm.thread_observation.attempts[0]["reason"] == "bootstrap_read_loss"
 
 
 @pytest.mark.parametrize("change", ["session", "model", "edit", "disabled", "cold"])

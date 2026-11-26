@@ -341,7 +341,6 @@ class _Attempt:
     committed: bool = False
     audited: bool = False
     cache: Optional[dict[str, Any]] = None
-    after_commit: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass(frozen=True)
@@ -793,8 +792,6 @@ class Agent:
         if attempt is not None:
             attempt.committed = True
         self._rows.append(row)
-        if attempt is not None and attempt.after_commit is not None:
-            await attempt.after_commit()
         return row
 
     async def _drive(
@@ -1157,12 +1154,8 @@ class Agent:
                             terminal.message if isinstance(terminal, Done) else terminal.partial,
                             error=None if isinstance(terminal, Done) else terminal,
                             cache=cache,
-                            after_commit=(request.thread_observation.after_commit
-                                          if isinstance(terminal, Done) and request.thread_observation else None),
                         )
                     )
-                    if request.thread_observation:
-                        request.thread_observation.after_commit = None
                     relieve = (
                         purpose == "conversation"
                         and self.context is not None
@@ -1262,10 +1255,6 @@ class Agent:
             failure = error
             raise
         finally:
-            # The caller has left the only scope in which it can still commit this answer,
-            # even on cancellation. Audit records must not retain a live bootstrap capability.
-            for item in self._attempts[first:]:
-                item.after_commit = None
             if not aborted:
                 # Invariant 4: the ledger, not each exit path, keeps the usage of attempts that did not become a
                 # response row: a retry, a relief, a usage-only terminal, a refusal at admission, a failed commit.
