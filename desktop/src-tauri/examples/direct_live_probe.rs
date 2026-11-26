@@ -8,42 +8,70 @@
 //! Usage: `direct_live_probe --controls` runs step 1 below alone: WebKit in
 //! this environment, on loopback, with no session and nothing sent anywhere.
 //! `direct_live_probe https://<name>-app.avibe.bot <instance-id>` runs it
-//! all, with the session of a regression-only account on standard input, one
-//! line. The session is put into this process's own in-memory stores for
-//! that exact origin and nowhere else: it is never printed, never passed to
-//! the native core, and never sent to another origin (a navigation that
-//! leaves the origin, a sign-in page included, is cancelled and reported).
-//! No certificate is ever accepted that the system does not.
+//! all. Standard input then carries two lines: the origin the session was
+//! issued for, and the session of a regression-only account.
+//!
+//! Where the session may go. It travels with its own origin, and the probe
+//! runs only if that origin is a managed one and is exactly the origin named
+//! on the command line; otherwise it reads nothing more and sends nothing.
+//! The session is put, as the instance's own host-only secure cookie, into
+//! this process's in-memory stores, and each view is held to that origin:
+//!
+//! - a main-frame navigation is allowed for the one URL the probe asked
+//!   for, once; every other main-frame navigation is cancelled before it is
+//!   sent, a redirect included, to the same origin or to another;
+//! - a subframe navigation is allowed on that exact origin only;
+//! - the main document's answer is shown only if it is that URL's.
+//!
+//! Step 1 holds WebKit to this with a dummy session: a fixture that
+//! redirects must not get a request at its target. What is not policed: the
+//! requests the instance's own page makes for its resources. The cookie's
+//! own scope bounds those: WebKit sends it to `https` requests for that
+//! host. The session is never printed, never passed to the native core, and
+//! no certificate is accepted that the system does not accept.
 //!
 //! Order, each step one JSON line on standard output:
 //!
-//! 1. Three controls of WebKit itself in this environment, on loopback pages
-//!    of the probe's own: a plain load; a load through a route to a CONNECT
-//!    listener; and a load whose listener answers `502`, which must fail
-//!    because the route allows no failover. If a control fails, what follows
-//!    would say nothing about the product, and the probe stops.
+//! 1. Controls of WebKit itself in this environment, on loopback pages of
+//!    the probe's own: a load that carries a dummy session to its origin;
+//!    a redirect to another origin and one within the origin, neither
+//!    followed; a load through a route to a CONNECT listener; and a load
+//!    whose listener answers `502`, which must fail because the route
+//!    allows no failover. If a control fails, what follows would say
+//!    nothing about the product, and the probe stops.
 //! 2. The session's document in a first store, on WebKit's own path: the
 //!    rendezvous request is the instance's own top document's, as shipped.
 //! 3. The native qualification, which asks that document for the rendezvous
 //!    answer through the shipping adapter (`webview_macos::fetch_rendezvous`).
-//! 4. The page leg, in a second store that has never connected to the host:
-//!    the session, then the route to the qualified client's listener with
-//!    its window credential and no failover, then the first load. A route
-//!    written to a store with a live connection to the host is not used
-//!    (measured, `webview_macos::install_route`), so the first store cannot
-//!    carry this leg. The listener is direct-only and the route has no
-//!    failover, so a page that loads, and a fresh `/health` its own script
-//!    fetches, came over the direct path.
-//! 5. Every withdrawal of the link, as it happens, until the probe ends.
+//! 4. The fresh-store leg, the positive control of the page path: a second
+//!    store that has never connected to the host gets the session, then the
+//!    route to the qualified client's listener with its window credential
+//!    and no failover, then its first load and a `/health` its own script
+//!    fetches. The listener is direct-only and the route has no failover,
+//!    so a payload that arrives came over the direct path.
+//! 5. The live-store leg: the first store, which is connected to the host
+//!    on WebKit's own path, gets the same route while it is live, as a
+//!    window that was open before the first answer does. A route written to
+//!    a store with a live connection is not used by that connection
+//!    (measured, `webview_macos::install_route`), so the probe then asks
+//!    the page for work of several kinds (a fetch, a fetch without
+//!    credentials, a WebSocket, a reload) and reports for each what the
+//!    page got and whether the listener committed a new direct stream.
+//! 6. Every opening and closing of a direct stream, every change of the
+//!    path's status and every withdrawal of the link, as they happen.
 //!
-//! Lines carry fixed words, counts and elapsed milliseconds only: no host,
-//! identifier, address, header, body or error text. `elapsed_ms` counts from
-//! the probe's start, except in the lines the native qualification prints
-//! itself, which count from `native_qualification_start`.
+//! Only standard output is the result, and only it may be pasted anywhere:
+//! its lines carry fixed words, counts, HTTP statuses, the system's own
+//! error numbers and elapsed milliseconds, and no host, identifier, address,
+//! header, body or error text. The command line, standard input and
+//! standard error are not for pasting. `elapsed_ms` counts from the probe's
+//! start, except in the lines the native qualification prints itself, which
+//! count from `native_qualification_start`.
 //!
-//! Exit code: 0 the page's payload arrived over the direct path; 1 a control
-//! failed; 2 the input was refused; 3 the session's document did not load;
-//! 4 the native qualification failed; 5 the page leg failed.
+//! Exit code: 0 both legs got their payload over the direct path; 1 a
+//! control failed; 2 the input was refused; 3 the session's document did not
+//! load; 4 the native qualification failed; 5 the fresh-store leg failed;
+//! 6 the live-store leg got no payload over a new direct stream.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -57,7 +85,7 @@ fn main() {
 #[path = "support/direct_transport_diag.rs"]
 mod direct_transport_diag;
 
-/// The probe's own loopback page and CONNECT listener, for the controls.
+/// The probe's own loopback pages and CONNECT listener, for the controls.
 #[cfg(target_os = "macos")]
 mod control {
     use std::{
@@ -65,7 +93,7 @@ mod control {
         net::{Ipv4Addr, Shutdown, TcpListener, TcpStream},
         sync::{
             atomic::{AtomicUsize, Ordering},
-            Arc,
+            Arc, Mutex,
         },
         thread,
         time::Duration,
@@ -76,6 +104,10 @@ mod control {
     pub const PASSWORD: &str = "control-only";
     /// Resolves nowhere: only the listener can carry a load of it.
     pub const ROUTED: &str = "direct-live-probe-control.invalid";
+    /// The dummy session of the controls. A cookie is its host's, whatever
+    /// the port, so a second loopback server would be sent it.
+    pub const SESSION_COOKIE: &str = "direct_live_probe_control_session";
+    pub const SESSION: &str = "dummy-session-of-the-controls";
 
     fn read_head(stream: &mut TcpStream) -> Option<String> {
         let mut head = Vec::new();
@@ -90,30 +122,79 @@ mod control {
             .then(|| String::from_utf8_lossy(&head).into_owned())
     }
 
-    /// One page, for any path.
-    pub fn page() -> u16 {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("control page port");
-        let port = listener.local_addr().expect("control page address").port();
-        thread::spawn(move || {
-            for mut stream in listener.incoming().flatten() {
-                thread::spawn(move || {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-                    if read_head(&mut stream).is_none() {
-                        return;
-                    }
-                    let body = format!("<!doctype html><title>{TITLE}</title><p>control</p>");
-                    let _ = stream.write_all(
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
-                            body.len()
-                        )
-                        .as_bytes(),
-                    );
-                    let _ = stream.shutdown(Shutdown::Both);
-                });
-            }
+    /// One request a page server got: its path, and whether it carried the
+    /// dummy session.
+    #[derive(Clone)]
+    pub struct Seen {
+        pub path: String,
+        pub session: bool,
+    }
+
+    /// A loopback page server that records what it is asked. `/` and
+    /// `/landed` are pages; `/redirect-same` redirects to `/landed`;
+    /// `/redirect-away` redirects to `away`, if there is one.
+    pub struct Pages {
+        pub port: u16,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    impl Pages {
+        pub fn start(away: Option<String>) -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("control page port");
+            let port = listener.local_addr().expect("control page address").port();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let log = seen.clone();
+            thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let (log, away) = (log.clone(), away.clone());
+                    thread::spawn(move || answer(stream, away.as_deref(), &log));
+                }
+            });
+            Self { port, seen }
+        }
+
+        pub fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().expect("seen").clone()
+        }
+    }
+
+    fn answer(mut stream: TcpStream, away: Option<&str>, log: &Mutex<Vec<Seen>>) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+        let Some(head) = read_head(&mut stream) else { return };
+        let path = head
+            .split("\r\n")
+            .next()
+            .and_then(|line| line.split(' ').nth(1))
+            .unwrap_or("")
+            .to_owned();
+        let session = head.split("\r\n").skip(1).any(|line| {
+            line.split_once(':').is_some_and(|(name, value)| {
+                name.eq_ignore_ascii_case("cookie") && value.contains(&format!("{SESSION_COOKIE}={SESSION}"))
+            })
         });
-        port
+        log.lock().expect("seen").push(Seen {
+            path: path.clone(),
+            session,
+        });
+        let redirect = match (path.as_str(), away) {
+            ("/redirect-same", _) => Some("/landed".to_owned()),
+            ("/redirect-away", Some(away)) => Some(away.to_owned()),
+            _ => None,
+        };
+        let text = match redirect {
+            Some(location) => format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n"
+            ),
+            None => {
+                let body = format!("<!doctype html><title>{TITLE}</title><p>control</p>");
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            }
+        };
+        let _ = stream.write_all(text.as_bytes());
+        let _ = stream.shutdown(Shutdown::Both);
     }
 
     /// A CONNECT listener for `served` alone, with the route's credential.
@@ -215,7 +296,7 @@ mod probe {
     use avibe_desktop_lib::direct::{
         rendezvous::{origin_of, Reply, Request},
         webview_macos::{fetch_rendezvous, install_route},
-        Fault, FaultCode, SelectedPath, Stage,
+        Fault, FaultCode, PathStatus, PreferredPath, SelectedPath, Stage,
     };
     use block2::{DynBlock, RcBlock};
     use objc2::{
@@ -237,14 +318,20 @@ mod probe {
     /// secure, for the whole host, and for that host alone.
     const SESSION_COOKIE: &str = "__Host-vibe_remote_session";
     const SESSION_MAX_BYTES: usize = 3800;
-    /// A web content process may take this long to launch on a loaded or
-    /// display-less machine.
-    const LOAD: Duration = Duration::from_secs(60);
-    const SCRIPT: Duration = Duration::from_secs(20);
+    /// A web content process may take this long to launch, and a first
+    /// script this long to answer, on a loaded or display-less machine (the
+    /// first script took 12 s in the macOS guest).
+    const LOAD: Duration = Duration::from_secs(90);
+    const SCRIPT: Duration = Duration::from_secs(60);
     /// Rendezvous, dial, probe, strict CONNECT, TLS and `/health`, each with
     /// its own bound inside the native half.
     const QUALIFICATION: Duration = Duration::from_secs(60);
-    /// How long the link is watched after the page's payload.
+    /// How long a stream of an earlier step may take to end before the next
+    /// step counts new ones.
+    const RELEASE: Duration = Duration::from_secs(10);
+    /// How long after a page's work the listener is given to show it.
+    const SETTLE: Duration = Duration::from_millis(500);
+    /// How long the link is watched after the last leg.
     const AFTERWARDS: Duration = Duration::from_secs(5);
 
     // MARK: The report
@@ -315,9 +402,9 @@ mod probe {
     /// What a view's main frame did, in order.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Event {
-        /// A main-frame navigation or response left the view's origin and was
-        /// cancelled: a redirect, a sign-in page.
-        LeftOrigin,
+        /// A navigation or an answer the view is not held to was cancelled:
+        /// a redirect, a sign-in page, a script that moved the page.
+        Blocked,
         /// The main document's answer, by its status.
         Answered(i64),
         Committed,
@@ -328,13 +415,18 @@ mod probe {
     }
 
     struct Fields {
+        /// The one origin this view may be on.
         origin: String,
+        /// The one URL a main-frame navigation may ask for next; taken by
+        /// the navigation that asks for it, so nothing follows it.
+        allowed: RefCell<Option<String>>,
+        /// The URL of the navigation that was allowed: its answer's.
+        asked: RefCell<Option<String>>,
         events: Rc<RefCell<Vec<Event>>>,
     }
 
-    fn origin_of_url(url: Option<Retained<NSURL>>) -> Option<String> {
-        url.and_then(|url| url.absoluteString())
-            .and_then(|url| origin_of(&url.to_string()))
+    fn url_text(url: Option<Retained<NSURL>>) -> Option<String> {
+        url.and_then(|url| url.absoluteString()).map(|url| url.to_string())
     }
 
     /// The failure as fixed words: which family of error, and what it says
@@ -396,19 +488,29 @@ mod probe {
                 handler: &DynBlock<dyn Fn(WKNavigationActionPolicy)>,
             ) {
                 // SAFETY: WebKit calls this on the main thread with a live action.
-                let (main, origin) = unsafe {
+                let (main, url) = unsafe {
                     (
                         action.targetFrame().is_none_or(|frame| frame.isMainFrame()),
-                        origin_of_url(action.request().URL()),
+                        url_text(action.request().URL()),
                     )
                 };
-                // The main frame stays on the view's origin: a redirect is a
-                // navigation action of its own, and is refused here before
-                // anything is sent to where it leads.
-                let allowed = !main || origin.as_deref() == Some(self.ivars().origin.as_str());
-                if !allowed {
-                    self.ivars().events.borrow_mut().push(Event::LeftOrigin);
-                }
+                let fields = self.ivars();
+                let allowed = if main {
+                    // The one URL the probe asked for, once. A redirect is a
+                    // navigation action of its own and finds nothing allowed:
+                    // it is refused before anything is sent to where it
+                    // leads, on this origin or off it.
+                    let wanted = fields.allowed.borrow_mut().take();
+                    let allowed = wanted.is_some() && wanted == url;
+                    if allowed {
+                        *fields.asked.borrow_mut() = url;
+                    } else {
+                        fields.events.borrow_mut().push(Event::Blocked);
+                    }
+                    allowed
+                } else {
+                    url.as_deref().and_then(origin_of).as_deref() == Some(fields.origin.as_str())
+                };
                 handler.call((if allowed {
                     WKNavigationActionPolicy::Allow
                 } else {
@@ -424,7 +526,7 @@ mod probe {
                 handler: &DynBlock<dyn Fn(WKNavigationResponsePolicy)>,
             ) {
                 // SAFETY: WebKit calls this on the main thread with a live response.
-                let (main, origin, status) = unsafe {
+                let (main, url, status) = unsafe {
                     let answer = response.response();
                     let status: i64 = if answer.respondsToSelector(sel!(statusCode)) {
                         let status: isize = msg_send![&*answer, statusCode];
@@ -432,16 +534,21 @@ mod probe {
                     } else {
                         0
                     };
-                    (response.isForMainFrame(), origin_of_url(answer.URL()), status)
+                    (response.isForMainFrame(), url_text(answer.URL()), status)
                 };
-                let allowed = !main || origin.as_deref() == Some(self.ivars().origin.as_str());
-                if main {
-                    self.ivars().events.borrow_mut().push(if allowed {
+                let fields = self.ivars();
+                let allowed = if main {
+                    // The answer of the URL that was asked for, and no other.
+                    let allowed = url.is_some() && url == *fields.asked.borrow();
+                    fields.events.borrow_mut().push(if allowed {
                         Event::Answered(status)
                     } else {
-                        Event::LeftOrigin
+                        Event::Blocked
                     });
-                }
+                    allowed
+                } else {
+                    url.as_deref().and_then(origin_of).as_deref() == Some(fields.origin.as_str())
+                };
                 handler.call((if allowed {
                     WKNavigationResponsePolicy::Allow
                 } else {
@@ -480,6 +587,8 @@ mod probe {
         fn new(mtm: MainThreadMarker, origin: &str, events: Rc<RefCell<Vec<Event>>>) -> Retained<Self> {
             let this = Self::alloc(mtm).set_ivars(Fields {
                 origin: origin.to_owned(),
+                allowed: RefCell::new(None),
+                asked: RefCell::new(None),
                 events,
             });
             // SAFETY: `NSObject`'s designated initializer.
@@ -494,16 +603,17 @@ mod probe {
     struct View {
         webview: Retained<WKWebView>,
         store: Retained<WKWebsiteDataStore>,
+        origin: String,
         events: Rc<RefCell<Vec<Event>>>,
         // WebKit keeps its delegate weakly.
-        _delegate: Retained<Delegate>,
+        delegate: Retained<Delegate>,
     }
 
     /// How a load ended.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Loaded {
         Finished,
-        LeftOrigin,
+        Blocked,
         Failed(&'static str, &'static str, i64),
         ContentProcessEnded,
         TimedOut,
@@ -527,22 +637,30 @@ mod probe {
             Self {
                 webview,
                 store,
+                origin: origin.to_owned(),
                 events,
-                _delegate: delegate,
+                delegate,
             }
         }
 
-        /// Puts the session into this view's store for `host` alone, as the
-        /// instance sets it: secure, for every path, and host-only.
-        fn seed_session(&self, host: &str, session: &str) -> bool {
-            let entries = [
-                ("Name", SESSION_COOKIE),
+        /// Puts a session cookie into this view's store for the host of
+        /// the view's own origin, and for that host alone: host-only, for
+        /// every path, and secure when the origin is.
+        fn seed_session(&self, name: &str, session: &str) -> bool {
+            let Some((scheme, authority)) = self.origin.split_once("://") else {
+                return false;
+            };
+            let host = authority.split(':').next().unwrap_or("");
+            let mut entries = vec![
+                ("Name", name),
                 ("Value", session),
                 ("Domain", host),
                 ("Path", "/"),
-                ("Secure", "TRUE"),
                 ("HttpOnly", "TRUE"),
             ];
+            if scheme == "https" {
+                entries.push(("Secure", "TRUE"));
+            }
             let keys: Vec<Retained<NSString>> = entries.iter().map(|(key, _)| NSString::from_str(key)).collect();
             let values: Vec<Retained<AnyObject>> = entries
                 .iter()
@@ -566,19 +684,26 @@ mod probe {
             pump_until(Duration::from_secs(10), || stored.get())
         }
 
-        /// Loads `url` and waits for its main document to finish or fail.
-        /// Reports the answer's status and the commit as they come.
-        fn load(&self, url: &str, report: &Report, answered: &'static str, committed: &'static str) -> Loaded {
+        /// Loads `path` of the view's own origin and waits for its main
+        /// document to finish or fail. Nothing else is asked for: the view's
+        /// delegate allows this one URL, once. Reports the answer's status
+        /// and the commit as they come.
+        fn load(&self, path: &str, report: &Report, answered: &'static str, committed: &'static str) -> Loaded {
+            let url = format!("{}{path}", self.origin);
             self.events.borrow_mut().clear();
-            // SAFETY: Main thread; `url` is the probe's own or the validated origin's.
+            // SAFETY: Main thread; the URL is of the view's own origin.
             unsafe {
-                let Some(target) = NSURL::URLWithString(&NSString::from_str(url)) else {
+                let Some(target) = NSURL::URLWithString(&NSString::from_str(&url)) else {
                     return Loaded::Failed("other", "other", 0);
                 };
+                // As WebKit will name it when it asks.
+                *self.delegate.ivars().allowed.borrow_mut() = url_text(Some(target.clone()));
+                *self.delegate.ivars().asked.borrow_mut() = None;
                 self.webview.loadRequest(&NSURLRequest::requestWithURL(&target));
             }
             let mut seen = 0;
             let mut outcome = None;
+            let mut shown = false;
             pump_until(LOAD, || {
                 let events = self.events.borrow().clone();
                 for event in &events[seen..] {
@@ -586,12 +711,19 @@ mod probe {
                         Event::Answered(status) => {
                             report.line(answered, json!({ "ok": status == 200, "status": status }))
                         }
-                        Event::Committed => report.ok(committed),
+                        Event::Committed => {
+                            shown = true;
+                            report.ok(committed)
+                        }
                         Event::Finished => outcome = outcome.or(Some(Loaded::Finished)),
-                        Event::LeftOrigin => outcome = outcome.or(Some(Loaded::LeftOrigin)),
+                        // The document asked for is shown, and its own script
+                        // then tried to go elsewhere: refused, and said, but
+                        // the document stays.
+                        Event::Blocked if shown => report.failed("navigation_blocked_after_commit", "refused"),
+                        // Cancelling a navigation also fails it; the first
+                        // cause is the one.
+                        Event::Blocked => outcome = outcome.or(Some(Loaded::Blocked)),
                         Event::Failed(family, word, code) => {
-                            // Cancelling a navigation that left the origin
-                            // also fails it; the first cause is the one.
                             outcome = outcome.or(Some(Loaded::Failed(family, word, code)))
                         }
                         Event::ContentProcessEnded => outcome = outcome.or(Some(Loaded::ContentProcessEnded)),
@@ -600,13 +732,19 @@ mod probe {
                 seen = events.len();
                 outcome.is_some()
             });
+            // Nothing may follow this load on its own.
+            *self.delegate.ivars().allowed.borrow_mut() = None;
             outcome.unwrap_or(Loaded::TimedOut)
         }
 
-        /// Whether the top document is `origin`'s and complete.
-        fn shows(&self, origin: &str) -> bool {
+        /// Whether the top document is the view's own origin's.
+        fn shows_its_origin(&self) -> bool {
             // SAFETY: Main thread; reading the web view's current URL.
-            origin_of_url(unsafe { self.webview.URL() }).as_deref() == Some(origin)
+            url_text(unsafe { self.webview.URL() })
+                .as_deref()
+                .and_then(origin_of)
+                .as_deref()
+                == Some(self.origin.as_str())
         }
 
         /// Runs `body` as an async function in the page's own world and
@@ -649,8 +787,8 @@ mod probe {
                 report.ok(boundary);
                 true
             }
-            Loaded::LeftOrigin => {
-                report.failed(boundary, "left_origin");
+            Loaded::Blocked => {
+                report.failed(boundary, "navigation_blocked");
                 false
             }
             Loaded::Failed(family, word, code) => {
@@ -673,20 +811,25 @@ mod probe {
 
     // MARK: The controls
 
-    /// WebKit itself, in this environment: a page loads; a routed page loads
-    /// through its listener; and a routed page whose listener answers 502
-    /// does not load, because its route allows no failover.
+    /// WebKit itself, in this environment. A page loads and its origin gets
+    /// the view's session. A redirect is not followed, to another origin or
+    /// within the origin: its target gets no request. A routed page loads
+    /// through its listener. A routed page whose listener answers 502 does
+    /// not load, because its route allows no failover.
     fn controls(mtm: MainThreadMarker, report: &Report) -> bool {
-        let page = control::page();
+        // The same host as the pages, so the dummy session would be sent
+        // to it: a cookie is its host's, whatever the port.
+        let elsewhere = control::Pages::start(None);
+        let pages = control::Pages::start(Some(format!("http://127.0.0.1:{}/landed", elsewhere.port)));
+        let origin = format!("http://127.0.0.1:{}", pages.port);
 
-        let plain_origin = format!("http://127.0.0.1:{page}");
-        let plain = View::new(mtm, &plain_origin);
-        let loaded = plain.load(
-            &format!("{plain_origin}/"),
-            report,
-            "control_plain_answered",
-            "control_plain_committed",
-        );
+        let plain = View::new(mtm, &origin);
+        if !plain.seed_session(control::SESSION_COOKIE, control::SESSION) {
+            report.failed("control_session_seeded", "cookie_refused");
+            return false;
+        }
+        report.ok("control_session_seeded");
+        let loaded = plain.load("/", report, "control_plain_answered", "control_plain_committed");
         if !report_load(report, "control_plain_loaded", loaded) {
             return false;
         }
@@ -696,10 +839,63 @@ mod probe {
             return false;
         }
         report.ok("control_plain_script");
+        // The checks below mean something only if the session does travel.
+        if !pages.seen().iter().any(|seen| seen.path == "/" && seen.session) {
+            report.failed("control_session_sent_to_its_origin", "session_not_sent");
+            return false;
+        }
+        report.ok("control_session_sent_to_its_origin");
 
-        let served = format!("{}:{page}", control::ROUTED);
+        // A redirect to another origin: cancelled before it is sent.
+        let loaded = plain.load(
+            "/redirect-away",
+            report,
+            "control_redirect_away_answered",
+            "control_redirect_away_committed",
+        );
+        pump_until(SETTLE, || false);
+        let asked = pages.seen().iter().any(|seen| seen.path == "/redirect-away");
+        let reached = elsewhere.seen();
+        if loaded == Loaded::Finished || !asked || !reached.is_empty() {
+            report.line(
+                "control_redirect_away_not_followed",
+                json!({
+                    "ok": false,
+                    "reason": if !asked { "redirect_not_asked" } else if reached.iter().any(|seen| seen.session) { "session_sent_elsewhere" } else { "redirect_followed" },
+                    "requests_elsewhere": reached.len(),
+                }),
+            );
+            return false;
+        }
+        report.ok("control_redirect_away_not_followed");
+
+        // A redirect within the origin: not followed either.
+        let loaded = plain.load(
+            "/redirect-same",
+            report,
+            "control_redirect_same_answered",
+            "control_redirect_same_committed",
+        );
+        pump_until(SETTLE, || false);
+        let seen = pages.seen();
+        let asked = seen.iter().any(|seen| seen.path == "/redirect-same");
+        let landed = seen.iter().any(|seen| seen.path == "/landed");
+        if loaded == Loaded::Finished || !asked || landed {
+            report.failed(
+                "control_redirect_same_not_followed",
+                if asked {
+                    "redirect_followed"
+                } else {
+                    "redirect_not_asked"
+                },
+            );
+            return false;
+        }
+        report.ok("control_redirect_same_not_followed");
+
+        let served = format!("{}:{}", control::ROUTED, pages.port);
         let routed_origin = format!("http://{served}");
-        let through = control::Listener::start(served.clone(), Some(page));
+        let through = control::Listener::start(served.clone(), Some(pages.port));
         let routed = View::new(mtm, &routed_origin);
         if !install_route(
             &routed.webview,
@@ -714,12 +910,7 @@ mod probe {
             return false;
         }
         report.ok("control_route_installed");
-        let loaded = routed.load(
-            &format!("{routed_origin}/"),
-            report,
-            "control_routed_answered",
-            "control_routed_committed",
-        );
+        let loaded = routed.load("/", report, "control_routed_answered", "control_routed_committed");
         if !report_load(report, "control_routed_loaded", loaded) {
             return false;
         }
@@ -743,12 +934,7 @@ mod probe {
             report.failed("control_no_failover", "refused_by_system");
             return false;
         }
-        let loaded = refused.load(
-            &format!("{routed_origin}/"),
-            report,
-            "control_refused_answered",
-            "control_refused_committed",
-        );
+        let loaded = refused.load("/", report, "control_refused_answered", "control_refused_committed");
         // The host resolves nowhere and the route allows no failover: the
         // only honest end is a failure after the listener was asked.
         let held = matches!(loaded, Loaded::Failed(..)) && refusing.asked() > 0;
@@ -769,25 +955,35 @@ mod probe {
 
     // MARK: The input
 
-    /// The exact managed origin and its host; `None` for anything else.
-    fn managed_origin(argument: &str) -> Option<(String, String)> {
-        let host = argument.strip_prefix("https://")?;
-        (origin_of(argument).as_deref() == Some(argument) && !host.contains(':') && host.ends_with("-app.avibe.bot"))
-            .then(|| (argument.to_owned(), host.to_owned()))
+    /// The host of an exact managed origin (`https://<label>-app.avibe.bot`,
+    /// no port, no path), by the rule the client itself applies to its host
+    /// (`connect::Authority::managed`); `None` for anything else.
+    fn managed_host(origin: &str) -> Option<&str> {
+        let host = origin.strip_prefix("https://")?;
+        let label = host.strip_suffix("-app.avibe.bot")?;
+        let plain = !label.is_empty()
+            && label.len() + 4 <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+        (plain && origin_of(origin).as_deref() == Some(origin)).then_some(host)
     }
 
-    /// One line of standard input: a cookie value and nothing else.
-    fn read_session() -> Option<String> {
+    /// One line of standard input, without its end; `None` when it is
+    /// longer than `limit` bytes or cannot be read.
+    fn read_line(input: &mut impl BufRead, limit: usize) -> Option<String> {
         let mut line = String::new();
-        std::io::stdin()
-            .lock()
-            .take(SESSION_MAX_BYTES as u64 + 2)
-            .read_line(&mut line)
-            .ok()?;
-        let session = line.trim_end_matches(['\r', '\n']);
+        let read = input.take(limit as u64 + 2).read_line(&mut line).ok()?;
+        let text = line.trim_end_matches(['\r', '\n']);
+        (read > 0 && text.len() <= limit).then(|| text.to_owned())
+    }
+
+    /// A cookie value and nothing else.
+    fn session_ok(session: &str) -> bool {
         let plain = |byte: u8| matches!(byte, 0x21..=0x7e) && !matches!(byte, b'"' | b',' | b';' | b'\\');
-        (!session.is_empty() && session.len() <= SESSION_MAX_BYTES && session.bytes().all(plain))
-            .then(|| session.to_owned())
+        !session.is_empty() && session.len() <= SESSION_MAX_BYTES && session.bytes().all(plain)
     }
 
     // MARK: The native half
@@ -799,6 +995,21 @@ mod probe {
         Rendezvous(String, tokio::sync::oneshot::Sender<Reply>),
         /// The qualified client's listener and its window credential.
         Qualified(Result<Leg, Fault>),
+    }
+
+    /// What the main thread asks of the native half once it is qualified.
+    enum ToNative {
+        Streams(mpsc::Sender<Streams>),
+        Stop,
+    }
+
+    /// The link's committed streams, as sampled: how many times one opened
+    /// while none was open, and whether one is open now. A second stream
+    /// that opens while another is open is not counted.
+    #[derive(Clone, Copy, Default)]
+    struct Streams {
+        opened: u64,
+        open: bool,
     }
 
     struct Leg {
@@ -818,15 +1029,32 @@ mod probe {
         }
     }
 
+    fn report_status(report: &Report, status: PathStatus) {
+        let preferred = match status.preferred {
+            PreferredPath::Tunnel => "tunnel",
+            PreferredPath::Direct(path) => path_word(Some(path)),
+        };
+        report.line(
+            "path_status",
+            json!({
+                "preferred": preferred,
+                "sequence": status.sequence,
+                "closures": status.closure,
+                "strict_failures": status.strict_failures,
+            }),
+        );
+    }
+
     /// Runs the native qualification on a thread and a runtime of its own,
-    /// and keeps the qualified client there until `stop`: its link is
-    /// watched and every withdrawal printed as it happens.
+    /// and keeps the qualified client there until it is told to stop: every
+    /// opening and closing of a direct stream, every change of the path's
+    /// status and every withdrawal of the link is printed as it happens.
     fn start_native(
         host: String,
         instance: String,
         report: Report,
         to_main: mpsc::Sender<FromNative>,
-        stop: tokio::sync::oneshot::Receiver<()>,
+        mut commands: tokio::sync::mpsc::UnboundedReceiver<ToNative>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
@@ -863,20 +1091,143 @@ mod probe {
                     })
                     .ok_or(Fault(Stage::Handover, FaultCode::ListenerClosed));
                 let _ = to_main.send(FromNative::Qualified(leg));
-                let mut stop = stop;
+
+                let mut status = live.client.path_changes();
+                report_status(&report, *status.borrow_and_update());
+                let (mut status_live, mut retirements_live) = (true, true);
+                let mut streams = Streams::default();
+                let mut opened_at = None;
+                let mut sample = tokio::time::interval(Duration::from_millis(5));
                 loop {
                     tokio::select! {
-                        _ = &mut stop => break,
-                        retired = live.retirements.recv() => match retired {
+                        command = commands.recv() => match command {
+                            Some(ToNative::Streams(answer)) => {
+                                let _ = answer.send(streams);
+                            }
+                            Some(ToNative::Stop) | None => break,
+                        },
+                        retired = live.retirements.recv(), if retirements_live => match retired {
                             Ok(fault) => report.fault("link_retired", fault),
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => retirements_live = false,
                         },
+                        changed = status.changed(), if status_live => match changed {
+                            Ok(()) => report_status(&report, *status.borrow_and_update()),
+                            Err(_) => status_live = false,
+                        },
+                        _ = sample.tick() => {
+                            // A committed stream on the link: after the native
+                            // check has let go of its own, only a page's.
+                            let path = live.client.selected_path();
+                            match (streams.open, path) {
+                                (false, Some(_)) => {
+                                    streams.open = true;
+                                    streams.opened += 1;
+                                    opened_at = Some(Instant::now());
+                                    report.line("direct_stream_opened", json!({ "path": path_word(path) }));
+                                }
+                                (true, None) => {
+                                    streams.open = false;
+                                    let open_ms = opened_at.take().map_or(0, |at: Instant| at.elapsed().as_millis() as u64);
+                                    report.line("direct_stream_closed", json!({ "open_ms": open_ms }));
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
-                report.line("link_at_end", json!({ "path": path_word(live.client.selected_path()) }));
+                report.line(
+                    "link_at_end",
+                    json!({ "path": path_word(live.client.selected_path()) }),
+                );
             });
         })
+    }
+
+    /// The native half's count of direct streams, asked now.
+    fn streams(native: &tokio::sync::mpsc::UnboundedSender<ToNative>) -> Option<Streams> {
+        let (answer, answered) = mpsc::channel();
+        native.send(ToNative::Streams(answer)).ok()?;
+        answered.recv_timeout(Duration::from_secs(2)).ok()
+    }
+
+    /// Waits until no direct stream is open, for `RELEASE` at most.
+    fn released(native: &tokio::sync::mpsc::UnboundedSender<ToNative>) -> bool {
+        pump_until(RELEASE, || streams(native).is_some_and(|now| !now.open))
+    }
+
+    // MARK: The live-store leg
+
+    /// One piece of work the live store's page is asked for: the word it
+    /// answers ("ok" for a payload) and what the listener showed for it.
+    fn live_attempt(
+        document: &View,
+        mtm: MainThreadMarker,
+        native: &tokio::sync::mpsc::UnboundedSender<ToNative>,
+        report: &Report,
+        boundary: &'static str,
+        script: &str,
+    ) -> (bool, u64, bool) {
+        let before = streams(native).unwrap_or_default();
+        let answer = document.page_async(mtm, script);
+        pump_until(SETTLE, || false);
+        let after = streams(native).unwrap_or_default();
+        let word = match answer.as_deref() {
+            Some("ok") => "ok",
+            Some("failed") => "failed",
+            Some("opened") => "opened",
+            Some("closed") => "closed",
+            Some("error") => "error",
+            Some("timeout") => "timeout",
+            Some(_) => "unexpected_answer",
+            None => "no_answer",
+        };
+        let opened = after.opened.saturating_sub(before.opened);
+        report.line(
+            boundary,
+            json!({
+                "ok": word == "ok" || word == "opened",
+                "result": word,
+                "direct_streams_opened": opened,
+                "direct_stream_open_before": before.open,
+                "direct_stream_open_after": after.open,
+            }),
+        );
+        (word == "ok", opened, before.open)
+    }
+
+    /// A `/health` the page's own script fetches now, with or without the
+    /// page's credentials.
+    fn health_script(nonce: u128, credentials: &str) -> String {
+        format!(
+            r#"try {{
+  const response = await fetch("/health?probe={nonce}", {{cache: "no-store", redirect: "error", credentials: "{credentials}"}});
+  const body = await response.json();
+  return response.status === 200 && body && body.status === "ok" ? "ok" : "unexpected";
+}} catch (error) {{
+  return "failed";
+}}"#
+        )
+    }
+
+    /// A WebSocket to the page's own host: a connection of its own. Whether
+    /// the instance accepts it there says nothing; that it was tried does.
+    fn websocket_script(nonce: u128) -> String {
+        format!(
+            r#"return await new Promise((resolve) => {{
+  let socket;
+  const timer = setTimeout(() => {{ try {{ socket.close(); }} catch {{}} resolve("timeout"); }}, 10000);
+  const end = (word) => {{ clearTimeout(timer); resolve(word); }};
+  try {{
+    socket = new WebSocket("wss://" + location.host + "/health?probe={nonce}");
+    socket.onopen = () => {{ socket.close(); end("opened"); }};
+    socket.onerror = () => end("error");
+    socket.onclose = () => end("closed");
+  }} catch (error) {{
+    end("error");
+  }}
+}});"#
+        )
     }
 
     // MARK: The run
@@ -899,7 +1250,7 @@ mod probe {
             report.failed("input", "usage");
             return 2;
         };
-        let Some((origin, host)) = managed_origin(&origin) else {
+        let Some(host) = managed_host(&origin).map(str::to_owned) else {
             report.failed("input", "origin_not_managed");
             return 2;
         };
@@ -912,10 +1263,22 @@ mod probe {
             report.failed("input", "instance_invalid");
             return 2;
         }
-        let Some(session) = read_session() else {
+        // The session travels with the origin it was issued for. It is read
+        // only once that origin is known to be the one this run is for.
+        let mut input = std::io::stdin().lock();
+        let Some(session_origin) = read_line(&mut input, 300) else {
+            report.failed("input", "session_origin_missing");
+            return 2;
+        };
+        if managed_host(&session_origin).is_none() || session_origin != origin {
+            report.failed("input", "session_is_for_another_origin");
+            return 2;
+        }
+        let Some(session) = read_line(&mut input, SESSION_MAX_BYTES).filter(|session| session_ok(session)) else {
             report.failed("input", "session_invalid");
             return 2;
         };
+        drop(input);
         report.ok("input");
 
         if !controls(mtm, &report) {
@@ -925,25 +1288,20 @@ mod probe {
         // The session's own document, on WebKit's own path: the rendezvous
         // request must come from it.
         let document = View::new(mtm, &origin);
-        if !document.seed_session(&host, &session) {
+        if !document.seed_session(SESSION_COOKIE, &session) {
             report.failed("session_seeded", "cookie_refused");
             return 3;
         }
         report.ok("session_seeded");
-        let loaded = document.load(
-            &format!("{origin}/"),
-            &report,
-            "document_answered",
-            "document_committed",
-        );
-        if !report_load(&report, "document_loaded", loaded) || !document.shows(&origin) {
+        let loaded = document.load("/", &report, "document_answered", "document_committed");
+        if !report_load(&report, "document_loaded", loaded) || !document.shows_its_origin() {
             return 3;
         }
 
         let (to_main, from_native) = mpsc::channel();
-        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let (native, commands) = tokio::sync::mpsc::unbounded_channel();
         report.ok("native_qualification_start");
-        let native = start_native(host.clone(), instance, report, to_main, stopped);
+        let worker = start_native(host.clone(), instance, report, to_main, commands);
         let mut qualified = None;
         pump_until(QUALIFICATION, || {
             match from_native.try_recv() {
@@ -983,8 +1341,8 @@ mod probe {
             qualified.is_some()
         });
         let finish = |code: i32| {
-            let _ = stop.send(());
-            let _ = native.join();
+            let _ = native.send(ToNative::Stop);
+            let _ = worker.join();
             code
         };
         let leg = match qualified {
@@ -999,19 +1357,77 @@ mod probe {
             }
         };
         report.ok("native_qualified");
+        // The native check's own stream ends before a page's is counted.
+        if released(&native) {
+            report.ok("native_stream_released");
+        } else {
+            report.failed("native_stream_released", "stream_still_open");
+        }
 
-        // The page leg: a store that has never connected to the host, so the
-        // route carries it from its first request. The session, then the
-        // route (the qualified client's listener, its window credential, no
-        // failover), then the first load.
-        let page = View::new(mtm, &origin);
-        if !page.seed_session(&host, &session) {
-            report.failed("page_session_seeded", "cookie_refused");
+        // The fresh-store leg, the positive control of the page path: a
+        // store that has never connected to the host, so the route carries
+        // it from its first request. The session, then the route (the
+        // qualified client's listener, its window credential, no failover),
+        // then the first load.
+        let fresh = {
+            let page = View::new(mtm, &origin);
+            if !page.seed_session(SESSION_COOKIE, &session) {
+                report.failed("fresh_session_seeded", "cookie_refused");
+                return finish(5);
+            }
+            report.ok("fresh_session_seeded");
+            if !install_route(
+                &page.webview,
+                mtm,
+                &host,
+                leg.proxy,
+                &leg.username,
+                &leg.password,
+                false,
+            ) {
+                report.failed("fresh_route_installed", "refused_by_system");
+                return finish(5);
+            }
+            report.ok("fresh_route_installed");
+            let loaded = page.load("/", &report, "fresh_answered", "fresh_committed");
+            if !report_load(&report, "fresh_loaded", loaded) || !page.shows_its_origin() {
+                return finish(5);
+            }
+            // A payload of the page's own, asked for now: not the native check's.
+            let nonce = report.start.elapsed().as_nanos();
+            let health = page.page_async(mtm, &health_script(nonce, "same-origin"));
+            let ok = health.as_deref() == Some("ok");
+            if ok {
+                report.ok("fresh_payload");
+            } else {
+                report.failed(
+                    "fresh_payload",
+                    match health.as_deref() {
+                        Some("failed") => "fetch_failed",
+                        Some(_) => "unexpected_answer",
+                        None => "no_answer",
+                    },
+                );
+            }
+            ok
+            // The view and its store end here, and their connections with them.
+        };
+        if !fresh {
             return finish(5);
         }
-        report.ok("page_session_seeded");
+        let clean = released(&native);
+        if clean {
+            report.ok("fresh_store_released");
+        } else {
+            // A stream that stays open hides a new one from the count.
+            report.failed("fresh_store_released", "stream_still_open");
+        }
+
+        // The live-store leg: the session's document is connected to the
+        // host on WebKit's own path. It gets the route now, while it is
+        // live, and is asked for work of several kinds.
         if !install_route(
-            &page.webview,
+            &document.webview,
             mtm,
             &host,
             leg.proxy,
@@ -1019,45 +1435,46 @@ mod probe {
             &leg.password,
             false,
         ) {
-            report.failed("page_route_installed", "refused_by_system");
-            return finish(5);
+            report.failed("live_route_installed", "refused_by_system");
+            return finish(6);
         }
-        report.ok("page_route_installed");
-        let loaded = page.load(&format!("{origin}/"), &report, "page_answered", "page_committed");
-        if !report_load(&report, "page_loaded", loaded) || !page.shows(&origin) {
-            return finish(5);
+        report.ok("live_route_installed");
+        let nonce = || report.start.elapsed().as_nanos();
+        let mut payload_on_new_stream = false;
+        let mut stream_without_payload = false;
+        let mut any_stream = false;
+        let mut attempt = |boundary: &'static str, script: String, payload: bool| {
+            let (ok, opened, busy) = live_attempt(&document, mtm, &native, &report, boundary, &script);
+            any_stream |= opened > 0;
+            if payload && opened > 0 && !busy {
+                payload_on_new_stream |= ok;
+                stream_without_payload |= !ok;
+            }
+        };
+        attempt("live_fetch", health_script(nonce(), "same-origin"), true);
+        attempt("live_fetch_without_credentials", health_script(nonce(), "omit"), true);
+        attempt("live_websocket", websocket_script(nonce()), false);
+        let reloaded = document.load("/", &report, "live_reload_answered", "live_reload_committed");
+        if report_load(&report, "live_reloaded", reloaded) && document.shows_its_origin() {
+            attempt("live_fetch_after_reload", health_script(nonce(), "same-origin"), true);
         }
-        // A payload of the page's own, asked for now: not the native check's.
-        let nonce = report.start.elapsed().as_nanos();
-        let health = page.page_async(
-            mtm,
-            &format!(
-                r#"try {{
-  const response = await fetch("/health?probe={nonce}", {{cache: "no-store", redirect: "error"}});
-  const body = await response.json();
-  return String(response.status) + "|" + String(body && body.status);
-}} catch (error) {{
-  return "failed";
-}}"#
-            ),
-        );
-        let code = match health.as_deref() {
-            Some("200|ok") => {
-                report.ok("page_payload");
-                0
-            }
-            Some("failed") => {
-                report.failed("page_payload", "fetch_failed");
-                5
-            }
-            Some(_) => {
-                report.failed("page_payload", "unexpected_answer");
-                5
-            }
-            None => {
-                report.failed("page_payload", "no_answer");
-                5
-            }
+        let code = if payload_on_new_stream {
+            report.ok("live_store_direct_payload");
+            0
+        } else {
+            report.failed(
+                "live_store_direct_payload",
+                if stream_without_payload {
+                    "direct_stream_without_payload"
+                } else if any_stream {
+                    "direct_stream_not_for_a_payload"
+                } else if clean {
+                    "route_not_taken"
+                } else {
+                    "route_not_taken_or_hidden"
+                },
+            );
+            6
         };
         // Whatever ends the link in the next moments is printed by the
         // native half as it happens.

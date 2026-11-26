@@ -4,8 +4,8 @@ name: desktop-direct-live-probe
 # Desktop's direct path (desktop/src-tauri/examples/direct_live_probe.rs) and
 # keeps the executable for two days, so that it can be run in a controlled
 # macOS guest against a regression instance. Nothing here runs the probe,
-# reaches an instance, or holds a credential. The job only exists on the
-# diagnosis branch; delete this file with the diagnosis.
+# reaches an instance, or holds a credential. The job exists for pull request
+# 4330 alone; delete this file with the diagnosis.
 
 on:
   pull_request:
@@ -30,10 +30,11 @@ env:
 jobs:
   build:
     name: macos-arm64 executable
-    # Only the diagnosis branch of this repository: never a fork, never
-    # another pull request that happens to touch these paths.
+    # Pull request 4330 of this repository, from its own branch: never a
+    # fork, never another pull request that happens to touch these paths.
     if: >-
-      github.head_ref == 'feat/direct-transport-diagnosis'
+      github.event.pull_request.number == 4330
+      && github.head_ref == 'feat/direct-transport-diagnosis'
       && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-26
     timeout-minutes: 60
@@ -43,11 +44,24 @@ jobs:
       run:
         working-directory: desktop
     steps:
+      # The pull request's own head, not its merge with the base: the
+      # executable is built from exactly the commit its artifact is named for.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
 
-      - name: Report toolchain
+      - name: Report the source and the toolchain
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          built="$(git rev-parse HEAD)"
+          echo "source: $built"
+          [ "$built" = "$HEAD_SHA" ] || {
+            echo "checked out $built, expected the pull request's head $HEAD_SHA" >&2
+            exit 1
+          }
           [ -d "$DEVELOPER_DIR" ] || {
             echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
             exit 1
@@ -105,6 +119,11 @@ jobs:
           printf '%s\n' "$out"
           [ "$code" -eq 2 ] || { echo "expected exit code 2, got $code" >&2; exit 1; }
           printf '%s\n' "$out" | grep -q '"boundary":"input"' || { echo "no input line" >&2; exit 1; }
+
+      # What a run of the executable must be checked against.
+      - name: Print the executable's sha256
+        run: |
+          set -euo pipefail
           file target/debug/examples/direct_live_probe
           shasum -a 256 target/debug/examples/direct_live_probe
 
