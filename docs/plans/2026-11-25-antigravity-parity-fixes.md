@@ -2,6 +2,22 @@
 
 Owner-authorized backend lane for closed PR #4252. Compare with current Claude/Codex behavior; keep native managed execution and Avibe ownership of Skills, updates, routing and recovery. No real agy runs or service restarts. UX/docs is a separate writer on the same branch; rebase before pushing.
 
+## Scope-preserving slimming (owner decision, 2026-11-26)
+
+Start after `ddc1039e4` has its exact-head verdict and no open threads (verified
+Codex pass at 05:53Z). Verify each proposed removal against production callers
+and preserve its contract in focused tests. Keep the persisted per-session
+effort baseline and leave other backend-owned helpers unchanged.
+
+Four local commits, then one push/review cycle: (1) use execution's config-option
+selection in connection probes and remove the unused legacy model protocol;
+(2) remove verified dead ACP/Antigravity APIs and duplicate production plumbing;
+(3) consolidate agent/ACP/parity fake-peer tests; (4) consolidate auth/install/
+registration coverage and scoped UI tests. Skip cuts whose premise is false or
+whose coverage cannot be preserved inside these boundaries. Report exact per-
+commit line removals, skipped items, focused validation and the final head.
+Do not merge; continue to exact-head review/green CI/zero threads/CLEAN.
+
 Each item is a separate commit with a regression at its owning boundary:
 
 - A2/F9 correction: retain the askill `antigravity` target. askill installs the canonical copy in `.agents/skills` and links agent directories to it; Avibe reads that canonical copy. The Codex remapping was incorrect and is reverted. Verify discovery through the canonical copy while preserving Antigravity attribution.

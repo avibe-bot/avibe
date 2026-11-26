@@ -23,12 +23,6 @@ _LIVE_MODELS_CACHE_SCHEMA_VERSION = 1
 _LIVE_MODELS_CACHE_FILENAME = "antigravity_models_cache.json"
 _LIVE_MODELS_CACHE_LOCK = threading.Lock()
 _CANONICAL_AUTH_MODES = ("oauth-personal", "oauth-business", "gemini-api-key", "agent-platform")
-_AUTH_MODE_ALIASES = {
-    "api_key": "gemini-api-key",
-    "agent_platform": "agent-platform",
-    "adc": "agent-platform",
-}
-
 
 class AntigravityModelSelectionError(RuntimeError):
     """Raised when Avibe's selected model or reasoning effort cannot be applied."""
@@ -115,28 +109,6 @@ def _find_config_option(
     return None
 
 
-def _extract_option_values(option: Mapping[str, Any]) -> set[str]:
-    """Extract selectable string values from flat or grouped ACP config options."""
-    values: set[str] = set()
-    raw_options = option.get("options")
-    if not isinstance(raw_options, Sequence) or isinstance(raw_options, (str, bytes)):
-        return values
-    for entry in raw_options:
-        if not isinstance(entry, Mapping):
-            continue
-        val = entry.get("value")
-        if isinstance(val, str) and val:
-            values.add(val)
-        nested = entry.get("options")
-        if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes)):
-            for sub in nested:
-                if isinstance(sub, Mapping):
-                    sub_val = sub.get("value")
-                    if isinstance(sub_val, str) and sub_val:
-                        values.add(sub_val)
-    return values
-
-
 def _normalize_config_options(raw: Any) -> tuple[dict[str, Any], ...]:
     if not isinstance(raw, list):
         return ()
@@ -184,7 +156,7 @@ def extract_initial_default_effort(
     init_model = _option_current_value(model_option)
     if init_model is None:
         return None
-    allowed_efforts = _extract_option_values(effort_option)
+    allowed_efforts = {value for value, _ in _extract_option_choices_ordered(effort_option)}
     init_effort = _valid_option_value(_option_default_value(effort_option), allowed_efforts)
     if init_effort is None and allow_current_value:
         init_effort = _valid_option_value(_option_current_value(effort_option), allowed_efforts)
@@ -224,14 +196,7 @@ def validate_model_selection_receipt(
     *,
     model_option_id: str | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    """Validate any model receipt returned by ACP model-selection RPCs.
-
-    Checks ``configOptions``, ``currentModelId``/``current_model_id``,
-    ``modelId``/``model_id``, and ``models.currentModelId`` against
-    ``expected_model``, raising ``AntigravityModelSelectionError`` with
-    ``reason="model_mismatch"`` if any returned receipt contradicts it.
-    Returns normalized ``configOptions`` if present, otherwise ``()``.
-    """
+    """Validate the model in returned ACP config options, when present."""
     if not isinstance(response, Mapping):
         return ()
 
@@ -251,26 +216,6 @@ def validate_model_selection_receipt(
                     reason="model_mismatch",
                     config_options=updated,
                 )
-
-    candidates: list[Any] = [
-        response.get("currentModelId"),
-        response.get("current_model_id"),
-        response.get("modelId"),
-        response.get("model_id"),
-    ]
-    raw_models = response.get("models")
-    if isinstance(raw_models, Mapping):
-        candidates.append(raw_models.get("currentModelId"))
-        candidates.append(raw_models.get("current_model_id"))
-
-    for raw_confirmed in candidates:
-        confirmed = _clean_optional(raw_confirmed)
-        if confirmed is not None and confirmed != expected_model:
-            raise AntigravityModelSelectionError(
-                f"Antigravity applied model {confirmed!r} instead of requested {expected_model!r}.",
-                reason="model_mismatch",
-                config_options=updated or None,
-            )
 
     return updated
 
@@ -427,7 +372,7 @@ async def apply_model_and_effort(
             reason="model_option_unavailable",
         )
 
-    allowed_models = _extract_option_values(model_option)
+    allowed_models = {value for value, _ in _extract_option_choices_ordered(model_option)}
     if allowed_models and selected_model not in allowed_models:
         raise AntigravityModelSelectionError(
             f"Antigravity model {selected_model!r} is not supported by this session "
@@ -458,7 +403,7 @@ async def apply_model_and_effort(
     )
     baseline_effort = _clean_optional(default_effort)
     if effort_option is not None:
-        allowed_efforts = _extract_option_values(effort_option)
+        allowed_efforts = {value for value, _ in _extract_option_choices_ordered(effort_option)}
         baseline_effort = _valid_option_value(baseline_effort, allowed_efforts)
         advertised_default = _valid_option_value(_option_default_value(effort_option), allowed_efforts)
         advertised_current = _valid_option_value(_option_current_value(effort_option), allowed_efforts)
@@ -535,7 +480,7 @@ async def apply_model_and_effort(
                 )
             if effort_option is not None and isinstance(effort_option.get("id"), str):
                 effort_option_id = str(effort_option["id"])
-                allowed_efforts = _extract_option_values(effort_option)
+                allowed_efforts = {value for value, _ in _extract_option_choices_ordered(effort_option)}
                 server_effort = _option_current_value(effort_option)
                 refreshed_default = _valid_option_value(_option_default_value(effort_option), allowed_efforts)
                 if refreshed_default is not None:
@@ -589,8 +534,7 @@ def _extract_antigravity_config(config: Any) -> Any:
 
 def _canonical_auth_mode(antigravity_config: Any) -> str:
     raw = (_config_str(antigravity_config, "auth_mode") or "oauth-personal").lower()
-    mode = _AUTH_MODE_ALIASES.get(raw, raw)
-    return mode if mode in _CANONICAL_AUTH_MODES else "oauth-personal"
+    return raw if raw in _CANONICAL_AUTH_MODES else "oauth-personal"
 
 
 def auth_config_fingerprint(antigravity_config: Any) -> str:
@@ -608,43 +552,27 @@ def auth_config_fingerprint(antigravity_config: Any) -> str:
 
 
 def _extract_option_choices_ordered(option: Mapping[str, Any]) -> list[tuple[str, str | None]]:
-    """Extract ordered, unique ``(value, display_name)`` pairs from flat or grouped ACP config options."""
+    """Read the flat or grouped select choices defined by ACP config options."""
     choices: list[tuple[str, str | None]] = []
     seen: set[str] = set()
-
-    def _add(entry: Any) -> None:
-        if isinstance(entry, str):
-            val = entry.strip()
-            label = None
-        elif isinstance(entry, Mapping):
-            raw_val = entry.get("value") or entry.get("id") or entry.get("modelId")
-            val = raw_val.strip() if isinstance(raw_val, str) else ""
-            raw_label = (
-                entry.get("name")
-                or entry.get("label")
-                or entry.get("displayName")
-                or entry.get("display_name")
-            )
-            label = raw_label.strip() if isinstance(raw_label, str) and raw_label.strip() else None
-        else:
-            return
-        if val and val not in seen:
-            seen.add(val)
-            choices.append((val, label))
-
-    raw_options = option.get("options")
-    if not isinstance(raw_options, Sequence) or isinstance(raw_options, (str, bytes)):
+    raw = option.get("options")
+    if not isinstance(raw, list):
         return choices
-    for entry in raw_options:
-        if isinstance(entry, Mapping):
-            if entry.get("value") or entry.get("id") or entry.get("modelId"):
-                _add(entry)
-            nested = entry.get("options")
-            if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes)):
-                for sub in nested:
-                    _add(sub)
-        else:
-            _add(entry)
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        grouped = entry.get("options", [entry])
+        if not isinstance(grouped, list):
+            continue
+        for choice in grouped:
+            if not isinstance(choice, Mapping):
+                continue
+            value = choice.get("value")
+            if not isinstance(value, str) or not value or value in seen:
+                continue
+            seen.add(value)
+            name = choice.get("name")
+            choices.append((value, name.strip() if isinstance(name, str) and name.strip() else None))
     return choices
 
 

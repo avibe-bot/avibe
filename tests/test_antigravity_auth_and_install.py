@@ -472,12 +472,12 @@ async def test_agent_platform_adc_detection_and_gcp_settings(fake_agy: FakeAgyAu
             False,
         ),
         (
-            "set_model_fallback_mismatch",
+            "config_options_required_even_if_legacy_set_model_would_succeed",
             [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}, {"value": "gemini-4-carbon"}]}],
             "method_not_found",
-            {"currentModelId": "gemini-4-carbon"},
+            {"currentModelId": "gemini-4-neon"},
             {"stopReason": "end_turn"},
-            "model_mismatch",
+            "model_rejected",
             False,
         ),
         (

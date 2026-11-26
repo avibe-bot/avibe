@@ -505,12 +505,6 @@ class AcpClient:
             timeout=self._request_timeout,
         )
 
-    async def session_set_model(self, session_id: str, model_id: str) -> dict[str, Any]:
-        return await self.send_request(
-            "session/set_model",
-            {"sessionId": session_id, "modelId": model_id},
-            timeout=self._request_timeout,
-        )
 
     async def session_set_mode(self, session_id: str, mode_id: str) -> dict[str, Any]:
         return await self.send_request(

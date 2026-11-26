@@ -62,7 +62,7 @@ def _peer_opt(state_file: Path, session_id: str, option_id: str) -> str | None:
 
 @pytest.mark.asyncio
 async def test_launch_argv_and_env_contract_for_execution_and_passive_list(tmp_path: Path) -> None:
-    async with make_agent_harness(tmp_path, auth_mode="api_key", api_key="test-gemini-key", base_url="https://gemini.example.test/v1", extra_args=["--sandbox"]) as h:
+    async with make_agent_harness(tmp_path, auth_mode="gemini-api-key", api_key="test-gemini-key", base_url="https://gemini.example.test/v1", extra_args=["--sandbox"]) as h:
         await h.agent.handle_message(make_request(message="stream_all", workdir=h.workdir, model="model-alpha", subagent_name="reviewer"))
         launches = h.launches()
         assert len(launches) == 1 and launches[0]["argv"] == ["acp", "--disable-telemetry", "--dangerously-skip-permissions", "--sandbox", "--agent", "reviewer"]
@@ -70,7 +70,7 @@ async def test_launch_argv_and_env_contract_for_execution_and_passive_list(tmp_p
             "true", "test-gemini-key", "https://gemini.example.test/v1", "ses_1"
         )
 
-        adc_env = build_antigravity_env(antigravity_config(h.shim, auth_mode="agent_platform", gcp_project="proj-123", gcp_location="us-central1"), base_env={"PATH": os.environ.get("PATH", "")})
+        adc_env = build_antigravity_env(antigravity_config(h.shim, auth_mode="agent-platform", gcp_project="proj-123", gcp_location="us-central1"), base_env={"PATH": os.environ.get("PATH", "")})
         assert (adc_env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV], adc_env["GOOGLE_CLOUD_PROJECT"], adc_env["GOOGLE_CLOUD_LOCATION"]) == ("true", "proj-123", "us-central1")
         assert "--dangerously-skip-permissions" not in build_antigravity_command("agy", execution=False)
 
@@ -94,7 +94,7 @@ async def test_live_env_never_inherits_gemini_api_key_and_missing_key_fails_with
         "GOOGLE_GEMINI_BASE_URL": "https://inherited.example.test/v1",
     }
 
-    for mode, api_key in (("gemini-api-key", ""), ("gemini-api-key", "   "), ("api_key", ""), ("agent-platform", "ignored"), ("oauth-personal", "ignored")):
+    for mode, api_key in (("gemini-api-key", ""), ("gemini-api-key", "   "), ("agent-platform", "ignored"), ("oauth-personal", "ignored")):
         env = build_antigravity_env(
             antigravity_config("agy", auth_mode=mode, api_key=api_key),
             base_env=inherited,
@@ -169,7 +169,7 @@ async def test_resolve_antigravity_cli_path_normalizes_explicit_paths_and_launch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("auth_mode", "required_method"), [("api_key", "gemini-api-key"), ("gemini-api-key", "gemini-api-key"), ("agent_platform", "agent-platform"), ("agent-platform", "agent-platform")])
+@pytest.mark.parametrize(("auth_mode", "required_method"), [("gemini-api-key", "gemini-api-key"), ("agent-platform", "agent-platform")])
 async def test_post_initialize_authenticate_for_adapter_and_native_sessions(tmp_path: Path, auth_mode: str, required_method: str) -> None:
     workdir, shared = tmp_path / "repo", FakeSessions()
     workdir.mkdir()
@@ -187,10 +187,10 @@ async def test_post_initialize_authenticate_for_adapter_and_native_sessions(tmp_
     listed = await asyncio.to_thread(AntigravityNativeSessionProvider(cli_path=str(shim), config=agy_cfg).list_metadata, str(workdir))
     assert len(listed) == 1 and listed[0].native_session_id == "sess-1" and listed[0].locator["title"] == "Update greeting"
 
-    async with make_agent_harness(tmp_path, workdir=workdir, cli_path=shim, auth_mode="oauth", name=f"unauth-{auth_mode}") as h_bad:
+    async with make_agent_harness(tmp_path, workdir=workdir, cli_path=shim, auth_mode="oauth-personal", name=f"unauth-{auth_mode}") as h_bad:
         await h_bad.agent.handle_message(make_request(message="hello", workdir=workdir, base_session_id="unauth"))
         assert "-32000" in h_bad.controller.events("notify")[0][1]
-    assert await asyncio.to_thread(AntigravityNativeSessionProvider(cli_path=str(shim), config=antigravity_config(shim, auth_mode="oauth")).list_metadata, str(workdir)) == []
+    assert await asyncio.to_thread(AntigravityNativeSessionProvider(cli_path=str(shim), config=antigravity_config(shim, auth_mode="oauth-personal")).list_metadata, str(workdir)) == []
 
 
 @pytest.mark.asyncio
@@ -1355,7 +1355,7 @@ async def test_consecutive_harness_deliveries_reuse_session_process_and_keep_run
 @pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["cwd", "auth", "rules", "renewal", "backend_config"])
 async def test_genuine_launch_input_changes_replace_same_key_runtime(tmp_path, change):
-    async with make_agent_harness(tmp_path, auth_mode="api_key", api_key="test-key") as h:
+    async with make_agent_harness(tmp_path, auth_mode="gemini-api-key", api_key="test-key") as h:
         req = make_request(message="first", workdir=h.workdir)
         await h.agent.handle_message(req)
         first = h.agent._sessions[req.composite_session_id]
@@ -1371,7 +1371,7 @@ async def test_genuine_launch_input_changes_replace_same_key_runtime(tmp_path, c
         elif change == "renewal":
             await h.agent.renew_runtime(h.agy_cfg)
         else:
-            await h.agent.renew_runtime(antigravity_config(h.shim, auth_mode="api_key", api_key="test-key", extra_args=["--sandbox"]), config_save=True)
+            await h.agent.renew_runtime(antigravity_config(h.shim, auth_mode="gemini-api-key", api_key="test-key", extra_args=["--sandbox"]), config_save=True)
         await h.agent.handle_message(next_req)
         second = h.agent._sessions[req.composite_session_id]
         assert second.client is not first.client and len(h.launches()) == 2

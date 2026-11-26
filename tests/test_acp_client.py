@@ -228,7 +228,7 @@ async def test_session_set_config_option_model_and_mode(tmp_path: Path) -> None:
             await client.session_set_config_option(sid, "model", "invalid-model")
         assert bad_val.value.code == -32602
 
-        await client.session_set_model(sid, "model-alpha")
+        await client.session_set_config_option(sid, "model", "model-alpha")
         await client.session_set_mode(sid, "plan")
         await client.session_prompt(sid, [{"type": "text", "text": "check"}])
 
