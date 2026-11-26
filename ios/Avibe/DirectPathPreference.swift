@@ -3,12 +3,18 @@ import Network
 
 /// This device's choice of path to one instance, per account and instance
 /// (the instance's "Devices › Connection" page, "this device"): automatic
-/// (the direct path when it can, otherwise the Cloudflare tunnel), or the
-/// Cloudflare tunnel only. Kept on this device only.
+/// (the direct path when it can, otherwise the Cloudflare tunnel), the
+/// Cloudflare tunnel only, or the direct path and its relay only (the
+/// tunnel only to establish it). Kept on this device only. A build that
+/// does not know a mode reads its entry as automatic.
 struct DirectPathPreference: Equatable, Codable, Sendable {
     enum Mode: String, Equatable, Codable, Sendable {
         case automatic
         case tunnel
+        /// 「仅直连和中继」: once this instance's direct path has come up,
+        /// new connections never go through the tunnel
+        /// (`DirectOnlyControlling`).
+        case direct
 
         /// A mode the page names. Unknown names are refused, so a later
         /// mode can be added without changing the shape.
@@ -20,16 +26,44 @@ struct DirectPathPreference: Equatable, Codable, Sendable {
     /// The App set the choice back to automatic itself.
     struct Reversion: Equatable, Codable, Sendable {
         enum Reason: String, Equatable, Codable, Sendable {
-            /// The instance could not be reached on the tunnel alone.
+            /// The instance could not be reached on the chosen path alone.
             case unreachable
         }
 
         let at: Date
         let reason: Reason
+        /// The mode it was set back from. An entry stored before there
+        /// were two such modes has none: it was the tunnel.
+        let from: Mode
+
+        init(at: Date, reason: Reason, from: Mode = .tunnel) {
+            self.at = at
+            self.reason = reason
+            self.from = from
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case at, reason, from
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            at = try container.decode(Date.self, forKey: .at)
+            reason = try container.decode(Reason.self, forKey: .reason)
+            from = try container.decodeIfPresent(Mode.self, forKey: .from) ?? .tunnel
+        }
     }
 
     var mode: Mode = .automatic
     var reverted: Reversion? = nil
+    /// The choice of 「仅直连和中继」 is recorded but takes effect only at
+    /// the next launch: the instance loaded without its route to the App's
+    /// listener in this process (`DirectOnlyControlling`). Not stored.
+    var pendingRelaunch = false
+
+    private enum CodingKeys: String, CodingKey {
+        case mode, reverted
+    }
 
     static let automatic = DirectPathPreference()
 
@@ -42,8 +76,10 @@ struct DirectPathPreference: Equatable, Codable, Sendable {
                 [
                     "at": Int(($0.at.timeIntervalSince1970 * 1_000).rounded()),
                     "reason": $0.reason.rawValue,
+                    "from": $0.from.rawValue,
                 ] as Any
             } ?? NSNull(),
+            "pendingRelaunch": pendingRelaunch,
         ]
     }
 
@@ -95,6 +131,8 @@ final class DirectPathPreferenceStore {
     func set(_ preference: DirectPathPreference, accountID: String, origin: String) {
         var entries = stored()
         let entry = Self.entry(accountID: accountID, origin: origin)
+        var preference = preference
+        preference.pendingRelaunch = false
         if preference == .automatic {
             entries.removeValue(forKey: entry)
         } else if let data = try? JSONEncoder().encode(preference) {
@@ -120,6 +158,13 @@ struct DirectPreferenceProvider {
     /// The mode, and the page's URL: a change reopens the instance there,
     /// after the answer.
     let write: @MainActor (WebOrigin, DirectPathPreference.Mode, URL) -> DirectPathPreference?
+    /// Whether 「仅直连和中继」 can be chosen: only with a path controller
+    /// that enforces it (`DirectOnlyControlling`). Otherwise the bridge
+    /// refuses `direct`, as a mode it does not know.
+    var acceptsDirectOnly = false
+    /// `direct.measure()` for the instance (`DirectPathMeasuring`); `nil`
+    /// when the path controller cannot measure.
+    var measure: (@MainActor (WebOrigin) async -> DirectMeasureReply)? = nil
 }
 
 /// Whether the device has a usable network, as the system reports it.

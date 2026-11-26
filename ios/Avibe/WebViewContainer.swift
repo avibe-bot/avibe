@@ -32,6 +32,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
     let directHandover: DirectHandoverProvider?
     let directPreference: DirectPreferenceProvider?
     let directLoadGate: DirectLoadGateProvider?
+    let directInstanceLoad: DirectInstanceLoadNote?
     let pushOpenedAck: (String, WebOrigin) -> Bool
     let setBadgeCount: (Int, WebOrigin) -> Bool
     let reconcileNotifications: (NotificationReconcile, WebOrigin) -> Bool
@@ -79,6 +80,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
+        directInstanceLoad: DirectInstanceLoadNote? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
@@ -125,6 +127,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
         self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
+        self.directInstanceLoad = directInstanceLoad
         self.pushOpenedAck = pushOpenedAck
         self.setBadgeCount = setBadgeCount
         self.reconcileNotifications = reconcileNotifications
@@ -171,6 +174,7 @@ struct WebViewContainer: UIViewControllerRepresentable {
             liveActivity: liveActivity,
             healthConnect: healthConnect,
             directLoadGate: directLoadGate,
+            directInstanceLoad: directInstanceLoad,
             pushOpenedAck: pushOpenedAck,
             setBadgeCount: setBadgeCount,
             reconcileNotifications: reconcileNotifications,

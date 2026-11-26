@@ -400,6 +400,7 @@ private struct BrowserScreen: View {
                         liveActivity: appModel.handleLiveActivity,
                         healthConnect: appModel.connectHealth,
                         directLoadGate: appModel.directLoadGateProvider(for: runtime),
+                        directInstanceLoad: appModel.directInstanceLoadNote(for: runtime),
                         pushOpenedAck: appModel.acknowledgePushOpened,
                         setBadgeCount: appModel.setBadgeCount,
                         reconcileNotifications: appModel.reconcileNotifications,

@@ -387,6 +387,10 @@ final class AppModel: ObservableObject {
     /// stop, or a sign-out clears it, and it is settled only for the
     /// identity it was made under.
     private var deferredOpen: (runtime: MobileRuntimeContext, identity: Int)?
+    /// 「仅直连和中继」 for the runtime on screen: its revert rules, while
+    /// the choice is in effect in this process.
+    private var directOnlyWatch: DirectOnlyWatch?
+    private var directOnlyCheck: Task<Void, Never>?
     /// The session check that an open is waiting for, because avibe.bot's
     /// last confirmation of the session is past its lifetime
     /// (`confirmSessionThenOpen`). One at a time.
@@ -645,15 +649,46 @@ final class AppModel: ObservableObject {
         guard directPathController != nil else {
             return nil
         }
+        let measure: (@MainActor (WebOrigin) async -> DirectMeasureReply)? =
+            directMeasureRunner.map { runner in
+                { origin in await runner.measure(forInstanceURL: origin.url) }
+            }
         return DirectPreferenceProvider(
             read: { [weak self] origin in
                 guard let self, let runtime = self.runtimeShowing(origin) else { return nil }
-                return self.directPathPreference(for: runtime)
+                return self.answering(self.directPathPreference(for: runtime), for: runtime)
             },
             write: { [weak self] origin, mode, url in
                 self?.setDirectPathPreference(mode, at: origin, reopeningAt: url)
-            }
+            },
+            acceptsDirectOnly: directOnlyControl != nil,
+            measure: measure
         )
+    }
+
+    /// The path controller's 「仅直连和中继」, once it provides it.
+    private var directOnlyControl: DirectOnlyControlling? {
+        let controller: AnyObject? = directPathController
+        return controller as? DirectOnlyControlling
+    }
+
+    /// `direct.measure()`, one at a time and bounded, once the path
+    /// controller provides the measurement.
+    private lazy var directMeasureRunner: DirectMeasureRunner? = {
+        let controller: AnyObject? = self.directPathController
+        return (controller as? DirectPathMeasuring).map { DirectMeasureRunner(measuring: $0) }
+    }()
+
+    /// Tells the view about each load of the instance it starts; `nil`
+    /// without 「仅直连和中继」 in the path controller.
+    func directInstanceLoadNote(for runtime: MobileRuntimeContext) -> DirectInstanceLoadNote? {
+        guard directOnlyControl != nil else {
+            return nil
+        }
+        let url = runtime.instance.url
+        return { [weak self] in
+            self?.directOnlyControl?.noteInstanceLoad(forInstanceURL: url)
+        }
     }
 
     var pushCoordinator: NativePushCoordinator {
@@ -759,6 +794,14 @@ final class AppModel: ObservableObject {
         _ = directPathController
         // The Action Button's hidden WebView loads through the same local
         // listener as the page, so it asks the same gate before its load.
+        // And it tells the direct path of each load, as the page's view does,
+        // on the model's current store only (the routes are that store's).
+        VoiceCaptureInstanceLoads.note = { [weak self] origin, storeIdentifier in
+            guard let self, storeIdentifier == self.websiteDataStore.identifier else {
+                return
+            }
+            self.directOnlyControl?.noteInstanceLoad(forInstanceURL: origin.url)
+        }
         VoiceCaptureLoadGate.provider = { [weak self] origin, storeIdentifier in
             guard let self, let controller = self.directPathController else {
                 return .open
@@ -2233,6 +2276,7 @@ final class AppModel: ObservableObject {
         {
             invalidatePendingSystemSchedule()
         }
+        directOnlyDidSeeFreshPage(event, runtime: runtime)
         guard
             runtimeIdentity == attemptID,
             runtimeOpenAttempt?.id == attemptID,
@@ -2448,9 +2492,22 @@ final class AppModel: ObservableObject {
         return directPathPreferences.preference(accountID: runtime.account.id, origin: origin)
     }
 
-    /// Whether opens of `runtime` may use the direct path.
+    /// Whether opens of `runtime` may use the direct path: automatic, and
+    /// 「仅直连和中继」.
     private func allowsDirect(_ runtime: MobileRuntimeContext) -> Bool {
-        directPathPreference(for: runtime).mode == .automatic
+        directPathPreference(for: runtime).mode != .tunnel
+    }
+
+    /// The choice as the page reads it: with `pendingRelaunch` when
+    /// 「仅直连和中继」 waits for the next launch.
+    private func answering(
+        _ preference: DirectPathPreference,
+        for runtime: MobileRuntimeContext
+    ) -> DirectPathPreference {
+        var answer = preference
+        answer.pendingRelaunch = preference.mode == .direct
+            && directOnlyControl?.directOnlyNeedsRelaunch(forInstanceURL: runtime.instance.url) == true
+        return answer
     }
 
     /// The runtime on screen, if it is `origin`'s and still selected.
@@ -2483,25 +2540,39 @@ final class AppModel: ObservableObject {
         let next = DirectPathPreference(mode: mode, reverted: nil)
         directPathPreferences.set(next, accountID: runtime.account.id, origin: key)
         guard previous.mode != mode else {
-            return next
+            return answering(next, for: runtime)
         }
+        directOnlyControl?.setDirectOnly(mode == .direct, forInstanceURL: runtime.instance.url)
+        let answer = answering(next, for: runtime)
+        guard !answer.pendingRelaunch else {
+            // Recorded for the next launch: this process has nothing to
+            // move over, so the page stays as it is.
+            endDirectOnlyWatch()
+            return answer
+        }
+        reopenRuntime(runtime, at: url)
+        return answer
+    }
+
+    /// Opens `runtime` again at `url` once the current call has returned:
+    /// every connection starts again on the path now chosen.
+    private func reopenRuntime(_ runtime: MobileRuntimeContext, at url: URL?) {
         let identity = runtimeIdentity
         Task { @MainActor [weak self] in
             guard
                 let self,
                 self.runtimeIdentity == identity,
-                self.route.runtime == runtime,
+                self.route.runtime == runtime || self.runtimeOpenAttempt?.runtime == runtime,
                 self.sessionCoordinator.isSelectedRuntime(runtime)
             else {
                 return
             }
             // For this reopen's attempt only: an open that never reaches
             // its first load leaves nothing for a later one.
-            if self.openRuntime(runtime) {
+            if self.openRuntime(runtime), let url {
                 self.runtimeStartURL = (runtime, self.runtimeIdentity, url)
             }
         }
-        return next
     }
 
     /// The URL the new controller of `runtime` starts at, once.
@@ -2545,13 +2616,181 @@ final class AppModel: ObservableObject {
         else {
             return false
         }
+        storeReversion(of: attempt.runtime, origin: origin, from: .tunnel)
+        return true
+    }
+
+    /// The choice goes back to automatic, recording from what, and the page
+    /// is told.
+    private func storeReversion(
+        of runtime: MobileRuntimeContext,
+        origin: String,
+        from mode: DirectPathPreference.Mode
+    ) {
         let reverted = DirectPathPreference(
             mode: .automatic,
-            reverted: .init(at: Date(), reason: .unreachable)
+            reverted: .init(at: Date(), reason: .unreachable, from: mode)
         )
-        directPathPreferences.set(reverted, accountID: attempt.runtime.account.id, origin: origin)
+        directPathPreferences.set(reverted, accountID: runtime.account.id, origin: origin)
         runtimeController?.deliverDirectPreferenceChanged(reverted)
-        return true
+    }
+
+    // MARK: 「仅直连和中继」
+
+    /// Revert-rule state for one runtime (`DirectOnlyRevertRules`).
+    private struct DirectOnlyWatch {
+        let runtime: MobileRuntimeContext
+        var rules = DirectOnlyRevertRules()
+        /// The first failed listener attempt that counts for rule c in the
+        /// current recovery.
+        var listenerDownSince: ContinuousClock.Instant?
+        /// The controller's drop count last seen.
+        var strictFailures: UInt64?
+    }
+
+    /// The controller hears this device's choice for `runtime`'s host:
+    /// before its route is prepared at each open (selection and restore
+    /// included). Idempotent.
+    private func applyDirectOnly(for runtime: MobileRuntimeContext) {
+        directOnlyControl?.setDirectOnly(
+            directPathPreference(for: runtime).mode == .direct,
+            forInstanceURL: runtime.instance.url
+        )
+    }
+
+    /// A new bootstrap of `runtime` (an open, a return to the foreground):
+    /// the revert rules run while 「仅直连和中继」 is in effect in this
+    /// process, and not at all while it waits for the next launch.
+    private func beginDirectOnlyBootstrap(for runtime: MobileRuntimeContext) {
+        let url = runtime.instance.url
+        guard
+            let control = directOnlyControl,
+            directPathPreference(for: runtime).mode == .direct,
+            !control.directOnlyNeedsRelaunch(forInstanceURL: url)
+        else {
+            endDirectOnlyWatch()
+            return
+        }
+        var watch = directOnlyWatch.flatMap { $0.runtime == runtime ? $0 : nil }
+            ?? DirectOnlyWatch(runtime: runtime)
+        watch.rules.beginBootstrap(
+            unlinkedRendezvous: control.unlinkedRendezvousCount(forInstanceURL: url),
+            linked: control.isDirectOnlyLinked(forInstanceURL: url)
+        )
+        directOnlyWatch = watch
+        checkDirectOnly()
+    }
+
+    private func endDirectOnlyWatch() {
+        directOnlyWatch = nil
+        directOnlyCheck?.cancel()
+        directOnlyCheck = nil
+    }
+
+    /// A live document of the instance committed: the instance answered
+    /// (rule a2's evidence).
+    private func directOnlyDidSeeFreshPage(
+        _ event: RuntimeNavigationEvent,
+        runtime: MobileRuntimeContext
+    ) {
+        guard
+            event.stage == .committed,
+            !event.fromCache,
+            event.destination == .instance,
+            directOnlyWatch?.runtime == runtime
+        else {
+            return
+        }
+        directOnlyWatch?.rules.noteFreshPage(at: .now)
+        checkDirectOnly()
+    }
+
+    /// Reads the controller and applies the rules: on a change of
+    /// availability, a fresh page, a bootstrap, and when a rule's time is
+    /// due. Nothing in the background.
+    private func checkDirectOnly() {
+        directOnlyCheck?.cancel()
+        directOnlyCheck = nil
+        guard var watch = directOnlyWatch, let control = directOnlyControl else {
+            return
+        }
+        let runtime = watch.runtime
+        let url = runtime.instance.url
+        guard
+            // Shown, or being opened (its route is prepared on the loading
+            // screen, and rendezvous are answered meanwhile).
+            route.runtime == runtime || runtimeOpenAttempt?.runtime == runtime,
+            sessionCoordinator.isSelectedRuntime(runtime),
+            directPathPreference(for: runtime).mode == .direct,
+            !control.directOnlyNeedsRelaunch(forInstanceURL: url)
+        else {
+            endDirectOnlyWatch()
+            return
+        }
+        guard runtimeOpenBackgroundedAt == nil else {
+            watch.listenerDownSince = nil
+            directOnlyWatch = watch
+            return
+        }
+        if let failure = directPathController?.listenerRecovery?.lastFailure,
+           failure.step != .waiting
+        {
+            watch.listenerDownSince = watch.listenerDownSince ?? failure.at
+        } else {
+            watch.listenerDownSince = nil
+        }
+        let strictFailures = control.strictFailureCount(forInstanceURL: url)
+        let dropped = watch.strictFailures.map { strictFailures > $0 } ?? false
+        watch.strictFailures = strictFailures
+        let decision = watch.rules.observe(
+            DirectOnlyRevertRules.Observation(
+                now: .now,
+                linked: control.isDirectOnlyLinked(forInstanceURL: url),
+                strictFailures: strictFailures,
+                unlinkedRendezvous: control.unlinkedRendezvousCount(forInstanceURL: url),
+                listenerDownSince: watch.listenerDownSince
+            )
+        )
+        directOnlyWatch = watch
+        switch decision {
+        case .revert:
+            revertDirectOnly(runtime)
+        case .keep(let nextCheck, let reloadsForLink):
+            if dropped {
+                // The link dropped: the controller only says so (it is not a
+                // fallback). Re-establishing it takes one full reopen (stop,
+                // prepare the route, open), as for a fresh open; a reload of
+                // the same WebView would not reach the tunnel again.
+                reopenRuntime(runtime, at: runtimeController?.instancePageURL)
+                return
+            }
+            if reloadsForLink {
+                runtimeController?.reloadInstancePage()
+            }
+            guard let nextCheck else {
+                return
+            }
+            directOnlyCheck = Task { @MainActor [weak self] in
+                try? await Task.sleep(until: nextCheck, clock: .continuous)
+                guard !Task.isCancelled else {
+                    return
+                }
+                self?.checkDirectOnly()
+            }
+        }
+    }
+
+    /// The rules found that 「仅直连和中继」 cannot reach the instance: back
+    /// to automatic (`reverted.from` direct), the page told, and the
+    /// instance opened again where it was.
+    private func revertDirectOnly(_ runtime: MobileRuntimeContext) {
+        endDirectOnlyWatch()
+        guard let origin = preferenceOrigin(runtime) else {
+            return
+        }
+        storeReversion(of: runtime, origin: origin, from: .direct)
+        directOnlyControl?.setDirectOnly(false, forInstanceURL: runtime.instance.url)
+        reopenRuntime(runtime, at: runtimeController?.instancePageURL)
     }
 
     private func isAuthenticationDestination(
@@ -2576,6 +2815,8 @@ final class AppModel: ObservableObject {
         }
         runtimeOpenBackgroundedAt = runtimeOpenTiming.now
         cancelRuntimeOpenTimers()
+        directOnlyCheck?.cancel()
+        directOnlyCheck = nil
     }
 
     /// Restarts the budget clock and schedules only the running attempt's
@@ -2600,6 +2841,9 @@ final class AppModel: ObservableObject {
             return
         }
         renewSessionConfirmationIfDue()
+        if let runtime = route.runtime {
+            beginDirectOnlyBootstrap(for: runtime)
+        }
         guard let attemptID = runtimeOpenAttempt?.id else {
             return
         }
@@ -2811,6 +3055,9 @@ final class AppModel: ObservableObject {
         // The route for the instance's host must be in place before the
         // runtime's first load (docs/plans/remote-direct-ios.md section 5).
         // Its wait consumes the same fixed attempt budget as Web navigation.
+        // 「仅直连和中继」 is set for the host before its route is.
+        applyDirectOnly(for: runtime)
+        beginDirectOnlyBootstrap(for: runtime)
         route = .loading
         let stillWanted = { [weak self] () -> Bool in
             guard let self else {
@@ -2916,6 +3163,7 @@ final class AppModel: ObservableObject {
         }
         runtimeController?.directAvailabilityDidChange()
         makeHeldRuntimeRetryIfTheGateOpened()
+        checkDirectOnly()
     }
 
     /// Keeps a Retry that could not reload because something else may hold
@@ -3548,5 +3796,44 @@ final class AppModel: ObservableObject {
             + VoiceCaptureController.shared.cancelForAccountTransition()
         pendingRuntimeReleaseBarriers.removeAll()
         return barriers
+    }
+}
+
+// The path controller's side of the seams (`DirectPathSeams.swift`). Here,
+// not beside the protocols: the sheet fixture compiles those without the
+// controller.
+// The path controller enforces 「仅直连和中继」.
+extension DirectPathController: DirectOnlyControlling {}
+
+// It measures (`DirectPathController.measure(forInstanceURL:)`, #4297); its
+// answer is mapped to the bridge's, milliseconds rounded to whole ones.
+extension DirectPathController: DirectPathMeasuring {
+    func measurePaths(forInstanceURL url: URL) async -> DirectMeasureResult {
+        switch await measure(forInstanceURL: url) {
+        case .busy:
+            return .busy
+        case .measured(let measurement):
+            return .measured(
+                DirectMeasurement(
+                    measuredAt: measurement.measuredAt,
+                    current: measurement.current.map(DirectMeasureLeg.init),
+                    tunnel: measurement.tunnel.map(DirectMeasureLeg.init)
+                )
+            )
+        }
+    }
+}
+
+extension DirectMeasureLeg {
+    init(_ leg: DirectMeasure.Leg) {
+        self.init(
+            kind: Kind(rawValue: leg.kind.rawValue) ?? .tunnel,
+            scope: leg.scope.flatMap { Scope(rawValue: $0.rawValue) },
+            relayRegion: leg.relayRegion,
+            ok: leg.ok,
+            medianMs: leg.medianMs.flatMap { $0.isFinite ? Int($0.rounded()) : nil },
+            maxMs: leg.maxMs.flatMap { $0.isFinite ? Int($0.rounded()) : nil },
+            error: leg.error.flatMap { Failure(rawValue: $0.rawValue) }
+        )
     }
 }

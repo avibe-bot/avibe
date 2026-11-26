@@ -704,6 +704,9 @@ final class WebViewController: UIViewController {
     /// Whether this runtime's WebView may be loaded now; `nil` without a
     /// direct transport, which loads as before.
     private let directLoadGate: DirectLoadGateProvider?
+    /// Told synchronously at each load of the instance this controller
+    /// starts, after the gate let it through (`DirectOnlyControlling`).
+    private let directInstanceLoad: DirectInstanceLoadNote?
     /// An automatic load of the instance (the first load, or the reload
     /// after the web content process ended) that met a held gate. One bit,
     /// not a queue: repeated requests coalesce, and it is consumed before
@@ -922,6 +925,7 @@ final class WebViewController: UIViewController {
         liveActivity: @escaping LiveActivityAction = { _, _ in throw NativeBridgeError.unsupported },
         healthConnect: @escaping HealthConnectAction = { _, _, _ in "failed" },
         directLoadGate: DirectLoadGateProvider? = nil,
+        directInstanceLoad: DirectInstanceLoadNote? = nil,
         pushOpenedAck: @escaping (String, WebOrigin) -> Bool = { _, _ in false },
         setBadgeCount: @escaping (Int, WebOrigin) -> Bool = { _, _ in false },
         reconcileNotifications: @escaping (NotificationReconcile, WebOrigin) -> Bool = { _, _ in false },
@@ -966,6 +970,7 @@ final class WebViewController: UIViewController {
         self.liveActivity = liveActivity
         self.healthConnect = healthConnect
         self.directLoadGate = directLoadGate
+        self.directInstanceLoad = directInstanceLoad
         self.navigationPolicy = navigationPolicy
             ?? NavigationPolicy(instanceOrigins: [instanceOrigin])
         self.accountFallbackVisibilityChanged =
@@ -1124,6 +1129,10 @@ final class WebViewController: UIViewController {
         switch directLoadGate?() ?? .open {
         case .open:
             hasPendingAutoLoad = false
+            // The load is decided: the path controller hears of it now, before
+            // the WebView's first connection (a cached page's subresources
+            // reach the instance too).
+            directInstanceLoad?()
             let start = takeStartURL()
             if start == nil, !hasLoadedLive, !hasUsedCache, loadCachedPage() {
                 return
@@ -1132,6 +1141,33 @@ final class WebViewController: UIViewController {
         case .held, .fault:
             hasPendingAutoLoad = true
         }
+    }
+
+    /// The instance's page in the WebView now, if it is the instance's.
+    var instancePageURL: URL? {
+        guard
+            let url = retainedWebView?.url,
+            WebOrigin(url: url, requiresHTTPS: false) == instanceOrigin
+        else {
+            return nil
+        }
+        return url
+    }
+
+    /// Loads the instance's page again where it is (or its root), through
+    /// the load gate as every load the shell starts: 「仅直连和中继」's link
+    /// has come up, and the page's connections move to it.
+    func reloadInstancePage() {
+        guard
+            !isInvalidatedForAccountTransition,
+            let webView = retainedWebView,
+            (directLoadGate?() ?? .open) == .open
+        else {
+            return
+        }
+        let url = instancePageURL ?? instanceOrigin.url
+        directInstanceLoad?()
+        webView.load(URLRequest(url: url))
     }
 
     /// The first load's own URL, once: a reopen where the page was (this
