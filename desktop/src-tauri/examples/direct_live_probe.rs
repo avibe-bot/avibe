@@ -44,7 +44,8 @@
 //!    a load that carries a dummy session to its origin;
 //!    a redirect to another origin and one within the origin, neither
 //!    followed; the event-stream script of the legs, which must read a
-//!    handshake and let go, stop at its bound when none comes, and fail
+//!    handshake and let go, stop at its bound when none comes within it
+//!    (counted in bytes: a handshake past the bound is not read), and fail
 //!    on a redirect within the origin and on one away from it, with no
 //!    request at either target; a load through a route to a CONNECT
 //!    listener; and a load
@@ -235,6 +236,9 @@ mod control {
         let frames = match path.as_str() {
             "/events" => Some(CONNECTED.to_owned()),
             "/events-flood" => Some(": pad\n".repeat(2048)),
+            // A whole handshake, but past the bound in bytes and within it
+            // in characters: 4104 bytes of comment, 2054 characters.
+            "/events-multibyte" => Some(format!(": {}\n\n{CONNECTED}", "\u{e9}".repeat(2050))),
             _ => None,
         };
         if let Some(frames) = frames {
@@ -1156,6 +1160,7 @@ mod probe {
         for (boundary, path, expected) in [
             ("control_stream_handshake_read", "/events", "direct"),
             ("control_stream_bounded", "/events-flood", "capped"),
+            ("control_stream_bounded_in_bytes", "/events-multibyte", "capped"),
         ] {
             let word = fetched(path);
             if word != expected {
@@ -1676,9 +1681,10 @@ mod probe {
     /// The request is the probe's own, so it is held as the page loads are:
     /// same-origin, and a redirect is an error, to another origin or to
     /// another path of this one (step 1 runs this same script against
-    /// both). It ends at the handshake, after `STREAM_BYTES` without one, or
-    /// after ten seconds, and the connection is given up either way. Only
-    /// the handshake's `via` is read, as one of two words.
+    /// both). It ends at the handshake, after `STREAM_BYTES` bytes of the
+    /// answer without a whole one (bytes as received, cut before they are
+    /// decoded), or after ten seconds, and the request is aborted either
+    /// way. Only the handshake's `via` is read, as one of two words.
     fn stream_script(path: &str) -> String {
         const SCRIPT: &str = r#"const controller = new AbortController();
 const timer = setTimeout(() => controller.abort(), 10000);
@@ -1692,24 +1698,27 @@ try {
   reader = response.body.getReader();
   const decoder = new TextDecoder();
   let text = "";
+  let remaining = __BYTES__;
   for (;;) {
     const {done, value} = await reader.read();
     if (done) return "ended";
-    text = (text + decoder.decode(value, {stream: true})).slice(0, __BYTES__);
+    const view = value.subarray(0, remaining);
+    remaining -= view.byteLength;
+    text += decoder.decode(view, {stream: true});
     const frame = /(?:^|\n)event: connected\ndata: ([^\n]*)\n\n/.exec(text);
     if (frame) {
       let via;
       try { via = JSON.parse(frame[1]).via; } catch {}
       return via === "direct" ? "direct" : via === "other" ? "other" : "unnamed";
     }
-    if (text.length >= __BYTES__) return "capped";
+    if (remaining === 0) return "capped";
   }
 } catch (error) {
   return controller.signal.aborted ? "timeout" : "failed";
 } finally {
-  clearTimeout(timer);
-  try { if (reader) await reader.cancel(); } catch {}
   controller.abort();
+  try { if (reader) await reader.cancel(); } catch {}
+  clearTimeout(timer);
 }"#;
         SCRIPT
             .replace("__PATH__", path)
