@@ -1,0 +1,116 @@
+name: desktop-direct-live-probe
+
+# Temporary, and for one pull request only: builds the live diagnostic of the
+# Desktop's direct path (desktop/src-tauri/examples/direct_live_probe.rs) and
+# keeps the executable for two days, so that it can be run in a controlled
+# macOS guest against a regression instance. Nothing here runs the probe,
+# reaches an instance, or holds a credential. The job only exists on the
+# diagnosis branch; delete this file with the diagnosis.
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - desktop/src-tauri/examples/direct_live_probe.rs
+      - desktop/src-tauri/examples/support/direct_transport_diag.rs
+      - desktop/src-tauri/src/direct/**
+      - .github/workflows/desktop-direct-live-probe.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-direct-live-probe-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: macos-arm64 executable
+    # Only the diagnosis branch of this repository: never a fork, never
+    # another pull request that happens to touch these paths.
+    if: >-
+      github.head_ref == 'feat/direct-transport-diagnosis'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Report toolchain
+        run: |
+          set -euo pipefail
+          [ -d "$DEVELOPER_DIR" ] || {
+            echo "Pinned Xcode is missing: $DEVELOPER_DIR" >&2
+            exit 1
+          }
+          xcodebuild -version
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          rustc --version
+          cargo --version
+          uname -m
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          node-version: "22.23.4"
+          cache: "npm"
+          cache-dependency-path: desktop/package-lock.json
+
+      # Read only, as the shell's pull-request job: release warm-ups own the
+      # desktop cache namespace.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target
+          key: ${{ runner.os }}-xcode-26.6-default-target-desktop-cargo-${{ hashFiles('desktop/Cargo.lock') }}
+
+      - name: Install bootstrap UI dependencies
+        run: npm ci
+
+      - name: Install shared account UI dependencies
+        working-directory: ui
+        run: npm ci
+
+      # `tauri::generate_context!` embeds `frontendDist` at compile time.
+      - name: Build bootstrap UI
+        run: npm run build
+
+      - name: Build the live diagnostic
+        run: cargo build --locked -p avibe-desktop --example direct_live_probe --all-features
+
+      # Its own controls: a real WKWebView with no window, on loopback pages
+      # of the probe's own. No session is read and nothing leaves the runner.
+      - name: Run the probe's WebKit controls
+        timeout-minutes: 10
+        run: target/debug/examples/direct_live_probe --controls
+
+      # Without its arguments and a session on standard input it reads
+      # nothing and reaches nothing.
+      - name: Check that it refuses an empty input
+        run: |
+          set -uo pipefail
+          out="$(target/debug/examples/direct_live_probe < /dev/null)"
+          code=$?
+          printf '%s\n' "$out"
+          [ "$code" -eq 2 ] || { echo "expected exit code 2, got $code" >&2; exit 1; }
+          printf '%s\n' "$out" | grep -q '"boundary":"input"' || { echo "no input line" >&2; exit 1; }
+          file target/debug/examples/direct_live_probe
+          shasum -a 256 target/debug/examples/direct_live_probe
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: direct-live-probe-macos-arm64-${{ github.event.pull_request.head.sha }}
+          path: desktop/target/debug/examples/direct_live_probe
+          if-no-files-found: error
+          retention-days: 2

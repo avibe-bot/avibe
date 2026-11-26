@@ -455,6 +455,14 @@ impl Client {
         }));
     }
 }
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.listener.retire();
+        // Detach rather than abort: the signalled monitor and drain own shutdown.
+        drop(self.withdraw(false));
+    }
+}
+
 #[cfg(test)]
 mod diagnosis_tests {
     use super::*;
@@ -475,13 +483,5 @@ mod diagnosis_tests {
                 (RefreshOutcome::Retired, Some(Fault(Stage::Rendezvous, code)))
             );
         }
-    }
-}
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.listener.retire();
-        // Detach rather than abort: the signalled monitor and drain own shutdown.
-        drop(self.withdraw(false));
     }
 }
