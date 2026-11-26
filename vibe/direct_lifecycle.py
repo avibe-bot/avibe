@@ -30,6 +30,9 @@ from vibe.direct_rendezvous import DirectRendezvous, rendezvous as default_rende
 
 logger = logging.getLogger(__name__)
 PERMISSION_MAX_AGE_SECONDS = 15 * 60
+# Start replacing the supervised process a minute before the 24h key limit.
+# Its ephemeral QUIC identity is unrelated to the instance TLS certificate.
+ENDPOINT_TURNOVER_SECONDS = 24 * 3600 - 60
 CONFIG_POLL_INTERVAL_SECONDS = 0.5
 BINARY_REFRESH_INTERVAL_SECONDS = 5.0
 BINARY_OBSERVATION_MAX_AGE_SECONDS = 15.0
@@ -291,6 +294,7 @@ class DirectAccessLifecycle:
         self._cancelled_retry_used = False
         self._ingress: Any = None
         self._supervisor: Any = None
+        self._endpoint_retire_at: float | None = None
         self._resource_generation: int | None = None
         self._failed_generation: int | None = None
         self._next_start = 0.0
@@ -729,6 +733,10 @@ class DirectAccessLifecycle:
             self._start_delay = min(INSTALL_RETRY_MAX_SECONDS, self._start_delay * 2)
 
     async def _reconcile(self) -> None:
+        if self._endpoint_retire_at is not None and suspend_elapsed() >= self._endpoint_retire_at:
+            # Withdraw and clear all peer admissions before stopping this owner.
+            # Existing heartbeat authority is neither invalidated nor renewed.
+            self._invalidate()
         self._refresh_binary_observation()
         state, reason, binary = self._gate()
         if binary is None:
@@ -795,6 +803,9 @@ class DirectAccessLifecycle:
             return
         from vibe.direct_rendezvous import PUBLIC_TRIAL
 
+        # Anchor before spawn, never to an address update, admission or heartbeat.
+        # A supervisor's own crash restarts can only make its current key younger.
+        self._endpoint_retire_at = suspend_elapsed() + ENDPOINT_TURNOVER_SECONDS
         self._supervisor = self._supervisor_factory(
             binary, self._ingress, _OwnedRendezvous(self, generation, ingress),
             **({"relay_policy": PUBLIC_TRIAL} if self._public_traversal_allowed and self._permission_fresh() else {}),
@@ -806,6 +817,7 @@ class DirectAccessLifecycle:
 
     def _can_commit(self, generation: int, ingress: Any) -> bool:
         return (generation == self._generation and ingress is self._ingress
+                and (self._endpoint_retire_at is None or suspend_elapsed() < self._endpoint_retire_at)
                 and self._gate()[2] is not None and _certificate_usable(self._certificate_result))
 
     async def _prepare_tls(self, operation: Callable, *args: Any, generation: int, ingress: Any) -> Any:
@@ -831,6 +843,7 @@ class DirectAccessLifecycle:
         if self._ingress is not None:
             await self._ingress.stop()
             self._ingress = None
+        self._endpoint_retire_at = None
         self._resource_generation = None
         self._rendezvous.publish(None, reason=reason)
         self._stopped.set()

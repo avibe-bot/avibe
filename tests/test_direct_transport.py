@@ -115,6 +115,14 @@ SIDECAR = textwrap.dedent(
         read_admission_notice()
         read_admission_notice()
         wait_for_stop()
+    elif mode == "daily_turnover":
+        ready()
+        message = json.loads(sys.stdin.readline())
+        if message.get('type') == 'admission' and message['ttl_seconds'] > 0:
+            event({'kind': 'admission_notice', 'message': message})
+            with socket.create_connection((host, port), timeout=3) as sock:
+                sock.sendall(f"AVDT1 {start['token']} {peer}\nday{generation}".encode('ascii'))
+                wait_for_stop()  # keep this admitted stream open until its process retires
     elif mode == "stream":
         ready()
         time.sleep(0.1)
@@ -323,6 +331,72 @@ async def test_ready_addresses_and_restart_publish_each_generation(sidecar):
         await supervisor.stop()
         os.environ.clear()
         os.environ.update(old_env)
+
+
+@pytest.mark.asyncio
+async def test_daily_turnover_reconnects_via_authenticated_rendezvous(sidecar, monkeypatch, tmp_path):
+    from vibe import direct_lifecycle as lifecycle, direct_rendezvous, remote_access
+    from vibe.ui_server import app
+    from tests.test_direct_lifecycle import FakeCertificateClient, FakeIngress, _permission
+    from tests.test_direct_rendezvous import _post, _body
+    from tests.ui_server_test_helpers import _save_config, remote_session_cookie
+
+    path, events, env = sidecar
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv('DIRECT_TEST_MODE', 'daily_turnover')
+    config = _save_config(tmp_path, paired=True)
+    host = 'alex-app.avibe.bot'
+    origin = config.remote_access.vibe_cloud.public_url = f'https://{host}'
+    config.save()
+    rv = RecordingRendezvous()
+    monkeypatch.setattr(direct_rendezvous, 'rendezvous', rv)
+    monkeypatch.setattr(remote_access, '_report_runtime_status_async', lambda *a, **kw: None)
+    clock = [100.0]
+    monkeypatch.setattr(lifecycle, 'suspend_elapsed', lambda: clock[0])
+    cert, received, closed = FakeCertificateClient(), [], []
+    class Ingress(FakeIngress):
+        async def handle_stream(self, stream, *, peer):
+            try:
+                payload = await stream.read(4)
+                received.append((peer, payload))
+                await stream.read(1)
+            finally:
+                closed.append(peer)
+    owner = lifecycle.DirectAccessLifecycle(object(), certificate_client=cert, config_loader=lambda: config,
+        binary_resolver=lambda cfg: path, ingress_factory=lambda *a, **kw: Ingress([], **kw), rendezvous=rv)
+    client = app.test_client()
+    client.set_cookie(remote_access.SESSION_COOKIE_NAME, remote_session_cookie(config, 'owner@example.com', 'owner'), domain=host)
+    await owner.start()
+    try:
+        await _wait_until(lambda: owner._config is not None)
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait_until(lambda: rv._endpoint and rv._endpoint.endpoint_id == ENDPOINT_ONE)
+        first = _post(client, _body(PEER), origin=origin).get_json()
+        assert first['endpoint']['id'] == ENDPOINT_ONE and rv.is_admitted(PEER)
+        await _wait_until(lambda: received == [(PEER, b'day1')])
+        first_pid = _events(events)[0]['pid']
+        # Renew normally for a simulated day. Neither heartbeat nor active stream
+        # moves the process deadline. No injected expiry, crash or forced stop.
+        deadline = owner._endpoint_retire_at
+        assert 23 * 3600 < deadline - clock[0] <= 24 * 3600
+        while clock[0] < deadline - 1:
+            clock[0] = min(clock[0] + 800, deadline - 1)
+            await _permission(owner, config, public_traversal_allowed=True)
+        assert rv.is_admitted(PEER) and rv._endpoint.endpoint_id == ENDPOINT_ONE
+        clock[0] = deadline
+        await _wait_until(lambda: rv._endpoint and rv._endpoint.endpoint_id == ENDPOINT_TWO)
+        assert closed == [PEER] and not rv.is_admitted(PEER) and not psutil.pid_exists(first_pid)
+        assert len(_admission_notices(events)) == 1
+        refused = _post(app.test_client(), _body(PEER), origin=origin)
+        assert refused.status_code == 401 and not rv.is_admitted(PEER)
+        second = _post(client, _body(PEER), origin=origin).get_json()
+        assert second['endpoint']['id'] == ENDPOINT_TWO and second['generation'] != first['generation']
+        await _wait_until(lambda: received == [(PEER, b'day1'), (PEER, b'day2')])
+        assert len(_admission_notices(events)) == 2 and rv.is_admitted(PEER)
+        assert config.remote_access.vibe_cloud.enabled and not any(c.get('rotate_key') for c in cert.calls)
+    finally:
+        await owner.stop()
 
 
 @pytest.mark.asyncio
