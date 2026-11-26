@@ -8721,7 +8721,9 @@ async def _run_update_control(action: str, enabled: bool | None = None):
             from config.v2_config import update_config_fields
 
             await asyncio.to_thread(update_config_fields, lambda config: setattr(config.update, "auto_update", enabled))
-        snapshot = await asyncio.to_thread(api.get_version_info)
+        # A check, or a channel switch that rechecks, is the user's own: it also
+        # finds a silent release, which unprompted version reads leave out.
+        snapshot = await asyncio.to_thread(api.get_version_info, explicit=action != "auto_update")
         if snapshot.get("error"):
             return jsonify({"ok": False, "error": "update_check_failed", "snapshot": snapshot}), 502
         return jsonify({"ok": True, "snapshot": snapshot})
@@ -11343,6 +11345,10 @@ async def opencode_options():
     return jsonify(result)
 
 
+# A published Avibe release as PyPI and the release index name it (`3.2.8`, `3.2.8rc1`).
+_RELEASE_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){1,3}(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?")
+
+
 @app.route("/api/upgrade", methods=["POST"])
 async def upgrade():
     from vibe import api
@@ -11354,13 +11360,17 @@ async def upgrade():
     confirm_interrupt = payload.get("confirm_interrupt")
     if "confirm_interrupt" in payload and not isinstance(confirm_interrupt, bool):
         return jsonify({"ok": False, "error": "invalid_request"}), 422
+    # The version the panel shows; missing, from an older page, installs the unprompted offer.
+    target = payload.get("target_version")
+    if "target_version" in payload and not (isinstance(target, str) and _RELEASE_VERSION.fullmatch(target)):
+        return jsonify({"ok": False, "error": "invalid_request"}), 422
     # Missing preserves the released endpoint: old Workbenches continue without
     # acquiring a new confirmation contract.
     if confirm_interrupt is False:
         interruptions = await count_upgrade_interruptions()
         if interruptions.requires_confirmation:
             return _upgrade_confirmation_response(interruptions)
-    result = await asyncio.to_thread(api.do_upgrade)
+    result = await asyncio.to_thread(api.do_upgrade, target_version=target)
     return jsonify(result)
 
 

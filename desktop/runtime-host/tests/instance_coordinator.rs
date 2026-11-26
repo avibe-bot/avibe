@@ -62,7 +62,9 @@ impl Transport for Http {
             assert!(!cookies.contains("private-account"));
             let expected = match path.as_str() {
                 "/api/update/check" => json!({}),
-                "/api/upgrade" => json!({"confirm_interrupt": true}),
+                // Both owners install exactly the version on screen: a standalone
+                // Runtime reports PEP 440, a desktop app SemVer.
+                "/api/upgrade" => json!({"target_version":"3.2.8rc4","confirm_interrupt":true}),
                 "/api/desktop/update/request" => json!({"target_version":"3.2.8-rc.4","confirm_interrupt":true}),
                 _ => json!({"enabled":true}),
             };
@@ -1826,7 +1828,7 @@ fn update_reads(f: &Fixture, can_manage: bool, snapshot: Value) {
 }
 fn offer() -> Value {
     json!({
-        "current": "3.2.7rc1", "latest": "3.2.8-rc.4", "has_update": true,
+        "current": "3.2.7rc1", "latest": "3.2.8rc4", "has_update": true,
         "error": null, "package_spec": "https://mirror.example/private.whl",
         "prereleases": true, "auto_update": false, "build": {"kind": "package"},
         "host_actions": ["check", "install", "prereleases", "auto_update", "unlisted"],
@@ -1890,11 +1892,13 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
     );
     for managed in [false, true] {
         let mut data = offer();
+        let target = if managed { "3.2.8-rc.4" } else { "3.2.8rc4" };
         if managed {
             // The standalone install above has ended: the instance restarted
             // on another version (now a desktop-managed host).
             data["managed_by"] = json!("desktop");
             data["current"] = json!("3.2.7rc2");
+            data["latest"] = json!(target);
         }
         update_reads(&f, true, data);
         let reply = refresh(&f).await;
@@ -1930,7 +1934,7 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
                 ClientAction::InstanceUpdateSetAutoUpdate { enabled: true },
                 "/api/update/auto-update",
             ),
-            (install("3.2.8-rc.4"), path),
+            (install(target), path),
         ] {
             f.http
                 .replies
@@ -1951,10 +1955,10 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
                 if install { json!(from) } else { Value::Null }
             );
         }
-        assert_eq!(update(&f)["request"]["target"], "3.2.8-rc.4");
+        assert_eq!(update(&f)["request"]["target"], target);
         // A second install of the same target while the first runs is refused.
         assert_eq!(
-            action(&f.client, install("3.2.8-rc.4")).await.error.unwrap().code,
+            action(&f.client, install(target)).await.error.unwrap().code,
             "update_in_progress"
         );
     }
@@ -1967,6 +1971,70 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
         .contains("rotated-by-instance"));
     // The local updater was never involved.
     assert!(f.view.update_calls.lock().unwrap().is_empty());
+}
+
+// A silent release (docs/release.md): a standalone instance's unprompted
+// version reads leave it out, the user's own check finds it, later reads keep
+// that offer while the instance runs the same version, and the install names it.
+#[tokio::test]
+async fn instance_update_keeps_the_offer_the_users_check_found() {
+    let f = selected_for_update().await;
+    let mut announced = offer();
+    announced["latest"] = json!("3.2.7rc1");
+    announced["has_update"] = json!(false);
+    update_reads(&f, true, announced.clone());
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["has_update"], false);
+
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/update/check", ok(json!({"ok": true, "snapshot": offer()}))));
+    let reply = action(&f.client, ClientAction::InstanceUpdateCheck {}).await;
+    assert!(reply.ok, "{:?}", reply.error);
+    update_reads(&f, true, announced.clone());
+    assert!(refresh(&f).await.ok);
+    let snapshot = update(&f)["snapshot"].clone();
+    assert_eq!(
+        (&snapshot["latest"], &snapshot["has_update"]),
+        (&json!("3.2.8rc4"), &json!(true))
+    );
+    // A newer announced release a later read offers wins over the kept one...
+    let mut newer = announced.clone();
+    newer["latest"] = json!("3.2.9");
+    newer["has_update"] = json!(true);
+    update_reads(&f, true, newer);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["latest"], "3.2.9");
+    // ...and on another channel the kept release candidate no longer applies.
+    let mut stable = announced.clone();
+    stable["prereleases"] = json!(false);
+    update_reads(&f, true, stable);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["has_update"], false);
+    update_reads(&f, true, announced.clone());
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["latest"], "3.2.8rc4");
+
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/upgrade", ok(json!({"ok": true}))));
+    let install = ClientAction::InstanceUpdateInstall {
+        target_version: "3.2.8rc4".into(),
+    };
+    let reply = action(&f.client, install).await;
+    assert!(reply.ok, "{:?}", reply.error);
+
+    // Running another version, the instance's own reads decide again.
+    let mut moved = announced;
+    moved["current"] = json!("3.2.8rc4");
+    moved["latest"] = json!("3.2.8rc4");
+    update_reads(&f, true, moved);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["has_update"], false);
 }
 
 // B1 display data: a known field that does not validate makes the answer
@@ -2007,7 +2075,7 @@ async fn instance_update_snapshot_is_display_data_only() {
     let reply = action(
         &f.client,
         ClientAction::InstanceUpdateInstall {
-            target_version: "3.2.8-rc.4".into(),
+            target_version: "3.2.8rc4".into(),
         },
     )
     .await;
@@ -2076,7 +2144,7 @@ async fn a_held_install_allows_reads_and_its_late_reply_changes_nothing() {
         action(
             &client,
             ClientAction::InstanceUpdateInstall {
-                target_version: "3.2.8-rc.4".into(),
+                target_version: "3.2.8rc4".into(),
             },
         )
         .await
@@ -2154,7 +2222,7 @@ async fn an_interrupted_receipt_settles_without_resending() {
         action(
             &client,
             ClientAction::InstanceUpdateInstall {
-                target_version: "3.2.8-rc.4".into(),
+                target_version: "3.2.8rc4".into(),
             },
         )
         .await
@@ -2208,7 +2276,7 @@ async fn an_accepted_install_is_followed_past_the_pre_restart_read() {
     let reply = action(
         &f.client,
         ClientAction::InstanceUpdateInstall {
-            target_version: "3.2.8-rc.4".into(),
+            target_version: "3.2.8rc4".into(),
         },
     )
     .await;
@@ -2269,7 +2337,7 @@ async fn an_install_request_is_dropped_when_its_generation_ends() {
         action(
             &client,
             ClientAction::InstanceUpdateInstall {
-                target_version: "3.2.8-rc.4".into(),
+                target_version: "3.2.8rc4".into(),
             },
         )
         .await

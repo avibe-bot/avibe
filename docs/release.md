@@ -115,10 +115,13 @@ remain mandatory.
   counts as announced only after its release notes are read without the
   marker; until then the check waits. The unattended install takes exactly
   the release the check found. An admin's own action (`vibe check-update`,
-  `vibe upgrade`, the Web update panel and its Update button, an update
-  notification's button) still sees a silent release. The Web update panel
-  reads every release, so an open page still shows a silent release as
-  available.
+  `vibe upgrade`, a manager's check in the Web update panel or in the desktop
+  app's panel for the instance, an update notification's button) still sees
+  a silent release. Unprompted version reads (`GET /api/version`, which the
+  Web badge and those panels poll) offer only releases the mirror index lists
+  as announced, and nothing while the index cannot be read. A check's offer
+  stays on screen until the next check, a newer announced offer, a channel
+  change, or a version change, and Update installs exactly the version shown.
 - The marker also silences the desktop app: its automatic checks (the startup
   check and the auto-update tick) skip a silent release, so they neither offer
   nor install it, while still finding any newer announced release. An explicit

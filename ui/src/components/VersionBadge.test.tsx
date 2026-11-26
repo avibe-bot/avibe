@@ -989,7 +989,7 @@ describe('remote desktop update contract', () => {
     api.doUpgrade.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     await openBrowserPopup('v9.9.9');
     fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.update') }));
-    expect(api.doUpgrade).toHaveBeenCalledExactlyOnceWith({ confirmInterrupt: true });
+    expect(api.doUpgrade).toHaveBeenCalledExactlyOnceWith({ confirmInterrupt: true, targetVersion: '10.0.0' });
     // The version popover stays the only dialog and shows the request in flight.
     expect(screen.getAllByRole('dialog')).toHaveLength(1);
     expect(screen.getByText(i18n.t('update.status.installing'))).toBeTruthy();
@@ -1242,3 +1242,53 @@ describe('an install the standalone Runtime reports', () => {
   });
 });
 
+describe('a silent release on a standalone Runtime', () => {
+  // Unprompted reads offer announced releases only; a manager's own check also finds a silent one.
+  it("keeps the offer a manager's check found over later unprompted reads, and installs exactly that version", async () => {
+    api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.7', has_update: false });
+    await openBrowserPopup('v3.2.7');
+    expect(screen.queryByRole('button', { name: i18n.t('update.action.update') })).toBeNull();
+
+    api.requestUpdateControl.mockResolvedValueOnce({
+      ok: true, snapshot: { current: '3.2.7', latest: '3.2.8rc1', has_update: true, error: null },
+    });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    await vi.waitFor(() => expect(api.requestUpdateControl).toHaveBeenCalledWith('check'));
+    expect(await screen.findByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
+
+    // A later unprompted read (the window coming back to the front) does not take the offer away.
+    act(() => { window.dispatchEvent(new Event('focus')); document.dispatchEvent(new Event('visibilitychange')); });
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledWith({ cache: false, background: true }));
+    let finish!: (result: UpgradeResult) => void;
+    api.doUpgrade.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.update') }));
+    expect(api.doUpgrade).toHaveBeenCalledExactlyOnceWith({ confirmInterrupt: true, targetVersion: '3.2.8rc1' });
+    await act(async () => finish({ ok: true, message: 'Upgrade successful', output: null, restarting: false }));
+  });
+
+  it('lets a newer announced release or another running version replace the kept offer', async () => {
+    api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.7', has_update: false });
+    await openBrowserPopup('v3.2.7');
+    api.requestUpdateControl.mockResolvedValueOnce({
+      ok: true, snapshot: { current: '3.2.7', latest: '3.2.8rc1', has_update: true, error: null },
+    });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    expect(await screen.findByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
+
+    // A newer announced release, read unprompted, is the one offered.
+    api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.9', has_update: true });
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledWith({ cache: false, background: true }));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.update') }));
+    expect(api.doUpgrade).toHaveBeenLastCalledWith({ confirmInterrupt: true, targetVersion: '3.2.9' });
+  });
+
+  it('shows no offer to a member, whose reads are all unprompted', async () => {
+    authorization.capabilities.can_manage_instance = false;
+    api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.7', has_update: false });
+    await openBrowserPopup('v3.2.7');
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledWith({ cache: false }));
+    expect(api.requestUpdateControl).not.toHaveBeenCalled();
+  });
+});

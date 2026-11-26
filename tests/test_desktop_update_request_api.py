@@ -17,7 +17,7 @@ from vibe.ui_server import app
 TARGET = "3.2.4-rc.1"
 
 
-def _version(*, has_update: bool = True):
+def _version(*, has_update: bool = True, explicit: bool = False):
     return {
         "current": "3.2.3rc11",
         "latest": TARGET if has_update else None,
@@ -119,7 +119,7 @@ def test_native_instance_update_session_origin_and_csrf(monkeypatch, tmp_path, p
         monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     else:
         monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
-    monkeypatch.setattr(api, "do_upgrade", lambda: {"ok": True})
+    monkeypatch.setattr(api, "do_upgrade", lambda **_: {"ok": True})
     monkeypatch.setattr(api, "get_version_info", _version)
     async def no_interruptions():
         return UpgradeInterruptions(0, 0, 0)
@@ -361,7 +361,7 @@ def test_upgrade_keeps_legacy_shape_and_optional_confirmation(monkeypatch) -> No
         "restarting": True,
     }
     calls = []
-    monkeypatch.setattr(api, "do_upgrade", lambda: calls.append(True) or expected)
+    monkeypatch.setattr(api, "do_upgrade", lambda **kwargs: calls.append(kwargs) or expected)
 
     async def active():
         return UpgradeInterruptions(1, 0, 0)
@@ -378,7 +378,7 @@ def test_upgrade_keeps_legacy_shape_and_optional_confirmation(monkeypatch) -> No
     )
     assert legacy.status_code == 200
     assert legacy.get_json() == expected
-    assert calls == [True]
+    assert calls == [{"target_version": None}]
 
     new_client = client.post(
         "/api/upgrade",
@@ -388,7 +388,7 @@ def test_upgrade_keeps_legacy_shape_and_optional_confirmation(monkeypatch) -> No
     )
     assert new_client.status_code == 409
     assert new_client.get_json()["error"] == "confirmation_required"
-    assert calls == [True]
+    assert calls == [{"target_version": None}]
 
     confirmed = client.post(
         "/api/upgrade",
@@ -398,4 +398,21 @@ def test_upgrade_keeps_legacy_shape_and_optional_confirmation(monkeypatch) -> No
     )
     assert confirmed.status_code == 200
     assert confirmed.get_json() == expected
-    assert calls == [True, True]
+    assert calls == [{"target_version": None}, {"target_version": None}]
+
+    # The panel names the version it shows; a malformed one is refused before anything runs.
+    named = client.post(
+        "/api/upgrade",
+        json={"confirm_interrupt": True, "target_version": "3.2.8rc1"},
+        headers=headers,
+        base_url="http://127.0.0.1",
+    )
+    assert named.status_code == 200
+    malformed = client.post(
+        "/api/upgrade",
+        json={"confirm_interrupt": True, "target_version": "3.2.8 ; os_name=='nt'"},
+        headers=headers,
+        base_url="http://127.0.0.1",
+    )
+    assert malformed.status_code == 422
+    assert calls[2:] == [{"target_version": "3.2.8rc1"}]

@@ -991,7 +991,8 @@ export type ApiContextType = {
     targetVersion: string,
     options?: { confirmInterrupt?: boolean },
   ) => Promise<DesktopRemoteUpdateResult>;
-  doUpgrade: (options?: { confirmInterrupt: boolean }) => Promise<UpgradeResult>;
+  /** `targetVersion`: the version the panel shows; the Runtime installs exactly that one. */
+  doUpgrade: (options?: { confirmInterrupt: boolean; targetVersion?: string }) => Promise<UpgradeResult>;
   /** Ask this host's updater to check now, or to change one of its settings. */
   requestUpdateControl: (action: UpdateControlRequest['action'], enabled?: boolean) => Promise<UpdateControlResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
@@ -4734,7 +4735,10 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const { res, payloadJson } = await requestJson('/api/upgrade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirm_interrupt: options.confirmInterrupt }),
+        body: JSON.stringify({
+          confirm_interrupt: options.confirmInterrupt,
+          ...(options.targetVersion ? { target_version: options.targetVersion } : {}),
+        }),
       }, '/api/upgrade', { handleError: false });
       if (!res.ok && payloadJson?.error !== 'confirmation_required') {
         throw new ApiError('Upgrade request failed', res.status, payloadJson?.error ?? null);

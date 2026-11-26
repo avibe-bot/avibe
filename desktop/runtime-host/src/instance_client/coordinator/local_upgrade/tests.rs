@@ -29,6 +29,10 @@ struct Runtime {
     stable_update: bool,
     /// An update is offered once prereleases are on.
     prerelease_update: bool,
+    /// The update is a silent release: only a check finds it.
+    silent: bool,
+    /// Before standalone checks: no `/api/update/check`.
+    no_check: bool,
     upgrade_refused: bool,
     /// The upgrade is accepted, but the Runtime never comes back newer.
     never_restarts: bool,
@@ -60,17 +64,24 @@ impl Transport for Runtime {
         let mut headers = HeaderMap::new();
         let (switched, upgraded) = *self.state.lock().unwrap();
         let prereleases = self.prereleases || switched;
+        let offered = !upgraded && (self.stable_update || (prereleases && self.prerelease_update));
+        let version = |checked: bool| {
+            json!({
+                "current": if upgraded { "3.2.9rc1" } else { "3.2.7" },
+                "latest": "3.2.9rc1",
+                "has_update": offered && (checked || !self.silent),
+                "prereleases": prereleases,
+                "managed_by": if self.managed { json!("desktop") } else { Value::Null },
+            })
+        };
         let (status, body) = match (r.method.as_str(), path.as_str()) {
-            ("GET", "/api/version") => (
-                200,
-                json!({
-                    "current": if upgraded { "3.2.9rc1" } else { "3.2.7" },
-                    "latest": "3.2.9rc1",
-                    "has_update": !upgraded && (self.stable_update || (prereleases && self.prerelease_update)),
-                    "prereleases": prereleases,
-                    "managed_by": if self.managed { json!("desktop") } else { Value::Null },
-                }),
-            ),
+            ("GET", "/api/version") => (200, version(false)),
+            ("POST", "/api/update/check") if self.no_check => (404, Value::Null),
+            ("POST", "/api/update/check") => {
+                assert_eq!(r.body, Some(json!({})));
+                assert_eq!(r.headers["x-vibe-csrf-token"], "fixture");
+                (200, json!({"ok": true, "snapshot": version(true)}))
+            }
             ("GET", "/api/csrf-token") => {
                 headers.insert(SET_COOKIE, "vibe_csrf_token=fixture; Path=/".parse().unwrap());
                 (200, json!({"csrf_token": "fixture"}))
@@ -82,8 +93,9 @@ impl Transport for Runtime {
                 (200, json!({"ok": true}))
             }
             ("POST", "/api/upgrade") => {
-                // The released request: no confirmation field, CSRF and Origin as the Workbench sends.
-                assert_eq!(r.body, Some(json!({})));
+                // The released request: no confirmation field, CSRF and Origin as the Workbench sends,
+                // naming the offer to install exactly.
+                assert_eq!(r.body, Some(json!({"target_version": "3.2.9rc1"})));
                 assert_eq!(r.headers["x-vibe-csrf-token"], "fixture");
                 if self.managed {
                     (200, json!({"ok": false, "code": "desktop_managed_runtime"}))
@@ -317,6 +329,30 @@ async fn an_upgrade_runs_the_workbench_calls_and_waits_for_the_runtime_again() {
         assert!(switched.is_none_or(|at| at < upgraded));
         assert_eq!(upgrades(&runtime), 1);
         assert!(!c.state().local.runtime_too_old, "{desktop}");
+    }
+}
+
+/// "Upgrade and try again" is the user's own request: it reads the offer as a
+/// check does, so a silent release the unprompted version read leaves out is
+/// found and installed by name. A Runtime without the check route has only
+/// its version read.
+#[tokio::test(start_paused = true)]
+async fn an_upgrade_finds_a_silent_release_through_a_check() {
+    for (case, silent, no_check, expected) in [
+        ("silent, checked", true, false, "upgraded"),
+        ("announced, no check route", false, true, "upgraded"),
+        ("silent, no check route", true, true, "local_runtime_still_too_old"),
+    ] {
+        let runtime = Runtime {
+            stable_update: true,
+            silent,
+            no_check,
+            describes: true,
+            ..Default::default()
+        };
+        let (c, runtime, host, _root) = setup(runtime, "3.2.9").await;
+        assert_eq!(state(c.upgrade_local_runtime(&host).await), expected, "{case}");
+        assert_eq!(upgrades(&runtime), usize::from(expected == "upgraded"), "{case}");
     }
 }
 

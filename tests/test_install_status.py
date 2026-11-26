@@ -104,7 +104,9 @@ def test_no_install_after_failure_or_holder_death(standalone, crash):
 import os, subprocess, sys
 from vibe import api, upgrade
 api.get_running_vibe_path = lambda: None
-api.get_version_info = lambda: {"latest": "2.0"}
+api.get_version_info = lambda: {"latest": "2.0", "has_update": True}
+api.exact_release_spec = lambda _version: "avibe-os"
+api.has_newer_version = lambda _candidate, _current: True
 api.build_upgrade_plan = lambda **kw: upgrade.UpgradePlan(["test"], None, "uv")
 api._runtime_process_was_running = lambda: False
 def stage(plan, **kw):

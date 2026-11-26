@@ -314,7 +314,10 @@ impl Coordinator {
             match &result {
                 Ok((snapshot, can_manage)) => {
                     update.status = Status::Ready;
-                    update.snapshot = Some(snapshot.clone());
+                    update.snapshot = Some(instance_update::keep_checked_offer(
+                        snapshot.clone(),
+                        update.checked.as_ref(),
+                    ));
                     update.can_manage = *can_manage;
                     update.fetched_at = Some(instance_update::now());
                 }
@@ -403,9 +406,12 @@ impl Coordinator {
                 if snapshot["has_update"] != true || snapshot["latest"].as_str() != Some(target.as_str()) {
                     return Err(ClientError::new("target_mismatch"));
                 }
+                // Both owners install exactly this version: a standalone Runtime
+                // refuses one it does not publish; one that predates the field
+                // installs the offer its own version read shows.
+                body["target_version"] = json!(target);
                 if snapshot["managed_by"] == "desktop" {
                     path = "/api/desktop/update/request";
-                    body["target_version"] = json!(target);
                 }
             }
             update.request_seen = false;
@@ -462,6 +468,14 @@ impl Coordinator {
             receipt.updated_at = instance_update::now();
             if let Ok(Outcome::Ok(reply)) = &outcome {
                 update.install_ref = reply["request_id"].as_str().map(str::to_owned);
+                // A standalone Runtime answers a check (or a channel switch) at once.
+                // Its offer may be a silent release that its unprompted version
+                // reads leave out; later reads keep it (`keep_checked_offer`).
+                if matches!(kind, Action::Check | Action::Prereleases) {
+                    if let Ok(checked) = instance_update::snapshot(&reply["snapshot"]) {
+                        update.checked = Some(checked);
+                    }
+                }
             }
             if failure.as_deref() == Some("instance_unauthorized") {
                 update.status = Status::Unauthorized;

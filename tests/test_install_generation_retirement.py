@@ -399,6 +399,9 @@ def test_repeated_real_upgrade_callers_retire_history(installation, monkeypatch,
     version = {"error": None, "has_update": True, "latest": "99"}
     monkeypatch.setattr(cli, "get_latest_version", lambda: version)
     monkeypatch.setattr(api, "get_version_info", lambda: version)
+    # The Runtime installs exactly the offer it shows; this test drives the installer, not that lookup.
+    monkeypatch.setattr("vibe.__version__", "1.0", raising=False)
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_: None)
     for index in range(5):
         exported = candidate(root, f"{index:032x}")
@@ -1127,7 +1130,8 @@ def test_api_postcommit_notice_failure_keeps_committed_generation(
         method="uv",
         activation=upgrade.AtomicActivation(launcher, exported),
     )
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99", "has_update": True})
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
@@ -1171,7 +1175,8 @@ def test_api_postcommit_owner_failure_keeps_committed_generation(
         method="uv",
         activation=upgrade.AtomicActivation(launcher, exported),
     )
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99", "has_update": True})
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
@@ -1223,7 +1228,8 @@ def test_deferred_parent_posthandoff_diagnostic_failure_keeps_generation(
 
     monkeypatch.setattr(api, "os", WindowsOsProxy())
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99", "has_update": True})
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
     monkeypatch.setattr(api, "activation_block_reason", lambda _activation: None)

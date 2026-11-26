@@ -98,8 +98,10 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
     monkeypatch.setattr(
         api,
         "get_latest_version_info",
-        # With no config, pre-release updates stay off.
-        lambda current, *, prereleases: expected if (current, prereleases) == ("3.0.6", False) else None,
+        # With no config, pre-release updates stay off; an unprompted read offers announced releases only.
+        lambda current, *, prereleases, announced_only, listed_only: expected
+        if (current, prereleases, announced_only, listed_only) == ("3.0.6", False, True, True)
+        else None,
     )
 
     assert api.get_version_info() == {
