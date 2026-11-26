@@ -886,6 +886,17 @@ def test_every_rc_runs_the_stable_release_regressions_on_its_package():
     assert rc.index('> "$RUNNER_TEMP/dist-before.sha256"') < rc.index("pytest") < rc.index(
         'cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"'
     )
+    # The same overlay of the workflow revision's test files as the stable step.
+    loop = 'cp "release-automation/$test_file" "$test_file"'
+    assert loop in rc and loop in stable
+    checkout = _step(rc_job, "Checkout release verification")["with"]["sparse-checkout"].split()
+    assert "scripts/release_dist_manifest.py" in checkout
+    assert all(path in checkout for path in pytest_files(rc))
+    # Not skippable and not advisory: it must run and pass for build-assets to succeed.
+    for step in (_step(rc_job, "Run release install and upgrade regressions"),
+                 _step(_job("publish.yml", "build"), "Run release install and upgrade regressions")):
+        assert "if" not in step and not step.get("continue-on-error", False)
+        assert step["run"].lstrip().startswith("set -euo pipefail\n") and "docker info" in step["run"]
     names = [step.get("name") for step in rc_job["steps"]]
     position = names.index("Run release install and upgrade regressions")
     assert names.index("Build Python distributions") < position < names.index("Upload release artifacts")
