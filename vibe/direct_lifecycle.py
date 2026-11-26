@@ -74,6 +74,31 @@ class PermissionRequest:
     sequence: int
 
 
+def _report_fields(state: str, reason: str, certificate_error: str | None) -> dict[str, str]:
+    """Wire vocabulary only. Never pass through a backend error or local diagnostic."""
+    if state == "running":
+        return {"direct_state": "running"}
+    if reason in {"permission_denied", "permission_expired"}:
+        fields = {"direct_state": "denied"}
+        if reason == "permission_expired":
+            fields["direct_reason"] = "permission_expired"
+        return fields
+    if state == "installing":
+        return {"direct_state": "installing"}
+    if reason in {"transport_install_failed", "transport_start_failed"}:
+        # A start exception can be the ingress, the child, or its handshake.
+        # Do not claim a spawn/hash/download cause without producer evidence.
+        return {"direct_state": "install_failed", "direct_reason": "other"}
+    if state == "waiting-certificate":
+        if not certificate_error or certificate_error in {"certificate_budget_queued", "certificate_order_in_progress"}:
+            return {"direct_state": "certificate_pending"}
+        code = {"acme_rate_limited": "rate_limited", "backend_unavailable": "provider",
+                "dns_challenge_visibility_timeout": "timeout"}.get(certificate_error, "other")
+        return {"direct_state": "certificate_failed", "direct_reason": code}
+    # No evidence for one of the wire states yet. Absence is not a failure.
+    return {}
+
+
 BinaryResolver = Callable[[V2Config], str | Path | None]
 
 
@@ -218,6 +243,7 @@ class DirectAccessLifecycle:
         self._permission_allowed: bool | None = None
         self._permission_received_at: float | None = None
         self._permission_reason = "permission_required"
+        self._public_traversal_allowed = False
         self._resume_required = False
         self._request_sequence = 0
         self._last_response_sequence = 0
@@ -232,6 +258,8 @@ class DirectAccessLifecycle:
         self._state_lock = threading.Lock()
         self._settled_generation: int | None = None
         self._status = DirectAccessStatus(False, "disabled", "setting_off")
+        self._reported_generation: int | None = None
+        self._reported_fields: dict[str, str] = {}
 
     async def start(self) -> None:
         """Scheduling only: no config load, HTTP, key I/O, or listener awaited."""
@@ -305,6 +333,7 @@ class DirectAccessLifecycle:
         self._permission_allowed = None
         self._permission_received_at = None
         self._permission_reason = "permission_required"
+        self._public_traversal_allowed = False
         self._resume_required = previous is not None
         if previous is None or signature[1:] != previous[1:]:
             self._cancelled_retry_used = False
@@ -341,6 +370,12 @@ class DirectAccessLifecycle:
         if not allowed:
             self._deny("permission_denied")
         else:
+            traversal = result.get("public_traversal_allowed") is True and bool(ticket.signature[-1])
+            if traversal != self._public_traversal_allowed:
+                # A change of policy retires the published endpoint and fences
+                # already-started work; this report still renews ordinary direct.
+                self._invalidate()
+                self._public_traversal_allowed = traversal
             self._resume_required |= self._permission_allowed is False
             self._permission_allowed = True
             self._permission_received_at = received
@@ -360,6 +395,7 @@ class DirectAccessLifecycle:
     def _deny(self, reason: str) -> None:
         self._invalidate()
         self._permission_allowed = False
+        self._public_traversal_allowed = False
         self._permission_received_at = None
         self._permission_reason = reason
         self._resume_required = True
@@ -396,6 +432,7 @@ class DirectAccessLifecycle:
         self._permission_allowed = None
         self._permission_received_at = None
         self._permission_reason = "permission_required"
+        self._public_traversal_allowed = False
         self._resume_required = True
         self._wake.set()
 
@@ -687,7 +724,7 @@ class DirectAccessLifecycle:
 
         self._supervisor = self._supervisor_factory(
             binary, self._ingress, _OwnedRendezvous(self, generation, ingress),
-            **({"relay_policy": PUBLIC_TRIAL} if self._signature[-1] else {}),
+            **({"relay_policy": PUBLIC_TRIAL} if self._public_traversal_allowed and self._permission_fresh() else {}),
         )
         await self._supervisor.start()
         if generation != self._generation or self._gate()[2] is None:
@@ -836,6 +873,13 @@ class DirectAccessLifecycle:
         with self._state_lock:
             return self._status
 
+    def report_fields(self, ticket: PermissionRequest | None) -> dict[str, str]:
+        with self._state_lock:
+            if (ticket is None or self._shutdown or ticket.signature != self._signature
+                    or ticket.generation != self._generation or self._reported_generation != self._generation):
+                return {}
+            return self._reported_fields.copy()
+
     def applied_generation(self, config: V2Config) -> int | None:
         signature = _config_signature(config)
         with self._state_lock:
@@ -847,6 +891,8 @@ class DirectAccessLifecycle:
         with self._state_lock:
             if state not in {"starting", "stopping"} and (self._supervisor is None or self._resource_generation == self._generation):
                 self._settled_generation = self._generation
+            self._reported_generation = self._generation
+            self._reported_fields = _report_fields(state, reason, getattr(self._certificate_result, "last_error_code", None))
             self._status = DirectAccessStatus(
                 enabled=bool(self._signature and self._signature[0]), state=state, reason=reason,
                 certificate_not_after=getattr(self._certificate_result, "certificate_not_after", None),

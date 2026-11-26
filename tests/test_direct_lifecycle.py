@@ -155,10 +155,10 @@ async def _owner(config, reports, *, cert=None, ingress_type=FakeIngress, superv
         await owner.stop()
 
 
-async def _permission(owner, config, allowed=True):
+async def _permission(owner, config, allowed=True, **fields):
     ticket = owner.runtime_status_request(config)
     assert ticket is not None
-    owner.submit_runtime_status_response(ticket, {"ok": True, "direct_access_allowed": allowed})
+    owner.submit_runtime_status_response(ticket, {"ok": True, "direct_access_allowed": allowed, **fields})
     await _wait(lambda: owner._last_response_sequence == ticket.sequence)
 
 
@@ -399,9 +399,17 @@ async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_
         assert DirectTransportRuntimeManager().ensure()["ok"]
         await _wait(lambda: owner.status().state == "waiting-permission")
         assert not policies
-        await _permission(owner, config)
+        await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "running")
         assert policies == ["public-trial-v1"]
+        # A valid ordinary-direct renewal from an older backend removes only
+        # the public policy. The same local enrollment never grants it again.
+        await _permission(owner, config)
+        await _wait(lambda: policies == ["public-trial-v1", None] and owner.status().state == "running")
+        assert "supervisor_stop" in calls
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: len(policies) == 3 and owner.status().state == "running")
+        assert policies[-1] == "public-trial-v1"
         generation = owner._generation
         config.remote_access.vibe_cloud.public_relay_trial = False
         owner.notify_config_changed(config)
@@ -409,7 +417,7 @@ async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_
         assert owner._generation > generation and "supervisor_stop" in calls
         await _permission(owner, config)
         await _wait(lambda: owner.status().state == "running")
-        assert policies == ["public-trial-v1", None]
+        assert policies == ["public-trial-v1", None, "public-trial-v1", None]
 
 
 async def test_managed_install_reaches_publication_only_after_all_lifecycle_gates(reports, published, monkeypatch):
@@ -679,8 +687,12 @@ async def test_permission_denial_missing_field_and_resume_stop_serving(reports):
     async with _owner(config, reports) as (owner, calls, cert, rv):
         await _permission(owner, config)
         await _wait(lambda: owner.status().state == "running")
-        owner.submit_runtime_status_response(owner.runtime_status_request(config), {"ok": True})
+        running_ticket = owner.runtime_status_request(config)
+        assert owner.report_fields(running_ticket) == {"direct_state": "running"}
+        owner.submit_runtime_status_response(running_ticket, {"ok": True})
         await _wait(lambda: owner.status().reason == "permission_denied")
+        assert owner.report_fields(running_ticket) == {}
+        assert owner.report_fields(owner.runtime_status_request(config)) == {"direct_state": "denied"}
         assert not owner.status().transport_running and not owner._ingress
         await _permission(owner, config)
         await _wait(lambda: len(cert.calls) == 2)
@@ -700,6 +712,9 @@ async def test_expiry_cancels_awaiting_supervisor_on_owning_loop(reports, monkey
         await _permission(owner, config)
         await asyncio.wait_for(entered.wait(), 1)
         await _wait(lambda: owner.status().reason == "permission_expired")
+        assert owner.report_fields(owner.runtime_status_request(config)) == {
+            "direct_state": "denied", "direct_reason": "permission_expired",
+        }
         assert "supervisor_stop" in calls and "ingress_stop" in calls
         assert not owner.status().transport_running and rv.endpoint is None
 

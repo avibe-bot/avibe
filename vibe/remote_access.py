@@ -1880,6 +1880,9 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
                 direct_lifecycle.runtime_status_request(config)
                 if payload.get("direct_paths_enabled") is True else None
             )
+            lifecycle = direct_lifecycle.active_lifecycle()
+            if runtime_status_ticket is not None and lifecycle is not None:
+                payload.update(lifecycle.report_fields(runtime_status_ticket))
         except Exception:
             direct_lifecycle = None
             runtime_status_ticket = None
