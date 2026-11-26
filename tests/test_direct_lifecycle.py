@@ -979,6 +979,41 @@ async def test_expiry_cancels_awaiting_supervisor_on_owning_loop(reports, monkey
         assert not owner.status().transport_running and rv.endpoint is None
 
 
+@pytest.mark.parametrize('change_endpoint', [False, True])
+async def test_only_heartbeat_issued_after_certificate_refusal_can_restore_grants(reports, change_endpoint):
+    config = _config()
+    entered, release = threading.Event(), threading.Event()
+    class RefuseOnce(FakeCertificateClient):
+        def poll(self, **opts):
+            self.calls.append(opts)
+            if len(self.calls) == 1:
+                entered.set()
+                assert release.wait(3)
+                return CertificateResult('blocked', last_error_code='direct_access_not_allowed')
+            return _ready()
+    class Trial(FakeSupervisor):
+        def __init__(self, *args, relay_policy):
+            assert relay_policy == 'public-trial-v1'
+            super().__init__(*args)
+    async with _owner(config, reports, cert=RefuseOnce(), supervisor_type=Trial) as (owner, _, cert, rv):
+        try:
+            await _permission(owner, config)
+            await _wait(entered.is_set)
+            if change_endpoint:
+                await _permission(owner, config, public_traversal_allowed=True)
+            stale = owner.runtime_status_request(config)
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == 'permission_denied')
+        owner.submit_runtime_status_response(stale, {'direct_access_allowed': True, 'public_traversal_allowed': True})
+        await asyncio.sleep(0)  # deliver the queued, pre-refusal ticket
+        assert not owner._permission_fresh() and not owner._public_traversal_allowed
+        assert rv.endpoint is None and len(cert.calls) == 1
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: rv.endpoint is not None)
+        assert cert.calls[-1]['resume'] and owner._public_traversal_allowed
+
+
 @pytest.mark.parametrize('reverse', [False, True])
 async def test_two_heartbeat_tickets_are_ordered_across_endpoint_generation(reports, reverse):
     config = _config()

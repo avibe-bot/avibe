@@ -838,6 +838,7 @@ class DirectAccessLifecycle:
     def _schedule_poll(self, *, rotate_key: bool = False) -> asyncio.Task:
         generation = self._generation
         generation_signature = self._signature
+        binding_epoch = self._binding_epoch
         assert generation_signature is not None
         permission_deadline = self._permission_received_at + PERMISSION_MAX_AGE_SECONDS
         resume, self._resume_required = self._resume_required, False
@@ -857,7 +858,14 @@ class DirectAccessLifecycle:
                 if rotate_key:
                     options["rotate_key"] = True
                 result = await asyncio.to_thread(self._certificate_client.poll, **options)
-                if generation == self._generation and self._gate()[2] is not None:
+                if result.last_error_code == 'direct_access_not_allowed' and binding_epoch is self._binding_epoch:
+                    # Binding-level refusal, even if an ordinary policy change
+                    # retired the endpoint while the certificate HTTP was out.
+                    # Only heartbeats issued after this fence can restore it.
+                    with self._state_lock:
+                        self._binding_epoch = object()
+                    self._deny('permission_denied')
+                elif generation == self._generation and self._gate()[2] is not None:
                     await self._accept_certificate(generation, result)
                 return result
             except asyncio.CancelledError:
@@ -877,9 +885,6 @@ class DirectAccessLifecycle:
 
     async def _accept_certificate(self, generation: int, result: CertificateResult) -> None:
         if generation != self._generation or self._gate()[2] is None:
-            return
-        if result.last_error_code == "direct_access_not_allowed":
-            self._deny("permission_denied")
             return
         if result.last_error_code == "permission_expired":
             # This poll carried an older receipt's deadline. A fresh grant can

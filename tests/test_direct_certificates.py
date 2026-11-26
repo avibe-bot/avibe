@@ -739,7 +739,7 @@ async def test_failed_order_body_cleans_up_then_retries_same_key_under_live_perm
         env.backend.advance_response['status'] = 'failed'
         await advance('failed')
         assert owner._certificate_result.last_error_code == 'order_failed'
-        assert owner._poll_at >= env.clock.now + lifecycle.INSTALL_RETRY_INITIAL_SECONDS
+        assert owner._poll_at >= env.clock.now + 6 * 3600
         count = len(polls)
         await asyncio.sleep(2 * lifecycle.TICK_SECONDS)
         assert len(polls) == count and env.config.remote_access.vibe_cloud.enabled
@@ -752,6 +752,67 @@ async def test_failed_order_body_cleans_up_then_retries_same_key_under_live_perm
         assert routes == ['certificates/orders', *['certificates/orders/certord_1/advance'] * 3,
                           'certificates/orders', 'certificates/orders/certord_1/advance']
         assert list(env.backend.orders) == [fp]
+
+
+def test_permanent_opaque_failure_budget_survives_restart_and_repair_with_same_hostname(setup):
+    env = setup
+    gap, week = 6 * 3600, 7 * 86400
+    first_start = env.clock.now
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed', certificate_pem=None, public_key_fingerprint=fp)
+    starts = [first_start]
+    for attempt in range(3):
+        failed = due(env, queued)
+        assert failed.status == 'failed' and failed.last_error_code == 'order_failed' and not failed.ready
+        earliest = max(env.clock.now + gap, starts[-1] + gap, starts[-3] + week if len(starts) >= 3 else 0)
+        assert failed.next_poll_at == earliest
+        env.client = DirectCertificateClient()
+        env.clock.now = earliest - 1
+        count = len(env.backend.calls)
+        env.client.poll(allowed=True, retry=True)
+        assert len(env.backend.calls) == count
+        if attempt == 2:
+            # Discard all keys/order state and replace the pairing on the same name.
+            discard_direct_certificates()
+            env.config.remote_access.vibe_cloud.instance_secret = 'replacement-fixture'
+            env.config.save()
+            assert env.client.poll(allowed=True).next_poll_at == earliest
+            assert len(env.backend.calls) == count
+        env.clock.now = earliest
+        queued = env.client.poll(allowed=True)
+        assert queued.status == 'queued' and env.backend.calls[-1][1] == 'certificates/orders'
+        starts.append(env.clock.now)
+    assert starts[3] == first_start + week
+    assert all(sum(t - week < s <= t for s in starts) <= 3 for t in starts)
+
+
+def test_lost_retry_response_spends_its_hostname_slot_before_http(setup):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed', certificate_pem=None, public_key_fingerprint=fp)
+    failure = due(env, queued)
+    env.clock.now = failure.next_poll_at
+    env.backend.lose_start = True
+    env.client.poll(allowed=True, retry=True)
+    lost_at = env.clock.now
+    assert len(env.backend.calls) == 3
+    env.client = DirectCertificateClient()
+    env.clock.now += 3600
+    waiting = env.client.poll(allowed=True)
+    assert len(env.backend.calls) == 3 and waiting.next_poll_at >= lost_at + 6 * 3600
+    assert due(env, waiting).status == 'queued' and len(env.backend.calls) == 4
+
+
+def test_unreadable_budget_refuses_fresh_order_but_not_other_hostnames(setup):
+    env = setup
+    path = certificates._HostOrders.path(HOST)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, 'broken')
+    assert env.client.poll(allowed=True).status == 'unavailable'
+    assert not env.backend.calls
+    assert certificates._HostOrders.load('different-app.avibe.bot').deadline() == 0
 
 
 def test_terminal_failure_requires_explicit_retry_and_preserves_retry_deadline(setup):
