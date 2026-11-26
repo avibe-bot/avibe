@@ -37,7 +37,11 @@ from core.handlers.model_hub.adapter import (
 )
 from core.anthropic_thread_errors import thread_error_fields
 from core.handlers.model_hub.async_owner import run_owned_in_thread
-from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
+from core.handlers.model_hub.classification import (
+    UPSTREAM_DIAGNOSTIC_CODES,
+    UPSTREAM_MACHINE_ERROR_CODES,
+    UPSTREAM_POLICY_CODES,
+)
 from core.handlers.model_hub.events import bounded_diagnostic_detail
 from core.handlers.model_hub.hosted_images import IMAGE_RESPONSE_MAX_BYTES
 from core.handlers.model_hub.json_wire import (
@@ -828,7 +832,7 @@ class EngineClient:
                         observe_buffered_protocol_response,
                         request_protocol,
                         error_body,
-                        machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                        machine_error_codes=UPSTREAM_DIAGNOSTIC_CODES,
                         deadline=time.monotonic() + _LOCAL_PROJECTION_TIMEOUT_SECONDS,
                     )
                     payload = await error_body.prefix_async(_ERROR_OBSERVATION_BYTES)
@@ -932,7 +936,7 @@ class EngineClient:
                     observe_buffered_protocol_response,
                     request_protocol,
                     buffered_body,
-                    machine_error_codes=UPSTREAM_MACHINE_ERROR_CODES,
+                    machine_error_codes=UPSTREAM_DIAGNOSTIC_CODES,
                     deadline=time.monotonic() + _LOCAL_PROJECTION_TIMEOUT_SECONDS,
                 )
                 outcome = _reduce_protocol_observation(
@@ -2227,6 +2231,9 @@ def _reduce_protocol_observation(
             error_type=error_type,
             error_code=error_code,
             error_candidates=candidates,
+            upstream_policy_code=next(
+                (code for code in observation.error_code_candidates if code in UPSTREAM_POLICY_CODES), None
+            ),
             message=observation.message or "upstream returned a protocol error event",
             stream_started=stream_started,
             response_correlation_ids=response_correlation_ids,
@@ -2341,6 +2348,7 @@ def _outcome(
     error_code: str | None = None,
     error_type: str | None = None,
     error_candidates: tuple[str, ...] = (),
+    upstream_policy_code: str | None = None,
     message: str | None = None,
     stream_started: bool = False,
     usage: ProtocolUsageReport | None = None,
@@ -2363,6 +2371,7 @@ def _outcome(
         source_id=source.source_id if source is not None else source_id or "unknown",
         error_type=error_type,
         error_candidates=error_candidates,
+        upstream_policy_code=upstream_policy_code,
         usage=usage,
         recovery_verified=recovery_verified,
         response_correlation_ids=response_correlation_ids,
