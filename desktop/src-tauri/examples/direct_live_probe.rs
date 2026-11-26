@@ -26,7 +26,10 @@
 //! - the main document's answer is shown only if it is that URL's.
 //!
 //! Step 1 holds WebKit to this with a dummy session: a fixture that
-//! redirects must not get a request at its target. What is not policed: the
+//! redirects must not get a request at its target. The probe makes one kind
+//! of request that is not a page load, the event-stream handshake of the
+//! legs: a same-origin `fetch` for which a redirect is an error, held by
+//! step 1 the same way. What is not policed: the
 //! requests the instance's own page makes for its resources. The cookie's
 //! own scope bounds those: WebKit sends it to `https` requests for that
 //! host. The session is never printed, never passed to the native core, and
@@ -40,7 +43,11 @@
 //!    read, which the check must refuse;
 //!    a load that carries a dummy session to its origin;
 //!    a redirect to another origin and one within the origin, neither
-//!    followed; a load through a route to a CONNECT listener; and a load
+//!    followed; the event-stream script of the legs, which must read a
+//!    handshake and let go, stop at its bound when none comes, and fail
+//!    on a redirect within the origin and on one away from it, with no
+//!    request at either target; a load through a route to a CONNECT
+//!    listener; and a load
 //!    whose listener answers `502`, which must fail because the route
 //!    allows no failover. If a control fails, what follows would say
 //!    nothing about the product, and the probe stops.
@@ -80,9 +87,10 @@
 //! and do not name it. `via` names it, or says `unknown`:
 //!
 //! - the event stream is the one payload whose path the instance itself
-//!   names, per request: `direct` when it entered through the direct
-//!   ingress. That word stands only if the store's registration has a
-//!   direct commit;
+//!   names, per request, in its handshake: `direct` when it entered
+//!   through the direct ingress. The page fetches the handshake and gives
+//!   the connection up; nothing after it is read. That word stands only if
+//!   the store's registration has a direct commit;
 //! - a payload the instance does not label is `own_path` when no CONNECT
 //!   ever presented the store's credential, and `direct` only in the store
 //!   that was routed before its first connection, with no failover (the
@@ -150,6 +158,10 @@ mod control {
     /// the port, so a second loopback server would be sent it.
     pub const SESSION_COOKIE: &str = "direct_live_probe_control_session";
     pub const SESSION: &str = "dummy-session-of-the-controls";
+    /// The handshake of the instance's event stream, as it sends it
+    /// (`_workbench_event_connected_frame` in `vibe/ui_server.py`).
+    const CONNECTED: &str =
+        ": stream connected\n\nevent: connected\ndata: {\"sub_id\":1,\"interval_ms\":15000,\"via\":\"direct\"}\n\n";
 
     fn read_head(stream: &mut TcpStream) -> Option<String> {
         let mut head = Vec::new();
@@ -218,6 +230,22 @@ mod control {
             path: path.clone(),
             session,
         });
+        // An event stream: the instance's handshake, or one that never
+        // sends it. Either stays open until the page lets go of it.
+        let frames = match path.as_str() {
+            "/events" => Some(CONNECTED.to_owned()),
+            "/events-flood" => Some(": pad\n".repeat(2048)),
+            _ => None,
+        };
+        if let Some(frames) = frames {
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+            if stream.write_all(head.as_bytes()).is_ok() && stream.write_all(frames.as_bytes()).is_ok() {
+                // Until the page closes it, or the read times out.
+                let _ = stream.read(&mut [0u8; 1]);
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+            return;
+        }
         let redirect = match (path.as_str(), away) {
             ("/redirect-same", _) => Some("/landed".to_owned()),
             ("/redirect-away", Some(away)) => Some(away.to_owned()),
@@ -373,6 +401,11 @@ mod probe {
     const RELEASE: Duration = Duration::from_secs(10);
     /// How long after a page's work the listener is given to show it.
     const SETTLE: Duration = Duration::from_millis(500);
+    /// The instance's event stream, and how much of an answer is looked at
+    /// for its handshake (it is the first thing sent, and a few hundred
+    /// bytes).
+    const EVENTS: &str = "/api/events";
+    const STREAM_BYTES: usize = 4096;
     /// How long the link is watched after the last leg.
     const AFTERWARDS: Duration = Duration::from_secs(5);
 
@@ -1105,6 +1138,58 @@ mod probe {
         }
         report.ok("control_redirect_same_not_followed");
 
+        // The one request of the probe's own that is not a page load: the
+        // event stream's handshake, fetched by the page. The same script as
+        // the legs run, against the pages here. It reads the handshake and
+        // lets go; it stops at its bound when no handshake comes; and a
+        // redirect is an error, so its target gets no request.
+        let loaded = plain.load(
+            "/",
+            report,
+            "control_stream_page_answered",
+            "control_stream_page_committed",
+        );
+        if !report_load(report, "control_stream_page_loaded", loaded) {
+            return false;
+        }
+        let fetched = |path: &str| answer_of(plain.page_async(mtm, &stream_script(path)).as_deref()).0;
+        for (boundary, path, expected) in [
+            ("control_stream_handshake_read", "/events", "direct"),
+            ("control_stream_bounded", "/events-flood", "capped"),
+        ] {
+            let word = fetched(path);
+            if word != expected {
+                report.failed(boundary, word);
+                return false;
+            }
+            report.ok(boundary);
+        }
+        for (boundary, path) in [
+            ("control_stream_redirect_same_not_followed", "/redirect-same"),
+            ("control_stream_redirect_away_not_followed", "/redirect-away"),
+        ] {
+            let asked_before = pages.seen().iter().filter(|seen| seen.path == path).count();
+            let word = fetched(path);
+            pump_until(SETTLE, || false);
+            let seen = pages.seen();
+            let asked = seen.iter().filter(|seen| seen.path == path).count() > asked_before;
+            let landed = seen.iter().any(|seen| seen.path == "/landed");
+            let reached = elsewhere.seen();
+            if word != "failed" || !asked || landed || !reached.is_empty() {
+                report.line(
+                    boundary,
+                    json!({
+                        "ok": false,
+                        "reason": if !asked { "redirect_not_asked" } else if landed || !reached.is_empty() { "redirect_followed" } else { "not_an_error" },
+                        "result": word,
+                        "requests_at_target": reached.len() + usize::from(landed),
+                    }),
+                );
+                return false;
+            }
+            report.ok(boundary);
+        }
+
         let served = format!("{}:{}", control::ROUTED, pages.port);
         let routed_origin = format!("http://{served}");
         let through = control::Listener::start(served.clone(), Some(pages.port));
@@ -1457,6 +1542,8 @@ mod probe {
             Some("closed") => "closed",
             Some("error") => "error",
             Some("timeout") => "timeout",
+            Some("capped") => "capped",
+            Some("ended") => "ended",
             _ => "unexpected_answer",
         };
         let close = match (parts.next().and_then(|code| code.parse::<u16>().ok()), parts.next()) {
@@ -1581,27 +1668,53 @@ mod probe {
         )
     }
 
-    /// The page's own event stream, opened once more and closed at its
-    /// handshake: the instance says there how that very request reached it
-    /// (`via`: `direct` through the direct ingress, `other` otherwise). The
-    /// one payload whose path the instance itself names. Only that word is
-    /// read.
-    const STREAM_SCRIPT: &str = r#"return await new Promise((resolve) => {
-  let source;
-  const timer = setTimeout(() => { try { source.close(); } catch {} resolve("timeout"); }, 10000);
-  const end = (word) => { clearTimeout(timer); try { source.close(); } catch {} resolve(word); };
-  try {
-    source = new EventSource("/api/events");
-    source.addEventListener("connected", (event) => {
+    /// The handshake of an event stream, fetched by the page and let go: the
+    /// instance says there how that very request reached it (`via`: `direct`
+    /// through the direct ingress, `other` otherwise). The one payload whose
+    /// path the instance itself names.
+    ///
+    /// The request is the probe's own, so it is held as the page loads are:
+    /// same-origin, and a redirect is an error, to another origin or to
+    /// another path of this one (step 1 runs this same script against
+    /// both). It ends at the handshake, after `STREAM_BYTES` without one, or
+    /// after ten seconds, and the connection is given up either way. Only
+    /// the handshake's `via` is read, as one of two words.
+    fn stream_script(path: &str) -> String {
+        const SCRIPT: &str = r#"const controller = new AbortController();
+const timer = setTimeout(() => controller.abort(), 10000);
+let reader;
+try {
+  const response = await fetch("__PATH__", {
+    cache: "no-store", redirect: "error", credentials: "same-origin", mode: "same-origin",
+    headers: {Accept: "text/event-stream"}, signal: controller.signal,
+  });
+  if (response.status !== 200 || response.redirected || !response.body) return "failed";
+  reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  for (;;) {
+    const {done, value} = await reader.read();
+    if (done) return "ended";
+    text = (text + decoder.decode(value, {stream: true})).slice(0, __BYTES__);
+    const frame = /(?:^|\n)event: connected\ndata: ([^\n]*)\n\n/.exec(text);
+    if (frame) {
       let via;
-      try { via = JSON.parse(event.data).via; } catch {}
-      end(via === "direct" ? "direct" : via === "other" ? "other" : "unnamed");
-    });
-    source.onerror = () => end("failed");
-  } catch (error) {
-    end("failed");
+      try { via = JSON.parse(frame[1]).via; } catch {}
+      return via === "direct" ? "direct" : via === "other" ? "other" : "unnamed";
+    }
+    if (text.length >= __BYTES__) return "capped";
   }
-});"#;
+} catch (error) {
+  return controller.signal.aborted ? "timeout" : "failed";
+} finally {
+  clearTimeout(timer);
+  try { if (reader) await reader.cancel(); } catch {}
+  controller.abort();
+}"#;
+        SCRIPT
+            .replace("__PATH__", path)
+            .replace("__BYTES__", &STREAM_BYTES.to_string())
+    }
 
     /// A WebSocket to the page's own host: a connection of its own. The
     /// instance does not upgrade `/health`, so it is expected to end before
@@ -1687,14 +1800,14 @@ mod probe {
         let mut carried = vec![
             ask(names.fetch, &health_script(nonce(), "same-origin")),
             ask(names.fetch_without_credentials, &health_script(nonce(), "omit")),
-            ask(names.stream, STREAM_SCRIPT),
+            ask(names.stream, &stream_script(EVENTS)),
         ];
         let websocket = ask(names.websocket, &websocket_script(nonce()));
         let loaded = view.load("/", report, names.reload_answered, names.reload_committed);
         let reloaded = report_load(report, names.reloaded, loaded) && view.shows_its_origin();
         if reloaded {
             carried.push(ask(names.fetch_after_reload, &health_script(nonce(), "same-origin")));
-            carried.push(ask(names.stream_after_reload, STREAM_SCRIPT));
+            carried.push(ask(names.stream_after_reload, &stream_script(EVENTS)));
         }
         Payloads {
             carried,
