@@ -1024,7 +1024,7 @@
       "installed": "{{name}} is ready.",
       "installFailed": "Install failed.",
       "backendsTitle": "Agent backends",
-      "backendsDetail": "Claude · OpenCode · Codex — managed in the Backends tab.",
+      "backendsDetail": "Claude · OpenCode · Codex · Antigravity — managed in the Backends tab.",
       "manageBackends": "Manage in Backends",
       "engineUpdates": {
         "current": "Up to date · checked {{time}}",

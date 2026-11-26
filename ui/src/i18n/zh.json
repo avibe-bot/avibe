@@ -1024,7 +1024,7 @@
       "installed": "{{name}} 已就绪。",
       "installFailed": "安装失败。",
       "backendsTitle": "Agent 后端",
-      "backendsDetail": "Claude · OpenCode · Codex —— 在 Backends 标签页管理。",
+      "backendsDetail": "Claude · OpenCode · Codex · Antigravity —— 在 Backends 标签页管理。",
       "manageBackends": "前往 Backends",
       "engineUpdates": {
         "current": "已是最新 · {{time}}检查",
