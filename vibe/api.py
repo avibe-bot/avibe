@@ -7962,6 +7962,16 @@ def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> 
         # Exactly the target: an unpinned upgrade would take the newest release, silent or not.
         try:
             version_info = {"latest": target_version, "package_spec": exact_release_spec(target_version)}
+        except LookupError as exc:
+            # Not a published, installable release (yanked, absent, or not a version at all).
+            return {
+                "ok": False,
+                "code": "no_update",
+                "message": "That release is not available.",
+                "output": str(exc),
+                "activation_notice": None,
+                "restarting": False,
+            }
         except Exception as exc:
             return {
                 "ok": False,

@@ -2419,10 +2419,18 @@ def test_get_latest_version_info_offers_silent_releases_only_to_explicit_discove
         ("3.2.8rc1", False, None, "update_check_failed"),
         # Not newer than the running release: nothing is installed.
         ("3.2.5", True, None, "no_update"),
+        # Yanked, unpublished, or not a version: a pin would install it anyway, so nothing is.
+        ("3.2.9", True, None, "no_update"),
+        ("3.3.0", True, None, "no_update"),
+        ("9.9.9 ; python_version<'3'", True, None, "no_update"),
     ],
 )
 def test_do_upgrade_installs_exactly_the_named_release(monkeypatch, tmp_path, target, index_available, spec, code):
     _write_release_feeds(tmp_path, monkeypatch, stable=["3.2.6", "3.2.7"], candidates=["3.2.8rc1"], silent=("3.2.7",))
+    pypi = tmp_path / "pypi.json"
+    metadata = json.loads(pypi.read_text(encoding="utf-8"))
+    metadata["releases"]["3.2.9"] = [{"yanked": True}]
+    pypi.write_text(json.dumps(metadata), encoding="utf-8")
     if not index_available:
         monkeypatch.setenv("AVIBE_RELEASE_INDEX_URL", (tmp_path / "missing.json").as_uri())
     monkeypatch.setattr("vibe.__version__", "3.2.5", raising=False)

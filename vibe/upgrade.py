@@ -1774,11 +1774,15 @@ def exact_release_spec(version: str) -> str:
     """The requirement that installs exactly ``version``, never a newer release.
 
     A release candidate installs its mirrored wheel from the release index;
-    a stable release pins the package. A configured custom package spec
-    cannot carry a pin and is returned as it is. Raises ``LookupError`` when
-    the candidate's wheel is not in the index.
+    a stable release pins the package, once the package index shows it
+    published and not yanked (a pin would install a yanked release). A
+    configured custom package spec cannot carry a pin and is returned as it
+    is. Raises ``LookupError`` when the release is not available, and other
+    errors when an index cannot be read.
     """
 
+    if _parse_version(version) is None:
+        raise LookupError(f"{version!r} is not a release version")
     if _PRERELEASE_TAG_RE.fullmatch(f"gh-v{version}"):
         index, index_url = _fetch_release_index()
         candidate = select_latest_prerelease(index, index_url, sees=lambda listed: listed == version)
@@ -1788,6 +1792,12 @@ def exact_release_spec(version: str) -> str:
     package_spec = get_upgrade_package_spec()
     if package_spec != PACKAGE_NAME:
         return package_spec
+    req = urllib.request.Request(get_update_metadata_url(), headers={"User-Agent": PACKAGE_NAME})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        releases = json.loads(resp.read().decode("utf-8")).get("releases")
+    files = releases.get(version) if isinstance(releases, Mapping) else None
+    if files is None or _is_yanked_release(files):
+        raise LookupError(f"release {version} is not available")
     return pinned_package_spec(version, package_name=PACKAGE_NAME)
 
 
