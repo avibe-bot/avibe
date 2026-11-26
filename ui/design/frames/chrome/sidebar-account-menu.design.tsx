@@ -1,8 +1,8 @@
 // Proposal (Max, 2026-11-26 09:37): in the desktop app, signed in, the instance button at the foot
 // of the sidebar opens a menu above it, as Claude's account menu does: the signed-in email and the
 // instance this window shows, neither a control, a line, then Switch instance and Sign out on this
-// device (destructive). Two readings of the instance line: A, its status dot and name; B, the
-// instance list's row in small, its icon, dot, name and domain. Today the button opens the Instances
+// device (destructive). The instance line is its status dot, name and state: 已连接 while connected
+// (Max, 09:58 and 10:00), 离线 or 连接中 when it is not. Today the button opens the Instances
 // page straight away. The row, the version beside it, Settings and the signed-out row are
 // chrome/bottom-row's and do not change. Each frame is the complete window.
 import type { ReactNode } from 'react';
@@ -18,7 +18,7 @@ import { InstanceVersionChipView } from '@/desktop/InstanceVersionChip';
 import type { DesktopClientProjection } from '@/desktop/bridge';
 
 import { frames, type FrameSpec } from '../../frame';
-import { DesktopSidebarAccountMenu, type AccountMenuInstanceStyle } from '../../kit/desktop-sidebar-account-menu';
+import { DesktopSidebarAccountMenu } from '../../kit/desktop-sidebar-account-menu';
 import { agentsApi } from '../agents/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
 import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
@@ -64,7 +64,6 @@ const row = (link: Link, name?: string, email?: string) => {
     ...(remote ? { instanceVersion: <InstanceVersionChipView name={name ?? REMOTE} version="3.2.7" attention={false} size="row" /> } : {}),
   };
 };
-const hostOf = (link: Link) => (link === 'remote' || link === 'offline' ? REMOTE_HOST : LOCAL_HOST);
 
 const shell = (footer: ReactNode) => () => (
   <Routes>
@@ -73,33 +72,21 @@ const shell = (footer: ReactNode) => () => (
     </Route>
   </Routes>
 );
-const menu = (style: AccountMenuInstanceStyle, link: Link, name?: string, email?: string) =>
-  shell(<DesktopSidebarAccountMenu row={row(link, name, email)} instanceStyle={style} host={hostOf(link)} />);
+const menu = (link: Link, name?: string, email?: string) =>
+  shell(<DesktopSidebarAccountMenu row={row(link, name, email)} />);
 
 type Shot = { name: string; title: string; render: () => ReactNode; hover?: string; width?: number; langs?: Lang[] };
-const LINK_TITLE: Record<Exclude<Link, 'remote'>, string> = { local: '在线（绿点）', offline: '连接断开（灰点）', switching: '正在连接（金点）' };
-
-const optionShots = (style: AccountMenuInstanceStyle): Shot[] => {
-  const label = style === 'A' ? '方案 A · 色点＋实例名' : '方案 B · 图标＋色点＋实例名＋域名';
-  const key = style.toLowerCase();
-  return [
-    { name: `${key}-online`, title: `${label} · ${LINK_TITLE.local}`, render: menu(style, 'local'), langs: ['zh', 'en'] },
-    { name: `${key}-offline`, title: `${label} · 另一台电脑 · ${LINK_TITLE.offline}`, render: menu(style, 'offline') },
-    { name: `${key}-switching`, title: `${label} · ${LINK_TITLE.switching}`, render: menu(style, 'switching') },
-    { name: `${key}-hover`, title: `${label} · 指针悬停在「切换实例」上`, render: menu(style, 'local'), hover: '[data-menu-switch] button' },
-    { name: `${key}-long-narrow`, title: `${label} · 长实例名＋长邮箱 · 窄窗口 880`, render: menu(style, 'local', LONG, LONG_EMAIL), width: 880 },
-  ];
-};
 
 const shots: Shot[] = [
   {
     name: 'closed', title: '菜单展开前 · 侧栏底部现状（本机实例 max，在线）',
     render: shell(<DesktopAccountRowView {...row('local')} onPresent={() => {}} />),
   },
-  ...optionShots('A'),
-  ...optionShots('B'),
-  { name: 'b-remote', title: '方案 B · 另一台电脑 · 在线（图标为地球，域名为那台的）', render: menu('B', 'remote') },
-  { name: 'b-hover-sign-out', title: '方案 B · 指针悬停在「在此设备退出」上', render: menu('B', 'local'), hover: '[data-menu-sign-out] button' },
+  { name: 'online', title: '菜单展开 · 在线（绿点，已连接）', render: menu('local'), langs: ['zh', 'en'] },
+  { name: 'offline', title: '菜单展开 · 另一台电脑连接断开（灰点，离线）', render: menu('offline') },
+  { name: 'switching', title: '菜单展开 · 正在切换（金点，连接中）', render: menu('switching') },
+  { name: 'hover', title: '菜单展开 · 指针悬停在「切换实例」上', render: menu('local'), hover: '[data-menu-switch] button' },
+  { name: 'long-narrow', title: '菜单展开 · 长实例名＋长邮箱 · 窄窗口 880（截断实例名，状态完整）', render: menu('local', LONG, LONG_EMAIL), width: 880 },
 ];
 
 const designFrames = frames(shots.flatMap((shot) => (shot.langs ?? ['zh']).map((lang): FrameSpec => ({
