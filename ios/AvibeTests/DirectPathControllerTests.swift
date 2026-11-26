@@ -587,6 +587,25 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(controller.strictFailureCount(forInstanceURL: url), 0)
     }
 
+    /// A load on the host's own route, which has no failover, while the
+    /// listener is closed for the background (the Action Button's hidden
+    /// view): it cannot leave the route, so the choice stays in effect.
+    @MainActor
+    func testALoadOnTheStrictRouteWhileTheListenerIsClosedNeedsNoRelaunch() async throws {
+        let harness = try Harness(test: self)
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        let controller = harness.controller
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+        harness.enterBackground()
+        try await eventually { controller.listenerState != .ready }
+        controller.noteInstanceLoad(forInstanceURL: url)
+        XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+    }
+
     @MainActor
     func testOnlyAnActualUnroutedLoadNeedsRelaunch() throws {
         let harness = try Harness(test: self)

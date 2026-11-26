@@ -994,10 +994,17 @@ final class DirectPathController {
     }
 
     /// Records a real load decision, not a presentation read of the load gate.
+    /// A load of a host whose route has no failover cannot leave that route
+    /// while the listener does not serve (it fails), so it needs no relaunch:
+    /// the Action Button's hidden view loads in the background, where the
+    /// listener is closed.
     func noteInstanceLoad(forInstanceURL url: URL) {
         guard let host = DirectAuthority(instanceURL: url)?.host else { return }
-        if routeOwner.routes(host, store: websiteDataStore.identifier), let listener,
-           case .serving = listener.lifecycle.phase { return }
+        let store = websiteDataStore.identifier
+        if routeOwner.routes(host, store: store) {
+            if let listener, case .serving = listener.lifecycle.phase { return }
+            if !routeOwner.allowsFailover(host, store: store) { return }
+        }
         if hostsNeedingColdStore.insert(host).inserted, requestedStrict.contains(host) {
             onAvailabilityChanged()
         }

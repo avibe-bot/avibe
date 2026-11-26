@@ -209,7 +209,7 @@ private final class DirectMeasureAnswer {
 ///   arm the revert; it is made at the next evidence that the instance
 ///   answers in a bootstrap (an unlinked rendezvous, a fresh page, or the
 ///   link). A phone that drops three times for want of a network keeps its
-///   choice.
+///   choice until the instance answers again; the revert is made then.
 /// - **c** The listener could not serve in the foreground for 60 s from
 ///   its first failed attempt that counts. Not counted: a launch's or a
 ///   return's first attempt, the background, a failure that only means
@@ -272,6 +272,14 @@ struct DirectOnlyRevertRules: Equatable {
         if freshPageAt == nil {
             freshPageAt = now
         }
+    }
+
+    /// The view left the instance's page for a sign-in page: the link
+    /// cannot come while it is away (its rendezvous is asked from the
+    /// instance's page), so a2's 20 s do not run. They start again at the
+    /// next fresh page.
+    mutating func noteLeftInstancePage() {
+        freshPageAt = nil
     }
 
     mutating func observe(_ seen: Observation) -> Decision {

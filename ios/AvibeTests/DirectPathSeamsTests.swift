@@ -80,6 +80,16 @@ final class DirectPathSeamsTests: XCTestCase {
         XCTAssertEqual(established.observe(seen(30)), .keep(nextCheck: nil, reloadsForLink: false))
         XCTAssertEqual(established.observe(seen(31, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: false))
 
+        // The view left for a sign-in page: a2's time does not run while it
+        // is away, and starts again at the next fresh page.
+        var away = bootstrapped()
+        away.noteFreshPage(at: at(0))
+        away.noteLeftInstancePage()
+        XCTAssertEqual(away.observe(seen(45)), .keep(nextCheck: nil, reloadsForLink: false))
+        away.noteFreshPage(at: at(50))
+        XCTAssertEqual(away.observe(seen(60)), .keep(nextCheck: at(70), reloadsForLink: false))
+        XCTAssertEqual(away.observe(seen(70)), .revert)
+
         var forgotten = bootstrapped()
         forgotten.noteFreshPage(at: at(0))
         forgotten.beginBootstrap(unlinkedRendezvous: 0, linked: false)

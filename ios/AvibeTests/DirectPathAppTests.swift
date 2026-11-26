@@ -5947,6 +5947,79 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.id, reopened)
     }
 
+    /// A sign-in page in front is never replaced. A revert made while it
+    /// shows sets the choice back and tells the controller, without opening
+    /// the instance again.
+    @MainActor
+    func testARevertOverASignInPageLeavesThePage() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .authentication),
+            attemptID: opened,
+            runtime: runtime
+        )
+
+        transport.report(.answeredWithoutLink, for: target)
+        transport.report(.answeredWithoutLink, for: target)
+        let reverted = store.preference(accountID: "account-1", origin: instance.serialized)
+        XCTAssertEqual(reverted.mode, .automatic)
+        XCTAssertEqual(reverted.reverted?.from, .direct)
+        // A reopen would be made in a later turn: none is.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        XCTAssertEqual(app.route, .browser(runtime))
+    }
+
+    /// A drop while a sign-in page is in front: the instance is opened
+    /// again only when the view is back on the instance.
+    @MainActor
+    func testADropOverASignInPageReopensOnlyWhenTheInstanceIsBack() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        transport.report(.usable(generation: "one"), for: target)
+        // The controller arms the link in a task of its own.
+        try await Task.sleep(for: .seconds(1))
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .authentication),
+            attemptID: opened,
+            runtime: runtime
+        )
+
+        transport.report(.lost, for: target)
+        // Past the controller's own 10 s for the link to come back: the
+        // drop is counted, and nothing is opened over the sign-in page.
+        try await Task.sleep(for: .seconds(13))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .instance),
+            attemptID: opened,
+            runtime: runtime
+        )
+        try await eventually(timeout: .seconds(30)) { (app.runtimeOpenAttempt?.id ?? 0) > opened }
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+    }
+
     /// Without 「仅直连和中继」 the same answers change nothing: the rules run
     /// only for that choice.
     @MainActor

@@ -812,10 +812,23 @@ conforms to. Without a conforming controller the App offers neither:
   foreground for 60 s from its first failed attempt that counts, not a
   first attempt, `waiting`, the background, or anything before a success
   (c); an open that runs out of time while c's clock runs applies c then,
-  so the choice is never held for good. Not while the choice waits for the next launch.
-  A drop while a sign-in page is in front reopens only once the instance's
-  page is back. The App then sets
-  the host back with `setDirectOnly(false)` and opens the instance again.
+  so the choice is never held for good. Not while the choice waits for the
+  next launch. The App then sets the host back with `setDirectOnly(false)`
+  and opens the instance again.
+- **A drop** (the controller counts one when a lost link has not come back
+  in 10 s) is news, not a fallback: the App opens the instance again once
+  through the route (stop, prepare, open), which is the one pass through
+  the tunnel that can bring the link back.
+- **A sign-in page in front** is never replaced: a2's 20 s do not run
+  while the view is away from the instance; a drop's reopen waits until
+  the view is back on the instance (or its way back fails); a revert is
+  made without the reopen.
+- **The Action Button's hidden view** tells the controller of each load it
+  makes. One made where the host has no route (the App was not opened in
+  this process, or the host is automatic) leaves 「仅直连和中继」 for the
+  next launch (`pendingRelaunch`). One made on the host's own route while
+  the listener is closed (the background) cannot leave it: it fails, the
+  take is kept, and the choice stays in effect.
 - **Measuring.** `DirectMeasureRunner` runs one measurement at a time and
   bounds it at 35 s, just above the controller's own 30 s.
 

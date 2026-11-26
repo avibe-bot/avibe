@@ -2276,7 +2276,7 @@ final class AppModel: ObservableObject {
         {
             invalidatePendingSystemSchedule()
         }
-        directOnlyDidSeeFreshPage(event, runtime: runtime)
+        directOnlyDidNavigate(event, attemptID: attemptID, runtime: runtime)
         guard
             runtimeIdentity == attemptID,
             runtimeOpenAttempt?.id == attemptID,
@@ -2640,7 +2640,9 @@ final class AppModel: ObservableObject {
         }
         endDirectOnlyWatch()
         storeReversion(of: attempt.runtime, origin: origin, from: .direct)
-        directOnlyControl?.setDirectOnly(false, forInstanceURL: attempt.runtime.instance.url)
+        // The controller hears it when the caller opens again
+        // (`applyDirectOnly`), after this attempt has been replaced: told
+        // here, its availability change would end this attempt as timed out.
         return true
     }
 
@@ -2667,8 +2669,12 @@ final class AppModel: ObservableObject {
         var rules = DirectOnlyRevertRules()
         /// Rule c's clock (`DirectOnlyListenerClock`).
         var listenerClock = DirectOnlyListenerClock()
+        /// The view's last committed document is a sign-in page, not the
+        /// instance's. Nothing replaces that page: a reopen waits, a revert
+        /// is made without one, and a2's time does not run.
+        var awayFromInstance = false
         /// The link dropped while a sign-in page was in front: the reopen
-        /// waits for the instance's own page to come back.
+        /// waits for the view to come back to the instance.
         var reopenOnInstancePage = false
         /// The controller's drop count last seen.
         var strictFailures: UInt64?
@@ -2687,7 +2693,7 @@ final class AppModel: ObservableObject {
     /// A new bootstrap of `runtime` (an open, a return to the foreground):
     /// the revert rules run while 「仅直连和中继」 is in effect in this
     /// process, and not at all while it waits for the next launch.
-    private func beginDirectOnlyBootstrap(for runtime: MobileRuntimeContext) {
+    private func beginDirectOnlyBootstrap(for runtime: MobileRuntimeContext, opening: Bool = false) {
         let url = runtime.instance.url
         guard
             let control = directOnlyControl,
@@ -2699,6 +2705,12 @@ final class AppModel: ObservableObject {
         }
         var watch = directOnlyWatch.flatMap { $0.runtime == runtime ? $0 : nil }
             ?? DirectOnlyWatch(runtime: runtime)
+        if opening {
+            // A new view: whatever page the last one showed is gone. The
+            // drops counted so far (rule b) stay.
+            watch.awayFromInstance = false
+            watch.reopenOnInstancePage = false
+        }
         watch.rules.beginBootstrap(
             unlinkedRendezvous: control.unlinkedRendezvousCount(forInstanceURL: url),
             linked: control.isDirectOnlyLinked(forInstanceURL: url)
@@ -2713,28 +2725,54 @@ final class AppModel: ObservableObject {
         directOnlyCheck = nil
     }
 
-    /// A live document of the instance committed: the instance answered
-    /// (rule a2's evidence).
-    private func directOnlyDidSeeFreshPage(
+    /// The view's navigations, for the rules: a live document of the
+    /// instance committed (the instance answered: rule a2's evidence); the
+    /// view left for a sign-in page, or came back from one.
+    private func directOnlyDidNavigate(
         _ event: RuntimeNavigationEvent,
+        attemptID: Int,
         runtime: MobileRuntimeContext
     ) {
-        guard
-            event.stage == .committed,
-            !event.fromCache,
-            event.destination == .instance,
-            directOnlyWatch?.runtime == runtime
-        else {
+        // The current view's only: an earlier one's late event says nothing
+        // of the page in front.
+        guard directOnlyWatch?.runtime == runtime, runtimeIdentity == attemptID else {
             return
         }
-        if directOnlyWatch?.reopenOnInstancePage == true {
-            // Back on the instance after a sign-in that a drop waited for.
+        if event.stage == .committed, isAuthenticationDestination(event.destination) {
+            directOnlyWatch?.awayFromInstance = true
+            directOnlyWatch?.rules.noteLeftInstancePage()
+            checkDirectOnly()
+            return
+        }
+        guard event.destination == .instance else {
+            return
+        }
+        switch event.stage {
+        case .committed:
+            directOnlyWatch?.awayFromInstance = false
+            if directOnlyWatch?.reopenOnInstancePage == true {
+                // Back on the instance after a sign-in that a drop waited for.
+                directOnlyWatch?.reopenOnInstancePage = false
+                reopenRuntime(runtime, at: runtimeController?.instancePageURL)
+                return
+            }
+            guard !event.fromCache else {
+                return
+            }
+            directOnlyWatch?.rules.noteFreshPage(at: .now)
+            checkDirectOnly()
+        case .failed:
+            // The way back from the sign-in page failed (the link it would
+            // need is the one that dropped): the waiting reopen is made now.
+            guard directOnlyWatch?.reopenOnInstancePage == true else {
+                return
+            }
+            directOnlyWatch?.awayFromInstance = false
             directOnlyWatch?.reopenOnInstancePage = false
-            reopenRuntime(runtime, at: runtimeController?.instancePageURL)
-            return
+            reopenRuntime(runtime, at: nil)
+        case .started, .finished, .handedOff, .cancelled, .restarting:
+            break
         }
-        directOnlyWatch?.rules.noteFreshPage(at: .now)
-        checkDirectOnly()
     }
 
     /// Reads the controller and applies the rules: on a change of
@@ -2794,7 +2832,7 @@ final class AppModel: ObservableObject {
                 // the same WebView would not reach the tunnel again. Not
                 // over a sign-in page in front: that waits for the
                 // instance's page to come back.
-                if runtimeController?.showsOtherThanInstance == true {
+                if watch.awayFromInstance {
                     watch.reopenOnInstancePage = true
                     directOnlyWatch = watch
                     return
@@ -2822,12 +2860,19 @@ final class AppModel: ObservableObject {
     /// to automatic (`reverted.from` direct), the page told, and the
     /// instance opened again where it was.
     private func revertDirectOnly(_ runtime: MobileRuntimeContext) {
+        let signInInFront = directOnlyWatch?.awayFromInstance == true
         endDirectOnlyWatch()
         guard let origin = preferenceOrigin(runtime) else {
             return
         }
         storeReversion(of: runtime, origin: origin, from: .direct)
         directOnlyControl?.setDirectOnly(false, forInstanceURL: runtime.instance.url)
+        // A sign-in page in front is not replaced: the host is automatic
+        // from here (the controller has moved its route), and the instance
+        // loads that way when the sign-in returns to it.
+        guard !signInInFront else {
+            return
+        }
         reopenRuntime(runtime, at: runtimeController?.instancePageURL)
     }
 
@@ -2855,6 +2900,8 @@ final class AppModel: ObservableObject {
         cancelRuntimeOpenTimers()
         directOnlyCheck?.cancel()
         directOnlyCheck = nil
+        // Rule c counts the foreground only.
+        directOnlyWatch?.listenerClock.reset()
     }
 
     /// Restarts the budget clock and schedules only the running attempt's
@@ -2881,6 +2928,9 @@ final class AppModel: ObservableObject {
         renewSessionConfirmationIfDue()
         if let runtime = route.runtime {
             beginDirectOnlyBootstrap(for: runtime)
+        } else {
+            // An open still held on the loading screen: its rules look again.
+            checkDirectOnly()
         }
         guard let attemptID = runtimeOpenAttempt?.id else {
             return
@@ -3095,7 +3145,7 @@ final class AppModel: ObservableObject {
         // Its wait consumes the same fixed attempt budget as Web navigation.
         // 「仅直连和中继」 is set for the host before its route is.
         applyDirectOnly(for: runtime)
-        beginDirectOnlyBootstrap(for: runtime)
+        beginDirectOnlyBootstrap(for: runtime, opening: true)
         route = .loading
         let stillWanted = { [weak self] () -> Bool in
             guard let self else {
