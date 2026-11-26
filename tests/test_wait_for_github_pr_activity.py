@@ -2662,7 +2662,7 @@ def test_main_writes_the_state_file_even_with_nothing_to_report(tmp_path) -> Non
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="qiqi"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -2672,7 +2672,7 @@ def test_main_writes_the_state_file_even_with_nothing_to_report(tmp_path) -> Non
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -2896,7 +2896,7 @@ def test_main_re_resolves_the_login_when_the_token_changed(tmp_path) -> None:
         patch.object(
             module, "get_authenticated_login", return_value="chatgpt-codex-connector[bot]"
         ) as fake_login,
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -2906,7 +2906,7 @@ def test_main_re_resolves_the_login_when_the_token_changed(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -2940,7 +2940,7 @@ def test_state_file_never_stores_the_token_itself(tmp_path) -> None:
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="ghp_super_secret"),
         patch.object(module, "get_authenticated_login", return_value="qiqi"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -2950,7 +2950,7 @@ def test_state_file_never_stores_the_token_itself(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3047,7 +3047,7 @@ def test_main_refuses_a_state_file_belonging_to_another_pr(tmp_path) -> None:
         patch.object(module, "_fetch_state", side_effect=AssertionError("must not poll")),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3057,7 +3057,7 @@ def test_main_refuses_a_state_file_belonging_to_another_pr(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3104,7 +3104,7 @@ def test_main_ignores_a_partial_state_file(tmp_path) -> None:
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3114,7 +3114,7 @@ def test_main_ignores_a_partial_state_file(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3153,7 +3153,7 @@ def test_main_refuses_to_poll_past_an_unreadable_state_file(tmp_path) -> None:
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3163,7 +3163,7 @@ def test_main_refuses_to_poll_past_an_unreadable_state_file(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3228,7 +3228,7 @@ def test_main_starts_over_from_an_empty_state_file(tmp_path) -> None:
         patch.object(module, "_fetch_state", side_effect=_fake_fetch_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3238,7 +3238,7 @@ def test_main_starts_over_from_an_empty_state_file(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3589,7 +3589,7 @@ def _run_new_pr_catch_up(module, state_file, *extra: str) -> str:
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3599,7 +3599,7 @@ def _run_new_pr_catch_up(module, state_file, *extra: str) -> str:
                 "--new-prs",
                 "--catch-up",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3671,7 +3671,7 @@ def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
         patch.object(module.os, "replace", side_effect=_replace_then_break),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3681,7 +3681,7 @@ def test_main_stops_when_persisting_advanced_cursors_fails(tmp_path) -> None:
                 "--pr",
                 "153",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -3722,7 +3722,7 @@ def test_main_state_file_round_trips_new_pr_cursor(tmp_path) -> None:
         patch.object(module, "_fetch_new_pr_state", side_effect=_fake_fetch_new_pr_state),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
-        patch.object(module.time, "sleep", return_value=None),
+        _advance_on_sleep(module),
         patch(
             "sys.argv",
             [
@@ -3731,7 +3731,7 @@ def test_main_state_file_round_trips_new_pr_cursor(tmp_path) -> None:
                 "avibe-bot/avibe",
                 "--new-prs",
                 "--timeout",
-                "0.0001",
+                "1",
                 "--interval",
                 "1",
                 "--state-file",
@@ -6262,9 +6262,10 @@ def test_malformed_saved_actions_fail_closed_without_overwriting_history(tmp_pat
         patch.object(module, "_fetch_state", return_value=(_ci_state(_ci_run()), 2)),
         patch.object(module, "get_token", return_value="token"),
         patch.object(module, "get_authenticated_login", return_value="tester"),
+        _advance_on_sleep(module),
         patch("sys.argv", [
             "wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--workflow", "CI",
-            "--branch", "feature", "--state-file", str(path), "--timeout", "0.001",
+            "--branch", "feature", "--state-file", str(path), "--timeout", "1",
         ]),
         patch("sys.stderr", stderr),
     ):
