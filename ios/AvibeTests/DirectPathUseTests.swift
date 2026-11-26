@@ -1,0 +1,169 @@
+import XCTest
+@testable import Avibe
+
+/// Seconds the tests move by hand.
+final class DirectPathUseTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 600
+
+    var now: Int {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+}
+
+final class DirectPathUseTests: XCTestCase {
+    private typealias Connection = DirectPathUseConnection
+
+    private func record(
+        _ direct: DirectRaceRecord.Leg,
+        _ publicOrigin: DirectRaceRecord.Leg,
+        _ winner: DirectRelayBackend?,
+        sticky: Bool = false
+    ) -> DirectRaceRecord {
+        DirectRaceRecord(direct: direct, publicOrigin: publicOrigin, winner: winner, path: .relay, sticky: sticky)
+    }
+
+    private func object(_ report: DirectPathUse.Report) throws -> [String: Any] {
+        try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.json.utf8)) as? [String: Any])
+    }
+
+    func testAConnectionIsReadFromTheListenersRecordAndThePlansOwnFacts() {
+        XCTAssertEqual(
+            Connection(record: record(.ready(120), .cancelled, .direct), strict: false, tunnelOnly: false),
+            Connection(carrier: .direct, plan: .raced, readyMs: 120)
+        )
+        XCTAssertEqual(
+            Connection(record: record(.cancelled, .ready(80), .publicOrigin), strict: false, tunnelOnly: false),
+            Connection(carrier: .tunnel, plan: .raced, readyMs: 80)
+        )
+        // No direct candidate: for want of a path, or because there is no
+        // direct session for the host at all.
+        XCTAssertEqual(
+            Connection(record: record(.none, .ready(70), .publicOrigin), strict: false, tunnelOnly: false),
+            Connection(carrier: .tunnel, plan: .noDirect, readyMs: 70)
+        )
+        XCTAssertEqual(
+            Connection(record: record(.none, .ready(70), .publicOrigin), strict: false, tunnelOnly: true),
+            Connection(carrier: .tunnel, plan: .tunnelOnly, readyMs: 70)
+        )
+        // A sticky attempt that missed its bound, carried by the tunnel.
+        XCTAssertEqual(
+            Connection(record: record(.timedOut, .ready(90), .publicOrigin, sticky: true), strict: false, tunnelOnly: false),
+            Connection(carrier: .tunnel, plan: .sticky, readyMs: 90, directTimedOut: true)
+        )
+        // Strict, and the direct leg failed: nothing carried it.
+        XCTAssertEqual(
+            Connection(record: record(.failed, .none, nil), strict: true, tunnelOnly: false),
+            Connection(carrier: .none, plan: .strict, directFailed: true)
+        )
+    }
+
+    func testAPathIsNamedInTheInstancesWords() {
+        XCTAssertEqual(DirectPathUse.Path(kind: nil, local: nil), DirectPathUse.Path.none)
+        XCTAssertEqual(DirectPathUse.Path(kind: .relay, local: nil), .relay)
+        XCTAssertEqual(DirectPathUse.Path(kind: .ipv4, local: true), .lan)
+        XCTAssertEqual(DirectPathUse.Path(kind: .ipv6, local: false), .punched)
+        // An address path whose class is not known yet is never called LAN.
+        XCTAssertEqual(DirectPathUse.Path(kind: .ipv4, local: nil), .punched)
+    }
+
+    func testAMinuteIsReportedOnceItIsOverWithExactlyTheInstancesKeys() throws {
+        let clock = DirectPathUseTestClock()
+        let use = DirectPathUse(seconds: { clock.now })
+        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 120), path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 80), path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .raced, readyMs: 60), path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .sticky, readyMs: 90, directTimedOut: true), path: .relay)
+        use.connection(Connection(carrier: .none, plan: .strict, directFailed: true), path: .relay)
+        use.connection(Connection(carrier: .tunnel, plan: .noDirect, readyMs: 30), path: .none)
+        use.handover(refused: .otherDocuments, path: .relay)
+        use.handover(refused: .otherDocuments, path: .relay)
+        use.handover(refused: .notUsable, path: .relay)
+        use.handover(refused: nil, path: .relay)
+        use.retired(.background, path: .relay)
+        // Nothing while the minute is still counting.
+        XCTAssertEqual(use.pending, [])
+
+        clock.now += 60
+        use.connection(Connection(carrier: .direct, plan: .raced, readyMs: 10), path: .lan)
+        let first = use.pending
+        XCTAssertEqual(first.map(\.path), [.none, .relay])
+        XCTAssertEqual(
+            first[1].json,
+            "{\"client\":\"ios\",\"path\":\"relay\",\"handover_rule\":\"other_documents\",\"retired_rule\":\"background\""
+                + ",\"age_min\":1,\"direct\":1,\"tunnel\":3,\"raced\":3,\"direct_won\":1,\"tunnel_won\":2"
+                + ",\"no_direct\":0,\"sticky\":1,\"strict\":1,\"tunnel_only\":0,\"direct_failed\":1,\"direct_timed_out\":1"
+                + ",\"direct_ms\":120,\"tunnel_ms\":80"
+                + ",\"handover_asked\":4,\"handover_done\":1,\"handover_refused\":3,\"retired\":1}"
+        )
+        // Exactly the keys the instance requires (`_PATH_USE_KEYS` in
+        // vibe/direct_rendezvous.py): one more or one fewer and it ignores
+        // the whole report.
+        XCTAssertEqual(
+            Set(try object(first[0]).keys),
+            [
+                "client", "age_min", "path", "handover_rule", "retired_rule",
+                "direct", "tunnel", "raced", "direct_won", "tunnel_won", "no_direct", "sticky", "strict",
+                "tunnel_only", "direct_failed", "direct_timed_out", "handover_asked", "handover_done",
+                "handover_refused", "retired", "direct_ms", "tunnel_ms",
+            ]
+        )
+        XCTAssertEqual(try object(first[0])["no_direct"] as? Int, 1)
+        XCTAssertEqual(try object(first[0])["handover_rule"] as? String, "none")
+
+        // Asking changed nothing: a request that failed reports them again,
+        // older by then.
+        clock.now += 120
+        let again = use.pending
+        XCTAssertEqual(again.map(\.path), [.none, .relay, .lan])
+        XCTAssertEqual(try object(again[1])["age_min"] as? Int, 3)
+        // Answered: gone, and the others stay.
+        use.answered(first)
+        XCTAssertEqual(use.pending.map(\.path), [.lan])
+        use.answered(use.pending)
+        XCTAssertEqual(use.pending, [])
+    }
+
+    func testWhatIsKeptAndSentIsBounded() throws {
+        let clock = DirectPathUseTestClock()
+        let use = DirectPathUse(seconds: { clock.now })
+        for minute in 0..<40 {
+            clock.now += 60
+            use.retired(.pathMonitor, path: minute % 2 == 0 ? .lan : .punched)
+        }
+        clock.now += 60
+        // At most ten in one request, the oldest kept first.
+        let many = use.pending
+        XCTAssertEqual(many.count, DirectPathUse.reportLimit)
+        XCTAssertEqual(try object(many[0])["age_min"] as? Int, DirectPathUse.kept)
+        XCTAssertEqual(try object(many[0])["retired_rule"] as? String, "path_monitor")
+        // At most thirty kept: the oldest ten were dropped.
+        var total = 0
+        while true {
+            let next = use.pending
+            if next.isEmpty {
+                break
+            }
+            total += next.count
+            use.answered(next)
+        }
+        XCTAssertEqual(total, DirectPathUse.kept)
+
+        // A minute older than the instance accepts is dropped unsent.
+        use.retired(.superseded, path: .relay)
+        clock.now += 60 * (DirectPathUse.maxAgeMinutes + 2)
+        XCTAssertEqual(use.pending, [])
+
+        // A minute's median is of the times kept, and the counts are of all.
+        for ms in 0..<100 {
+            use.connection(Connection(carrier: .direct, plan: .raced, readyMs: ms), path: .lan)
+        }
+        clock.now += 60
+        let busy = try object(try XCTUnwrap(use.pending.first))
+        XCTAssertEqual(busy["direct"] as? Int, 100)
+        XCTAssertEqual(busy["direct_ms"] as? Int, 15)
+        XCTAssertEqual(DirectPathUse.median([]), 0)
+        XCTAssertEqual(DirectPathUse.median([9, 1, 5, 7]), 5)
+    }
+}

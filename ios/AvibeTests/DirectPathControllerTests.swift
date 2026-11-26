@@ -2371,6 +2371,10 @@ private final class Harness {
     private(set) var availabilityChanges = 0
     private(set) var lastOpened: MobileRuntimeContext?
 
+    /// This harness's own account of path use, on a clock the test moves.
+    let pathUseClock = DirectPathUseTestClock()
+    private(set) lazy var pathUse = DirectPathUse(seconds: { [pathUseClock] in pathUseClock.now })
+
     private(set) lazy var controller: DirectPathController = DirectPathController(
         websiteDataStore: websiteDataStore,
         transport: transport,
@@ -2381,6 +2385,7 @@ private final class Harness {
         limits: .patient,
         timing: timing,
         notificationCenter: notifications,
+        pathUse: pathUse,
         onStatusChanged: { [unowned self] in
             self.announcements += 1
             let status = self.status("instance-1")
@@ -2902,6 +2907,78 @@ extension DirectPathControllerTests {
     /// only while the transport's mark of that path is the same. Taking it,
     /// and opening a stream over it, makes no plan and reports nothing to
     /// the transport.
+    /// Each connection is counted under the path its plan was made on, as
+    /// that path was named then; a hand-over under the path in use.
+    @MainActor
+    func testConnectionsAndHandOversAreCountedUnderThePathOfTheirOwnMoment() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let authority = try XCTUnwrap(DirectAuthority(host: one))
+
+        // Through the relay: two connections raced, one each way, and a
+        // hand-over refused for another document.
+        harness.transport.currentPath = .relay
+        harness.transport.selectedPath = DirectSelectedPath(kind: .relay, local: nil, rttMs: 120)
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let relayed = try XCTUnwrap(harness.controller.plan(for: authority))
+        relayed.recordRace?(DirectRaceRecord(
+            direct: .cancelled, publicOrigin: .ready(80), winner: .publicOrigin, path: .relay, sticky: false
+        ))
+        relayed.recordRace?(DirectRaceRecord(
+            direct: .ready(120), publicOrigin: .cancelled, winner: .direct, path: .relay, sticky: false
+        ))
+        try await eventually { harness.status("instance-1").races.count == 2 }
+        XCTAssertEqual(harness.status("instance-1").preferred, .direct)
+        var answered: DirectHandoverOutcome?
+        harness.controller.handover(for: harness.origin("instance-1"), soleDocument: false) { answered = $0 }
+        XCTAssertEqual(answered, .skipped(.otherDocuments))
+
+        // On a LAN address: the plan is named `lan` when it is made. Its
+        // connection ends after the path's class is no longer readable, and
+        // is still counted as `lan`.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv4, local: true, rttMs: 4)
+        harness.transport.report(.pathChanged(.ipv4), for: target)
+        let local = try XCTUnwrap(harness.controller.plan(for: authority))
+        harness.transport.selectedPath = nil
+        local.recordRace?(DirectRaceRecord(
+            direct: .ready(9), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: true
+        ))
+        try await eventually { harness.status("instance-1").races.count == 3 }
+        // A plan made while the address's class is not known is never
+        // called LAN.
+        let unread = try XCTUnwrap(harness.controller.plan(for: authority))
+        unread.recordRace?(DirectRaceRecord(
+            direct: .ready(30), publicOrigin: .none, winner: .direct, path: .ipv4, sticky: true
+        ))
+        try await eventually { harness.status("instance-1").races.count == 4 }
+
+        // Nothing is reported while the minute is counting.
+        XCTAssertEqual(harness.pathUse.pending, [])
+        harness.pathUseClock.now += 60
+        let reports = harness.pathUse.pending
+        XCTAssertEqual(reports.map(\.path), [.lan, .punched, .relay])
+        func entry(_ index: Int) throws -> [String: Any] {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data(reports[index].json.utf8)) as? [String: Any])
+        }
+        let lan = try entry(0)
+        XCTAssertEqual(lan["direct"] as? Int, 1)
+        XCTAssertEqual(lan["sticky"] as? Int, 1)
+        XCTAssertEqual(lan["direct_ms"] as? Int, 9)
+        XCTAssertEqual(try entry(1)["direct"] as? Int, 1)
+        let relay = try entry(2)
+        XCTAssertEqual(relay["raced"] as? Int, 2)
+        XCTAssertEqual(relay["direct_won"] as? Int, 1)
+        XCTAssertEqual(relay["tunnel_won"] as? Int, 1)
+        XCTAssertEqual(relay["tunnel_ms"] as? Int, 80)
+        XCTAssertEqual(relay["handover_asked"] as? Int, 1)
+        XCTAssertEqual(relay["handover_refused"] as? Int, 1)
+        XCTAssertEqual(relay["handover_rule"] as? String, "other_documents")
+        XCTAssertEqual(relay["tunnel_only"] as? Int, 0)
+        XCTAssertEqual(relay["strict"] as? Int, 0)
+    }
+
     @MainActor
     func testAMeasurementsLinkIsTheAdmittedPathAndIsCurrentOnlyWhileNothingChanged() async throws {
         let harness = try Harness(test: self)

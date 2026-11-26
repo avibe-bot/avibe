@@ -492,6 +492,9 @@ final class DirectPathController {
     private let limits: DirectConnectLimits
     private let timing: DirectPathTiming
     private let notificationCenter: NotificationCenter
+    /// The account of which leg carried the pages' connections, sent to the
+    /// instance with the rendezvous request.
+    private let pathUse: DirectPathUse
     private let onStatusChanged: () -> Void
     /// Called when a load gate or `listenerRecovery` may have changed: the
     /// listener was closed for the background, a return was settled, an
@@ -592,6 +595,27 @@ final class DirectPathController {
     /// The kind of path the usable transport's connection runs on, as last
     /// reported; nil when none is usable or the transport cannot tell.
     private var currentPath: DirectPathKind?
+    /// The path of the last plan that had a direct candidate, as it was
+    /// named for `DirectPathUse` then: connections closed later for that
+    /// path are counted under the name they were planned on.
+    private var plannedPath: (kind: DirectPathKind, use: DirectPathUse.Path)?
+
+    /// A plan's own facts for `DirectPathUse`, read when the plan is made.
+    private struct PlanUse: Sendable {
+        let path: DirectPathUse.Path
+        let strict: Bool
+        let tunnelOnly: Bool
+    }
+
+    /// The direct path new connections prefer now, in `DirectPathUse`'s
+    /// words: `none` unless they prefer one.
+    private var pathInUse: DirectPathUse.Path {
+        guard preferred == .direct, let currentPath else {
+            return .none
+        }
+        let selected = transport.pathDiagnostics.selected
+        return DirectPathUse.Path(kind: currentPath, local: selected?.kind == currentPath ? selected?.local : nil)
+    }
     /// A sticky plan's direct candidate missed its bound: plans hedge again
     /// until a direct candidate wins, or the path changes.
     private var stickyDropped = false
@@ -656,9 +680,11 @@ final class DirectPathController {
         limits: DirectConnectLimits = .standard,
         timing: DirectPathTiming = .standard,
         notificationCenter: NotificationCenter = .default,
+        pathUse: DirectPathUse = .shared,
         onStatusChanged: @escaping () -> Void,
         onAvailabilityChanged: @escaping () -> Void = {}
     ) {
+        self.pathUse = pathUse
         self.websiteDataStore = websiteDataStore
         self.transport = transport
         self.isCurrentRuntime = isCurrentRuntime
@@ -772,13 +798,16 @@ final class DirectPathController {
             directAuthorized(for: target.authority),
             let listener
         else {
+            pathUse.handover(refused: .notUsable, path: pathInUse)
             reply(.skipped(.notUsable))
             return
         }
         guard soleDocument == true else {
+            pathUse.handover(refused: .otherDocuments, path: pathInUse)
             reply(.skipped(.otherDocuments))
             return
         }
+        pathUse.handover(refused: nil, path: pathInUse)
         let host = origin.host
         Task {
             let result = await listener.closeQuietRelays(
@@ -1489,6 +1518,24 @@ final class DirectPathController {
             && !stickyDropped
         let generation = pathGeneration
         let dropSerial = stickyDropSerial
+        // For the account of which leg carries the pages' connections
+        // (`DirectPathUse`): the plan's own facts, read now, with the plan.
+        let planPath = directTag == nil ? nil : currentPath
+        let selectedPath = planPath == nil ? nil : transport.pathDiagnostics.selected
+        let use = PlanUse(
+            path: DirectPathUse.Path(
+                kind: planPath,
+                local: selectedPath?.kind == planPath ? selectedPath?.local : nil
+            ),
+            strict: strict,
+            // No direct session for this host at all: the choice of the
+            // tunnel alone, no permission, or an instance that is not the
+            // selected one. Otherwise there is one and it has no usable path.
+            tunnelOnly: directTag == nil && target?.authority != authority
+        )
+        if let planPath {
+            plannedPath = (planPath, use.path)
+        }
         var plan = DirectConnectPlan(
             scope: scope,
             generation: pathGeneration,
@@ -1522,7 +1569,8 @@ final class DirectPathController {
                     record,
                     generation: generation,
                     selection: fence.selection,
-                    dropSerial: dropSerial
+                    dropSerial: dropSerial,
+                    use: use
                 )
             }
         }
@@ -1603,8 +1651,14 @@ final class DirectPathController {
         _ record: DirectRaceRecord,
         generation: Int,
         selection raced: Int,
-        dropSerial: Int
+        dropSerial: Int,
+        use: PlanUse
     ) {
+        // Counted whichever instance is selected by now: the connection was made.
+        pathUse.connection(
+            DirectPathUseConnection(record: record, strict: use.strict, tunnelOnly: use.tunnelOnly),
+            path: use.path
+        )
         guard raced == selection else {
             return
         }
@@ -1787,6 +1841,14 @@ final class DirectPathController {
             quietMs: Array(quietMs.prefix(DirectLossRecord.quietLimit)),
             path: path
         )
+        let rule: DirectPathUse.RetiredRule
+        switch cause {
+        case .lost: rule = .pathMonitor
+        case .generationReplaced: rule = .superseded
+        case .background: rule = .background
+        }
+        let planned = plannedPath.flatMap { $0.kind == path ? $0.use : nil }
+        pathUse.retired(rule, path: planned ?? DirectPathUse.Path(kind: path, local: nil))
         losses.append(record)
         if losses.count > Self.raceLimit {
             losses.removeFirst(losses.count - Self.raceLimit)
