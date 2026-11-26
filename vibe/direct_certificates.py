@@ -634,15 +634,25 @@ class DirectCertificateClient:
         now = time.time()
         with config_file_lock():
             live_config = V2Config.load()
-            refusal = _caller_authorization_error(live_config, expected_pairing_fingerprint, permission_deadline)
-            if refusal is not None:
-                return refusal
             if _binding(live_config) != binding:
                 # Pairing's hook retires the old generation. Never remove a new
                 # pairing's files or recreate an unpaired directory on late HTTP.
-                return CertificateResult("pairing_changed")
+                return CertificateResult("pairing_changed", last_error_code="pairing_changed")
+            # Expiry limits what an HTTP reply may authorize; it cannot erase
+            # an explicit refusal for the still-matching binding. Neither of
+            # these negative paths can install or return a usable certificate.
+            denied = ((http_status == 403 and isinstance(error, dict) and error.get('error') == 'direct_access_not_allowed')
+                      or (fetch_current and error is None and isinstance(response, dict)
+                          and response.get('direct_access_allowed') is False))
+            refusal = _caller_authorization_error(live_config, expected_pairing_fingerprint,
+                                                  None if denied else permission_deadline)
+            if refusal is not None:
+                return refusal
             current = _load()
             if current is None or current.request_id != request_id:
+                # Convey a binding-level refusal without modifying another worker's state.
+                if denied:
+                    return CertificateResult('blocked', last_error_code='direct_access_not_allowed')
                 return CertificateResult("superseded")
             state = current
             # Rebase fallback backoff after a long sleep/slow request, too.

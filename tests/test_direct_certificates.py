@@ -316,6 +316,68 @@ def test_response_after_authorization_withdrawal_is_not_published(setup, change)
     assert current["active_certificate"] == previous["active_certificate"]
 
 
+@pytest.mark.parametrize('refusal', ['403', 'current_false'])
+async def test_late_certificate_refusal_fences_pre_refusal_heartbeat(setup, monkeypatch, refusal):
+    import asyncio
+    from vibe import direct_lifecycle as lifecycle
+    from tests.test_direct_lifecycle import FakeSupervisor, _owner, _permission, _wait
+
+    env = setup
+    installed(env)
+    entered, release = threading.Event(), threading.Event()
+    def refuse(config, method, suffix, payload):
+        assert (method, suffix) == ('GET', 'certificates/current')
+        entered.set()
+        assert release.wait(3)
+        if refusal == '403':
+            raise remote_access.BackendRequestError(403, {'error': 'direct_access_not_allowed'})
+        return {'direct_access_allowed': False}
+    class Trial(FakeSupervisor):
+        def __init__(self, *args, relay_policy):
+            assert relay_policy == 'public-trial-v1'
+            super().__init__(*args)
+    env.backend.error = refuse
+    monkeypatch.setattr(lifecycle, 'time', SimpleNamespace(time=lambda: env.clock.now))
+    monkeypatch.setattr(lifecycle, 'suspend_elapsed', lambda: env.clock.monotonic)
+    monkeypatch.setattr(remote_access, '_report_runtime_status_async', lambda *a, **kw: None)
+    async with _owner(env.config, [], cert=env.client, supervisor_type=Trial) as (owner, _, _, rv):
+        try:
+            await _permission(owner, env.config, public_traversal_allowed=True)
+            await _wait(lambda: rv.endpoint is not None)
+            env.clock.now = owner._poll_at
+            owner._wake.set()
+            await _wait(entered.is_set)
+            env.clock.monotonic += 899
+            await _permission(owner, env.config, public_traversal_allowed=True)
+            stale = owner.runtime_status_request(env.config)
+            env.clock.monotonic += 2  # original worker deadline passed; renewed grant is live
+            assert owner._permission_fresh()
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == 'permission_denied' and rv.endpoint is None)
+        owner.submit_runtime_status_response(stale, {'direct_access_allowed': True, 'public_traversal_allowed': True})
+        await asyncio.sleep(0)
+        assert not owner._permission_fresh() and not owner._public_traversal_allowed
+        assert certificates._load().blocked
+        env.backend.error = None
+        await _permission(owner, env.config, public_traversal_allowed=True)
+        await _wait(lambda: rv.endpoint is not None)
+
+
+@pytest.mark.parametrize('change,expected', [('pairing', 'pairing_changed'), ('off', 'direct_paths_disabled')])
+def test_late_403_does_not_latch_against_replaced_pairing_or_local_off(setup, change, expected):
+    env = setup
+    grant = _caller_grant(env)
+    def refuse(config, method, suffix, payload):
+        _withdraw_grant(env, change)
+        env.clock.monotonic += 901
+        raise remote_access.BackendRequestError(403, {'error': 'direct_access_not_allowed'})
+    env.backend.error = refuse
+    result = env.client.poll(**grant)
+    assert result.last_error_code == expected and not result.ready
+    assert not certificates._load().blocked
+
+
 def test_backend_shared_spki_fingerprint_vector():
     """Pin the cross-language wire fingerprint, not merely a self-consistent hash.
 
