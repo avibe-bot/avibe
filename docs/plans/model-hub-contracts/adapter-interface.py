@@ -318,6 +318,8 @@ class RawCallOutcome:
     thread_error_fields: tuple[tuple[str, str], ...] = ()
     # Identity captured by the engine admission, not by a later evidence writer.
     engine_release: str | None = None
+    # Display-only structured upstream error.code; never an input to routing or retry.
+    upstream_policy_code: str | None = None
 
 
 class ObservationOutcome(str, Enum):
