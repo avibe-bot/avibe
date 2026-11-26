@@ -61,7 +61,7 @@ class FakeRendezvous:
         self.endpoint = None
         self.reason = None
 
-    def publish(self, endpoint, *, reason="not_running"):
+    def publish(self, endpoint, *, reason="not_running", retire_at=None):
         self.endpoint, self.reason = endpoint, reason
         self.calls.append(("publish", endpoint, reason))
 
@@ -921,6 +921,36 @@ async def test_retryable_certificate_failure_preserves_tunnel_and_provider_deadl
         assert owner._poll_at >= deadline
         await _wait(lambda: owner.status().state == "running")
         assert cert.calls[-1]["retry"] is True and time.time() >= deadline
+
+
+async def test_daily_turnover_latches_and_retries_failed_stop_before_replacement(reports, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(module, 'INSTALL_RETRY_INITIAL_SECONDS', 0.04)
+    monkeypatch.setattr(module, 'INSTALL_RETRY_MAX_SECONDS', 0.08)
+    monkeypatch.setattr(module, 'TICK_SECONDS', 0.005)
+    attempts = []
+    class FaultyStop(FakeSupervisor):
+        async def stop(self):
+            attempts.append((self.loop.time(), owner._generation, calls.count('supervisor_start'), rv.endpoint))
+            if len(attempts) <= 3:
+                raise OSError('fixture retirement failure')
+            await super().stop()
+    config = _config()
+    async with _owner(config, reports, supervisor_type=FaultyStop) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == 'running')
+        before = owner._generation
+        clock[0] = owner._endpoint_retire_at
+        # Model a binding with a renewed receipt when the old key expires.
+        await _permission(owner, config)
+        await _wait(lambda: len(attempts) == 1)
+        await _permission(owner, config)
+        await _wait(lambda: calls.count('supervisor_start') == 2)
+        assert [row[1:] for row in attempts] == [(before + 1, 1, None)] * 4
+        for prior, later, minimum in zip(attempts, attempts[1:], (0.04, 0.08, 0.08)):
+            assert later[0] - prior[0] >= minimum
+        assert rv.endpoint and owner._turnover_retry_at is None
 
 
 async def test_start_error_backs_off_then_publishes_without_tunnel_change(reports, monkeypatch):

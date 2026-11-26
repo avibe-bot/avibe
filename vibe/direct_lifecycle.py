@@ -218,9 +218,16 @@ class _OwnedRendezvous:
         self._owner, self._generation, self._ingress = lifecycle, generation, ingress
 
     def publish(self, endpoint: Any, *, reason: str = "not_running") -> None:
-        if endpoint is not None and not self._owner._can_commit(self._generation, self._ingress):
-            return
-        self._owner._rendezvous.publish(endpoint, reason=reason)
+        if endpoint is not None:
+            if self._owner._can_commit(self._generation, self._ingress):
+                self._owner._rendezvous.publish(endpoint, reason=reason, retire_at=self._owner._endpoint_retire_at)
+        else:
+            self._owner._rendezvous.publish(None, reason=reason)
+
+    def limit_admission_ttl(self, ttl: int) -> int:
+        if self._generation != self._owner._generation or self._ingress is not self._owner._ingress:
+            return 0
+        return self._owner._rendezvous.limit_admission_ttl(ttl)
 
     def clear_paths(self) -> None:
         if self._owner._can_commit(self._generation, self._ingress):
@@ -295,6 +302,8 @@ class DirectAccessLifecycle:
         self._ingress: Any = None
         self._supervisor: Any = None
         self._endpoint_retire_at: float | None = None
+        self._turnover_retry_at: float | None = None
+        self._turnover_delay = INSTALL_RETRY_INITIAL_SECONDS
         self._resource_generation: int | None = None
         self._failed_generation: int | None = None
         self._next_start = 0.0
@@ -719,7 +728,7 @@ class DirectAccessLifecycle:
                 self._back_off_start(self._generation)
                 self._set_state("error", "lifecycle_error")
                 logger.warning("Direct access lifecycle transition failed")
-            if self._shutdown:
+            if self._shutdown and self._turnover_retry_at is None:
                 return
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=TICK_SECONDS)
@@ -733,10 +742,23 @@ class DirectAccessLifecycle:
             self._start_delay = min(INSTALL_RETRY_MAX_SECONDS, self._start_delay * 2)
 
     async def _reconcile(self) -> None:
-        if self._endpoint_retire_at is not None and suspend_elapsed() >= self._endpoint_retire_at:
-            # Withdraw and clear all peer admissions before stopping this owner.
-            # Existing heartbeat authority is neither invalidated nor renewed.
+        if self._turnover_retry_at is None and self._endpoint_retire_at is not None and suspend_elapsed() >= self._endpoint_retire_at:
+            # Retire once. Ordinary permission renewals and further ticks must
+            # neither reset cleanup backoff nor authorize a second supervisor.
+            self._turnover_retry_at = 0.0
+            self._turnover_delay = INSTALL_RETRY_INITIAL_SECONDS
             self._invalidate()
+        if self._turnover_retry_at is not None:
+            if self._loop.time() < self._turnover_retry_at:
+                return
+            try:
+                await self._stop_direct('generation_changed')
+            except Exception:
+                self._turnover_retry_at = self._loop.time() + self._turnover_delay
+                self._turnover_delay = min(INSTALL_RETRY_MAX_SECONDS, self._turnover_delay * 2)
+                logger.warning('Direct endpoint retirement incomplete; retrying teardown after backoff')
+                return
+            self._turnover_retry_at = None
         self._refresh_binary_observation()
         state, reason, binary = self._gate()
         if binary is None:

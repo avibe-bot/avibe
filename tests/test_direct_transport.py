@@ -221,9 +221,9 @@ class RecordingRendezvous(DirectRendezvous):
         super().__init__(clock=clock or time.time)
         self.published: list[tuple[DirectEndpoint | None, str]] = []
 
-    def publish(self, endpoint, *, reason="not_running"):
+    def publish(self, endpoint, *, reason="not_running", retire_at=None):
         self.published.append((endpoint, reason))
-        super().publish(endpoint, reason=reason)
+        super().publish(endpoint, reason=reason, retire_at=retire_at)
 
 
 @pytest.fixture
@@ -354,6 +354,7 @@ async def test_daily_turnover_reconnects_via_authenticated_rendezvous(sidecar, m
     monkeypatch.setattr(remote_access, '_report_runtime_status_async', lambda *a, **kw: None)
     clock = [100.0]
     monkeypatch.setattr(lifecycle, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(direct_rendezvous, 'suspend_elapsed', lambda: clock[0])
     cert, received, closed = FakeCertificateClient(), [], []
     class Ingress(FakeIngress):
         async def handle_stream(self, stream, *, peer):
@@ -384,7 +385,17 @@ async def test_daily_turnover_reconnects_via_authenticated_rendezvous(sidecar, m
             clock[0] = min(clock[0] + 800, deadline - 1)
             await _permission(owner, config, public_traversal_allowed=True)
         assert rv.is_admitted(PEER) and rv._endpoint.endpoint_id == ENDPOINT_ONE
+        last = _post(client, _body(PEER), origin=origin).get_json()
+        assert last['client']['admitted_until'] == last['expires_at'] == last['issued_at'] + 1
         clock[0] = deadline
+        # No await: the HTTP request thread can see the old publication before
+        # reconciliation. Neither a renewal nor a new peer receives the key.
+        assert rv._endpoint.endpoint_id == ENDPOINT_ONE
+        for peer in (PEER, 'c' * 64):
+            refused = _post(client, _body(peer), origin=origin).get_json()
+            assert refused['status'] == 'unavailable' and 'endpoint' not in refused
+            assert not rv.is_admitted(peer)
+        assert rv.limit_admission_ttl(300) == 0
         await _wait_until(lambda: rv._endpoint and rv._endpoint.endpoint_id == ENDPOINT_TWO)
         assert closed == [PEER] and not rv.is_admitted(PEER) and not psutil.pid_exists(first_pid)
         assert len(_admission_notices(events)) == 1
@@ -397,6 +408,30 @@ async def test_daily_turnover_reconnects_via_authenticated_rendezvous(sidecar, m
         assert config.remote_access.vibe_cloud.enabled and not any(c.get('rotate_key') for c in cert.calls)
     finally:
         await owner.stop()
+
+
+@pytest.mark.asyncio
+async def test_queued_admission_cannot_outlive_endpoint_at_control_write(monkeypatch):
+    from vibe import direct_rendezvous
+    clock = [1.0]
+    monkeypatch.setattr(direct_rendezvous, 'suspend_elapsed', lambda: clock[0])
+    rv = RecordingRendezvous()
+    rv.publish(DirectEndpoint(ENDPOINT_ONE, ('192.168.1.2:3210',)), retire_at=2.0)
+    supervisor = DirectTransportSupervisor('unused', RecordingIngress(), rv)
+    supervisor._control_write_lock = lock = asyncio.Lock()
+    written = []
+    class Writer:
+        def write(self, data):
+            written.append(json.loads(data))
+        async def drain(self):
+            pass
+    async with lock:
+        task = asyncio.create_task(supervisor._write_control(Writer(), {'type': 'admission', 'endpoint_id': PEER, 'ttl_seconds': 1}))
+        await asyncio.sleep(0)
+        assert not task.done()
+        clock[0] = 3.0
+    await task
+    assert written == [{'type': 'admission', 'endpoint_id': PEER, 'ttl_seconds': 0}]
 
 
 @pytest.mark.asyncio
