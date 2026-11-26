@@ -20,7 +20,8 @@ and the implementation differ, the "Implementation" section wins.
   provider keys. 60 s per run, 4 MB of stdout, killed on timeout or when the turn stops the call.
 - **Outputs.** A hook's `result` is mapped onto the canonical record: search `results[]` → `sources` (`url`, `title`,
   `snippet`, `page_age`; at most 50, bounded like the search mapping); fetch `url` / `final_url` / `title` /
-  `content` → the `WebFetchRecord`, content cut to its budget. Other fields are not passed on. The original
+  `content` → the `WebFetchRecord`, content cut to its budget. Other fields are not passed on. A failed search output also carries the sources the search kept
+  before it ended (`result.results`), because the model reads them; a hook's failed output may keep some. The original
   `attempts` and `execution` (what really ran and its cost) are kept. A hook-written success that no executor
   produced names the Avibe-owned origin `src_sourcefilter` with a reported cost of $0, using released enum values so
   an older release still reads the record.

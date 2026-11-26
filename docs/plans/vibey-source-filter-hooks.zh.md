@@ -8,7 +8,7 @@
 - 开启后主模型不再原生搜索；`web_search` / `web_fetch` 每次逻辑调用前后各跑一次对应脚本。
 - 模型原始参数先走常规检查；before 改写的参数在真正发出时再检查一次，没通过就作为失败输出交给 after。
 - 每次运行最长 60 秒、stdout 最多 4 MB；有 `.venv` 用 `.venv` 的 Python，否则用 Avibe 自带的 Python。
-- 脚本的 `result` 会映射到标准记录：搜索取 `url`、`title`、`snippet`、`page_age`（最多 50 条）；读取取 `url`、`final_url`、`title`、`content`。其他字段不传给模型。真实执行过的尝试和费用照常保留。
+- 脚本的 `result` 会映射到标准记录：搜索取 `url`、`title`、`snippet`、`page_age`（最多 50 条）；读取取 `url`、`final_url`、`title`、`content`。其他字段不传给模型。搜索失败但已找到部分来源时，失败输出也带上这些来源（`result.results`），after 可以保留其中一部分。真实执行过的尝试和费用照常保留。
 - 拦截记为 `source_filter_blocked`，脚本失败记为 `source_filter_failed`；每个脚本最近一次失败显示在设置页，直到它下次正常运行。
 
 ## 一句话
