@@ -5,6 +5,7 @@ import re
 
 from scripts.ci_docs_only import Scope, WINDOWS_CONTROL_IPC_PATHS
 from scripts.ci_scope import DESKTOP_CONTRACTS, IOS_CONTRACTS
+from scripts.ci_targeted_paths import matched_proofs
 
 LINUX = frozenset(('ruff', 'unit-test-shards', 'ui-checks', 'ui-tests', 'show-router-integration',
                    'memory-insight-contract', 'npm-wrapper', 'migration-release-guard', 'build-linux-artifacts'))
@@ -55,7 +56,21 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
     paths = scope.verified_paths or (scope.paths if scope.routable else ())
     if not paths:
         raise ValueError('No verified PR change range; cannot select sensitive proofs')
+    # The allowlist controls admission only. Once admitted, evaluate the old
+    # producer policy over the entire diff, not just the admitted files.
+    if '.github/request-sensitive-checks.md' in paths:
+        return set(PROOFS), set(LINUX | EXTRA)
+    named = set().union(*(matched_proofs(p) for p in paths))
+    if not named:
+        return set(), set(LINUX)
     groups = set().union(*(path_groups(p) for p in paths))
+    # Named inputs that the old path heuristic did not recognize in isolation.
+    if 'updater-ui' in named:
+        groups.add('desktop')
+    if 'vibe/personal_claims.py' in paths:
+        groups.add('identity')
+    if 'core/update_checker.py' in paths:
+        groups.add('install')
     return groups, set(LINUX).union(*(PROOFS[g] for g in groups))
 
 
