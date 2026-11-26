@@ -2087,6 +2087,144 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertTrue(slept.isEmpty)
     }
 
+    // MARK: The background's port check (DirectPathController.backgroundLoadGate)
+
+    /// In the background the listener is closed and the load rests on
+    /// WebKit's failover past its port. Before that load the direct path
+    /// asks the port once: something answering there is not this App's
+    /// listener, so nothing is loaded (the take is kept, as for a fault).
+    /// A port nothing answers on lets the load go, as before.
+    func testInTheBackgroundAPortSomethingElseHoldsLoadsNothing() async throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
+            storeIdentifier: UUID()
+        )
+        var asked = 0
+        let client = VoiceCaptureInstanceClient(
+            target: target, gate: { .held },
+            backgroundGate: { asked += 1; return .fault },
+            isActive: { false }, sleep: { _ in }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("a port something else holds loads nothing")
+        } catch {
+            XCTAssertEqual(error as? Failure, .directFault)
+        }
+        XCTAssertEqual(asked, 1)
+        XCTAssertEqual(client.failures.count, 1)
+        XCTAssertTrue(client.failures[0].hasPrefix("GET /api/asr/status direct_fault port +"), client.failures[0])
+    }
+
+    /// Nothing answers on the port: `held` from the background's check means
+    /// the load may go (WebKit fails over), not "wait". It goes at once.
+    func testInTheBackgroundAPortNothingAnswersOnLetsTheLoadGo() async throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
+            storeIdentifier: UUID()
+        )
+        var asked = 0
+        var slept: [Duration] = []
+        let client = VoiceCaptureInstanceClient(
+            target: target, gate: { .held },
+            backgroundGate: { asked += 1; return .held },
+            isActive: { false }, sleep: { slept.append($0) }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("the fixture's host does not exist")
+        } catch {
+            // The load went, and failed for the host: not refused by the check.
+            XCTAssertNotEqual(error as? Failure, .directFault)
+            XCTAssertNotEqual(error as? Failure, .closed)
+        }
+        XCTAssertEqual(asked, 1)
+        XCTAssertTrue(slept.isEmpty)
+        XCTAssertFalse(client.failures.contains { $0.contains("direct_fault") }, "\(client.failures)")
+    }
+
+    /// In front the listener serves or is being bound again: the port is not
+    /// asked, and the gate is waited for as before.
+    func testInFrontThePortIsNotAsked() async throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
+            storeIdentifier: UUID()
+        )
+        var asked = 0
+        let client = VoiceCaptureInstanceClient(
+            target: target, gate: { .fault },
+            backgroundGate: { asked += 1; return .held },
+            isActive: { true }, sleep: { _ in }
+        )
+        _ = try? await client.status()
+        XCTAssertEqual(asked, 0)
+    }
+
+    /// A take given up while the port was being asked loads nothing.
+    func testATakeClosedWhileThePortIsAskedLoadsNothing() async throws {
+        let target = VoiceCaptureTarget(
+            accountID: "a", instanceID: "i",
+            origin: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.invalid")),
+            storeIdentifier: UUID()
+        )
+        var client: VoiceCaptureInstanceClient!
+        client = VoiceCaptureInstanceClient(
+            target: target, gate: { .held },
+            backgroundGate: { client.close(); return .held },
+            isActive: { false }, sleep: { _ in }
+        )
+        do {
+            _ = try await client.status()
+            XCTFail("a closed take loads nothing")
+        } catch {
+            XCTAssertEqual(error as? Failure, .closed)
+        }
+    }
+
+    /// Without a test's gate, the background's check is the App model's, for
+    /// the take's own host and store; with neither, the synchronous gate.
+    func testTheBackgroundCheckIsTheAppsForTheTakesHost() async throws {
+        let origin = try XCTUnwrap(WebOrigin.parseConfigured("https://instance-one.example"))
+        let store = UUID()
+        let saved = (VoiceCaptureLoadGate.provider, VoiceCaptureLoadGate.backgroundProvider)
+        defer { (VoiceCaptureLoadGate.provider, VoiceCaptureLoadGate.backgroundProvider) = saved }
+        var askedFor: [String] = []
+        VoiceCaptureLoadGate.provider = { _, _ in .held }
+        VoiceCaptureLoadGate.backgroundProvider = { asked, askedStore in
+            askedFor.append("\(asked.serialized) \(askedStore == store)")
+            return .fault
+        }
+        let target = VoiceCaptureTarget(accountID: "a", instanceID: "i", origin: origin, storeIdentifier: store)
+        let client = VoiceCaptureInstanceClient(target: target, isActive: { false }, sleep: { _ in })
+        do {
+            _ = try await client.status()
+            XCTFail("the App's check said fault")
+        } catch {
+            XCTAssertEqual(error as? Failure, .directFault)
+        }
+        XCTAssertEqual(askedFor, ["https://instance-one.example true"])
+
+        // On another store (an account change since the take began) the
+        // App's routes do not apply: open, with nothing asked.
+        let gates = VoiceCaptureLoadGate.self
+        var direct = 0
+        let other = await gates.backgroundGate(for: origin, store: UUID(), currentStore: store) { _ in
+            direct += 1
+            return .fault
+        }
+        XCTAssertEqual(other, .open)
+        XCTAssertEqual(direct, 0)
+        let same = await gates.backgroundGate(for: origin, store: store, currentStore: store) { _ in
+            direct += 1
+            return .fault
+        }
+        XCTAssertEqual(same, .fault)
+        XCTAssertEqual(direct, 1)
+    }
+
     /// A faulted listener is its own reason in the client's record, and the
     /// take is kept as for an unreachable instance: sent again by itself,
     /// with the island's promise to (「还没发出去，连上你的 Avibe 后会自动发送。」).
