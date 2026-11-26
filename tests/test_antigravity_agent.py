@@ -635,8 +635,8 @@ async def test_caller_context_session_stable_reuse_replacement_and_sibling_isola
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, user_id="U2", message_id="M3", platform_specific={"task_execution_id": "run_42", "task_trigger_kind": "agent_run", "source_kind": "agent"}))
         pid3 = h.agent._sessions[req1.composite_session_id].client.pid
-        assert pid3 != pid1 and h.agent._sessions[req1.composite_session_id].native_session_id == native_a
-        assert (h.launches()[-1]["env"][AVIBE_RUN_ID_ENV], h.launches()[-1]["env"][AVIBE_CALLER_SOURCE_ENV]) == ("run_42", "agent_run")
+        assert pid3 == pid1 and h.agent._sessions[req1.composite_session_id].native_session_id == native_a
+        assert AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and AVIBE_CALLER_SOURCE_ENV not in h.launches()[-1]["env"]
         assert "turn-1" in h.controller.events("result")[0][1] and "turn-2" in h.controller.events("result")[0][1]
 
         h.controller.emitted.clear()
@@ -1314,3 +1314,66 @@ async def test_complete_latest_reply_wins_concurrent_stop(tmp_path, steered, rep
         results = h.controller.events("result")
         assert len(results) == 1 and results[0][1] == "finished answer"
         assert results[0][2]["output"].settled_by != SETTLED_BY_STOPPED
+
+
+@pytest.mark.asyncio
+async def test_consecutive_harness_deliveries_reuse_session_process_and_keep_run_in_prompt(tmp_path):
+    from dataclasses import fields
+    from core.agent_input import AgentInputMetadata, harness_label
+
+    async with make_agent_harness(tmp_path, record_rpc=True) as h:
+        session = None
+        for index, (run_id, source) in enumerate((("run-first", "agent"), ("run-second", "agent"), ("run-third", "callback"))):
+            payload = {
+                "agent_session_id": "ses_same",
+                "agent_session_target": {"id": "ses_same", "agent_backend": "antigravity", "native_session_id": session.native_session_id if session else None},
+                "task_execution_id": run_id, "task_trigger_kind": "agent_run", "source_kind": source,
+                "source_actor": "ses_sender", "source_session_id": "ses_sender",
+                "turn_token": f"turn-{index}", "agent_runtime_turn_token": f"runtime-{index}",
+                "message_delivery_id": f"delivery-{index}",
+            }
+            req = make_request(message="first" if not session else "recall", workdir=h.workdir, platform="avibe",
+                               base_session_id="avibe_proj:run-anchor", session_key="avibe::project::proj", message_id=f"message-{index}", platform_specific=payload)
+            req.input_metadata = AgentInputMetadata(harness_source=harness_label(payload))
+            if session:
+                desired, _, _ = await h.agent._build_launch(req, runtime_key=session.runtime_key, resolved_model="model-alpha")
+                differences = [field.name for field in fields(desired) if getattr(session.spec, field.name) != getattr(desired, field.name)]
+                env_changes = {key: (dict(session.spec.caller_env).get(key), dict(desired.caller_env).get(key)) for key in set(dict(session.spec.caller_env)) | set(dict(desired.caller_env)) if dict(session.spec.caller_env).get(key) != dict(desired.caller_env).get(key)}
+            await h.agent.handle_message(req)
+            current = h.agent._sessions[h.agent.runtime_turn_key(req)]
+            if session:
+                assert current is session, {"spec_differences": differences, "caller_env_changes": env_changes}
+            session = current
+            assert session.client.is_alive and not session.retired
+            if source != "callback":
+                assert run_id in h.rpcs("session/prompt")[-1]["params"]["prompt"][0]["text"]
+        assert len(h.launches()) == 1 and len(h.rpcs("session/new")) == 1 and not h.rpcs("session/resume")
+        assert AVIBE_RUN_ID_ENV not in h.launches()[0]["env"]
+        assert AVIBE_CALLER_SOURCE_ENV not in h.launches()[0]["env"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["cwd", "auth", "rules", "renewal", "backend_config"])
+async def test_genuine_launch_input_changes_replace_same_key_runtime(tmp_path, change):
+    async with make_agent_harness(tmp_path, auth_mode="api_key", api_key="test-key") as h:
+        req = make_request(message="first", workdir=h.workdir)
+        await h.agent.handle_message(req)
+        first = h.agent._sessions[req.composite_session_id]
+        next_req = make_request(message="recall", workdir=h.workdir)
+        if change == "cwd":
+            directory = tmp_path / "different-cwd"
+            directory.mkdir()
+            next_req.working_path = str(directory)
+        elif change == "auth":
+            h.agy_cfg.api_key = "different-test-key"
+        elif change == "rules":
+            next_req.vibe_agent_system_prompt = "Use the revised project instructions."
+        elif change == "renewal":
+            await h.agent.renew_runtime(h.agy_cfg)
+        else:
+            await h.agent.renew_runtime(antigravity_config(h.shim, auth_mode="api_key", api_key="test-key", extra_args=["--sandbox"]), config_save=True)
+        await h.agent.handle_message(next_req)
+        second = h.agent._sessions[req.composite_session_id]
+        assert second.client is not first.client and len(h.launches()) == 2
+        assert first.retired and not first.client.is_alive
+        assert second.native_session_id == first.native_session_id

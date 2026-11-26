@@ -94,6 +94,10 @@ class CallerContext:
         per session and its environment cannot be refreshed afterwards — the per-message
         fields are not merely useless, they are dangerous:
 
+        * ``run_id`` and ``source`` describe one Harness delivery, not its Session.
+          Keeping them would respawn a fixed-environment backend for each Run and
+          could attribute shell work to a Run that has already finished. The current
+          Run/source remains in the per-Turn context and rendered Harness input;
         * ``turn_id`` changes on every Turn and is kept in the in-process context
           only; it is never exported as a subprocess credential;
         * ``message_id`` changes on every message, so keeping it in the comparison that
@@ -120,9 +124,9 @@ class CallerContext:
         ``<platform>::user::<id>``, so the person is carried by the scope itself.
         """
 
-        if not self.user_id and not self.message_id and not self.turn_id:
+        if not any((self.user_id, self.message_id, self.turn_id, self.run_id, self.source)):
             return self
-        return replace(self, turn_id=None, user_id=None, message_id=None)
+        return replace(self, run_id=None, source=None, turn_id=None, user_id=None, message_id=None)
 
     def to_env(self) -> dict[str, str]:
         env = {AVIBE_SESSION_ID_ENV: self.session_id}
