@@ -357,6 +357,48 @@ final class DirectPathControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testCutoverRetiresTheRaceButAnswersTheOriginalCONNECT() async throws {
+        let baseline = try listeningSockets()
+        let harness = try Harness(test: self)
+        let controller = harness.controller
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let port = try harness.listenerPort(since: baseline)
+        let old = LoopbackClient(port: port)
+        defer { old.close() }
+        let oldStream = try await establishPublic(old, harness: harness)
+        oldStream.holdCancellation() // Keep the drain open while the race is retired.
+        defer { oldStream.releaseCancellation() }
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        harness.publicOrigin.streams.setMode(.hang)
+        let racing = LoopbackClient(port: port)
+        defer { racing.close() }
+        // Send exactly one CONNECT; its first direct candidate never answers.
+        try await racing.send("CONNECT \(one):443 HTTP/1.1\r\nHost: \(one):443\r\n\r\n")
+        let first = try await harness.transport.streams.waitForStream(count: 1)
+        XCTAssertEqual(harness.currentRoutes.first?.allowFailover, true)
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await eventually { first.isCancelled && oldStream.isCancelled }
+        XCTAssertEqual(controller.loadGate(forInstanceURL: url), .held)
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        let publicAttempts = harness.publicOrigin.streams.attempts
+        oldStream.releaseCancellation()
+        let replacement = try await harness.transport.streams.waitForStream(count: 2)
+        replacement.instanceSends(Data(established.utf8))
+        let response = try await racing.receive(count: established.utf8.count)
+        XCTAssertEqual(response, Data(established.utf8))
+        try await racing.send("through-original-client")
+        try await eventually { String(decoding: replacement.written, as: UTF8.self).hasSuffix("through-original-client") }
+        XCTAssertEqual(harness.publicOrigin.streams.attempts, publicAttempts)
+        XCTAssertEqual(harness.currentRoutes.first?.allowFailover, false)
+        XCTAssertTrue(controller.isDirectOnlyLinked(forInstanceURL: url))
+        XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+    }
+
+    @MainActor
     func testStrictSlowFirstBindPublishesWithoutUserAction() async throws {
         let harness = try Harness(timing: DirectPathTiming(listenerWaitSeconds: 0, rebindSeconds: 10,
                                                            strictOpenSeconds: 0, retrySeconds: [0.1]), test: self)

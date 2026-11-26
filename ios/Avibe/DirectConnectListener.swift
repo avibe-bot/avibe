@@ -718,22 +718,26 @@ actor DirectConnectListener {
         closeRelaysTimed(backend: backend, before: generation).closed
     }
 
-    /// Ends both legs for this host, including setups, and waits until each
-    /// relay has cancelled its client socket. Does not close the listener or
-    /// an unrelated host. The controller holds new plans across the rewrite.
+    /// Drains granted tunnels for this host. A CONNECT whose opener is still
+    /// racing keeps its client socket: retire only the race so it replans under
+    /// the new policy rather than silently closing on WebKit's old route.
     func drainHost(_ host: String) async {
         // An identified request without an admitted plan has started no opener.
         // Leave it for the rewrite hold; a plan sampled across this snapshot
         // cannot be admitted with its pre-drain stamp.
         drainEpoch[host, default: 0] &+= 1
-        let selected = relays.filter { $0.value.host == host && $0.value.plan != nil }
-        for (id, _) in selected {
-            lifecycle.end(id)
-            drain(id)
+        let grants = lifecycle.grants
+        var closing: [Task<Void, Never>] = []
+        for (id, relay) in relays where relay.host == host {
+            if grants[id] != nil || relay.isDraining {
+                lifecycle.end(id)
+                drain(id)
+                closing.append(relay.task)
+            } else {
+                relay.plan?.race.retire()
+            }
         }
-        for relay in selected.values {
-            await relay.task.value
-        }
+        for task in closing { await task.value }
     }
 
     private func identify(_ id: UUID, host: String) -> Bool {
@@ -1166,6 +1170,7 @@ actor DirectConnectListener {
         // selection and account only.
         var scope: DirectPlanScope?
         var ordinaryPlans = 0
+        var lastStamp: UInt64?
         var deadline: ContinuousClock.Instant?
         var strictOnly = false
         var heldExpiry: (@MainActor @Sendable () -> Void)?
@@ -1175,9 +1180,12 @@ actor DirectConnectListener {
                 await heldExpiry?()
                 return
             }
-            if deadline == nil, ordinaryPlans >= 2 { break }
-            let race = DirectRaceHandle()
             let stamp = await listener.drainStamp(for: authority.host)
+            // A cutover is not another ordinary path miss. Even the last
+            // ordinary race gets to see the hold or the new strict plan.
+            if deadline == nil, ordinaryPlans >= 2, stamp == lastStamp { break }
+            lastStamp = stamp
+            let race = DirectRaceHandle()
             guard
                 !Task.isCancelled,
                 let plan = await planner(authority),
