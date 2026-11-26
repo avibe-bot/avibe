@@ -162,8 +162,20 @@ async def test_pty_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: FakeA
     _assert_passive_invocations(fake_agy)
 
     fake_agy.clear_logs()
-    reused = await service.start_web_setup("antigravity", force_reset=False, auth_method="oauth-personal")
-    assert reused.state == "success" and reused.authorization_completed is True and all("--login" not in inv["argv"] for inv in fake_agy.invocations())
+    # An explicit Web re-login must obtain fresh consent even with valid credentials.
+    assert (await probe_antigravity_passive_status(str(fake_agy.binary), config=V2Config.load().agents.antigravity))["authenticated"] is True
+    relogin = await service.start_web_setup("antigravity", force_reset=False, auth_method="oauth-personal")
+    try:
+        assert relogin.state != "success" and relogin.authorization_completed is False
+        status = await _poll_flow(service, relogin.flow_id, {"awaiting_code"}, require_url=True)
+        assert status["url"].startswith("https://accounts.google.com/o/oauth2/auth")
+        assert [inv["argv"] for inv in fake_agy.invocations() if "--login" in inv["argv"]] == [["acp", "--login", "--disable-telemetry"]]
+        assert await service.submit_web_code(relogin.flow_id, "agy-code-7788") == {"ok": True}
+        status = await _poll_flow(service, relogin.flow_id, {"success", "failed"})
+        assert status["state"] == "success" and status["authorization_completed"] is True
+        assert "logout" not in fake_agy.rpc_methods()
+    finally:
+        await service.cancel_web_flow(relogin.flow_id)
 
     fake_agy.clear_logs()
     assert await service.remove_web_auth("antigravity") == {"ok": True} and "logout" in fake_agy.rpc_methods()
@@ -211,25 +223,7 @@ async def test_oauth_credential_cutover_discards_previous_account_model_menu(
     assert backend_model_snapshot("antigravity", schedule_refresh=False)["authoritative"] is False
 
 
-@pytest.mark.asyncio
-async def test_try_reuse_rejects_cross_mode_switch_and_oauth_url_buffers_split_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
-    probe_calls: list[str] = []
-
-    async def _fake_probe(_binary: str, *, auth_mode: str | None = None, **_kw: Any) -> dict[str, Any]:
-        probe_calls.append(str(auth_mode))
-        return {"ok": True, "authenticated": True}
-
-    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _fake_probe)
-    service = AgentAuthService.__new__(AgentAuthService)
-    saved_mode = {"value": "oauth-personal"}
-    service._resolve_backend_config = lambda _b: SimpleNamespace(auth_mode=saved_mode["value"])
-    service._get_cli_binary = lambda _b: "agy"
-
-    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-business")) is False
-    saved_mode["value"] = "oauth-business"
-    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-personal")) is False and probe_calls == []
-    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-business")) is True and probe_calls == ["oauth-business"]
-
+def test_oauth_url_buffers_split_chunks() -> None:
     p1, p2, p3 = "Open URL: \x1b[36mhttps://accounts.google.com/o/oauth2/auth?client_id=agy", "&state=split-token-123\x1b[0m", "\nPaste code: "
     expected = "https://accounts.google.com/o/oauth2/auth?client_id=agy&state=split-token-123"
     assert extract_antigravity_oauth_url(p1, eof=False) is None and extract_antigravity_oauth_url(p1 + "&state=half", eof=False) is None
