@@ -197,7 +197,25 @@ def test_graphql_quota_recovery_rejects_partial_data_and_bounds_retried_pages():
     ):
         result = module.github_request(fetch, quota_deadline=10)
     assert result.error.exit_code == 124
-    assert requests == [30, 3]  # no next page after the deadline
+    assert requests == [10, 3]  # no next page after the deadline
+
+
+def test_quota_then_transient_failure_cannot_restart_startup_budget():
+    module = _load_module()
+    clock = 0.0
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+    operation = Mock(side_effect=[
+        urllib.error.HTTPError("https://example.invalid", 429, "slow down", {"Retry-After": "9"}, None),
+        urllib.error.HTTPError("https://example.invalid", 503, "temporarily unavailable", {}, None),
+        "late success",
+    ])
+    with patch.object(module.time, "monotonic", side_effect=lambda: clock), patch.object(module.time, "sleep", side_effect=advance):
+        result = module.retry_initial_request(operation, description="snapshot", quota_deadline=10)
+    assert clock == 10
+    assert result.error.exit_code == 124
+    assert operation.call_count == 2
 
 
 def test_http_incomplete_read_is_transient() -> None:

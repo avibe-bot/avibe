@@ -69,7 +69,7 @@ NOT_MODIFIED_STATUS = 304
 SINCE_REWIND_SECONDS = 2
 
 _MISSING = object()
-_recovery_deadline: ContextVar[float] = ContextVar("github_recovery_deadline", default=math.inf)
+_request_deadline: ContextVar[float] = ContextVar("github_request_deadline", default=math.inf)
 _T = TypeVar("_T")
 
 
@@ -98,7 +98,7 @@ class GitHubRateLimit(GitHubTransientError):
         self.secondary = secondary
 
 
-class GitHubQuotaTimeout(GitHubRequestError):
+class GitHubRequestTimeout(GitHubRequestError):
     exit_code = 124
 
 
@@ -127,12 +127,12 @@ def _quota_error(code: int, headers: Any, *, secondary: bool, rate_limited: bool
 
 
 def _request_timeout() -> float:
-    deadline = _recovery_deadline.get()
+    deadline = _request_deadline.get()
     if deadline == math.inf:
         return REQUEST_TIMEOUT_SECONDS
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise GitHubQuotaTimeout("Timed out during GitHub quota recovery")
+        raise GitHubRequestTimeout("Timed out during GitHub request")
     return min(remaining, REQUEST_TIMEOUT_SECONDS)
 
 
@@ -219,29 +219,29 @@ def github_request(
     report already in hand must not be delayed by quota recovery.
     """
     multiplier = 1
-    recovering = False
+    deadline = math.inf if quota_deadline is None else quota_deadline
     while True:
-        budget = _recovery_deadline.set(quota_deadline if recovering else math.inf)
+        budget = _request_deadline.set(deadline)
         try:
+            _request_timeout()  # Includes outer startup retries and successive viewer/state reads.
             value = operation()
             _request_timeout()  # Reject a late snapshot, even after the final page.
             return GitHubRequestResult(value=value)
         except Exception as err:  # noqa: BLE001 - this is the classification boundary
-            if recovering and time.monotonic() >= quota_deadline:
-                return GitHubRequestResult(error=GitHubQuotaTimeout("Timed out during GitHub quota recovery"))
+            if deadline != math.inf and time.monotonic() >= deadline:
+                return GitHubRequestResult(error=GitHubRequestTimeout("Timed out during GitHub request"))
             error = _classify_github_exception(err, unauthenticated=unauthenticated)
         finally:
-            _recovery_deadline.reset(budget)
+            _request_deadline.reset(budget)
         if not isinstance(error, GitHubRateLimit) or quota_deadline is None:
             return GitHubRequestResult(error=error)
-        recovering = True
         delay = min(MAX_QUOTA_WAIT, max(error.primary, error.secondary * multiplier))
         multiplier = min(MAX_QUOTA_WAIT, multiplier * 2) if error.secondary else 1
         remaining = max(0.0, quota_deadline - time.monotonic())
         print(f"{error}; waiting {min(delay, remaining):.1f}s", file=sys.stderr)
         time.sleep(min(delay, remaining))
         if delay >= remaining or time.monotonic() >= quota_deadline:
-            return GitHubRequestResult(error=GitHubQuotaTimeout("Timed out waiting for GitHub rate limit reset"))
+            return GitHubRequestResult(error=GitHubRequestTimeout("Timed out waiting for GitHub rate limit reset"))
 
 
 def retry_initial_request(
@@ -266,6 +266,8 @@ def retry_initial_request(
                 )
             )
         delay = INITIAL_REQUEST_BACKOFF_SECONDS * (2 ** (attempt - 1))
+        if quota_deadline is not None:
+            delay = min(delay, max(0.0, quota_deadline - time.monotonic()))
         print(
             f"Transient {description} failure on attempt {attempt}/{INITIAL_REQUEST_MAX_ATTEMPTS}: "
             f"{failure}; retrying in {delay:.1f}s",
