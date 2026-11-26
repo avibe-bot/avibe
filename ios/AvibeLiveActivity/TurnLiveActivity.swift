@@ -21,7 +21,7 @@ struct TurnLiveActivity: Widget {
                 VoiceCaptureMark()
             } compactTrailing: {
                 if shown.runsTimer && context.state.phase == .working {
-                    TurnActivityClock(state: context.state).frame(maxWidth: 64)
+                    TurnActivityClock(state: context.state)
                         .foregroundStyle(VoiceCaptureStyle.accent)
                 } else {
                     TurnActivityGlyph(shown: shown)
@@ -86,12 +86,21 @@ struct TurnActivityGlyph: View {
     }
 }
 
+/// The running time, trailing in a slot as wide as its longest value
+/// (`0:00:00`, in the same font). A timer's text has no bounded width of its
+/// own: fixed at its ideal size it laid the whole card out infinitely wide and
+/// the system drew a black card and island (11-26). Checked on the simulator
+/// by TurnLiveActivityLayoutUITests.
 struct TurnActivityClock: View {
     let state: TurnActivityAttributes.ContentState
     var body: some View {
         let start = Date(timeIntervalSince1970: Double(state.startedAt))
-        Text(timerInterval: start...start.addingTimeInterval(28800), countsDown: false)
-            .monospacedDigit().fixedSize().lineLimit(1)
+        Text(verbatim: "0:00:00").hidden()
+            .overlay(alignment: .trailing) {
+                Text(timerInterval: start...start.addingTimeInterval(28800), countsDown: false)
+                    .multilineTextAlignment(.trailing).lineLimit(1)
+            }
+            .monospacedDigit()
     }
 }
 
