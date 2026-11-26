@@ -529,9 +529,9 @@ async def test_maybe_emit_auth_recovery_message_branches_for_antigravity(fake_ag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("method", "shows_notice"), [("oauth-personal", True), ("oauth-business", False)])
+@pytest.mark.parametrize("method", ["oauth-personal", "oauth-business"])
 @pytest.mark.parametrize("terminator", ["\r\n", " ", "\x1b[0m"])
-async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_only(fake_agy: FakeAgyAuthFixture, method: str, shows_notice: bool, terminator: str) -> None:
+async def test_im_setup_link_sends_instructions_once_url_completes(fake_agy: FakeAgyAuthFixture, method: str, terminator: str) -> None:
     service, ctx = _make_auth_service(), MessageContext(user_id="u1", channel_id="c1", platform="slack")
     service._send_message = AsyncMock()
     service.controller._get_settings_key = lambda context: context.channel_id
@@ -550,9 +550,7 @@ async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_
     assert flow.url == url and service._send_message.await_count == 1
 
     sent = service._send_message.await_args.args[1]
-    notice = service._t("command.setup.antigravityPersonalNotice")
-    assert "https://accounts.google.com/o/oauth2/auth" in sent
-    assert sent.startswith(notice) if shows_notice else notice not in sent
+    assert sent == service._t("command.setup.antigravityInstructions", url=url)
 
 
 @pytest.mark.asyncio

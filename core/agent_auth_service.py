@@ -2150,8 +2150,6 @@ class AgentAuthService:
             if flow.url and not flow.login_prompt_sent:
                 flow.login_prompt_sent = True
                 instructions = self._t("command.setup.antigravityInstructions", url=flow.url)
-                if flow.auth_method == "oauth-personal":
-                    instructions = f"{self._t('command.setup.antigravityPersonalNotice')}\n\n{instructions}"
                 await self._send_message(flow.context, instructions)
             return
 

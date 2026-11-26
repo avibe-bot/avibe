@@ -189,10 +189,10 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     expect(screen.getByText(B.testConnectionInferenceOk)).toBeTruthy();
   });
 
-  it('shows the personal sign-in notice in the onboarding dialog for the Google method only, without a default Enterprise terminal block', async () => {
+  it('shows no sign-in notice in the onboarding dialog and no a default Enterprise terminal block', async () => {
     renderDialog('oauth');
     expect(await screen.findByText(C.antigravityDialogIntro)).toBeTruthy();
-    expect(screen.getByRole('note').textContent).toBe(B.antigravityPersonalNotice);
+    expect(screen.queryByRole('note')).toBeNull();
     fireEvent.click(screen.getByRole('radio', { name: B.antigravityMethodEnterpriseCompact }));
     expect(screen.queryByRole('note')).toBeNull();
     expect(screen.queryByText(B.antigravityEnterpriseTerminalTitle)).toBeNull();
