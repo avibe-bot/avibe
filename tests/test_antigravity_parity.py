@@ -34,7 +34,7 @@ from core.services.session_fork import (
 )
 from core.session_handoff import HANDOFF_BUDGET_CHARS
 from core.vibe_agents import VibeAgentStore, parse_agent_file
-from modules.agents.antigravity.agent import AGY_CLI_DISABLE_AUTO_UPDATE_ENV
+from modules.agents.antigravity.auth import AGY_CLI_DISABLE_AUTO_UPDATE_ENV
 from modules.agents.antigravity import agent as agy_agent_module
 from modules.agents.base import AgentRequest
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
