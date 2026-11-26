@@ -73,8 +73,9 @@ still ship with Product's go:
    summary (green included), but the attestation replaces its verdict. The run summary and the
    RC's notes print
    `` not verified in this RC: `<job>` — `<reason>` (go: `<quote>`) ``, every
-   field in a code span so it renders literally, followed in the notes by a
-   hidden marker that binds the line to the tag's source.
+   field in a code span so it renders literally. In the notes it is its own
+   paragraph ahead of the generated text, followed by a hidden marker that
+   binds the line to the tag's source.
 4. Desktop Stage 2 ignores dispatch inputs for this. When the full backstop is
    not green on an RC, it honours an exception only if this exact tag's
    published notes carry that one line with Stage 1's marker for the same

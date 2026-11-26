@@ -447,7 +447,8 @@ def unverified_from_notes(api: GitHubApi, tag: str, source_sha: str) -> Unverifi
     """
     release = api.get(f"releases/tags/{urllib.parse.quote(tag, safe='')}")
     body = release.get("body") if isinstance(release, dict) else None
-    lines = body.splitlines() if isinstance(body, str) else []
+    # LF records (CRLF tolerated), the same boundaries Stage 1's grep scrub uses.
+    lines = re.split(r"\r?\n", body) if isinstance(body, str) else []
     markers = [(i, NOTES_MARKER_RE.fullmatch(line)) for i, line in enumerate(lines)]
     markers = [(i, m) for i, m in markers if m]
     if not markers:

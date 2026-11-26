@@ -597,8 +597,9 @@ def _marker(line: str = LINE, source: str = SOURCE_SHA) -> str:
         (f"{LINE}\n{_marker(source='e' * 40)}", False),
         (f"{LINE.replace('runner', 'Runner')}\n{_marker()}", False),
         (f"{LINE}\n{_marker()}\n{LINE}\n{_marker()}", False),
+        (f"{LINE}\r\n{_marker()}\r\nprose\u2028{_marker()}\n", True),
     ],
-    ids=["stage1-line", "no-line", "prose-without-marker", "other-source", "edited-line", "two-markers"],
+    ids=["stage1-line", "no-line", "prose-without-marker", "other-source", "edited-line", "two-markers", "crlf-and-non-lf-separator"],
 )
 def test_stage2_honours_only_the_stage1_notes_line(
     body: str, accepted: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
