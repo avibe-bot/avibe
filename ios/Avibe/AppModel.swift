@@ -16,11 +16,6 @@ protocol RuntimeOpenTiming: AnyObject {
     /// page a web content launch's time there.
     var accountTransportDeadlines: MobileAuthTransportDeadlines { get }
 
-    /// The bounds of the direct path controller the App makes. The App's
-    /// are `.standard`; a timing for the CI simulator may let an open wait
-    /// longer for the listener's first bind there.
-    var directPathTiming: DirectPathTiming { get }
-
     func schedule(
         after delay: Duration,
         _ action: @escaping @MainActor () -> Void
@@ -29,7 +24,6 @@ protocol RuntimeOpenTiming: AnyObject {
 
 extension RuntimeOpenTiming {
     var accountTransportDeadlines: MobileAuthTransportDeadlines { .standard }
-    var directPathTiming: DirectPathTiming { .standard }
 }
 
 @MainActor
@@ -600,7 +594,6 @@ final class AppModel: ObservableObject {
                 isCurrentRuntime: { [weak self] runtime in
                     self?.sessionCoordinator.isCurrentRuntime(runtime) ?? false
                 },
-                timing: runtimeOpenTiming.directPathTiming,
                 onStatusChanged: { [weak self] in
                     self?.deliverDirectStatus()
                 },

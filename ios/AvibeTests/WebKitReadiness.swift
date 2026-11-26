@@ -55,35 +55,10 @@ enum WebKitReadiness {
             + afterWebContentLaunch.requestMilliseconds
     ) + .seconds(5)
 
-    /// The direct path controller's bounds for an App whose tests are not
-    /// about the listener wait: an open waits for the listener's first bind
-    /// and its check until they end by themselves, serving or failed.
-    ///
-    /// The App waits one second (`DirectPathTiming.standard`) and then loads
-    /// the host on the public path, routes it never on that store, stops
-    /// the listener and records nothing: its designed fallback. On the CI
-    /// simulator the first bind and its check have taken longer (1.19 s in
-    /// run 45784478069, with web content launches of 3 s around it; run
-    /// 44934936305 before it), and a test that then expects a routed host
-    /// and a selection fails on a path the product never promised it. A
-    /// bind that never finishes still ends: its check has `rebindSeconds`,
-    /// and the foreground deadline fails it, on record. Every other bound
-    /// is the App's. The one-second wait itself is held by the controller's
-    /// own tests, and by the fixture test that gives an App no wait at all.
-    static let afterASlowFirstBind = DirectPathTiming(
-        listenerWaitSeconds: 60,
-        rebindSeconds: DirectPathTiming.standard.rebindSeconds,
-        foregroundSeconds: DirectPathTiming.standard.foregroundSeconds,
-        strictOpenSeconds: DirectPathTiming.standard.strictOpenSeconds,
-        retrySeconds: DirectPathTiming.standard.retrySeconds
-    )
-
     /// The App's own clock, with account transports whose control-plane page
     /// may take a web content launch's time on the CI simulator
-    /// (`afterWebContentLaunch`), and a direct path controller that waits
-    /// for its first bind (`afterASlowFirstBind`): the timing an App fixture
-    /// passes so that a slow launch is not the App's readiness timeout, nor
-    /// a slow bind its fallback to the public path. A fixture that passes
+    /// (`afterWebContentLaunch`): the timing an App fixture passes so that a
+    /// slow launch is not the App's readiness timeout. A fixture that passes
     /// it bounds its waits on that App with `launchedTransportOperation`.
     /// It rides on the App's existing timing injection (#3973).
     @MainActor
@@ -98,10 +73,6 @@ enum WebKitReadiness {
 
         var accountTransportDeadlines: MobileAuthTransportDeadlines {
             WebKitReadiness.afterWebContentLaunch
-        }
-
-        var directPathTiming: DirectPathTiming {
-            WebKitReadiness.afterASlowFirstBind
         }
 
         func schedule(
