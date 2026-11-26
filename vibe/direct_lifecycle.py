@@ -30,6 +30,10 @@ from vibe.direct_rendezvous import DirectRendezvous, rendezvous as default_rende
 
 logger = logging.getLogger(__name__)
 PERMISSION_MAX_AGE_SECONDS = 15 * 60
+# Start replacing the supervised process a minute before the 24h key limit.
+# Its ephemeral QUIC identity is unrelated to the instance TLS certificate.
+ENDPOINT_TURNOVER_SECONDS = 24 * 3600 - 60
+TURNOVER_SHUTDOWN_WAIT_SECONDS = 15.0
 CONFIG_POLL_INTERVAL_SECONDS = 0.5
 BINARY_REFRESH_INTERVAL_SECONDS = 5.0
 BINARY_OBSERVATION_MAX_AGE_SECONDS = 15.0
@@ -213,24 +217,33 @@ class _OwnedRendezvous:
 
     def __init__(self, lifecycle: DirectAccessLifecycle, generation: int, ingress: Any) -> None:
         self._owner, self._generation, self._ingress = lifecycle, generation, ingress
+        self._publisher = lifecycle._publisher
 
     def publish(self, endpoint: Any, *, reason: str = "not_running") -> None:
-        if endpoint is not None and not self._owner._can_commit(self._generation, self._ingress):
-            return
-        self._owner._rendezvous.publish(endpoint, reason=reason)
+        if endpoint is not None:
+            if self._owner._can_commit(self._generation, self._ingress):
+                self._owner._rendezvous.publish(endpoint, reason=reason, retire_at=self._owner._endpoint_retire_at,
+                                                publisher=self._publisher)
+        else:
+            self._owner._rendezvous.publish(None, reason=reason, publisher=self._publisher)
+
+    def limit_admission_ttl(self, ttl: int) -> int:
+        if self._generation != self._owner._generation or self._ingress is not self._owner._ingress:
+            return 0
+        return self._owner._rendezvous.limit_admission_ttl(ttl, publisher=self._publisher)
 
     def clear_paths(self) -> None:
         if self._owner._can_commit(self._generation, self._ingress):
-            self._owner._rendezvous.clear_paths()
+            self._owner._rendezvous.clear_paths(publisher=self._publisher)
 
     def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
         if self._owner._can_commit(self._generation, self._ingress):
-            self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path)
+            self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path, publisher=self._publisher)
 
     def set_admission_listener(self, listener: Any) -> None:
         if listener is not None and not self._owner._can_commit(self._generation, self._ingress):
             return
-        self._owner._rendezvous.set_admission_listener(listener)
+        self._owner._rendezvous.set_admission_listener(listener, publisher=self._publisher)
 
 
 class DirectAccessLifecycle:
@@ -248,6 +261,7 @@ class DirectAccessLifecycle:
         self._ingress_factory = ingress_factory or _default_ingress_factory
         self._supervisor_factory = supervisor_factory or _default_supervisor_factory
         self._rendezvous = rendezvous or default_rendezvous
+        self._publisher = object()  # Unclaimed until start; never matches the unmanaged publisher.
         self._config_loader = config_loader or V2Config.load
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: asyncio.Task | None = None
@@ -291,6 +305,10 @@ class DirectAccessLifecycle:
         self._cancelled_retry_used = False
         self._ingress: Any = None
         self._supervisor: Any = None
+        self._endpoint_retire_at: float | None = None
+        self._turnover_retry_at: float | None = None
+        self._turnover_stop: asyncio.Task | None = None
+        self._turnover_delay = INSTALL_RETRY_INITIAL_SECONDS
         self._resource_generation: int | None = None
         self._failed_generation: int | None = None
         self._next_start = 0.0
@@ -306,6 +324,7 @@ class DirectAccessLifecycle:
         if self._runner is not None:
             return
         self._loop = asyncio.get_running_loop()
+        self._publisher = self._rendezvous.claim_publisher()
         self._shutdown = False
         self._next_binary_check = 0.0
         self._runner = asyncio.create_task(self._run(), name="direct-access-lifecycle")
@@ -348,7 +367,7 @@ class DirectAccessLifecycle:
         self._poll_at = 0.0
         if self._start_task is not None:
             self._start_task.cancel()
-        self._rendezvous.publish(None, reason="state_changed")
+        self._rendezvous.publish(None, reason="state_changed", publisher=self._publisher)
         self._wake.set()
 
     def notify_config_changed(self, config: V2Config) -> None:
@@ -448,7 +467,7 @@ class DirectAccessLifecycle:
         self._permission_received_at = None
         self._permission_reason = reason
         self._resume_required = True
-        self._rendezvous.publish(None, reason=reason)
+        self._rendezvous.publish(None, reason=reason, publisher=self._publisher)
 
     def _permission_fresh(self) -> bool:
         return (self._permission_allowed is True and self._permission_received_at is not None
@@ -587,7 +606,7 @@ class DirectAccessLifecycle:
             pass  # An unreadable optional runtime is unavailable, not a Web UI failure.
         return generation, started, binary, missing
 
-    def _binary_check_done(self, task: asyncio.Task) -> None:
+    def _worker_done(self, task: asyncio.Task) -> None:
         if not task.cancelled():
             task.exception()
         self._wake.set()
@@ -628,7 +647,7 @@ class DirectAccessLifecycle:
                             self._install_pin, self._generation, self._signature,
                             self._permission_received_at + PERMISSION_MAX_AGE_SECONDS,
                         ), name="direct-transport-install")
-                        self._install_task.add_done_callback(self._binary_check_done)
+                        self._install_task.add_done_callback(self._worker_done)
                         return
         config = self._config
         if (self._binary_task is not None or self._shutdown or self._pairing_suspended
@@ -641,7 +660,7 @@ class DirectAccessLifecycle:
         self._binary_task = asyncio.create_task(asyncio.to_thread(
             self._resolve_binary, self._generation, self._loop.time(), binary_config,
         ), name="direct-binary-observation")
-        self._binary_task.add_done_callback(self._binary_check_done)
+        self._binary_task.add_done_callback(self._worker_done)
 
     def _clear_binary(self) -> None:
         self._binary = None
@@ -701,6 +720,9 @@ class DirectAccessLifecycle:
     async def _run(self) -> None:
         while True:
             self._wake.clear()
+            if self._shutdown and self._turnover_retry_at is not None:
+                await self._finish_turnover_on_shutdown()
+                return
             try:
                 if self._permission_allowed is True and not self._permission_fresh():
                     self._deny("permission_expired")
@@ -715,7 +737,7 @@ class DirectAccessLifecycle:
                 self._back_off_start(self._generation)
                 self._set_state("error", "lifecycle_error")
                 logger.warning("Direct access lifecycle transition failed")
-            if self._shutdown:
+            if self._shutdown and self._turnover_retry_at is None:
                 return
             try:
                 await asyncio.wait_for(self._wake.wait(), timeout=TICK_SECONDS)
@@ -728,7 +750,53 @@ class DirectAccessLifecycle:
             self._next_start = self._loop.time() + self._start_delay
             self._start_delay = min(INSTALL_RETRY_MAX_SECONDS, self._start_delay * 2)
 
+    def _begin_turnover_stop(self) -> asyncio.Task:
+        self._turnover_stop = asyncio.create_task(self._stop_direct('generation_changed'), name='direct-endpoint-retire')
+        self._turnover_stop.add_done_callback(self._worker_done)
+        return self._turnover_stop
+
+    async def _finish_turnover_on_shutdown(self) -> None:
+        # stop() already withdrew publication and invalidated the generation.
+        # Reuse an in-flight teardown. After a failed attempt, skip its backoff
+        # and try once more. Never start a second stop alongside the first.
+        task = self._turnover_stop
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = self._begin_turnover_stop()
+        done, _ = await asyncio.wait((task,), timeout=TURNOVER_SHUTDOWN_WAIT_SECONDS)
+        if not done:
+            # Keep ownership: cancellation could interrupt child reaping. If
+            # this owner restarts, it must collect this stop before replacing it.
+            logger.warning('Direct endpoint teardown still pending at shutdown')
+        elif task.cancelled() or task.exception() is not None:
+            self._turnover_stop = None
+            logger.warning('Direct endpoint teardown failed at shutdown')
+        else:
+            self._turnover_stop = None
+            self._turnover_retry_at = None
+
     async def _reconcile(self) -> None:
+        if self._turnover_retry_at is None and self._endpoint_retire_at is not None and suspend_elapsed() >= self._endpoint_retire_at:
+            # Retire once. Ordinary permission renewals and further ticks must
+            # neither reset cleanup backoff nor authorize a second supervisor.
+            self._turnover_retry_at = 0.0
+            self._turnover_delay = INSTALL_RETRY_INITIAL_SECONDS
+            self._invalidate()
+        if self._turnover_retry_at is not None:
+            if self._loop.time() < self._turnover_retry_at:
+                return
+            task = self._turnover_stop
+            if task is None:
+                self._begin_turnover_stop()
+                return
+            if not task.done():
+                return
+            self._turnover_stop = None
+            if task.cancelled() or task.exception() is not None:
+                self._turnover_retry_at = self._loop.time() + self._turnover_delay
+                self._turnover_delay = min(INSTALL_RETRY_MAX_SECONDS, self._turnover_delay * 2)
+                logger.warning('Direct endpoint retirement incomplete; retrying teardown after backoff')
+                return
+            self._turnover_retry_at = None
         self._refresh_binary_observation()
         state, reason, binary = self._gate()
         if binary is None:
@@ -795,6 +863,9 @@ class DirectAccessLifecycle:
             return
         from vibe.direct_rendezvous import PUBLIC_TRIAL
 
+        # Anchor before spawn, never to an address update, admission or heartbeat.
+        # A supervisor's own crash restarts can only make its current key younger.
+        self._endpoint_retire_at = suspend_elapsed() + ENDPOINT_TURNOVER_SECONDS
         self._supervisor = self._supervisor_factory(
             binary, self._ingress, _OwnedRendezvous(self, generation, ingress),
             **({"relay_policy": PUBLIC_TRIAL} if self._public_traversal_allowed and self._permission_fresh() else {}),
@@ -806,6 +877,7 @@ class DirectAccessLifecycle:
 
     def _can_commit(self, generation: int, ingress: Any) -> bool:
         return (generation == self._generation and ingress is self._ingress
+                and (self._endpoint_retire_at is None or suspend_elapsed() < self._endpoint_retire_at)
                 and self._gate()[2] is not None and _certificate_usable(self._certificate_result))
 
     async def _prepare_tls(self, operation: Callable, *args: Any, generation: int, ingress: Any) -> Any:
@@ -822,7 +894,8 @@ class DirectAccessLifecycle:
         return await asyncio.shield(task)
 
     async def _stop_direct(self, reason: str) -> None:
-        self._rendezvous.publish(None, reason=reason)
+        publisher = self._publisher  # A stop can outlive this startup and its runner.
+        self._rendezvous.publish(None, reason=reason, publisher=publisher)
         if self._supervisor is not None or self._ingress is not None:
             self._set_state("stopping", reason)
         if self._supervisor is not None:
@@ -831,8 +904,9 @@ class DirectAccessLifecycle:
         if self._ingress is not None:
             await self._ingress.stop()
             self._ingress = None
+        self._endpoint_retire_at = None
         self._resource_generation = None
-        self._rendezvous.publish(None, reason=reason)
+        self._rendezvous.publish(None, reason=reason, publisher=publisher)
         self._stopped.set()
 
     def _schedule_poll(self, *, rotate_key: bool = False) -> asyncio.Task:

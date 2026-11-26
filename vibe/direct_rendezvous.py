@@ -21,6 +21,8 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from vibe.connection_settings import suspend_elapsed
+
 logger = logging.getLogger(__name__)
 # Publication reasons may originate in sidecar messages. Never log an arbitrary string.
 _LOG_REFUSALS = frozenset({
@@ -157,6 +159,11 @@ class _Admission:
     connections: dict[int, tuple[float, dict | None]] = field(default_factory=dict)
 
 
+def key_limited_ttl(retire_at: float | None, ttl: int) -> int:
+    """Whole seconds safe to offer on this process's suspend-inclusive clock."""
+    return ttl if retire_at is None else max(0, min(ttl, int(retire_at - suspend_elapsed())))
+
+
 class DirectRendezvous:
     """The published endpoint and the client endpoints admitted to dial it.
 
@@ -167,7 +174,8 @@ class DirectRendezvous:
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._publisher: object | None = None
         # Key by authenticated caller, never by its freely replaceable endpoint key.
         self._log_callers: OrderedDict[str, tuple[tuple, float, int]] = OrderedDict()
         # Distinguishes this process's generations from any earlier process's.
@@ -175,13 +183,22 @@ class DirectRendezvous:
         self._revision = 0
         self._next_epoch = 1
         self._endpoint: DirectEndpoint | None = None
+        self._retire_at: float | None = None
         self._candidates: tuple[dict[str, str], ...] = ()
         self._unavailable_reason = "not_running"
         # client endpoint ID -> (subject, admitted_until), oldest first.
         self._admissions: dict[str, _Admission] = {}
         self._admission_listener: AdmissionListener | None = None
 
-    def set_admission_listener(self, listener: AdmissionListener | None) -> None:
+    def claim_publisher(self) -> object:
+        """Transfer publication to one lifecycle, atomically with offer and cleanup."""
+        with self._lock:
+            self.publish(None, reason="not_running", publisher=self._publisher)
+            self._admission_listener = None
+            self._publisher = object()
+            return self._publisher
+
+    def set_admission_listener(self, listener: AdmissionListener | None, *, publisher: object | None = None) -> None:
         """Set the optional non-blocking hook for admission notices.
 
         The hook is called after the in-memory admission change and before
@@ -192,9 +209,11 @@ class DirectRendezvous:
         """
 
         with self._lock:
-            self._admission_listener = listener
+            if publisher is self._publisher:
+                self._admission_listener = listener
 
-    def publish(self, endpoint: DirectEndpoint | None, *, reason: str = "not_running") -> None:
+    def publish(self, endpoint: DirectEndpoint | None, *, reason: str = "not_running", retire_at: float | None = None,
+                publisher: object | None = None) -> None:
         """Replace the published endpoint; ``None`` withdraws it for ``reason``.
 
         A change of endpoint ID or of the address set starts a new generation.
@@ -216,6 +235,8 @@ class DirectRendezvous:
             ordered = sorted(seen.values(), key=lambda item: (_KIND_ORDER[item["kind"]], item["address"]))
             candidates = tuple(ordered[:_MAX_ADDRESSES])
         with self._lock:
+            if publisher is not self._publisher:
+                return
             previous_id = self._endpoint.endpoint_id if self._endpoint is not None else None
             current_id = endpoint.endpoint_id if endpoint is not None else None
             previous_policy = self._endpoint.relay_policy if self._endpoint else None
@@ -232,6 +253,7 @@ class DirectRendezvous:
             if previous_id != current_id or candidates != self._candidates or previous_origin != current_origin or previous_policy != current_policy:
                 self._revision += 1
             self._endpoint = endpoint
+            self._retire_at = retire_at if endpoint is not None else None
             self._candidates = candidates
             self._unavailable_reason = reason
 
@@ -290,7 +312,10 @@ class DirectRendezvous:
         if endpoint is None or (not self._candidates and relay is None):
             reason = self._unavailable_reason if endpoint is None else "no_reachable_address"
             return unavailable(instance_id=base["instance_id"], hostname=base["hostname"], reason=reason)
-        expires_at = now + RENDEZVOUS_TTL_SECONDS
+        ttl = key_limited_ttl(self._retire_at, RENDEZVOUS_TTL_SECONDS)
+        if not ttl:
+            return unavailable(instance_id=base['instance_id'], hostname=base['hostname'], reason='not_running')
+        expires_at = now + ttl
         notifications = self._admit(client_endpoint_id, subject, expires_at, now, session)
         if self._admission_listener is not None:
             # Schedule on the loop in mutation order while holding the lock.
@@ -307,7 +332,8 @@ class DirectRendezvous:
     def relay_connected(self) -> bool:
         """Actual validated publication, not the policy selection or an offer/admission."""
         with self._lock:
-            return bool(self._endpoint and self._endpoint.relay_policy == PUBLIC_TRIAL and self._endpoint.relay_origin)
+            return bool(self._endpoint and key_limited_ttl(self._retire_at, 1)
+                        and self._endpoint.relay_policy == PUBLIC_TRIAL and self._endpoint.relay_origin)
 
     def is_admitted(self, client_endpoint_id: str) -> bool:
         """Whether a transport peer with this endpoint ID may open streams now."""
@@ -315,15 +341,24 @@ class DirectRendezvous:
         now = int(self._clock())
         with self._lock:
             admission = self._admissions.get(client_endpoint_id)
-            return admission is not None and admission.until > now
+            return admission is not None and admission.until > now and bool(key_limited_ttl(self._retire_at, 1))
 
-    def clear_paths(self) -> None:
+    def limit_admission_ttl(self, ttl: int, *, publisher: object | None = None) -> int:
         with self._lock:
+            return key_limited_ttl(self._retire_at, ttl) if self._endpoint and publisher is self._publisher else 0
+
+    def clear_paths(self, *, publisher: object | None = None) -> None:
+        with self._lock:
+            if publisher is not self._publisher:
+                return
             for admission in self._admissions.values():
                 admission.connections.clear()
 
-    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
+    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None, *,
+                     publisher: object | None = None) -> None:
         with self._lock:
+            if publisher is not self._publisher:
+                return
             admission = self._admissions.get(peer)
             if not admission or not admission.session or not epoch or admission.epoch != epoch or admission.until <= self._clock():
                 return
@@ -338,6 +373,8 @@ class DirectRendezvous:
         latest = {}
         with self._lock:
             now = self._clock()
+            if not key_limited_ttl(self._retire_at, 1):
+                return latest
             cutoff = time.monotonic() - _PATH_MAX_AGE
             for admission in self._admissions.values():
                 session = admission.session

@@ -23,6 +23,7 @@ from config.v2_config import V2Config
 from vibe import direct_lifecycle as module, remote_access
 from vibe.direct_certificates import CertificateResult
 from vibe.direct_lifecycle import DirectAccessLifecycle
+from vibe.direct_rendezvous import DirectEndpoint, DirectRendezvous
 from tests.test_direct_transport_runtime import published  # Shared inert published-release fixture.
 
 
@@ -61,7 +62,10 @@ class FakeRendezvous:
         self.endpoint = None
         self.reason = None
 
-    def publish(self, endpoint, *, reason="not_running"):
+    def claim_publisher(self):
+        return object()
+
+    def publish(self, endpoint, *, reason="not_running", retire_at=None, publisher=None):
         self.endpoint, self.reason = endpoint, reason
         self.calls.append(("publish", endpoint, reason))
 
@@ -139,7 +143,7 @@ def reports(monkeypatch):
 async def _owner(config, reports, *, cert=None, ingress_type=FakeIngress, supervisor_type=FakeSupervisor, **options):
     calls = []
     cert = cert or FakeCertificateClient()
-    rendezvous = FakeRendezvous(calls)
+    rendezvous = options.pop("rendezvous", None) or FakeRendezvous(calls)
     owner = DirectAccessLifecycle(
         object(), certificate_client=cert,
         ingress_factory=lambda app, **kw: ingress_type(calls, **kw),
@@ -921,6 +925,139 @@ async def test_retryable_certificate_failure_preserves_tunnel_and_provider_deadl
         assert owner._poll_at >= deadline
         await _wait(lambda: owner.status().state == "running")
         assert cert.calls[-1]["retry"] is True and time.time() >= deadline
+
+
+async def test_daily_turnover_latches_and_retries_failed_stop_before_replacement(reports, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(module, 'INSTALL_RETRY_INITIAL_SECONDS', 0.04)
+    monkeypatch.setattr(module, 'INSTALL_RETRY_MAX_SECONDS', 0.08)
+    monkeypatch.setattr(module, 'TICK_SECONDS', 0.005)
+    attempts = []
+    class FaultyStop(FakeSupervisor):
+        async def stop(self):
+            attempts.append((self.loop.time(), owner._generation, calls.count('supervisor_start'), rv.endpoint))
+            if len(attempts) <= 3:
+                raise OSError('fixture retirement failure')
+            await super().stop()
+    config = _config()
+    async with _owner(config, reports, supervisor_type=FaultyStop) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == 'running')
+        before = owner._generation
+        clock[0] = owner._endpoint_retire_at
+        # Model a binding with a renewed receipt when the old key expires.
+        await _permission(owner, config)
+        await _wait(lambda: len(attempts) == 1)
+        await _permission(owner, config)
+        await _wait(lambda: calls.count('supervisor_start') == 2)
+        assert [row[1:] for row in attempts] == [(before + 1, 1, None)] * 4
+        for prior, later, minimum in zip(attempts, attempts[1:], (0.04, 0.08, 0.08)):
+            assert later[0] - prior[0] >= minimum
+        assert rv.endpoint and owner._turnover_retry_at is None
+
+
+@pytest.mark.parametrize('final_stop', ['success', 'raises', 'stalls', 'already_in_flight'])
+async def test_shutdown_bypasses_turnover_backoff_once_without_replacement(reports, monkeypatch, final_stop):
+    clock = [100.0]
+    release = asyncio.Event()
+    attempts = []
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(module, 'TURNOVER_SHUTDOWN_WAIT_SECONDS', 0.05)
+    class FaultyStop(FakeSupervisor):
+        async def stop(self):
+            attempts.append(self)
+            if len(attempts) == 1 and final_stop != 'already_in_flight':
+                raise OSError('first retirement attempt failed')
+            if final_stop == 'raises':
+                raise OSError('final teardown failed')
+            if final_stop in {'stalls', 'already_in_flight'}:
+                await release.wait()
+            await super().stop()
+    config = _config()
+    async with _owner(config, reports, supervisor_type=FaultyStop) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == 'running')
+        clock[0] = owner._endpoint_retire_at
+        await _permission(owner, config)
+        if final_stop == 'already_in_flight':
+            await _wait(lambda: len(attempts) == 1)
+        else:
+            await _wait(lambda: (owner._turnover_retry_at or 0) > owner._loop.time() + 20)
+        try:
+            await asyncio.wait_for(owner.stop(), timeout=0.5)
+            assert len(attempts) == (1 if final_stop == 'already_in_flight' else 2)
+            assert rv.endpoint is None and calls.count('supervisor_start') == 1
+            assert (owner._supervisor is None) == (final_stop == 'success')
+        finally:
+            release.set()
+            if owner._turnover_stop is not None:
+                await asyncio.wait_for(owner._turnover_stop, timeout=0.5)
+
+
+async def test_late_retirement_preserves_successor_offer_admissions_and_listener(reports, monkeypatch):
+    rv = DirectRendezvous()
+    release, stopping = asyncio.Event(), asyncio.Event()
+    notices = []
+    clock = [100.0]
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr('vibe.direct_rendezvous.suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(module, 'TURNOVER_SHUTDOWN_WAIT_SECONDS', 0.05)
+
+    class PublishingSupervisor(FakeSupervisor):
+        key = 'a' * 64
+
+        async def start(self):
+            self.endpoint_id, self.running = self.key, True
+            self.rendezvous.set_admission_listener(lambda peer, ttl, epoch: notices.append((self.key, peer, ttl)))
+            self.rendezvous.publish(DirectEndpoint(self.key, ('192.168.1.2:3210',)))
+
+        async def stop(self):
+            self.rendezvous.set_admission_listener(None)
+            await super().stop()
+
+    class OldSupervisor(PublishingSupervisor):
+        key = 'b' * 64
+
+        async def stop(self):
+            stopping.set()
+            await release.wait()
+            await super().stop()
+
+    def offer(peer):
+        return rv.offer(instance_id='instance-one', hostname='example.invalid', subject='owner', client_endpoint_id=peer)
+
+    config = _config()
+    peer = 'c' * 64
+    async with _owner(config, reports, rendezvous=rv, supervisor_type=OldSupervisor) as (old, *_):
+        await _permission(old, config)
+        await _wait(lambda: old.status().state == 'running')
+        assert offer(peer)['endpoint']['id'] == OldSupervisor.key
+        clock[0] = old._endpoint_retire_at
+        await _permission(old, config)
+        await asyncio.wait_for(stopping.wait(), 1)
+        try:
+            await asyncio.wait_for(old.stop(), 0.5)
+            assert not rv.is_admitted(peer)
+            async with _owner(config, reports, rendezvous=rv, supervisor_type=PublishingSupervisor) as (new, *_):
+                await _permission(new, config)
+                await _wait(lambda: new.status().state == 'running')
+                ready = offer(peer)
+                assert ready['status'] == 'ready' and ready['endpoint']['id'] == PublishingSupervisor.key
+                release.set()
+                await asyncio.wait_for(asyncio.shield(old._turnover_stop), 0.5)
+                assert rv.is_admitted(peer)  # Check before a new offer could re-admit it.
+                before = len(notices)
+                fresh = 'd' * 64
+                after = offer(fresh)
+                assert after['status'] == 'ready' and after['generation'] == ready['generation']
+                assert after['endpoint'] == ready['endpoint']
+                assert len(notices) == before + 1 and notices[-1][:2] == (PublishingSupervisor.key, fresh)
+                assert notices[-1][2] > 0
+        finally:
+            release.set()
+            if old._turnover_stop is not None:
+                await asyncio.wait_for(old._turnover_stop, 0.5)
 
 
 async def test_start_error_backs_off_then_publishes_without_tunnel_change(reports, monkeypatch):

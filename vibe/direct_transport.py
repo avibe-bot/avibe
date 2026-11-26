@@ -744,6 +744,10 @@ class DirectTransportSupervisor:
         *,
         interruptible: bool,
     ) -> None:
+        if message.get('type') == 'admission' and message['ttl_seconds'] > 0:
+            # A queued grant may have waited on the loop or the control lock
+            # across wake. Never deliver positive authority past key retirement.
+            message = {**message, 'ttl_seconds': self._rendezvous.limit_admission_ttl(message['ttl_seconds'])}
         encoded = (json.dumps(message, ensure_ascii=True, separators=(",", ":")) + "\n").encode("ascii")
         if len(encoded) > CONTROL_LINE_LIMIT_BYTES:
             raise _ProtocolError("control_line_too_large")

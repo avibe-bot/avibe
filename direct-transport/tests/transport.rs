@@ -137,6 +137,18 @@ impl Sidecar {
     }
 }
 
+#[tokio::test]
+async fn restarting_the_sidecar_replaces_the_endpoint_key() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let first = Sidecar::start(addr).await;
+    let old_id = first.ready["endpoint_id"].clone();
+    first.stop().await;
+    let second = Sidecar::start(addr).await;
+    assert!(old_id != second.ready["endpoint_id"], "endpoint key reused");
+    second.stop().await;
+}
+
 fn ready_sockets(ready: &Value) -> Vec<SocketAddr> {
     ready["addresses"]
         .as_array()
