@@ -29,7 +29,10 @@ from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.build_identity import get_build_identity
 from vibe.i18n import t as i18n_t
 from vibe.upgrade import (
+    AUTOMATIC_DISCOVERY,
+    EXPLICIT_DISCOVERY,
     PACKAGE_NAME,
+    UpdateDiscovery,
     get_latest_version_info,
     get_running_vibe_path,
     has_newer_version,
@@ -73,8 +76,12 @@ _STABLE_PACKAGE_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[.-]?post\d+)?$")
 _PRERELEASE_VERSION_RE = re.compile(r"\d+\.\d+\.\d+rc\d+")
 
 
-def _fetch_pypi_version_sync() -> Dict[str, Any]:
-    """Synchronous PyPI version fetch (to be run in thread)."""
+def _fetch_pypi_version_sync(discovery: UpdateDiscovery = AUTOMATIC_DISCOVERY) -> Dict[str, Any]:
+    """Synchronous PyPI version fetch (to be run in thread).
+
+    The periodic check is automatic, so by default it skips silent releases;
+    an admin's own update action passes explicit discovery.
+    """
     from vibe import __version__
 
     current = __version__
@@ -83,7 +90,7 @@ def _fetch_pypi_version_sync() -> Dict[str, Any]:
         return result
 
     # The same offer as the version dialog: pre-releases follow `update.prereleases`.
-    return get_latest_version_info(current, prereleases=prerelease_updates_enabled())
+    return get_latest_version_info(current, prereleases=prerelease_updates_enabled(), discovery=discovery)
 
 
 def _github_release_url(version: str) -> str:
@@ -503,14 +510,15 @@ class UpdateChecker:
                     latest,
                     cached=release_notifications_enabled,
                 )
-                if release_notifications and self._within_notification_grace_period(latest):
+                if not release_notifications:
+                    # Discovery skips silent releases the release index marks; this
+                    # catches one the index could not be read for.
+                    logger.info("Skipping auto-update to %s: the release is silent", latest)
+                elif self._within_notification_grace_period(latest):
                     logger.info("Within notification grace period, deferring auto-update")
                 else:
                     logger.info("System is idle, performing auto-update...")
-                    update_kwargs = {}
-                    if not release_notifications:
-                        update_kwargs["suppress_post_update_notification"] = True
-                    result = await self._perform_update(latest, **update_kwargs)
+                    result = await self._perform_update(latest)
                     if not result.get("ok"):
                         logger.warning(
                             "Auto-update to %s failed and will be retried on a later check: %s",
@@ -653,8 +661,8 @@ class UpdateChecker:
         return "failed"
 
     async def _get_version_info_async(self) -> Dict[str, Any]:
-        """Get version info asynchronously."""
-        return await asyncio.to_thread(_fetch_pypi_version_sync)
+        """Version info for an admin's own update action, which also sees silent releases."""
+        return await asyncio.to_thread(_fetch_pypi_version_sync, EXPLICIT_DISCOVERY)
 
     async def _should_send_release_notifications(self, latest: str, cached: Optional[bool] = None) -> bool:
         """Return whether update notifications should be sent for the release."""
@@ -1193,9 +1201,12 @@ class UpdateChecker:
         channel_id: Optional[str] = None,
         message_id: Optional[str] = None,
         platform: Optional[str] = None,
-        suppress_post_update_notification: bool = False,
     ) -> Dict[str, Any]:
-        """Perform the actual update and restart. Returns do_upgrade result dict."""
+        """Install ``target_version`` and restart. Returns do_upgrade result dict.
+
+        The install resolves the target it was given rather than whatever is
+        newest, so an automatic update never installs a silent release.
+        """
         # Prevent concurrent upgrades
         if self._upgrade_lock.locked():
             logger.warning("Upgrade already in progress, skipping")
@@ -1212,20 +1223,17 @@ class UpdateChecker:
             # Run upgrade in thread to avoid blocking event loop
             from vibe.api import do_upgrade
 
-            result = await asyncio.to_thread(do_upgrade, True)
+            result = await asyncio.to_thread(do_upgrade, True, target_version=target_version)
 
             if result["ok"]:
                 logger.info(f"Upgrade successful: {result['message']}")
                 if result.get("restarting"):
                     # Write marker only if restart is scheduled
-                    if suppress_post_update_notification:
-                        logger.info("Post-update notification suppressed for %s", target_version)
                     self._write_update_marker(
                         target_version,
                         channel_id=channel_id,
                         message_id=message_id,
                         platform=platform,
-                        suppress_success_notification=suppress_post_update_notification,
                     )
                 else:
                     logger.warning("Upgrade completed without restart; manual restart required")

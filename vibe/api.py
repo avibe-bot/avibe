@@ -103,6 +103,7 @@ from vibe.upgrade import (
     get_latest_version_info,
     prerelease_updates_enabled,
     get_running_vibe_path,
+    UpdateDiscovery,
     get_safe_cwd,
     format_activation_failures,
     get_deferred_activation_log_path,
@@ -7913,11 +7914,16 @@ def get_version_info() -> dict:
     return result
 
 
-def do_upgrade(auto_restart: bool = True) -> dict:
+def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> dict:
     """Perform upgrade to latest version.
 
     Args:
         auto_restart: If True, restart vibe after successful upgrade
+        target_version: The release the caller resolved (the periodic check,
+            or an update notification's button). It is installed unless a newer
+            announced release has appeared; a silent release is installed only
+            when named, and with no newer release it installs nothing. Without
+            it, an explicit upgrade takes the newest release.
 
     Returns:
         {
@@ -7939,7 +7945,25 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         }
 
     current_vibe_path = get_running_vibe_path()
-    version_info = get_version_info()
+    if target_version is None or get_build_identity().kind == "source":
+        version_info = get_version_info()
+    else:
+        from vibe import __version__
+
+        version_info = get_latest_version_info(
+            __version__,
+            prereleases=prerelease_updates_enabled(),
+            discovery=UpdateDiscovery.requested(target_version),
+        )
+        # An unpinned upgrade would take the newest release, silent or not.
+        if version_info.get("error") or not version_info.get("has_update"):
+            return {
+                "ok": False,
+                "message": "No newer release to install.",
+                "output": version_info.get("error"),
+                "activation_notice": None,
+                "restarting": False,
+            }
     try:
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,

@@ -429,7 +429,8 @@ def test_no_admin_discord_without_fallback_does_not_block_auto_update(monkeypatc
     assert performed == [("1.0.1", {})]
 
 
-def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
+def test_silent_release_metadata_skips_notifications_and_auto_update(monkeypatch, tmp_path, sqlite_schema_db_factory):
+    """A silent release the release index could not mark is still never installed unattended."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
@@ -474,7 +475,27 @@ def test_silent_release_metadata_skips_notifications_but_keeps_auto_update(monke
     assert notified == []
     assert checker.state.notified_version is None
     assert checker.state.notified_at is None
-    assert performed == [("1.0.1", {"suppress_post_update_notification": True})]
+    assert performed == []
+
+
+def test_periodic_check_discovers_automatically_and_admin_actions_explicitly(monkeypatch):
+    """The periodic check skips silent releases; an admin's update button still sees them."""
+    monkeypatch.setattr(update_checker, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(update_checker, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(update_checker, "prerelease_updates_enabled", lambda: True)
+    seen = []
+
+    def fake_latest(current, *, prereleases, discovery):
+        seen.append(discovery)
+        return {"current": current, "latest": None, "has_update": False, "error": None}
+
+    monkeypatch.setattr(update_checker, "get_latest_version_info", fake_latest)
+    checker = UpdateChecker(_StubController(SimpleNamespace()), UpdateConfig())
+
+    update_checker._fetch_pypi_version_sync()
+    asyncio.run(checker._get_version_info_async())
+
+    assert seen == [update_checker.AUTOMATIC_DISCOVERY, update_checker.EXPLICIT_DISCOVERY]
 
 
 def test_update_check_reconciles_askill_even_when_product_auto_update_disabled(monkeypatch, tmp_path, sqlite_schema_db_factory):
@@ -564,24 +585,26 @@ def test_update_check_loop_catches_python_310_asyncio_timeout(monkeypatch, tmp_p
     assert checks == [True, True]
 
 
-def test_suppressed_post_update_notification_writes_verification_marker(monkeypatch, tmp_path, sqlite_schema_db_factory):
+def test_perform_update_installs_the_release_it_was_given(monkeypatch, tmp_path, sqlite_schema_db_factory):
+    """An unattended install resolves its own target, not whatever is newest (a silent release)."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
+    targets = []
 
-    monkeypatch.setattr(
-        "vibe.api.do_upgrade",
-        lambda restart: {"ok": True, "restarting": True, "message": "ok", "output": None},
-    )
+    def fake_do_upgrade(restart, *, target_version=None):
+        targets.append(target_version)
+        return {"ok": True, "restarting": True, "message": "ok", "output": None}
 
-    result = asyncio.run(checker._perform_update("1.0.1", suppress_post_update_notification=True))
+    monkeypatch.setattr("vibe.api.do_upgrade", fake_do_upgrade)
+
+    result = asyncio.run(checker._perform_update("1.0.1"))
 
     assert result["ok"] is True
+    assert targets == ["1.0.1"]
     marker = tmp_path / "state" / "pending_update_notification.json"
-    data = json.loads(marker.read_text(encoding="utf-8"))
-    assert data["version"] == "1.0.1"
-    assert data["suppress_success_notification"] is True
+    assert json.loads(marker.read_text(encoding="utf-8"))["version"] == "1.0.1"
 
 
 def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp_path, sqlite_schema_db_factory):

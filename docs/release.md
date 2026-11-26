@@ -84,8 +84,14 @@ remain mandatory.
 - Tags advance the latest version number, for example `v1.0.1` to `v1.0.2`.
 - For an official `v*` release, the annotated tag is the only release-state
   input. Put `<!-- avibe:update-notification=none -->` in the tag annotation
-  when the release should suppress update and post-update notifications while
-  automatic updates remain enabled.
+  for a silent release: no automatic path announces, offers, or installs it.
+- On the Runtime, the periodic check sends no update notification for a silent
+  release and its automatic update skips it, still finding any newer announced
+  release below it (pinned, since an unpinned upgrade takes the newest). The
+  check reads the marker from the mirror index, and from the release notes when
+  the index is unreachable. An admin's own action (`vibe check-update`,
+  `vibe upgrade`, the Web update panel) still finds a silent release, and an
+  install that names a version installs it.
 - The marker also silences the desktop app: its automatic checks (the startup
   check and the auto-update tick) skip a silent release, so they neither offer
   nor install it, while still finding any newer announced release. An explicit
