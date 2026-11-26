@@ -796,7 +796,7 @@ jobs:
           fi
 
           # The RC's one accepted unverified job, as the release gate printed it.
-          if [ -n "$UNVERIFIED_LINE" ] && ! grep -qF "$UNVERIFIED_LINE" release.md; then
+          if [ -n "${UNVERIFIED_LINE:-}" ] && ! grep -qF "$UNVERIFIED_LINE" release.md; then
             printf '\n\n%s\n' "$UNVERIFIED_LINE" >> release.md
           fi
 
@@ -913,20 +913,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.tag.outputs.tag }}
           SOURCE_SHA: ${{ needs.release-backstop.outputs.source_sha }}
-          UNVERIFIED_JOB: ${{ github.event.inputs.unverified_job }}
-          UNVERIFIED_REASON: ${{ github.event.inputs.unverified_reason }}
-          UNVERIFIED_GO: ${{ github.event.inputs.unverified_go }}
         shell: bash
         run: |
           set -euo pipefail
-          # Stage 2 re-checks the same single exception; it accepts no other.
+          # Stage 2 reads any override from this tag's published notes, never from inputs.
           if ! gh workflow run desktop-release.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref master \
             -f tag="$RELEASE_TAG" \
-            -f source_sha="$SOURCE_SHA" \
-            -f unverified_job="$UNVERIFIED_JOB" \
-            -f unverified_reason="$UNVERIFIED_REASON" \
-            -f unverified_go="$UNVERIFIED_GO"; then
+            -f source_sha="$SOURCE_SHA"; then
             echo "::warning::Could not dispatch desktop Stage 2; rerun desktop-release.yml for $RELEASE_TAG." >&2
           fi

@@ -11,21 +11,6 @@ on:
         description: "Optional exact source SHA proven by Stage 1"
         required: false
         type: string
-      unverified_job:
-        description: "RC only: the same single never-ran job Stage 1 accepted"
-        required: false
-        type: string
-        default: ""
-      unverified_reason:
-        description: "RC only: Stage 1's reason for it"
-        required: false
-        type: string
-        default: ""
-      unverified_go:
-        description: "RC only: Stage 1's quoted go"
-        required: false
-        type: string
-        default: ""
 
 permissions:
   contents: write
@@ -56,10 +41,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-          RELEASE_UNVERIFIED_JOB: ${{ inputs.unverified_job }}
-          RELEASE_UNVERIFIED_REASON: ${{ inputs.unverified_reason }}
-          RELEASE_UNVERIFIED_GO: ${{ inputs.unverified_go }}
-        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+        # Honours only the one override line Stage 1 published in this tag's notes.
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --unverified-from-notes
       - name: Confirm Stage 1 source when supplied
         if: inputs.source_sha != ''
         env:

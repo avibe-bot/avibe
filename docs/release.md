@@ -45,24 +45,38 @@ Ordinary pull requests no longer run the native and browser legs, so a green
 pull request is not full proof and the pipeline does not accept one for an RC.
 A tag-push run uses the workflow files at the tagged commit, so a tag on a
 commit from before this rule would still run the older, PR-gate Stage 1. The
-pre-tag check below is therefore mandatory for every tag, not a convenience:
+pre-tag check below is therefore mandatory for every tag, not a convenience
+(the one RC exception below replaces it with the operator's hand check):
 
 ```bash
 GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
   --repository avibe-bot/avibe --source-sha <sha>
 ```
 
-**The one RC exception.** When exactly one full-backstop job never got a
-runner, an RC may still ship with Product's go. Dispatch `Release (AI Notes)`
-for the RC tag with `unverified_job` (the exact job name), `unverified_reason`
-and `unverified_go` (her go, quoted). The gate then accepts the tag's own full
-run only if that named job never ran (queued with no runner, or cancelled before
-a runner took it) and every other job is green. It refuses if the job ran and
-failed, if any other job is missing or red, or for any stable tag. The run
-summary and the RC's notes print
-`not verified in this RC: <job> — <reason> (go: <quote>)`, and desktop Stage 2
-re-checks the same exception that Stage 1 passes it. A stable release never
-takes the exception.
+**The one RC exception (Product's plain override).** It is an accepted risk,
+not evidence. When exactly one full-backstop job never got a runner, an RC may
+still ship with Product's go:
+
+1. Before using it, the operator confirms by hand, on the tag SHA's own full
+   run, that the named job is the only one not green and that it never started
+   (queued with no runner, or cancelled before a runner took it). The script
+   does not prove this; the operator attests it.
+2. Dispatch `Release (AI Notes)` for the RC tag with `unverified_job` (the one
+   job name), `unverified_reason` and `unverified_go` (Product's go, quoted;
+   the operator attests that the quote is hers). All three are required
+   together, each one plain line without backticks. A stable tag or PyPI never
+   accepts them.
+3. The gate still reads the backstop and prints its full report in the run
+   summary, but the attestation replaces its verdict. The run summary and the
+   RC's notes print
+   `` not verified in this RC: `<job>` — `<reason>` (go: `<quote>`) ``, every
+   field in a code span so it renders literally.
+4. Desktop Stage 2 ignores dispatch inputs for this. It honours an exception
+   only if this exact tag's published notes, written by Stage 1, carry that
+   one line.
+
+There is no recheck at publication. If the named job later runs and fails, that
+is fixed forward in the next RC.
 
 `ci_release_backstop.py` still has an `--rc-pull-request-gate` option, which
 reports whether an RC tag's merged pull request passed `master`'s required
