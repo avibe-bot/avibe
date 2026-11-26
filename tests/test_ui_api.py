@@ -1706,7 +1706,7 @@ def test_start_oauth_web_localizes_native_login_conflict(monkeypatch):
     assert result == {
         "ok": False,
         "error": "native_login_in_progress",
-        "detail": "openai（codex）登录正在进行中，请先完成或取消后再重新发起。",
+        "detail": "Codex 已有一个登录正在进行中，请先在发起它的地方完成或取消。",
     }
 
 
