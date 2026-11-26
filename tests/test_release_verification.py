@@ -867,3 +867,27 @@ def test_dist_manifest_refuses_symlinks_and_tells_added_files_apart(tmp_path):
     linked.symlink_to(dist)
     assert _dist_manifest(linked).returncode != 0
     assert _dist_manifest(dist).stdout == before.stdout
+
+
+def test_every_rc_runs_the_stable_release_regressions_on_its_package():
+    # A stable must never be the first build to run these: Stage 1 of every RC runs
+    # the same three files against its real package build, before anything publishes.
+    def pytest_files(run):
+        block = run[run.index("pytest"):run.index("-v", run.index("pytest"))]
+        return [part.strip(" \\\n") for part in block.split() if part.startswith("tests/")]
+
+    stable = _step(_job("publish.yml", "build"), "Run release install and upgrade regressions")["run"]
+    rc_job = _job("release_ai.yml", "build-assets")
+    rc = _step(rc_job, "Run release install and upgrade regressions")["run"]
+    assert pytest_files(rc) == pytest_files(stable) == [
+        "tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py",
+    ]
+    assert 'VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"' in rc
+    assert rc.index('> "$RUNNER_TEMP/dist-before.sha256"') < rc.index("pytest") < rc.index(
+        'cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"'
+    )
+    names = [step.get("name") for step in rc_job["steps"]]
+    position = names.index("Run release install and upgrade regressions")
+    assert names.index("Build Python distributions") < position < names.index("Upload release artifacts")
+    # The RC's release job publishes only after this job succeeded.
+    assert "build-assets" in _job("release_ai.yml", "release")["needs"]
