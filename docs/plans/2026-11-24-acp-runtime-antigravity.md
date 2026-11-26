@@ -14,6 +14,7 @@ A user selects **Antigravity**, uses Google's unmodified `agy acp` and works fro
 
 ## Ownership and internal contracts
 
+- **First-load delivery contract (PR #4252):** keep the chat budget at 904 KiB. The earlier home-shell split leaves citation SHA-256 helpers in a separate shared chat chunk; defer Show Page audience settings until its share popover opens using `lazyPage` and a local Suspense fallback. The existing built-artifact budget check is the regression boundary: the CI merge tree fails at 904.6 KiB / 60 JS files before the change and passes at 899.2 KiB / 58 files after it. Existing share-control/settings tests cover opening, reads, and edits after deferred loading.
 - **Existing core:** owns routing, admission, queues, Turn identity, settlement and runtime ownership. Only `antigravity` receives a backend/catalog entry; ACP is not a public backend or plugin system.
 - **`modules/agents/acp/`:** a controller-independent stdlib asyncio stdio NDJSON RPC client and pure mapping of standard session updates. One reader dispatches responses, notifications and server requests asynchronously, including requests received during a prompt. It provides initialize, authentication, session and capability operations, and uses existing process-isolation/cleanup helpers for process-tree mechanics.
 - **Three consumers:** the controller's adapter, UI/auth status operations, and native session history use that client without constructing a controller. ACP does not implement `BaseAgent`, own Avibe lifecycle decisions, or define a provider SPI.
