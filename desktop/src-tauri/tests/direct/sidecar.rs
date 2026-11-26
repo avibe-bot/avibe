@@ -207,7 +207,18 @@ async fn run(changed_selection: bool) {
     let credential = handover.window_credential("to-close").unwrap();
     let mut closing = super::credential_tests::connect_as(&client, &credential, 200).await;
     super::credential_tests::echo(&mut closing).await;
+    // Counted for its registration where it was decided.
+    assert_eq!(
+        handover.window_counts(&credential),
+        Some(super::WindowCounts {
+            connects: 1,
+            direct: 1,
+            public: 0,
+            refused: 0
+        })
+    );
     handover.revoke_window(&credential);
+    assert_eq!(handover.window_counts(&credential), None);
     assert_retired_read(closing.read(&mut [0]).await);
     drop(super::credential_tests::connect_as(&client, &credential, 407).await);
     let active = handover.window_credential("second").unwrap();

@@ -7,7 +7,10 @@ use base64::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::watch;
@@ -48,10 +51,53 @@ impl WindowRegistration {
         Arc::ptr_eq(&self.credential, &entry.credential)
     }
 }
+/// What one registration's authenticated CONNECTs came to, counted where
+/// each is decided. Exact, and only counts: no peer, target or time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowCounts {
+    /// CONNECTs that presented this registration's credential.
+    pub connects: u64,
+    /// Of those, committed on the direct link.
+    pub direct: u64,
+    /// Of those, committed on a public leg.
+    pub public: u64,
+    /// Of those, answered `502`: no backend, or a public leg fenced.
+    pub refused: u64,
+}
+#[derive(Default)]
+pub(super) struct Counters {
+    connects: AtomicU64,
+    direct: AtomicU64,
+    public: AtomicU64,
+    refused: AtomicU64,
+}
+impl Counters {
+    pub fn connect(&self) {
+        self.connects.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn direct(&self) {
+        self.direct.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn public(&self) {
+        self.public.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn refused(&self) {
+        self.refused.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn read(&self) -> WindowCounts {
+        WindowCounts {
+            connects: self.connects.load(Ordering::Relaxed),
+            direct: self.direct.load(Ordering::Relaxed),
+            public: self.public.load(Ordering::Relaxed),
+            refused: self.refused.load(Ordering::Relaxed),
+        }
+    }
+}
 struct Entry {
     credential: Arc<Credential>,
     valid: watch::Sender<bool>,
     legs: PublicLegs,
+    counts: Arc<Counters>,
 }
 impl Entry {
     fn new() -> Option<Self> {
@@ -59,12 +105,14 @@ impl Entry {
             credential: Arc::new(Credential::generate()?),
             valid: watch::channel(true).0,
             legs: PublicLegs::default(),
+            counts: Arc::default(),
         })
     }
     fn grant(&self) -> Grant {
         Grant {
             valid: self.valid.subscribe(),
             legs: self.legs.clone(),
+            counts: self.counts.clone(),
         }
     }
 }
@@ -72,6 +120,7 @@ impl Entry {
 pub(super) struct Grant {
     pub valid: watch::Receiver<bool>,
     pub legs: PublicLegs,
+    pub counts: Arc<Counters>,
 }
 impl Grant {
     /// Hold the read side only for one synchronous poll. Revocation fences
@@ -93,8 +142,17 @@ impl Grant {
 #[derive(Default)]
 pub(super) struct Windows {
     windows: Mutex<HashMap<String, Entry>>,
+    unadmitted: AtomicU64,
 }
 impl Windows {
+    /// A connection that ended without an authenticated CONNECT: no head,
+    /// or one the listener refused. It belongs to no registration.
+    pub fn note_unadmitted(&self) {
+        self.unadmitted.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn unadmitted(&self) -> u64 {
+        self.unadmitted.load(Ordering::Relaxed)
+    }
     pub fn credential(&self, window: &str) -> Option<WindowRegistration> {
         if window.is_empty() || window.len() > 256 {
             return None;

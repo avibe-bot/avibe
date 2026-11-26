@@ -1,7 +1,7 @@
 use super::{
     credential_tests::{connect_as, echo},
     registered::Registered,
-    Client, HandoverResult, PublicCensus,
+    Client, HandoverResult, PublicCensus, WindowCounts,
 };
 use tokio::{
     io::AsyncReadExt,
@@ -53,6 +53,15 @@ async fn each_window_presents_its_own_registration_and_has_its_own_connections()
         echo(&mut of_show).await;
         assert!(one_quiet_or_busy(handover.window_census(&show)));
         assert!(one_quiet_or_busy(handover.window_census(&view)));
+        // And each window's CONNECT, exactly, where it was decided.
+        let one_public = Some(WindowCounts {
+            connects: 1,
+            direct: 0,
+            public: 1,
+            refused: 0,
+        });
+        assert_eq!(handover.window_counts(&view), one_public);
+        assert_eq!(handover.window_counts(&show), one_public);
 
         // A page's hand-over is asked with its own window's registration.
         // With no direct link up there is nothing to move to, and nothing
@@ -86,7 +95,13 @@ async fn a_window_that_closed_is_revoked_and_the_others_are_untouched() {
         registered.keep(|window| window != "show-1");
         assert!(registered.of("show-1").is_none());
         assert!(closed(&mut of_show).await);
+        // Its credential is no registration's now: the knock is counted as
+        // not admitted, and for no window.
+        let (knocks, view_counts) = (handover.unadmitted().unwrap(), handover.window_counts(&view));
         drop(connect_as(&client, &show, 407).await);
+        assert_eq!(handover.unadmitted(), Some(knocks + 1));
+        assert_eq!(handover.window_counts(&view), view_counts);
+        assert_eq!(handover.window_counts(&show), None);
         assert_eq!(handover.window_census(&show), None);
         assert_eq!(
             handover.close_quiet_public_for_window(HOST, &show).await,

@@ -1,6 +1,10 @@
 use super::{
-    connect::Authority, credentials::WindowRegistration, listener::ListenerAccess, quiet::PublicCensus,
-    transport::Link, SelectedPath,
+    connect::Authority,
+    credentials::{WindowCounts, WindowRegistration},
+    listener::ListenerAccess,
+    quiet::PublicCensus,
+    transport::Link,
+    SelectedPath,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::{sync::watch, time::Instant};
@@ -112,6 +116,18 @@ impl Handover {
             }
             tokio::time::sleep_until(deadline.min(Instant::now() + Duration::from_millis(100))).await;
         }
+    }
+    /// What this registration's authenticated CONNECTs came to so far.
+    /// `None` once it is revoked or the listener is gone.
+    pub fn window_counts(&self, registration: &WindowRegistration) -> Option<WindowCounts> {
+        let grant = self.owned_listener()?.windows.window(registration)?;
+        let valid = grant.valid.borrow();
+        (*valid).then(|| grant.counts.read())
+    }
+    /// Connections to the listener that ended without an authenticated
+    /// CONNECT, whoever made them. `None` once the listener is gone.
+    pub fn unadmitted(&self) -> Option<u64> {
+        Some(self.owned_listener()?.windows.unadmitted())
     }
     pub fn window_census(&self, registration: &WindowRegistration) -> Option<PublicCensus> {
         let grant = self.owned_listener()?.windows.window(registration)?;

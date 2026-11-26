@@ -52,22 +52,53 @@
 //!    those two facts and whether the role is Owner, nothing else of it).
 //! 3. The native qualification, which asks that document for the rendezvous
 //!    answer through the shipping adapter (`webview_macos::fetch_rendezvous`).
-//! 4. The fresh-store leg, the positive control of the page path: a second
-//!    store that has never connected to the host gets the session, then the
-//!    route to the qualified client's listener with its window credential
-//!    and no failover, then its first load and a `/health` its own script
-//!    fetches. The listener is direct-only and the route has no failover,
-//!    so a payload that arrives came over the direct path.
-//! 5. The live-store leg: the first store, which is connected to the host
-//!    on WebKit's own path, gets the same route while it is live, as a
-//!    window that was open before the first answer does. A route written to
-//!    a store with a live connection is not used by that connection
-//!    (measured, `webview_macos::install_route`), so the probe then asks
-//!    the page for work of several kinds (a fetch, a fetch without
-//!    credentials, a WebSocket, a reload) and reports for each what the
-//!    page got and whether the listener committed a new direct stream.
-//! 6. Every opening and closing of a direct stream, every change of the
-//!    path's status and every withdrawal of the link, as they happen.
+//! 4. The live-store leg, alone and first: the first store, which is
+//!    connected to the host on WebKit's own path, gets the route to the
+//!    qualified client's listener while it is live, as a window that was
+//!    open before the first answer does. No other store has been routed
+//!    yet, and this store's credential is a registration of its own at the
+//!    listener. The page is then asked for work of several kinds: a fetch,
+//!    a fetch without credentials, its event stream, a WebSocket, a reload,
+//!    and after it a fetch and the event stream again.
+//! 5. The fresh-store leg, the positive control of the same payloads: a
+//!    second store that has never connected to the host gets the session,
+//!    then the route with a registration of its own and no failover, then
+//!    its first load and the same work in the same order.
+//! 6. Whether any committed stream is on the link, every change of the
+//!    path's status and every withdrawal of the link, as they happen. The
+//!    `direct_stream_opened` and `direct_stream_closed` lines are presence
+//!    only: they are sampled, they do not count streams, and they attribute
+//!    nothing.
+//!
+//! How a payload is attributed. The listener counts, exactly and where each
+//! is decided, what the CONNECTs that presented each registration's
+//! credential came to (`connects`, and of those `direct`, `public`,
+//! `refused`), and the connections that ended without an authenticated
+//! CONNECT (`unadmitted`, whoever made them). Each line of a store's work
+//! carries what its own registration counted meanwhile; the page's own
+//! background requests are in those numbers too, so they bound a payload
+//! and do not name it. `via` names it, or says `unknown`:
+//!
+//! - the event stream is the one payload whose path the instance itself
+//!   names, per request: `direct` when it entered through the direct
+//!   ingress. That word stands only if the store's registration has a
+//!   direct commit;
+//! - a payload the instance does not label is `own_path` when no CONNECT
+//!   ever presented the store's credential, and `direct` only in the store
+//!   that was routed before its first connection, with no failover (the
+//!   listener is direct-only, and step 1 holds WebKit to the no-failover
+//!   rule). In the live store, which also holds connections of its own
+//!   path, it is otherwise `unknown`.
+//!
+//! The live store's verdict (`live_store_route`) is `taken` when a payload
+//! of its is `direct`; `not_taken` when its payloads were answered, no
+//! CONNECT presented its credential and nothing was left unadmitted while
+//! it alone was routed; `not_admitted` or `unknown` otherwise. It means
+//! something only if the control (`fresh_store_route`) holds: every payload
+//! of the routed store attributed to its registration. The WebSocket is not
+//! upgraded by the instance at `/health`, so it is expected to end before
+//! it opens: each line gives its close code and class, and
+//! `websocket_compared` sets the live store's beside the control's.
 //!
 //! Only standard output is the result, and only it may be pasted anywhere:
 //! its lines carry fixed words, counts, HTTP statuses, the system's own
@@ -77,11 +108,12 @@
 //! start, except in the lines the native qualification prints itself, which
 //! count from `native_qualification_start`.
 //!
-//! Exit code: 0 both legs got their payload over the direct path; 1 a
-//! control failed; 2 the input was refused; 3 the session's document did not
-//! load or the instance did not take the session; 4 the native
-//! qualification failed; 5 the fresh-store leg failed;
-//! 6 the live-store leg got no payload over a new direct stream.
+//! Exit code: 0 the live store took the route and the control held; 1 a
+//! control of step 1 failed; 2 the input was refused; 3 the session's
+//! document did not load or the instance did not take the session; 4 the
+//! native qualification failed; 5 the fresh-store control did not hold;
+//! 6 the live store did not take the route (the listener was never asked);
+//! 7 the live store's route is not known.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {}
@@ -306,7 +338,7 @@ mod probe {
     use avibe_desktop_lib::direct::{
         rendezvous::{origin_of, Reply, Request},
         webview_macos::{fetch_rendezvous, install_route},
-        Fault, FaultCode, PathStatus, PreferredPath, SelectedPath, Stage,
+        Fault, FaultCode, PathStatus, PreferredPath, SelectedPath, Stage, WindowCounts, WindowRegistration,
     };
     use block2::{DynBlock, RcBlock};
     use objc2::{
@@ -1179,23 +1211,53 @@ mod probe {
 
     /// What the main thread asks of the native half once it is qualified.
     enum ToNative {
-        Streams(mpsc::Sender<Streams>),
+        /// Whether a committed stream is on the link now, as sampled.
+        StreamOpen(mpsc::Sender<bool>),
+        /// The listener's own exact counts, so far, for this store.
+        Counts(Store, mpsc::Sender<Option<Counted>>),
         Stop,
     }
 
-    /// The link's committed streams, as sampled: how many times one opened
-    /// while none was open, and whether one is open now. A second stream
-    /// that opens while another is open is not counted.
-    #[derive(Clone, Copy, Default)]
-    struct Streams {
-        opened: u64,
-        open: bool,
+    /// The two stores a route is given to. Each has a registration of its
+    /// own at the listener, so a CONNECT is counted for the store whose
+    /// credential it presented and for no other.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Store {
+        /// The session's document: connected to the host on WebKit's own
+        /// path before it is given the route.
+        Live,
+        /// A store that is given the route before its first connection.
+        Fresh,
+    }
+
+    /// What the listener counted: what the CONNECTs that presented a
+    /// store's credential came to, and how many connections, whoever made
+    /// them, ended without an authenticated CONNECT.
+    #[derive(Clone, Copy)]
+    struct Counted {
+        of_store: WindowCounts,
+        unadmitted: u64,
+    }
+
+    struct Login {
+        username: String,
+        password: String,
+    }
+
+    impl Login {
+        fn of(registration: &WindowRegistration) -> Self {
+            let (username, password) = registration.native_login();
+            Self {
+                username: username.to_owned(),
+                password: password.to_owned(),
+            }
+        }
     }
 
     struct Leg {
         proxy: SocketAddrV4,
-        username: String,
-        password: String,
+        live: Login,
+        fresh: Login,
     }
 
     fn reply_word(reply: &Reply) -> &'static str {
@@ -1257,17 +1319,20 @@ mod probe {
                         return;
                     }
                 };
+                // A registration for each store, beside the native check's
+                // own: three credentials, three counts.
+                let handover = live.client.handover();
+                let stores = handover
+                    .window_credential("live-store")
+                    .zip(handover.window_credential("fresh-store"));
                 let leg = live
                     .client
                     .route()
-                    .map(|route| route.proxy)
-                    .map(|proxy| {
-                        let (username, password) = live.registration.native_login();
-                        Leg {
-                            proxy,
-                            username: username.to_owned(),
-                            password: password.to_owned(),
-                        }
+                    .zip(stores.as_ref())
+                    .map(|(route, (of_live, of_fresh))| Leg {
+                        proxy: route.proxy,
+                        live: Login::of(of_live),
+                        fresh: Login::of(of_fresh),
                     })
                     .ok_or(Fault(Stage::Handover, FaultCode::ListenerClosed));
                 let _ = to_main.send(FromNative::Qualified(leg));
@@ -1275,14 +1340,25 @@ mod probe {
                 let mut status = live.client.path_changes();
                 report_status(&report, *status.borrow_and_update());
                 let (mut status_live, mut retirements_live) = (true, true);
-                let mut streams = Streams::default();
+                let mut stream_open = false;
                 let mut opened_at = None;
                 let mut sample = tokio::time::interval(Duration::from_millis(5));
                 loop {
                     tokio::select! {
                         command = commands.recv() => match command {
-                            Some(ToNative::Streams(answer)) => {
-                                let _ = answer.send(streams);
+                            Some(ToNative::StreamOpen(answer)) => {
+                                let _ = answer.send(stream_open);
+                            }
+                            Some(ToNative::Counts(store, answer)) => {
+                                let registration = stores.as_ref().map(|(of_live, of_fresh)| match store {
+                                    Store::Live => of_live,
+                                    Store::Fresh => of_fresh,
+                                });
+                                let counted = registration
+                                    .and_then(|of| handover.window_counts(of))
+                                    .zip(handover.unadmitted())
+                                    .map(|(of_store, unadmitted)| Counted { of_store, unadmitted });
+                                let _ = answer.send(counted);
                             }
                             Some(ToNative::Stop) | None => break,
                         },
@@ -1296,18 +1372,18 @@ mod probe {
                             Err(_) => status_live = false,
                         },
                         _ = sample.tick() => {
-                            // A committed stream on the link: after the native
-                            // check has let go of its own, only a page's.
+                            // Presence only: whether any committed stream is
+                            // on the link, whoever's. Not a count of streams
+                            // and no attribution; the counts are for that.
                             let path = live.client.selected_path();
-                            match (streams.open, path) {
+                            match (stream_open, path) {
                                 (false, Some(_)) => {
-                                    streams.open = true;
-                                    streams.opened += 1;
+                                    stream_open = true;
                                     opened_at = Some(Instant::now());
                                     report.line("direct_stream_opened", json!({ "path": path_word(path) }));
                                 }
                                 (true, None) => {
-                                    streams.open = false;
+                                    stream_open = false;
                                     let open_ms = opened_at.take().map_or(0, |at: Instant| at.elapsed().as_millis() as u64);
                                     report.line("direct_stream_closed", json!({ "open_ms": open_ms }));
                                 }
@@ -1316,6 +1392,26 @@ mod probe {
                         }
                     }
                 }
+                // Every registration's counts as the run ends: the native
+                // check's own, and each store's.
+                let at_end = |of: Option<&WindowRegistration>| match of.and_then(|of| handover.window_counts(of)) {
+                    Some(counts) => json!({
+                        "connects": counts.connects,
+                        "direct": counts.direct,
+                        "public": counts.public,
+                        "refused": counts.refused,
+                    }),
+                    None => json!(null),
+                };
+                report.line(
+                    "registrations_at_end",
+                    json!({
+                        "unadmitted": handover.unadmitted(),
+                        "native": at_end(Some(&live.registration)),
+                        "live_store": at_end(stores.as_ref().map(|(of_live, _)| of_live)),
+                        "fresh_store": at_end(stores.as_ref().map(|(_, of_fresh)| of_fresh)),
+                    }),
+                );
                 report.line(
                     "link_at_end",
                     json!({ "path": path_word(live.client.selected_path()) }),
@@ -1324,56 +1420,151 @@ mod probe {
         })
     }
 
-    /// The native half's count of direct streams, asked now.
-    fn streams(native: &tokio::sync::mpsc::UnboundedSender<ToNative>) -> Option<Streams> {
-        let (answer, answered) = mpsc::channel();
-        native.send(ToNative::Streams(answer)).ok()?;
-        answered.recv_timeout(Duration::from_secs(2)).ok()
-    }
-
-    /// Waits until no direct stream is open, for `RELEASE` at most.
+    /// Waits until no committed stream is on the link, for `RELEASE` at most.
     fn released(native: &tokio::sync::mpsc::UnboundedSender<ToNative>) -> bool {
-        pump_until(RELEASE, || streams(native).is_some_and(|now| !now.open))
+        pump_until(RELEASE, || {
+            let (answer, answered) = mpsc::channel();
+            native.send(ToNative::StreamOpen(answer)).is_ok()
+                && answered.recv_timeout(Duration::from_secs(2)) == Ok(false)
+        })
     }
 
-    // MARK: The live-store leg
+    /// The listener's exact counts for a store's registration, asked now.
+    /// `None` when the registration or the listener is gone.
+    fn counts(native: &tokio::sync::mpsc::UnboundedSender<ToNative>, store: Store) -> Option<Counted> {
+        let (answer, answered) = mpsc::channel();
+        native.send(ToNative::Counts(store, answer)).ok()?;
+        answered.recv_timeout(Duration::from_secs(2)).ok()?
+    }
 
-    /// One piece of work the live store's page is asked for: the word it
-    /// answers ("ok" for a payload) and what the listener showed for it.
-    fn live_attempt(
-        document: &View,
-        mtm: MainThreadMarker,
-        native: &tokio::sync::mpsc::UnboundedSender<ToNative>,
-        report: &Report,
-        boundary: &'static str,
-        script: &str,
-    ) -> (bool, u64, bool) {
-        let before = streams(native).unwrap_or_default();
-        let answer = document.page_async(mtm, script);
-        pump_until(SETTLE, || false);
-        let after = streams(native).unwrap_or_default();
-        let word = match answer.as_deref() {
+    // MARK: A store's payloads
+
+    /// What a piece of a page's work answered: a fixed word, and for a
+    /// WebSocket that ended before it opened, its close code and whether the
+    /// close was clean.
+    fn answer_of(answer: Option<&str>) -> (&'static str, Option<(u16, bool)>) {
+        let Some(answer) = answer else {
+            return ("no_answer", None);
+        };
+        let mut parts = answer.split(':');
+        let word = match parts.next() {
             Some("ok") => "ok",
             Some("failed") => "failed",
+            Some("direct") => "direct",
+            Some("other") => "other",
+            Some("unnamed") => "unnamed",
             Some("opened") => "opened",
             Some("closed") => "closed",
             Some("error") => "error",
             Some("timeout") => "timeout",
-            Some(_) => "unexpected_answer",
-            None => "no_answer",
+            _ => "unexpected_answer",
         };
-        let opened = after.opened.saturating_sub(before.opened);
-        report.line(
-            boundary,
-            json!({
-                "ok": word == "ok" || word == "opened",
-                "result": word,
-                "direct_streams_opened": opened,
-                "direct_stream_open_before": before.open,
-                "direct_stream_open_after": after.open,
-            }),
-        );
-        (word == "ok", opened, before.open)
+        let close = match (parts.next().and_then(|code| code.parse::<u16>().ok()), parts.next()) {
+            (Some(code), Some(clean @ ("0" | "1"))) if parts.next().is_none() => Some((code, clean == "1")),
+            _ => None,
+        };
+        (word, close)
+    }
+
+    /// Which path carried an answered payload, or `unknown`.
+    ///
+    /// - `direct`, `other`: the instance's own word for that very request
+    ///   (the stream payload). `direct` stands only if this registration has
+    ///   a direct commit, and `other` only if it has no public one: anything
+    ///   else contradicts the listener and is `unknown`.
+    /// - `ok` (a payload the instance does not label): `own_path` when no
+    ///   CONNECT has ever presented this store's credential, because the
+    ///   listener then carried nothing of this store; `direct` only in a
+    ///   store that was routed before its first connection, with no
+    ///   failover, when its registration has direct commits and no public
+    ///   one. In a store that also holds connections of its own path, which
+    ///   connection carried the request is not observable: `unknown`.
+    fn via(word: &str, routed_from_birth: bool, so_far: Option<Counted>) -> &'static str {
+        let Some(so_far) = so_far.map(|counted| counted.of_store) else {
+            return "unknown";
+        };
+        match word {
+            "direct" if so_far.direct > 0 => "direct",
+            "other" if so_far.public == 0 => "own_path",
+            "ok" if so_far.connects == 0 => "own_path",
+            "ok" if routed_from_birth && so_far.direct > 0 && so_far.public == 0 => "direct",
+            "ok" | "direct" | "other" => "unknown",
+            _ => "none",
+        }
+    }
+
+    struct Attempt {
+        word: &'static str,
+        via: &'static str,
+        close: Option<(u16, bool)>,
+        /// Direct commits of the store's registration during the attempt.
+        direct: u64,
+    }
+
+    /// One piece of work a store's page is asked for: what it answered, what
+    /// the store's own registration counted meanwhile (exact, but the page's
+    /// own background requests are in it too), and which path carried it.
+    fn attempt(
+        view: &View,
+        mtm: MainThreadMarker,
+        native: &tokio::sync::mpsc::UnboundedSender<ToNative>,
+        report: &Report,
+        store: Store,
+        boundary: &'static str,
+        script: &str,
+    ) -> Attempt {
+        let before = counts(native, store);
+        let answer = view.page_async(mtm, script);
+        pump_until(SETTLE, || false);
+        let after = counts(native, store);
+        let (word, close) = answer_of(answer.as_deref());
+        let via = via(word, store == Store::Fresh, after);
+        let mut fields = json!({
+            "ok": matches!(word, "ok" | "opened" | "direct" | "other"),
+            "result": word,
+            "via": via,
+            "counted": before.is_some() && after.is_some(),
+        });
+        let mut direct = 0;
+        if let (Some(fields), Some(before), Some(after)) = (fields.as_object_mut(), before, after) {
+            let unadmitted = after.unadmitted.saturating_sub(before.unadmitted);
+            let (before, after) = (before.of_store, after.of_store);
+            fields.insert("unadmitted".into(), json!(unadmitted));
+            direct = after.direct.saturating_sub(before.direct);
+            let refused = after.refused.saturating_sub(before.refused);
+            fields.insert("connects".into(), json!(after.connects.saturating_sub(before.connects)));
+            fields.insert("direct".into(), json!(direct));
+            fields.insert("public".into(), json!(after.public.saturating_sub(before.public)));
+            fields.insert("refused".into(), json!(refused));
+            fields.insert("connects_so_far".into(), json!(after.connects));
+            fields.insert("direct_so_far".into(), json!(after.direct));
+            if matches!(word, "opened" | "closed" | "error" | "timeout") {
+                // A WebSocket's class: what can be known of how it ended.
+                let class = if word == "opened" {
+                    "opened"
+                } else if refused > 0 {
+                    "listener_refused"
+                } else if unadmitted > 0 {
+                    "listener_not_admitted"
+                } else if word == "timeout" {
+                    "no_end_in_time"
+                } else {
+                    "ended_before_open"
+                };
+                fields.insert("class".into(), json!(class));
+            }
+        }
+        if let (Some(fields), Some((code, clean))) = (fields.as_object_mut(), close) {
+            fields.insert("close_code".into(), json!(code));
+            fields.insert("clean".into(), json!(clean));
+        }
+        report.line(boundary, fields);
+        Attempt {
+            word,
+            via,
+            close,
+            direct,
+        }
     }
 
     /// A `/health` the page's own script fetches now, with or without the
@@ -1390,24 +1581,146 @@ mod probe {
         )
     }
 
-    /// A WebSocket to the page's own host: a connection of its own. Whether
-    /// the instance accepts it there says nothing; that it was tried does.
+    /// The page's own event stream, opened once more and closed at its
+    /// handshake: the instance says there how that very request reached it
+    /// (`via`: `direct` through the direct ingress, `other` otherwise). The
+    /// one payload whose path the instance itself names. Only that word is
+    /// read.
+    const STREAM_SCRIPT: &str = r#"return await new Promise((resolve) => {
+  let source;
+  const timer = setTimeout(() => { try { source.close(); } catch {} resolve("timeout"); }, 10000);
+  const end = (word) => { clearTimeout(timer); try { source.close(); } catch {} resolve(word); };
+  try {
+    source = new EventSource("/api/events");
+    source.addEventListener("connected", (event) => {
+      let via;
+      try { via = JSON.parse(event.data).via; } catch {}
+      end(via === "direct" ? "direct" : via === "other" ? "other" : "unnamed");
+    });
+    source.onerror = () => end("failed");
+  } catch (error) {
+    end("failed");
+  }
+});"#;
+
+    /// A WebSocket to the page's own host: a connection of its own. The
+    /// instance does not upgrade `/health`, so it is expected to end before
+    /// it opens; how it ends (the close code) and what the listener counted
+    /// meanwhile are the result, and the routed store's is the control.
     fn websocket_script(nonce: u128) -> String {
         format!(
             r#"return await new Promise((resolve) => {{
   let socket;
+  let failed = false;
   const timer = setTimeout(() => {{ try {{ socket.close(); }} catch {{}} resolve("timeout"); }}, 10000);
   const end = (word) => {{ clearTimeout(timer); resolve(word); }};
   try {{
     socket = new WebSocket("wss://" + location.host + "/health?probe={nonce}");
     socket.onopen = () => {{ socket.close(); end("opened"); }};
-    socket.onerror = () => end("error");
-    socket.onclose = () => end("closed");
+    socket.onerror = () => {{ failed = true; }};
+    socket.onclose = (event) => end((failed ? "error" : "closed") + ":" + (event.code | 0) + ":" + (event.wasClean ? 1 : 0));
   }} catch (error) {{
     end("error");
   }}
 }});"#
         )
+    }
+
+    /// The names of one store's lines.
+    struct Names {
+        fetch: &'static str,
+        fetch_without_credentials: &'static str,
+        stream: &'static str,
+        websocket: &'static str,
+        reload_answered: &'static str,
+        reload_committed: &'static str,
+        reloaded: &'static str,
+        fetch_after_reload: &'static str,
+        stream_after_reload: &'static str,
+    }
+
+    const LIVE: Names = Names {
+        fetch: "live_fetch",
+        fetch_without_credentials: "live_fetch_without_credentials",
+        stream: "live_stream",
+        websocket: "live_websocket",
+        reload_answered: "live_reload_answered",
+        reload_committed: "live_reload_committed",
+        reloaded: "live_reloaded",
+        fetch_after_reload: "live_fetch_after_reload",
+        stream_after_reload: "live_stream_after_reload",
+    };
+
+    const FRESH: Names = Names {
+        fetch: "fresh_fetch",
+        fetch_without_credentials: "fresh_fetch_without_credentials",
+        stream: "fresh_stream",
+        websocket: "fresh_websocket",
+        reload_answered: "fresh_reload_answered",
+        reload_committed: "fresh_reload_committed",
+        reloaded: "fresh_reloaded",
+        fetch_after_reload: "fresh_fetch_after_reload",
+        stream_after_reload: "fresh_stream_after_reload",
+    };
+
+    struct Payloads {
+        /// The fetches and streams, in order; after a reload that failed,
+        /// only those before it.
+        carried: Vec<Attempt>,
+        websocket: Attempt,
+        reloaded: bool,
+    }
+
+    /// The same work for either store, in the same order: a fetch, a fetch
+    /// without credentials, the event stream, a WebSocket, a reload, and
+    /// after it a fetch and the event stream again.
+    fn payloads(
+        view: &View,
+        mtm: MainThreadMarker,
+        native: &tokio::sync::mpsc::UnboundedSender<ToNative>,
+        report: &Report,
+        store: Store,
+        names: &Names,
+    ) -> Payloads {
+        let nonce = || report.start.elapsed().as_nanos();
+        let ask = |boundary: &'static str, script: &str| attempt(view, mtm, native, report, store, boundary, script);
+        let mut carried = vec![
+            ask(names.fetch, &health_script(nonce(), "same-origin")),
+            ask(names.fetch_without_credentials, &health_script(nonce(), "omit")),
+            ask(names.stream, STREAM_SCRIPT),
+        ];
+        let websocket = ask(names.websocket, &websocket_script(nonce()));
+        let loaded = view.load("/", report, names.reload_answered, names.reload_committed);
+        let reloaded = report_load(report, names.reloaded, loaded) && view.shows_its_origin();
+        if reloaded {
+            carried.push(ask(names.fetch_after_reload, &health_script(nonce(), "same-origin")));
+            carried.push(ask(names.stream_after_reload, STREAM_SCRIPT));
+        }
+        Payloads {
+            carried,
+            websocket,
+            reloaded,
+        }
+    }
+
+    /// A leg's verdict, with its store's counts so far and the connections
+    /// the listener did not admit since the leg began.
+    fn counts_line(
+        report: &Report,
+        boundary: &'static str,
+        ok: bool,
+        reason: &'static str,
+        counted: Option<(WindowCounts, u64)>,
+    ) {
+        let mut fields = json!({ "ok": ok, "reason": reason, "counted": counted.is_some() });
+        if let (Some(fields), Some((so_far, unadmitted))) = (fields.as_object_mut(), counted) {
+            fields.insert("unadmitted".into(), json!(unadmitted));
+            fields.insert("connects".into(), json!(so_far.connects));
+            fields.insert("direct".into(), json!(so_far.direct));
+            fields.insert("public".into(), json!(so_far.public));
+            fields.insert("refused".into(), json!(so_far.refused));
+        }
+        report.line(boundary, fields);
     }
 
     // MARK: The run
@@ -1548,121 +1861,130 @@ mod probe {
             report.failed("native_stream_released", "stream_still_open");
         }
 
-        // The fresh-store leg, the positive control of the page path: a
-        // store that has never connected to the host, so the route carries
-        // it from its first request. The session, then the route (the
-        // qualified client's listener, its window credential, no failover),
-        // then the first load.
-        let fresh = {
-            let page = View::new(mtm, &origin);
-            let held = page.seed_session(SESSION_COOKIE, &session);
-            if !report_seeded(&report, "fresh_session_seeded", held, true) {
-                return finish(5);
-            }
-            if !install_route(
-                &page.webview,
-                mtm,
-                &host,
-                leg.proxy,
-                &leg.username,
-                &leg.password,
-                false,
-            ) {
-                report.failed("fresh_route_installed", "refused_by_system");
-                return finish(5);
-            }
-            report.ok("fresh_route_installed");
-            let loaded = page.load("/", &report, "fresh_answered", "fresh_committed");
-            if !report_load(&report, "fresh_loaded", loaded) || !page.shows_its_origin() {
-                return finish(5);
-            }
-            // Over the direct path now: the instance still takes the session.
-            if !session_accepted(&page, mtm, &report, "fresh_session_accepted") {
-                return finish(5);
-            }
-            // A payload of the page's own, asked for now: not the native check's.
-            let nonce = report.start.elapsed().as_nanos();
-            let health = page.page_async(mtm, &health_script(nonce, "same-origin"));
-            let ok = health.as_deref() == Some("ok");
-            if ok {
-                report.ok("fresh_payload");
-            } else {
-                report.failed(
-                    "fresh_payload",
-                    match health.as_deref() {
-                        Some("failed") => "fetch_failed",
-                        Some(_) => "unexpected_answer",
-                        None => "no_answer",
-                    },
-                );
-            }
-            ok
-            // The view and its store end here, and their connections with them.
-        };
-        if !fresh {
-            return finish(5);
-        }
-        let clean = released(&native);
-        if clean {
-            report.ok("fresh_store_released");
-        } else {
-            // A stream that stays open hides a new one from the count.
-            report.failed("fresh_store_released", "stream_still_open");
-        }
-
-        // The live-store leg: the session's document is connected to the
-        // host on WebKit's own path. It gets the route now, while it is
-        // live, and is asked for work of several kinds.
+        // The live-store leg, alone and first: the session's document is
+        // connected to the host on WebKit's own path, and no other store has
+        // been routed yet. It gets the route now, while it is live, with a
+        // credential no one else holds, and is asked for its work.
         if !install_route(
             &document.webview,
             mtm,
             &host,
             leg.proxy,
-            &leg.username,
-            &leg.password,
+            &leg.live.username,
+            &leg.live.password,
             false,
         ) {
             report.failed("live_route_installed", "refused_by_system");
             return finish(6);
         }
         report.ok("live_route_installed");
-        let nonce = || report.start.elapsed().as_nanos();
-        let mut payload_on_new_stream = false;
-        let mut stream_without_payload = false;
-        let mut any_stream = false;
-        let mut attempt = |boundary: &'static str, script: String, payload: bool| {
-            let (ok, opened, busy) = live_attempt(&document, mtm, &native, &report, boundary, &script);
-            any_stream |= opened > 0;
-            if payload && opened > 0 && !busy {
-                payload_on_new_stream |= ok;
-                stream_without_payload |= !ok;
-            }
+        let in_leg = |store: Store, began: Option<Counted>| {
+            counts(&native, store)
+                .zip(began)
+                .map(|(now, began)| (now.of_store, now.unadmitted.saturating_sub(began.unadmitted)))
         };
-        attempt("live_fetch", health_script(nonce(), "same-origin"), true);
-        attempt("live_fetch_without_credentials", health_script(nonce(), "omit"), true);
-        attempt("live_websocket", websocket_script(nonce()), false);
-        let reloaded = document.load("/", &report, "live_reload_answered", "live_reload_committed");
-        if report_load(&report, "live_reloaded", reloaded) && document.shows_its_origin() {
-            attempt("live_fetch_after_reload", health_script(nonce(), "same-origin"), true);
-        }
-        let code = if payload_on_new_stream {
-            report.ok("live_store_direct_payload");
+        let began = counts(&native, Store::Live);
+        let of_live = payloads(&document, mtm, &native, &report, Store::Live, &LIVE);
+        let live_so_far = in_leg(Store::Live, began);
+        let answered = of_live
+            .carried
+            .iter()
+            .any(|attempt| matches!(attempt.word, "ok" | "direct" | "other"));
+        let live_code = if of_live.carried.iter().any(|attempt| attempt.via == "direct") {
+            // A payload the instance names direct, on this store's own
+            // registration: the live store took the route.
+            counts_line(&report, "live_store_route", true, "taken", live_so_far);
             0
-        } else {
-            report.failed(
-                "live_store_direct_payload",
-                if stream_without_payload {
-                    "direct_stream_without_payload"
-                } else if any_stream {
-                    "direct_stream_not_for_a_payload"
-                } else if clean {
-                    "route_not_taken"
-                } else {
-                    "route_not_taken_or_hidden"
-                },
-            );
+        } else if answered && live_so_far.is_some_and(|(so_far, unadmitted)| so_far.connects == 0 && unadmitted == 0) {
+            // Its payloads were answered, no CONNECT ever presented its
+            // credential, and nothing knocked at the listener while this
+            // store alone was routed: the listener was never asked.
+            counts_line(&report, "live_store_route", false, "not_taken", live_so_far);
             6
+        } else if answered && live_so_far.is_some_and(|(so_far, _)| so_far.connects == 0) {
+            // Something reached the listener and was not admitted. The
+            // payloads did not go through it; whether the route was tried
+            // for them is not known.
+            counts_line(&report, "live_store_route", false, "not_admitted", live_so_far);
+            7
+        } else {
+            counts_line(&report, "live_store_route", false, "unknown", live_so_far);
+            7
         };
+
+        // The fresh-store leg, the positive control of the same payloads: a
+        // store that has never connected to the host, so the route carries
+        // it from its first request. The session, then the route (the same
+        // listener, this store's own credential, no failover), then the
+        // first load and the same work.
+        let fresh_began = counts(&native, Store::Fresh);
+        let page = View::new(mtm, &origin);
+        let held = page.seed_session(SESSION_COOKIE, &session);
+        if !report_seeded(&report, "fresh_session_seeded", held, true) {
+            return finish(5);
+        }
+        if !install_route(
+            &page.webview,
+            mtm,
+            &host,
+            leg.proxy,
+            &leg.fresh.username,
+            &leg.fresh.password,
+            false,
+        ) {
+            report.failed("fresh_route_installed", "refused_by_system");
+            return finish(5);
+        }
+        report.ok("fresh_route_installed");
+        let loaded = page.load("/", &report, "fresh_answered", "fresh_committed");
+        if !report_load(&report, "fresh_loaded", loaded) || !page.shows_its_origin() {
+            return finish(5);
+        }
+        // Over the direct path now: the instance still takes the session.
+        if !session_accepted(&page, mtm, &report, "fresh_session_accepted") {
+            return finish(5);
+        }
+        let of_fresh = payloads(&page, mtm, &native, &report, Store::Fresh, &FRESH);
+        let fresh_so_far = in_leg(Store::Fresh, fresh_began);
+        // The control holds only if every payload of the routed store is
+        // attributed to its registration: otherwise the live store's lines
+        // say nothing about the route.
+        let control = of_fresh.reloaded && of_fresh.carried.iter().all(|attempt| attempt.via == "direct");
+        counts_line(
+            &report,
+            "fresh_store_route",
+            control,
+            if control {
+                "taken"
+            } else if !of_fresh.reloaded {
+                "reload_failed"
+            } else {
+                "payload_not_attributed"
+            },
+            fresh_so_far,
+        );
+        // The WebSocket, beside its control. Where the routed store's ended
+        // the same way after a direct commit of its own, the ending is the
+        // endpoint's answer and not the route's doing.
+        let same =
+            of_live.websocket.word == of_fresh.websocket.word && of_live.websocket.close == of_fresh.websocket.close;
+        report.line(
+            "websocket_compared",
+            json!({
+                "ok": same,
+                "live": of_live.websocket.word,
+                "control": of_fresh.websocket.word,
+                "control_direct": of_fresh.websocket.direct,
+                "class": if !same {
+                    "differs_from_control"
+                } else if of_fresh.websocket.direct > 0 {
+                    "as_control_after_direct_commit"
+                } else {
+                    "as_control"
+                },
+            }),
+        );
+        let code = if control { live_code } else { 5 };
         // Whatever ends the link in the next moments is printed by the
         // native half as it happens.
         pump_until(AFTERWARDS, || false);

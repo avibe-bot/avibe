@@ -255,10 +255,14 @@ async fn serve<F: Future<Output = Option<Backend>>>(
         }
     })
     .await;
-    let Ok(Some(parsed)) = parsed else { return };
+    let Ok(Some(parsed)) = parsed else {
+        keys.note_unadmitted();
+        return;
+    };
     let (end, grant) = match parsed {
         Head::Accept(n, grant) => (n, grant),
         other => {
+            keys.note_unadmitted();
             let answer:&[u8]=match other {
         Head::Refuse(407)=>b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"Avibe Direct\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         Head::Refuse(403)=>b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n",
@@ -268,20 +272,29 @@ async fn serve<F: Future<Output = Option<Backend>>>(
             return;
         }
     };
+    // Each authenticated CONNECT is counted for its registration here, and
+    // once more where it is decided: direct, public, or refused.
+    grant.counts.connect();
     grant
         .until_revoked(async {
             let Some(backend) = open().await else {
+                grant.counts.refused();
                 let _ = browser
                     .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                     .await;
                 return;
             };
             let (mut stream, _direct) = match backend {
-                Backend::Direct(s, guard) => (s, guard),
+                Backend::Direct(s, guard) => {
+                    grant.counts.direct();
+                    (s, guard)
+                }
                 Backend::Public(s, ticket) => {
                     if let Some(copy) = ticket.commit(&grant.legs, &browser, &s) {
+                        grant.counts.public();
                         copy.serve(browser, s, &data[end..]).await;
                     } else {
+                        grant.counts.refused();
                         let _ = browser
                             .write_all(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
                             .await;
@@ -324,10 +337,11 @@ mod tests {
         .await
         .unwrap();
         let mut browser = TcpStream::connect((Ipv4Addr::LOCALHOST, l.port)).await.unwrap();
+        let registration = l.access.window_credential("test-window").unwrap();
         let request = format!(
             "CONNECT {}:443 HTTP/1.1\r\nProxy-Authorization: {}\r\n\r\n",
             host.host(),
-            basic(&l.access.window_credential("test-window").unwrap())
+            basic(&registration)
         );
         browser.write_all(request.as_bytes()).await.unwrap();
         let mut response = Vec::new();
@@ -336,6 +350,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(response, b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");
+        // One authenticated CONNECT, refused: counted for its registration.
+        let counts = l.access.windows.window(&registration).unwrap().counts.read();
+        assert_eq!(
+            (counts.connects, counts.direct, counts.public, counts.refused),
+            (1, 0, 0, 1)
+        );
     }
     #[tokio::test]
     async fn observed_denial_fails_authenticated_connect_despite_pending_lan_success() {

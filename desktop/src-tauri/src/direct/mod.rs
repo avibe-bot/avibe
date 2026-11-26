@@ -16,7 +16,7 @@ mod dead_end;
 #[cfg(test)]
 #[path = "../../tests/direct/dead_end.rs"]
 mod dead_end_tests;
-pub use credentials::WindowRegistration;
+pub use credentials::{WindowCounts, WindowRegistration};
 pub use quiet::PublicCensus;
 #[cfg(test)]
 #[path = "../../tests/direct/cross_network.rs"]
