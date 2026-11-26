@@ -42,7 +42,7 @@ const dialog = (step: BindStep) => () => <div className="flex h-full flex-col bg
 
 const instances = (phase?: 'running' | 'failed') => () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground">
   <InstanceSwitcherView state={tooOld} localInstanceId={null} busy={false} pendingId={null} failure={null}
-    onSelect={noop} onLocal={noop} onCancel={noop} onRefresh={noop} onConsent={noop} onAccount={noop} onAdd={noop}
+    onSelect={noop} onLocal={noop} onCancel={noop} onRefresh={noop} onConsent={noop} onSignOut={noop} onAdd={noop}
     thisComputer={{ line: <LocalTooOldLine phase={phase} onUpgrade={noop} /> }} />
 </div>;
 

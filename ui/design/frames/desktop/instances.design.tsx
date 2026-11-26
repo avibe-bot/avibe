@@ -30,6 +30,7 @@ const designFrames = frames(desktopInstanceFrames.map(({ fixture, ...frame }) =>
   if (profile) return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><AccountDetailsView {...profile} /></div> };
   if (fixture.state === 'add') return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><AddInstanceView onBack={() => {}} onRefresh={() => {}} busy={false} /></div> };
   const switcher = switcherViewProps(fixture);
+  // ui/design: desktop/instances/instances-* and current-shared-* include the shipped inline account card.
   if (switcher) return { ...frame, status: 'shipped', render: () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground"><InstanceSwitcherView {...switcher} /></div> };
   const factor = factorViewProps(fixture);
   if (factor) return { ...frame, status: 'shipped', render: () => <div className="flex h-full flex-col overflow-y-auto bg-background px-10 py-5 text-foreground"><AccountSecondFactorView {...factor} /></div> };

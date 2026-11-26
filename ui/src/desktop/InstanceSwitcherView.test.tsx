@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 // ui/design: desktop/status-dots/*; desktop/instances/instances-*, switching-*, offline-*.
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { desktopEn as en } from '../i18n/desktop';
 import states from './__fixtures__/instance-client-v1/states.json';
 import { InstanceSwitcherView, type InstanceSwitcherViewProps } from './InstanceSwitcherView';
@@ -27,7 +27,7 @@ const base = (instances: Instance[], patch: Partial<DesktopClientState> = {}): D
 function view(state: DesktopClientState, extra: Partial<InstanceSwitcherViewProps> = {}) {
   const noop = () => {};
   render(<I18nextProvider i18n={i18n}><InstanceSwitcherView state={state} localInstanceId="local" busy={false} pendingId={null} failure={null}
-    onSelect={noop} onLocal={noop} onCancel={noop} onRefresh={noop} onConsent={noop} onAccount={noop} onAdd={noop} {...extra} /></I18nextProvider>);
+    onSelect={noop} onLocal={noop} onCancel={noop} onRefresh={noop} onConsent={noop} onSignOut={noop} onAdd={noop} {...extra} /></I18nextProvider>);
 }
 
 /** The tone each row's dot reads as, or null when the column is empty. */
@@ -111,4 +111,30 @@ it('keeps a reachable row green after a failed open and announces each dot once'
   const local = document.querySelector('[data-instance-id="local"] button')!;
   expect(local.hasAttribute('aria-describedby')).toBe(false);
   expect(local.textContent).not.toContain(en.desktopClient.connected);
+});
+
+// ui/design: desktop/instances/instances-* and current-shared-*.
+it.each(['local', 'remote'])('shows the signed-in account and signs out directly on %s', (connection) => {
+  const onSignOut = vi.fn();
+  const state = connection === 'remote' ? onRemote('remote_connected', [studio]) : base([studio]);
+  view(state, { onSignOut });
+  const card = screen.getByRole('region', { name: en.desktopAccount.accountTitle });
+  expect(within(card).getByText(en.desktopAccount.currentAccount)).toBeTruthy();
+  const email = within(card).getByText(state.account.identity!.email);
+  expect(email.closest('button, a, [role="button"]')).toBeNull();
+  fireEvent.click(email);
+  expect(onSignOut).not.toHaveBeenCalled();
+  expect(card.querySelector('.lucide-chevron-right')).toBeNull();
+  expect(within(card).getAllByRole('button')).toHaveLength(1);
+  fireEvent.click(within(card).getByRole('button', { name: en.desktopClient.signOut }));
+  expect(onSignOut).toHaveBeenCalledOnce();
+});
+
+it.each([{ busy: true }, { pendingId: 'studio' }])('keeps inline sign-out disabled while an instance action is pending: %j', (extra) => {
+  const onSignOut = vi.fn();
+  view(base([studio]), { ...extra, onSignOut });
+  const button = screen.getByRole('button', { name: en.desktopClient.signOut });
+  expect(button.hasAttribute('disabled')).toBe(true);
+  fireEvent.click(button);
+  expect(onSignOut).not.toHaveBeenCalled();
 });

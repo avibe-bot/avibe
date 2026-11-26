@@ -114,7 +114,7 @@ export function switcherViewProps(fixture: DesktopInstanceFixture): InstanceSwit
   if (fixture.state === 'consent') state.consent = { instance_id: 'team', instance_name: 'Product team', host: 'team-app.avibe.bot', scope: 'openid email profile' };
   return { state, localInstanceId: 'local', busy: false, pendingId: fixture.state === 'switching' ? 'studio' : null,
     failure: ['switch-error', 'upgrade-error'].includes(fixture.state) ? { instanceId: 'studio', message: fixture.state === 'upgrade-error' ? strings.errors.upgrade : strings.errors.request } : null,
-    onAccount: noop, onAdd: noop, onSelect: noop, onLocal: noop, onCancel: noop, onRefresh: noop, onConsent: noop };
+    onSignOut: noop, onAdd: noop, onSelect: noop, onLocal: noop, onCancel: noop, onRefresh: noop, onConsent: noop };
 }
 
 export function factorViewProps(fixture: DesktopInstanceFixture): AccountSecondFactorViewProps | null {

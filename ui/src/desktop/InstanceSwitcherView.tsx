@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Check, ChevronRight, Globe, Laptop, Plus, RefreshCw, UserRound, UsersRound } from 'lucide-react';
+import { Check, ChevronRight, Globe, Laptop, Plus, RefreshCw, UsersRound } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Skeleton } from '../components/ui/skeleton';
 import { LineGlyph, StatusDot } from '../components/SidebarStatusRow';
@@ -19,7 +19,7 @@ export interface InstanceSwitcherViewProps {
   onCancel: () => void;
   onRefresh: () => void;
   onConsent: (approve: boolean) => void;
-  onAccount: () => void;
+  onSignOut: () => void;
   onAdd: () => void;
   consentError?: string | null;
   /** Proposal (ui/design: desktop/bind-in-instances/*): this computer's binding, under its own row.
@@ -30,7 +30,7 @@ export interface InstanceSwitcherViewProps {
 /** ui/design: desktop/instances/instances-*, switching-*, offline-*, consent-*; desktop/status-dots/*.
  * Native owns identity and recency. Keep catalog order; never infer identity from a URL or name. */
 export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, failure,
-  onSelect, onLocal, onCancel, onRefresh, onConsent, onAccount, onAdd, consentError, thisComputer }: InstanceSwitcherViewProps) {
+  onSelect, onLocal, onCancel, onRefresh, onConsent, onSignOut, onAdd, consentError, thisComputer }: InstanceSwitcherViewProps) {
   const { t } = useTranslation();
   const current = state.connection.committed;
   const currentRemote = current.kind === 'remote';
@@ -89,7 +89,11 @@ export function InstanceSwitcherView({ state, localInstanceId, busy, pendingId, 
     </div>
     <section aria-label={t('desktopAccount.accountTitle')} className="mt-6" data-instance-account>
       <h2 className="mb-2 text-sm font-medium text-muted">{t('desktopAccount.accountTitle')}</h2>
-      <Button variant="ghost" disabled={blocked} className="h-auto w-full justify-start gap-3 rounded-xl border border-edge bg-surface p-4 [--press-scale:1]" onClick={onAccount}><UserRound className="size-5 shrink-0 text-muted" /><span className="min-w-0 flex-1 whitespace-normal break-words text-left [overflow-wrap:anywhere]">{state.account.identity?.email ?? state.account.email ?? t('desktopAccount.accountTitle')}</span><ChevronRight className="size-4 shrink-0 text-muted" /></Button>
+      <div className="rounded-xl border border-edge bg-surface p-4">
+        <p className="text-xs text-muted">{t('desktopAccount.currentAccount')}</p>
+        <p className="mt-2 break-words text-sm font-semibold [overflow-wrap:anywhere]">{state.account.identity?.email ?? state.account.email ?? t('desktopAccount.accountTitle')}</p>
+        <Button variant="outline" disabled={blocked} className="mt-5 w-full [--press-scale:1]" onClick={onSignOut}>{t('desktopClient.signOut')}</Button>
+      </div>
     </section>
     <Dialog open={!!state.consent} onOpenChange={(open) => { if (!open) { if (busy) onCancel(); else onConsent(false); } }}>
       {state.consent && <DialogContent closeLabel={t('common.close')} onEscapeKeyDown={(event) => { event.preventDefault(); event.stopPropagation(); if (busy) onCancel(); else onConsent(false); }}>
