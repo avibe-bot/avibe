@@ -9,6 +9,24 @@ import WebKit
 @MainActor
 enum VoiceCaptureLoadGate {
     static var provider: ((WebOrigin, UUID) -> DirectLoadGate)?
+    /// The same gate for a load about to be made in the background
+    /// (`DirectPathController.backgroundLoadGate`): there the listener is
+    /// closed and the load rests on WebKit's failover past its port, so the
+    /// port is asked first. `fault`: something else answers there, load
+    /// nothing; `held`: nothing does, the load may go. `nil` without a
+    /// direct transport.
+    static var backgroundProvider: (@MainActor (WebOrigin, UUID) async -> DirectLoadGate)?
+
+    /// `gate(for:store:currentStore:direct:)` for the background's check.
+    static func backgroundGate(
+        for origin: WebOrigin,
+        store: UUID,
+        currentStore: UUID,
+        direct: @MainActor (URL) async -> DirectLoadGate
+    ) async -> DirectLoadGate {
+        guard store == currentStore else { return .open }
+        return await direct(origin.url)
+    }
 
     /// The gate for a take's load to `origin` on `store`. On the model's
     /// current store it is the direct path's answer for that host
@@ -159,6 +177,8 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
     /// The direct path's load gate for this instance, whether Avibe is in
     /// front, and a wait (tests replace them).
     private let gate: () -> DirectLoadGate
+    /// The gate asked right before a load made in the background.
+    private let backgroundGate: @MainActor () async -> DirectLoadGate
     private let isActive: () -> Bool
     private let sleep: (Duration) async -> Void
 
@@ -166,6 +186,7 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         target: VoiceCaptureTarget,
         dictationID: String = "ios-action-\(UUID().uuidString.lowercased())",
         gate: (() -> DirectLoadGate)? = nil,
+        backgroundGate: (@MainActor () async -> DirectLoadGate)? = nil,
         isActive: @escaping () -> Bool = { UIApplication.shared.applicationState == .active },
         sleep: @escaping (Duration) async -> Void = { try? await Task.sleep(for: $0) }
     ) {
@@ -173,7 +194,17 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         self.dictationID = dictationID
         let origin = target.origin
         let store = target.storeIdentifier
-        self.gate = gate ?? { VoiceCaptureLoadGate.provider?(origin, store) ?? .open }
+        if let gate {
+            self.gate = gate
+            // A test's own gate stands for both, unless it gives the second.
+            self.backgroundGate = backgroundGate ?? { gate() }
+        } else {
+            self.gate = { VoiceCaptureLoadGate.provider?(origin, store) ?? .open }
+            self.backgroundGate = backgroundGate ?? {
+                if let ask = VoiceCaptureLoadGate.backgroundProvider { return await ask(origin, store) }
+                return VoiceCaptureLoadGate.provider?(origin, store) ?? .open
+            }
+        }
         self.isActive = isActive
         self.sleep = sleep
     }
@@ -554,6 +585,24 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
             if settled == .fault {
                 gaveUp(label, "direct_fault")
                 throw Failure.directFault
+            }
+            // In the background the listener is closed and the load rests on
+            // WebKit's failover past its port: the direct path asks the port
+            // first. Something answering there is not this App's listener,
+            // and gets nothing (the take is kept, and sent by itself once the
+            // instance is reached). `held` here means nothing answers: the
+            // load goes, as before. A process taking the port in the few ms
+            // between this answer and the load's own connection is not covered.
+            if !isActive() {
+                let checked = await backgroundGate()
+                guard !closed else {
+                    gaveUp(label, "closed")
+                    throw Failure.closed
+                }
+                if checked == .fault {
+                    gaveUp(label, "direct_fault port")
+                    throw Failure.directFault
+                }
             }
             if waited >= 50 { gaveUp(label, "gate \(settled == .held ? "held" : "open") after \(waited)ms") }
             do {

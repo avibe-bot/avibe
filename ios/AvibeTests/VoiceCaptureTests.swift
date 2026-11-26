@@ -2155,11 +2155,16 @@ final class VoiceCaptureTests: XCTestCase {
         )
         var asked = 0
         let client = VoiceCaptureInstanceClient(
-            target: target, gate: { .fault },
-            backgroundGate: { asked += 1; return .held },
+            target: target, gate: { .open },
+            backgroundGate: { asked += 1; return .fault },
             isActive: { true }, sleep: { _ in }
         )
-        _ = try? await client.status()
+        do {
+            _ = try await client.status()
+            XCTFail("the fixture's host does not exist")
+        } catch {
+            XCTAssertNotEqual(error as? Failure, .directFault)
+        }
         XCTAssertEqual(asked, 0)
     }
 
