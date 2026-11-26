@@ -1842,6 +1842,8 @@ def runtime_status_payload(config: V2Config | None = None, event: str = "heartbe
         "expected_origin_service": origin_service_for_pairing(config),
         "direct_paths_enabled": bool(config.remote_access.vibe_cloud.direct),
     }
+    if payload["direct_paths_enabled"] is False:
+        payload["direct_state"] = "off_by_user"
     if observed_origin_service:
         payload["observed_origin_service"] = observed_origin_service
     quality = current.get("tunnel_quality")
@@ -1880,14 +1882,27 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
                 direct_lifecycle.runtime_status_request(config)
                 if payload.get("direct_paths_enabled") is True else None
             )
+            lifecycle = direct_lifecycle.active_lifecycle()
+            if runtime_status_ticket is not None and lifecycle is not None:
+                payload.update(lifecycle.report_fields(runtime_status_ticket))
         except Exception:
             direct_lifecycle = None
             runtime_status_ticket = None
-        result = _json_request(
-            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
-            payload,
-            timeout=5.0,
-        )
+        try:
+            result = _json_request(
+                f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
+                payload,
+                timeout=5.0,
+            )
+        except BackendRequestError as exc:
+            # Only the credential verifier's exact status/code pairs are decisions.
+            # A timeout, proxy refusal or policy outage neither renews nor revokes.
+            definitive = {401: 'invalid_device_secret', 403: 'instance_credential_mismatch',
+                          404: 'instance_not_found', 409: 'instance_inactive'}
+            if (runtime_status_ticket is not None and exc.status in definitive
+                    and exc.payload.get('error') == definitive[exc.status]):
+                direct_lifecycle.accept_runtime_status_response(runtime_status_ticket, {'direct_access_allowed': False})
+            raise
         _clear_availability_cooldown(source="runtime_status")
         try:
             if direct_lifecycle is not None:

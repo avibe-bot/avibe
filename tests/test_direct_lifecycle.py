@@ -155,23 +155,49 @@ async def _owner(config, reports, *, cert=None, ingress_type=FakeIngress, superv
         await owner.stop()
 
 
-async def _permission(owner, config, allowed=True):
+async def _permission(owner, config, allowed=True, **fields):
     ticket = owner.runtime_status_request(config)
     assert ticket is not None
-    owner.submit_runtime_status_response(ticket, {"ok": True, "direct_access_allowed": allowed})
+    owner.submit_runtime_status_response(ticket, {"ok": True, "direct_access_allowed": allowed, **fields})
     await _wait(lambda: owner._last_response_sequence == ticket.sequence)
 
 
 def test_setting_default_legacy_config_and_roundtrip():
     config = _config(direct=False)
     config.save()
-    payload = json.loads(paths.get_config_path().read_text())
-    assert payload["remote_access"]["vibe_cloud"]["direct"] is False
-    del payload["remote_access"]["vibe_cloud"]["direct"]
-    assert V2Config.from_payload(payload).remote_access.vibe_cloud.direct is False
-    config.remote_access.vibe_cloud.direct = True
+    path = paths.get_config_path()
+    payload = json.loads(path.read_text())
+    cloud = payload["remote_access"]["vibe_cloud"]
+    assert cloud["direct"] is False and cloud["direct_choice"] == "off"
+    assert V2Config.load().remote_access.vibe_cloud.direct is False
+    # The released writer emitted false even for an untouched choice. It left
+    # no provenance; migration intentionally interprets that shape as default.
+    del cloud["direct_choice"]
+    path.write_text(json.dumps(payload))
+    migrated = V2Config.load()
+    assert migrated.remote_access.vibe_cloud.direct is True
+    assert migrated.remote_access.vibe_cloud.direct_choice == "default"
+    assert V2Config.default().remote_access.vibe_cloud.direct is True
+    migrated.remote_access.vibe_cloud.set_path_choice("direct", False)
+    migrated.save()
+    assert V2Config.load().remote_access.vibe_cloud.direct is False
+
+
+def test_generic_save_preserves_host_choices_and_does_not_expose_markers():
+    from vibe import api
+
+    config = V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.set_path_choice('direct', False)
+    cloud.set_path_choice('public_relay_trial', False)
     config.save()
-    assert V2Config.load().remote_access.vibe_cloud.direct is True
+    projection = api.config_to_payload(config)['remote_access']['vibe_cloud']
+    assert 'direct_choice' not in projection and 'public_relay_choice' not in projection
+    api.save_config({'remote_access': {'vibe_cloud': {'direct': False, 'public_relay_trial': False,
+                    'direct_choice': 'default', 'public_relay_choice': 'on'}}}, generic_remote_access=True)
+    restored = V2Config.load().remote_access.vibe_cloud
+    assert not restored.direct and not restored.public_relay_trial
+    assert restored.direct_choice == restored.public_relay_choice == 'off'
 
 
 def test_direct_toggle_does_not_reconcile_or_change_tunnel_identity():
@@ -220,8 +246,8 @@ async def test_off_is_literal_no_listener_child_order_or_file(reports, monkeypat
     assert set(paths.get_state_dir().rglob("*")) == before
 
 
-@pytest.mark.parametrize("bad_pin", ["pending", "tampered"])
-async def test_failed_auto_install_backs_off_without_starting(reports, published, monkeypatch, bad_pin):
+@pytest.mark.parametrize("bad_pin,reason", [("pending", "other"), ("tampered", "integrity"), ("unavailable", "download")])
+async def test_failed_auto_install_backs_off_without_starting(reports, published, monkeypatch, bad_pin, reason):
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
     payload, manifest, downloads, sources = published
@@ -230,7 +256,10 @@ async def test_failed_auto_install_backs_off_without_starting(reports, published
         manifest.write_text(json.dumps(payload))
     else:
         source = sources[payload["archives"]["linux-x64"]["url"]]
-        source.write_bytes(b"x" * source.stat().st_size)
+        if bad_pin == "unavailable":
+            source.unlink()  # hermetic fetch_to_path fails before returning an archive
+        else:
+            source.write_bytes(b"x" * source.stat().st_size)
     attempts = []
     ensure = DirectTransportRuntimeManager.ensure
     def counted(manager):
@@ -240,11 +269,14 @@ async def test_failed_auto_install_backs_off_without_starting(reports, published
     monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.3)
     monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
     config = _config()
-    async with _owner(config, reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
-        await _wait(lambda: owner.status().reason == "transport_install_failed")
+    async with _owner(config, reports, binary_resolver=None) as (owner, calls, cert, rv):
         await _permission(owner, config)
+        await _wait(lambda: owner.status().reason == "transport_install_failed")
         await _wait(lambda: len(attempts) >= 2 and owner.status().reason == "transport_install_failed" and owner._install_task is None)
         assert attempts[1] - attempts[0] >= 0.3
+        assert owner.report_fields(owner.runtime_status_request(config)) == {
+            "direct_state": "install_failed", "direct_reason": reason,
+        }
         assert not cert.calls and rv.endpoint is None and "supervisor_start" not in calls
         assert DirectTransportRuntimeManager().resolve_binary() is None
         assert not downloads if bad_pin == "pending" else len(downloads) == 2
@@ -261,7 +293,9 @@ async def test_auto_failure_logs_hide_manager_details_but_not_other_callers(repo
         raise OSError("/private/path/owner/test-lock")
     monkeypatch.setattr(DirectTransportRuntimeManager, "_acquire_mutation_lock", fail_lock)
     caplog.set_level("INFO")
-    async with _owner(_config(), reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, *_):
+    config = _config()
+    async with _owner(config, reports, binary_resolver=None) as (owner, *_):
+        await _permission(owner, config)
         try:
             await _wait(entered.is_set)
             managed_runtime.logger.warning("unrelated manager diagnostic")
@@ -299,12 +333,15 @@ async def test_skipped_install_and_prior_failure_do_not_delay_reenable(reports, 
         return {"ok": False} if len(attempts) == 1 else ensure(manager)
     monkeypatch.setattr(DirectAccessLifecycle, "_install_pin", mark_worker)
     monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", fail_once)
-    async with _owner(config, reports, config_loader=load, binary_resolver=module.resolve_direct_transport_binary) as (owner, *_):
+    async with _owner(config, reports, config_loader=load, binary_resolver=None) as (owner, *_):
         async def toggle(enabled):
             config.remote_access.vibe_cloud.direct = enabled
             owner.notify_config_changed(config)
             await _wait(lambda: owner.status().enabled == enabled)
+            if enabled:
+                await _permission(owner, config)
         try:
+            await _permission(owner, config)
             await _wait(entered.is_set)
             await toggle(False)
             await toggle(True)
@@ -314,8 +351,30 @@ async def test_skipped_install_and_prior_failure_do_not_delay_reenable(reports, 
         assert attempts == [1] and owner._install_delay == 2 * module.INSTALL_RETRY_INITIAL_SECONDS
         await toggle(False)
         await toggle(True)
-        await _wait(lambda: owner.status().state == "waiting-permission")
+        await _wait(lambda: owner.status().state == "running")
         assert attempts == [1, 1]
+
+
+async def test_sleep_between_install_scheduling_and_worker_admission_skips_download(reports, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+    config = _config()
+    clock, attempts = [300.0], []
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(DirectTransportRuntimeManager, 'ensure', lambda self: attempts.append(True))
+    original = DirectAccessLifecycle._install_pin
+    returned = threading.Event()
+    def resume_after_sleep(self, *args):
+        clock[0] += 901
+        try:
+            return original(self, *args)
+        finally:
+            returned.set()
+    monkeypatch.setattr(DirectAccessLifecycle, '_install_pin', resume_after_sleep)
+    async with _owner(config, reports, binary_resolver=lambda cfg: None) as (owner, *_):
+        await _permission(owner, config)
+        await _wait(returned.is_set)
+        await _wait(lambda: owner._install_task is None)
+        assert not attempts and not owner._install_failed
 
 
 async def test_auto_install_once_only_when_enabled(reports, published, monkeypatch):
@@ -331,14 +390,18 @@ async def test_auto_install_once_only_when_enabled(reports, published, monkeypat
         assert release.wait(4)
         return ensure(manager)
     monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", slow)
-    async with _owner(config, reports, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
+    async with _owner(config, reports, binary_resolver=None) as (owner, calls, cert, rv):
         assert not attempts and not published[2]
         config.remote_access.vibe_cloud.direct = True
         owner.notify_config_changed(config)
         try:
+            await _wait(lambda: owner.status().state == 'transport-not-installed')
+            await _permission(owner, config, False)
+            await asyncio.sleep(0.15)
+            assert not attempts and not published[2]
+            await _permission(owner, config)
             await _wait(entered.is_set)
             await _wait(lambda: owner.status().state == "installing")
-            await _permission(owner, config)
             await asyncio.sleep(0.15)
             assert not cert.calls and rv.endpoint is None and attempts == [1]
         finally:
@@ -347,69 +410,237 @@ async def test_auto_install_once_only_when_enabled(reports, published, monkeypat
         assert attempts == [1] and len(published[2]) == 1 and rv.endpoint is not None
 
 
-def test_enrollment_only_changes_the_effective_policy_for_its_pairing(tmp_path, monkeypatch):
+@pytest.mark.parametrize('contents', [b'broken', b'{}', b'{"version":true,"binding":null}',
+                                      b'{"version":1,"binding":"bad"}', b'{"version":1,"binding":null,"binding":null}'])
+def test_invalid_enrollment_never_selects_relay(tmp_path, monkeypatch, contents):
+    from vibe import connection_settings as cs
+    path = tmp_path / 'enrollment.json'
+    monkeypatch.setattr(cs, '_relay_enrollment_path', lambda: path)
+    config = _config()
+    path.write_bytes(contents)
+    assert cs.relay_enrollment_status(config) == 'unknown'
+    assert not module._effective_relay(config)
+    config.remote_access.vibe_cloud.set_path_choice('public_relay_trial', True)
+    assert not module._effective_relay(config)
+
+
+def test_unreadable_enrollment_is_not_absent(tmp_path, monkeypatch):
+    from vibe import connection_settings as cs
+    path = tmp_path / 'enrollment.json'
+    monkeypatch.setattr(cs, '_relay_enrollment_path', lambda: path)
+    config = _config()
+    assert module._effective_relay(config)
+    cs.enroll_from_host(config)
+    original = Path.read_text
+    def refuse(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError('fixture')
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', refuse)
+    assert cs.relay_enrollment_status(config) == 'unknown' and not module._effective_relay(config)
+
+
+def test_the_relay_is_wanted_unless_the_user_turned_it_off(tmp_path, monkeypatch):
     from vibe import connection_settings as cs
 
     monkeypatch.setattr(cs, "_relay_enrollment_path", lambda: tmp_path / "enrollment.json")
     config = _config()
     cloud = config.remote_access.vibe_cloud
-    cloud.public_relay_trial = True
-    not_enrolled = module._config_signature(config)
-    assert not not_enrolled[-1]
-    cs.enroll_from_host(config)
+    # Untouched: no host enrollment and no local opt-in. This grants nothing
+    # by itself; the server's fresh bit is asked for with every report.
+    assert (cloud.public_relay_trial, cloud.public_relay_choice) == (False, "default")
+    assert not cs.relay_enrolled(config)
     assert module._config_signature(config)[-1] is True
-    # No change to the config file or its enabled bit was needed to advance the policy.
-    assert module._config_signature(config) != not_enrolled
-    cloud.enabled = False
-    cloud.session_secret = "rotated-browser-cookie-key"
-    cloud.public_url = "https://renamed-app.avibe.bot"
-    assert cs.relay_enrolled(config)
-    cloud.enabled = True
-    assert module._config_signature(config)[-1] is True
-    cloud.instance_secret = "different-pairing-credential"
+    # An explicit off wins, with or without an enrollment, and across a save.
+    cloud.set_path_choice("public_relay_trial", False)
     assert module._config_signature(config)[-1] is False
-    assert cloud.public_relay_trial is True
+    cs.enroll_from_host(config)
+    assert module._config_signature(config)[-1] is False
+    config.save()
+    reloaded = V2Config.load()
+    assert reloaded.remote_access.vibe_cloud.public_relay_choice == "off"
+    assert module._config_signature(reloaded)[-1] is False
+    cloud.set_path_choice("public_relay_trial", True)
+    assert module._config_signature(config)[-1] is True
 
 
-async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
-    from core.direct_transport_runtime import DirectTransportRuntimeManager
+def test_an_enrolled_pairing_whose_trial_was_switched_off_before_choices_were_recorded_stays_off(tmp_path, monkeypatch):
+    from vibe import connection_settings as cs
 
-    from vibe.connection_settings import enroll_from_host
-
+    monkeypatch.setattr(cs, "_relay_enrollment_path", lambda: tmp_path / "enrollment.json")
     config = _config()
-    config.remote_access.vibe_cloud.public_relay_trial = True
-    enroll_from_host(config)
-    manager = DirectTransportRuntimeManager()
-    assert manager.ensure()["ok"]
-    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    cs.enroll_from_host(config)
+    config.save()
+    path = paths.get_config_path()
+    payload = json.loads(path.read_text())
+    stored = payload["remote_access"]["vibe_cloud"]
+    # What the released writer left after `public-trial on` and then off:
+    # the setting false, and nothing that says who made it so.
+    stored["public_relay_trial"] = False
+    stored.pop("public_relay_choice", None)
+    path.write_text(json.dumps(payload))
+    switched_off = V2Config.load()
+    cloud = switched_off.remote_access.vibe_cloud
+    assert (cloud.public_relay_trial, cloud.public_relay_choice) == (False, "default")
+    assert cs.relay_enrolled(switched_off)
+    assert module._config_signature(switched_off)[-1] is False
+    # The same stored shape on a pairing the host never enrolled is the
+    # untouched default, and follows the server.
+    cloud.instance_secret = "different-pairing-credential"
+    assert not cs.relay_enrolled(switched_off)
+    assert module._config_signature(switched_off)[-1] is True
+    # Enrolled and left on: the released writer's true is an explicit on.
+    stored["public_relay_trial"] = True
+    path.write_text(json.dumps(payload))
+    left_on = V2Config.load()
+    assert left_on.remote_access.vibe_cloud.public_relay_choice == "on"
+    assert module._config_signature(left_on)[-1] is True
+
+
+@pytest.mark.parametrize("grant", [{}, {"public_traversal_allowed": False}, {"public_traversal_allowed": "true"},
+                                   {"public_traversal_allowed": 1}, {"public_traversal_allowed": None}])
+async def test_without_the_servers_true_bit_no_public_relay_policy_is_used(reports, grant):
+    config = _config()
     policies = []
     class Recorder(FakeSupervisor):
         def __init__(self, *args, relay_policy=None):
             super().__init__(*args)
             policies.append(relay_policy)
 
-    async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, _, rv):
+    async with _owner(config, reports, supervisor_type=Recorder) as (owner, calls, _, rv):
+        await _permission(owner, config, **grant)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == [None] and owner._public_traversal_allowed is False
+        # The bit, fresh and true, is all it takes; a renewal without it
+        # retires the public endpoint and ordinary direct goes on.
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: policies == [None, "public-trial-v1"] and owner.status().state == "running")
+        await _permission(owner, config, **grant)
+        await _wait(lambda: policies == [None, "public-trial-v1", None] and owner.status().state == "running")
+        assert calls.count("supervisor_stop") == 2
+
+
+async def test_the_public_relay_ends_when_the_servers_grant_expires_or_is_denied(reports, monkeypatch):
+    config = _config()
+    monkeypatch.setattr(module, "PERMISSION_MAX_AGE_SECONDS", 0.3)
+    policies = []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    async with _owner(config, reports, supervisor_type=Recorder) as (owner, calls, _, rv):
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == ["public-trial-v1"] and owner._public_traversal_allowed is True
+        # Nothing renews it: the grant ages out, and the relay with it.
+        await _wait(lambda: owner.status().reason == "permission_expired")
+        assert owner._public_traversal_allowed is False
+        assert rv.endpoint is None and "supervisor_stop" in calls
+        assert policies == ["public-trial-v1"]
+        # An expired true is not carried into the next grant.
         await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == ["public-trial-v1", None]
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: len(policies) == 3 and owner.status().state == "running")
+        # A denial of direct itself takes the relay too, whatever else it says.
+        await _permission(owner, config, False, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().reason == "permission_denied")
+        assert owner._public_traversal_allowed is False and rv.endpoint is None
+        assert policies == ["public-trial-v1", None, "public-trial-v1"]
+
+
+async def test_an_explicit_off_wins_over_the_servers_true_bit(reports):
+    config = _config()
+    config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
+    policies, asked = [], []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    def resolver(config):
+        asked.append(module._effective_relay(config))
+        return "/injected/test-sidecar"
+
+    async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=resolver) as (owner, calls, _, rv):
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == [None] and owner._public_traversal_allowed is False
+        # Turned on again, the next fresh true bit gives the relay; off again
+        # retires it at once, without waiting for the server.
+        config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", True)
+        owner.notify_config_changed(config)
+        await _wait(lambda: owner.status().state == "waiting-permission")
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: policies == [None, "public-trial-v1"] and owner.status().state == "running")
+        config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
+        owner.notify_config_changed(config)
+        await _wait(lambda: owner.status().state == "waiting-permission" and rv.endpoint is None)
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: policies == [None, "public-trial-v1", None] and owner.status().state == "running")
+    # The pin is asked for the relay only while the relay may be used, and
+    # the user's stored choice is never what was edited to ask.
+    assert True in asked and asked[0] is False and asked[-1] is False
+    assert config.remote_access.vibe_cloud.public_relay_choice == "off"
+
+
+async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
+    from core.direct_transport_runtime import DirectTransportRuntimeManager
+
+    # No host enrollment and no local opt-in: the server's bit decides.
+    config = _config()
+    manager = DirectTransportRuntimeManager()
+    assert manager.ensure()["ok"]
+    monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    installs, ensure = [], DirectTransportRuntimeManager.ensure
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", lambda self, **kw: (installs.append(1), ensure(self, **kw))[1])
+    policies = []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=None) as (owner, calls, _, rv):
+        # Without the bit the ordinary pin is all that is asked for, so a pin
+        # that is not a reviewed one still serves ordinary direct.
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == [None]
+        await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "transport-not-installed")
-        assert not policies
+        assert policies == [None]
+        # The installed pin is only not a reviewed one: it is not missing,
+        # and several observations later nothing has tried to install it.
+        await asyncio.sleep(0.2)
+        assert installs == [] and owner.status().state == "transport-not-installed"
         await _permission(owner, config, False)
         payload, manifest, _, _ = published
         payload["provenance"] = {"source_sha": "578659184dfa38bc87261a6fa832f9b4c65a1c90"}
         manifest.write_text(json.dumps(payload))
         assert DirectTransportRuntimeManager().ensure()["ok"]
         await _wait(lambda: owner.status().state == "waiting-permission")
-        assert not policies
-        await _permission(owner, config)
+        assert policies == [None]
+        await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "running")
-        assert policies == ["public-trial-v1"]
+        assert policies == [None, "public-trial-v1"]
+        # A valid ordinary-direct renewal from an older backend removes only
+        # the public policy. Nothing local grants it again.
+        await _permission(owner, config)
+        await _wait(lambda: policies == [None, "public-trial-v1", None] and owner.status().state == "running")
+        assert "supervisor_stop" in calls
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: len(policies) == 4 and owner.status().state == "running")
+        assert policies[-1] == "public-trial-v1"
         generation = owner._generation
-        config.remote_access.vibe_cloud.public_relay_trial = False
+        config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
         owner.notify_config_changed(config)
         await _wait(lambda: owner.status().state == "waiting-permission" and rv.endpoint is None)
         assert owner._generation > generation and "supervisor_stop" in calls
-        await _permission(owner, config)
+        await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "running")
-        assert policies == ["public-trial-v1", None]
+        assert policies == [None, "public-trial-v1", None, "public-trial-v1", None]
 
 
 async def test_managed_install_reaches_publication_only_after_all_lifecycle_gates(reports, published, monkeypatch):
@@ -433,7 +664,7 @@ async def test_managed_install_reaches_publication_only_after_all_lifecycle_gate
             assert release.wait(3)
             return _ready()
     try:
-        async with _owner(config, reports, cert=WaitingCertificate(), binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, cert, rv):
+        async with _owner(config, reports, cert=WaitingCertificate(), binary_resolver=None) as (owner, calls, cert, rv):
             assert cert.calls == [] and rv.endpoint is None
             config.remote_access.vibe_cloud.direct = True
             owner.notify_config_changed(config)
@@ -661,7 +892,7 @@ async def test_start_stop_order_and_renewal_from_client_deadline(reports):
         assert len(cert.calls) == 2
         assert calls.count("supervisor_start") == 1
         assert cert.calls[0]["expected_pairing_fingerprint"] == module._config_signature(config)[3]
-        assert cert.calls[0]["permission_deadline"] > time.monotonic()
+        assert cert.calls[0]["permission_deadline"] > module.suspend_elapsed()
         before_stop = len(calls)
         config.remote_access.vibe_cloud.direct = False
         owner.notify_config_changed(config)
@@ -674,13 +905,54 @@ async def test_start_stop_order_and_renewal_from_client_deadline(reports):
         assert reports[-1][1]["event"] == "direct_paths_disabled"
 
 
+@pytest.mark.parametrize("error,coarse", [("acme_rate_limited", "rate_limited"),
+                                        ("backend_unavailable", "provider"),
+                                        ("dns_challenge_visibility_timeout", "timeout")])
+async def test_retryable_certificate_failure_preserves_tunnel_and_provider_deadline(reports, monkeypatch, error, coarse):
+    monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.05)
+    config = _config()
+    deadline = time.time() + 0.65
+    cert = FakeCertificateClient([CertificateResult("failed", last_error_code=error, next_poll_at=deadline)])
+    async with _owner(config, reports, cert=cert) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.report_fields(owner.runtime_status_request(config)).get("direct_state") == "certificate_failed")
+        assert owner.report_fields(owner.runtime_status_request(config))["direct_reason"] == coarse
+        assert rv.endpoint is None and "supervisor_start" not in calls and config.remote_access.vibe_cloud.enabled
+        assert owner._poll_at >= deadline
+        await _wait(lambda: owner.status().state == "running")
+        assert cert.calls[-1]["retry"] is True and time.time() >= deadline
+
+
+async def test_start_error_backs_off_then_publishes_without_tunnel_change(reports, monkeypatch):
+    monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.2)
+    attempts = []
+    class RetrySupervisor(FakeSupervisor):
+        async def start(self):
+            attempts.append(time.monotonic())
+            if len(attempts) == 1:
+                raise OSError("private details must not be reported")
+            await super().start()
+    config = _config()
+    async with _owner(config, reports, supervisor_type=RetrySupervisor) as (owner, _, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().reason == "transport_start_failed")
+        assert owner.report_fields(owner.runtime_status_request(config)) == {"direct_state": "install_failed", "direct_reason": "other"}
+        assert config.remote_access.vibe_cloud.enabled and not rv.endpoint
+        await _wait(lambda: owner.status().state == "running")
+        assert len(attempts) == 2 and attempts[1] - attempts[0] >= 0.2
+
+
 async def test_permission_denial_missing_field_and_resume_stop_serving(reports):
     config = _config()
     async with _owner(config, reports) as (owner, calls, cert, rv):
         await _permission(owner, config)
         await _wait(lambda: owner.status().state == "running")
-        owner.submit_runtime_status_response(owner.runtime_status_request(config), {"ok": True})
+        running_ticket = owner.runtime_status_request(config)
+        assert owner.report_fields(running_ticket) == {"direct_state": "running"}
+        owner.submit_runtime_status_response(running_ticket, {"ok": True})
         await _wait(lambda: owner.status().reason == "permission_denied")
+        assert owner.report_fields(running_ticket) == {}
+        assert owner.report_fields(owner.runtime_status_request(config)) == {"direct_state": "denied"}
         assert not owner.status().transport_running and not owner._ingress
         await _permission(owner, config)
         await _wait(lambda: len(cert.calls) == 2)
@@ -700,8 +972,101 @@ async def test_expiry_cancels_awaiting_supervisor_on_owning_loop(reports, monkey
         await _permission(owner, config)
         await asyncio.wait_for(entered.wait(), 1)
         await _wait(lambda: owner.status().reason == "permission_expired")
+        assert owner.report_fields(owner.runtime_status_request(config)) == {
+            "direct_state": "denied", "direct_reason": "permission_expired",
+        }
         assert "supervisor_stop" in calls and "ingress_stop" in calls
         assert not owner.status().transport_running and rv.endpoint is None
+
+
+@pytest.mark.parametrize('change_endpoint', [False, True])
+async def test_only_heartbeat_issued_after_certificate_refusal_can_restore_grants(reports, change_endpoint):
+    config = _config()
+    entered, release = threading.Event(), threading.Event()
+    class RefuseOnce(FakeCertificateClient):
+        def poll(self, **opts):
+            self.calls.append(opts)
+            if len(self.calls) == 1:
+                entered.set()
+                assert release.wait(3)
+                return CertificateResult('blocked', last_error_code='direct_access_not_allowed')
+            return _ready()
+    class Trial(FakeSupervisor):
+        def __init__(self, *args, relay_policy):
+            assert relay_policy == 'public-trial-v1'
+            super().__init__(*args)
+    async with _owner(config, reports, cert=RefuseOnce(), supervisor_type=Trial) as (owner, _, cert, rv):
+        try:
+            await _permission(owner, config)
+            await _wait(entered.is_set)
+            if change_endpoint:
+                await _permission(owner, config, public_traversal_allowed=True)
+            stale = owner.runtime_status_request(config)
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == 'permission_denied')
+        owner.submit_runtime_status_response(stale, {'direct_access_allowed': True, 'public_traversal_allowed': True})
+        await asyncio.sleep(0)  # deliver the queued, pre-refusal ticket
+        assert not owner._permission_fresh() and not owner._public_traversal_allowed
+        assert rv.endpoint is None and len(cert.calls) == 1
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: rv.endpoint is not None)
+        assert cert.calls[-1]['resume'] and owner._public_traversal_allowed
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+async def test_two_heartbeat_tickets_are_ordered_across_endpoint_generation(reports, reverse):
+    config = _config()
+    async with _owner(config, reports) as (owner, _, _, rv):
+        older = owner.runtime_status_request(config)
+        newer = owner.runtime_status_request(config)
+        replies = [(older, {'direct_access_allowed': True, 'public_traversal_allowed': True}),
+                   (newer, {'direct_access_allowed': False})]
+        for ticket, reply in (reversed(replies) if reverse else replies):
+            owner.submit_runtime_status_response(ticket, reply)
+        await _wait(lambda: owner.status().reason == 'permission_denied')
+        assert owner._last_response_sequence == newer.sequence and not owner._public_traversal_allowed
+        assert owner._generation > older.generation and rv.endpoint is None
+
+
+async def test_sleep_expires_ordinary_and_public_grants_without_event_loop_time_advancing(reports, monkeypatch):
+    clock = [500.0]
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    config = _config()
+    class Trial(FakeSupervisor):
+        def __init__(self, *args, relay_policy):
+            assert relay_policy == 'public-trial-v1'
+            super().__init__(*args)
+    async with _owner(config, reports, supervisor_type=Trial) as (owner, _, cert, rv):
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().state == 'running')
+        assert cert.calls[0]['permission_deadline'] == clock[0] + 900
+        clock[0] += 3600
+        assert not owner._can_commit(owner._generation, owner._ingress)
+        await _wait(lambda: owner.status().reason == 'permission_expired')
+        assert not owner._public_traversal_allowed and rv.endpoint is None
+
+
+@pytest.mark.parametrize('status,code,denied', [(401, 'invalid_device_secret', True),
+    (403, 'instance_credential_mismatch', True), (409, 'instance_inactive', True), (404, 'instance_not_found', True),
+    (503, 'cloud_policy_unavailable', False), (503, 'invalid_device_secret', False), (403, 'backend_http_error', False)])
+async def test_heartbeat_refusal_withdraws_but_outage_does_not_renew(reports, monkeypatch, status, code, denied):
+    config = _config()
+    monkeypatch.setattr(remote_access, 'runtime_status_payload', lambda *args, **kw: {'direct_paths_enabled': True})
+    def refuse(*args, **kw):
+        raise remote_access.BackendRequestError(status, {'error': code, 'detail': 'fixture'})
+    monkeypatch.setattr(remote_access, '_json_request', refuse)
+    async with _owner(config, reports) as (owner, _, _, rv):
+        monkeypatch.setattr(module, 'active_lifecycle', lambda: owner)
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == 'running')
+        receipt = owner._permission_received_at
+        assert not (await asyncio.to_thread(remote_access.report_runtime_status, config))['ok']
+        if denied:
+            await _wait(lambda: owner.status().reason == 'permission_denied')
+            assert rv.endpoint is None
+        else:
+            assert rv.endpoint and owner._permission_received_at == receipt
 
 
 async def test_off_on_drops_old_permission_ticket_even_same_pairing(reports):
@@ -813,7 +1178,7 @@ async def test_old_reload_after_optout_never_applies_context(reports):
 async def test_old_poll_deadline_retries_under_refreshed_grant(reports, monkeypatch, already_running):
     config = _config()
     clock = [100.0]
-    monkeypatch.setattr(module, "time", SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
+    monkeypatch.setattr(module, "suspend_elapsed", lambda: clock[0])
     entered, release = threading.Event(), threading.Event()
     rejected_call = 2 if already_running else 1
 

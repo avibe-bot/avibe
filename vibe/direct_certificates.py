@@ -37,12 +37,16 @@ from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config, config_file_lock
 from vibe import remote_access
+from vibe.connection_settings import suspend_elapsed
 from vibe.direct_ingress import _load_certificate_context, normalize_ingress_hostname
 
 logger = logging.getLogger(__name__)
 _MIN_POLL = 30.0
 _SERVER_POLL_FLOOR = 5.0
 _MAX_BACKOFF = 3600.0
+_OPAQUE_FAILURE_GAP = 6 * 3600.0
+_ORDER_WINDOW = 7 * 86400.0
+_ORDER_LIMIT = 3
 _CURRENT_INTERVAL = 6 * 3600.0
 _MAX_DOCUMENT = 256 * 1024
 _FINGERPRINT = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -121,6 +125,49 @@ class _State:
     active_csr_pem: str | None = None
     conflict_order_id: str | None = None
     cancelled_order_id: str | None = None
+
+
+@dataclass
+class _HostOrders:
+    """Conservative start reservations, separate from replaceable pairing/key state."""
+    starts: list[float]
+    failure_at: float | None
+
+    @classmethod
+    def load(cls, hostname: str) -> _HostOrders:
+        try:
+            data = json.loads(_read_private(cls.path(hostname), 1024))
+        except FileNotFoundError:
+            return cls([], None)
+        record = cls(**data)
+        times = record.starts
+        if (not isinstance(times, list) or len(times) > _ORDER_LIMIT
+                or any(type(t) not in (int, float) or not math.isfinite(t) or t < 0
+                       for t in [*times, *([] if record.failure_at is None else [record.failure_at])])
+                or times != sorted(times)):
+            raise ValueError('invalid certificate retry budget')
+        return record
+
+    @staticmethod
+    def path(hostname: str) -> Path:
+        digest = hashlib.sha256(hostname.encode('ascii')).hexdigest()
+        return paths.get_state_dir() / 'direct-order-budgets' / f'{digest}.json'
+
+    def save(self, hostname: str) -> None:
+        write_atomic(self.path(hostname), json.dumps(asdict(self)))
+
+    def deadline(self) -> float:
+        if self.failure_at is None:
+            return 0.0
+        return max(self.failure_at + _OPAQUE_FAILURE_GAP,
+                   self.starts[-1] + _OPAQUE_FAILURE_GAP if self.starts else 0,
+                   self.starts[0] + _ORDER_WINDOW if len(self.starts) == _ORDER_LIMIT else 0)
+
+    def record_failure(self, hostname: str, now: float) -> None:
+        if not self.starts:  # Existing order from a version without a reservation.
+            self.starts.append(now)
+        self.failure_at = max(now, self.failure_at or 0)
+        self.save(hostname)
 
 
 def _directory() -> Path:
@@ -327,7 +374,10 @@ def _active_usable(state: _State, now: float) -> bool:
 
 def _next_work(state: _State) -> tuple[bool | None, float]:
     """Independent order and current-leaf deadlines, with one shared HTTP lease."""
-    order_due = max(state.next_poll_at, state.order_not_before) if state.status not in _TERMINAL_FAILURE | _ISSUED else math.inf
+    # Cleanup is not a settled order. Advance the same id until the backend
+    # reports settlement; do not replace an order that can still own a TXT record.
+    order_live = state.status == 'failed_cleanup_pending' or state.status not in _TERMINAL_FAILURE | _ISSUED
+    order_due = max(state.next_poll_at, state.order_not_before) if order_live else math.inf
     current_due = max(state.next_current_at, state.current_not_before) if state.active_fingerprint or state.status in _ISSUED else math.inf
     if math.isinf(min(order_due, current_due)):
         return None, max(state.next_poll_at, state.order_not_before, state.request_not_before)
@@ -395,7 +445,7 @@ def _caller_authorization_error(
     if permission_deadline is not None and (
         type(permission_deadline) not in (int, float)
         or not math.isfinite(permission_deadline)
-        or time.monotonic() >= permission_deadline
+        or suspend_elapsed() >= permission_deadline
     ):
         return CertificateResult("disabled", last_error_code="permission_expired")
     return None
@@ -496,7 +546,14 @@ class DirectCertificateClient:
                 # Fresh permission clears only the denial latch. It cannot
                 # bypass either endpoint's deadline or an outstanding backoff.
                 command = True
-            if retry and state.status in _TERMINAL_FAILURE:
+            if retry and state.status == 'failed' and state.last_error_code == 'order_failed':
+                # Upgrade from an already-settled legacy order. Arm the budget
+                # once, not on every read of the same failure.
+                budget = _HostOrders.load(state.hostname)
+                if budget.failure_at is None:
+                    budget.record_failure(state.hostname, now)
+                state.order_not_before = max(state.order_not_before, budget.deadline())
+            if retry and state.status in _TERMINAL_FAILURE - {'failed_cleanup_pending'}:
                 state.status, state.order_id = "new", None
                 command = True
             if rotate_key and state.active_fingerprint == state.public_key_fingerprint and state.status in _ISSUED:
@@ -519,6 +576,13 @@ class DirectCertificateClient:
             elif state.order_id:
                 method, suffix, payload = "POST", f"certificates/orders/{quote(state.order_id, safe='')}/advance", None
             else:
+                # A known budget wait is not an HTTP attempt. Don't increment
+                # failures or push its request lease past the effective deadline.
+                deadline = _HostOrders.load(state.hostname).deadline()
+                if now < deadline:
+                    state.order_not_before = max(state.order_not_before, deadline)
+                    _save(state)
+                    return _result(state, now)
                 method, suffix = "POST", "certificates/orders"
                 payload = {"csr_pem": state.csr_pem, "purpose": state.purpose}
             # Persist intent and a bounded lease before HTTP: lost replies and
@@ -541,6 +605,21 @@ class DirectCertificateClient:
             refusal = _caller_authorization_error(V2Config.load(), expected_pairing_fingerprint, permission_deadline)
             if refusal is not None:
                 return refusal
+            if suffix == 'certificates/orders':
+                # Charge only fresh starts, at final HTTP admission. A lost
+                # response consumes its slot; a concurrent or obsolete worker
+                # cannot clear a reservation by restoring its older state.
+                live = _load()
+                if live is None or live.request_id != request_id:
+                    return CertificateResult('superseded')
+                admitted_at = time.time()
+                budget = _HostOrders.load(live.hostname)
+                if admitted_at < budget.deadline():
+                    live.order_not_before = max(live.order_not_before, budget.deadline())
+                    _save(live)
+                    return _result(live, admitted_at)
+                budget.starts = sorted([*budget.starts, admitted_at])[-_ORDER_LIMIT:]
+                budget.save(live.hostname)
 
         response, error, http_status = None, None, 0
         try:
@@ -555,15 +634,25 @@ class DirectCertificateClient:
         now = time.time()
         with config_file_lock():
             live_config = V2Config.load()
-            refusal = _caller_authorization_error(live_config, expected_pairing_fingerprint, permission_deadline)
-            if refusal is not None:
-                return refusal
             if _binding(live_config) != binding:
                 # Pairing's hook retires the old generation. Never remove a new
                 # pairing's files or recreate an unpaired directory on late HTTP.
-                return CertificateResult("pairing_changed")
+                return CertificateResult("pairing_changed", last_error_code="pairing_changed")
+            # Expiry limits what an HTTP reply may authorize; it cannot erase
+            # an explicit refusal for the still-matching binding. Neither of
+            # these negative paths can install or return a usable certificate.
+            denied = ((http_status == 403 and isinstance(error, dict) and error.get('error') == 'direct_access_not_allowed')
+                      or (fetch_current and error is None and isinstance(response, dict)
+                          and response.get('direct_access_allowed') is False))
+            refusal = _caller_authorization_error(live_config, expected_pairing_fingerprint,
+                                                  None if denied else permission_deadline)
+            if refusal is not None:
+                return refusal
             current = _load()
             if current is None or current.request_id != request_id:
+                # Convey a binding-level refusal without modifying another worker's state.
+                if denied:
+                    return CertificateResult('blocked', last_error_code='direct_access_not_allowed')
                 return CertificateResult("superseded")
             state = current
             # Rebase fallback backoff after a long sleep/slow request, too.
@@ -713,6 +802,24 @@ class DirectCertificateClient:
             state.next_poll_at = next_poll
             if changed or state.status in _ISSUED:
                 state.next_current_at = _current_deadline(state, now)
+            if status == 'failed_cleanup_pending':
+                # Preserve the backed-off request lease across repeated cleanup
+                # replies (and process restart), even if next_poll_at is stale.
+                state.next_poll_at = max(state.next_poll_at, state.request_not_before)
+                state.last_error_code = 'order_failed'
+                return changed
+        if not current and status == 'failed':
+            budget = _HostOrders.load(state.hostname)
+            budget.record_failure(state.hostname, now)
+            state.order_not_before = max(state.order_not_before, budget.deadline())
+        elif changed and pem is not None:
+            # Recovery succeeded. Ordinary renewal/rotation isn't a failed-order
+            # retry. Retain the recent reservations for any subsequent failure.
+            budget = _HostOrders.load(state.hostname)
+            if budget.failure_at is not None:
+                budget.failure_at = None
+                budget.save(state.hostname)
         state.failures, state.request_not_before = 0, 0.0
-        state.last_error_code = "order_failed" if state.status in _TERMINAL_FAILURE else None
+        if not current or state.status not in _TERMINAL_FAILURE:
+            state.last_error_code = "order_failed" if state.status in _TERMINAL_FAILURE else None
         return changed

@@ -143,7 +143,8 @@ def setup(monkeypatch):
     cloud.backend_url = "https://control.invalid"
     config.save()
     clock = SimpleNamespace(now=float(int(time.time())), monotonic=time.monotonic())
-    monkeypatch.setattr(certificates, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.monotonic))
+    monkeypatch.setattr(certificates, 'suspend_elapsed', lambda: clock.monotonic)
+    monkeypatch.setattr(certificates, "time", SimpleNamespace(time=lambda: clock.now))
     backend = Backend(clock)
     monkeypatch.setattr(remote_access, "_device_json_request", backend)
     return SimpleNamespace(client=DirectCertificateClient(), clock=clock, backend=backend, config=config)
@@ -313,6 +314,68 @@ def test_response_after_authorization_withdrawal_is_not_published(setup, change)
     assert result.certificate_file is None and result.key_file is None
     current = json.loads((paths.get_state_dir() / "direct/state.json").read_text())
     assert current["active_certificate"] == previous["active_certificate"]
+
+
+@pytest.mark.parametrize('refusal', ['403', 'current_false'])
+async def test_late_certificate_refusal_fences_pre_refusal_heartbeat(setup, monkeypatch, refusal):
+    import asyncio
+    from vibe import direct_lifecycle as lifecycle
+    from tests.test_direct_lifecycle import FakeSupervisor, _owner, _permission, _wait
+
+    env = setup
+    installed(env)
+    entered, release = threading.Event(), threading.Event()
+    def refuse(config, method, suffix, payload):
+        assert (method, suffix) == ('GET', 'certificates/current')
+        entered.set()
+        assert release.wait(3)
+        if refusal == '403':
+            raise remote_access.BackendRequestError(403, {'error': 'direct_access_not_allowed'})
+        return {'direct_access_allowed': False}
+    class Trial(FakeSupervisor):
+        def __init__(self, *args, relay_policy):
+            assert relay_policy == 'public-trial-v1'
+            super().__init__(*args)
+    env.backend.error = refuse
+    monkeypatch.setattr(lifecycle, 'time', SimpleNamespace(time=lambda: env.clock.now))
+    monkeypatch.setattr(lifecycle, 'suspend_elapsed', lambda: env.clock.monotonic)
+    monkeypatch.setattr(remote_access, '_report_runtime_status_async', lambda *a, **kw: None)
+    async with _owner(env.config, [], cert=env.client, supervisor_type=Trial) as (owner, _, _, rv):
+        try:
+            await _permission(owner, env.config, public_traversal_allowed=True)
+            await _wait(lambda: rv.endpoint is not None)
+            env.clock.now = owner._poll_at
+            owner._wake.set()
+            await _wait(entered.is_set)
+            env.clock.monotonic += 899
+            await _permission(owner, env.config, public_traversal_allowed=True)
+            stale = owner.runtime_status_request(env.config)
+            env.clock.monotonic += 2  # original worker deadline passed; renewed grant is live
+            assert owner._permission_fresh()
+        finally:
+            release.set()
+        await _wait(lambda: owner.status().reason == 'permission_denied' and rv.endpoint is None)
+        owner.submit_runtime_status_response(stale, {'direct_access_allowed': True, 'public_traversal_allowed': True})
+        await asyncio.sleep(0)
+        assert not owner._permission_fresh() and not owner._public_traversal_allowed
+        assert certificates._load().blocked
+        env.backend.error = None
+        await _permission(owner, env.config, public_traversal_allowed=True)
+        await _wait(lambda: rv.endpoint is not None)
+
+
+@pytest.mark.parametrize('change,expected', [('pairing', 'pairing_changed'), ('off', 'direct_paths_disabled')])
+def test_late_403_does_not_latch_against_replaced_pairing_or_local_off(setup, change, expected):
+    env = setup
+    grant = _caller_grant(env)
+    def refuse(config, method, suffix, payload):
+        _withdraw_grant(env, change)
+        env.clock.monotonic += 901
+        raise remote_access.BackendRequestError(403, {'error': 'direct_access_not_allowed'})
+    env.backend.error = refuse
+    result = env.client.poll(**grant)
+    assert result.last_error_code == expected and not result.ready
+    assert not certificates._load().blocked
 
 
 def test_backend_shared_spki_fingerprint_vector():
@@ -701,6 +764,117 @@ def test_conflict_with_still_owned_active_key_abandons_pending_rotation_safely(s
     result = due(env, result)
     assert result.ready and result.key_file == old.key_file
     assert not any(suffix.endswith("/cancel") for _, suffix, _ in env.backend.calls)
+
+
+async def test_failed_order_body_cleans_up_then_retries_same_key_under_live_permission(setup, monkeypatch):
+    """#425 orderBody carries a status/deadline, not the provider's failure code."""
+    import asyncio
+    from vibe import direct_lifecycle as lifecycle
+    from tests.test_direct_lifecycle import _owner, _permission, _wait
+
+    env = setup
+    monkeypatch.setattr(lifecycle, 'time', SimpleNamespace(time=lambda: env.clock.now))
+    monkeypatch.setattr(lifecycle, 'suspend_elapsed', lambda: env.clock.monotonic)
+    monkeypatch.setattr(remote_access, '_report_runtime_status_async', lambda *a, **kw: None)
+    polls = []
+    poll = env.client.poll
+    def counted(**kwargs):
+        polls.append(kwargs)
+        return poll(**kwargs)
+    monkeypatch.setattr(env.client, 'poll', counted)
+    async with _owner(env.config, [], cert=env.client) as (owner, _, _, rv):
+        await _permission(owner, env.config)
+        await _wait(lambda: owner._certificate_result and owner._certificate_result.status == 'queued')
+        fp, = env.backend.orders
+        past = datetime.fromtimestamp(env.clock.now - 60, timezone.utc).isoformat()
+        env.backend.advance_response = dict(status='failed_cleanup_pending', certificate_pem=None,
+                                            public_key_fingerprint=fp, next_poll_at=past)
+        async def advance(status):
+            env.clock.now = owner._poll_at
+            owner._wake.set()
+            count = len(polls)
+            await _wait(lambda: len(polls) > count and owner._poll_task is None and owner._certificate_result.status == status)
+        await advance('failed_cleanup_pending')
+        assert owner._poll_at >= env.clock.now + 60 and rv.endpoint is None
+        await advance('failed_cleanup_pending')
+        assert owner._poll_at >= env.clock.now + 120
+        env.backend.advance_response['status'] = 'failed'
+        await advance('failed')
+        assert owner._certificate_result.last_error_code == 'order_failed'
+        assert owner._poll_at >= env.clock.now + 6 * 3600
+        count = len(polls)
+        await asyncio.sleep(2 * lifecycle.TICK_SECONDS)
+        assert len(polls) == count and env.config.remote_access.vibe_cloud.enabled
+        env.backend.advance_response = None
+        await advance('queued')
+        assert polls[-1]['retry']
+        await advance('issued')
+        await _wait(lambda: rv.endpoint is not None)
+        routes = [suffix for _, suffix, _ in env.backend.calls]
+        assert routes == ['certificates/orders', *['certificates/orders/certord_1/advance'] * 3,
+                          'certificates/orders', 'certificates/orders/certord_1/advance']
+        assert list(env.backend.orders) == [fp]
+
+
+def test_permanent_opaque_failure_budget_survives_restart_and_repair_with_same_hostname(setup):
+    env = setup
+    gap, week = 6 * 3600, 7 * 86400
+    first_start = env.clock.now
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed', certificate_pem=None, public_key_fingerprint=fp)
+    starts = [first_start]
+    for attempt in range(3):
+        failed = due(env, queued)
+        assert failed.status == 'failed' and failed.last_error_code == 'order_failed' and not failed.ready
+        earliest = max(env.clock.now + gap, starts[-1] + gap, starts[-3] + week if len(starts) >= 3 else 0)
+        assert failed.next_poll_at == earliest
+        env.client = DirectCertificateClient()
+        env.clock.now = earliest - 1
+        count = len(env.backend.calls)
+        env.client.poll(allowed=True, retry=True)
+        assert len(env.backend.calls) == count
+        if attempt == 2:
+            # Discard all keys/order state and replace the pairing on the same name.
+            discard_direct_certificates()
+            env.config.remote_access.vibe_cloud.instance_secret = 'replacement-fixture'
+            env.config.save()
+            assert env.client.poll(allowed=True).next_poll_at == earliest
+            assert len(env.backend.calls) == count
+        env.clock.now = earliest
+        queued = env.client.poll(allowed=True)
+        assert queued.status == 'queued' and env.backend.calls[-1][1] == 'certificates/orders'
+        starts.append(env.clock.now)
+    assert starts[3] == first_start + week
+    assert all(sum(t - week < s <= t for s in starts) <= 3 for t in starts)
+
+
+def test_lost_retry_response_spends_its_hostname_slot_before_http(setup):
+    env = setup
+    queued = env.client.poll(allowed=True)
+    fp, = env.backend.orders
+    env.backend.advance_response = dict(status='failed', certificate_pem=None, public_key_fingerprint=fp)
+    failure = due(env, queued)
+    env.clock.now = failure.next_poll_at
+    env.backend.lose_start = True
+    env.client.poll(allowed=True, retry=True)
+    lost_at = env.clock.now
+    assert len(env.backend.calls) == 3
+    env.client = DirectCertificateClient()
+    env.clock.now += 3600
+    waiting = env.client.poll(allowed=True)
+    assert len(env.backend.calls) == 3 and waiting.next_poll_at >= lost_at + 6 * 3600
+    assert due(env, waiting).status == 'queued' and len(env.backend.calls) == 4
+
+
+def test_unreadable_budget_refuses_fresh_order_but_not_other_hostnames(setup):
+    env = setup
+    path = certificates._HostOrders.path(HOST)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_atomic(path, 'broken')
+    assert env.client.poll(allowed=True).status == 'unavailable'
+    assert not env.backend.calls
+    assert certificates._HostOrders.load('different-app.avibe.bot').deadline() == 0
 
 
 def test_terminal_failure_requires_explicit_retry_and_preserves_retry_deadline(setup):

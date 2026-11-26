@@ -3913,11 +3913,28 @@ class VibeCloudRemoteAccessConfig:
     edge_ip_version: str = "4"
     edge_bind_address: str = ""
     dev_login_hint: str = ""
-    # Optional direct iOS path. Additive and intentionally off by default;
-    # this is configuration/CLI state until the later settings-page change.
-    direct: bool = False
-    # Operator-local consent; generic Web saves cannot change this field.
+    # Ordinary direct still requires fresh authenticated instance permission.
+    direct: bool = True
     public_relay_trial: bool = False
+    direct_choice: str = "default"
+    public_relay_choice: str = "default"
+
+    def set_path_choice(self, key: str, enabled: bool) -> bool:
+        """Record explicit intent even when it matches the default; return whether it changed."""
+        marker = {"direct": "direct_choice", "public_relay_trial": "public_relay_choice"}[key]
+        choice = "on" if enabled else "off"
+        changed = getattr(self, key) != enabled or getattr(self, marker) != choice
+        setattr(self, key, enabled)
+        setattr(self, marker, choice)
+        return changed
+
+    def persisted_fields(self) -> dict:
+        data = self.__dict__.copy()
+        for key, marker, default in (("direct", "direct_choice", True), ("public_relay_trial", "public_relay_choice", False)):
+            enabled = data[key]
+            if enabled != default or data[marker] != "default":
+                data[marker] = "on" if enabled else "off"
+        return data
 
     def __post_init__(self) -> None:
         """Refuse a value that is not the kind this class declares.
@@ -3949,6 +3966,9 @@ class VibeCloudRemoteAccessConfig:
         if self.instance_kind not in ("personal", "organization"):
             self.instance_kind = ""
         _refuse_values_naming_nothing("remote_access.vibe_cloud", self)
+        for key in ("direct_choice", "public_relay_choice"):
+            if getattr(self, key) not in {"default", "on", "off"}:
+                raise ValueError(f"Config 'remote_access.vibe_cloud.{key}' must be default, on or off")
 
     def runtime_credentials(self) -> tuple[str, str, str] | None:
         """Return ``(backend_url, instance_id, instance_secret)``, or ``None``.
@@ -4291,6 +4311,18 @@ class V2Config:
     @classmethod
     def _recover_payload(cls, candidate: dict) -> "V2Config":
         """Parse stored data with recovery defaults, without file IO or locks."""
+        # Released snapshots included the default false even after unrelated
+        # saves. Apply this migration only to disk, not to deliberate API input.
+        remote = candidate.get("remote_access")
+        cloud = remote.get("vibe_cloud") if isinstance(remote, dict) else None
+        if isinstance(cloud, dict):
+            for key, marker, default in (("direct", "direct_choice", True), ("public_relay_trial", "public_relay_choice", False)):
+                if marker not in cloud and cloud.get(key) is False:
+                    cloud[key] = default
+                elif marker not in cloud and cloud.get(key) is True:
+                    cloud[marker] = "on"
+                elif cloud.get(marker) in ("default", "on", "off"):
+                    cloud[key] = default if cloud[marker] == "default" else cloud[marker] == "on"
         recovery_warnings: list[str] = []
         recovered_sections: set[str] = set()
         rewritten: dict[tuple[str, ...], set[str]] = {}
@@ -4796,7 +4828,7 @@ class V2Config:
             "ui": self.ui.__dict__,
             "remote_access": {
                 "provider": self.remote_access.provider,
-                "vibe_cloud": self.remote_access.vibe_cloud.__dict__,
+                "vibe_cloud": self.remote_access.vibe_cloud.persisted_fields(),
             },
             "audio_asr": self.audio_asr.__dict__,
             "update": self.update.__dict__,

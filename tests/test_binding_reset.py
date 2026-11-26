@@ -47,7 +47,9 @@ def test_restart_after_effect_before_phase_write(reset_host, phase, monkeypatch)
     assert remote.pair('key_B', 'https://backend.test')['error'] == 'operation_in_progress'
     assert reset.resume() == {'state': 'unpaired'}
     cloud = V2Config.load().remote_access.vibe_cloud
-    assert not any((cloud.enabled, cloud.instance_secret, cloud.instance_id, cloud.session_secret, cloud.direct))
+    assert not any((cloud.enabled, cloud.instance_secret, cloud.instance_id, cloud.session_secret))
+    assert cloud.runtime_credentials() is None
+    assert cloud.direct and cloud.direct_choice == 'default'  # preference is not authority
     assert not gate.reset_in_progress() and local._installation_id() is None
     assert workspace.read_text() == 'keep' and len(calls) == 1
 

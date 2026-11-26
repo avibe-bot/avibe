@@ -10,7 +10,9 @@ import hmac
 import ipaddress
 import json
 import logging
+import re
 import secrets
+import stat
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -98,27 +100,51 @@ def enroll_from_host(config: V2Config) -> None:
 def adopt_host_enrollment() -> None:
     """First-start adoption only. A tombstone prevents guessing eligibility after re-pair."""
     with config_file_lock():
-        if not _relay_enrollment_path().exists():
-            config = V2Config.load()
+        config = V2Config.load()
+        if relay_enrollment_status(config) == 'absent':
             cloud = config.remote_access.vibe_cloud
             _record_enrollment(relay_pairing(config) if cloud.public_relay_trial is True else None)
 
 
-def relay_enrolled(config: V2Config) -> bool:
+def relay_enrollment_status(config: V2Config) -> str:
+    """Only absence and a valid nonmatching record prove there is no legacy opt-out."""
+    path = _relay_enrollment_path()
     try:
-        marker = json.loads(_relay_enrollment_path().read_text(encoding="utf-8"))
-        pairing = relay_pairing(config)
-        return (pairing is not None and isinstance(marker, dict) and marker.get("version") == 1
-                and marker.get("binding") == pairing)
-    except (OSError, UnicodeError, ValueError):
-        return False
+        info = path.lstat()
+    except FileNotFoundError:
+        return 'absent'
+    except OSError:
+        return 'unknown'
+    try:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
+            return 'unknown'
+        pairs = json.loads(path.read_text(encoding='utf-8'), object_pairs_hook=tuple)
+        if not isinstance(pairs, tuple) or len(pairs) != 2:
+            return 'unknown'
+        marker = dict(pairs)
+        if (set(marker) != {'version', 'binding'}
+                or type(marker['version']) is not int or marker['version'] != 1):
+            return 'unknown'
+        bound = marker['binding']
+        if bound is None:
+            return 'nonmatch'  # the host's explicit first-start tombstone
+        if not isinstance(bound, str) or not re.fullmatch(r'[0-9a-f]{64}', bound):
+            return 'unknown'
+        return 'match' if bound == relay_pairing(config) else 'nonmatch'
+    except (OSError, UnicodeError, ValueError, RecursionError):
+        return 'unknown'
+
+
+def relay_enrolled(config: V2Config) -> bool:
+    return relay_enrollment_status(config) == 'match'
 
 
 def value(config: V2Config, key: str) -> str | bool:
     return getattr(config.remote_access.vibe_cloud, FIELDS[key])
 
 
-def _clock() -> float:
+def suspend_elapsed() -> float:
+    """Elapsed seconds including system suspend on the supported desktop platforms."""
     import sys
     if sys.platform.startswith("linux"):
         return time.clock_gettime(time.CLOCK_BOOTTIME)
@@ -137,7 +163,7 @@ def now() -> str:
 
 
 class PinFailureWindow:
-    def __init__(self, clock: Callable[[], float] = _clock):
+    def __init__(self, clock: Callable[[], float] = suspend_elapsed):
         self.clock = clock
         self.identity: tuple | None = None
         self.seconds = self.last_down = 0.0
@@ -174,7 +200,7 @@ def _valid_pin_route(route) -> bool:
 
 
 class Journal:
-    def __init__(self, clock: Callable[[], float] = _clock):
+    def __init__(self, clock: Callable[[], float] = suspend_elapsed):
         self.clock = clock
         self.boot = secrets.token_hex(16)
         self.warned_unavailable = False

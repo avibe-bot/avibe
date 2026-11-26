@@ -1269,9 +1269,16 @@ def save_config(
         # This settings writer does not change relay consent. Ordinary host file
         # and shell access can still modify local config, including via Web Terminal.
         # Compare against the locked base, not a prior read or the request's role.
-        if generic_remote_access and config.remote_access.vibe_cloud.direct != bool(
-            base_config and base_config.remote_access.vibe_cloud.direct
-        ):
+        # Choice provenance belongs to the setting writers, not the generic API.
+        # Preserve it across a full-form save, including a future explicit off.
+        cloud = config.remote_access.vibe_cloud
+        previous_cloud = base_config.remote_access.vibe_cloud if base_config is not None else type(cloud)()
+        for key, marker in (("direct", "direct_choice"), ("public_relay_trial", "public_relay_choice")):
+            if getattr(cloud, key) == getattr(previous_cloud, key):
+                setattr(cloud, marker, getattr(previous_cloud, marker))
+            else:
+                cloud.set_path_choice(key, getattr(cloud, key))
+        if generic_remote_access and cloud.direct != previous_cloud.direct:
             raise ValueError("Direct consent must be changed through connection settings")
         if config.remote_access.vibe_cloud.public_relay_trial != bool(
             base_config and base_config.remote_access.vibe_cloud.public_relay_trial
@@ -1395,6 +1402,8 @@ def _vibe_cloud_payload(config: V2Config, include_secrets: bool) -> dict:
     """Project remote-access pairing state while redacting credentials."""
     vibe_cloud = config.remote_access.vibe_cloud
     payload = vibe_cloud.__dict__.copy()
+    payload.pop("direct_choice", None)
+    payload.pop("public_relay_choice", None)
     payload["paired"] = vibe_cloud.is_runtime_paired()
     if not include_secrets:
         for key in ("tunnel_token", "instance_secret", "session_secret"):

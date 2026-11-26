@@ -16933,7 +16933,7 @@ def cmd_remote_direct(args):
                 except ConnectionError as exc:
                     print(exc.code, file=sys.stderr)
                     return 1
-            config = update_config_fields(lambda config: setattr(config.remote_access.vibe_cloud, "public_relay_trial", enabled))
+            config = update_config_fields(lambda config: config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", enabled))
             connection_journal.legacy_supersede(config, {"public_relay_trial"})
         print(f"Public relay trial setting: {args.trial_state}. Direct-path permission and installation are unchanged.")
         return 0
@@ -16952,7 +16952,7 @@ def cmd_remote_direct(args):
         enabled = action == "on"
 
         def apply(config) -> None:
-            config.remote_access.vibe_cloud.direct = enabled
+            config.remote_access.vibe_cloud.set_path_choice("direct", enabled)
 
         from vibe.authorization import current_invocation_authority
         from vibe.connection_settings import ConnectionError, journal as connection_journal
