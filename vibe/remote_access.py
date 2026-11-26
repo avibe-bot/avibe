@@ -1888,11 +1888,21 @@ def report_runtime_status(config: V2Config | None = None, event: str = "heartbea
         except Exception:
             direct_lifecycle = None
             runtime_status_ticket = None
-        result = _json_request(
-            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
-            payload,
-            timeout=5.0,
-        )
+        try:
+            result = _json_request(
+                f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{request_instance_id}/runtime-status",
+                payload,
+                timeout=5.0,
+            )
+        except BackendRequestError as exc:
+            # Only the credential verifier's exact status/code pairs are decisions.
+            # A timeout, proxy refusal or policy outage neither renews nor revokes.
+            definitive = {401: 'invalid_device_secret', 403: 'instance_credential_mismatch',
+                          404: 'instance_not_found', 409: 'instance_inactive'}
+            if (runtime_status_ticket is not None and exc.status in definitive
+                    and exc.payload.get('error') == definitive[exc.status]):
+                direct_lifecycle.accept_runtime_status_response(runtime_status_ticket, {'direct_access_allowed': False})
+            raise
         _clear_availability_cooldown(source="runtime_status")
         try:
             if direct_lifecycle is not None:

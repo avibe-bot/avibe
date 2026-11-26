@@ -37,6 +37,7 @@ from config import paths
 from config.atomic_io import write_atomic
 from config.v2_config import V2Config, config_file_lock
 from vibe import remote_access
+from vibe.connection_settings import suspend_elapsed
 from vibe.direct_ingress import _load_certificate_context, normalize_ingress_hostname
 
 logger = logging.getLogger(__name__)
@@ -327,7 +328,10 @@ def _active_usable(state: _State, now: float) -> bool:
 
 def _next_work(state: _State) -> tuple[bool | None, float]:
     """Independent order and current-leaf deadlines, with one shared HTTP lease."""
-    order_due = max(state.next_poll_at, state.order_not_before) if state.status not in _TERMINAL_FAILURE | _ISSUED else math.inf
+    # Cleanup is not a settled order. Advance the same id until the backend
+    # reports settlement; do not replace an order that can still own a TXT record.
+    order_live = state.status == 'failed_cleanup_pending' or state.status not in _TERMINAL_FAILURE | _ISSUED
+    order_due = max(state.next_poll_at, state.order_not_before) if order_live else math.inf
     current_due = max(state.next_current_at, state.current_not_before) if state.active_fingerprint or state.status in _ISSUED else math.inf
     if math.isinf(min(order_due, current_due)):
         return None, max(state.next_poll_at, state.order_not_before, state.request_not_before)
@@ -395,7 +399,7 @@ def _caller_authorization_error(
     if permission_deadline is not None and (
         type(permission_deadline) not in (int, float)
         or not math.isfinite(permission_deadline)
-        or time.monotonic() >= permission_deadline
+        or suspend_elapsed() >= permission_deadline
     ):
         return CertificateResult("disabled", last_error_code="permission_expired")
     return None
@@ -496,7 +500,7 @@ class DirectCertificateClient:
                 # Fresh permission clears only the denial latch. It cannot
                 # bypass either endpoint's deadline or an outstanding backoff.
                 command = True
-            if retry and state.status in _TERMINAL_FAILURE:
+            if retry and state.status in _TERMINAL_FAILURE - {'failed_cleanup_pending'}:
                 state.status, state.order_id = "new", None
                 command = True
             if rotate_key and state.active_fingerprint == state.public_key_fingerprint and state.status in _ISSUED:
@@ -713,6 +717,13 @@ class DirectCertificateClient:
             state.next_poll_at = next_poll
             if changed or state.status in _ISSUED:
                 state.next_current_at = _current_deadline(state, now)
+            if status == 'failed_cleanup_pending':
+                # Preserve the backed-off request lease across repeated cleanup
+                # replies (and process restart), even if next_poll_at is stale.
+                state.next_poll_at = max(state.next_poll_at, state.request_not_before)
+                state.last_error_code = 'order_failed'
+                return changed
         state.failures, state.request_not_before = 0, 0.0
-        state.last_error_code = "order_failed" if state.status in _TERMINAL_FAILURE else None
+        if not current or state.status not in _TERMINAL_FAILURE:
+            state.last_error_code = "order_failed" if state.status in _TERMINAL_FAILURE else None
         return changed

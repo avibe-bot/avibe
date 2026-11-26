@@ -24,6 +24,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 from config.v2_config import V2Config
+from vibe.connection_settings import relay_enrollment_status, suspend_elapsed
 from vibe.direct_certificates import CertificateResult, DirectCertificateClient
 from vibe.direct_rendezvous import DirectRendezvous, rendezvous as default_rendezvous
 
@@ -72,6 +73,7 @@ class PermissionRequest:
     generation: int
     signature: tuple[Any, ...]
     sequence: int
+    binding_epoch: object
 
 
 def _report_fields(state: str, reason: str, certificate_error: str | None) -> dict[str, str]:
@@ -114,14 +116,15 @@ def _effective_relay(config: V2Config) -> bool:
     cloud = config.remote_access.vibe_cloud
     if cloud.public_relay_choice == "off":
         return False
+    enrollment = relay_enrollment_status(config)
+    if enrollment == 'unknown':
+        return False
     if cloud.public_relay_trial or cloud.public_relay_choice == "on":
         return True
     # No recorded choice and the setting off. Before choices were recorded,
     # off was the untouched default everywhere except on a pairing the host
     # had enrolled: there it was once on, and someone turned it off.
-    from vibe.connection_settings import relay_enrolled
-
-    return not relay_enrolled(config)
+    return enrollment in {'absent', 'nonmatch'}
 
 
 def _decline_relay(private_copy: V2Config) -> None:
@@ -130,13 +133,24 @@ def _decline_relay(private_copy: V2Config) -> None:
 
 
 def resolve_direct_transport_binary(config: V2Config) -> Path | None:
+    """Offline status: inspect the pin required by the observed local preference."""
+    return _verified_binary(config, _effective_relay(config))
+
+
+def _resolve_selected_binary(config: V2Config) -> Path | None:
+    # Runner supplied a private copy with this generation's policy. A second
+    # marker read here could silently weaken a required public-compatible pin.
+    return _verified_binary(config, config.remote_access.vibe_cloud.public_relay_trial)
+
+
+def _verified_binary(config: V2Config, require_public: bool) -> Path | None:
     """Worker-only: inspect the exact packaged pin; never install or run it."""
     if not config.remote_access.vibe_cloud.direct or not _is_paired(config) or managed_direct_hostname(config) is None:
         return None
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
     manager = DirectTransportRuntimeManager()
-    if _effective_relay(config):
+    if require_public:
         return manager.resolve_binary(require_public_trial=True)
     return manager.resolve_binary()
 
@@ -230,7 +244,7 @@ class DirectAccessLifecycle:
     ) -> None:
         self._app = app
         self._certificate_client = certificate_client or DirectCertificateClient()
-        self._binary_resolver = binary_resolver or resolve_direct_transport_binary
+        self._binary_resolver = binary_resolver or _resolve_selected_binary
         self._ingress_factory = ingress_factory or _default_ingress_factory
         self._supervisor_factory = supervisor_factory or _default_supervisor_factory
         self._rendezvous = rendezvous or default_rendezvous
@@ -267,6 +281,7 @@ class DirectAccessLifecycle:
         self._permission_reason = "permission_required"
         self._public_traversal_allowed = False
         self._resume_required = False
+        self._binding_epoch = object()
         self._request_sequence = 0
         self._last_response_sequence = 0
         self._certificate_result: CertificateResult | None = None
@@ -300,6 +315,8 @@ class DirectAccessLifecycle:
         if self._runner is None:
             return
         self._shutdown = True
+        with self._state_lock:
+            self._binding_epoch = object()
         self._invalidate()
         await self._runner
         self._runner = None
@@ -354,6 +371,7 @@ class DirectAccessLifecycle:
             self._install_at = 0.0
             self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
         with self._state_lock:
+            self._binding_epoch = object()
             self._config = config
             self._signature = signature
         self._pairing_suspended = False
@@ -376,20 +394,20 @@ class DirectAccessLifecycle:
     def runtime_status_request(self, config: V2Config) -> PermissionRequest | None:
         signature = _config_signature(config)
         with self._state_lock:
-            if self._shutdown or signature != self._signature or not signature[0]:
+            if self._shutdown or self._pairing_suspended or signature != self._signature or not signature[0]:
                 return None
             self._request_sequence += 1
-            return PermissionRequest(self._generation, signature, self._request_sequence)
+            return PermissionRequest(self._generation, signature, self._request_sequence, self._binding_epoch)
 
     def submit_runtime_status_response(
         self, ticket: PermissionRequest | None, result: dict[str, Any],
     ) -> None:
         """Accept only the ticket captured before sending an opted-in report."""
         if isinstance(ticket, PermissionRequest):
-            self._submit(self._observe_permission, ticket, dict(result), time.monotonic())
+            self._submit(self._observe_permission, ticket, dict(result), suspend_elapsed())
 
     def _observe_permission(self, ticket: PermissionRequest, result: dict[str, Any], received: float) -> None:
-        if (ticket.generation != self._generation or ticket.signature != self._signature
+        if (ticket.binding_epoch is not self._binding_epoch or ticket.signature != self._signature
                 or ticket.sequence <= self._last_response_sequence or self._pairing_suspended):
             return
         self._last_response_sequence = ticket.sequence
@@ -397,6 +415,8 @@ class DirectAccessLifecycle:
         if not allowed:
             self._deny("permission_denied")
         else:
+            if not self._permission_fresh():
+                self._next_binary_check = 0.0  # a missing pin may now be installed
             traversal = result.get("public_traversal_allowed") is True and bool(ticket.signature[-1])
             if traversal != self._public_traversal_allowed:
                 self._clear_binary()
@@ -411,7 +431,7 @@ class DirectAccessLifecycle:
             self._permission_reason = "permission_allowed"
             if self._permission_timer is not None:
                 self._permission_timer.cancel()
-            remaining = max(0.0, received + PERMISSION_MAX_AGE_SECONDS - time.monotonic())
+            remaining = max(0.0, received + PERMISSION_MAX_AGE_SECONDS - suspend_elapsed())
             self._permission_timer = asyncio.get_running_loop().call_later(
                 remaining, self._expire_permission,
             )
@@ -432,7 +452,7 @@ class DirectAccessLifecycle:
 
     def _permission_fresh(self) -> bool:
         return (self._permission_allowed is True and self._permission_received_at is not None
-                and 0 <= time.monotonic() - self._permission_received_at < PERMISSION_MAX_AGE_SECONDS)
+                and 0 <= suspend_elapsed() - self._permission_received_at < PERMISSION_MAX_AGE_SECONDS)
 
     async def prepare_pairing_change(self) -> str:
         """Fence starts, then let the one resource owner stop before key discard.
@@ -440,7 +460,9 @@ class DirectAccessLifecycle:
         Does not load config or await a certificate worker: the writer already
         holds the config lock. A failed config commit deliberately stays closed.
         """
-        self._pairing_suspended = True
+        with self._state_lock:
+            self._pairing_suspended = True
+            self._binding_epoch = object()
         # Random, not a counter: a token kept across a UI restart must match nothing.
         token = self._suspension_token = secrets.token_hex(16)
         self._deny("pairing_changed")
@@ -515,7 +537,7 @@ class DirectAccessLifecycle:
                     self._config_read_task = None
             await asyncio.sleep(CONFIG_POLL_INTERVAL_SECONDS)
 
-    def _install_pin(self, generation: int, signature: tuple[Any, ...]) -> tuple[int, bool | None, str]:
+    def _install_pin(self, generation: int, signature: tuple[Any, ...], deadline: float) -> tuple[int, bool | None, str]:
         from core.direct_transport_runtime import DirectTransportRuntimeManager
         from core.managed_runtime import omit_managed_runtime_log_details
 
@@ -525,7 +547,7 @@ class DirectAccessLifecycle:
         except Exception:
             return generation, None, "other"
         with self._state_lock:
-            if self._shutdown or generation != self._generation:
+            if self._shutdown or generation != self._generation or suspend_elapsed() >= deadline:
                 return generation, None, "other"
         # An admitted download may finish after OFF; never use its returned path.
         logger.info("Direct transport install reason=transport_installing")
@@ -556,7 +578,7 @@ class DirectAccessLifecycle:
             binary = str(resolved) if resolved else None
             if not binary:
                 # An installed pin rejected only by trial policy isn't missing.
-                if _effective_relay(config):
+                if config.remote_access.vibe_cloud.public_relay_trial:
                     _decline_relay(config)
                     missing = self._binary_resolver(config) is None
                 else:
@@ -600,10 +622,11 @@ class DirectAccessLifecycle:
                         self._install_failed = False
                         self._install_at = 0.0
                         self._install_delay = INSTALL_RETRY_INITIAL_SECONDS
-                    elif (missing and not self._pairing_suspended and now >= self._install_at
+                    elif (missing and self._permission_fresh() and not self._pairing_suspended and now >= self._install_at
                             and now < started + BINARY_OBSERVATION_MAX_AGE_SECONDS):
                         self._install_task = asyncio.create_task(asyncio.to_thread(
                             self._install_pin, self._generation, self._signature,
+                            self._permission_received_at + PERMISSION_MAX_AGE_SECONDS,
                         ), name="direct-transport-install")
                         self._install_task.add_done_callback(self._binary_check_done)
                         return
@@ -614,10 +637,7 @@ class DirectAccessLifecycle:
                 or self._loop.time() < self._next_binary_check):
             return
         binary_config = copy.deepcopy(config)
-        if not self._public_traversal_allowed:
-            # A LAN-only grant needs only the ordinary pin capabilities. Never
-            # edit the persisted user preference to inspect a different policy.
-            _decline_relay(binary_config)
+        binary_config.remote_access.vibe_cloud.set_path_choice('public_relay_trial', self._public_traversal_allowed)
         self._binary_task = asyncio.create_task(asyncio.to_thread(
             self._resolve_binary, self._generation, self._loop.time(), binary_config,
         ), name="direct-binary-observation")
@@ -734,7 +754,7 @@ class DirectAccessLifecycle:
                 # Separate task permits callbacks to fence an awaiting start.
                 # A timeout also bounds ingress failure; never wait on HTTP here.
                 remaining_permission = max(
-                    0.0, self._permission_received_at + PERMISSION_MAX_AGE_SECONDS - time.monotonic(),
+                    0.0, self._permission_received_at + PERMISSION_MAX_AGE_SECONDS - suspend_elapsed(),
                 )
                 await asyncio.wait_for(self._start_task, timeout=min(10.0, remaining_permission))
                 if self._resource_generation != generation or self._gate()[2] is None:
@@ -892,12 +912,17 @@ class DirectAccessLifecycle:
         self._certificate_result = result
         self._poll_at = getattr(result, "next_poll_at", None)
         if (not result.ready and result.status == "failed" and result.last_error_code in
-                {"acme_rate_limited", "backend_unavailable", "dns_challenge_visibility_timeout"}):
-            # Only a definitively failed, retryable order, never one still in
-            # cleanup. Do not bring a provider's Retry-After forward.
+                {"order_failed", "acme_rate_limited", "backend_unavailable", "dns_challenge_visibility_timeout"}):
+            # orderBody reports a settled failure without its provider detail.
+            # Explicit credential, policy and ACME authorization refusals aren't
+            # a settled wire order and are not in this retry set.
             self._retry_cancelled = True
             self._poll_at = max(self._poll_at or 0, time.time() + self._certificate_retry_delay)
             self._certificate_retry_delay = min(self._certificate_retry_delay * 2, INSTALL_RETRY_MAX_SECONDS)
+        elif not result.ready and not result.certificate_not_after and result.status in {'failed', 'cancelled', 'expired'}:
+            # No current leaf to refresh and no autonomous work for this order.
+            # Waiting on a passed terminal deadline would just take the file lock every tick.
+            self._poll_at = None
         elif result.ready:
             self._certificate_retry_delay = INSTALL_RETRY_INITIAL_SECONDS
         if getattr(result, "status", None) == "cancelled" and not self._cancelled_retry_used:
@@ -938,7 +963,8 @@ class DirectAccessLifecycle:
     def report_fields(self, ticket: PermissionRequest | None) -> dict[str, str]:
         with self._state_lock:
             if (ticket is None or self._shutdown or ticket.signature != self._signature
-                    or ticket.generation != self._generation or self._reported_generation != self._generation):
+                    or ticket.binding_epoch is not self._binding_epoch or ticket.generation != self._generation
+                    or self._reported_generation != self._generation):
                 return {}
             return self._reported_fields.copy()
 

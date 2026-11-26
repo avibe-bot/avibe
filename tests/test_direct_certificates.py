@@ -143,7 +143,8 @@ def setup(monkeypatch):
     cloud.backend_url = "https://control.invalid"
     config.save()
     clock = SimpleNamespace(now=float(int(time.time())), monotonic=time.monotonic())
-    monkeypatch.setattr(certificates, "time", SimpleNamespace(time=lambda: clock.now, monotonic=lambda: clock.monotonic))
+    monkeypatch.setattr(certificates, 'suspend_elapsed', lambda: clock.monotonic)
+    monkeypatch.setattr(certificates, "time", SimpleNamespace(time=lambda: clock.now))
     backend = Backend(clock)
     monkeypatch.setattr(remote_access, "_device_json_request", backend)
     return SimpleNamespace(client=DirectCertificateClient(), clock=clock, backend=backend, config=config)
@@ -701,6 +702,56 @@ def test_conflict_with_still_owned_active_key_abandons_pending_rotation_safely(s
     result = due(env, result)
     assert result.ready and result.key_file == old.key_file
     assert not any(suffix.endswith("/cancel") for _, suffix, _ in env.backend.calls)
+
+
+async def test_failed_order_body_cleans_up_then_retries_same_key_under_live_permission(setup, monkeypatch):
+    """#425 orderBody carries a status/deadline, not the provider's failure code."""
+    import asyncio
+    from vibe import direct_lifecycle as lifecycle
+    from tests.test_direct_lifecycle import _owner, _permission, _wait
+
+    env = setup
+    monkeypatch.setattr(lifecycle, 'time', SimpleNamespace(time=lambda: env.clock.now))
+    monkeypatch.setattr(lifecycle, 'suspend_elapsed', lambda: env.clock.monotonic)
+    monkeypatch.setattr(remote_access, '_report_runtime_status_async', lambda *a, **kw: None)
+    polls = []
+    poll = env.client.poll
+    def counted(**kwargs):
+        polls.append(kwargs)
+        return poll(**kwargs)
+    monkeypatch.setattr(env.client, 'poll', counted)
+    async with _owner(env.config, [], cert=env.client) as (owner, _, _, rv):
+        await _permission(owner, env.config)
+        await _wait(lambda: owner._certificate_result and owner._certificate_result.status == 'queued')
+        fp, = env.backend.orders
+        past = datetime.fromtimestamp(env.clock.now - 60, timezone.utc).isoformat()
+        env.backend.advance_response = dict(status='failed_cleanup_pending', certificate_pem=None,
+                                            public_key_fingerprint=fp, next_poll_at=past)
+        async def advance(status):
+            env.clock.now = owner._poll_at
+            owner._wake.set()
+            count = len(polls)
+            await _wait(lambda: len(polls) > count and owner._poll_task is None and owner._certificate_result.status == status)
+        await advance('failed_cleanup_pending')
+        assert owner._poll_at >= env.clock.now + 60 and rv.endpoint is None
+        await advance('failed_cleanup_pending')
+        assert owner._poll_at >= env.clock.now + 120
+        env.backend.advance_response['status'] = 'failed'
+        await advance('failed')
+        assert owner._certificate_result.last_error_code == 'order_failed'
+        assert owner._poll_at >= env.clock.now + lifecycle.INSTALL_RETRY_INITIAL_SECONDS
+        count = len(polls)
+        await asyncio.sleep(2 * lifecycle.TICK_SECONDS)
+        assert len(polls) == count and env.config.remote_access.vibe_cloud.enabled
+        env.backend.advance_response = None
+        await advance('queued')
+        assert polls[-1]['retry']
+        await advance('issued')
+        await _wait(lambda: rv.endpoint is not None)
+        routes = [suffix for _, suffix, _ in env.backend.calls]
+        assert routes == ['certificates/orders', *['certificates/orders/certord_1/advance'] * 3,
+                          'certificates/orders', 'certificates/orders/certord_1/advance']
+        assert list(env.backend.orders) == [fp]
 
 
 def test_terminal_failure_requires_explicit_retry_and_preserves_retry_deadline(setup):
