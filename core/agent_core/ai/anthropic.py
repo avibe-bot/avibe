@@ -987,12 +987,6 @@ class AnthropicAdapter(ProviderAdapter):
                         attempt.record["full_bytes"] = size
                     observation.attempts.append(attempt.record)
 
-                observed_version = None
-
-                def response_headers(headers) -> None:
-                    nonlocal observed_version
-                    observed_version = threads.thread_engine.version(headers.get(threads.thread_engine.HEADER))
-
                 speculative = bool(attempt and attempt.mode != "full")
                 response_id = None
                 lossless = True
@@ -1014,7 +1008,6 @@ class AnthropicAdapter(ProviderAdapter):
                     # The endpoint refused the lifetime before answering: sent again below, with nothing lost.
                     bound_pin_handback=speculative,
                     on_send=record_send if attempt else None,
-                    on_response_headers=response_headers if self._gateway and attempt else None,
                     on_http_error=(lambda status, body: threads.record_http_error(attempt.record, status, body, hub=self._gateway)) if attempt else None,
                     refused=_rejects_ttl if prefix_ttl is not None and not speculative else None,
                 )
@@ -1091,8 +1084,6 @@ class AnthropicAdapter(ProviderAdapter):
                                     veto = "unverified_origin"
                                 elif attempt.record.get("bootstrap_outcome") == "bootstrap_read_loss":
                                     veto = "bootstrap_read_loss"
-                                elif attempt.trial and attempt.trial.version and observed_version != attempt.trial.version:
-                                    veto = "unverified_engine"
                                 elif attempt.capture_warm and not message.usage.cache_read_tokens:
                                     veto = "cold_full"
                                 else:
@@ -1103,26 +1094,22 @@ class AnthropicAdapter(ProviderAdapter):
                                     yield event
                                     continue
                                 u = message.usage
-                                if attempt.mode == "continue" and attempt.trial and not (
-                                    0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]
-                                ):
-                                    attempt.record["bootstrap_outcome"] = await asyncio.to_thread(
-                                        threads.bootstrap.settle, route, attempt.trial, "bootstrap_no_byte_saving"
-                                    )
                                 if threads.claims.get(session) is not claim:
                                     binding("superseded")
                                     yield event
                                     continue
-                                if attempt.mode == "continue" and attempt.trial and not attempt.record.get("bootstrap_outcome"):
-                                    attempt.record["bootstrap_outcome"] = "retained_smaller"
+                                if attempt.mode == "continue" and attempt.trial:
+                                    attempt.record["bootstrap_outcome"] = (
+                                        "retained_smaller" if 0 < attempt.record.get("body_bytes", 0) < attempt.record["full_bytes"]
+                                        else "bootstrap_no_byte_saving"
+                                    )
                                     trial = attempt.trial
 
                                     async def accept_trial() -> None:
-                                        await asyncio.to_thread(threads.bootstrap.settle, route, trial, "bootstrap_proven")
+                                        await asyncio.to_thread(threads.bootstrap.complete, route, trial)
 
                                     observation.after_commit = accept_trial
-                                    if trial.lease:
-                                        trial.lease.handoff(weakref.ref(accept_trial))
+                                    trial.lease.handoff(weakref.ref(accept_trial))
                                 attempt.record["binding"] = "warm_full" if attempt.capture_warm else "bound"
                                 next_trial = None
                                 if attempt.mode == "create" and attempt.trial:
@@ -1144,7 +1131,6 @@ class AnthropicAdapter(ProviderAdapter):
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
                                         observation.carry_projection,
-                                        observed_version,
                                     ),
                                 )
                         else:

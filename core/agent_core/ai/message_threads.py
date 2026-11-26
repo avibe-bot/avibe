@@ -13,7 +13,6 @@ from typing import Any
 
 from config.paths import get_state_dir
 from core.anthropic_thread_errors import thread_error_fields
-from core import anthropic_thread_engine as thread_engine
 from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER, WireRequest, _header_value
 from core.agent_core.ai import thread_bootstrap as bootstrap
 from core.agent_core.ai.provider import ModelEndpoint
@@ -70,7 +69,6 @@ class Parent:
     terminal_mark: bool = False
     pinned_drop_block: bool = False
     carry_projection: str = ""
-    engine_version: str | None = None
 
 
 class StreamOwner:
@@ -79,7 +77,7 @@ class StreamOwner:
 
 def publish_parent(session: str, parent: Parent) -> None:
     remember(parents, session, parent)
-    if parent.trial and parent.trial.lease:
+    if parent.trial:
         ref = weakref.ref(parent)
 
         def available() -> bool:
@@ -99,7 +97,7 @@ def parent_entry(session: str | None, *, claim: bool, owner: StreamOwner | None 
         return None, "no_session"
     entry = parents.get(session)
     if claim:
-        if owner and isinstance(entry, Parent) and entry.trial and entry.trial.lease:
+        if owner and isinstance(entry, Parent) and entry.trial:
             # Transfer BEFORE removing the entry: no observable ownerless gap.
             entry.trial.lease.handoff(weakref.ref(owner))
         parents.pop(session, None)
@@ -233,9 +231,7 @@ class Attempt:
         self.record["bootstrap_observed_reads"] = reads
         if reads * 100 < self.trial.reads * MIN_USAGE_PERCENT:
             self.record["bootstrap_outcome"] = "bootstrap_read_loss"
-            saved = await asyncio.to_thread(bootstrap.settle, route, self.trial, "bootstrap_read_loss")
-            if saved != "bootstrap_read_loss":
-                self.record["bootstrap_ledger"] = saved
+            await asyncio.to_thread(bootstrap.measured_loss, route)
             self.trial = None
 
 
@@ -476,7 +472,7 @@ def prepare(
     if mode == "create" and cache_reason:
         reason = cache_reason
         if warm and omitted_mark is not None:
-            trial, reason = bootstrap.reserve(route, parent.reads, preview, version=parent.engine_version if gateway else None, lease=lease)
+            trial, reason = bootstrap.reserve(route, parent.reads, preview, lease=lease)
         if trial is None:
             mode = "full"
             capture_warm = omitted_mark is not None
@@ -503,8 +499,6 @@ def prepare(
         betas.append(BETA)
         if gateway:
             headers[PIN_SOURCE_HEADER] = ep.source_id
-            if trial and trial.version:
-                headers[thread_engine.HEADER] = trial.version
             if _header_value(ep.model_id):
                 headers.setdefault(PIN_MODEL_HEADER, ep.model_id)
             if mode == "continue":
@@ -519,7 +513,7 @@ def prepare(
     if delta_rejection and delta_rejection != reason:
         record["delta_rejection"] = delta_rejection
     if trial:
-        record.update(bootstrap_baseline_reads=trial.reads, bootstrap_prior_proven=trial.proven)
+        record["bootstrap_baseline_reads"] = trial.reads
     return Attempt(
         replace(wire, headers=headers, body=body),
         mode,

@@ -23,7 +23,6 @@ from packaging.version import Version
 
 from config import paths
 from config.v2_config import MODEL_HUB_BACKENDS
-from core import anthropic_thread_engine as thread_engine
 from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from vibe.i18n import t as i18n_t
 
@@ -1274,7 +1273,6 @@ class ModelHubTurnGateway:
                         protocol=protocol,
                         headers=caller_headers,
                         thread_calls=thread_calls,
-                        thread_engine=request.headers.get(thread_engine.HEADER) if execution.thread_receipt else None,
                         primary_origin=terminalizer.primary_origin,
                         pinned_hop=(
                             terminalizer.pinned_hop(pin_source_id, pin_model_id) if pin_source_id else None
@@ -1520,11 +1518,6 @@ class ModelHubTurnGateway:
         # overload may have been discarded before this point; only the final
         # admitted producer supplies these downstream headers.
         origin_headers = _response_origin_headers(resolved)
-        # Never forward provider headers as evidence. Only the admitted, lifecycle-owned handle may stamp a witness.
-        if origin_headers and protocol == "anthropic" and request.match_info["backend"] == "vibey":
-            admitted = thread_engine.version(getattr(resolved.handle, "thread_engine_version", None))
-            if admitted:
-                origin_headers[thread_engine.HEADER] = admitted
         if resolved.outcome is not None:
             # A call that reached the resolver's own hands has already been
             # metered there; its body never becomes this gateway's to forward.

@@ -11416,12 +11416,6 @@ class ModelHubService:
 
             def admitted() -> None:
                 nonlocal admission_confirmed
-                # The adapter owns the engine generation here, before handing the call to transport.
-                expected = getattr(request, "thread_engine", None)
-                if expected is not None:
-                    version = getattr(self.adapter, "thread_engine_version", None)
-                    if not callable(version) or version() != expected:
-                        raise _pin_unavailable()
                 admission_confirmed = True
                 release_exclusion()
                 if on_admitted is not None:
