@@ -30,46 +30,68 @@ its existing master backstop. Manual full validation is available on master.
 Historical runs with no explicit full-backstop certificate are not assumed
 equivalent.
 
-This is the gate for a stable `v*` tag in Stage 1, `Publish to PyPI` and
-Stage 2, and for every tag that is not a canonical `gh-vX.Y.ZrcN`. `Publish to
-PyPI` applies it to any tag it is given.
+This is the gate for every release tag, stable `v*` and GitHub-only
+`gh-vX.Y.ZrcN` alike, in Stage 1, Stage 2 and `Publish to PyPI` as defined on
+current `master` (older commits' Stage 1 still accepts the RC pull-request gate;
+see below). An RC is cut
+only from a SHA whose own full `lint` run on `master` (a push run, or a manual
+full run at that exact SHA) completed green. A parent's or a later SHA's green
+run does not count. If the SHA's run is red or cancelled, rerun that same run or
+fix forward; if it never started (coalesced away) and `master` has moved on, a
+run dispatched now would prove a different SHA, so select another candidate
+whose own full run is green instead.
 
-### GitHub-only RC tags: the merged pull request
-
-A `gh-vX.Y.ZrcN` tag does not wait for the full backstop. Stage 1 and Stage 2
-require instead that:
-
-1. the tag's SHA is on `master` and is the merge commit of a pull request
-   merged into `master`; and
-2. on that pull request's head, every check `master`'s ruleset requires
-   concluded `success` or `skipped`. Where a check ran more than once on the
-   head, its newest run counts, as it did for the merge.
-
-The gate fails closed. It refuses an RC whose SHA resolves to no such pull
-request, such as a direct push or a commit that is not the merge commit; one
-with a required check that failed, was cancelled, is still running or is
-absent; and one it cannot prove because GitHub could not be read or `master`
-has no required checks. Nothing after the gate changes for an RC: the exact
-tag/source binding, the predecessor contract, immutability, signing,
-notarization and the mirror apply as before.
-
-The full backstop still runs on `master`, and a red one still gets its
-fix-forward owner. For an RC the gate only reports the state at the RC's SHA:
-`success`, `pending`, `failed`, or `missing` when no full pass finished there
-because it was coalesced away, cancelled or never started. A `failed` state is
-a warning on the release run, not a refusal.
-
-**The release Session owns the follow-up.** After publishing an RC it follows
-the full pass at the RC's SHA to its conclusion, or the next full pass on
-`master` when that one was coalesced away. If it ends red, the Session reports
-the RC tag, the SHA and the failed jobs to the product Bot (`product`). The RC
-stays published, and no stable is cut from a SHA without its own green
-backstop. To read the state again:
+Ordinary pull requests no longer run the native and browser legs, so a green
+pull request is not full proof and the pipeline does not accept one for an RC.
+A tag-push run uses the workflow files at the tagged commit, so a tag on a
+commit from before this rule would still run the older, PR-gate Stage 1. The
+pre-tag check below is therefore mandatory for every tag, not a convenience
+(the one RC exception below replaces it with the operator's hand check, but
+only for tags on commits that carry this rule; an older commit's tag-push
+Stage 1 still accepts the PR gate, so it always needs the full check):
 
 ```bash
 GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
-  --repository avibe-bot/avibe --tag <rc-tag> --rc-pull-request-gate
+  --repository avibe-bot/avibe --source-sha <sha>
 ```
+
+**The one RC exception (Product's plain override).** It is an accepted risk,
+not evidence. When exactly one full-backstop job never got a runner, an RC may
+still ship with Product's go:
+
+1. Before using it, the operator confirms by hand, on the tag SHA's own full
+   run, that the named job is the only one not green and that it never started
+   (queued with no runner, or cancelled before a runner took it). The script
+   does not prove this; the operator attests it.
+2. Dispatch `Release (AI Notes)` for the RC tag with `unverified_job` (the one
+   job name), `unverified_reason` and `unverified_go` (Product's go, quoted;
+   the operator attests that the quote is hers). All three are required
+   together, each one plain line without backticks or angle brackets. A
+   stable tag or PyPI never
+   accepts them.
+3. The gate still reads the backstop and prints its full report in the run
+   summary (green included), but the attestation replaces its verdict. The run summary and the
+   RC's notes print
+   `` not verified in this RC: `<job>` — `<reason>` (go: `<quote>`) ``, every
+   field in a code span so it renders literally. In the notes it is its own
+   paragraph ahead of the generated text, followed by a hidden marker that
+   binds the line to the tag's source.
+4. Desktop Stage 2 ignores dispatch inputs for this. When the full backstop is
+   not green on an RC, it honours an exception only if this exact tag's
+   published notes carry that one line with Stage 1's marker for the same
+   source and line digest. Prose that merely quotes the format does not count.
+   The marker guards against accidental prose, not against people who can
+   edit release notes: they can also dispatch Stage 1, so they are trusted as
+   release operators.
+
+There is no recheck at publication. If the named job later runs and fails, that
+is fixed forward in the next RC.
+
+`ci_release_backstop.py` still has an `--rc-pull-request-gate` option, which
+reports whether an RC tag's merged pull request passed `master`'s required
+checks. No release workflow on current `master` passes it; Stage 1 as defined
+on commits before this rule still does, which the mandatory pre-tag check above
+covers.
 
 ### Before pushing the tag
 
@@ -162,7 +184,7 @@ request; missing, expired or mismatched bytes use the normal local UI build.
 A partial CI rerun that inherits an earlier attempt's successful UI build or
 certificate also falls back: the producer job must have actually started in the
 proven attempt, not merely carry its relabelled attempt number.
-This optional optimization never makes the full backstop an RC gate again.
+This optional optimization only reuses a build; the full backstop at the exact SHA remains the gate.
 
 The final wheel/sdist are still built with the release version and activated
 predecessor compatibility. All distribution assertions remain: the three fresh

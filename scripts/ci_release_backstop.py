@@ -10,6 +10,7 @@ check master's ruleset requires; the full backstop is then only reported.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,38 @@ class BackstopProof:
     event: str
     # Optional optimization provenance, not a new release-gate requirement.
     run_attempt: int = 0
+
+
+@dataclass(frozen=True)
+class UnverifiedJob:
+    """Product's plain RC override: an accepted risk the operator attests, not evidence.
+
+    The operator has read the backstop by hand and names the one job that never
+    got a runner, a reason, and Product's go quoted. The gate does not prove the
+    narrowness; it records it in the run and in the RC's notes.
+    """
+
+    job: str
+    reason: str
+    go: str
+
+    def line(self) -> str:
+        # Code spans render every field literally in Markdown.
+        return f"not verified in this RC: `{self.job}` \u2014 `{self.reason}` (go: `{self.go}`)"
+
+
+NOTES_LINE_RE = re.compile(r"not verified in this RC: `([^`\r\n]+)` \u2014 `([^`\r\n]+)` \(go: `([^`\r\n]+)`\)")
+# Stage 1 binds the line it wrote to the tag's source; Stage 2 trusts no other prose.
+NOTES_MARKER_RE = re.compile(r"^<!-- avibe:rc-unverified source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->$")
+
+
+@dataclass(frozen=True)
+class UnverifiedProof:
+    source_sha: str
+    unverified: UnverifiedJob
+    # The backstop's own verdict, reported and overridden: "pending", "failed" or "missing".
+    backstop: str
+    backstop_run_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -365,11 +398,76 @@ def prove_rc_pull_request(api: GitHubApi, *, tag: str) -> PullRequestProof:
 
 
 def prove_release(
-    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False
-) -> BackstopProof | PullRequestProof:
+    api: GitHubApi, *, tag: str, rc_pull_request_gate: bool = False, unverified: UnverifiedJob | None = None,
+    source_sha: str | None = None,
+) -> BackstopProof | PullRequestProof | UnverifiedProof:
+    if unverified is not None:
+        if not RC_TAG_RE.fullmatch(tag):
+            raise ReleaseBackstopError(f"An unverified-job exception applies only to gh-vX.Y.ZrcN tags, not {tag}")
+        source_sha = source_sha or resolve_tag_sha(api, tag)
+        proof, state, run_id = _backstop(api, source_sha)
+        # The attestation replaces the verdict, green or not; the report keeps the observed state.
+        if proof is not None:
+            state, run_id = "success", proof.run_id
+        return UnverifiedProof(source_sha=source_sha, unverified=unverified, backstop=state, backstop_run_id=run_id)
     if rc_pull_request_gate and RC_TAG_RE.fullmatch(tag):
         return prove_rc_pull_request(api, tag=tag)
     return prove_backstop(api, tag=tag)
+
+
+_EXCEPTION_FIELD_LIMITS = {"job": 200, "reason": 300, "go": 500}
+
+
+def _unverified_from(job: str, reason: str, go: str) -> UnverifiedJob | None:
+    values = {"job": job.strip(), "reason": reason.strip(), "go": go.strip()}
+    if not any(values.values()):
+        return None
+    for name, value in values.items():
+        if not value:
+            raise ReleaseBackstopError("An unverified-job exception needs the job, a reason and the go, all three")
+        if (
+            len(value) > _EXCEPTION_FIELD_LIMITS[name]
+            or value.splitlines() != [value]  # Unicode line separators too, as Stage 2 reads lines.
+            or any(ord(ch) < 32 or ch in "`<>" for ch in value)
+        ):
+            # No backticks (literal rendering) and no angle brackets (release-control comments).
+            raise ReleaseBackstopError(
+                f"The exception's {name} must be one plain line of at most {_EXCEPTION_FIELD_LIMITS[name]} "
+                "characters, without backticks or angle brackets"
+            )
+    return UnverifiedJob(**values)
+
+
+def unverified_from_notes(api: GitHubApi, tag: str, source_sha: str) -> UnverifiedJob | None:
+    """Read the one override Stage 1 wrote and bound into this exact tag's published notes, if any.
+
+    Trust boundary (Product's decision D): Stage 1 is the only writer of this marker. Anyone
+    who can edit release notes can also dispatch Stage 1, so release editors are trusted the
+    same as release operators; the marker guards against accidental prose, not against them.
+    """
+    release = api.get(f"releases/tags/{urllib.parse.quote(tag, safe='')}")
+    body = release.get("body") if isinstance(release, dict) else None
+    # LF records (CRLF tolerated), the same boundaries Stage 1's grep scrub uses.
+    lines = re.split(r"\r?\n", body) if isinstance(body, str) else []
+    markers = [(i, NOTES_MARKER_RE.fullmatch(line)) for i, line in enumerate(lines)]
+    markers = [(i, m) for i, m in markers if m]
+    if not markers:
+        return None
+    if len(markers) > 1:
+        raise ReleaseBackstopError(f"The notes for {tag} carry more than one unverified-job marker")
+    index, marker = markers[0]
+    source, digest = marker.groups()
+    if source != source_sha:
+        raise ReleaseBackstopError(f"The unverified-job marker in {tag}'s notes names another source")
+    line = lines[index - 1] if index > 0 else ""
+    match = NOTES_LINE_RE.fullmatch(line)
+    if match is None or hashlib.sha256(line.encode("utf-8")).hexdigest() != digest:
+        raise ReleaseBackstopError(f"The unverified-job line in {tag}'s notes does not match its Stage 1 marker")
+    try:
+        unverified = _unverified_from(*match.groups())
+    except ReleaseBackstopError as exc:
+        raise ReleaseBackstopError(f"The unverified-job line in {tag}'s notes is not a valid override: {exc}") from None
+    return unverified
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -384,6 +482,15 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="gate a gh-vX.Y.ZrcN tag on its pull request's required checks instead of the full backstop",
     )
+    # The plain override: one named job that never got a runner, on an RC tag only.
+    parser.add_argument("--unverified-job", default=os.environ.get("RELEASE_UNVERIFIED_JOB", ""))
+    parser.add_argument("--unverified-reason", default=os.environ.get("RELEASE_UNVERIFIED_REASON", ""))
+    parser.add_argument("--unverified-go", default=os.environ.get("RELEASE_UNVERIFIED_GO", ""))
+    parser.add_argument(
+        "--unverified-from-notes",
+        action="store_true",
+        help="desktop Stage 2: honour only the override line in this tag's published Stage 1 notes",
+    )
     return parser
 
 
@@ -391,15 +498,46 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         api = GitHubApi(args.repository, args.token)
-        if args.source_sha is not None:
+        unverified = _unverified_from(args.unverified_job, args.unverified_reason, args.unverified_go)
+        if args.unverified_from_notes:
+            if unverified is not None or args.tag is None:
+                raise ReleaseBackstopError("--unverified-from-notes takes a tag and no override inputs")
+            try:
+                proof = prove_release(api, tag=args.tag)
+            except ReleaseBackstopError:
+                # Only a red RC consults its notes; a green or stable tag never reads them.
+                if not RC_TAG_RE.fullmatch(args.tag):
+                    raise
+                # Resolve once: the marker, the backstop report and the proof name the same commit.
+                source_sha = resolve_tag_sha(api, args.tag)
+                unverified = unverified_from_notes(api, args.tag, source_sha)
+                if unverified is None:
+                    raise
+                proof = prove_release(api, tag=args.tag, unverified=unverified, source_sha=source_sha)
+        elif args.source_sha is not None:
+            if unverified is not None:
+                raise ReleaseBackstopError("An unverified-job exception is checked against a tag, not a bare SHA")
             proof = prove_backstop_sha(api, source_sha=args.source_sha)
         else:
-            proof = prove_release(api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate)
+            proof = prove_release(
+                api, tag=args.tag, rc_pull_request_gate=args.rc_pull_request_gate, unverified=unverified
+            )
     except ReleaseBackstopError as exc:
         print(f"::error::{exc}", file=sys.stderr)
         return 1
     outputs = [f"source_sha={proof.source_sha}"]
-    if isinstance(proof, BackstopProof):
+    if isinstance(proof, UnverifiedProof):
+        line = proof.unverified.line()
+        run = f" (run {proof.backstop_run_id})" if proof.backstop_run_id else ""
+        report = f"Full master backstop at {proof.source_sha}: {proof.backstop}{run}; overridden by the operator's attestation."
+        print(report)
+        print(f"::warning::{line}")
+        outputs.append(f"unverified_line={line}")
+        summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary:
+            with open(summary, "a", encoding="utf-8") as handle:
+                handle.write(f"{report}\n\n{line}\n")
+    elif isinstance(proof, BackstopProof):
         print(f"Exact full master backstop verified for {proof.source_sha} (run {proof.run_id}, event {proof.event}).")
     else:
         print(
@@ -416,7 +554,9 @@ def main(argv: list[str] | None = None) -> int:
     # The RC path already inspected the backstop for reporting. Reuse only that
     # existing successful proof; pending/missing/red RCs incur no new discovery
     # requests and never wait for the backstop just to build their UI.
-    full_backstop = proof if isinstance(proof, BackstopProof) else proof.full_backstop
+    full_backstop = (
+        proof if isinstance(proof, BackstopProof) else None if isinstance(proof, UnverifiedProof) else proof.full_backstop
+    )
     if full_backstop is not None:
         outputs.extend([f"run_id={full_backstop.run_id}", f"run_attempt={full_backstop.run_attempt}"])
     github_output = os.environ.get("GITHUB_OUTPUT")

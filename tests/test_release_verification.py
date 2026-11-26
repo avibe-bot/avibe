@@ -64,6 +64,36 @@ def test_notes_shell_reads_remote_annotation_not_checkout_ref(
     assert _fixture_git(remote, "rev-parse", f"refs/tags/{tag}") == remote_object
 
 
+def test_notes_shell_appends_the_rc_override_line_once_before_the_ready_marker(tmp_path):
+    _remote, workspace, env, _tag, source, command = _notes_git_fixture(
+        tmp_path, annotation="Ordinary annotated release", existing_body="",
+    )
+    line = "not verified in this RC: `web-fetch-macos` \u2014 `no runner $(touch pwned) \\n %s` (go: `ok`)"
+    notes = workspace / "release.md"
+    # Generated Markdown can end inside an open comment or fence, and can quote a marker.
+    notes.write_text(
+        "<!-- avibe:update-notification=none -->\n<!-- avibe:update-notification=none, still open\n# Release\n\n"
+        "<!-- avibe:rc-unverified source=x sha256=y -->\n\n<!-- unclosed\n```\n",
+        encoding="utf-8",
+    )
+    for _ in range(2):
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", command],
+            cwd=workspace, env={**env, "UNVERIFIED_LINE": line}, capture_output=True, text=True, timeout=15,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+    text = notes.read_text(encoding="utf-8")
+    assert text.count(line) == 1
+    digest = hashlib.sha256(line.encode()).hexdigest()
+    assert f"{line}\n<!-- avibe:rc-unverified source={source} sha256={digest} -->\n" in text
+    assert text.count("<!-- avibe:rc-unverified ") == 1
+    # A complete silent marker may stay first; an incomplete marker-prefixed comment may not.
+    assert text.index("<!-- avibe:update-notification=none -->\n") < text.index(line)
+    assert text.index(line) < text.index("still open") < text.index("# Release") < text.index("<!-- unclosed")
+    assert text.rstrip().endswith(f"<!-- avibe:release-notes=ready source={source} run=42 -->")
+    assert not (workspace / "pwned").exists()
+
+
 @pytest.mark.parametrize("failure", ["missing-tag", "source-mismatch"])
 def test_notes_shell_does_not_mutate_notes_when_remote_tag_cannot_be_bound(tmp_path, failure):
     remote, workspace, env, tag, source, command = _notes_git_fixture(
