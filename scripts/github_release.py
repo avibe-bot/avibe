@@ -260,11 +260,17 @@ def wait_for_notes(
                 raise ReleaseError(
                     f"Release notes marker points to unexpected workflow {run_path!r}"
                 )
-            if run.get("head_sha") != run_sha or run.get("head_branch") != branch:
+            # The notes producer is this run's own revision, or (for a dispatched
+            # recovery of a tag) the tag's own push run on the exact source.
+            same_revision = run.get("head_sha") == run_sha and run.get("head_branch") == branch
+            tag_push_producer = (
+                run.get("event") == "push" and run.get("head_branch") == tag and run.get("head_sha") == source_sha
+            )
+            if not same_revision and not tag_push_producer:
                 raise ReleaseError(
                     f"Release notes run {run_id} does not match the expected workflow revision"
                 )
-            if run.get("event") != event:
+            if same_revision and not tag_push_producer and run.get("event") != event:
                 raise ReleaseError(
                     f"Release notes run {run_id} has unexpected event {run.get('event')!r}"
                 )
