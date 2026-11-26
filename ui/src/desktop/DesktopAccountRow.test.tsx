@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { createInstance } from 'i18next';
 import { I18nextProvider } from 'react-i18next';
 import en from '../i18n/en.json';
@@ -8,7 +9,7 @@ import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 import { DesktopAccountRow } from './DesktopAccountRow';
 
 const mock = vi.hoisted(() => ({
-  present: vi.fn(), remote: false, phase: 'available', signedIn: true,
+  present: vi.fn(), connectionStatus: null as string | null, remote: false, phase: 'available', signedIn: true,
   invoke: vi.fn(), getVersion: vi.fn(), localUrl: null as string | null, localAccess: 'off', slug: undefined as string | null | undefined,
 }));
 vi.mock('../context/ApiContext', () => ({ useApi: () => ({ getVersion: mock.getVersion }) }));
@@ -18,7 +19,7 @@ vi.mock('./useDesktopClient', () => ({
   usePresentDesktopClient: () => mock.present,
   useDesktopClientProjection: () => ({
     account: { status: mock.signedIn ? 'signed_in' : 'signed_out', identity: { id: 'fixture', email: 'max@example.test' } },
-    connection: { status: mock.remote ? 'remote_connected' : 'local', committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
+    connection: { status: mock.connectionStatus ?? (mock.remote ? 'remote_connected' : 'local'), committed: { kind: mock.remote ? 'remote' : 'local', name: 'Studio', instance_id: 'studio' }, pending: null },
     local: { slug: mock.slug, name: '小麦的 Mac.local', remote_access: mock.localAccess, remote_access_url: mock.localUrl },
     desktop: { version: '3.2.6rc12', update: { phase: mock.phase, latest: '3.2.7' } },
     remote_auxiliary: 'disabled_incomplete',
@@ -27,7 +28,7 @@ vi.mock('./useDesktopClient', () => ({
 const i18n = createInstance();
 await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
 beforeEach(() => {
-  mock.remote = false; mock.phase = 'available'; mock.signedIn = true; mock.localUrl = null; mock.localAccess = 'off'; mock.slug = undefined;
+  mock.connectionStatus = null; mock.remote = false; mock.phase = 'available'; mock.signedIn = true; mock.localUrl = null; mock.localAccess = 'off'; mock.slug = undefined;
   mock.getVersion.mockResolvedValue({ current: '3.2.6rc12', latest: '3.2.7', has_update: true, managed_by: 'desktop' });
   mock.invoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
     ? {
@@ -91,7 +92,7 @@ it('AUTH-SETUP-178 current version offers no install; account entry stays separa
   expect(document.querySelector('[data-update-menu]')).toBeNull();
   fireEvent.click(within(dialog).getByRole('button', { name: en.common.close }));
   fireEvent.click(document.querySelector('[data-account-trigger]')!);
-  expect(document.querySelector('[data-instance-menu]')).toBeNull();
+  fireEvent.click(await screen.findByRole('menuitem', { name: en.desktopClient.switchInstance }));
   expect(mock.present).toHaveBeenCalledWith('instances');
 });
 
@@ -146,12 +147,13 @@ it('AUTH-SETUP-177 signed-out footer directly presents account without opening a
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
 });
 
-it('AUTH-SETUP-178 the whole signed-in footer directly opens instances without a popup or caret', async () => {
+it('AUTH-SETUP-178 the whole signed-in footer opens its menu without a caret', async () => {
   mount();
   const trigger = document.querySelector('[data-account-trigger]')!;
   fireEvent.click(trigger.querySelector('[data-status-indicator]')!);
-  expect(mock.present).toHaveBeenCalledExactlyOnceWith('instances');
-  expect(trigger.hasAttribute('aria-expanded')).toBe(false);
+  expect(mock.present).not.toHaveBeenCalled();
+  expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  expect(screen.getByRole('menu')).toBeTruthy();
   expect(document.querySelector('[data-instance-menu]')).toBeNull();
   expect(document.querySelector('[data-account-chevron]')).toBeNull();
   expect(document.querySelector('[data-account-avatar]')).toBeNull();
@@ -201,4 +203,84 @@ it.each([
   fireEvent.mouseOver(trigger);
   expect(trigger.hasAttribute('title')).toBe(false);
   expect(trigger.querySelector('[title]')).toBeNull();
+});
+
+// ui/design: chrome/sidebar-account-menu. State is live while the menu remains open.
+it.each([
+  { connection: 'local', remote: false, text: en.devices.reach.connected, accessible: en.desktopClient.connected },
+  { connection: 'remote_connected', remote: true, text: en.devices.reach.connected, accessible: en.desktopClient.connected },
+  { connection: 'remote_unreachable', remote: true, text: en.common.offline, accessible: en.desktopClient.disconnected },
+  { connection: 'switching', remote: false, text: en.desktopClient.connecting, accessible: en.desktopClient.connecting },
+])('AUTH-SETUP-178 menu exposes the current instance and $connection state', async ({ connection, remote, text, accessible }) => {
+  mock.connectionStatus = connection; mock.remote = remote; mock.slug = 'local-slug';
+  mount();
+  await userEvent.click(document.querySelector('[data-account-trigger]')!);
+  const menu = screen.getByRole('menu');
+  expect(within(menu).getByText('max@example.test')).toBeTruthy();
+  expect(within(menu).getByText(remote ? 'Studio' : 'local-slug')).toBeTruthy();
+  expect(within(menu).getByText(text)).toBeTruthy();
+  expect(within(menu).getByLabelText(accessible)).toBeTruthy();
+  expect(within(menu).getAllByRole('menuitem')).toHaveLength(2);
+  expect(menu.querySelector('[data-menu-instance]')?.hasAttribute('tabindex')).toBe(false);
+});
+
+it.each([
+  { label: en.desktopClient.switchInstance, view: 'instances' },
+  { label: en.desktopClient.signOut, view: 'sign-out' },
+])('AUTH-SETUP-178 $view uses the existing native presentation and closes the menu', async ({ label, view }) => {
+  mount();
+  const trigger = document.querySelector('[data-account-trigger]')!;
+  await userEvent.click(trigger);
+  await userEvent.click(screen.getByRole('menuitem', { name: label }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith(view);
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  await waitFor(() => expect(document.activeElement).toBe(trigger));
+});
+
+it.each(['{Enter}', ' '])('AUTH-SETUP-178 keyboard %s opens, arrows move only among actions, Escape restores focus', async (key) => {
+  mount();
+  const trigger = document.querySelector<HTMLButtonElement>('[data-account-trigger]')!;
+  trigger.focus();
+  await userEvent.keyboard(key);
+  const actions = screen.getAllByRole('menuitem');
+  expect(document.activeElement).toBe(actions[0]);
+  for (const [key, index] of [['{ArrowUp}', 1], ['{ArrowDown}', 0], ['{End}', 1], ['{Home}', 0]] as const) {
+    await userEvent.keyboard(key);
+    expect(document.activeElement).toBe(actions[index]);
+  }
+  await userEvent.keyboard('{Escape}');
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+  expect(mock.present).not.toHaveBeenCalled();
+});
+
+it('AUTH-SETUP-178 outside click and repeated trigger click dismiss with focus on the trigger', async () => {
+  mount();
+  const trigger = document.querySelector<HTMLButtonElement>('[data-account-trigger]')!;
+  await userEvent.click(trigger);
+  await userEvent.click(document.body);
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+  await userEvent.click(trigger);
+  expect(screen.getByRole('menu')).toBeTruthy();
+  await userEvent.click(trigger);
+  await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+  expect(document.activeElement).toBe(trigger);
+});
+
+it('AUTH-SETUP-178 an open menu follows state updates and disappears when signed out', async () => {
+  const view = mount();
+  await userEvent.click(document.querySelector('[data-account-trigger]')!);
+  mock.connectionStatus = 'switching';
+  view.rerender(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  expect(within(screen.getByRole('menu')).getByText(en.desktopClient.connecting)).toBeTruthy();
+  mock.remote = true; mock.connectionStatus = 'remote_unreachable';
+  view.rerender(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  expect(within(screen.getByRole('menu')).getByText('Studio')).toBeTruthy();
+  expect(within(screen.getByRole('menu')).getByText(en.common.offline)).toBeTruthy();
+  mock.signedIn = false;
+  view.rerender(<I18nextProvider i18n={i18n}><DesktopAccountRow /></I18nextProvider>);
+  expect(screen.queryByRole('menu')).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: /Sign in/ }));
+  expect(mock.present).toHaveBeenCalledExactlyOnceWith('account');
 });

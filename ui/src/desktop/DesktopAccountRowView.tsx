@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { RefreshCw, WifiOff } from 'lucide-react';
 import { SidebarStatusRow, StatusDot } from '../components/SidebarStatusRow';
+import { DesktopSidebarAccountMenu } from './DesktopSidebarAccountMenu';
 import type { DesktopClientProjection, DesktopClientView } from './bridge';
 
 export type DesktopAccountRowViewProps = {
@@ -30,7 +31,7 @@ export function DesktopAccountRowView({ state, onPresent, localUpdater, instance
   // button and as far from its left edge as from its top and bottom, 10 px each (Max, 2026-11-22 13:15).
   // A long name truncates; no hover tip, not even for a truncated name (Max, 2026-11-20): the label is
   // the button's name.
-  const accountTrigger = <button data-account-trigger type="button" onClick={() => onPresent(signedIn ? 'instances' : 'account')}
+  const accountTrigger = <button data-account-trigger type="button" onClick={signedIn ? undefined : () => onPresent('account')}
     className="flex h-7 min-w-0 flex-1 items-center gap-1.5 rounded-md pl-2.5 pr-3 text-left text-xs font-medium text-foreground transition-colors hover:bg-field-hover active:bg-field-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background">
     {/* A fixed 10 px slot centred on the button, not on the name's letters. The icon fills its box where
         the dot leaves 2 px free, so it sits 2 px left: the same clear space before the name in every
@@ -46,6 +47,8 @@ export function DesktopAccountRowView({ state, onPresent, localUpdater, instance
   // the other instance's own version beside its name (ui/design: update/instance-and-app).
   const version = remote ? instanceVersion : localUpdater;
   return <div data-desktop-account-row className="relative min-w-0">
-    <SidebarStatusRow status={accountTrigger} version={version} />
+    {signedIn
+      ? <DesktopSidebarAccountMenu state={state} trigger={accountTrigger} version={version} onPresent={onPresent} />
+      : <SidebarStatusRow status={accountTrigger} version={version} />}
   </div>;
 }

@@ -1,10 +1,4 @@
-// Proposal (Max, 2026-11-26 09:37): in the desktop app, signed in, the instance button at the foot
-// of the sidebar opens a menu above it, as Claude's account menu does: the signed-in email and the
-// instance this window shows, neither a control, a line, then Switch instance and Sign out on this
-// device (destructive). The instance line is its status dot, name and state: 已连接 while connected
-// (Max, 09:58 and 10:00), 离线 or 连接中 when it is not. Today the button opens the Instances
-// page straight away. The row, the version beside it, Settings and the signed-out row are
-// chrome/bottom-row's and do not change. Each frame is the complete window.
+// ui/design: chrome/sidebar-account-menu. Approved by Max on 2026-11-26; renders the shipped menu.
 import type { ReactNode } from 'react';
 import { Route, Routes } from 'react-router-dom';
 
@@ -18,7 +12,6 @@ import { InstanceVersionChipView } from '@/desktop/InstanceVersionChip';
 import type { DesktopClientProjection } from '@/desktop/bridge';
 
 import { frames, type FrameSpec } from '../../frame';
-import { DesktopSidebarAccountMenu } from '../../kit/desktop-sidebar-account-menu';
 import { agentsApi } from '../agents/fixtures';
 import { copyFor } from '../desktop/instances-fixtures';
 import { homeFactsApi, workbenchFixtures } from '../workbench/fixtures';
@@ -73,7 +66,7 @@ const shell = (footer: ReactNode) => () => (
   </Routes>
 );
 const menu = (link: Link, name?: string, email?: string) =>
-  shell(<DesktopSidebarAccountMenu row={row(link, name, email)} />);
+  shell(<DesktopAccountRowView {...row(link, name, email)} onPresent={() => {}} />);
 
 type Shot = { name: string; title: string; render: () => ReactNode; hover?: string; width?: number; langs?: Lang[] };
 
@@ -94,7 +87,8 @@ const designFrames = frames(shots.flatMap((shot) => (shot.langs ?? ['zh']).map((
   title: `${shot.title} · ${lang}`,
   width: shot.width ?? 1200,
   height: 800,
-  status: shot.name === 'closed' ? 'shipped' : 'proposed',
+  status: 'shipped',
+  ...(shot.name === 'closed' ? {} : { click: ['[data-account-trigger]'] }),
   route: '/',
   fixtures: fixturesFor(lang),
   render: shot.render,
