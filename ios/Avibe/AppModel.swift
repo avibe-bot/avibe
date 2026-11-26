@@ -1552,7 +1552,6 @@ final class AppModel: ObservableObject {
         defer { Self.coldStartSignposter.endInterval("bootstrap", launch) }
         // Retire earlier-build cards locally before any account cleanup can send.
         if !turnActivities.deviceEnabled { await turnActivities.endAllLocally() }
-        await websiteDataStore.sweepOrphans()
         // Open first: with the last session avibe.bot confirmed and its
         // selected instance on this device, open that instance now and check
         // the session behind it. The check's answer decides as a refresh
@@ -1579,6 +1578,15 @@ final class AppModel: ObservableObject {
             // A tap or shortcut that arrived meanwhile waited for the
             // check, so it opens against the answered session.
             await completeBootstrap()
+            // Then the stores left behind are removed, started and not waited
+            // for: WebKit answers a removal only once the store's own web
+            // process has exited, and the open (open-first included) has
+            // started its own WebView by now. Sweeps run one after another,
+            // and none removes a store a view still holds (one the bootstrap
+            // rotated away from while its page lived).
+            websiteDataStore.startSweep(canSweep: { [weak self] in
+                self?.sessionCoordinator.canSweepStores ?? false
+            })
             return
         }
         sessionCoordinator.activateAccountSurface()
@@ -1608,6 +1616,15 @@ final class AppModel: ObservableObject {
             route = .onboarding(.instances)
         }
         await completeBootstrap()
+        // Then the stores left behind are removed, started and not waited
+        // for: WebKit answers a removal only once the store's own web
+        // process has exited, and the open (open-first included) has
+        // started its own WebView by now. Sweeps run one after another,
+        // and none removes a store a view still holds (one the bootstrap
+        // rotated away from while its page lived).
+        websiteDataStore.startSweep(canSweep: { [weak self] in
+            self?.sessionCoordinator.canSweepStores ?? false
+        })
     }
 
     /// After an open-first's session check: push work the open started was

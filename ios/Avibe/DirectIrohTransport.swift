@@ -1582,13 +1582,17 @@ final class DirectRendezvousWebViewSource {
             let faults = self?.faultReport.pending(
                 from: self?.appModel?.directListenerFailures ?? []
             ) ?? []
+            // And the App's slow store removals, the same way.
+            let removals = SlowStoreRemovals.shared.pending
             let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,
                 clientEndpointID: clientEndpointID,
-                listenerFaults: faults
+                listenerFaults: faults,
+                slowStoreRemovalsMs: removals.map(\.milliseconds)
             )
             self?.faultReport.answered(faults)
+            SlowStoreRemovals.shared.answered(removals)
             return answer
         }
     }
