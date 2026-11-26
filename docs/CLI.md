@@ -712,7 +712,7 @@ To bind a computer again, run this by hand in a terminal on that computer (an SS
 vibe remote rebind
 ```
 
-It shows which Avibe the computer is bound to and what state the binding is in. Binding the same Avibe again is done in a browser at the computer's own address, on the Devices page; the command explains how, including SSH port forwarding for a server with no browser. The command itself offers "Bind as a new computer": it lists what is lost and kept, asks for a typed `yes`, then prints a link, waits for it to be approved on avibe.bot, and asks you to accept the account and the domain it shows. It does not run from an Agent, a Task, a script or a pipe. When `vibe remote status` prints a `Binding:` line, this is the command it points at.
+It shows which Avibe the computer is bound to and what state the binding is in. Binding the same Avibe again is done in a browser at the computer's own address, on the Devices page; the command explains how, including SSH port forwarding for a server with no browser. The command itself offers "Bind as a new computer": it lists what is lost and kept, asks for a typed `yes`, deletes the computer's Avibe on avibe.bot (its name stays with the owning account for 30 days), then prints a link, waits for it to be approved on avibe.bot, and asks you to accept the account and the domain it shows. It does not run from an Agent, a Task, a script or a pipe. When `vibe remote status` prints a `Binding:` line, this is the command it points at.
 
 ### `vibe screenshot`
 
