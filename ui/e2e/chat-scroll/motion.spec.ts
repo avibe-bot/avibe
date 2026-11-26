@@ -1437,6 +1437,10 @@ test('a disclosure tapped on a row another opening still pushes down writes no s
     frames: 60,
   });
   expect(frames[0].moving).toBe(true);
+  // The tap does not drop the row to where it ends: it still slides at every read the tapping task takes (they
+  // share the read before the tap's time, so this holds on any runner, however late its frames come).
+  const firstFrame = frames.findIndex(({ frame }) => frame !== null);
+  expect(frames.slice(1, firstFrame).every(({ moving }) => moving)).toBe(true);
   await page.waitForTimeout(300);
   const { writes } = await stop(page);
   expect(restoreWrites(writes)).toEqual([]);
