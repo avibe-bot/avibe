@@ -8617,6 +8617,7 @@ def _opencode_model_options(
     provider: Optional[str],
     cwd: Optional[str],
     config: Optional[V2Config],
+    cached_only: bool = False,
 ) -> dict:
     """OpenCode model options, including custom providers and user-added models.
 
@@ -8633,7 +8634,12 @@ def _opencode_model_options(
     if not resolved_cwd:
         resolved_cwd = "."
 
-    raw = opencode_options(resolved_cwd)
+    if cached_only:
+        cached = _OPENCODE_OPTIONS_CACHE.get(os.path.expanduser(resolved_cwd), {})
+        data = cached.get("data") if cached.get("mode") == "direct" else None
+        raw = {"ok": bool(data), "data": data}
+    else:
+        raw = opencode_options(resolved_cwd)
     if not raw.get("ok"):
         return {"ok": False, "backend": "opencode", "error": raw.get("error") or "opencode options unavailable"}
 
@@ -8727,6 +8733,7 @@ def agent_model_options(
     *,
     provider: Optional[str] = None,
     cwd: Optional[str] = None,
+    cached_only: bool = False,
 ) -> dict:
     """Backend-agnostic available models + per-model reasoning efforts.
 
@@ -8770,7 +8777,7 @@ def agent_model_options(
             "live": False,
         }
     if normalized_backend == "claude":
-        data = claude_models()
+        data = claude_models(schedule_refresh=False) if cached_only else claude_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "claude model lookup failed"}
         result = {
@@ -8783,7 +8790,7 @@ def agent_model_options(
             "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
     elif normalized_backend == "codex":
-        data = codex_models()
+        data = codex_models(schedule_refresh=False) if cached_only else codex_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "codex model lookup failed"}
         result = {
@@ -8796,7 +8803,7 @@ def agent_model_options(
             "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
     elif normalized_backend == "antigravity":
-        data = antigravity_models()
+        data = antigravity_models(schedule_refresh=False) if cached_only else antigravity_models()
         if not data.get("ok"):
             return {
                 "ok": False,
@@ -8814,7 +8821,7 @@ def agent_model_options(
             "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
     else:
-        result = _opencode_model_options(provider=provider, cwd=cwd, config=config)
+        result = _opencode_model_options(provider=provider, cwd=cwd, config=config, cached_only=cached_only)
 
     return result
 
@@ -8857,6 +8864,7 @@ def route_menu_options(
     *,
     hub_agent_reader: Optional[Callable[[str], Any]] = None,
     provider: Optional[str] = None,
+    cached_only: bool = False,
 ) -> dict:
     """The models, efforts, and fast tiers a Session on ``backend`` can switch to: the Web route picker's menu.
 
@@ -8865,6 +8873,9 @@ def route_menu_options(
     A Direct backend, or a Hub that cannot answer, falls back to ``agent_model_options``: Vibey's configured menu
     stays authoritative, as does Antigravity's cached live menu; Claude and Codex bundled catalogs may lag a
     release. Only Hub offers fast mode.
+
+    ``cached_only`` reads the existing menu without scheduling catalog refreshes
+    or starting an OpenCode server. Disk-backed snapshots still belong off the event loop.
     """
     normalized_backend = (backend or "").strip().lower()
     hub_agent = None
@@ -8886,7 +8897,9 @@ def route_menu_options(
             "live": True,
             "authoritative": True,
         }
-    options = dict(agent_model_options(normalized_backend, provider=provider))
+    options = dict(agent_model_options(
+        normalized_backend, provider=provider, **({"cached_only": True} if cached_only else {})
+    ))
     if options.get("ok"):
         options["mode"] = (
             "hub" if not is_native_cli_backend(normalized_backend)

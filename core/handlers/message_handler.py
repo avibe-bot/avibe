@@ -499,6 +499,11 @@ class MessageHandler(BaseHandler):
                 materialize = getattr(self.sessions, "materialize_agent_session_route", None)
                 if callable(materialize):
                     try:
+                        if not session_target.get("reasoning_effort"):
+                            effective_reasoning_effort = await self._inherited_effort_for_model(
+                                agent_name, effective_model, effective_reasoning_effort,
+                            )
+                            inherited_reasoning_effort = effective_reasoning_effort
                         materialize(
                             str(session_target["id"]),
                             agent_id=vibe_agent.id if materialized_agent_identity else None,
@@ -1916,6 +1921,47 @@ class MessageHandler(BaseHandler):
             agent = None
         backend = getattr(agent, "backend", None)
         return str(backend) if is_agent_backend(str(backend)) else None
+
+    async def _inherited_effort_for_model(
+        self, backend: str, model: str | None, effort: str | None,
+    ) -> str | None:
+        """Resolve an inherited effort before pinning the route the header and Turn share."""
+        if not model or not effort:
+            return effort
+        from config.v2_config import MODEL_HUB_BACKENDS
+
+        service = getattr(self.controller, "model_hub_service", None)
+        read_sources = getattr(service, "read_agent_sources", None)
+        hub_agent = None
+        if backend in MODEL_HUB_BACKENDS and callable(read_sources):
+            try:
+                hub_agent = await read_sources(backend)
+            except Exception:
+                logger.debug("Model Hub menu unavailable for %s", backend, exc_info=True)
+
+        def read_menu():
+            from vibe.api import route_menu_options
+
+            return route_menu_options(
+                backend, hub_agent_reader=lambda _backend: hub_agent, cached_only=True,
+            )
+
+        try:
+            menu = await asyncio.to_thread(read_menu)
+        except Exception:
+            logger.debug("Cached model menu unavailable for %s", backend, exc_info=True)
+            return effort
+        entry = next((row for row in menu.get("models", []) if row.get("value") == model), None)
+        if entry is None:
+            return None if menu.get("authoritative") else effort
+        offered = list(entry.get("reasoning_efforts") or [])
+        if not offered:
+            return None
+        if effort in offered:
+            return effort
+        from core.session_route_succession import _nearest_effort
+
+        return _nearest_effort(effort, offered)
 
     async def _succeed_retired_session_route(
         self,
