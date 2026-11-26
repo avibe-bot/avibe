@@ -8043,10 +8043,18 @@ final class DirectPathAppTests: XCTestCase {
     /// Starts a push-management request and returns once the control plane
     /// is answering it. Until `hold.release` is signaled the request stays
     /// in flight, and the account coordinator is busy with it.
+    ///
+    /// A request that never gets there ends the test here, with that as its
+    /// one failure: the account transport's page did not load, which on the
+    /// CI simulator is a WebKit process that stalled (run 45758417964). What
+    /// a test checks after this wait is about a request in flight; checked
+    /// without one it only adds failures that say nothing.
     @MainActor
     private func holdPushManagement(
         _ hold: PushHold,
-        in app: AppModel
+        in app: AppModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws -> Task<Void, Error> {
         let request = Task { @MainActor in
             _ = try await app.mobileSessionCoordinator.pushManagementRequest(
@@ -8060,10 +8068,23 @@ final class DirectPathAppTests: XCTestCase {
         }
         // The request launches its own account transport first: the App
         // itself allows that the readiness and request deadlines together.
-        await fulfillment(
+        let budget = WebKitReadiness.launchedTransportOperationSeconds
+        let reached = await XCTWaiter.fulfillment(
             of: [hold.inFlight.expectation],
-            timeout: WebKitReadiness.launchedTransportOperationSeconds
+            timeout: budget
         )
+        guard reached == .completed else {
+            // Nothing is left held or running behind the failure.
+            hold.release.signal()
+            request.cancel()
+            throw recordThrown(
+                "The push request to \(hold.path) did not reach the control plane within \(budget) s "
+                    + "(the account transport's page did not load); nothing after this wait was checked",
+                DirectTestTimeout(),
+                file: file,
+                line: line
+            )
+        }
         return request
     }
 
