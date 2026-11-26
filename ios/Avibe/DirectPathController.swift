@@ -994,13 +994,54 @@ final class DirectPathController {
     }
 
     /// Records a real load decision, not a presentation read of the load gate.
+    /// A load of a host whose route has no failover cannot leave that route
+    /// while the listener does not serve (it fails), so it needs no relaunch:
+    /// the Action Button's hidden view loads in the background, where the
+    /// listener is closed.
     func noteInstanceLoad(forInstanceURL url: URL) {
         guard let host = DirectAuthority(instanceURL: url)?.host else { return }
-        if routeOwner.routes(host, store: websiteDataStore.identifier), let listener,
-           case .serving = listener.lifecycle.phase { return }
+        let store = websiteDataStore.identifier
+        if routeOwner.routes(host, store: store) {
+            if let listener, case .serving = listener.lifecycle.phase { return }
+            if !routeOwner.allowsFailover(host, store: store) { return }
+        }
         if hostsNeedingColdStore.insert(host).inserted, requestedStrict.contains(host) {
             onAvailabilityChanged()
         }
+    }
+
+    /// Hosts whose route was opened to failover for a voice take
+    /// (`noteVoiceLoad`): it stays so for the rest of this process.
+    private var failoverOpenedForTakes: Set<String> = []
+
+    /// The Action Button's hidden view is starting a load of the instance.
+    /// A voice message must arrive. Where the host's route has no failover
+    /// and the listener does not serve (the background, where it is
+    /// closed), the load would fail: the host is marked as taking
+    /// 「仅直连和中继」 only at the next launch, and in the same turn its
+    /// route is opened to failover, so nothing leaves before the mark. The
+    /// route then stays open for this process; the next launch is strict
+    /// again by the normal path. Any other load is the page's kind
+    /// (`noteInstanceLoad`). Only that hidden view calls this: the page's
+    /// view never loads while its gate is held.
+    func noteVoiceLoad(forInstanceURL url: URL) {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return }
+        let store = websiteDataStore.identifier
+        var serving = false
+        if let listener, case .serving = listener.lifecycle.phase { serving = true }
+        guard routeOwner.routes(host, store: store), !serving,
+              !routeOwner.allowsFailover(host, store: store), let port = listenerPort else {
+            noteInstanceLoad(forInstanceURL: url)
+            return
+        }
+        hostsNeedingColdStore.insert(host)
+        failoverOpenedForTakes.insert(host)
+        armed.remove(host)
+        policyGeneration[host, default: 0] &+= 1
+        if target?.authority.host == host { lossWake?.cancel(); lossWake = nil }
+        _ = routeOwner.rewrite(host, store: store, dataStore: websiteDataStore.dataStore,
+                               port: port, allowsFailover: true)
+        onAvailabilityChanged()
     }
 
     private func needsListener(_ host: String) -> Bool {
@@ -1065,8 +1106,10 @@ final class DirectPathController {
                 let strict = self.requestedStrict.contains(host) && !self.hostsNeedingColdStore.contains(host)
                     && self.target?.authority.host == host && self.isUsable && !self.isInBackground
                     && self.listenerState == .ready
+                // A route opened for a voice take is never closed again here.
+                let allowsFailover = !self.requestedStrict.contains(host) || self.failoverOpenedForTakes.contains(host)
                 if self.routeOwner.rewrite(host, store: store, dataStore: self.websiteDataStore.dataStore,
-                                           port: port, allowsFailover: !self.requestedStrict.contains(host)), strict {
+                                           port: port, allowsFailover: allowsFailover), strict {
                     self.armed.insert(host)
                 } else { self.armed.remove(host) }
             }

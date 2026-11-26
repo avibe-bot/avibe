@@ -5842,6 +5842,242 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(store.preference(accountID: "account-1", origin: two.serialized).mode, .tunnel)
     }
 
+    /// 「仅直连和中继」 with the path controller that enforces it: the page may
+    /// choose it, the answer says it takes effect now (`pendingRelaunch`
+    /// false), the choice is kept, and the instance opens again where the
+    /// page was. Back to automatic, the same.
+    @MainActor
+    func testChoosingDirectOnlyKeepsItAndOpensTheInstanceAgain() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.count == 1
+        }
+        let provider = try XCTUnwrap(app.directPreferenceProvider)
+        XCTAssertTrue(provider.acceptsDirectOnly)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+
+        let page = try XCTUnwrap(URL(string: "https://instance-one.example/settings/devices/connection"))
+        let identity = try XCTUnwrap(app.runtimeOpenAttempt).id
+        let answer = try XCTUnwrap(provider.write(instance, .direct, page))
+        XCTAssertEqual(answer.mode, .direct)
+        XCTAssertFalse(answer.pendingRelaunch)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+        // Answered before anything was reopened; then reopened where it was.
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, identity)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > identity }
+        let reopened = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(reopened, runtime)
+        XCTAssertEqual(app.takeRuntimeStartURL(for: runtime), page)
+        XCTAssertEqual(provider.read(instance)?.mode, .direct)
+
+        let direct = try XCTUnwrap(app.runtimeOpenAttempt).id
+        XCTAssertEqual(provider.write(instance, .automatic, page)?.mode, .automatic)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > direct }
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized), .automatic)
+    }
+
+    /// Rule a1 through the App: the instance answers two rendezvous in one
+    /// bootstrap that end without a link. One is not enough; the second
+    /// sets the choice back to automatic, from `direct`, tells the page, and
+    /// opens the instance again.
+    @MainActor
+    func testDirectOnlyGoesBackToAutomaticAfterTwoUnlinkedAnswers() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        _ = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+
+        transport.report(.answeredWithoutLink, for: target)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+
+        transport.report(.answeredWithoutLink, for: target)
+        let reverted = store.preference(accountID: "account-1", origin: instance.serialized)
+        XCTAssertEqual(reverted.mode, .automatic)
+        XCTAssertEqual(reverted.reverted?.reason, .unreachable)
+        XCTAssertEqual(reverted.reverted?.from, .direct)
+        try await eventually { (app.runtimeOpenAttempt?.id ?? 0) > opened }
+        _ = try await waitForBrowser("instance-1", in: app)
+        XCTAssertEqual(try XCTUnwrap(app.directPreferenceProvider).read(instance)?.reverted?.from, .direct)
+    }
+
+    /// A drop of the link under 「仅直连和中继」 (the controller counts a
+    /// strict failure once its link stays lost) is only news: the choice
+    /// stays, and the App re-establishes the link by opening the instance
+    /// again once, through the route (stop, prepare, open), which selects
+    /// the transport again. A second look with nothing new does not reopen.
+    @MainActor
+    func testADropUnderDirectOnlyReopensTheInstanceOnceAndKeepsTheChoice() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        _ = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        transport.report(.usable(generation: "one"), for: target)
+        // The controller arms the link after draining the host's
+        // connections (none here), in a task of its own.
+        try await Task.sleep(for: .seconds(1))
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        let selections = transport.selections.count
+
+        transport.report(.lost, for: target)
+        // The controller's own wait for the link to come back, then the drop.
+        try await eventually(timeout: .seconds(30)) { (app.runtimeOpenAttempt?.id ?? 0) > opened }
+        _ = try await waitForBrowser("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            transport.selections.count > selections
+        }
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+        let reopened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, reopened)
+    }
+
+    /// An Action Button take made before the instance was opened in this
+    /// process goes out with no route: 「仅直连和中继」 then waits for the
+    /// next launch. The stored choice is kept, never set back: the page
+    /// reads it as chosen and pending, and the revert rules do not run.
+    @MainActor
+    func testAVoiceTakeBeforeTheOpenLeavesDirectOnlyPendingNeverReverted() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        // The hidden view's load, on the App's current store.
+        let note = try XCTUnwrap(VoiceCaptureInstanceLoads.note)
+        note(instance, app.websiteDataStore.identifier)
+
+        _ = try await select("instance-1", in: app)
+        let read = try XCTUnwrap(try XCTUnwrap(app.directPreferenceProvider).read(instance))
+        XCTAssertEqual(read.mode, .direct)
+        XCTAssertTrue(read.pendingRelaunch)
+        XCTAssertNil(read.reverted)
+        XCTAssertEqual(
+            store.preference(accountID: "account-1", origin: instance.serialized),
+            DirectPathPreference(mode: .direct)
+        )
+
+        // What would set an enforced choice back changes nothing here.
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        transport.report(.answeredWithoutLink, for: target)
+        transport.report(.answeredWithoutLink, for: target)
+        XCTAssertEqual(
+            store.preference(accountID: "account-1", origin: instance.serialized),
+            DirectPathPreference(mode: .direct)
+        )
+    }
+
+    /// A sign-in page in front is never replaced. A revert made while it
+    /// shows sets the choice back and tells the controller, without opening
+    /// the instance again.
+    @MainActor
+    func testARevertOverASignInPageLeavesThePage() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .authentication),
+            attemptID: opened,
+            runtime: runtime
+        )
+
+        transport.report(.answeredWithoutLink, for: target)
+        transport.report(.answeredWithoutLink, for: target)
+        let reverted = store.preference(accountID: "account-1", origin: instance.serialized)
+        XCTAssertEqual(reverted.mode, .automatic)
+        XCTAssertEqual(reverted.reverted?.from, .direct)
+        // A reopen would be made in a later turn: none is.
+        try await Task.sleep(for: .milliseconds(500))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        XCTAssertEqual(app.route, .browser(runtime))
+    }
+
+    /// A drop while a sign-in page is in front: the instance is opened
+    /// again only when the view is back on the instance.
+    @MainActor
+    func testADropOverASignInPageReopensOnlyWhenTheInstanceIsBack() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        let runtime = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        transport.report(.usable(generation: "one"), for: target)
+        // The controller arms the link in a task of its own.
+        try await Task.sleep(for: .seconds(1))
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .authentication),
+            attemptID: opened,
+            runtime: runtime
+        )
+
+        transport.report(.lost, for: target)
+        // Past the controller's own 10 s for the link to come back: the
+        // drop is counted, and nothing is opened over the sign-in page.
+        try await Task.sleep(for: .seconds(13))
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+
+        app.handleRuntimeNavigation(
+            RuntimeNavigationEvent(stage: .committed, destination: .instance),
+            attemptID: opened,
+            runtime: runtime
+        )
+        try await eventually(timeout: .seconds(30)) { (app.runtimeOpenAttempt?.id ?? 0) > opened }
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized).mode, .direct)
+    }
+
+    /// Without 「仅直连和中继」 the same answers change nothing: the rules run
+    /// only for that choice.
+    @MainActor
+    func testUnlinkedAnswersChangeNothingForAutomatic() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        _ = try await select("instance-1", in: app)
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        let opened = try XCTUnwrap(app.runtimeOpenAttempt).id
+        for _ in 0..<3 {
+            transport.report(.answeredWithoutLink, for: target)
+        }
+        XCTAssertEqual(store.preference(accountID: "account-1", origin: instance.serialized), .automatic)
+        XCTAssertEqual(app.runtimeOpenAttempt?.id, opened)
+    }
+
     /// The bridge surface: `directPreference` 1 only with a provider; the
     /// reading takes no parameters; the setting takes exactly a known mode
     /// (a later mode is refused, not guessed); both answer the agreed shape;
@@ -5884,7 +6120,7 @@ final class DirectPathAppTests: XCTestCase {
               item && typeof item === "object" && !Array.isArray(item)
                 ? Object.fromEntries(Object.entries(item).sort()) : item);
             const refusals = [];
-            for (const params of [{mode: "relayOff"}, {}, {mode: "tunnel", extra: 1}, {mode: 1}]) {
+            for (const params of [{mode: "relayOff"}, {mode: "direct"}, {}, {mode: "tunnel", extra: 1}, {mode: 1}]) {
               try {
                 await window.avibeNative.call("direct.setPreference", params);
                 refusals.push("accepted");
@@ -5911,7 +6147,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(
             result as? String,
-            #"{"capability":1,"read":{"mode":"automatic","reverted":{"at":1700000000000,"reason":"unreachable"}},"refusals":["invalid_argument","invalid_argument","invalid_argument","invalid_argument","invalid_argument"],"set":{"mode":"tunnel","reverted":null}}"#
+            #"{"capability":1,"read":{"mode":"automatic","pendingRelaunch":false,"reverted":{"at":1700000000000,"from":"tunnel","reason":"unreachable"}},"refusals":["invalid_argument","invalid_argument","invalid_argument","invalid_argument","invalid_argument","invalid_argument"],"set":{"mode":"tunnel","pendingRelaunch":false,"reverted":null}}"#
         )
         XCTAssertEqual(written.count, 1)
         XCTAssertEqual(written.first?.0, instance)
@@ -5937,7 +6173,7 @@ final class DirectPathAppTests: XCTestCase {
         )
         XCTAssertEqual(
             heard as? String,
-            #"{"mode":"automatic","reverted":{"at":1700000000000,"reason":"unreachable"}}"#
+            #"{"mode":"automatic","pendingRelaunch":false,"reverted":{"at":1700000000000,"from":"tunnel","reason":"unreachable"}}"#
         )
         let elsewhere = try XCTUnwrap(
             reverted.eventScript(for: try XCTUnwrap(WebOrigin.parseConfigured("https://instance-two.example")))
@@ -5967,6 +6203,103 @@ final class DirectPathAppTests: XCTestCase {
             contentWorld: .page
         )
         XCTAssertEqual(bareResult as? String, #"{"capability":null,"code":"unsupported"}"#)
+    }
+
+    /// With a controller that enforces 「仅直连和中继」 and measures:
+    /// `directPreference` 2 and `directMeasure` 1; `direct` is accepted
+    /// and the answer carries `pendingRelaunch`; `direct.measure` takes no
+    /// parameters, answers the measurement, refuses a second call as busy
+    /// and an unfinished one as failed. Without them neither capability and
+    /// `direct.measure` is unsupported.
+    @MainActor
+    func testTheDirectOnlyAndMeasureSurface() async throws {
+        var replies: [DirectMeasureReply] = [
+            .measured(DirectPathSeamsTests.measurement), .busy, .timedOut,
+        ]
+        var measuredFor: [WebOrigin] = []
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in
+                    reply(DirectPathStatus(preferred: .tunnel, sequence: 1, closure: 0))
+                },
+                directPreference: DirectPreferenceProvider(
+                    read: { _ in DirectPathPreference(mode: .direct, pendingRelaunch: true) },
+                    write: { _, mode, _ in DirectPathPreference(mode: mode, pendingRelaunch: mode == .direct) },
+                    acceptsDirectOnly: true,
+                    measure: { origin in
+                        measuredFor.append(origin)
+                        return replies.removeFirst()
+                    }
+                )
+            )
+        )
+        let loader = PageLoader()
+        webView.navigationDelegate = loader
+        try await loader.loadHTML("<!doctype html>", baseURL: instance.url, in: webView)
+        let result = try await webView.callAsyncJavaScript(
+            """
+            const canon = (value) => JSON.stringify(value, (key, item) =>
+              item && typeof item === "object" && !Array.isArray(item)
+                ? Object.fromEntries(Object.entries(item).sort()) : item);
+            const outcome = async (method, params) => {
+              try { return await window.avibeNative.call(method, params); }
+              catch (error) { return error.code; }
+            };
+            return canon({
+              preference: window.avibeNative.capabilities.directPreference,
+              measure: window.avibeNative.capabilities.directMeasure,
+              read: await outcome("direct.preference"),
+              set: await outcome("direct.setPreference", {mode: "direct"}),
+              withParams: await outcome("direct.measure", {leg: "tunnel"}),
+              measured: await outcome("direct.measure"),
+              busy: await outcome("direct.measure"),
+              timedOut: await outcome("direct.measure")
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(
+            result as? String,
+            #"{"busy":"busy","measure":1,"measured":{"basis":"warm-https-health","current":{"error":null,"kind":"relay","maxMs":61,"medianMs":48,"ok":5,"relayRegion":"tokyo","scope":null},"measuredAt":1700000000000,"samples":5,"tunnel":{"error":"timeout","kind":"tunnel","maxMs":null,"medianMs":null,"ok":0,"relayRegion":null,"scope":null}},"preference":2,"read":{"mode":"direct","pendingRelaunch":true,"reverted":null},"set":{"mode":"direct","pendingRelaunch":true,"reverted":null},"timedOut":"failed","withParams":"invalid_argument"}"#
+        )
+        XCTAssertEqual(measuredFor, [instance, instance, instance])
+
+        // A provider without them: version 1, no measurement.
+        let plain = WKWebView(
+            frame: .zero,
+            configuration: NativeBridgeConfiguration.make(
+                instanceOrigin: instance,
+                setOuterScrollLocked: { _, _ in false },
+                directStatus: { _, reply in reply(nil) },
+                directPreference: DirectPreferenceProvider(
+                    read: { _ in .automatic },
+                    write: { _, _, _ in nil }
+                )
+            )
+        )
+        let plainLoader = PageLoader()
+        plain.navigationDelegate = plainLoader
+        try await plainLoader.loadHTML("<!doctype html>", baseURL: instance.url, in: plain)
+        let plainResult = try await plain.callAsyncJavaScript(
+            """
+            let code = "answered";
+            try { await window.avibeNative.call("direct.measure"); } catch (error) { code = error.code; }
+            return JSON.stringify({
+              preference: window.avibeNative.capabilities.directPreference ?? null,
+              measure: window.avibeNative.capabilities.directMeasure ?? null,
+              code
+            });
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        XCTAssertEqual(plainResult as? String, #"{"preference":1,"measure":null,"code":"unsupported"}"#)
     }
 
     /// The stored choices: per account and instance; a mode this build
@@ -6746,14 +7079,14 @@ final class DirectPathAppTests: XCTestCase {
             #"{"capability":1,"advertised":1,"status":["direct",7,2,3],"refused":["invalid_argument","invalid_argument","invalid_argument"]}"#
         )
         XCTAssertEqual(askedFor, instance)
-        // The whole surface: a status, and a hand-over that takes nothing.
-        // Nothing takes an address, starts a probe, or accepts a rendezvous
-        // answer.
+        // The whole surface: a status, a hand-over that takes nothing, the
+        // path choice, and the measurement the App's controller makes.
+        // Nothing takes an address or accepts a rendezvous answer.
         XCTAssertEqual(
             NativeBridgeMethod.allCases
                 .map(\.rawValue)
                 .filter { $0.hasPrefix("direct.") },
-            ["direct.status", "direct.handover", "direct.preference", "direct.setPreference"]
+            ["direct.status", "direct.handover", "direct.preference", "direct.setPreference", "direct.measure"]
         )
     }
 

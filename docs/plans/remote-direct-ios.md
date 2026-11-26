@@ -486,6 +486,10 @@ Open-source notices for iroh are shipped by the licenses work, a separate task, 
 4. **Admission while the coordinator is busy.** `isCurrentRuntime` is false during a push-management request, so a `usable` report then is refused once, and the transport reports again.
 5. **A navigation in flight when the direct path is lost** ends as a failed load, and Retry loads over the public backend. Should the shell reload once by itself?
 
+### Residual: 「仅直连和中继」 and Action Button takes
+
+A voice take is sent from a hidden WebView on the account's store, which shares WebKit's connections with the page. A take made while the App was not opened in this process, or while its listener is closed for the background, leaves on the public path (in the second case the host's route is opened to failover for it, `DirectPathController.noteVoiceLoad`). The store then holds public connections the listener does not control, so 「仅直连和中继」 is not enforced again until the next launch (`pendingRelaunch`); the stored choice is unchanged. Someone who mostly uses the Action Button may therefore rarely have the choice in effect. Keeping it in effect and delivering the take needs the take to go through the listener in the background (binding it for the take) or over a connection of its own; neither is built.
+
 ## 14. Pull requests
 
 | PR | Content | Status |

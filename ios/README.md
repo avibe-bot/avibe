@@ -294,6 +294,8 @@ The native bridge method surface is fixed:
 | `voiceHold: 3` | `voice.holdSurfaces({surfaces, holdMs?})`, `voice.holdAdopt({take})`, `voice.holdReject({take})` | The App recognises a hold itself, so the cue never waits for the page or the microphone. The page names up to eight surfaces `{id, x, y, width, height, start?, startAfterMs?, prepare?}` (the WebView's own points) where a hold may record now, and its hold threshold `holdMs` (100–500, default 200; any other is `invalid_argument`); an empty list ends it. Only a consent-marked document (as for `voice.captureStart`) names a surface: another gets `failed` `consent`. Only the instance's own WebView is watched: a popup gets `failed` `unwatched`, and the page goes on recognising its holds itself. One WebView's list at a time, and its calls count in the order the page made them: a list overtaken by a later call, or by its document going, gets `failed` `superseded`. A passive recogniser sees each touch (it cancels and delays nothing). On a surface, at touch-down the App prepares the input off the main thread (session and engine, nothing started) and starts it at the later of "prepared" and `startAfterMs` (0 to 500 ms; 50 when the page names none), and only if the touch, asked on the main thread once every touch event that reached the App has been handled, is still down and within the slop: **a lift before the input starts never opens the microphone**, and a stalled main thread starts nothing (a hold made then records from when it is free). `start: "recognition"` (or `avibe-diagnostics://voice/hold-quiet?on=1`) starts it with the cue instead; `prepare: "start"` prepares nothing before the start; when other audio plays or the route is Bluetooth nothing is prepared before the hold is recognised. A list with any other key or value is `invalid_argument`, so a page sends the new keys only from version 3. At the threshold (10 pt slop), once it has handled every touch event that reached it (a lift it had not yet heard of ends the press as a tap, with no cue; the touch itself is asked, since UIKit does not report the lift of a press the page took for itself), it fires the haptic and dispatches `avibe:native:voice.hold` `{phase: "recognised", take, surface}`. When the input cannot start for a take no page has taken, the page gets `{phase: "failed", take, surface, step}` instead of audio: the App is not following that press, and the page goes on recognising it itself. The take's audio waits in memory until the page calls `voice.holdAdopt` (answer `{sampleRate, timings}`; the same consent-marked document), then arrives as `voice.capture` events, what was recorded since touch-down first; the page ends it with `voice.captureStop`, and gets `{phase: "timings", take, timings}`. A press whose surface the page takes back is counted as a tap when its touch, asked, has lifted (the tap that focuses the composer: the page takes it back before the App learns of the lift). When the touch is already gone by then (on a phone, once the keyboard is up), it is counted with the most it can have lasted instead of its length (`lost`, and per threshold `c…`: it surely ended before the input could start). Only a press taken back under a finger still down is kept as `withdrawn`. The audio of a touch that ends as a tap or a scroll is dropped when the touch ends and never leaves the App's memory (a touch shorter than the threshold by its own timestamps is a tap, even if its end was handled late); so is a take the page rejects or does not adopt within 1 s of recognition (`end=unadopted` in its timings), or whose input has passed on 2 s of audio before the page adopted it (the input counts this itself, on the thread its audio arrives on, and stops there: the bound holds while the main thread is stalled), and one cut off by App Lock, the background, an Action Button take or a withdrawn surface. After recognition the finger's slides are the page's: it gives the cancel haptics and decides what a release does (the App is not told of moves on a surface whose page took the press for itself, so at the cue it also asks the touch where it is, and gives none to a finger past the slop). Each hold's timings (numbers only, with how long the touch took to reach the App and when the input was asked to start), and counts of the touches that were not holds by duration (25 ms steps), with how many had the microphone started (`open`) and how many would have with a `startAfterMs` of 50, 80, 100 and 120 ms (`w50`…), are kept for the next Action Button message's `capture_earlier`; the counts since installation also ride in each hold's `timings` event (`taps`, in the form every page reads; `tapsLost` for the taps of unknown length). `avibe-diagnostics://voice/hold-quiet?on=1` (TestFlight and development builds) only prepares the input at touch-down and starts it at recognition. Version 1 (TestFlight 50.1 only) could give a tap the cue when the lift reached the App late; the page names surfaces from version 2. Version 2 (51.1) started the input at touch-down with no look at the finger, so a tap opened the microphone for a moment |
 | `viewport: 1` | `viewport.setOuterScrollLocked({locked})` | `null`; applies to the calling managed WebView |
 | `direct: 1` | `direct.status()` | `{preferred: "tunnel" \| "direct", sequence, closure}`; read-only, takes no parameters, and describes the instance the calling WebView was made for. Offered only when the App has a direct transport; this shell has none, so the capability is absent and the call answers `unsupported` |
+| `directPreference: 1` or `2` | `direct.preference()`, `direct.setPreference({mode})`, event `direct.preferenceChanged` | This device's path choice for the instance, per account: `{mode, reverted: {at, reason: "unreachable", from} \| null, pendingRelaunch}`. Version 1 takes `automatic` or `tunnel`; version 2 also `direct` (「仅直连和中继」), offered only when the path controller enforces it (`DirectOnlyControlling`). `from` is the mode the App set back to automatic (an entry stored before it existed reads `tunnel`); `pendingRelaunch` is true when `direct` takes effect only at the next launch. Offered only with a direct transport |
+| `directMeasure: 1` | `direct.measure()` | Takes no parameters; the path controller measures the direct or relay path in use and the tunnel (`DirectPathMeasuring`) and the App answers `{measuredAt, basis: "warm-https-health", samples: 5, current, tunnel}`, each leg `{kind, scope, relayRegion, ok, medianMs, maxMs, error}` or `null`. A second call while one runs is refused `busy`; the App answers `failed` if the controller has not answered in 35 s. Nothing is stored or sent off the device. Offered only when the controller can measure |
 
 After a validated notification tap, the native shell emits
 `push.opened({url})` to the selected instance's primary WebView. The event
@@ -783,6 +785,58 @@ With a transport:
   none.
 
 The time bounds above are proposals for source and tests, not measurements.
+
+### 「仅直连和中继」 and 「线路测速」
+
+The App's side is written against two protocols in `DirectPathSeams.swift`,
+`DirectOnlyControlling` and `DirectPathMeasuring`, which the path controller
+conforms to. Without a conforming controller the App offers neither:
+`directPreference` stays 1, `direct` is refused, and there is no
+`directMeasure`.
+
+- **Setting it.** `AppModel` calls `setDirectOnly` for the host before its
+  route is prepared at every open, and again at each change of the choice;
+  a change opens the instance again where the page was, unless the
+  controller says it takes effect only at the next launch
+  (`directOnlyNeedsRelaunch`, answered as `pendingRelaunch`). Opens under
+  `direct` use the direct path as automatic does. Each load of the
+  instance the view starts calls `noteInstanceLoad` first.
+- **The link.** Its first arrival in a bootstrap reloads the view once, so
+  the page's connections move to it.
+- **Going back to automatic** (`DirectOnlyRevertRules`; `reverted.from` is
+  `direct`) happens only on evidence that this phone reached the instance,
+  counted per bootstrap (an open, a return to the foreground, a drop):
+  two rendezvous the instance answered without a link (a1); a fresh page of
+  the instance and no link within 20 s (a2); three drops within 10 minutes,
+  applied at the next evidence (b); the listener unable to serve in the
+  foreground for 60 s from its first failed attempt that counts, not a
+  first attempt, `waiting`, the background, or anything before a success
+  (c); an open that runs out of time while c's clock runs applies c then,
+  so the choice is never held for good. Rule b records nothing
+  (`reverted` stays null: the page shows automatic and no line); a1, a2
+  and c record when and from what. Not while the choice waits for the
+  next launch. The App then sets the host back with `setDirectOnly(false)`
+  and opens the instance again.
+- **A drop** (the controller counts one when a lost link has not come back
+  in 10 s) is news, not a fallback: the App opens the instance again once
+  through the route (stop, prepare, open), which is the one pass through
+  the tunnel that can bring the link back.
+- **A sign-in page in front** is never replaced: a2's 20 s do not run
+  while the view is away from the instance; a drop's reopen waits until
+  the view is back on the instance (or its way back fails); a revert is
+  made without the reopen.
+- **The Action Button's hidden view** tells the controller of each load it
+  makes (`noteVoiceLoad`). A voice message must arrive, and the choice is
+  for the page's traffic. A load made where the host has no route (the App
+  was not opened in this process) goes out on the public path. One made on
+  the host's own route while the listener cannot serve (the background,
+  where it is closed) opens that route to failover in the same step that
+  marks the host. Either way 「仅直连和中继」 then waits for the next launch
+  (`pendingRelaunch`): the stored choice is kept, never set back, and the
+  route stays open for the rest of the process. The page's view never
+  loads on a held gate, so it never does this.
+- **Measuring.** `DirectMeasureRunner` runs one measurement at a time and
+  bounds it at 35 s, just above the controller's own 30 s.
 
 ## Mobile account onboarding
 

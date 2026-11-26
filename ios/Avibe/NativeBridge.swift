@@ -57,32 +57,45 @@ struct NativeShellMetadata: Equatable {
     /// Whether it answers `direct.preference` and `direct.setPreference`:
     /// the `directPreference` capability.
     let directPreference: Bool
+    /// Whether that choice includes 「仅直连和中继」 (`direct`):
+    /// `directPreference` version 2.
+    let directOnly: Bool
+    /// Whether it answers `direct.measure()`: the `directMeasure` capability.
+    let directMeasure: Bool
 
     init(
         shellVersion: String,
         userAgentVersion: String,
         direct: Bool = false,
         directHandover: Bool = false,
-        directPreference: Bool = false
+        directPreference: Bool = false,
+        directOnly: Bool = false,
+        directMeasure: Bool = false
     ) {
         self.shellVersion = shellVersion
         self.userAgentVersion = userAgentVersion
         self.direct = direct
         self.directHandover = direct && directHandover
         self.directPreference = direct && directPreference
+        self.directOnly = direct && directPreference && directOnly
+        self.directMeasure = direct && directMeasure
     }
 
     func withDirect(
         _ direct: Bool,
         handover: Bool = false,
-        preference: Bool = false
+        preference: Bool = false,
+        directOnly: Bool = false,
+        measure: Bool = false
     ) -> NativeShellMetadata {
         NativeShellMetadata(
             shellVersion: shellVersion,
             userAgentVersion: userAgentVersion,
             direct: direct,
             directHandover: handover,
-            directPreference: preference
+            directPreference: preference,
+            directOnly: directOnly,
+            directMeasure: measure
         )
     }
 
@@ -95,8 +108,13 @@ struct NativeShellMetadata: Equatable {
         }
         if directPreference {
             // This device's path choice for the instance: automatic, or the
-            // Cloudflare tunnel only.
-            capabilities["directPreference"] = 1
+            // Cloudflare tunnel only; version 2 adds 「仅直连和中继」 and
+            // `reverted.from` and `pendingRelaunch` in its answers.
+            capabilities["directPreference"] = directOnly ? 2 : 1
+        }
+        if directMeasure {
+            // `direct.measure()`: both paths measured on demand.
+            capabilities["directMeasure"] = 1
         }
         return capabilities
     }
@@ -237,6 +255,7 @@ enum NativeBridgeMethod: String, CaseIterable {
     case directHandover = "direct.handover"
     case directPreference = "direct.preference"
     case directSetPreference = "direct.setPreference"
+    case directMeasure = "direct.measure"
     case liveActivitySetting = "liveActivity.setting"
     case liveActivitySetSetting = "liveActivity.setSetting"
     case liveActivityObserve = "liveActivity.observe"
@@ -353,9 +372,13 @@ enum NativeBridgeError: Error, Equatable {
     case invalidRequest
     case unsupported
     case failed(String)
+    /// The same call is already running.
+    case busy
 
     var code: String {
         switch self {
+        case .busy:
+            return "busy"
         case .forbidden:
             return "forbidden"
         case .invalidArgument:
@@ -381,6 +404,8 @@ enum NativeBridgeError: Error, Equatable {
             return "The native bridge method is not supported by this shell."
         case .failed(let message):
             return message
+        case .busy:
+            return "The same call is already running."
         }
     }
 
@@ -482,7 +507,9 @@ enum NativeBridgeConfiguration {
         let metadata = metadata.withDirect(
             directStatus != nil,
             handover: directHandover != nil,
-            preference: directPreference != nil
+            preference: directPreference != nil,
+            directOnly: directPreference?.acceptsDirectOnly == true,
+            measure: directPreference?.measure != nil
         )
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = websiteDataStore
@@ -1614,12 +1641,16 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 guard
                     request.params.count == 1,
                     let name = request.params["mode"] as? String,
-                    let mode = DirectPathPreference.Mode(name: name)
+                    let mode = DirectPathPreference.Mode(name: name),
+                    // 「仅直连和中继」 only where it is enforced.
+                    mode != .direct || directPreference.acceptsDirectOnly
                 else {
                     reply(
                         replyHandler,
                         error: .invalidArgument(
-                            "direct.setPreference requires mode automatic or tunnel."
+                            directPreference.acceptsDirectOnly
+                                ? "direct.setPreference requires mode automatic, tunnel or direct."
+                                : "direct.setPreference requires mode automatic or tunnel."
                         )
                     )
                     return
@@ -1634,6 +1665,42 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandlerWithRep
                 return
             }
             reply(replyHandler, result: preference.jsonObject)
+        case .directMeasure:
+            guard let measure = directPreference?.measure else {
+                reply(replyHandler, error: .unsupported)
+                return
+            }
+            guard request.params.isEmpty else {
+                reply(
+                    replyHandler,
+                    error: .invalidArgument("direct.measure does not accept parameters.")
+                )
+                return
+            }
+            guard
+                let sourceWebView,
+                let url = sourceWebView.url,
+                WebOrigin(url: url, requiresHTTPS: false) == policy.instanceOrigin
+            else {
+                reply(replyHandler, error: .failed("The page is no longer this instance's."))
+                return
+            }
+            let instanceOrigin = policy.instanceOrigin
+            Task { @MainActor [weak self] in
+                let answer = await measure(instanceOrigin)
+                guard let self else {
+                    replyHandler(nil, nil)
+                    return
+                }
+                switch answer {
+                case .measured(let measurement):
+                    self.reply(replyHandler, result: measurement.jsonObject)
+                case .busy:
+                    self.reply(replyHandler, error: .busy)
+                case .timedOut:
+                    self.reply(replyHandler, error: .failed("The measurement did not finish."))
+                }
+            }
         case .pushStatus, .pushSubscribe, .pushUnsubscribe, .pushOpenedAck,
              .systemScheduleCapabilities, .systemScheduleRequest,
              .systemScheduleCancel:
