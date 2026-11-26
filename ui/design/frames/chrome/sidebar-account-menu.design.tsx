@@ -1,4 +1,4 @@
-// ui/design: chrome/sidebar-account-menu. Approved by Max on 2026-11-26; renders the shipped menu.
+// ui/design: chrome/sidebar-account-menu. Shipped menu; 2026-11-26 spacing follows update/panel.
 import type { ReactNode } from 'react';
 import { Route, Routes } from 'react-router-dom';
 
@@ -78,7 +78,7 @@ const shots: Shot[] = [
   { name: 'online', title: '菜单展开 · 在线（绿点，已连接）', render: menu('local'), langs: ['zh', 'en'] },
   { name: 'offline', title: '菜单展开 · 另一台电脑连接断开（灰点，离线）', render: menu('offline') },
   { name: 'switching', title: '菜单展开 · 正在切换（金点，连接中）', render: menu('switching') },
-  { name: 'hover', title: '菜单展开 · 指针悬停在「切换实例」上', render: menu('local'), hover: '[data-menu-switch] button' },
+  { name: 'hover', title: '菜单展开 · 指针悬停在「切换实例」上', render: menu('local'), langs: ['zh', 'en'], hover: '[data-menu-switch] button' },
   { name: 'long-narrow', title: '菜单展开 · 长实例名＋长邮箱 · 窄窗口 880（截断实例名，状态完整）', render: menu('local', LONG, LONG_EMAIL), width: 880 },
 ];
 

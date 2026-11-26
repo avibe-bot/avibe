@@ -41,7 +41,7 @@ export function DesktopSidebarAccountMenu({ state, trigger, version, onPresent }
 
   // The dot centred in the menu icons' 16 px column, the name on their labels' line (Max, 10:01), the
   // state after it.
-  const instance = <div data-menu-instance className="flex min-w-0 items-center gap-2.5 px-2.5 py-1.5">
+  const instance = <div data-menu-instance className="flex min-w-0 items-center gap-2.5 leading-5">
     <span className="grid size-4 shrink-0 place-items-center">{dot}</span>
     <span className="flex min-w-0 items-baseline gap-1.5">
       <span className={cn('min-w-0 truncate text-[12.5px] font-medium', offline ? 'text-muted' : 'text-foreground')}>{name}</span>
@@ -80,12 +80,16 @@ export function DesktopSidebarAccountMenu({ state, trigger, version, onPresent }
           : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
         items[next]?.focus();
       }}
-      className="w-[var(--radix-popover-trigger-width)] p-1.5">
-      {email && <div data-menu-email className="truncate px-2.5 pb-1 pt-1 text-[12px] text-muted">{email}</div>}
-      {instance}
-      <div className="my-1 border-t border-border" />
-      <div data-menu-switch><ContextMenuItem icon={<ArrowLeftRight className="size-4 text-muted" />} label={t('desktopClient.switchInstance')} onClick={() => select('instances')} /></div>
-      <div data-menu-sign-out><ContextMenuItem danger icon={<LogOut className="size-4" />} label={t('desktopClient.signOut')} onClick={() => select('sign-out')} /></div>
+      className="w-[var(--radix-popover-trigger-width)] p-0">
+      {/* Match UpdatePanel's full-width header divider and 16/12 px content rhythm. */}
+      <div data-menu-divider className="space-y-3 border-b border-border px-4 py-3">
+        {email && <div data-menu-email className="truncate text-[12px] leading-5 text-muted">{email}</div>}
+        {instance}
+      </div>
+      <div className="px-2 py-2.5 [&_button]:px-2 [&_button]:leading-5">
+        <div data-menu-switch><ContextMenuItem icon={<ArrowLeftRight className="size-4 text-muted" />} label={t('desktopClient.switchInstance')} onClick={() => select('instances')} /></div>
+        <div data-menu-sign-out><ContextMenuItem danger icon={<LogOut className="size-4" />} label={t('desktopClient.signOut')} onClick={() => select('sign-out')} /></div>
+      </div>
     </PopoverContent>
   </Popover>;
 }
