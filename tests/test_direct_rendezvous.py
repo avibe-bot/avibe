@@ -478,10 +478,12 @@ def test_leg_faults_log_only_their_fixed_words_and_numbers_without_changing_the_
             caplog.clear()
             _post(client, {**_body(), "leg_faults": [_leg_fault(**{key: word})]})
             assert len([line for line in caplog.messages if f" {key}={word} " in line]) == 1, (key, word)
-    assert direct_rendezvous._LEG_FAULT_STAGES == ("rendezvous", "dial", "open", "connect", "tls", "handover", "revert")
+    assert direct_rendezvous._LEG_FAULT_STAGES == (
+        "rendezvous", "dial", "open", "connect", "tls", "health", "handover", "revert")
     assert direct_rendezvous._LEG_FAULT_CODES == (
         "timeout", "refused", "unreachable", "denied", "status", "closed_by_page", "closed_by_peer",
-        "lost_race", "proxy_auth", "expired", "other")
+        "lost_race", "proxy_auth", "expired", "other", "invalid_offer", "no_permitted_path",
+        "listener_closed", "superseded", "not_ready", "connection_ended", "invalid_head")
     assert direct_rendezvous._LEG_FAULT_PATHS == ("lan", "punched", "relay", "none")
     # It rides beside the iPhone's fields without either changing the other.
     caplog.clear()

@@ -78,11 +78,14 @@ def log_listener_faults(faults: Any) -> None:
 
 
 # What a desktop client may say of a direct leg that did not end in a working
-# stream. Fixed words only: nothing a client sends is logged as it came.
-_LEG_FAULT_STAGES = ("rendezvous", "dial", "open", "connect", "tls", "handover", "revert")
+# stream. Fixed words only: nothing a client sends is logged as it came. They
+# are the desktop transport's own classification (`Stage` and `FaultCode` in
+# desktop/src-tauri/src/direct/transport.rs), in snake case.
+_LEG_FAULT_STAGES = ("rendezvous", "dial", "open", "connect", "tls", "health", "handover", "revert")
 _LEG_FAULT_CODES = (
     "timeout", "refused", "unreachable", "denied", "status", "closed_by_page", "closed_by_peer",
-    "lost_race", "proxy_auth", "expired", "other",
+    "lost_race", "proxy_auth", "expired", "other", "invalid_offer", "no_permitted_path",
+    "listener_closed", "superseded", "not_ready", "connection_ended", "invalid_head",
 )
 _LEG_FAULT_PATHS = ("lan", "punched", "relay", "none")
 
