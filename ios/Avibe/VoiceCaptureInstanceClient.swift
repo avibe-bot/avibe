@@ -580,6 +580,9 @@ final class VoiceCaptureInstanceClient: NSObject, WKNavigationDelegate {
         self.webView?.navigationDelegate = nil
         self.webView = webView
         let url = target.origin.url.appending(path: "api/csrf-token")
+        // The direct path hears of this load as of the page's
+        // (「仅直连和中继」 must know an unrouted load of the host).
+        VoiceCaptureInstanceLoads.note?(target.origin, target.storeIdentifier)
         try await withCheckedThrowingContinuation { continuation in
             loadContinuation = continuation
             webView.load(URLRequest(
