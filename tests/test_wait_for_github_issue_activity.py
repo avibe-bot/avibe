@@ -514,6 +514,19 @@ def test_main_returns_terminal_exit_code_for_non_retryable_initial_issue_http_er
     assert "GitHub HTTP 404 Not Found" in stderr.getvalue()
 
 
+def test_issue_comments_still_report_when_optional_viewer_is_forbidden(capsys) -> None:
+    module = _load_module()
+    denied = urllib.error.HTTPError("https://example.invalid/user", 403, "Forbidden", {}, None)
+    with (
+        patch.object(module, "get_token", return_value="installation-token"),
+        patch.object(module, "get_authenticated_login", side_effect=denied),
+        patch.object(module, "_fetch_issue_comment_state", return_value=({"issue_comments": [{"id": 123}]}, 1)),
+        patch("sys.argv", ["wait_issue.py", "--repo", "owner/repo", "--issue", "24", "--catch-up"]),
+    ):
+        assert module.main() == 0
+    assert "issue_comment #123" in capsys.readouterr().out
+
+
 def test_main_returns_retry_exit_code_for_initial_issue_network_error() -> None:
     module = _load_module()
     stderr = io.StringIO()

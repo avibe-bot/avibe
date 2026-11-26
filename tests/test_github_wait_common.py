@@ -131,6 +131,7 @@ def test_unauthenticated_rate_limit_is_terminal() -> None:
     (429, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "bad"}, "", [60]),
     (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "9000"}, "", [3900]),
     (403, {"Retry-After": "10"}, "", [10, 20, 40, 80]),
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1010", "Retry-After": "300"}, "", [300, 600]),
     (429, {"Retry-After": "3000"}, "", [3000, 3900]),
     (403, {}, "You have exceeded a secondary rate limit.", [60, 120]),
     (403, {}, "Resource not accessible by integration", []),
@@ -162,6 +163,41 @@ def test_quota_recovery_respects_cycle_deadline():
         result = module.github_request(lambda: (_ for _ in ()).throw(error), quota_deadline=100)
     sleep.assert_called_once_with(5)
     assert result.error.exit_code == 124
+
+
+def test_graphql_quota_recovery_rejects_partial_data_and_bounds_retried_pages():
+    module = _load_module()
+    throttled = _FakeResponse({"errors": [{"type": "RATE_LIMITED"}], "data": {"partial": True}})
+    throttled.headers = {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1006"}
+    clock = 0.0
+    requests = []
+
+    def advance(seconds):
+        nonlocal clock
+        clock += seconds
+
+    def transport(request, timeout):
+        requests.append(timeout)
+        if len(requests) == 1:
+            return throttled
+        # Simulate a response taking longer than its remaining wall-clock budget.
+        advance(4)
+        return _FakeResponse({"data": {"late": True}})
+
+    def fetch():
+        module.github_graphql("query { a }", {}, "token")
+        return module.github_graphql("query { b }", {}, "token")
+
+    with (
+        patch.object(module.time, "time", return_value=1000),
+        patch.object(module.random, "uniform", return_value=1),
+        patch.object(module.time, "monotonic", side_effect=lambda: clock),
+        patch.object(module.time, "sleep", side_effect=advance),
+        patch.object(module.urllib.request, "urlopen", side_effect=transport),
+    ):
+        result = module.github_request(fetch, quota_deadline=10)
+    assert result.error.exit_code == 124
+    assert requests == [30, 3]  # no next page after the deadline
 
 
 def test_http_incomplete_read_is_transient() -> None:

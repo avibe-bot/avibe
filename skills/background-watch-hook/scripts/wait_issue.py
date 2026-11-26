@@ -232,8 +232,12 @@ def main() -> int:
     if args.issue is not None and token and not args.include_self_comments:
         viewer = github_request(lambda: get_authenticated_login(token, raise_on_error=True), quota_deadline=quota_deadline)
         if viewer.error:
-            print(str(viewer.error), file=sys.stderr)
-            return RETRY_EXIT_CODE if viewer.error.retryable else viewer.error.exit_code
+            if viewer.error.exit_code == 124:
+                print(str(viewer.error), file=sys.stderr)
+                return viewer.error.exit_code
+            # Installation tokens can read issue comments but not /user. As
+            # before, an unavailable viewer disables only the optional filter.
+            print(f"Viewer unavailable; not filtering self-authored comments: {viewer.error}", file=sys.stderr)
         viewer_login = viewer.value
 
     def fetch(stop_after_id: int | None, max_pages: int | None = None):
