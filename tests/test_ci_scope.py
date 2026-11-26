@@ -297,6 +297,7 @@ def test_docs_fast_path_keeps_only_the_existing_dependency_free_guidance_check()
     ("ios/Avibe/NavigationPolicy.swift", False, "run"),
     ("scripts/ci_scope.py", False, "run"),
     ("unknown/input", False, "run"),
+    ("storage/alembic/env.py", False, "skip"),
 ])
 def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_path, path, docs, ios):
     from tests.test_ci_docs_only import make_repo, synthetic_pr, writes
@@ -322,9 +323,7 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     assert result.returncode == 0, result.stderr
     routed = dict(line.split('=', 1) for line in output.read_text().splitlines())
     from scripts.ci_fast_pr import LINUX
-    extras = {'ios/Avibe/NavigationPolicy.swift': {'ios-shell'},
-              'scripts/ci_scope.py': {'manifest-consistency'},
-              '.github/PULL_REQUEST_TEMPLATE.md': {'manifest-consistency'}}.get(path, set())
+    extras = {'storage/alembic/env.py': {'install-upgrade-shards'}}.get(path, set())
     assert routed['portfolio'] == 'true' and routed['sensitive'] == str(bool(extras)).lower()
     assert {k for k, v in json.loads(routed['dispatch_jobs']).items() if v == 'run'} == LINUX | extras
     assert json.loads(routed['unit_shards']) == list(range(24))
@@ -360,7 +359,7 @@ def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
     groups, jobs = selected(scope('core/auth.py', 'storage/alembic/env.py', 'uv.lock'))
     assert groups == {'identity', 'migration', 'shared'}
     assert jobs == LINUX | {'ui-browser-checks', 'windows-control-ipc', 'install-upgrade-shards', 'manifest-consistency'}
-    rename = scope_of([('D', '100644', '000000', 'storage/vault_data.py'), ('A', '000000', '100644', 'docs/b.md')], True)
+    rename = scope_of([('D', '100644', '000000', 'storage/vault_policy.py'), ('A', '000000', '100644', 'docs/b.md')], True)
     assert 'vault' in selected(rename)[0]
     with pytest.raises(ValueError):
         selected(full('unknown diff', False))
@@ -383,9 +382,25 @@ def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
 def test_indirect_sensitive_inputs_require_the_consuming_producer(path, group, proof):
     from scripts.ci_fast_pr import selected
 
-    groups, jobs = selected(scope(path, 'docs/guide.md'))
+    # Once a real admission boundary is touched, the old producer policy
+    # still sees all paths, including indirect inputs that no longer admit alone.
+    groups, jobs = selected(scope(path, 'vibe/binding_admission.py'))
     assert group in groups and proof in jobs
     assert proof in workflow()['jobs']['sensitive-proof']['needs']
+
+
+def test_named_files_and_manual_request_select_real_proofs():
+    from scripts.ci_fast_pr import EXTRA, LINUX, selected
+    from scripts.ci_targeted_paths import BOUNDARIES
+
+    for paths in BOUNDARIES.values():
+        for path in paths:
+            assert (ROOT / path).is_file()
+            assert selected(scope(path))[1] - LINUX, path
+    assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell'}
+    assert selected(scope('storage/alembic/versions/new_revision.py'))[1] == LINUX | {'install-upgrade-shards'}
+    assert selected(scope('ios/AvibeTests/MobileOnboardingTests.swift', 'ui/thread_bootstrap.ts'))[1] == LINUX
+    assert selected(scope('.github/request-sensitive-checks.md'))[1] == LINUX | EXTRA
 
 
 @pytest.mark.parametrize('gate', ['fast-gate', 'sensitive-proof'])
