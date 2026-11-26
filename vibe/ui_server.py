@@ -90,6 +90,7 @@ from modules.agents.catalog import (
     is_agent_backend,
     supports_runtime_refresh,
 )
+from vibe import direct_path_use
 from vibe.direct_ingress import DIRECT_INGRESS_SCOPE_KEY
 from vibe import declared_proxy, ui_network_access
 from vibe.network_position import BindingState, binding_state, position_snapshot
@@ -2831,6 +2832,12 @@ def enforce_remote_access_cookie():
             remote_access.register_device_session(config, identity, payload, request.headers)
         g.remote_session_payload = payload
         g.remote_authorization_resolution = resolution
+        # Counts only: which way this session's requests arrive (direct_path_use).
+        direct_path_use.counts.note(
+            (str(identity.get("sub")), str(identity.get("browser_session_id"))),
+            direct=_is_direct_ingress_request(),
+            owner=context.is_instance_owner,
+        )
         if remote_access.session_needs_renewal(
             payload,
             instance_kind=config.remote_access.vibe_cloud.instance_kind,
@@ -9407,6 +9414,7 @@ def direct_rendezvous():
         )
     rendezvous_state.log_listener_faults(payload.get("listener_faults"))
     rendezvous_state.log_leg_faults(payload.get("leg_faults"))
+    rendezvous_state.log_path_use(payload.get("path_use"))
     rendezvous_state.log_slow_store_removals(payload.get("slow_store_removals_ms"))
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
