@@ -16,8 +16,8 @@ export function SignInWelcome({
   compact = false,
   children,
 }: {
-  /** Two lines: each app says what it adds. */
-  subtitle: readonly [string, string];
+  /** Desktop uses one sentence; iOS keeps its two explicit lines. */
+  subtitle: string | readonly [string, string];
   compact?: boolean;
   children: ReactNode;
 }) {
@@ -58,19 +58,17 @@ export function SignInWelcome({
           <br />
           {t('mobileApp.welcome.titleLine2')}
         </h1>
-        <p className={cn('max-w-xs text-center text-sm text-muted', compact ? 'mt-3 leading-6' : 'mt-5 leading-7')}>
-          {subtitle[0]}
-          <br />
-          {subtitle[1]}
+        <p className={cn('text-center text-sm text-muted', compact ? 'mt-3 w-max max-w-none whitespace-nowrap leading-6' : 'mt-5 max-w-xs leading-7')}>
+          {typeof subtitle === 'string' ? subtitle : <>{subtitle[0]}<br />{subtitle[1]}</>}
         </p>
       </div>
       <div className={cn('flex flex-col pb-3', compact ? 'gap-3' : 'gap-4')}>
         {children}
-        <p className="text-center text-xs leading-relaxed text-muted">
+        {!compact && <p className="text-center text-xs leading-relaxed text-muted">
           {t('mobileApp.welcome.footerLine1')}
           <br />
           {t('mobileApp.welcome.footerLine2')}
-        </p>
+        </p>}
       </div>
     </>
   );
