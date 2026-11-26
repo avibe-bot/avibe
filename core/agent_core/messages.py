@@ -819,8 +819,8 @@ class Usage:
     # Transient provider diagnostics: only ModelResponse.cache persists these.
     # Keeping the canonical Usage shape unchanged permits older releases to read the transcript.
     cache_writes_by_ttl: Optional[Mapping[str, int]] = field(default=None, compare=False, repr=False)
-    # False when a provider exposed TTL detail but omitted the aggregate write total; the
-    # detail may be retained for diagnostics but must not be treated as complete billing input.
+    # False when the provider did not explicitly report the aggregate. TTL buckets, when
+    # present, are evidence for those buckets only, not a complete billing measurement.
     cache_write_total_reported: bool = field(default=True, compare=False, repr=False)
 
     def __post_init__(self) -> None:
