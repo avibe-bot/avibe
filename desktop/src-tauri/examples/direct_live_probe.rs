@@ -33,7 +33,9 @@
 //! Order, each step one JSON line on standard output:
 //!
 //! 1. Controls of WebKit itself in this environment, on loopback pages of
-//!    the probe's own: a load that carries a dummy session to its origin;
+//!    the probe's own: a cookie of the real one's shape, with a dummy
+//!    value, stored and read back (never sent);
+//!    a load that carries a dummy session to its origin;
 //!    a redirect to another origin and one within the origin, neither
 //!    followed; a load through a route to a CONNECT listener; and a load
 //!    whose listener answers `502`, which must fail because the route
@@ -41,6 +43,10 @@
 //!    nothing about the product, and the probe stops.
 //! 2. The session's document in a first store, on WebKit's own path: the
 //!    rendezvous request is the instance's own top document's, as shipped.
+//!    The instance serves its page to anyone, so the document proves no
+//!    session: the page then asks the instance's own `/api/session`, and
+//!    the probe goes on only if that says remote and signed in (it prints
+//!    those two facts and whether the role is Owner, nothing else of it).
 //! 3. The native qualification, which asks that document for the rendezvous
 //!    answer through the shipping adapter (`webview_macos::fetch_rendezvous`).
 //! 4. The fresh-store leg, the positive control of the page path: a second
@@ -70,7 +76,8 @@
 //!
 //! Exit code: 0 both legs got their payload over the direct path; 1 a
 //! control failed; 2 the input was refused; 3 the session's document did not
-//! load; 4 the native qualification failed; 5 the fresh-store leg failed;
+//! load or the instance did not take the session; 4 the native
+//! qualification failed; 5 the fresh-store leg failed;
 //! 6 the live-store leg got no payload over a new direct stream.
 
 #[cfg(not(target_os = "macos"))]
@@ -619,6 +626,89 @@ mod probe {
         TimedOut,
     }
 
+    /// A session cookie as the store holds it after seeding.
+    #[derive(Clone, Copy)]
+    struct Seeded {
+        /// For the origin's host exactly, not for a domain.
+        host_only: bool,
+        secure: bool,
+        http_only: bool,
+    }
+
+    /// Says what the store holds, and whether it is the shape the instance's
+    /// own cookie has for an origin of this scheme.
+    fn report_seeded(report: &Report, boundary: &'static str, seeded: Option<Seeded>, secure: bool) -> bool {
+        let Some(seeded) = seeded else {
+            report.failed(boundary, "cookie_not_stored");
+            return false;
+        };
+        let ok = seeded.host_only && seeded.secure == secure;
+        report.line(
+            boundary,
+            json!({ "ok": ok, "host_only": seeded.host_only, "secure": seeded.secure, "http_only": seeded.http_only }),
+        );
+        ok
+    }
+
+    /// Whether the instance takes the view's session: its own `/api/session`
+    /// answer, read by the page and reduced to three facts. The instance
+    /// serves its page to anyone, so a document that loads proves nothing.
+    #[derive(Clone, Copy)]
+    struct SessionCheck {
+        remote: bool,
+        authenticated: bool,
+        owner: bool,
+    }
+
+    const SESSION_CHECK: &str = r#"try {
+  const response = await fetch("/api/session", {cache: "no-store", redirect: "error", credentials: "same-origin"});
+  if (response.status !== 200) return "status";
+  const body = await response.json();
+  const bit = (value) => (value === true ? "1" : "0");
+  return bit(body.remote) + bit(body.authenticated) + bit(body.instance_role === "owner");
+} catch (error) {
+  return "failed";
+}"#;
+
+    /// Asks and reports. `true` when the instance says the session is a
+    /// remote, signed-in one.
+    fn session_accepted(view: &View, mtm: MainThreadMarker, report: &Report, boundary: &'static str) -> bool {
+        let answer = view.page_async(mtm, SESSION_CHECK);
+        let check = answer.as_deref().and_then(|text| {
+            let bits: Vec<bool> = text
+                .bytes()
+                .map(|byte| match byte {
+                    b'1' => Some(true),
+                    b'0' => Some(false),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            (bits.len() == 3).then(|| SessionCheck {
+                remote: bits[0],
+                authenticated: bits[1],
+                owner: bits[2],
+            })
+        });
+        let Some(check) = check else {
+            report.failed(
+                boundary,
+                match answer.as_deref() {
+                    Some("status") => "unexpected_status",
+                    Some("failed") => "fetch_failed",
+                    Some(_) => "unexpected_answer",
+                    None => "no_answer",
+                },
+            );
+            return false;
+        };
+        let ok = check.remote && check.authenticated;
+        report.line(
+            boundary,
+            json!({ "ok": ok, "remote": check.remote, "authenticated": check.authenticated, "owner": check.owner }),
+        );
+        ok
+    }
+
     impl View {
         fn new(mtm: MainThreadMarker, origin: &str) -> Self {
             let events = Rc::new(RefCell::new(Vec::new()));
@@ -643,18 +733,20 @@ mod probe {
             }
         }
 
-        /// Puts a session cookie into this view's store for the host of
-        /// the view's own origin, and for that host alone: host-only, for
-        /// every path, and secure when the origin is.
-        fn seed_session(&self, name: &str, session: &str) -> bool {
-            let Some((scheme, authority)) = self.origin.split_once("://") else {
-                return false;
-            };
-            let host = authority.split(':').next().unwrap_or("");
+        /// Puts a session cookie into this view's store as the instance sets
+        /// its own: for the host of the view's origin and that host alone
+        /// (made from the origin's URL, with no domain attribute, which a
+        /// `__Host-` cookie may not have), for every path, not for script,
+        /// and secure when the origin is. Then reads the store back: what
+        /// it holds under that name, or `None` when it holds nothing.
+        fn seed_session(&self, name: &str, session: &str) -> Option<Seeded> {
+            let (scheme, authority) = self.origin.split_once("://")?;
+            let host = authority.split(':').next().unwrap_or("").to_owned();
+            let url = format!("{}/", self.origin);
             let mut entries = vec![
                 ("Name", name),
                 ("Value", session),
-                ("Domain", host),
+                ("OriginURL", url.as_str()),
                 ("Path", "/"),
                 ("HttpOnly", "TRUE"),
             ];
@@ -674,14 +766,54 @@ mod probe {
             // SAFETY: Main thread. `cookieWithProperties:` answers nil for
             // properties it cannot make a cookie of; the store and the
             // cookie are live for the call, and the block is copied by it.
-            unsafe {
+            let cookies: Retained<AnyObject> = unsafe {
                 let cookie: Option<Retained<AnyObject>> =
                     msg_send![class!(NSHTTPCookie), cookieWithProperties: &*properties];
-                let Some(cookie) = cookie else { return false };
+                let cookie = cookie?;
                 let cookies: Retained<AnyObject> = msg_send![&*self.store, httpCookieStore];
                 let _: () = msg_send![&*cookies, setCookie: &*cookie, completionHandler: &*block];
+                cookies
+            };
+            if !pump_until(Duration::from_secs(10), || stored.get()) {
+                return None;
             }
-            pump_until(Duration::from_secs(10), || stored.get())
+            // What the store itself says it holds.
+            let found: Rc<RefCell<Option<Option<Seeded>>>> = Rc::new(RefCell::new(None));
+            let filled = found.clone();
+            let wanted = name.to_owned();
+            let read = RcBlock::new(move |all: *mut AnyObject| {
+                let mut seeded = None;
+                if !all.is_null() {
+                    // SAFETY: WebKit passes a live NSArray of NSHTTPCookie
+                    // for the duration of the call; the selectors are theirs.
+                    unsafe {
+                        let count: usize = msg_send![all, count];
+                        for index in 0..count {
+                            let cookie: Retained<AnyObject> = msg_send![all, objectAtIndex: index];
+                            let cookie_name: Retained<NSString> = msg_send![&*cookie, name];
+                            if cookie_name.to_string() != wanted {
+                                continue;
+                            }
+                            let domain: Retained<NSString> = msg_send![&*cookie, domain];
+                            let secure: bool = msg_send![&*cookie, isSecure];
+                            let http_only: bool = msg_send![&*cookie, isHTTPOnly];
+                            seeded = Some(Seeded {
+                                host_only: domain.to_string() == host,
+                                secure,
+                                http_only,
+                            });
+                        }
+                    }
+                }
+                *filled.borrow_mut() = Some(seeded);
+            });
+            // SAFETY: Main thread; the block is copied by the call.
+            unsafe {
+                let _: () = msg_send![&*cookies, getAllCookies: &*read];
+            }
+            pump_until(Duration::from_secs(10), || found.borrow().is_some());
+            let seeded = found.borrow_mut().take().flatten();
+            seeded
         }
 
         /// Loads `path` of the view's own origin and waits for its main
@@ -823,12 +955,20 @@ mod probe {
         let pages = control::Pages::start(Some(format!("http://127.0.0.1:{}/landed", elsewhere.port)));
         let origin = format!("http://127.0.0.1:{}", pages.port);
 
-        let plain = View::new(mtm, &origin);
-        if !plain.seed_session(control::SESSION_COOKIE, control::SESSION) {
-            report.failed("control_session_seeded", "cookie_refused");
+        // The real cookie's own shape (its name, secure, host-only), with a
+        // dummy value, for a host that resolves nowhere: stored and read
+        // back, never sent.
+        let shaped = View::new(mtm, &format!("https://{}", control::ROUTED));
+        let held = shaped.seed_session(SESSION_COOKIE, control::SESSION);
+        if !report_seeded(report, "control_host_cookie_stored", held, true) {
             return false;
         }
-        report.ok("control_session_seeded");
+
+        let plain = View::new(mtm, &origin);
+        let held = plain.seed_session(control::SESSION_COOKIE, control::SESSION);
+        if !report_seeded(report, "control_session_seeded", held, false) {
+            return false;
+        }
         let loaded = plain.load("/", report, "control_plain_answered", "control_plain_committed");
         if !report_load(report, "control_plain_loaded", loaded) {
             return false;
@@ -1288,13 +1428,17 @@ mod probe {
         // The session's own document, on WebKit's own path: the rendezvous
         // request must come from it.
         let document = View::new(mtm, &origin);
-        if !document.seed_session(SESSION_COOKIE, &session) {
-            report.failed("session_seeded", "cookie_refused");
+        let held = document.seed_session(SESSION_COOKIE, &session);
+        if !report_seeded(&report, "session_seeded", held, true) {
             return 3;
         }
-        report.ok("session_seeded");
         let loaded = document.load("/", &report, "document_answered", "document_committed");
         if !report_load(&report, "document_loaded", loaded) || !document.shows_its_origin() {
+            return 3;
+        }
+        // The page loads for anyone. Whether the instance takes the session
+        // is its own answer, before anything is asked of the direct path.
+        if !session_accepted(&document, mtm, &report, "session_accepted") {
             return 3;
         }
 
@@ -1371,11 +1515,10 @@ mod probe {
         // then the first load.
         let fresh = {
             let page = View::new(mtm, &origin);
-            if !page.seed_session(SESSION_COOKIE, &session) {
-                report.failed("fresh_session_seeded", "cookie_refused");
+            let held = page.seed_session(SESSION_COOKIE, &session);
+            if !report_seeded(&report, "fresh_session_seeded", held, true) {
                 return finish(5);
             }
-            report.ok("fresh_session_seeded");
             if !install_route(
                 &page.webview,
                 mtm,
@@ -1391,6 +1534,10 @@ mod probe {
             report.ok("fresh_route_installed");
             let loaded = page.load("/", &report, "fresh_answered", "fresh_committed");
             if !report_load(&report, "fresh_loaded", loaded) || !page.shows_its_origin() {
+                return finish(5);
+            }
+            // Over the direct path now: the instance still takes the session.
+            if !session_accepted(&page, mtm, &report, "fresh_session_accepted") {
                 return finish(5);
             }
             // A payload of the page's own, asked for now: not the native check's.
