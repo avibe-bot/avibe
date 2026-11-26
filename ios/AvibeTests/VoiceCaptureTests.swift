@@ -2230,6 +2230,30 @@ final class VoiceCaptureTests: XCTestCase {
         XCTAssertEqual(direct, 1)
     }
 
+    /// A take the background's check refused (something held the port, or
+    /// the check could not tell in time: on a stalled phone too) is kept,
+    /// sent again by itself, and sent when Avibe comes to the front: never
+    /// lost to the check.
+    func testATakeTheBackgroundCheckRefusedIsSentLater() async {
+        let world = World()
+        world.instance.statusResult = .failure(Failure.directFault)
+        let controller = world.controller()
+        _ = await controller.toggle()
+        world.audio?.duration = 3
+        _ = await controller.toggle()
+        XCTAssertEqual(controller.phase, .failed)
+        XCTAssertEqual(world.activities.first?.states.last?.reason, .willSend)
+        XCTAssertNotNil(controller.retryTask, "sent again by itself")
+        XCTAssertTrue(world.instance.sent.isEmpty)
+
+        // Avibe comes to the front: the listener serves, the take is sent.
+        world.instance.statusResult = .success(.init(available: true, consent: .granted))
+        await controller.activated()
+        XCTAssertEqual(world.instance.sent, ["hello"])
+        XCTAssertEqual(controller.phase, .idle)
+        XCTAssertEqual(world.retryHolds, 0)
+    }
+
     /// A faulted listener is its own reason in the client's record, and the
     /// take is kept as for an unreachable instance: sent again by itself,
     /// with the island's promise to (「还没发出去，连上你的 Avibe 后会自动发送。」).
