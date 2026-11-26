@@ -63,7 +63,12 @@ def selected(scope: Scope) -> tuple[set[str], set[str]]:
     named = set().union(*(matched_proofs(p) for p in paths))
     if not named:
         return set(), set(LINUX)
+    if named == {'ios-app'}:
+        # App build inputs require the simulator, not unrelated historical heuristics.
+        return {'ios'}, set(LINUX | PROOFS['ios'])
     groups = set().union(*(path_groups(p) for p in paths))
+    if 'ios-app' in named:
+        groups.add('ios')
     # Named inputs that the old path heuristic did not recognize in isolation.
     if 'updater-ui' in named:
         groups.add('desktop')

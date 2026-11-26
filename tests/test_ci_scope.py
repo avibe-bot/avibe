@@ -323,7 +323,11 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
     assert result.returncode == 0, result.stderr
     routed = dict(line.split('=', 1) for line in output.read_text().splitlines())
     from scripts.ci_fast_pr import LINUX
-    extras = {'storage/alembic/env.py': {'install-upgrade-shards'}}.get(path, set())
+    extras = {
+        'storage/alembic/env.py': {'install-upgrade-shards'},
+        'ios/Avibe/NavigationPolicy.swift': {'ios-shell'},
+        'ui/src/App.tsx': {'ios-shell'},
+    }.get(path, set())
     assert routed['portfolio'] == 'true' and routed['sensitive'] == str(bool(extras)).lower()
     assert {k for k, v in json.loads(routed['dispatch_jobs']).items() if v == 'run'} == LINUX | extras
     assert json.loads(routed['unit_shards']) == list(range(24))
@@ -355,7 +359,7 @@ def test_listener_consumers_alone_do_not_trigger_install_regressions(path):
 def test_portfolio_unions_mixed_sensitive_paths_and_ordinary_unknown_paths():
     from scripts.ci_fast_pr import LINUX, selected
 
-    assert selected(scope('unknown/area', 'ui/src/App.tsx')) == (set(), LINUX)
+    assert selected(scope('unknown/area', 'docs/guide.md')) == (set(), LINUX)
     groups, jobs = selected(scope('core/auth.py', 'storage/alembic/env.py', 'uv.lock'))
     assert groups == {'identity', 'migration', 'shared'}
     assert jobs == LINUX | {'ui-browser-checks', 'windows-control-ipc', 'install-upgrade-shards', 'manifest-consistency'}
@@ -400,10 +404,23 @@ def test_named_files_and_manual_request_select_real_proofs():
     assert selected(scope('vibe/model_hub_runtime/cliproxyapi_manifest.json')) == (
         {'engine-wire'}, LINUX | {'model-hub-hosted-wire'},
     )
-    assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell'}
+    assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell', 'ios-shell'}
     assert selected(scope('storage/alembic/versions/new_revision.py'))[1] == LINUX | {'install-upgrade-shards'}
-    assert selected(scope('ios/AvibeTests/MobileOnboardingTests.swift', 'ui/thread_bootstrap.ts'))[1] == LINUX
+    assert selected(scope('ios/AvibeTests/MobileOnboardingTests.swift', 'ui/thread_bootstrap.ts'))[1] == LINUX | {'ios-shell'}
     assert selected(scope('.github/request-sensitive-checks.md'))[1] == LINUX | EXTRA
+
+
+@pytest.mark.parametrize('path', [
+    'ios/Avibe/DirectPathController.swift', 'ios/AvibeTests/LiveActivityTests.swift',
+    '.github/workflows/ios-shell.yml', 'ui/src/components/MobileChrome.tsx', 'ui/mobile.html',
+    'ui/package-lock.json', 'ui/scripts/bundleNotices.mjs', 'packaging/iroh-apple/release.json',
+    'tests/fixtures/live_activity/contract_vectors.json', 'scripts/cargo_notices.py',
+])
+def test_app_build_input_alone_requires_simulator_proof(path):
+    from scripts.ci_fast_pr import LINUX, selected
+
+    assert selected(scope(path)) == ({'ios'}, LINUX | {'ios-shell'})
+    assert 'ios-shell' in workflow()['jobs']['sensitive-proof']['needs']
 
 
 @pytest.mark.parametrize('gate', ['fast-gate', 'sensitive-proof'])
