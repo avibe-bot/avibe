@@ -104,7 +104,14 @@ final class TurnActivityCoordinator {
     private let beginBackgroundTask: BackgroundTask
     private let isActive: @MainActor () -> Bool
     private static let settingKey = "avibe.liveActivities.enabled"
-    var deviceEnabled: Bool { defaults.bool(forKey: Self.settingKey) }
+    /// Lock Screen and Dynamic Island progress is switched off pending a
+    /// redesign (11-26): the shell does not announce `lockScreenProgress`, the
+    /// setting reads and stays off, nothing starts a card, and a card an
+    /// earlier build left ends at launch and whenever the App comes to the
+    /// front. The feature's code stays; this is the one switch.
+    static let shipsLockScreenProgress = false
+    private let available: Bool
+    var deviceEnabled: Bool { available && defaults.bool(forKey: Self.settingKey) }
 
     typealias Request = @MainActor (Target, String, String, [String: Any]?) async throws -> VoiceCaptureInstanceClient.Response
     typealias Create = @MainActor (TurnActivityAttributes, TurnActivityAttributes.ContentState) throws -> any TurnActivityHandle
@@ -142,6 +149,7 @@ final class TurnActivityCoordinator {
                  content: ActivityContent(state: state, staleDate: state.staleDate), pushType: .token))
          }, request: Request? = nil,
          mayRequest: @escaping @MainActor (Target) -> Bool,
+         available: Bool = TurnActivityCoordinator.shipsLockScreenProgress,
          isActive: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active },
          beginBackgroundTask: @escaping BackgroundTask = { expiration in
              let lease = TurnActivityBackgroundLease(expiration: expiration)
@@ -150,6 +158,9 @@ final class TurnActivityCoordinator {
         self.isActive = isActive
         self.beginBackgroundTask = beginBackgroundTask
         self.defaults = defaults
+        self.available = available
+        // Switched on by an earlier build: it stays off until the redesign.
+        if !available { defaults.set(false, forKey: Self.settingKey) }
         self.mayRequest = mayRequest
         self.now = now
         self.enabled = enabled
@@ -182,11 +193,14 @@ final class TurnActivityCoordinator {
     }
 
     func setSetting(_ value: Bool) async {
+        let value = value && available
         defaults.set(value, forKey: Self.settingKey)
         if !value { await endAll(reason: "disabled") }
     }
 
     func observe(_ value: Observation?) async {
+        // Switched off: no observation, so no prefetch request and nothing to start.
+        guard available else { return }
         guard value?.target == selectedTarget || value == nil else { return }
         guard observation != value else { return }
         observation = value
@@ -217,6 +231,8 @@ final class TurnActivityCoordinator {
     }
 
     func foreground(target: Target?) async {
+        // Switched off: a card still showing (an earlier build's) ends here.
+        guard available else { await endAll(reason: "disabled"); return }
         guard target == selectedTarget else { return }
         await refreshObservation()
         await reconcile(target: target)

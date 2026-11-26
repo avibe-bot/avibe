@@ -50,20 +50,7 @@
   },
   "show": {
     "systemEntry": {
-      "defaultTitle": "Show Page",
-      "cta": "添加到主屏幕或程序坞",
-      "iosCta": "添加到主屏幕",
-      "macCta": "添加到程序坞",
-      "title": "添加此 Show Page",
-      "iosTitle": "添加到主屏幕",
-      "macTitle": "添加到程序坞",
-      "iosBody": "在 Safari 中点击分享，然后选择“添加到主屏幕”。",
-      "macBody": "在 Safari 中点分享按钮或菜单「文件」，选择「添加到程序坞」。",
-      "otherBody": "在 Safari 中打开此页面，再通过分享或文件菜单添加。",
-      "copyLink": "复制链接",
-      "copied": "已复制链接",
-      "close": "关闭提示",
-      "collapse": "收起提示"
+      "defaultTitle": "Show Page"
     },
     "event": {
       "acceptanceUnknown": "Show 事件可能仍在处理中，未在本地重复提交。",
@@ -568,16 +555,16 @@
     "codexCliPermissionDenied": "系统不允许运行 Codex CLI，因此 Codex 无法启动。仅重试无法解决。请让 Codex CLI 可以执行，或重新安装 Codex，然后重试这条输入。",
     "codexCliNotFound": "找不到 Codex CLI，因此 Codex 无法启动。请在设置的“后端”页面安装 Codex 或设置其 CLI 路径，然后重试这条输入。",
     "agentRuntimeRetired": "{agent} 已关闭或 Avibe 正在停止，这条消息没有开始执行。请在 {agent} 启用后重新发送。",
-    "antigravityAuthRequired": "Antigravity 需要身份验证（ACP {code}）：{detail}",
-    "antigravityVerificationRequired": "Antigravity 账号需要完成 Google 资格验证。请先在终端运行一次 `agy` 完成验证后再重试。\n\n{detail}",
-    "antigravityCapabilityMissing": "Antigravity ACP 服务器未声明 {capability} 能力，Avibe 无法附加 Agent 指令和工具策略规则。请升级 Antigravity CLI（agy）或启用 {capability} 支持后重试。",
+    "antigravityAuthRequired": "Antigravity 需要登录：{detail}",
+    "antigravityVerificationRequired": "Antigravity 账号还需要在 Google 完成一次验证。请在终端运行一次 `agy`，按提示完成后再重试。\n\n{detail}",
+    "antigravityCapabilityMissing": "当前 Antigravity CLI（agy）版本不支持 Avibe 需要的功能，请升级后重试。",
     "antigravityCliNotFound": "找不到 Antigravity CLI：{detail}",
     "antigravityLaunchFailed": "Antigravity CLI 启动失败：{detail}",
     "antigravityError": "Antigravity 错误：{detail}",
-    "antigravityTurnIncomplete": "Antigravity 回合未完整结束（{reason}）。",
-    "antigravityTurnRefused": "Antigravity 拒绝完成此回合（refusal）。",
-    "antigravityTurnUnexpectedStop": "Antigravity 回合以意外的 stopReason 结束：{reason}。",
-    "antigravityTurnMissingStopReason": "Antigravity 回合结束时缺少 stopReason。",
+    "antigravityTurnIncomplete": "Antigravity 这次回复没有完成（{reason}）。",
+    "antigravityTurnRefused": "Antigravity 拒绝了这次请求。",
+    "antigravityTurnUnexpectedStop": "Antigravity 意外结束了这次回复（{reason}）。",
+    "antigravityTurnMissingStopReason": "Antigravity 没有正常结束这次回复。",
     "codexResponseTooLarge": "Codex 返回的响应超过 {limitMiB} MiB，此连接无法继续。请检查或升级 Codex 后重试。",
     "opencodeRuntimeConfigInvalid": "OpenCode 无法启动，因为 OPENCODE_CONFIG_CONTENT 无效。请修正运行时配置后重试。",
     "opencodeDirectoryBootstrapTimeout": "OpenCode 仍在完成首次准备，请稍后重新发送消息。",
@@ -850,8 +837,7 @@
       "manualFallback": "如果当前平台不支持按钮，请执行 `/setup {backend}`。",
       "codexInstructions": "Codex 登录修复已开始。\n\n1. 在浏览器打开这个地址：\n{url}\n\n2. 输入这个一次性验证码：\n`{code}`\n\nBot 会继续等待，并在登录完成后回消息确认。",
       "claudeInstructions": "Claude 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器回调页面会显示最终的 `authorizationCode#state`，请直接把它发回当前聊天。",
-      "antigravityPersonalNotice": "用个人 Google 账号登录时，Google 允许你本人指挥 Antigravity 工作。Google 说明这种登录不包含无人值守的运行和任务队列，例如定时任务、Watch，以及由别的 Agent 转交的工作。需要自动化时，请改用 API key 或 Agent Platform 登录，这两种按用量计费。",
-      "antigravityInstructions": "Antigravity 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器显示授权码后，请直接把它发回当前聊天。",
+      "antigravityInstructions": "Antigravity 登录修复已开始。\n\n请在浏览器打开下面的地址并完成登录：\n{url}\n\n浏览器显示授权码后，请直接把它发回当前聊天。也可以直接粘贴授权后浏览器地址栏里的完整链接。",
       "antigravityBusinessFallback": "如果 Gemini Enterprise 在这里没有提供可粘贴的授权码，请在终端运行 `{command}` 完成登录。",
       "antigravityAdcRecoveryPrompt": "Antigravity Agent Platform 需要有效的 Application Default Credentials。请在终端运行 `{command}` 或检查设置后重试。",
       "claudeCodePrompt": "Claude 正在等待后续回调值，请直接在当前聊天里发送。",
@@ -861,7 +847,7 @@
       "opencodeCodeRetryPrompt": "OpenCode 仍在等待 `{provider}` 的 API key，上一条值可能没有被接受。请直接在当前聊天里回复 key。",
       "timedOut": "{backend} 登录修复已超时，请重新发起 setup 再试一次。",
       "success": "{backend} 已重新登录，可继续使用。",
-      "loginInProgress": "{vendor}（{backend}）登录正在进行中，请先完成或取消后再重新发起。",
+      "loginInProgress": "{backend} 已有一个登录正在进行中，请先在发起它的地方完成或取消。",
       "hubOwned": "请在模型网关中管理 {backend} 的认证。",
       "failed": "{backend} 登录修复失败：{detail}",
       "unknownFailure": "未知登录失败。"
@@ -1960,8 +1946,8 @@
   },
   "antigravityNotice": {
       "summaryFork": "此分支从对话摘要开始，不包含完整历史。",
-      "effortAdjusted": "{model} 使用思考级别 {effort}。",
-      "noEffort": "{model} 不使用思考级别。"
+      "effortAdjusted": "{model} 使用思考强度「{effort}」。",
+      "noEffort": "{model} 不支持设置思考强度。"
   },
   "antigravityAuth": {
     "invalidPayload": "请以对象格式提交 Antigravity 设置。",

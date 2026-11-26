@@ -202,7 +202,9 @@ def test_unit_shard_lanes_run_planned_files_concurrently_and_fail_closed(tmp_pat
     assert {line.split()[1] for line in finished} == {"0]", "1]"}
     assert result.stdout.count("test_meets_the_other_lane PASSED") == 2
     assert "test_sigint_keeps_python_default PASSED" in result.stdout
-    assert "FAILED files:\n[lane 0]   tests/test_fails.py" in result.stdout
+    # The relay preserves order within a lane, not between lanes.
+    lane_zero = [line for line in result.stdout.splitlines() if line.startswith("[lane 0] ")]
+    assert lane_zero[-2:] == ["[lane 0] FAILED files:", "[lane 0]   tests/test_fails.py"]
     assert "Failed lane(s): [0]." in result.stdout
 
 

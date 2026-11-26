@@ -142,18 +142,33 @@ async def test_get_backend_connection_uses_passive_antigravity_status(fake_agy: 
 
 
 @pytest.mark.asyncio
-async def test_pty_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: FakeAgyAuthFixture) -> None:
+async def test_pipe_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: FakeAgyAuthFixture, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_agy.set_state(authenticated=False)
     fake_agy.set_config({"expected_code": "agy-code-7788"})
+    launch = asyncio.create_subprocess_exec
+    launches = []
+
+    async def capture(*args, **kwargs):
+        if "--login" in args:
+            launches.append(kwargs)
+        return await launch(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    monkeypatch.setattr(os, "openpty", lambda: pytest.fail("Antigravity login must not allocate a PTY"))
     fake_agy.clear_logs()
     service = _make_auth_service()
 
     flow = await service.start_web_setup("antigravity", force_reset=True, auth_method="oauth-personal")
     assert flow.backend == "antigravity"
+    assert flow.pty_master_fd is None
+    assert launches and launches[0]["stdin"] == asyncio.subprocess.PIPE
+    assert launches[0]["stdout"] == asyncio.subprocess.PIPE
+    assert launches[0]["stderr"] == asyncio.subprocess.STDOUT
+    assert flow.process.stdin is not None and not flow.process.stdin.is_closing()
     status = await _poll_flow(service, flow.flow_id, {"awaiting_code"}, require_url=True)
     assert status["callback_kind"] == "code" and status["url"].startswith("https://accounts.google.com/o/oauth2/auth")
     assert await service.submit_web_code(flow.flow_id, "line1\nline2") == {"ok": False, "error": "invalid_format"}
-    assert await service.submit_web_code(flow.flow_id, "agy-code-7788") == {"ok": True}
+    assert await service.submit_web_code(flow.flow_id, "  https://antigravity.google/oauth-callback?code=agy-code-7788&state=fixture  ") == {"ok": True}
 
     status = await _poll_flow(service, flow.flow_id, {"success", "failed"})
     assert status["state"] == "success" and status["authorization_completed"] is True and flow.pty_master_fd is None
@@ -162,8 +177,20 @@ async def test_pty_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: FakeA
     _assert_passive_invocations(fake_agy)
 
     fake_agy.clear_logs()
-    reused = await service.start_web_setup("antigravity", force_reset=False, auth_method="oauth-personal")
-    assert reused.state == "success" and reused.authorization_completed is True and all("--login" not in inv["argv"] for inv in fake_agy.invocations())
+    # An explicit Web re-login must obtain fresh consent even with valid credentials.
+    assert (await probe_antigravity_passive_status(str(fake_agy.binary), config=V2Config.load().agents.antigravity))["authenticated"] is True
+    relogin = await service.start_web_setup("antigravity", force_reset=False, auth_method="oauth-personal")
+    try:
+        assert relogin.state != "success" and relogin.authorization_completed is False
+        status = await _poll_flow(service, relogin.flow_id, {"awaiting_code"}, require_url=True)
+        assert status["url"].startswith("https://accounts.google.com/o/oauth2/auth")
+        assert [inv["argv"] for inv in fake_agy.invocations() if "--login" in inv["argv"]] == [["acp", "--login", "--disable-telemetry"]]
+        assert await service.submit_web_code(relogin.flow_id, "agy-code-7788") == {"ok": True}
+        status = await _poll_flow(service, relogin.flow_id, {"success", "failed"})
+        assert status["state"] == "success" and status["authorization_completed"] is True
+        assert "logout" not in fake_agy.rpc_methods()
+    finally:
+        await service.cancel_web_flow(relogin.flow_id)
 
     fake_agy.clear_logs()
     assert await service.remove_web_auth("antigravity") == {"ok": True} and "logout" in fake_agy.rpc_methods()
@@ -211,25 +238,7 @@ async def test_oauth_credential_cutover_discards_previous_account_model_menu(
     assert backend_model_snapshot("antigravity", schedule_refresh=False)["authoritative"] is False
 
 
-@pytest.mark.asyncio
-async def test_try_reuse_rejects_cross_mode_switch_and_oauth_url_buffers_split_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
-    probe_calls: list[str] = []
-
-    async def _fake_probe(_binary: str, *, auth_mode: str | None = None, **_kw: Any) -> dict[str, Any]:
-        probe_calls.append(str(auth_mode))
-        return {"ok": True, "authenticated": True}
-
-    monkeypatch.setattr(auth_mod, "probe_antigravity_passive_status", _fake_probe)
-    service = AgentAuthService.__new__(AgentAuthService)
-    saved_mode = {"value": "oauth-personal"}
-    service._resolve_backend_config = lambda _b: SimpleNamespace(auth_mode=saved_mode["value"])
-    service._get_cli_binary = lambda _b: "agy"
-
-    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-business")) is False
-    saved_mode["value"] = "oauth-business"
-    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-personal")) is False and probe_calls == []
-    assert await service._try_reuse_antigravity_login(SimpleNamespace(auth_method="oauth-business")) is True and probe_calls == ["oauth-business"]
-
+def test_oauth_url_buffers_split_chunks() -> None:
     p1, p2, p3 = "Open URL: \x1b[36mhttps://accounts.google.com/o/oauth2/auth?client_id=agy", "&state=split-token-123\x1b[0m", "\nPaste code: "
     expected = "https://accounts.google.com/o/oauth2/auth?client_id=agy&state=split-token-123"
     assert extract_antigravity_oauth_url(p1, eof=False) is None and extract_antigravity_oauth_url(p1 + "&state=half", eof=False) is None
@@ -529,9 +538,9 @@ async def test_maybe_emit_auth_recovery_message_branches_for_antigravity(fake_ag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("method", "shows_notice"), [("oauth-personal", True), ("oauth-business", False)])
+@pytest.mark.parametrize("method", ["oauth-personal", "oauth-business"])
 @pytest.mark.parametrize("terminator", ["\r\n", " ", "\x1b[0m"])
-async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_only(fake_agy: FakeAgyAuthFixture, method: str, shows_notice: bool, terminator: str) -> None:
+async def test_im_setup_link_sends_instructions_once_url_completes(fake_agy: FakeAgyAuthFixture, method: str, terminator: str) -> None:
     service, ctx = _make_auth_service(), MessageContext(user_id="u1", channel_id="c1", platform="slack")
     service._send_message = AsyncMock()
     service.controller._get_settings_key = lambda context: context.channel_id
@@ -550,9 +559,25 @@ async def test_im_setup_link_carries_personal_sign_in_notice_for_google_account_
     assert flow.url == url and service._send_message.await_count == 1
 
     sent = service._send_message.await_args.args[1]
-    notice = service._t("command.setup.antigravityPersonalNotice")
-    assert "https://accounts.google.com/o/oauth2/auth" in sent
-    assert sent.startswith(notice) if shows_notice else notice not in sent
+    assert sent == service._t("command.setup.antigravityInstructions", url=url)
+
+
+@pytest.mark.asyncio
+async def test_im_callback_url_is_relayed_as_code(fake_agy: FakeAgyAuthFixture) -> None:
+    """IM owns its submit branch; Web coverage cannot detect a missed IM parser call."""
+    service, ctx = _make_auth_service(), MessageContext(user_id="u1", channel_id="c1", platform="slack")
+    service._send_message = AsyncMock()
+    writer = SimpleNamespace(is_closing=lambda: False, write=lambda payload: writes.append(payload), drain=AsyncMock())
+    writes = []
+    flow = auth_mod.AgentAuthFlow(
+        flow_id="im-code", backend="antigravity", settings_key="c1", initiator_user_id="u1",
+        context=ctx, process=SimpleNamespace(stdin=writer), reader_task=None, waiter_task=None,
+        awaiting_code=True,
+    )
+    await service._submit_code_owned(flow, ctx, "https://antigravity.google/oauth-callback?state=s")
+    assert writes == [] and flow.awaiting_code
+    await service._submit_code_owned(flow, ctx, " https://antigravity.google/oauth-callback?code=im%2Fcode&state=s ")
+    assert writes == [b"im/code\n"] and not flow.awaiting_code
 
 
 @pytest.mark.asyncio
@@ -748,3 +773,28 @@ def test_non_desktop_antigravity_refuses_pinned_version(monkeypatch, tmp_path, m
     assert result["ok"] is False
     assert result["code"] == ("cli_readback_failed" if mode == "existing" else "pinned_version_unsupported")
     assert executed == []
+
+
+def test_plain_text_oauth_url_is_published_only_after_the_full_line() -> None:
+    """Pipe output has no ANSI terminator; earlier coverage used only ANSI chunks."""
+    url = "https://accounts.google.com/o/oauth2/auth?client_id=agy&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=complete"
+    flow = SimpleNamespace(pty_output_buffer="", last_status_text="", url=None, awaiting_code=False)
+    AgentAuthService._consume_antigravity_text(flow, "Open this link in a browser to log in with Google:\n\n  " + url[:90])
+    assert flow.url is None
+    AgentAuthService._consume_antigravity_text(flow, url[90:] + "\n\nThen paste the authorization code, or the full URL of the page you land on, and press Enter:")
+    assert flow.url == url and flow.awaiting_code
+    assert extract_antigravity_oauth_url("  " + url + "\n") == url
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("https://antigravity.google/oauth-callback?code=4%2Fabc&state=s", "4/abc"),
+    ("Returned: https://antigravity.google/oauth-callback?state=s&code=abc", "abc"),
+    ("bare-code", "bare-code"),
+    ("  bare-code \n", "bare-code"),
+    (" https://antigravity.google/oauth-callback?state=s ", None),
+    ("https://antigravity.google/oauth-callback?code=", None),
+    ("https://antigravity.google/oauth-callback?code=a%0Ab", None),
+])
+def test_antigravity_pasted_callback_code(raw: str, expected: str | None) -> None:
+    """Both submit surfaces must relay only a code; previous coverage used bare codes."""
+    assert AgentAuthService._parse_antigravity_code(raw) == expected

@@ -2607,6 +2607,28 @@ extension DirectPathTiming {
         foregroundSeconds: 600,
         retrySeconds: [0.1]
     )
+
+    /// `recovering`, and patient with the background's question to the
+    /// port as well: for a test that asks once and expects the port's own
+    /// answer. With the App's bounds (0.3 s for the port's answer, 3 s for
+    /// the listener's own socket) an answer that arrives late is `fault`
+    /// by design, and a hosted runner stalls for seconds at a time: the
+    /// port refused within 33 ms and the answer still came after the bound.
+    /// Nothing is slept through: the gate answers the moment the listener's
+    /// socket has closed and the port has answered, and these bounds are
+    /// only how long a stalled runner is given before that counts as a
+    /// failure (as `eventually` gives 30 s). One ask is kept, not a retry,
+    /// because a retry would also pass a gate that said `fault` first.
+    /// The App's own two bounds are pinned in
+    /// `testThePortsAnswerDecidesOnlyInTheStayItWasAskedIn`.
+    static let askingThePort = DirectPathTiming(
+        listenerWaitSeconds: 30,
+        rebindSeconds: 10,
+        foregroundSeconds: 600,
+        retrySeconds: [0.1],
+        ownCloseSeconds: 30,
+        portProbeSeconds: 30
+    )
 }
 
 /// The public origin in a test: every host resolves to one public address,
@@ -3089,7 +3111,7 @@ extension DirectPathControllerTests {
     @MainActor
     func testInTheBackgroundAStrangerOnThePortIsAFaultAndAClosedPortIsTheGatesOwnAnswer() async throws {
         let listening = try listeningSockets()
-        let harness = try Harness(timing: .recovering, test: self)
+        let harness = try Harness(timing: .askingThePort, test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let controller = harness.controller
@@ -3182,7 +3204,7 @@ extension DirectPathControllerTests {
         // bind the port is under way. Asked now, the answer waits for that
         // attempt to end and its socket to close.
         let listening = try listeningSockets()
-        let harness = try Harness(timing: .recovering, test: self)
+        let harness = try Harness(timing: .askingThePort, test: self)
         try await harness.signIn()
         try await harness.select("instance-1")
         let routed = try XCTUnwrap(harness.lastOpened).instance.url

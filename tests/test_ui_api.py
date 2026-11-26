@@ -1690,7 +1690,14 @@ def test_start_oauth_web_blocks_recovery_before_service_mutation(monkeypatch):
     assert service_calls == []
 
 
-def test_start_oauth_web_localizes_native_login_conflict(monkeypatch):
+@pytest.mark.parametrize(
+    "language,detail",
+    [
+        ("zh", "Codex 已有一个登录正在进行中，请先在发起它的地方完成或取消。"),
+        ("en", "A Codex sign-in is already in progress. Finish or cancel it where it was started."),
+    ],
+)
+def test_start_oauth_web_localizes_native_login_conflict(monkeypatch, language, detail):
     from core.agent_auth_service import BackendLoginInProgressError
 
     service = SimpleNamespace(
@@ -1698,7 +1705,7 @@ def test_start_oauth_web_localizes_native_login_conflict(monkeypatch):
             side_effect=BackendLoginInProgressError("openai", "codex")
         )
     )
-    monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(language="zh"))
+    monkeypatch.setattr(api, "load_config", lambda: SimpleNamespace(language=language))
     monkeypatch.setattr(api, "_get_oauth_service", lambda: service)
 
     result = asyncio.run(api.start_oauth_web_async("codex"))
@@ -1706,7 +1713,7 @@ def test_start_oauth_web_localizes_native_login_conflict(monkeypatch):
     assert result == {
         "ok": False,
         "error": "native_login_in_progress",
-        "detail": "openai（codex）登录正在进行中，请先完成或取消后再重新发起。",
+        "detail": detail,
     }
 
 

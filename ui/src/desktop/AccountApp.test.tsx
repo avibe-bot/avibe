@@ -249,3 +249,16 @@ it.each(['12px', '19.5px', ''])('uses the configured back-header inset %s withou
   expect(container.querySelector('main')!.classList.contains('px-10')).toBe(true);
   document.documentElement.style.removeProperty('--shell-window-controls-left');
 });
+
+it('the instances card sends the existing sign-out action without opening account details or a confirmation', async () => {
+  window.history.replaceState(null, '', '/account/index.html?view=instances');
+  const i18n = createInstance(); await i18n.init({ lng: 'en', resources: { en: { translation: en } } });
+  render(<I18nextProvider i18n={i18n}><AccountApp /></I18nextProvider>);
+  fireEvent.click(screen.getByText('max@example.test'));
+  expect(send).not.toHaveBeenCalled();
+  expect(document.querySelector('[data-account-details]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.desktopClient.signOut }));
+  expect(send).toHaveBeenCalledExactlyOnceWith({ type: 'sign_out' });
+  expect(document.querySelector('[data-account-sign-out]')).toBeTruthy();
+  expect(screen.queryByRole('dialog')).toBeNull();
+});

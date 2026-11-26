@@ -1653,14 +1653,22 @@ scenarios:
       - tests/test_antigravity_auth_and_install.py::test_antigravity_auth_save_validation_uses_configured_language
       - tests/test_antigravity_auth_and_install.py::test_agent_platform_adc_detection_and_gcp_settings
   - id: AUTH-SETUP-931
-    name: Antigravity auth recovery, explicit probe, and credential cutover keep the model catalog account-scoped
+    name: Antigravity Web re-login with valid credentials shows a link without opening a browser, accepts the callback URL, and reaches account-scoped catalog cutover
     status: covered
     kind: recovery
     layer: scenario
     backend: antigravity
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop
     supporting_tests:
-      - tests/test_antigravity_auth_and_install.py::test_pty_paste_code_oauth_personal_flow_and_acp_logout
+      - tests/test_antigravity_auth_and_install.py::test_pipe_paste_code_oauth_personal_flow_and_acp_logout
       - tests/test_antigravity_auth_and_install.py::test_oauth_credential_cutover_discards_previous_account_model_menu
       - tests/test_antigravity_auth_and_install.py::test_oauth_business_surfaces_terminal_fallback_when_paste_code_unsupported
+  - id: AUTH-SETUP-934
+    name: An abandoned Web login is replaced when the user returns and signs in again
+    status: covered
+    kind: retry
+    layer: scenario
+    backend: shared
+    scope: same_service_instance
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_abandoned_web_login_can_restart_and_complete
 next_priority: []

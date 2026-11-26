@@ -111,7 +111,6 @@ async def test_every_web_backend_publishes_deadline_after_startup_with_waiter(
     service._start_codex_process = start_codex
     service._start_claude_control_flow = start_claude
     service._start_antigravity_login_process = start_antigravity
-    service._try_reuse_antigravity_login = AsyncMock(return_value=False)
     service._lease_opencode_server = lease_returning(server)
     service._wait_for_codex_completion_web = AsyncMock()
     service._wait_for_claude_completion_web = AsyncMock()
@@ -170,7 +169,6 @@ async def test_every_im_native_backend_publishes_deadline_after_startup_with_wai
     service._start_claude_control_flow = start_claude
     service._start_opencode_process = start_opencode
     service._start_antigravity_login_process = start_antigravity
-    service._try_reuse_antigravity_login = AsyncMock(return_value=False)
     service._read_codex_output = AsyncMock()
     service._read_pty_output = AsyncMock()
     service._wait_for_completion = AsyncMock()
@@ -353,3 +351,73 @@ async def test_cancel_retains_native_claim_when_termination_raises() -> None:
         flow.native_lease.release()
         flow.native_lease = None
     service._flow_registry.drop(flow)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("surface,owner", [("web", None), ("web", "source"), ("im", None)])
+async def test_explicit_sign_in_supersedes_abandoned_web_flow(surface, owner) -> None:
+    """A fresh request retires an abandoned writer before spawning its replacement.
+
+    Existing coverage only rejected concurrent starts; it missed returning users.
+    """
+    service = AgentAuthService(_Controller())
+    process = _SyntheticProcess(returncode=None)
+    old = WebAuthFlow(
+        flow_id="abandoned", backend="claude", state="awaiting_code",
+        source_id=owner if surface == "web" else None, process=process, native_cli=True,
+    )
+    old.native_lease = service._acquire_native_lease("claude")
+    service._flow_registry.put(old)
+
+    async def start(_context, **_kwargs):
+        assert old.state == "cancelled"
+        assert old.native_lease is None
+        assert process.returncode == 0
+        assert old.flow_id not in service._flows_by_id
+        return _synthetic_claude_client(), "https://claude.ai/oauth/authorize", None
+
+    async def pending(_flow):
+        await asyncio.Future()
+
+    service._start_claude_control_flow = start
+    service._wait_for_claude_completion_web = pending
+    service._wait_for_claude_completion = pending
+    if surface == "web":
+        new = await service.start_web_setup("claude", force_reset=False, owner_ref=owner)
+    else:
+        await service.start_setup(
+            MessageContext(user_id="user", channel_id="channel"),
+            backend="claude", force_reset=False, claude_login_method="claudeai",
+        )
+        assert old.state == "cancelled"
+        new = service._flows["channel:claude"]
+    assert new.flow_id != old.flow_id
+    assert new.url == "https://claude.ai/oauth/authorize"
+    if surface == "web":
+        await service.cancel_web_flow(new.flow_id)
+    else:
+        await service._terminate_flow(new)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_kind", ["im", "other_source"])
+async def test_new_web_sign_in_preserves_other_owners(existing_kind) -> None:
+    """Takeover cannot retire an IM login or another Source's writer."""
+    service = AgentAuthService(_Controller())
+    if existing_kind == "im":
+        old = AgentAuthFlow(
+            flow_id="active", backend="claude", settings_key="channel",
+            initiator_user_id="user", context=MessageContext(user_id="user", channel_id="channel"),
+            process=None, reader_task=None, waiter_task=None, native_cli=True,
+        )
+    else:
+        old = WebAuthFlow(flow_id="active", backend="claude", source_id="other", native_cli=True)
+    service._flow_registry.put(old)
+    service._start_claude_control_flow = AsyncMock()
+    try:
+        with pytest.raises(BackendLoginInProgressError):
+            await service.start_web_setup("claude", force_reset=False, owner_ref="source")
+        assert service._flows_by_id[old.flow_id] is old
+        service._start_claude_control_flow.assert_not_awaited()
+    finally:
+        service._flow_registry.drop(old)

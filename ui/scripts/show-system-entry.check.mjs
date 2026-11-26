@@ -5,17 +5,8 @@ import { createServer } from 'node:http';
 import { test } from 'node:test';
 import { launchSafeBrowser } from './safe-browser.mjs';
 
-// Exercise the server's actual injected script in a browser, including its Shadow DOM.
+// Exercise the server's actual metadata injection and manifest link in a browser.
 const server = await readFile(new URL('../../vibe/ui_server.py', import.meta.url), 'utf8');
-const script = server.match(/_SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""([\s\S]*?)"""/)?.[1];
-assert.ok(script);
-const copy = {
-  title: 'Add this Show Page', cta: 'Add to Home Screen or Dock',
-  iosCta: 'Add to Home Screen', macCta: 'Add to Dock',
-  iosTitle: 'Add to Home Screen', iosBody: 'Use Safari Share.',
-  macTitle: 'Add to Dock', macBody: 'Use Safari File.',
-  collapse: 'Collapse guidance', close: 'Close',
-};
 
 test('HTML injection preserves document mode, authored nodes and the real head', async (t) => {
   const content = '<main data-author="body"><p>First</p><p>Last</p></main>';
@@ -43,7 +34,7 @@ from html.parser import HTMLParser
 from typing import Any
 data = json.load(sys.stdin)
 names = {
-    "_SHOW_SYSTEM_ENTRY_META", "_SHOW_SYSTEM_ENTRY_MANIFEST", "_SHOW_SYSTEM_ENTRY_SCRIPT",
+    "_SHOW_SYSTEM_ENTRY_MANIFEST",
     "_SHOW_RUNTIME_MODULE_SCRIPT_RE", "_SHOW_HMR_RESUME_SCRIPT",
     "_inject_show_system_entry", "_inject_show_runtime_config", "_show_runtime_config_script",
 }
@@ -55,8 +46,9 @@ nodes = [
 scope = dict(html=html, json=json, re=re, Any=Any, HTMLParser=HTMLParser)
 scope["_show_runtime_config_payload"] = lambda *args, **kwargs: {"basePath": kwargs["base_path"]}
 exec(compile(ast.Module(body=nodes, type_ignores=[]), "actual-show-injectors", "exec"), scope)
-config = {"title": "Synthetic Show", "iconUrl": "/show/test/__show/icon", "copy": {}}
-inject = lambda value: scope["_inject_show_system_entry"](value, config, base_path="/show/test/").decode()
+inject = lambda value: scope["_inject_show_system_entry"](
+    value, title="Synthetic Show", icon_url="/show/test/__show/icon", base_path="/show/test/",
+).decode()
 for case in data["cases"]:
     baseline = case["html"].encode()
     if case["runtime"]:
@@ -89,7 +81,8 @@ print(json.dumps(data["cases"]))
               text: document.body.textContent,
               author: [...document.querySelectorAll('[data-author]')].map((node) => [node.dataset.author, node.outerHTML, node.parentElement.tagName]),
               heads: document.querySelectorAll('head').length,
-              tags: [...document.querySelectorAll('link, meta, script[src$="system-entry.js"]')].map((node) => node.parentElement === document.head),
+              tags: [...document.querySelectorAll('link, meta')].map((node) => node.parentElement === document.head),
+              scripts: document.querySelectorAll('script').length,
               manifest: document.querySelector('head > link[rel="manifest"]')?.getAttribute('href'),
             }));
           } finally {
@@ -112,187 +105,15 @@ print(json.dumps(data["cases"]))
         assert.equal(states.injected.text, states.baseline.text);
         assert.deepEqual(states.injected.author, states.baseline.author);
         assert.equal(states.injected.heads, 1);
-        assert.deepEqual(states.injected.tags, Array(7).fill(true));
+        assert.deepEqual(states.injected.tags, Array(5).fill(true));
+        // Native install metadata only: no Avibe-drawn install prompt script.
+        assert.equal(states.injected.scripts, states.baseline.scripts);
         assert.equal(states.injected.manifest, '/show/test/__show/manifest.webmanifest');
       });
     }
   } finally {
     await browser.close();
   }
-});
-
-async function annotationFixture(page) {
-  // The Runtime attaches this public API before appending its overlay root.
-  await page.evaluate(() => {
-    let state = { enabled: false, available: true, mode: 'smart' };
-    const listeners = new Set();
-    const fab = document.createElement('button');
-    fab.textContent = 'Annotate';
-    fab.dataset.showAnnotationUi = '';
-    fab.style.cssText = 'position:fixed;right:26px;bottom:26px;width:52px;height:52px;z-index:2147483200';
-    const sheet = document.createElement('section');
-    sheet.hidden = true;
-    sheet.setAttribute('role', 'dialog');
-    sheet.dataset.showAnnotationUi = '';
-    sheet.style.cssText = 'position:fixed;bottom:0;left:0;right:0;height:60vh;background:white;z-index:2147483300';
-    const exit = document.createElement('button');
-    exit.textContent = 'Exit annotation';
-    sheet.append(exit);
-    const change = (enabled) => {
-      state = { ...state, enabled };
-      sheet.hidden = !enabled;
-      fab.hidden = enabled;
-      for (const listener of listeners) listener(state);
-    };
-    fab.onclick = () => change(true);
-    exit.onclick = () => change(false);
-    window.__AVIBE_SHOW__ = { annotation: { api: {
-      getState: () => state,
-      subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
-    } } };
-    window.annotationListenerCount = () => listeners.size;
-    const root = document.createElement('div');
-    root.dataset.showAnnotationRoot = '';
-    root.append(fab, sheet);
-    document.body.append(root);
-  });
-}
-
-function intersects(a, b) {
-  return a.x < b.x + b.width && a.x + a.width > b.x
-    && a.y < b.y + b.height && a.y + a.height > b.y;
-}
-
-for (const [name, width, height, agent] of [
-  ['iPhone', 390, 844, 'Mozilla/5.0 (iPhone) Version/18.0 Mobile Safari/605.1.15'],
-  ['iPad', 390, 844, 'Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15'],
-  ['Mac', 1440, 900, 'Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15'],
-  ['Mac Chrome', 1440, 900, 'Mozilla/5.0 (Macintosh) Chrome/130.0 Safari/537.36'],
-]) {
-  test(`${name}: entry and annotation remain independently usable`, async () => {
-    const browser = await launchSafeBrowser({ contextOptions: { viewport: { width, height } } });
-    try {
-      const { context } = browser;
-      await context.route('http://show.test/**', (route) => route.fulfill({
-        contentType: 'text/html',
-        body: '<!doctype html><body style="margin:0"><main style="min-height:calc(100vh - 140px);display:flex;flex-direction:column"><h1>Authored Show</h1><p id="last-line" style="margin-top:auto">END OF TEST CONTENT — this line must remain reachable.</p></main></body>',
-      }));
-      await context.addInitScript(({ userAgent, ipad }) => {
-        Object.defineProperty(navigator, 'userAgent', { value: userAgent });
-        Object.defineProperty(navigator, 'platform', { value: 'MacIntel' });
-        Object.defineProperty(navigator, 'maxTouchPoints', { value: ipad ? 5 : 0 });
-      }, { userAgent: agent, ipad: name === 'iPad' });
-      const page = await context.newPage();
-      await page.goto('http://show.test/show/test/');
-      await page.evaluate((config) => {
-        const meta = document.createElement('meta');
-        meta.name = 'avibe-show-system-entry';
-        meta.content = JSON.stringify(config);
-        document.head.append(meta);
-      }, { copy });
-      const authoredBody = await page.locator('body').innerHTML();
-      await page.addScriptTag({ content: script });
-      if (name.startsWith('Mac')) {
-        assert.equal(await page.locator('[data-avibe-show-system-entry], [data-avibe-show-system-entry-spacer]').count(), 0);
-        // Script evaluation must leave authored geometry and content untouched.
-        assert.equal(await page.locator('body').innerHTML(), authoredBody);
-        await annotationFixture(page);
-        await page.getByRole('button', { name: 'Annotate', exact: true }).click();
-        await page.getByRole('button', { name: 'Exit annotation' }).click();
-        assert.equal(await page.evaluate(() => window.annotationListenerCount()), 0);
-        return;
-      }
-      await annotationFixture(page); // The real overlay also mounts asynchronously.
-      const entry = page.getByRole('button', { name: 'Add to Home Screen', exact: true });
-      const fab = page.getByRole('button', { name: 'Annotate', exact: true });
-      assert.equal(intersects(await entry.boundingBox(), await fab.boundingBox()), false);
-      await entry.click({ timeout: 2000 });
-      // Opening scrolls and focuses on the next animation frame; measure the settled UI.
-      await page.waitForFunction(() => document.querySelector('[data-avibe-show-system-entry]')?.shadowRoot.activeElement?.classList.contains('collapse'));
-      const guide = page.getByRole('dialog', { name: 'Add to Home Screen' });
-      assert.equal(intersects(await guide.boundingBox(), await fab.boundingBox()), false);
-      const lastLine = await page.locator('#last-line').boundingBox();
-      const guideBox = await guide.boundingBox();
-      assert.ok(lastLine.y >= 0 && lastLine.y + lastLine.height <= height, 'last authored line stays in the viewport when guidance opens');
-      assert.equal(intersects(lastLine, guideBox), false, 'expanded guidance must not cover authored content');
-      await page.getByRole('button', { name: 'Collapse guidance' }).click();
-      await entry.click();
-      await fab.click(); // The expanded guide must not prevent annotation.
-      await page.waitForFunction(() => document.querySelector('[data-avibe-show-system-entry]')?.shadowRoot.querySelector('.wrap').hidden);
-      assert.equal(await guide.isVisible(), false);
-      assert.equal(await entry.isVisible(), false);
-      await page.getByRole('button', { name: 'Exit annotation' }).click();
-      await guide.waitFor({ state: 'visible' });
-      assert.equal(await page.evaluate(() => localStorage.getItem('avibe-show-system-entry:/show/test/')), 'expanded');
-      await page.getByRole('button', { name: 'Close', exact: true }).click();
-      assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0);
-      assert.equal(await page.evaluate(() => window.annotationListenerCount()), 0);
-      await fab.click();
-      await page.getByRole('button', { name: 'Exit annotation' }).click();
-      assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0);
-      await page.addScriptTag({ content: script });
-      assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0, 'dismissal survives another injection');
-    } finally {
-      await browser.close();
-    }
-  });
-}
-
-for (const mode of ['ios', 'display-mode']) {
-  test(`${mode}: standalone launch suppresses installation guidance`, async () => {
-    const browser = await launchSafeBrowser();
-    try {
-      const { context } = browser;
-      await context.route('http://show.test/**', (route) => route.fulfill({
-        contentType: 'text/html', body: '<!doctype html><body><h1>Original Show</h1></body>',
-      }));
-      const page = await context.newPage();
-      await page.goto('http://show.test/p/limited/');
-      await page.evaluate(({ copy, mode }) => {
-        const meta = document.createElement('meta');
-        meta.name = 'avibe-show-system-entry';
-        meta.content = JSON.stringify({ copy });
-        document.head.append(meta);
-        if (mode === 'ios') Object.defineProperty(navigator, 'standalone', { value: true });
-        else {
-          const original = window.matchMedia.bind(window);
-          window.matchMedia = (query) => query === '(display-mode: standalone)'
-            ? { matches: true } : original(query);
-        }
-      }, { copy, mode });
-      await page.addScriptTag({ content: script });
-      assert.equal(await page.locator('[data-avibe-show-system-entry]').count(), 0);
-      assert.equal(await page.getByRole('heading', { name: 'Original Show' }).count(), 1);
-    } finally { await browser.close(); }
-  });
-}
-
-test('embedded Show keeps the outer handoff without offering to install Workbench', async () => {
-  const browser = await launchSafeBrowser();
-  try {
-    const { context } = browser;
-    await context.route('http://show.test/**', (route) => route.fulfill({
-      contentType: 'text/html',
-      body: new URL(route.request().url()).pathname === '/workbench'
-        ? '<!doctype html><a href="/p/limited/" target="_blank">Open Show Page</a><iframe src="/p/limited/"></iframe>'
-        : '<!doctype html><h1>Original Show</h1>',
-    }));
-    const page = await context.newPage();
-    await page.goto('http://show.test/workbench');
-    const embedded = page.frames().find((frame) => frame !== page.mainFrame());
-    await embedded.waitForSelector('h1');
-    await embedded.evaluate((copy) => {
-      const meta = document.createElement('meta');
-      meta.name = 'avibe-show-system-entry';
-      meta.content = JSON.stringify({ copy });
-      document.head.append(meta);
-    }, copy);
-    await embedded.addScriptTag({ content: script });
-    assert.equal(await embedded.locator('[data-avibe-show-system-entry]').count(), 0);
-    assert.equal(await embedded.getByRole('heading', { name: 'Original Show' }).count(), 1);
-    assert.equal(await page.getByRole('link', { name: 'Open Show Page' }).getAttribute('href'), '/p/limited/');
-    // The existing top-level viewport cases above exercise the same script with guidance visible.
-  } finally { await browser.close(); }
 });
 
 test('browser manifest loader carries test identity and rejects missing/revoked grants', async () => {

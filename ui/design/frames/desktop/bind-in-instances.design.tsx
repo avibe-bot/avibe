@@ -40,7 +40,7 @@ function state({ bound, others, remote = false }: { bound: boolean; others: bool
 
 const props = (s: DesktopClientState, extra: Partial<InstanceSwitcherViewProps> = {}): InstanceSwitcherViewProps => ({
   state: s, localInstanceId: s.local.instance_id ?? null, busy: false, pendingId: null, failure: null,
-  onSelect: noop, onLocal: noop, onCancel: noop, onRefresh: noop, onConsent: noop, onAccount: noop, onAdd: noop, ...extra,
+  onSelect: noop, onLocal: noop, onCancel: noop, onRefresh: noop, onConsent: noop, onSignOut: noop, onAdd: noop, ...extra,
 });
 const page = (children: ReactNode) => () => <div className="h-full overflow-y-auto bg-background px-10 py-5 text-foreground">{children}</div>;
 const line = (binding: ComputerBinding) => ({ line: <ThisComputerLine binding={binding} onBind={noop} onRefresh={noop} onUpdates={noop} onSignInOther={noop} />, dim: binding.state === 'unknown' });

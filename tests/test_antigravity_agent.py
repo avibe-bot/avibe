@@ -101,7 +101,7 @@ async def test_live_env_never_inherits_gemini_api_key_and_missing_key_fails_with
         assert prewrite_failure_evidence(req.context).get("reason") == "auth_required"
         assert h.controller.events("result")[0][2].get("is_error") is True
         note = h.controller.events("notify")[0][1]
-        assert "-32000" in note and "Gemini API key is not configured." in note
+        assert "needs you to sign in" in note and "Gemini API key is not configured." in note
 
         provider = make_native_provider(cli_path=str(h.shim), config=h.agy_cfg)
         assert await asyncio.to_thread(provider.list_metadata, str(h.workdir)) == []
@@ -170,7 +170,7 @@ async def test_post_initialize_authenticate_for_adapter_and_native_sessions(tmp_
 
     async with make_agent_harness(tmp_path, workdir=workdir, cli_path=shim, auth_mode="oauth-personal", name=f"unauth-{auth_mode}") as h_bad:
         await h_bad.agent.handle_message(make_request(message="hello", workdir=workdir, base_session_id="unauth"))
-        assert "-32000" in h_bad.controller.events("notify")[0][1]
+        assert "needs you to sign in" in h_bad.controller.events("notify")[0][1]
     assert await asyncio.to_thread(make_native_provider(cli_path=str(shim), config=antigravity_config(shim, auth_mode="oauth-personal")).list_metadata, str(workdir)) == []
 
 
@@ -197,7 +197,7 @@ async def test_model_and_dependent_effort_applied_in_order_and_fails_explicitly(
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="hello", workdir=h.workdir, model="model-beta", effort="ultra-invalid"))
         assert not h.controller.events("result")[0][2].get("is_error")
-        assert "uses thinking level" in h.controller.events("notify")[0][1]
+        assert "uses reasoning effort" in h.controller.events("notify")[0][1]
 
 
 @pytest.mark.asyncio
@@ -469,7 +469,7 @@ async def test_strict_stop_reason_settlement_preserves_partial_text_and_fails(tm
         assert expected_partial in h.controller.events("assistant")[0][1]
         assert opts.get("is_error") is True and opts.get("terminal_error")
         if language == "zh":
-            assert "回合未完整结束" in h.controller.events("notify")[0][1]
+            assert "这次回复没有完成" in h.controller.events("notify")[0][1]
             assert opts["terminal_error"] == "Antigravity turn stopped incomplete (max_tokens)."
 
 
@@ -515,10 +515,10 @@ async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(t
 @pytest.mark.parametrize(
     ("case_id", "server_config", "missing_cli", "platform_specific", "expected_reason", "expected_sub", "forbidden_sub", "language"),
     [
-        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "-32000", None, "en"),
-        ("auth_resume", {"requireAuth": True}, False, {"agent_session_target": {"id": "ses_existing", "agent_backend": "antigravity", "native_session_id": "sess-1"}}, "auth_required", "-32000", "Could not resume", "en"),
+        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "needs you to sign in", None, "en"),
+        ("auth_resume", {"requireAuth": True}, False, {"agent_session_target": {"id": "ses_existing", "agent_backend": "antigravity", "native_session_id": "sess-1"}}, "auth_required", "needs you to sign in", "Could not resume", "en"),
         ("cli_not_found", None, True, None, "cli_not_found", "CLI not found", None, "en"),
-        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "需要身份验证", None, "zh"),
+        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "需要登录", None, "zh"),
         ("cli_not_found", None, True, None, "cli_not_found", "找不到 Antigravity CLI", None, "zh"),
     ],
 )
@@ -548,7 +548,7 @@ async def test_missing_additional_directories_capability_refuses_turn_explicitly
         await h.agent.handle_message(req)
         methods = [r.get("method") for r in h.rpcs()]
         assert "initialize" in methods and not any(m in methods for m in ("session/new", "session/resume", "session/fork", "session/prompt"))
-        assert h.agent._sessions == {} and "sessionCapabilities.additionalDirectories" in h.controller.events("notify")[0][1]
+        assert h.agent._sessions == {} and "agy" in h.controller.events("notify")[0][1]
         assert prewrite_failure_evidence(req.context).get("reason") == "capability_missing"
 
 
@@ -872,8 +872,8 @@ async def test_large_diff_preview_is_bounded_and_offloaded_off_event_loop(
 @pytest.mark.parametrize(
     ("language", "expected_guidance"),
     [
-        ("en", "Run `agy` once in a terminal to complete Google verification"),
-        ("zh", "请先在终端运行一次 `agy` 完成验证后再重试"),
+        ("en", "Run `agy` once in a terminal, follow its prompts, then retry"),
+        ("zh", "请在终端运行一次 `agy`，按提示完成后再重试"),
     ],
 )
 async def test_verification_required_reply_fails_turn_and_normal_verification_prose_succeeds(

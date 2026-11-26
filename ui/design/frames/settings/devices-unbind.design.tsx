@@ -82,6 +82,9 @@ const designFrames = frames([
   // 4. Done: the Devices page as on a new install, with what happened and how long the name stays.
   devices('done', '完成 · 设备页回到没绑定的样子，带「开启远程访问」；说名字保留到哪天', WIDE, { unbind: { state: 'done', host, releaseAt: RELEASE } }),
   devices('done-phone', '完成 · 390 宽', PHONE, { unbind: { state: 'done', host, releaseAt: RELEASE } }),
+  devices('done-original-account', '完成 · 作为新电脑绑定、删的是另一个账号的 Avibe：名字「为原来的账号」保留到哪天，不说「你的账号」', WIDE,
+    { unbind: { state: 'done', host, releaseAt: RELEASE, originalAccount: true } }),
+  devices('done-original-account-phone', '完成 · 另一个账号的 Avibe · 390 宽', PHONE, { unbind: { state: 'done', host, releaseAt: RELEASE, originalAccount: true } }),
 
   // 5. Nothing changed: the reason, and remote access is as it was before.
   frame('not-changed', '什么都没变 · avibe.bot 说不合资格：远程访问的开关恢复到按下之前，不再给「解除绑定」（钥匙失效走已有的「绑定被拒」那一屏）', PAGE, { unbind: { state: 'notChanged' } }),
