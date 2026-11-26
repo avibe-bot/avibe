@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, ExternalLink, FileText, Image as ImageIcon, LayoutGrid, Loader2, Share2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -24,14 +24,9 @@ import { isIosDevice, isRealMobileSafari, isRealSafari, isStandalonePwa } from '
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
 import { cn, copyTextToClipboard } from '../../lib/utils';
-import { lazyPage } from '../../lib/lazyPage';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
+import { ShowPageSharingSettings } from './ShowPageSharingSettings';
 import { ShowPageSystemEntryGuide, type ShowPageSystemEntryMode } from './ShowPageSystemEntryGuide';
-
-// The chat header draws only the Share trigger; fetch audience settings when
-// its popover first opens, rather than with every conversation's first screen.
-const ShowPageSharingSettings = lazyPage(() =>
-  import('./ShowPageSharingSettings').then((module) => module.ShowPageSharingSettings));
 
 type ShowExportKind = Exclude<NativeShareKind, 'link'>;
 
@@ -470,15 +465,13 @@ export const ShowPageShareControl: React.FC<{
 
         {access?.can_publish_public ? (
           <div className="border-t border-border pt-3">
-            <Suspense fallback={<div className="text-sm text-muted">{t('common.loading')}</div>}>
-              <ShowPageSharingSettings
-                active={open}
-                canManage
-                sessionId={sessionId}
-                onApplied={handleShowAccessApplied}
-                ownerWindowId={ownerWindowId}
-              />
-            </Suspense>
+            <ShowPageSharingSettings
+              active={open}
+              canManage
+              sessionId={sessionId}
+              onApplied={handleShowAccessApplied}
+              ownerWindowId={ownerWindowId}
+            />
           </div>
         ) : null}
 
