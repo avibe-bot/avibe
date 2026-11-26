@@ -8,6 +8,7 @@ Each item is a separate commit with a regression at its owning boundary:
 - A4: Emit one completed/failed tool row, with readable paths, commands, bounded output and edit previews. Stream fixtures previously expected duplicate status rows.
 - A5: Script installs participate in idle updates, settled release selection, version readback and failure restoration. Never restore agy's native background updater. State installer pinning limits explicitly.
 - A6: Map an unavailable effort to the shared succession policy's offered value/default, report the effective choice, and permit models without an effort option. Previously unsupported selections failed the Turn.
+  CLI model overrides clear an incompatible inherited effort with a warning, using the same route check as Session updates; explicitly requested incompatible efforts remain refused. Persist the cleared effort on both the reserved Session and queued Run, retain the Agent default, and cover Antigravity's live menu and Vibey's authoritative Hub menu through the CLI boundary.
 - A7: Bundle the owner's agy 1.5.17 menu; preserve known empty effort lists and never guess efforts for unobserved live models.
 - A8: Route incomplete results through standard failure/Retry; flush partial narration before RPC/transport failures. Previous tests accepted a failed text row without recovery affordances.
 - A9: Managed live execution selects an advertised allow-once permission; malformed requests error cleanly. Passive clients do not acquire execution policy.

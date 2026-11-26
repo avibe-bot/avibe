@@ -6018,39 +6018,42 @@ def _agent_value_warning_fields(agent) -> dict:
     }
 
 
-def _session_model_override_fields(
+def _new_session_model_overrides(
     *,
     backend: str,
     agent_label: str,
     model: Optional[str],
     reasoning_effort: Optional[str],
     help_command: str,
+    inherited_reasoning_effort: Optional[str] = None,
     speed: Optional[str] = None,
     hub_agent_reader=None,
-) -> dict:
+) -> tuple[dict, dict]:
     """Check the model, effort, and speed a new Session will run on against the menu its Session will have.
 
-    ``model`` and ``reasoning_effort`` are the effective pair: the run's overrides over the defaults the Session would
-    otherwise keep. With a Model Hub reader the menu is the Web route picker's (``_check_session_route``); without
+    Return Session writes and response fields. ``model`` and ``reasoning_effort`` are the effective pair, except
+    when a model override inherits an effort: pass that default as ``inherited_reasoning_effort`` so the same
+    model-change rule as ``session update`` can clear it. With a Model Hub reader the menu is the Web route picker's; without
     one, the Agent's catalog: where it is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
     and its reservation released; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
     """
-    if hub_agent_reader is not None or speed == "fast":
+    if hub_agent_reader is not None or speed is not None or inherited_reasoning_effort is not None:
         menu = _route_menu(backend, hub_agent_reader=hub_agent_reader, help_command=help_command)
-        _writes, notes = _check_session_route(
+        writes, notes = _check_session_route(
             menu,
             backend=backend,
-            current={"model": None, "reasoning_effort": None, "speed": "standard"},
+            current={"model": None, "reasoning_effort": inherited_reasoning_effort, "speed": "standard"},
             model=model,
             reasoning_effort=reasoning_effort,
             speed=speed,
             menu_command=f"vibe agent models {agent_label}",
             help_command=help_command,
         )
-        return {"warnings": notes, "hint": f"Run `vibe agent models {agent_label}` to list valid models and reasoning efforts."} if notes else {}
+        fields = {"warnings": notes, "hint": f"Run `vibe agent models {agent_label}` to list valid models and reasoning efforts."} if notes else {}
+        return writes, fields
     mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort)
     if not mismatches:
-        return {}
+        return {}, {}
     hint = f"Run `vibe agent models {agent_label}` to list valid models and reasoning efforts."
     if authoritative:
         raise TaskCliError(
@@ -6060,7 +6063,7 @@ def _session_model_override_fields(
             help_command=help_command,
             details={"backend": backend, "model": model, "reasoning_effort": reasoning_effort},
         )
-    return {"warnings": mismatches, "hint": hint}
+    return {}, {"warnings": mismatches, "hint": hint}
 
 
 def cmd_agent_create(args):
@@ -7756,34 +7759,39 @@ def _enqueue_agent_run(
                 agent_store=agent_store,
             )
         override_fields: dict = {}
+        route_writes: dict = {}
+        effective_model = fork_result.model if fork_result else model_override or (agent.model if agent else None)
+        effective_effort = (
+            fork_result.reasoning_effort if fork_result else effort_override or (agent.reasoning_effort if agent else None)
+        )
         if model_override or effort_override or speed_override:
             # Checked only after the reservation, which admitted the caller to the source Session or the Agent, so a
             # refusal tells nothing about a Session or Agent the caller cannot reach; a refused pair releases the
             # reservation (the ``except`` below). The pair is the one the Session will run on: each override over the
             # default it would otherwise keep, the source Session's for a fork, else the Agent's.
-            override_fields = _session_model_override_fields(
+            inherited_effort = effective_effort if model_override and not effort_override else None
+            route_writes, override_fields = _new_session_model_overrides(
                 backend=agent.backend,
                 agent_label=agent.name,
-                model=fork_result.model if fork_result else model_override or agent.model,
-                reasoning_effort=(
-                    fork_result.reasoning_effort if fork_result else effort_override or agent.reasoning_effort
-                ),
+                model=effective_model,
+                reasoning_effort=None if inherited_effort else effective_effort,
+                inherited_reasoning_effort=inherited_effort,
                 speed=speed_override,
                 hub_agent_reader=hub_agent_reader,
                 help_command="vibe agent run --help",
             )
-        if speed_override and session_id:
+            effective_effort = route_writes.get("reasoning_effort", effective_effort)
+        if route_writes and session_id:
             from core.services import sessions as sessions_service
 
-            # A new Session starts at the standard tier and a fork keeps its source's; an explicit --speed sets it
-            # with the same Session write the Web picker makes.
+            # Persist the same route decision as session update, including clearing an incompatible inherited effort.
             from storage.db import get_cached_sqlite_engine
 
             with get_cached_sqlite_engine().begin() as conn:
                 sessions_service.update_session(
                     conn,
                     session_id,
-                    speed="fast" if speed_override == "fast" else None,
+                    **route_writes,
                     authorization_context=caller_authorization,
                 )
         source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
@@ -7814,12 +7822,8 @@ def _enqueue_agent_run(
             agent_id=agent.id if agent else None,
             agent_backend=agent.backend if agent else None,
             # An existing Session's run never carries an override (``_validate_run_session_policy``).
-            model=fork_result.model if fork_result else model_override or (agent.model if agent else None),
-            reasoning_effort=(
-                fork_result.reasoning_effort
-                if fork_result
-                else effort_override or (agent.reasoning_effort if agent else None)
-            ),
+            model=effective_model,
+            reasoning_effort=effective_effort,
             session_policy=session_policy,
             session_key=session_key,
             session_id=session_id,
