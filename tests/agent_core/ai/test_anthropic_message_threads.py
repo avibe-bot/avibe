@@ -121,7 +121,7 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
     assert follow(36_406, "x" * 13_000).reason == "dense_delta_risk"
     assert follow(36_406, "结果 " * 8_000).reason == "large_static_or_delta"
 
-    # Both decisions survive on an actual-send receipt: a rejected delta and a cache-safe full.
+    # The delta is unsafe, but all history is present in the new create and only the older user mark is removed.
     marker = {"type": "ephemeral"}
     history = [
         {
@@ -144,7 +144,9 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
     create = mt.prepare(wire, ep, True, None, route, None)
     assert create.mode == "create"
     attempt = follow(36_406, "x" * 13_000, mark_result=True)
-    assert attempt.mode == "full" and attempt.record["reason"] == "preserve_cache_breakpoints"
+    assert attempt.mode == "create" and attempt.record["reason"] == "full_history_create"
+    assert attempt.wire.body["thread"] == {"type": "create"}
+    assert len(attempt.wire.body["messages"]) == len(history) + 2
     assert attempt.record["delta_rejection"] == "dense_delta_risk"
 
 

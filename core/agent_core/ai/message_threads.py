@@ -59,11 +59,10 @@ class Parent:
     count: int
     history: bytes
     assistant: bytes
-    message_id: str | None  # None: ordinary warm witness, never a server parent.
+    message_id: str | None  # None: ordinary full witness, never a server parent.
     tokens: int
     expires: float
     reads: int | None = None
-    warm_create: bool = False  # Only this verified child of the immediately preceding warm full.
     terminal_mark: bool = False
     pinned_drop_block: bool = False
     carry_projection: str = ""
@@ -79,7 +78,7 @@ def parent_entry(session: str | None, *, claim: bool) -> tuple[Parent | None, st
         return None, "no_session"
     entry = parents.pop(session, None) if claim else parents.get(session)
     if isinstance(entry, Parent):
-        return entry, "bound" if entry.message_id else "warm_full"
+        return entry, "bound" if entry.message_id else "full_witness"
     return None, entry or "no_local_entry"
 
 
@@ -198,11 +197,11 @@ class Attempt:
     fixed: bytes
     history: bytes
     record: dict
-    capture_warm: bool
+    capture_witness: bool
     pinned_drop_block: bool = False
     reported_reads: int | None = None
 
-    def observe_usage(self, raw) -> None:
+    def observe_usage(self, raw, usage, *, attributable: bool) -> None:
         # Missing counters are unknown, not zero. Start and delta may report different fields.
         if not isinstance(raw, dict):
             return
@@ -213,15 +212,19 @@ class Attempt:
                 self.record["create_cache_reads"] = reads
         if self.mode != "create":
             return
+        self.record["create_usage_attribution"] = "verified" if attributable else "unverified"
+        if not attributable:
+            # The request was pinned, but these counters did not come from a verified serving hop.
+            for key in ("route_hash", "model", "prior_cache_reads"):
+                self.record.pop(key, None)
         writes = raw.get("cache_creation_input_tokens")
         if type(writes) is int and writes >= 0:
             self.record["create_cache_writes"] = writes
-        detail = raw.get("cache_creation")
-        if isinstance(detail, dict):
-            for ttl in ("5m", "1h"):
-                count = detail.get(f"ephemeral_{ttl}_input_tokens")
-                if type(count) is int and count >= 0:
-                    self.record.setdefault("create_cache_writes_by_ttl", {})[ttl] = count
+        # Use the canonical start/delta reconciliation. A revised aggregate may invalidate older TTL detail.
+        if usage is not None and usage.cache_writes_by_ttl is not None:
+            self.record["create_cache_writes_by_ttl"] = dict(usage.cache_writes_by_ttl)
+        else:
+            self.record.pop("create_cache_writes_by_ttl", None)
 
 
 def _cache_plan(full: dict) -> tuple[str | None, int | None]:
@@ -246,7 +249,8 @@ def _cache_plan(full: dict) -> tuple[str | None, int | None]:
             offset += 1
     if static + len(marks) <= 3:
         return None, None
-    if len(marks) != 2 or static != 2:
+    if (len(marks) != 2 or static != 2 or marks[0][1] == marks[1][1]
+            or any(full["messages"][index]["role"] != "user" for _, index in marks)):
         return "preserve_cache_breakpoints", None
     if offset > 20 or marks[-1][0] - marks[0][0] >= 20:
         return "preserve_cache_breakpoints", marks[0][1]
@@ -406,9 +410,9 @@ def prepare(
         cache_reason, omitted_mark = _cache_plan(full)
         if cache_reason == "native_history":
             ordinary = cache_reason
-    warm = False
+    matched_append = False
     prior_reads = None
-    capture_warm = False
+    capture_witness = False
     mode = "full" if ordinary or (get_state_dir() / "disable-message-threads").exists() else "create"
     if mode == "full":
         reason = ordinary or "disabled"
@@ -426,23 +430,23 @@ def prepare(
             or message_digest([msgs[n]]) != parent.assistant
         ):
             reason = "history_changed"
-        elif parent.tokens < MIN_PARENT_TOKENS:
-            prior_reads = parent.reads
-            reason = "small_parent"
         else:
+            matched_append = True
             prior_reads = parent.reads
             suffix = msgs[n + 1 :]
             # Encoded bytes bound text, not the tokens billed for decoded pixels. Never rely on the
             # usage heuristic for a suffix containing images, including a tool's returned images.
             if _contains_image(suffix):
                 mode, reason = "full", "image_delta"
+            elif parent.message_id is None:
+                pass  # A full-history create neither restores parent tokens nor needs a small suffix.
+            elif parent.tokens < MIN_PARENT_TOKENS:
+                reason = "small_parent"
             elif budget_reason := _continuation_budget(full, suffix, parent.tokens):
                 reason = budget_reason
-            elif parent.message_id is None:
-                warm = bool(parent.reads)
-            elif parent.terminal_mark and not parent.warm_create and not _reaches_parent_mark(msgs[n], suffix):
+            elif parent.terminal_mark and not _reaches_parent_mark(msgs[n], suffix):
                 mode, reason = "full", "terminal_marker_out_of_reach"
-                capture_warm = omitted_mark is not None
+                capture_witness = omitted_mark is not None
             else:
                 mode = "continue"
                 body = {k: v for k, v in full.items() if k not in ("system", "tools")}
@@ -454,11 +458,11 @@ def prepare(
     )
     if mode == "create" and cache_reason:
         reason = cache_reason
-        if warm and omitted_mark is not None:
-            reason = "warm_bootstrap"
+        if matched_append and omitted_mark is not None:
+            reason = "full_history_create"
         else:
             mode = "full"
-            capture_warm = omitted_mark is not None
+            capture_witness = omitted_mark is not None
     if mode == "create":
         body = {**full, "thread": {"type": "create"}}
         if omitted_mark is not None:
@@ -496,7 +500,7 @@ def prepare(
     if delta_rejection and delta_rejection != reason:
         record["delta_rejection"] = delta_rejection
     if mode == "create":
-        record.update(route_hash=route.hex(), model=ep.model_id)
+        record.update(route_hash=route.hex(), model=ep.model_id, create_usage_attribution="unobserved")
         if prior_reads is not None:
             record["prior_cache_reads"] = prior_reads
     return Attempt(
@@ -505,8 +509,8 @@ def prepare(
         reason,
         parent,
         fixed,
-        message_digest(msgs) if mode != "full" or capture_warm else b"",
+        message_digest(msgs) if mode != "full" or capture_witness else b"",
         record,
-        capture_warm,
+        capture_witness,
         pinned_drop_block,
     )

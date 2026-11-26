@@ -171,6 +171,95 @@ async def test_non_bootstrap_create_observes_only_reported_comparable_counters()
     assert two["body_bytes"] > 0 and two["ordinary_baseline_bytes"] == two["full_bytes"]
 
 
+@pytest.mark.parametrize("reads", [None, 0, 17])
+@pytest.mark.parametrize("append_size", [4, 18000])
+async def test_full_create_needs_neither_cache_hits_nor_delta_budget(reads, append_size):
+    bodies = []
+
+    def handle(wire):
+        bodies.append(json.loads(wire.content))
+        text = served(reads or 0).text
+        if reads is None:
+            text = text.replace(',"cache_read_input_tokens":0', "")
+        return httpx.Response(200, text=text)
+
+    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("full-root"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        witness = await send(adapter, req)
+        root = replace(witness, messages=(*witness.messages[:-1], user("L" * append_size)))
+        follow = await send(adapter, root)
+        await send(adapter, follow)
+    assert [b.get("thread", {}).get("type", "full") for b in bodies] == ["full", "create", "continue"]
+    assert len(bodies[1]["messages"]) == len(root.messages) and len(bodies[2]["messages"]) == 1
+    assert root.thread_observation.attempts[0].get("prior_cache_reads") == reads
+
+
+async def test_origin_rejected_create_keeps_unattributed_reported_usage_then_replays():
+    req = _request(messages=(user("small"),), source_id="src_receipt01")
+    req = replace(
+        req,
+        endpoint=replace(req.endpoint, source_identity="fixture"),
+        thread_observation=ThreadObservation("unattributed"),
+    )
+    sends = []
+
+    def handle(wire):
+        sends.append(json.loads(wire.content))
+        text = served(29).text.replace(
+            '"input_tokens":23000',
+            '"input_tokens":23000,"cache_creation_input_tokens":51,"cache_creation":{"ephemeral_5m_input_tokens":51}',
+        )
+        return httpx.Response(200, text=text)  # No verified served-hop header.
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        await send(AnthropicAdapter(client, gateway=True), req)
+    facts = req.thread_observation.attempts[0]
+    assert [s.get("thread", {}).get("type", "full") for s in sends] == ["create", "full"]
+    assert facts["failure"] == "thread_origin_mismatch"
+    assert (
+        facts.get("create_cache_reads"),
+        facts.get("create_cache_writes"),
+        facts.get("create_cache_writes_by_ttl"),
+    ) == (29, 51, {"5m": 51})
+    assert facts["create_usage_attribution"] == "unverified" and "route_hash" not in facts and "model" not in facts
+
+
+async def test_revised_zero_create_total_drops_obsolete_ttl_detail():
+    req = replace(_request(messages=(user("small"),)), thread_observation=ThreadObservation("revised"))
+    text = (
+        served(0)
+        .text.replace(
+            '"input_tokens":23000',
+            '"input_tokens":23000,"cache_creation_input_tokens":75,"cache_creation":{"ephemeral_5m_input_tokens":75}',
+        )
+        .replace('"output_tokens":1', '"output_tokens":1,"cache_creation_input_tokens":0')
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=text))) as client:
+        await send(AnthropicAdapter(client), req)
+    facts = req.thread_observation.attempts[0]
+    assert facts["create_cache_writes"] == facts["create_cache_reads"] == 0
+    assert "create_cache_writes_by_ttl" not in facts
+
+
+async def test_first_child_of_full_history_create_still_needs_reachable_terminal_mark():
+    modes = []
+
+    def handle(wire):
+        mode = json.loads(wire.content).get("thread", {}).get("type", "full")
+        modes.append(mode)
+        response = served(22000)
+        return httpx.Response(200, text=many_blocks(response.text, 24)) if mode == "create" else response
+
+    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("root-mark"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        follow = await send(adapter, await send(adapter, req))
+        await send(adapter, follow)
+    assert modes == ["full", "create", "full"]
+    assert follow.thread_observation.attempts[0]["reason"] == "terminal_marker_out_of_reach"
+
+
 async def test_verified_delta_ignores_distant_ordinary_markers():
     bodies = []
 
@@ -208,15 +297,15 @@ async def test_actual_terminal_mark_needs_reachable_delta_lookup(blocks, expecte
         assert len(_breakpoints(bodies[-1])) == 4
 
 
-@pytest.mark.parametrize("change", ["session", "model", "edit", "disabled", "cold"])
-async def test_only_immediately_preceding_warm_bound_full_can_bootstrap(change):
+@pytest.mark.parametrize("change", ["session", "model", "edit", "disabled"])
+async def test_long_create_requires_an_immediately_preceding_bound_full(change):
     from config.paths import get_state_dir
 
     bodies = []
 
     def handle(wire):
         bodies.append(json.loads(wire.content))
-        return served(0 if change == "cold" else 22000)
+        return served(22000)
 
     req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("warm-test"))
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:

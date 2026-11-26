@@ -401,7 +401,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if speculative and self._gateway and not served_as_pinned() and event_type != "message_start":
                         yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                         return
-                    if (speculative or (attempt and attempt.capture_warm)) and lossless:
+                    if (speculative or (attempt and attempt.capture_witness)) and lossless:
                         lossless = shape.accepts(event_type, chunk)
                     if (
                         attempt
@@ -458,11 +458,12 @@ class AnthropicAdapter(ProviderAdapter):
                         mid = message.get("id")
                         response_id = mid if isinstance(mid, str) and 0 < len(mid) <= 256 and mid.isascii() else None
                         assembler.set_usage(response_usage)
-                        if speculative and self._gateway and not served_as_pinned():
+                        attributable = not self._gateway or served_as_pinned()
+                        if attempt:
+                            attempt.observe_usage(message.get("usage"), response_usage, attributable=attributable)
+                        if speculative and not attributable:
                             yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                             return
-                        if attempt:
-                            attempt.observe_usage(message.get("usage"))
                         if attempt and attempt.mode == "continue":
                             total = (
                                 (
@@ -872,7 +873,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 )
                         response_usage = _anthropic_usage(usage, current=response_usage)
                         if attempt:
-                            attempt.observe_usage(usage)
+                            attempt.observe_usage(usage, response_usage, attributable=not self._gateway or served_as_pinned())
                         assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
                             response_counts = reported_counts(usage.get("server_tool_use"), bound=None)
@@ -1066,7 +1067,7 @@ class AnthropicAdapter(ProviderAdapter):
                                 event = replace(event, retryable=False, continuable=False, after_thinking=False)
                         elif isinstance(event, Done):
                             message = event.message
-                            if attempt and (speculative or attempt.capture_warm) and session:
+                            if attempt and (speculative or attempt.capture_witness) and session:
                                 if speculative and not response_id:
                                     veto = "missing_or_invalid_message_id"
                                 elif not message_stopped:
@@ -1079,8 +1080,6 @@ class AnthropicAdapter(ProviderAdapter):
                                     veto = "missing_usage"
                                 elif self._gateway and not served_as_pinned():
                                     veto = "unverified_origin"
-                                elif attempt.capture_warm and not message.usage.cache_read_tokens:
-                                    veto = "cold_full"
                                 else:
                                     veto = None
                                 assistant_hash = None if veto else await asyncio.to_thread(_replayable_digest, message)
@@ -1093,7 +1092,7 @@ class AnthropicAdapter(ProviderAdapter):
                                     binding("superseded")
                                     yield event
                                     continue
-                                attempt.record["binding"] = "warm_full" if attempt.capture_warm else "bound"
+                                attempt.record["binding"] = "full_witness" if attempt.capture_witness else "bound"
                                 threads.remember(
                                     threads.parents,
                                     session,
@@ -1107,7 +1106,6 @@ class AnthropicAdapter(ProviderAdapter):
                                         u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens,
                                         time.monotonic() + threads.PARENT_SECONDS,
                                         attempt.reported_reads,
-                                        attempt.reason == "warm_bootstrap",
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
                                         observation.carry_projection,
