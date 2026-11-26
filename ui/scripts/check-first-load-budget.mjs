@@ -62,9 +62,16 @@ const KiB = 1024;
 // measures 900.5 KiB; the repair itself was moved off the first screen first
 // (src/lib/webPushBindingRepair.ts loads on demand). It is not raised again
 // without him.
+// Antigravity backend: catalog membership, picker branding and model/effort
+// support, plus its localized labels in the existing whole-locale bundle.
+// Owner approved this measured allowance on 2026-11-26.
+// Against master 376522e95, home grows 607.7 -> 609.3 KiB and chat grows
+// 903.8 -> 905.4 KiB (about 1.6 KiB each, rounded up to 2 KiB). No added
+// first-screen modules: provider forms, connection dialogs and design frames
+// remain deferred. This allowance does not change other features' loading.
 const BUDGETS = {
-  home: 608 * KiB,
-  chat: 904 * KiB,
+  home: 610 * KiB,
+  chat: 906 * KiB,
 };
 
 const dist = process.argv[2] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'dist');
