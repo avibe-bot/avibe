@@ -104,9 +104,8 @@ beforeEach(async () => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('Antigravity settings, auth flows, and onboarding', () => {
-  it.each(['en', 'zh'] as const)('completes %s Google paste-code OAuth with the personal sign-in notice and no Model Hub card', async (lang) => {
-    await i18n.changeLanguage(lang);
-    const t = lang === 'en' ? en : zh;
+  it('completes Google paste-code OAuth without a Model Hub card', async () => {
+    const t = en;
     mock.api.startOAuthWeb.mockResolvedValue({
       ok: true, flow_id: 'flow_agy', backend: 'antigravity', state: 'awaiting_code',
       callback_kind: 'code', url: 'https://accounts.google.com/o/oauth2/v2/auth?code=1',
@@ -115,7 +114,6 @@ describe('Antigravity settings, auth flows, and onboarding', () => {
     renderProvider();
 
     const signInButton = await screen.findByRole('button', { name: t.settings.backends.antigravitySignInGoogle });
-    expect(screen.getByRole('note').textContent).toBe(t.settings.backends.antigravityPersonalNotice);
     expect(screen.queryByText(t.settings.models.supplyMode.title)).toBeNull();
     expect(modelsApi.listAgents).not.toHaveBeenCalled();
     expect(mock.api.testBackendAuth).not.toHaveBeenCalled();

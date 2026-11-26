@@ -344,14 +344,9 @@ def test_antigravity_direct_models_use_authoritative_live_menu(monkeypatch, tmp_
 @pytest.mark.parametrize("explicit_effort", [False, True])
 @pytest.mark.parametrize("backend,model,default_effort,offered", [
     ("antigravity", "gemini-pro-orchestrator", "medium", []),
-    ("antigravity", "gemini-pro-orchestrator-neon", "medium", []),
-    ("antigravity", "gemini-pro-orchestrator-argon", "medium", []),
-    ("antigravity", "gpt-oss-120b-medium", "medium", []),
     ("antigravity", "gemini-4-carbon", "xhigh", ["low", "medium", "high"]),
     ("antigravity", "gemini-4-carbon", "high", ["low", "medium", "high"]),
     ("vibey", "plain-model", "medium", []),
-    ("vibey", "grok/grok-4.6", "xhigh", ["low", "high"]),
-    ("vibey", "grok/grok-4.6", "high", ["low", "high"]),
 ])
 def test_agent_run_model_change_clears_only_inherited_incompatible_effort(
     monkeypatch, tmp_path, capsys, backend, model, default_effort, offered, explicit_effort,

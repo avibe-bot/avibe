@@ -24,10 +24,10 @@ from core.run_settlement import SETTLED_BY_STOPPED
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerReconcileRequest, SteerRequest
 from core.services.running_agents import _resolve_live_state, end_running_agent, snapshot_running_agents
 from modules.agents.acp.client import AcpRpcError
-from modules.agents.antigravity.agent import AGY_CLI_DISABLE_AUTO_UPDATE_ENV, AntigravityAgent, build_antigravity_env
+from modules.agents.antigravity.agent import AntigravityAgent, build_antigravity_env
 from modules.agents.antigravity.rules import MAX_RULE_FILE_BYTES, MAX_RULE_TOTAL_BYTES, render_session_rules
 from modules.agents.antigravity.models import AntigravityModelSelectionError, apply_model_and_effort
-from modules.agents.antigravity.auth import antigravity_acp_command
+from modules.agents.antigravity.auth import AGY_CLI_DISABLE_AUTO_UPDATE_ENV, antigravity_acp_command
 from modules.agents.antigravity import agent as agy_agent_module
 from modules.agents.antigravity.agent import resolve_antigravity_cli_path
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider

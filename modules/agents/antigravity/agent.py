@@ -118,7 +118,6 @@ from vibe.i18n import t as i18n_t
 
 logger = logging.getLogger(__name__)
 
-AGY_CLI_DISABLE_AUTO_UPDATE_ENV = "AGY_CLI_DISABLE_AUTO_UPDATE"
 _CLIENT_INFO = {"name": "avibe", "version": "1.0.0"}
 _STOP_CANCEL_GRACE_SECONDS = 3.0
 _STEER_RECEIPT_TIMEOUT_SECONDS = 1.0

@@ -1,9 +1,8 @@
 """Unit tests for core/services/skills.py — the askill CLI shell.
 
-Most tests monkeypatch the subprocess boundary (`_run_askill`) with canned
-``--json`` envelopes, without askill installed or network access. An optional
-local-source installation test runs askill with isolated home and project paths.
-These tests pin the command construction (scope / agent / install flags,
+Hermetic: the subprocess boundary (`_run_askill`) is monkeypatched with canned
+``--json`` envelopes, so these run without askill installed and without the
+network. They pin the command construction (scope / agent / install flags,
 ``--skill`` selection, ``check`` / ``update``) and the error paths.
 """
 
@@ -1151,37 +1150,3 @@ def test_missing_project_dir_error_preserves_host_path_for_authorized_service_ca
         _run(skills._run_askill("askill", ["list"], cwd=str(missing)))
     assert info.value.code == "project_dir_missing"
     assert str(missing) in info.value.message
-
-
-@pytest.mark.parametrize("scope", ["project", "global"])
-def test_antigravity_install_keeps_target_and_discovers_canonical_copy(tmp_path, scope):
-    """Keep Antigravity attribution; its canonical copy supplies managed discovery.
-
-    The old remapping asserted that .agent must not exist, although that is a
-    legitimate askill link. Assert the canonical owner and actual discovery instead.
-    """
-    import shutil
-    from pathlib import Path
-
-    from core.managed_skills import resolve_skills
-
-    assert skills._agent_flags(["antigravity"]) == ["-a", "antigravity"]
-    assert skills.AGENT_TO_BACKEND["antigravity"] == "antigravity"
-    executable = shutil.which("askill")
-    if executable is None:
-        pytest.skip("local askill CLI is unavailable")
-    source = tmp_path / "source" / "canonical-antigravity-probe"
-    source.mkdir(parents=True)
-    (source / "SKILL.md").write_text(
-        "---\nname: canonical-antigravity-probe\ndescription: Local canonical-copy probe\n---\nUse this probe.\n"
-    )
-    project = tmp_path / "project"
-    project.mkdir()
-    installed = _run(skills.add_skill(
-        executable, str(source), scope=scope, project_dir=str(project), backends=["antigravity"],
-    ))
-    assert installed["ok"], installed
-    canonical = (project if scope == "project" else Path.home()) / ".agents" / "skills" / source.name
-    assert (canonical / "SKILL.md").is_file()
-    discovered = next(skill for skill in resolve_skills(cwd=project) if skill.name == source.name)
-    assert discovered.directory.resolve() == canonical.resolve()

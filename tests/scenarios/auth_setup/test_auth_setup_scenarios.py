@@ -6982,12 +6982,13 @@ def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, t
 
 def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
     """Scenario: AUTH-SETUP-931 — recovery, explicit probe, then account-scoped catalog cutover."""
-    from modules.agents import acp
+    from tests.helpers.antigravity_harness import FakeAgyAuthFixture
     from modules.im import MessageContext
 
+    fake_agy = FakeAgyAuthFixture(tmp_path)
     config = V2Config.default()
     config.agents.antigravity.enabled = True
-    config.agents.antigravity.cli_path = "/fake/agy"
+    config.agents.antigravity.cli_path = str(fake_agy.binary)
     config.agents.antigravity.auth_mode = "oauth-personal"
     config.save()
 
@@ -7010,72 +7011,17 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
     )
     service = AgentAuthService(controller)
 
-    class _FakeAcpClient:
-        mode = "success"
-        observed_commands = []
+    from modules.agents import acp
+    from tests.helpers.acp_probe_stub import make_probe_client
 
-        def __init__(self, command, *, cwd=None, env=None, request_timeout=120.0):
-            self.command = list(command)
-            self.env = dict(env or {})
-            self.auth_methods = [{"id": "oauth-personal"}]
-            self.supports_close = True
-            self._notify = None
-            self.closed_sessions = []
-            _FakeAcpClient.observed_commands.append((self.command, self.env))
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_exc):
-            return None
-
-        def on_notification(self, cb):
-            self._notify = cb
-
-        async def initialize(self, **_kwargs):
-            return {"protocolVersion": 1}
-
-        async def authenticate(self, _method_id):
-            return {}
-
-        async def session_new(self, _cwd, **_kwargs):
-            if _FakeAcpClient.mode == "auth_error":
-                raise acp.AcpRpcError(-32000, "Authentication required")
-            return {
-                "sessionId": "sess-probe-1",
-                "configOptions": [
-                    {
-                        "id": "model",
-                        "category": "model",
-                        "options": [{"value": "gemini-4-neon"}],
-                    }
-                ],
-            }
-
-        async def session_set_config_option(self, _sid, _cid, value):
-            if value != "gemini-4-neon":
-                raise acp.AcpRpcError(-32602, f"Unsupported model: {value}")
-            return {}
-
-        async def session_prompt(self, _sid, _prompt, **_kwargs):
-            if self._notify is not None:
-                await self._notify(
-                    "session/update",
-                    {
-                        "sessionId": "sess-probe-1",
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": "OK"},
-                        },
-                    },
-                )
-            return {"stopReason": "end_turn"}
-
-        async def session_close(self, session_id):
-            self.closed_sessions.append(session_id)
-            return {}
-
-    monkeypatch.setattr(acp, "AcpClient", _FakeAcpClient)
+    # This suite forbids child processes. Reuse the agy fixture's state and
+    # protocol script through the existing in-process transport boundary.
+    Client, observed = make_probe_client(
+        options=[{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
+        chunks=[("sess-probe-1", "echo:Hi")],
+        authenticated=lambda: json.loads(fake_agy.state_file.read_text())["authenticated"],
+    )
+    monkeypatch.setattr(acp, "AcpClient", Client)
     ctx = MessageContext(user_id="u1", channel_id="c1", platform="slack")
 
     async def _run():
@@ -7087,14 +7033,14 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         assert recovered is True
         assert sent_buttons and sent_buttons[-1][1] == "auth_setup:antigravity"
 
-        _FakeAcpClient.mode = "auth_error"
+        fake_agy.set_state(authenticated=False)
         r_auth = await service.test_web_auth("antigravity", model="gemini-4-neon")
         assert r_auth["ok"] is False
         assert r_auth["authenticated"] is False
         assert r_auth["catalog_available"] is False
         assert r_auth["inference_verified"] is False
 
-        _FakeAcpClient.mode = "success"
+        fake_agy.set_state(authenticated=True)
         r_bad_model = await service.test_web_auth("antigravity", model="unknown-model")
         assert r_bad_model["ok"] is False
         assert r_bad_model["authenticated"] is True
@@ -7106,7 +7052,7 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         assert r_ok["authenticated"] is True
         assert r_ok["catalog_available"] is True
         assert r_ok["inference_verified"] is True
-        assert r_ok["excerpt"] == "OK"
+        assert "echo:Hi" in r_ok["excerpt"]
 
         from modules.agents.antigravity.models import read_antigravity_live_models
 
@@ -7116,9 +7062,8 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         await service._persist_backend_auth_mode("antigravity", "oauth-personal", strict=True)
         assert read_antigravity_live_models(config) == []
 
-        for cmd, env in _FakeAcpClient.observed_commands:
-            assert "--dangerously-skip-permissions" not in cmd
-            assert "--disable-telemetry" in cmd
+        for command, env in observed["commands"]:
+            assert "--dangerously-skip-permissions" not in command and "--disable-telemetry" in command
             assert env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
 
     asyncio.run(_run())

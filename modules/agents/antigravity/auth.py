@@ -27,6 +27,8 @@ from modules.agents.antigravity.models import (
 
 logger = logging.getLogger(__name__)
 
+AGY_CLI_DISABLE_AUTO_UPDATE_ENV = "AGY_CLI_DISABLE_AUTO_UPDATE"
+
 ANTIGRAVITY_AUTH_MODES = ("oauth-personal", "oauth-business", "gemini-api-key", "agent-platform")
 ANTIGRAVITY_OAUTH_METHODS = frozenset({"oauth-personal", "oauth-business"})
 ANTIGRAVITY_ADC_LOGIN_COMMAND = "gcloud auth application-default login"
@@ -159,7 +161,7 @@ def build_antigravity_auth_env(
 ) -> dict[str, str]:
     """Build subprocess env for Antigravity ACP auth/status/logout/probe calls."""
     env = dict(os.environ if base_env is None else base_env)
-    env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
+    env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV] = "true"
     mode = normalize_antigravity_auth_mode(config, auth_mode)
 
     if mode == "gemini-api-key":

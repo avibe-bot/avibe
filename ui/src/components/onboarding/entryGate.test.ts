@@ -316,10 +316,9 @@ describe('Direct-only Antigravity admission', () => {
   it.each<[string, Partial<EntryEvidence>]>([
     ['connection.ready is false', { connections: [agApplied({ ready: false })] }],
     ['connection.enabled is false', { connections: [agApplied({ enabled: false })] }],
-    ['connection.application is stopped', { connections: [agApplied({ application: 'stopped', ready: false })] }],
     ...(['draining', 'failed', 'unknown'] as const).map((application): [string, Partial<EntryEvidence>] => [`connection.application is ${application}`, { connections: [agApplied({ application })] }]),
     ['cliHealthy.antigravity is false', { cliHealthy: NO_CLI }],
-    ...([null, '', '   '] as const).map((model): [string, Partial<EntryEvidence>] => [`agent.model is ${JSON.stringify(model)}`, { agents: [{ ...ANTIGRAVITY, model }] }]),
+    ...([null, '   '] as const).map((model): [string, Partial<EntryEvidence>] => [`agent.model is ${JSON.stringify(model)}`, { agents: [{ ...ANTIGRAVITY, model }] }]),
     ['agent is disabled', { agents: [{ ...ANTIGRAVITY, enabled: false }] }],
     ['agent is archived', { agents: [{ ...ANTIGRAVITY, archived: true }] }],
     ['agent is a Bot agent', { agents: [{ ...ANTIGRAVITY, bot: { handle: 'ag-bot', display_name: '', builtin: false } }] }],

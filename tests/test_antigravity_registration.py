@@ -34,6 +34,9 @@ from vibe.cli_repair import identify_repair_source
 from vibe.desktop_backends import BACKEND_SPECS, DesktopBackendError, install_desktop_backend
 
 
+AGY_MODEL_IDS = ['gemini-4-neon', 'gemini-4-carbon', 'gemini-4-argon', 'gemini-4-hydrogen', 'gemini-pro-orchestrator-neon', 'gemini-pro-orchestrator', 'gemini-pro-orchestrator-argon', 'gemini-3.8-flash', 'claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-oss-120b-medium']
+
+
 def test_catalog_registers_antigravity_and_never_acp():
     assert "antigravity" in AGENT_BACKENDS and "antigravity" in NATIVE_CLI_BACKENDS
     assert "acp" not in AGENT_BACKEND_REGISTRY
@@ -98,7 +101,6 @@ def test_antigravity_config_round_trip_masking_and_upgrade_compat(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_model_hub_excludes_antigravity_and_keeps_it_direct(tmp_path: Path):
-    assert "antigravity" not in MODEL_HUB_BACKENDS
     hub_config = ModelHubConfig()
     assert "antigravity" not in hub_config.agents
     for cfg in (hub_config, ModelHubConfig(enabled=False), None):
@@ -230,103 +232,21 @@ async def test_antigravity_live_model_catalog_cache_is_account_scoped_and_enrich
     cfg.agents.antigravity.auth_mode = "oauth-personal"
     cfg.save()
 
-    spawn_count = 0
+    from tests.helpers.acp_probe_stub import make_probe_client
 
-    class _LiveCatalogClient:
-        def __init__(self, *_a: object, **_kw: object) -> None:
-            nonlocal spawn_count
-            spawn_count += 1
-            self.supports_close = True
-            self._notify: object = None
-
-        async def __aenter__(self) -> _LiveCatalogClient:
-            return self
-
-        async def __aexit__(self, *_exc: object) -> None:
-            return None
-
-        def on_notification(self, cb: object) -> None:
-            self._notify = cb
-
-        async def initialize(self, **_kw: object) -> dict[str, object]:
-            return {"protocolVersion": 1}
-
-        async def authenticate(self, _method_id: str) -> dict[str, object]:
-            return {}
-
-        async def session_new(self, _cwd: str, **_kw: object) -> dict[str, object]:
-            return {
-                "sessionId": "sess-live-1",
-                "models": {
-                    "currentModelId": "live-only-model",
-                    "availableModels": [
-                        {"modelId": "live-only-model", "name": "Live Only Model"},
-                        {"modelId": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-                    ],
-                },
-                "configOptions": [
-                    {
-                        "id": "model",
-                        "category": "model",
-                        "currentValue": "live-only-model",
-                        "options": [
-                            {"value": "live-only-model", "name": "Live Only Model"},
-                            {"value": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-                        ],
-                    },
-                    {
-                        "id": "thought_level",
-                        "category": "thought_level",
-                        "currentValue": "low",
-                        "options": [{"value": "low"}, {"value": "xhigh"}],
-                    },
-                ],
-            }
-
-        async def session_set_config_option(self, _sid: str, cid: str, val: object) -> dict[str, object]:
-            assert cid == "model" and val == "gemini-2.5-pro"
-            return {
-                "configOptions": [
-                    {
-                        "id": "model",
-                        "category": "model",
-                        "currentValue": "gemini-2.5-pro",
-                        "options": [
-                            {"value": "live-only-model", "name": "Live Only Model"},
-                            {"value": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-                        ],
-                    },
-                    {
-                        "id": "thought_level",
-                        "category": "thought_level",
-                        "currentValue": "medium",
-                        "options": [{"value": "low"}, {"value": "medium"}],
-                    },
-                ]
-            }
-
-        async def session_prompt(self, _sid: str, _blocks: object, **_kw: object) -> dict[str, object]:
-            if callable(self._notify):
-                await self._notify(
-                    "session/update",
-                    {
-                        "sessionId": "sess-live-1",
-                        "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "ok"}},
-                    },
-                )
-            return {"stopReason": "end_turn"}
-
-        async def session_close(self, _sid: str) -> dict[str, object]:
-            return {}
-
-    monkeypatch.setattr(acp, "AcpClient", _LiveCatalogClient)
+    Client, observed = make_probe_client(
+        options=[{'id': 'model', 'category': 'model', 'currentValue': 'live-only-model', 'options': [{'value': 'live-only-model', 'name': 'Live Only Model'}, {'value': 'gemini-2.5-pro', 'name': 'Gemini 2.5 Pro'}]}, {'id': 'thought_level', 'category': 'thought_level', 'currentValue': 'low', 'options': [{'value': 'low'}, {'value': 'xhigh'}]}],
+        selection={'configOptions': [{'id': 'model', 'category': 'model', 'currentValue': 'gemini-2.5-pro', 'options': [{'value': 'live-only-model', 'name': 'Live Only Model'}, {'value': 'gemini-2.5-pro', 'name': 'Gemini 2.5 Pro'}]}, {'id': 'thought_level', 'category': 'thought_level', 'currentValue': 'medium', 'options': [{'value': 'low'}, {'value': 'medium'}]}]},
+        chunks=[("sess-probe-1", "ok")],
+    )
+    monkeypatch.setattr(acp, "AcpClient", Client)
     probe = await run_antigravity_connection_probe(
         binary="/fake/agy",
         cwd=str(tmp_path),
         model="gemini-2.5-pro",
         config=cfg.agents.antigravity,
     )
-    assert probe["ok"] is True and spawn_count == 1
+    assert probe["ok"] is True and observed["spawns"] == 1
 
     # (a) Matching fingerprint uses authoritative live models and preserves per-model efforts.
     snapshot = backend_model_snapshot("antigravity", schedule_refresh=False)
@@ -346,7 +266,7 @@ async def test_antigravity_live_model_catalog_cache_is_account_scoped_and_enrich
     ]
     builtin = backend_builtin_snapshot("antigravity", schedule_refresh=False)
     assert [m["id"] for m in builtin["models"]] == ["live-only-model", "gemini-2.5-pro"]
-    assert spawn_count == 1
+    assert observed["spawns"] == 1
 
     # (b) Changing auth_mode/api_key invalidates the fingerprint and falls back to static catalog without spawning.
     cfg.agents.antigravity.auth_mode = "gemini-api-key"
@@ -356,7 +276,7 @@ async def test_antigravity_live_model_catalog_cache_is_account_scoped_and_enrich
     fallback = backend_model_snapshot("antigravity", schedule_refresh=False)
     assert "gemini-4-neon" in fallback["models"]
     assert "live-only-model" not in fallback["models"]
-    assert spawn_count == 1
+    assert observed["spawns"] == 1
 
 
 @pytest.fixture
@@ -371,11 +291,7 @@ def agy_session_options() -> dict:
         ]]},
         "configOptions": [
             {"id": "model", "category": "model", "type": "select", "currentValue": "gemini-4-neon",
-             "options": [{"value": value} for value in [
-                 "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
-                 "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
-                 "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
-             ]]},
+             "options": [{"value": value} for value in AGY_MODEL_IDS]},
             {"id": "thought_level", "category": "thought_level", "type": "select", "currentValue": "high",
              "options": [{"value": value} for value in ["low", "medium", "high", "xhigh"]]},
             {"id": "mode", "category": "mode", "type": "select", "currentValue": "default",
@@ -389,11 +305,7 @@ def test_live_catalog_uses_only_config_options(agy_session_options, extractor):
     from modules.agents.antigravity.auth import extract_acp_live_models
     from modules.agents.antigravity.models import extract_live_model_catalog_entries
 
-    expected = [
-        "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
-        "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
-        "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
-    ]
+    expected = AGY_MODEL_IDS
     if extractor == "auth":
         assert extract_acp_live_models(agy_session_options) == expected
         assert extract_acp_live_models({"models": agy_session_options["models"]}) == []
@@ -428,11 +340,7 @@ def test_legacy_model_cache_is_ignored_and_replaced(tmp_path, monkeypatch, agy_s
         # Config-option updates must discard legacy entries too, even without a full session payload.
         record_antigravity_live_models(cfg, agy_session_options["configOptions"])
         entries = read_antigravity_live_models(cfg)
-        assert [entry["id"] for entry in entries] == [
-            "gemini-4-neon", "gemini-4-carbon", "gemini-4-argon", "gemini-4-hydrogen",
-            "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator", "gemini-pro-orchestrator-argon",
-            "gemini-3.8-flash", "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b-medium",
-        ]
+        assert [entry["id"] for entry in entries] == AGY_MODEL_IDS
 
 
 def test_live_effort_observation_preserves_empty_and_never_guesses(tmp_path, monkeypatch):

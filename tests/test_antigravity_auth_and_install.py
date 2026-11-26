@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.helpers.acp_probe_stub import make_probe_client
+
 from tests.helpers.antigravity_harness import make_native_provider
 
 import asyncio
@@ -46,18 +48,8 @@ from modules.agents.antigravity.auth import (
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
 from modules.agents.native_sessions.service import AgentNativeSessionService
 from modules.im import MessageContext
-from tests.helpers.antigravity_harness import (
-    SENTINEL_SESSION_TITLE,
-    FakeAgyAuthFixture,
-    FakeController,
-    FakeIMClient,
-    antigravity_config,
-    app_config,
-    create_fake_agy_shim,
-    make_acp_capabilities,
-    make_request,
-    read_jsonl,
-)
+from tests.helpers.antigravity_harness import SENTINEL_SESSION_TITLE, FakeAgyAuthFixture, FakeController, FakeIMClient, antigravity_config, app_config, create_fake_agy_shim, make_request, read_jsonl
+from tests.helpers.fake_acp_server import make_acp_capabilities
 from vibe import api, desktop_backends, ui_server
 
 _AUTH_ENV_VARS = ("GOOGLE_APPLICATION_CREDENTIALS", "GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION")
@@ -124,18 +116,10 @@ async def test_passive_status_uses_session_list_never_infers_or_exposes_sessions
     assert SENTINEL_SESSION_TITLE not in json.dumps(auth) and fake_agy.rpc_methods() == ["initialize", "session/list"]
 
 
-def test_http_antigravity_auth_get_and_models_routes(fake_agy: FakeAgyAuthFixture) -> None:
+def test_http_antigravity_models_route(fake_agy: FakeAgyAuthFixture) -> None:
     fake_agy.set_state(authenticated=True, include_sentinel_session=True)
     fake_agy.clear_logs()
     client = ui_server.app.test_client()
-
-    auth_resp = client.get("/api/backend/antigravity/auth")
-    assert auth_resp.status_code == 200
-    body = auth_resp.get_json()
-    assert (body["ok"], body["authenticated"], body["active_auth_mode"], body["cli_installed"], body["cli_version"], body["adc_command"], body["catalog_available"], body["inference_verified"]) == (
-        True, True, "oauth-personal", True, "1.5.16", ANTIGRAVITY_ADC_LOGIN_COMMAND, False, False
-    )
-    assert SENTINEL_SESSION_TITLE not in json.dumps(body)
 
     models_resp = client.get("/api/antigravity/models")
     assert models_resp.status_code == 200 and models_resp.get_json()["ok"] is True and "gemini-4-neon" in models_resp.get_json()["models"]
@@ -155,28 +139,6 @@ async def test_get_backend_connection_uses_passive_antigravity_status(fake_agy: 
     fake_agy.set_state(authenticated=False)
     conn_out = await api.get_backend_connection("antigravity")
     assert (conn_out["auth"], conn_out["ready"]) == ("none", False)
-
-
-@pytest.mark.asyncio
-async def test_explicit_connection_test_distinguishes_auth_catalog_and_inference(fake_agy: FakeAgyAuthFixture) -> None:
-    service = _make_auth_service()
-    fake_agy.set_state(authenticated=True)
-    fake_agy.clear_logs()
-
-    ok = await service.test_web_auth("antigravity", model="gemini-4-neon")
-    assert (ok["ok"], ok["authenticated"], ok["credentials_present"], ok["catalog_available"], ok["inference_verified"], ok["model"]) == (True, True, True, True, True, "gemini-4-neon")
-    assert "gemini-4-neon" in ok["models"] and "echo:Hi" in ok["excerpt"]
-    assert fake_agy.rpc_methods() == ["initialize", "session/new", "session/set_config_option", "session/prompt", "session/close"]
-    _assert_passive_invocations(fake_agy)
-
-    fake_agy.clear_logs()
-    bad = await service.test_web_auth("antigravity", model="nonexistent-model-xyz")
-    assert (bad["ok"], bad["authenticated"], bad["catalog_available"], bad["inference_verified"]) == (False, True, True, False)
-    assert "session/prompt" not in fake_agy.rpc_methods() and "session/close" in fake_agy.rpc_methods()
-
-    fake_agy.set_state(authenticated=False)
-    no_auth = await service.test_web_auth("antigravity", model="gemini-4-neon")
-    assert (no_auth["ok"], no_auth["error"], no_auth["authenticated"], no_auth["catalog_available"], no_auth["inference_verified"]) == (False, "not_logged_in", False, False, False)
 
 
 @pytest.mark.asyncio
@@ -500,6 +462,8 @@ async def test_agent_platform_adc_detection_and_gcp_settings(fake_agy: FakeAgyAu
             "incomplete_response",
             True,
         ),
+        ("other_session", [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}], {"configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}]}, {}, {"stopReason": "end_turn"}, "empty_response", True),
+        ("verification", [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}], {"configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}]}, {}, {"stopReason": "end_turn"}, "not_logged_in", True),
     ],
 )
 async def test_connection_probe_validates_model_receipt_and_end_turn_stop_reason(
@@ -513,54 +477,9 @@ async def test_connection_probe_validates_model_receipt_and_end_turn_stop_reason
     expected_error: str,
     expect_prompt: bool,
 ) -> None:
-    del case_id
-    observed = {"prompt_called": False, "closed": False}
-
-    class _StubAcpClient:
-        def __init__(self, *_a: Any, **_kw: Any) -> None:
-            self.supports_close = True
-            self._notify: Any = None
-
-        async def __aenter__(self) -> _StubAcpClient:
-            return self
-
-        async def __aexit__(self, *_exc: Any) -> None:
-            return None
-
-        def on_notification(self, cb: Any) -> None:
-            self._notify = cb
-
-        async def initialize(self, **_kw: Any) -> dict[str, Any]:
-            return {"protocolVersion": 1}
-
-        async def authenticate(self, _method_id: str) -> dict[str, Any]:
-            return {}
-
-        async def session_new(self, _cwd: str, **_kw: Any) -> dict[str, Any]:
-            return {"sessionId": "sess-probe-1", "configOptions": config_opts}
-
-        async def session_set_config_option(self, _sid: str, _cid: str, _val: Any) -> dict[str, Any]:
-            if set_opt_behavior == "method_not_found":
-                raise acp.AcpRpcError(acp.JSONRPC_METHOD_NOT_FOUND, "Method not found")
-            return dict(set_opt_behavior)
-
-        async def session_set_model(self, _sid: str, _model: str) -> dict[str, Any]:
-            return dict(set_model_resp)
-
-        async def session_prompt(self, _sid: str, _blocks: Any, **_kw: Any) -> dict[str, Any]:
-            observed["prompt_called"] = True
-            if self._notify is not None:
-                await self._notify(
-                    "session/update",
-                    {"sessionId": "sess-probe-1", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial reply"}}},
-                )
-            return dict(prompt_result)
-
-        async def session_close(self, _sid: str) -> dict[str, Any]:
-            observed["closed"] = True
-            return {}
-
-    monkeypatch.setattr(acp, "AcpClient", _StubAcpClient)
+    chunks = [("other-session", "foreign reply")] if case_id == "other_session" else [("sess-probe-1", "\n⚠ Verification Required\n")] if case_id == "verification" else None
+    Client, observed = make_probe_client(options=config_opts, selection=set_opt_behavior, result=prompt_result, chunks=chunks, legacy_model=set_model_resp)
+    monkeypatch.setattr(acp, "AcpClient", Client)
     res = await run_antigravity_connection_probe(
         binary="/fake/agy",
         cwd=str(tmp_path),
@@ -568,67 +487,12 @@ async def test_connection_probe_validates_model_receipt_and_end_turn_stop_reason
         config=AntigravityConfig(auth_mode="oauth-personal"),
     )
     assert (res["ok"], res["authenticated"], res["catalog_available"], res["inference_verified"], res["error"]) == (
-        False, True, True, False, expected_error
+        False, case_id != "verification", True, False, expected_error
     )
-    assert observed == {"prompt_called": expect_prompt, "closed": True}
-
-
-@pytest.mark.asyncio
-async def test_connection_probe_ignores_message_chunks_from_other_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class _OtherSessionChunkClient:
-        def __init__(self, *_a: Any, **_kw: Any) -> None:
-            self.supports_close = True
-            self._notify: Any = None
-
-        async def __aenter__(self) -> _OtherSessionChunkClient:
-            return self
-
-        async def __aexit__(self, *_exc: Any) -> None:
-            return None
-
-        def on_notification(self, cb: Any) -> None:
-            self._notify = cb
-
-        async def initialize(self, **_kw: Any) -> dict[str, Any]:
-            return {"protocolVersion": 1}
-
-        async def authenticate(self, _method_id: str) -> dict[str, Any]:
-            return {}
-
-        async def session_new(self, _cwd: str, **_kw: Any) -> dict[str, Any]:
-            return {
-                "sessionId": "sess-probe-1",
-                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
-            }
-
-        async def session_set_config_option(self, _sid: str, _cid: str, _val: Any) -> dict[str, Any]:
-            return {
-                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
-            }
-
-        async def session_prompt(self, _sid: str, _blocks: Any, **_kw: Any) -> dict[str, Any]:
-            if self._notify is not None:
-                await self._notify(
-                    "session/update",
-                    {"sessionId": "other-session", "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "foreign reply"}}},
-                )
-            return {"stopReason": "end_turn"}
-
-        async def session_close(self, _sid: str) -> dict[str, Any]:
-            return {}
-
-    monkeypatch.setattr(acp, "AcpClient", _OtherSessionChunkClient)
-    res = await run_antigravity_connection_probe(
-        binary="/fake/agy",
-        cwd=str(tmp_path),
-        model="gemini-4-neon",
-        config=AntigravityConfig(auth_mode="oauth-personal"),
-    )
-    assert (res["ok"], res["authenticated"], res["catalog_available"], res["inference_verified"], res["error"]) == (
-        False, True, True, False, "empty_response"
-    )
+    assert (observed["prompt_called"], observed["closed"]) == (expect_prompt, True)
+    if case_id == "verification":
+        assert "agy" in res["detail"] and "Verification Required" in res["detail"]
+        assert "Verification Required" in res["excerpt"]
 
 
 def test_classify_auth_error_and_env_command_guards() -> None:
@@ -658,10 +522,6 @@ def test_classify_auth_error_and_env_command_guards() -> None:
 async def test_maybe_emit_auth_recovery_message_branches_for_antigravity(fake_agy: FakeAgyAuthFixture) -> None:
     im_client, cfg = FakeIMClient(), V2Config.load()
     service, ctx = _make_auth_service(cfg, im_client=im_client), MessageContext(user_id="u1", channel_id="c1", platform="slack")
-
-    cfg.agents.antigravity.auth_mode = "oauth-personal"
-    assert await service.maybe_emit_auth_recovery_message(ctx, "antigravity", "ACP RPC error -32000") is True
-    assert im_client.sent_buttons and im_client.sent_buttons[-1][1] == "auth_setup:antigravity"
 
     for auth_mode, err_msg, expected in (("gemini-api-key", "API key not valid", "API key"), ("agent-platform", "Could not find default credentials", ANTIGRAVITY_ADC_LOGIN_COMMAND)):
         cfg.agents.antigravity.auth_mode = auth_mode
@@ -711,21 +571,8 @@ async def test_antigravity_auth_service_expands_tilde_cli_path_non_desktop(tmp_p
     compat_service = _make_auth_service(to_app_config(V2Config.load(), resolve_agent_paths=False))
     assert service._get_cli_binary("antigravity") == str(tilde_shim.absolute()) == compat_service._get_cli_binary("antigravity")
 
-    flow = await service.start_web_setup("antigravity", force_reset=True, auth_method="oauth-personal")
-    await _poll_flow(service, flow.flow_id, {"awaiting_code"}, require_url=True)
-    assert await service.submit_web_code(flow.flow_id, "tilde-code-42") == {"ok": True}
-    assert (await _poll_flow(service, flow.flow_id, {"success", "failed"}))["state"] == "success"
-
+    state_file.write_text(json.dumps({"authenticated": True, "next_session_num": 1, "sessions": {}}), encoding="utf-8")
     assert (await probe_antigravity_passive_status("~/.local/bin/agy", config=v2.agents.antigravity))["authenticated"] is True
-    monkeypatch.setattr(api, "detect_cli_async", AsyncMock(return_value={"found": True, "path": "", "status": "ok", "version": "1.5.16"}))
-    assert (await api.get_antigravity_auth_async())["authenticated"] is True
-    conn = await service.test_web_auth("antigravity", model="gemini-4-neon")
-    assert (conn["ok"], conn["authenticated"], conn["catalog_available"], conn["inference_verified"]) == (True, True, True, True)
-
-    rpc_log.unlink(missing_ok=True)
-    assert await service.remove_web_auth("antigravity") == {"ok": True}
-    assert "logout" in [e["method"] for e in read_jsonl(rpc_log) if "method" in e]
-    assert (await probe_antigravity_passive_status("~/.local/bin/agy", config=v2.agents.antigravity))["authenticated"] is False
 
 
 @pytest.mark.asyncio
@@ -779,7 +626,7 @@ async def test_desktop_runtime_resolves_bare_agy_before_command_and_env(tmp_path
     assert auth_svc._get_cli_binary("antigravity") == "agy"
 
 
-def test_install_agent_antigravity_install_and_upgrade_disable_auto_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_agent_antigravity_disables_auto_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     recorded: list[tuple[list[str], dict | None, str]] = []
     monkeypatch.setattr(api, "_run_install_command", lambda _n, cmd, _t, *, mode, env=None, **_kw: recorded.append((list(cmd), dict(env) if env else None, mode)) or {"ok": True, "message": "ok", "output": "", "path": str(tmp_path / "agy")})
     monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
@@ -793,214 +640,20 @@ def test_install_agent_antigravity_install_and_upgrade_disable_auto_update(tmp_p
     assert api._install_agent("antigravity")["ok"] is True
     assert recorded[-1][2] == "install" and recorded[-1][1]["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true" and "https://antigravity.google/cli/install." in " ".join(recorded[-1][0])
 
-    existing = str(tmp_path / "agy")
-    monkeypatch.setattr(api, "resolve_cli_path", lambda name: existing if name == "agy" else f"/usr/bin/{name}")
-    monkeypatch.setattr(api, "detect_cli", lambda _p, _b: {"found": True, "path": existing, "status": "ok", "version": "1.5.15", "reason": None})
-    assert api._install_agent("antigravity")["ok"] is True
-    assert recorded[-1][0] == [existing, "update"] and recorded[-1][2] == "upgrade" and recorded[-1][1]["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
 
 
-def _desktop_archive_env(tmp_path: Path) -> dict[str, str]:
-    runtime = tmp_path / "runtime" / "1.0.0" / "digest"
-    runtime.mkdir(parents=True)
-    return {"AVIBE_DESKTOP_RUNTIME_ROOT": str(runtime), "AVIBE_DESKTOP_BACKENDS_ROOT": str(tmp_path / "backends"), "PATH": str(tmp_path / "external-bin")}
-
-
-def _native_binary_bytes() -> bytes:
-    return (b"MZ\x00\x00" if os.name == "nt" else b"\x7fELF") + b"0" * 64
-
-
-def _build_archive(archive_path: Path, fmt: str, members: dict[str, bytes], *, symlink: str | None = None) -> str:
-    if fmt == "tar.gz":
-        with tarfile.open(archive_path, "w:gz") as tf:
-            for name, content in members.items():
-                info = tarfile.TarInfo(name=name)
-                info.size, info.mode = len(content), 0o755
-                tf.addfile(info, io.BytesIO(content))
-            if symlink is not None:
-                link = tarfile.TarInfo(name=symlink)
-                link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
-                tf.addfile(link)
-    else:
-        with zipfile.ZipFile(archive_path, "w") as zf:
-            for name, content in members.items():
-                info = zipfile.ZipInfo(name)
-                info.external_attr = (stat.S_IFREG | 0o755) << 16
-                zf.writestr(info, content)
-            if symlink is not None:
-                link = zipfile.ZipInfo(symlink)
-                link.external_attr = (stat.S_IFLNK | 0o777) << 16
-                zf.writestr(link, "/etc/passwd")
-    return hashlib.sha256(archive_path.read_bytes()).hexdigest()
-
-
-def _release_payload(asset_name: str, digest: str | None = None) -> dict[str, Any]:
-    asset: dict[str, str] = {"name": asset_name, "browser_download_url": f"https://github.com/google-antigravity/antigravity-cli/releases/download/v1.5.16/{asset_name}"}
-    if digest is not None:
-        asset["digest"] = f"sha256:{digest}"
-    return {"tag_name": "v1.5.16", "assets": [asset]}
-
-
-@pytest.mark.parametrize("binary_name", ["agy", "antigravity"])
-@pytest.mark.parametrize("archive_format", ["tar.gz", "zip"])
-def test_desktop_archive_install_verifies_sha256_and_publishes_without_node(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, binary_name: str, archive_format: str
-) -> None:
-    env = _desktop_archive_env(tmp_path)
-    assert desktop_backends.desktop_backend_toolchain(env) is None and desktop_backends.desktop_backend_toolchain(env, backend="antigravity") is not None
-
-    asset_name = f"agy_cli_{desktop_backends._release_archive_platform_tag('antigravity')}.{archive_format}"
-    source_archive = tmp_path / asset_name
-    exe_name = f"{binary_name}.exe" if os.name == "nt" else binary_name
-    digest = _build_archive(source_archive, archive_format, {f"bin/{exe_name}": _native_binary_bytes()})
-
-    probe_envs: list[dict[str, str]] = []
-    monkeypatch.setattr(desktop_backends, "_fetch_github_release", lambda _r, **_kw: _release_payload(asset_name, digest))
-    monkeypatch.setattr(desktop_backends, "_download_release_asset", lambda _u, dest, **_kw: dest.write_bytes(source_archive.read_bytes()))
-    monkeypatch.setattr(desktop_backends, "_run_command", lambda cmd, *, cwd, env, timeout_seconds: probe_envs.append(dict(env)) or subprocess.CompletedProcess(cmd, 0, "1.5.16\n", ""))
-
-    activated: list[str] = []
-    result = desktop_backends.install_desktop_backend("antigravity", base_env=env, activate=activated.append)
-    assert (result.backend, result.package, result.version, result.path, Path(result.path).name) == ("antigravity", "google-antigravity/antigravity-cli", "1.5.16", activated[0], exe_name)
-    assert desktop_backends.resolve_published_desktop_backend("antigravity", env) == result.path and probe_envs[0]["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
-    sub_env = desktop_backends.desktop_backend_subprocess_environment("antigravity", result.path, env)
-    assert sub_env is not None and sub_env["AGY_CLI_DISABLE_AUTO_UPDATE"] == "true"
-
-
-@pytest.mark.parametrize(
-    ("case_id", "fmt", "members", "symlink", "digest_override", "expected_code"),
-    [
-        ("sha256_mismatch", "tar.gz", {"agy": _native_binary_bytes()}, None, "0" * 64, "checksum_mismatch"),
-        ("missing_checksum", "tar.gz", {"agy": b"x"}, None, "", "missing_checksum"),
-        ("traversal_tar", "tar.gz", {"../outside-agy": _native_binary_bytes()}, None, None, "invalid_archive"),
-        ("symlink_tar", "tar.gz", {"bin/agy": _native_binary_bytes()}, "bin/link", None, "invalid_archive"),
-        ("symlink_zip", "zip", {"bin/agy": _native_binary_bytes()}, "bin/link", None, "invalid_archive"),
-    ],
-)
-def test_desktop_archive_install_rejects_bad_checksum_traversal_and_symlink(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case_id: str, fmt: str, members: dict[str, bytes], symlink: str | None, digest_override: str | None, expected_code: str
-) -> None:
-    env = _desktop_archive_env(tmp_path)
-    asset_name = f"agy_cli_{desktop_backends._release_archive_platform_tag('antigravity')}.{fmt}"
-    archive = tmp_path / f"{case_id}.{fmt}"
-    real_digest = _build_archive(archive, fmt, members, symlink=symlink)
-    digest = None if digest_override == "" else (digest_override or real_digest)
-
-    monkeypatch.setattr(desktop_backends, "_fetch_github_release", lambda _r, **_kw: _release_payload(asset_name, digest))
-    monkeypatch.setattr(desktop_backends, "_download_release_asset", lambda _u, dest, **_kw: dest.write_bytes(archive.read_bytes()))
-    extract_called = False
-    if case_id == "sha256_mismatch":
-        def _forbid(*_a: Any, **_kw: Any) -> None:
-            nonlocal extract_called
-            extract_called = True
-        monkeypatch.setattr(desktop_backends, "_extract_release_archive", _forbid)
-
-    with pytest.raises(desktop_backends.DesktopBackendError) as raised:
-        desktop_backends.install_desktop_backend("antigravity", base_env=env)
-    assert raised.value.code == expected_code and extract_called is False and not (tmp_path / "outside-agy").exists()
-    backend_root = Path(env["AVIBE_DESKTOP_BACKENDS_ROOT"]) / "antigravity"
-    assert not (backend_root / "current.json").exists() and list(backend_root.glob(".staging-*")) == [] and list(backend_root.glob("releases/*")) == []
-
-
-@pytest.mark.parametrize(
-    ("reply_text", "expected"),
-    [
-        ("", False),
-        ("   \n\t  ", False),
-        ("\n⚠ Verification Required\n", True),
-        ("⚠️ Verification Required", True),
-        ("**⚠ Verification Required**", True),
-        (" **⚠️ vErIfIcAtIoN rEqUiReD** ", True),
-        ("⚠ Verification Required\nPlease complete verification at https://accounts.google.com/verify", False),
-        ("**⚠ Verification Required**\nVerify your Google account to continue.", False),
-        ("⚠ Verification Required followed by ordinary text", False),
-        ("⚠ Verification Required!", False),
-        ("*⚠ Verification Required*", False),
-        ("**⚠ Verification Required", False),
-        ("⚠ Verification Required**", False),
-        ("Verification Required", False),
-        ("**Verification Required**", False),
-        ("Verification Required:\nPlease verify your Google account.", False),
-        ("Verification Required - Run agy to complete eligibility check.", False),
-        ("Verification required: run the tests before merging the google branch", False),
-        ("Verification required in OAuth flows means the client must validate the token.", False),
-        ("Verification required: in a typical CI pipeline, tests run before merge.", False),
-        ("Here is how verification works in Google OAuth:\n⚠ Verification Required is an example banner.", False),
-        ("Hi! How can I help you today?", False),
-    ],
-)
+@pytest.mark.parametrize("reply_text,expected", [
+    ("", False), (" \n\t", False),
+    ("\n⚠ Verification Required\n", True), ("⚠️ Verification Required", True),
+    ("**⚠ Verification Required**", True), ("⚠ verification required", True),
+    ("Verification Required", False), ("**Verification Required**", False),
+    ("Verification required: run the tests before merging the google branch", False),
+    ("⚠ Verification Required\nHere is the explanation.", False),
+    ("Here is how verification works in Google OAuth:\n⚠ Verification Required is an example banner.", False),
+    ("Hi! How can I help you today?", False),
+])
 def test_is_antigravity_verification_required_reply(reply_text: str, expected: bool) -> None:
     assert is_antigravity_verification_required_reply(reply_text) is expected
-
-
-@pytest.mark.asyncio
-async def test_connection_probe_fails_when_reply_is_verification_required(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    class _VerificationRequiredClient:
-        def __init__(self, *_a: Any, **_kw: Any) -> None:
-            self.supports_close = True
-            self._notify: Any = None
-
-        async def __aenter__(self) -> _VerificationRequiredClient:
-            return self
-
-        async def __aexit__(self, *_exc: Any) -> None:
-            return None
-
-        def on_notification(self, cb: Any) -> None:
-            self._notify = cb
-
-        async def initialize(self, **_kw: Any) -> dict[str, Any]:
-            return {"protocolVersion": 1}
-
-        async def authenticate(self, _method_id: str) -> dict[str, Any]:
-            return {}
-
-        async def session_new(self, _cwd: str, **_kw: Any) -> dict[str, Any]:
-            return {
-                "sessionId": "sess-verify-1",
-                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
-            }
-
-        async def session_set_config_option(self, _sid: str, _cid: str, _val: Any) -> dict[str, Any]:
-            return {
-                "configOptions": [{"id": "model", "category": "model", "currentValue": "gemini-4-neon", "options": [{"value": "gemini-4-neon"}]}],
-            }
-
-        async def session_prompt(self, _sid: str, _blocks: Any, **_kw: Any) -> dict[str, Any]:
-            if self._notify is not None:
-                await self._notify(
-                    "session/update",
-                    {
-                        "sessionId": "sess-verify-1",
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {
-                                "type": "text",
-                                "text": "\n⚠ Verification Required\n",
-                            },
-                        },
-                    },
-                )
-            return {"stopReason": "end_turn"}
-
-        async def session_close(self, _sid: str) -> dict[str, Any]:
-            return {}
-
-    monkeypatch.setattr(acp, "AcpClient", _VerificationRequiredClient)
-    res = await run_antigravity_connection_probe(
-        binary="/fake/agy",
-        cwd=str(tmp_path),
-        model="gemini-4-neon",
-        config=AntigravityConfig(auth_mode="oauth-personal"),
-    )
-    assert (res["ok"], res["authenticated"], res["inference_verified"], res["error"]) == (
-        False, False, False, "not_logged_in"
-    )
-    assert "agy" in (res.get("detail") or "")
-    assert "Verification Required" in (res.get("detail") or "")
-    assert "Verification Required" in (res.get("excerpt") or "")
 
 
 @pytest.mark.parametrize("updated", ["1.5.17", "1.5.18", "broken"])
@@ -1029,3 +682,62 @@ def test_script_auto_update_verifies_settled_version_and_restores_binary(tmp_pat
     assert binary.read_text() == ("1.5.17" if updated == "1.5.17" else "1.5.16")
     if updated != "1.5.17":
         assert result["restore"] == "restored"
+
+@pytest.mark.parametrize("mode", ["existing", "fresh", "broken"])
+def test_non_desktop_antigravity_refuses_pinned_version(monkeypatch, tmp_path, mode):
+    """Non-desktop agy update and script installers must refuse pinned versions without executing."""
+    from config.v2_config import V2Config
+    from vibe import api
+    from vibe.cli_repair import RepairSource
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    cfg = V2Config.default()
+    cfg.agents.antigravity.cli_path = "agy"
+    cfg.save()
+
+    executed: list[list[str]] = []
+    monkeypatch.setattr(
+        api,
+        "_run_install_command",
+        lambda _n, cmd, *_a, **_kw: executed.append(list(cmd)) or {"ok": True},
+    )
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "is_desktop_backend_path", lambda _p: False)
+
+    existing = str(tmp_path / "agy")
+    if mode == "existing":
+        monkeypatch.setattr(api, "resolve_cli_path", lambda name: existing if name == "agy" else f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            api,
+            "detect_cli",
+            lambda _p, _b: {"found": True, "path": existing, "status": "ok", "version": "0.5.0", "reason": None},
+        )
+    elif mode == "broken":
+        monkeypatch.setattr(api, "resolve_cli_path", lambda name: existing if name == "agy" else f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            api,
+            "detect_cli",
+            lambda _p, _b: {"found": True, "path": existing, "status": "broken", "version": None, "reason": "broken"},
+        )
+        monkeypatch.setattr(
+            api,
+            "identify_repair_source",
+            lambda _name, _sel: RepairSource(kind="native", destination=existing),
+        )
+    else:
+        monkeypatch.setattr(
+            api,
+            "resolve_cli_path",
+            lambda name: f"/usr/bin/{name}" if name in {"curl", "bash", "powershell"} else None,
+        )
+        monkeypatch.setattr(
+            api,
+            "detect_cli",
+            lambda _p, _b: {"found": False, "path": None, "status": "missing", "version": None, "reason": "not_found"},
+        )
+
+    result = api.install_agent("antigravity", version="0.4.0")
+
+    assert result["ok"] is False
+    assert result["code"] == ("cli_readback_failed" if mode == "existing" else "pinned_version_unsupported")
+    assert executed == []

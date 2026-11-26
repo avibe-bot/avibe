@@ -10,7 +10,6 @@ Owner decision: PR #4252 contains only Antigravity and shared changes its integr
 | `ui/src/components/VaultSandboxAppearanceBridge.tsx` | Unrelated Vault appearance wiring in an owner-gated security area. | Remove via normal revert `f4e7bb567` (`f2ace7dbf`). |
 | `ui/src/lib/vaultSandboxClient.ts` | Same Vault workaround; no Antigravity dependency. | Remove via the same normal revert. |
 | `ui/src/lib/vaultSandboxIntegrity.test.ts` | Only tests that reverted Vault wiring. | Remove via the same normal revert. |
-| `docs/plans/model-hub-implementation.md` | Register the Antigravity registration test in the live Model Hub authority closure; its generated ownership check requires this path. | Keep — shared, required by Antigravity |
 
 The three Vault files and Show sharing control have no remaining PR diff. Existing Vault cryptography, appearance delivery and authorization are unchanged.
 
@@ -47,6 +46,7 @@ Every remaining path is accounted for below. Shared entries are required by Anti
 
 | File | Reason | Decision |
 | --- | --- | --- |
+| `docs/plans/model-hub-implementation.md` | Register the Antigravity registration test in the live Model Hub authority closure; its generated ownership check requires this path. | Keep — shared, required by Antigravity |
 | `README.md` | Document Antigravity among supported native backends. | Keep — Antigravity integration/coverage |
 | `README_ZH.md` | Chinese supported-backend documentation counterpart. | Keep — Antigravity integration/coverage |
 | `config/v2_compat.py` | Convert Antigravity V2 config into the controller launch config. | Keep — shared, required by Antigravity |
@@ -100,6 +100,7 @@ Every remaining path is accounted for below. Shared entries are required by Anti
 | `skills/use-avibe/SKILL.md` | Expose Antigravity configuration/routing to the Avibe operator. | Keep — Antigravity integration/coverage |
 | `skills/use-avibe/references/backends.md` | Antigravity operator reference for auth, updates and model selection. | Keep — Antigravity integration/coverage |
 | `storage/settings_service.py` | Load/store Antigravity channel routing variant. | Keep — shared, required by Antigravity |
+| `tests/helpers/acp_probe_stub.py` | Shared scripted ACP peer for Antigravity probe/registration/auth-scenario coverage. | Keep — Antigravity integration/coverage |
 | `tests/helpers/antigravity_harness.py` | Hermetic Antigravity/ACP fake peer and adapter harness. | Keep — Antigravity integration/coverage |
 | `tests/helpers/fake_acp_server.py` | Hermetic Antigravity/ACP fake peer and adapter harness. | Keep — Antigravity integration/coverage |
 | `tests/scenarios/auth_setup/catalog.yaml` | Antigravity passive-auth and recovery scenarios alongside existing auth ownership guards. | Keep — Antigravity integration/coverage |
@@ -134,8 +135,8 @@ Every remaining path is accounted for below. Shared entries are required by Anti
 | `tests/test_session_model_cli.py` | Antigravity authoritative menus, inherited clearing and explicit-effort refusal. | Keep — Antigravity integration/coverage |
 | `tests/test_session_titles.py` | Native history title lookup is asynchronous after adding the ACP provider. | Keep — Antigravity integration/coverage |
 | `tests/test_settings_handler.py` | Antigravity registration/integration regression at settings handler boundary. | Keep — Antigravity integration/coverage |
-| `tests/test_skills_service.py` | Antigravity askill attribution and actual canonical .agents/skills discovery under isolated local-source fixtures. | Keep — Antigravity integration/coverage |
 | `tests/test_ui_server_fastapi.py` | Antigravity registration/integration regression at ui server fastapi boundary. | Keep — Antigravity integration/coverage |
+| `tests/test_skills_service.py` | Hermetic askill command construction includes the Antigravity backend target; real canonical discovery is recorded as provider acceptance evidence. | Keep — Antigravity integration/coverage |
 | `tests/test_update_checker_platforms.py` | Antigravity idle-update settlement and restore verification contract. | Keep — Antigravity integration/coverage |
 | `ui/design/frames/models/backend-detail.design.tsx` | Antigravity provider/auth design frames and backend fixtures; design-only entry, not first screen. | Keep — Antigravity integration/coverage |
 | `ui/design/frames/models/backends.fixtures.ts` | Antigravity provider/auth design frames and backend fixtures; design-only entry, not first screen. | Keep — Antigravity integration/coverage |
@@ -204,3 +205,28 @@ Every remaining path is accounted for below. Shared entries are required by Anti
 - Ruff passes on all 90 Python files in the complete PR diff; this scope correction adds no Python changes.
 - `git diff --check` passes. The existing budget check reproduces both pre-allowance failures (609.3 > 608 and 905.4 > 904) and passes with the minimal measured allowance.
 - Fresh exact-head Codex review and CI are required after the scope-correction push. Do not merge.
+
+## Scope-preserving slimming (2026-11-26)
+
+After `ddc1039e4` received its exact-head Codex pass and all 23 threads were resolved:
+
+- The connection probe now uses execution's `apply_model_and_effort` path. A regression failed before the fix because legacy `session/set_model` could report a successful connection after config-option selection was rejected.
+- Delete unused load/mode/model RPCs, unused capabilities and test-only process/negotiation properties, command-event parsing without a consumer, extra-argument plumbing and package re-exports. Keep `AcpClient.pid`: `core/services/running_agents.py` uses it in production.
+- Share session request params and the ACP command builder, reuse atomic writes/passive status, and seed initial effort once. Preserve all per-session effort baselines and restoration across resume, eviction and SQLite restart.
+- Tables now own contradictory model/effort receipts, stop/drain behavior, no-write steering and localized failures. Large diffs and exact-text replies use the stdio fake peer; protocol fixtures and direct imports replace the importlib loader.
+- One scripted probe peer replaces repeated auth/catalog stubs. AUTH-SETUP-931 reuses `FakeAgyAuthFixture` state through that peer, retaining the scenario suite's no-child-process guard. Archive fixtures/validation live together in `test_desktop_backends.py`; version mismatch is a bad-archive row. Shared updater and scripted installer readback tests retain settling, idle admission, update env and restoration coverage. Real askill discovery remains recorded in the PR's real-provider evidence; the optional CLI-dependent test is removed.
+- Restore the minimal Model Hub ownership-ledger entry: it was required by the generated closure test, rather than incidental history.
+
+Deliberate skips after checking callers and contracts:
+
+| Proposed cut | Result / reason |
+| --- | --- |
+| `AcpClient.pid` | Keep: running-agent projection has a production caller. All other listed unused APIs/properties were removed. |
+| Adapter/fork metadata storage consolidation | Keep current bounded reads and transactions: there is no public generic metadata read/mutate API. Read-only loading, mutation return semantics and engine/error ownership differ; a combined lifecycle abstraction would exceed the allowed tiny helper. Existing decoder/write helpers belong to active storage workflows. |
+| Masked key and URL extraction between the two forms | Keep: `BackendConnectionForm` already imports `AntigravityConnectionForm`. Exporting shared form pieces back across those two files introduces a cycle; a third shared component/module would expand the proposed two-file extraction. |
+| Hub registration tests | Remove the duplicate static backend-membership assertion; retain resolver direct routing and service mode-switch refusal, which the registry enumeration contract does not exercise. |
+| Entry-gate negatives | Remove duplicate stopped/unready and empty-string examples; keep distinct missing/unread/disabled/archived/Bot/model/CLI/application boundaries. The earlier application table has `ready: false`; it cannot replace Antigravity's `ready: true` refusal checks. |
+| Four fork appends | Already a loop in this head; no change required. |
+| Other backend helpers | No Codex image saver, session-title or managed-runtime extraction refactor. |
+
+Validation for this pass: 293 affected Python contract-suite cases, 15 archive cases, and 191 focused integration cases (including AUTH-SETUP-931 and the generated ownership closure), 50 UI tests, UI and desktop builds, and explicit first-load budget check pass. The task branch remains home 608.1 KiB / 4 JS files and chat 904.1 KiB / 59 JS files; 610/906 KiB limits are unchanged. UI test typechecking and changed-file Ruff also pass. Fresh exact-head review and CI are required; no merge is authorized.
