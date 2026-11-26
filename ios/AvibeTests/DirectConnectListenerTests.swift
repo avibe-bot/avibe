@@ -3972,3 +3972,62 @@ extension DirectListenerLifecycle {
         failUnconfirmed(DirectListenerFailureCause(.deadline))
     }
 }
+
+extension DirectConnectListenerTests {
+    // MARK: The port probe
+
+    /// One connection attempt to a loopback port: accepted by whatever
+    /// listens there, refused when nothing does, and neither when the bound
+    /// runs out first.
+    func testAPortProbeSaysWhetherAnythingAcceptsOnThePort() async throws {
+        let holder = try ControlListener(family: AF_INET, address: "127.0.0.1")
+        defer { holder.close() }
+        let port = holder.socket.port
+        let accepted = await DirectConnectListener.probe(port: port, within: 5)
+        XCTAssertEqual(accepted, .accepted)
+
+        // The port is let go: refused, well within the bound.
+        holder.close()
+        let began = ContinuousClock.now
+        try await eventually {
+            await DirectConnectListener.probe(port: port, within: 5) == .refused
+        }
+        let refused = await DirectConnectListener.probe(port: port, within: 5)
+        XCTAssertEqual(refused, .refused)
+        XCTAssertLessThan(began.duration(to: .now), .seconds(5))
+
+        // No time to ask, or no port to ask: neither.
+        let rushed = await DirectConnectListener.probe(port: port, within: 0)
+        XCTAssertEqual(rushed, .undecided)
+        let nowhere = await DirectConnectListener.probe(port: 0, within: 1)
+        XCTAssertEqual(nowhere, .undecided)
+    }
+
+    /// A listener says whether it holds a listening socket: none before a
+    /// bind, one while bound, and none again after a close, when nothing
+    /// accepts on the port any more.
+    func testAListenerSaysWhetherItHoldsAListeningSocket() async throws {
+        let listener = DirectConnectListener(
+            limits: .patient,
+            planner: { _ in nil },
+            onListenerFailure: {}
+        )
+        addTeardownBlock {
+            await listener.stop()
+        }
+        let unbound = await listener.holdsNoListeningSocket()
+        XCTAssertTrue(unbound)
+        let binding = try await listener.bind(port: nil)
+        let bound = await listener.holdsNoListeningSocket()
+        XCTAssertFalse(bound)
+        let close = Task {
+            await listener.closeListeningSocket()
+        }
+        while !(await listener.holdsNoListeningSocket()) {
+            await Task.yield()
+        }
+        let answer = await DirectConnectListener.probe(port: binding.port, within: 5)
+        XCTAssertEqual(answer, .refused)
+        await close.value
+    }
+}

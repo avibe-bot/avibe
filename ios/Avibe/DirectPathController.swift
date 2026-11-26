@@ -319,19 +319,30 @@ struct DirectPathTiming: Sendable {
     /// checked again, attempt by attempt; the last one repeats for as long
     /// as the App stays in the foreground.
     let retrySeconds: [TimeInterval]
+    /// In the background (`backgroundLoadGate`): how long the listener's
+    /// own socket may take to be closed after the App left the foreground
+    /// (a close takes up to a second, and an attempt that was under way
+    /// ends first), and how long the port may take to accept or refuse one
+    /// connection attempt.
+    let ownCloseSeconds: TimeInterval
+    let portProbeSeconds: TimeInterval
 
     init(
         listenerWaitSeconds: TimeInterval,
         rebindSeconds: TimeInterval,
         foregroundSeconds: TimeInterval = 5,
         strictOpenSeconds: TimeInterval = 10,
-        retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5]
+        retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5],
+        ownCloseSeconds: TimeInterval = 3,
+        portProbeSeconds: TimeInterval = 0.3
     ) {
         self.strictOpenSeconds = strictOpenSeconds
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
         self.foregroundSeconds = foregroundSeconds
         self.retrySeconds = retrySeconds
+        self.ownCloseSeconds = ownCloseSeconds
+        self.portProbeSeconds = portProbeSeconds
     }
 
     static let standard = DirectPathTiming(listenerWaitSeconds: 1, rebindSeconds: 2)
@@ -956,6 +967,100 @@ final class DirectPathController {
             guard case .serving = listener.lifecycle.phase else { return .held }
         }
         return gate
+    }
+
+    /// The gate for a load that is made while the App is in the background
+    /// (an Action Button voice take). In the foreground it is `loadGate`,
+    /// at once. In the background `loadGate` cannot say what a load would
+    /// meet: the listener is closed there on purpose, a load of a routed
+    /// host goes to the listener's port all the same, and that port may
+    /// have been taken by another process since the App left. So the port
+    /// is asked, right before the load:
+    ///
+    /// - something accepts a connection there: `fault`. It is not this
+    ///   App's listener, and the load would go to it;
+    /// - the connection is refused: `loadGate`'s own answer. Nothing
+    ///   listens there, and the load goes as it does today;
+    /// - neither within `timing.portProbeSeconds`: `fault`.
+    ///
+    /// "It is not this App's listener" holds only once the listener's own
+    /// socket is closed, which only this controller and its listener know:
+    /// right after the App leaves the foreground the close is still under
+    /// way, and an attempt to bind that was running ends first. That is
+    /// waited for, up to `timing.ownCloseSeconds`; a socket still not
+    /// closed then is `fault` as well, since nothing could be told from an
+    /// answer on the port.
+    ///
+    /// Nothing is recorded or changed by asking. What it cannot cover: the
+    /// port can be taken between this answer and the load's own connection,
+    /// a few milliseconds later; and it is asked for one load, so a page
+    /// that is already loaded makes its later connections without it.
+    func backgroundLoadGate(forInstanceURL url: URL) async -> DirectLoadGate {
+        let gate = loadGate(forInstanceURL: url)
+        guard
+            isInBackground,
+            gate != .fault,
+            let stay = leftForegroundAt,
+            let authority = DirectAuthority(instanceURL: url),
+            routeOwner.routes(authority.host, store: websiteDataStore.identifier),
+            let listener,
+            let port = listenerPort
+        else {
+            return gate
+        }
+        // The same stay in the background throughout: after a return the
+        // listener binds this port again, and an answer on it is its own.
+        let stayNow = { [weak self] () -> BackgroundStay in
+            guard let self, self.isInBackground else {
+                return .ended
+            }
+            return self.leftForegroundAt == stay && self.listener === listener ? .same : .another
+        }
+        let closeBy = ContinuousClock.now.advanced(by: .seconds(timing.ownCloseSeconds))
+        while true {
+            // An attempt still running binds the port, or has, and is
+            // closed by its own completion.
+            if !rebinds.inFlight, await listener.holdsNoListeningSocket(), !rebinds.inFlight {
+                break
+            }
+            guard stayNow() == .same, ContinuousClock.now < closeBy, !Task.isCancelled else {
+                return Self.backgroundGate(.undecided, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        guard stayNow() == .same else {
+            return Self.backgroundGate(.undecided, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
+        }
+        let probe = await DirectConnectListener.probe(port: port, within: timing.portProbeSeconds)
+        return Self.backgroundGate(probe, stay: stayNow(), otherwise: loadGate(forInstanceURL: url))
+    }
+
+    /// Where the App is when an answer about the background is ready.
+    enum BackgroundStay: Equatable {
+        /// In the background, as when the question was asked.
+        case same
+        /// In the background again, after a return in between.
+        case another
+        /// In the foreground.
+        case ended
+    }
+
+    /// What the port's answer makes of the gate. In the stay it was asked
+    /// in: a refused connection leaves the gate as it is, and anything
+    /// else is a fault. Back in the foreground the gate alone answers, as
+    /// it does there. In another stay nothing was learnt about this one,
+    /// and the port may be the listener's own again or someone else's.
+    nonisolated static func backgroundGate(
+        _ probe: DirectPortProbe,
+        stay: BackgroundStay,
+        otherwise gate: DirectLoadGate
+    ) -> DirectLoadGate {
+        switch (stay, probe) {
+        case (.ended, _), (.same, .refused):
+            return gate
+        case (.another, _), (.same, .accepted), (.same, .undecided):
+            return .fault
+        }
     }
 
     /// The gate of a host routed to `listener`, from its lifecycle and from
