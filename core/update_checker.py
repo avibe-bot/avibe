@@ -29,10 +29,7 @@ from modules.im import InlineButton, InlineKeyboard, MessageContext
 from vibe.build_identity import get_build_identity
 from vibe.i18n import t as i18n_t
 from vibe.upgrade import (
-    AUTOMATIC_DISCOVERY,
-    EXPLICIT_DISCOVERY,
     PACKAGE_NAME,
-    UpdateDiscovery,
     get_latest_version_info,
     get_running_vibe_path,
     has_newer_version,
@@ -76,11 +73,11 @@ _STABLE_PACKAGE_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[.-]?post\d+)?$")
 _PRERELEASE_VERSION_RE = re.compile(r"\d+\.\d+\.\d+rc\d+")
 
 
-def _fetch_pypi_version_sync(discovery: UpdateDiscovery = AUTOMATIC_DISCOVERY) -> Dict[str, Any]:
+def _fetch_pypi_version_sync(announced_only: bool = True) -> Dict[str, Any]:
     """Synchronous PyPI version fetch (to be run in thread).
 
     The periodic check is automatic, so by default it skips silent releases;
-    an admin's own update action passes explicit discovery.
+    an admin's own update action sees every release.
     """
     from vibe import __version__
 
@@ -90,7 +87,7 @@ def _fetch_pypi_version_sync(discovery: UpdateDiscovery = AUTOMATIC_DISCOVERY) -
         return result
 
     # The same offer as the version dialog: pre-releases follow `update.prereleases`.
-    return get_latest_version_info(current, prereleases=prerelease_updates_enabled(), discovery=discovery)
+    return get_latest_version_info(current, prereleases=prerelease_updates_enabled(), announced_only=announced_only)
 
 
 def _github_release_url(version: str) -> str:
@@ -452,45 +449,45 @@ class UpdateChecker:
             latest = version_info["latest"]
             current = version_info["current"]
             logger.info(f"Update available: {current} -> {latest}")
-            release_notifications_enabled: Optional[bool] = None
+            notify = self.config.notify_admins and self.state.notified_version != latest
+            if not (notify or self.config.auto_update):
+                return
+            # A silent release is neither announced nor installed automatically.
+            if not await self._release_announced(latest, listed=version_info.get("announced") is True):
+                return
             unattended_supported, unattended_reason = self._supports_unattended_self_update(current)
 
             # Notification flow — failure must not block auto-update
-            if self.config.notify_admins and self.state.notified_version != latest:
-                release_notifications_enabled = await self._should_send_release_notifications(
-                    latest,
-                    cached=release_notifications_enabled,
-                )
-                if release_notifications_enabled:
-                    configured_admin_ids = self._get_admin_user_ids()
-                    admin_ids = self._active_admin_ids(configured_admin_ids)
-                    platform = getattr(self.controller.config, "platform", "slack")
-                    if admin_ids:
-                        waiting_for_transport = self._notification_targets_waiting_for_transport(admin_ids, platform)
-                    elif configured_admin_ids:
-                        waiting_for_transport = False
-                    else:
-                        waiting_for_transport = self._notification_targets_waiting_for_transport([], platform)
-                    if waiting_for_transport:
-                        logger.info(
-                            "Deferring update notification and auto-update for %s until an admin transport is ready",
-                            latest,
-                        )
-                        return
-                    delivered = False
-                    try:
-                        delivered = await self._send_update_notification(current, latest)
-                    except Exception as e:
-                        logger.error(f"Failed to send update notification: {e}", exc_info=True)
-                    if delivered:
-                        self.state.notified_version = latest
-                        self.state.notified_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                    else:
-                        logger.warning(
-                            "Update notification for %s was not delivered; skipping grace period",
-                            latest,
-                        )
-                    self.state.save()
+            if notify:
+                configured_admin_ids = self._get_admin_user_ids()
+                admin_ids = self._active_admin_ids(configured_admin_ids)
+                platform = getattr(self.controller.config, "platform", "slack")
+                if admin_ids:
+                    waiting_for_transport = self._notification_targets_waiting_for_transport(admin_ids, platform)
+                elif configured_admin_ids:
+                    waiting_for_transport = False
+                else:
+                    waiting_for_transport = self._notification_targets_waiting_for_transport([], platform)
+                if waiting_for_transport:
+                    logger.info(
+                        "Deferring update notification and auto-update for %s until an admin transport is ready",
+                        latest,
+                    )
+                    return
+                delivered = False
+                try:
+                    delivered = await self._send_update_notification(current, latest)
+                except Exception as e:
+                    logger.error(f"Failed to send update notification: {e}", exc_info=True)
+                if delivered:
+                    self.state.notified_version = latest
+                    self.state.notified_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                else:
+                    logger.warning(
+                        "Update notification for %s was not delivered; skipping grace period",
+                        latest,
+                    )
+                self.state.save()
 
             # Auto-update flow — respect a grace period after successful notification
             # so the admin has time to read the notification before auto-update kicks in.
@@ -506,15 +503,7 @@ class UpdateChecker:
                 if not unattended_supported:
                     logger.warning("Skipping unattended self-update for %s: %s", latest, unattended_reason)
                     return
-                release_notifications = await self._should_send_release_notifications(
-                    latest,
-                    cached=release_notifications_enabled,
-                )
-                if not release_notifications:
-                    # Discovery skips silent releases the release index marks; this
-                    # catches one the index could not be read for.
-                    logger.info("Skipping auto-update to %s: the release is silent", latest)
-                elif self._within_notification_grace_period(latest):
+                if self._within_notification_grace_period(latest):
                     logger.info("Within notification grace period, deferring auto-update")
                 else:
                     logger.info("System is idle, performing auto-update...")
@@ -662,27 +651,34 @@ class UpdateChecker:
 
     async def _get_version_info_async(self) -> Dict[str, Any]:
         """Version info for an admin's own update action, which also sees silent releases."""
-        return await asyncio.to_thread(_fetch_pypi_version_sync, EXPLICIT_DISCOVERY)
+        return await asyncio.to_thread(_fetch_pypi_version_sync, announced_only=False)
 
-    async def _should_send_release_notifications(self, latest: str, cached: Optional[bool] = None) -> bool:
-        """Return whether update notifications should be sent for the release."""
-        if cached is not None:
-            return cached
+    async def _release_announced(self, latest: str, *, listed: bool) -> bool:
+        """Whether automatic paths may announce or install the release.
+
+        Discovery already skips releases the release index marks silent. A
+        release the index lists without the marker is announced; one it does
+        not list yet (it is indexed once its assets are mirrored) is announced
+        only when its notes were read and carry no marker. An unreadable one
+        waits for a later check.
+        """
+        if listed:
+            return True
 
         policy_info = await asyncio.to_thread(_fetch_update_notification_policy_sync, latest)
         if policy_info.get("error"):
             logger.warning(
-                "Failed to check update notification policy for %s: %s",
+                "Deferring update %s: its notification policy could not be read: %s",
                 latest,
                 policy_info["error"],
             )
-            return True
+            return False
 
         policy = policy_info.get("policy") or UPDATE_NOTIFICATION_POLICY_DEFAULT
-        enabled = policy != UPDATE_NOTIFICATION_POLICY_NONE
-        if not enabled:
-            logger.info("Update notifications suppressed by release metadata for %s", latest)
-        return enabled
+        if policy == UPDATE_NOTIFICATION_POLICY_NONE:
+            logger.info("Update %s is silent: no notification or automatic update", latest)
+            return False
+        return True
 
     def _is_idle(self) -> bool:
         """Check if the system is idle (no active sessions and no recent activity)."""
@@ -1191,7 +1187,11 @@ class UpdateChecker:
             platform=platform,
         )
         if not result.get("ok"):
-            await im_client.edit_message(context, message_id, text=self._t("update.upgradeFailed"))
+            # A button for a release that is already installed, or one that cannot be looked up.
+            failure = {"no_update": "update.alreadyUpToDate", "update_check_failed": "update.checkFailed"}
+            await im_client.edit_message(
+                context, message_id, text=self._t(failure.get(result.get("code"), "update.upgradeFailed"))
+            )
         elif not result.get("restarting"):
             await im_client.edit_message(context, message_id, text=self._t("update.restartRequired"))
 
@@ -1251,7 +1251,6 @@ class UpdateChecker:
         channel_id: Optional[str] = None,
         message_id: Optional[str] = None,
         platform: Optional[str] = None,
-        suppress_success_notification: bool = False,
     ) -> None:
         """Write a marker file to trigger post-update notification."""
         try:
@@ -1259,8 +1258,6 @@ class UpdateChecker:
                 "version": version,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
-            if suppress_success_notification:
-                data["suppress_success_notification"] = True
             # Store message coordinates for updating the original message after restart
             if channel_id and message_id:
                 data["channel_id"] = channel_id

@@ -103,7 +103,8 @@ from vibe.upgrade import (
     get_latest_version_info,
     prerelease_updates_enabled,
     get_running_vibe_path,
-    UpdateDiscovery,
+    exact_release_spec,
+    has_newer_version,
     get_safe_cwd,
     format_activation_failures,
     get_deferred_activation_log_path,
@@ -7920,10 +7921,9 @@ def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> 
     Args:
         auto_restart: If True, restart vibe after successful upgrade
         target_version: The release the caller resolved (the periodic check,
-            or an update notification's button). It is installed unless a newer
-            announced release has appeared; a silent release is installed only
-            when named, and with no newer release it installs nothing. Without
-            it, an explicit upgrade takes the newest release.
+            or an update notification's button). Exactly that release is
+            installed, and nothing when it is not newer than the running one.
+            Without it, an explicit upgrade takes the newest release.
 
     Returns:
         {
@@ -7950,17 +7950,24 @@ def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> 
     else:
         from vibe import __version__
 
-        version_info = get_latest_version_info(
-            __version__,
-            prereleases=prerelease_updates_enabled(),
-            discovery=UpdateDiscovery.requested(target_version),
-        )
-        # An unpinned upgrade would take the newest release, silent or not.
-        if version_info.get("error") or not version_info.get("has_update"):
+        if not has_newer_version(target_version, __version__):
             return {
                 "ok": False,
-                "message": "No newer release to install.",
-                "output": version_info.get("error"),
+                "code": "no_update",
+                "message": "Already up to date.",
+                "output": None,
+                "activation_notice": None,
+                "restarting": False,
+            }
+        # Exactly the target: an unpinned upgrade would take the newest release, silent or not.
+        try:
+            version_info = {"latest": target_version, "package_spec": exact_release_spec(target_version)}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "update_check_failed",
+                "message": "Update check failed.",
+                "output": str(exc),
                 "activation_notice": None,
                 "restarting": False,
             }

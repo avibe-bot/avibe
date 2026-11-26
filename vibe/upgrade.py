@@ -1554,45 +1554,24 @@ def _is_yanked_release(files: object) -> bool:
     return bool(yanked_flags) and all(yanked_flags)
 
 
-@dataclass(frozen=True)
-class UpdateDiscovery:
-    """Which releases a check may offer (docs/release.md, silent releases).
+def release_index_notifications(index: Mapping[str, object]) -> dict[str, bool]:
+    """Each version the release index lists, and whether it is silent.
 
-    A silent release (``update-notification=none``) is not announced. Explicit
-    discovery, a user's own check or upgrade, sees every release. Automatic
-    discovery, the periodic check and its unattended install, skips silent
-    releases and still finds the newest announced one. A ``target`` the caller
-    already resolved is seen even when silent.
+    A silent release carries ``update_notification: "none"`` (docs/release.md);
+    the index lists a release only once its assets are mirrored.
     """
 
-    announced_only: bool = False
-    target: str | None = None
-
-    @classmethod
-    def requested(cls, target: str) -> "UpdateDiscovery":
-        return cls(announced_only=True, target=target)
-
-    def sees(self, version: str, silent: bool) -> bool:
-        return not (self.announced_only and silent) or version == self.target
-
-
-EXPLICIT_DISCOVERY = UpdateDiscovery()
-AUTOMATIC_DISCOVERY = UpdateDiscovery(announced_only=True)
-
-
-def silent_release_versions(index: Mapping[str, object]) -> frozenset[str]:
-    """The versions the release index marks ``update_notification: "none"``."""
-
     if index.get("schema_version") != 1 or index.get("repository") != RELEASE_INDEX_REPOSITORY:
-        return frozenset()
+        return {}
     releases = index.get("releases")
-    silent = set()
+    listed: dict[str, bool] = {}
     for release in releases if isinstance(releases, list) else []:
-        if not isinstance(release, Mapping) or release.get("update_notification") != "none":
+        if not isinstance(release, Mapping):
             continue
         tag = str(release.get("tag") or "")
-        silent.add(tag.removeprefix("gh-v") if tag.startswith("gh-v") else tag.removeprefix("v"))
-    return frozenset(silent)
+        version = tag.removeprefix("gh-v") if tag.startswith("gh-v") else tag.removeprefix("v")
+        listed[version] = release.get("update_notification") == "none"
+    return listed
 
 
 def select_latest_update_version(
@@ -1678,9 +1657,10 @@ def prerelease_updates_enabled() -> bool:
 def select_latest_prerelease(
     index: Mapping[str, object],
     index_url: str,
-    discovery: UpdateDiscovery = EXPLICIT_DISCOVERY,
+    *,
+    sees: Callable[[str], bool] = lambda _version: True,
 ) -> tuple[str, str] | None:
-    """The newest release candidate with a mirrored core wheel, and its install spec.
+    """The newest release candidate ``sees`` admits with a mirrored core wheel, and its install spec.
 
     The spec pins the wheel's mirrored URL and SHA-256 from the index, so pip
     and uv verify the bytes they install.
@@ -1700,7 +1680,7 @@ def select_latest_prerelease(
         parsed = _parse_version(match["version"]) if match else None
         if parsed is None or (best is not None and parsed <= best[0]):
             continue
-        if not discovery.sees(match["version"], release.get("update_notification") == "none"):
+        if not sees(match["version"]):
             continue
         version = match["version"]
         wheel = f"{wheel_prefix}-{version}-py3-none-any.whl"
@@ -1735,29 +1715,34 @@ def get_latest_version_info(
     current_version: str,
     *,
     prereleases: bool = False,
-    discovery: UpdateDiscovery = EXPLICIT_DISCOVERY,
+    announced_only: bool = False,
 ) -> dict:
     """The newest release to offer: stable from PyPI, plus release candidates when opted in.
 
     An offered release candidate also carries ``package_spec``, the requirement
     that installs it. Turning pre-releases off never offers a downgrade: an
-    older stable release is not newer than the running candidate. Silent
-    releases are offered as ``discovery`` allows; the release index marks them.
-    When the index is unreachable, a silent stable release cannot be told
-    apart here, and the automatic caller checks the release's own notes.
+    older stable release is not newer than the running candidate.
+
+    ``announced_only`` is automatic discovery: it skips every release the
+    release index marks silent and reports ``announced``, whether the index
+    lists the offer without the marker. An offer the index does not (yet) list
+    is unclassified; the automatic caller reads its notes before acting.
     """
 
     result = {"current": current_version, "latest": None, "has_update": False, "error": None}
 
     index: Mapping[str, object] | None = None
     index_url = ""
-    if prereleases or discovery.announced_only:
+    if prereleases or announced_only:
         try:
             index, index_url = _fetch_release_index()
         except Exception as exc:
             # Stable releases remain on offer when the release index is unreachable.
             logger.warning("Release index check failed: %s", exc)
-    silent = silent_release_versions(index) if index is not None else frozenset()
+    listed = release_index_notifications(index) if index is not None else {}
+
+    def sees(version: str) -> bool:
+        return not (announced_only and listed.get(version, False))
 
     try:
         url = get_update_metadata_url()
@@ -1765,34 +1750,45 @@ def get_latest_version_info(
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
-        latest = select_latest_update_version(
-            data,
-            current_version,
-            sees=lambda version: discovery.sees(version, version in silent),
-        )
+        latest = select_latest_update_version(data, current_version, sees=sees)
         result["latest"] = latest
 
         if latest and latest != current_version:
             result["has_update"] = has_newer_version(latest, current_version)
-        # An unpinned upgrade takes the newest release on the index, so an
-        # offer below a skipped silent release pins its own version.
-        if (
-            result["has_update"]
-            and latest != select_latest_update_version(data, current_version)
-            and get_upgrade_package_spec() == PACKAGE_NAME
-        ):
-            result["package_spec"] = pinned_package_spec(latest, package_name=PACKAGE_NAME)
     except Exception as e:
         result["error"] = str(e)
         return result
 
     if prereleases and index is not None:
-        candidate = select_latest_prerelease(index, index_url, discovery)
+        candidate = select_latest_prerelease(index, index_url, sees=sees)
         if candidate and (not result["latest"] or has_newer_version(candidate[0], result["latest"])):
             result["latest"], result["package_spec"] = candidate
             result["has_update"] = has_newer_version(candidate[0], current_version)
 
+    if announced_only:
+        result["announced"] = listed.get(str(result["latest"] or "")) is False
     return result
+
+
+def exact_release_spec(version: str) -> str:
+    """The requirement that installs exactly ``version``, never a newer release.
+
+    A release candidate installs its mirrored wheel from the release index;
+    a stable release pins the package. A configured custom package spec
+    cannot carry a pin and is returned as it is. Raises ``LookupError`` when
+    the candidate's wheel is not in the index.
+    """
+
+    if _PRERELEASE_TAG_RE.fullmatch(f"gh-v{version}"):
+        index, index_url = _fetch_release_index()
+        candidate = select_latest_prerelease(index, index_url, sees=lambda listed: listed == version)
+        if candidate is None:
+            raise LookupError(f"release candidate {version} is not in the release index")
+        return candidate[1]
+    package_spec = get_upgrade_package_spec()
+    if package_spec != PACKAGE_NAME:
+        return package_spec
+    return pinned_package_spec(version, package_name=PACKAGE_NAME)
 
 
 def is_uv_tool_install(python_executable: str | None = None) -> bool:
