@@ -812,7 +812,9 @@ conforms to. Without a conforming controller the App offers neither:
   foreground for 60 s from its first failed attempt that counts, not a
   first attempt, `waiting`, the background, or anything before a success
   (c); an open that runs out of time while c's clock runs applies c then,
-  so the choice is never held for good. Not while the choice waits for the
+  so the choice is never held for good. Rule b records nothing
+  (`reverted` stays null: the page shows automatic and no line); a1, a2
+  and c record when and from what. Not while the choice waits for the
   next launch. The App then sets the host back with `setDirectOnly(false)`
   and opens the instance again.
 - **A drop** (the controller counts one when a lost link has not come back
@@ -824,11 +826,15 @@ conforms to. Without a conforming controller the App offers neither:
   the view is back on the instance (or its way back fails); a revert is
   made without the reopen.
 - **The Action Button's hidden view** tells the controller of each load it
-  makes. One made where the host has no route (the App was not opened in
-  this process, or the host is automatic) leaves 「仅直连和中继」 for the
-  next launch (`pendingRelaunch`). One made on the host's own route while
-  the listener is closed (the background) cannot leave it: it fails, the
-  take is kept, and the choice stays in effect.
+  makes (`noteVoiceLoad`). A voice message must arrive, and the choice is
+  for the page's traffic. A load made where the host has no route (the App
+  was not opened in this process) goes out on the public path. One made on
+  the host's own route while the listener cannot serve (the background,
+  where it is closed) opens that route to failover in the same step that
+  marks the host. Either way 「仅直连和中继」 then waits for the next launch
+  (`pendingRelaunch`): the stored choice is kept, never set back, and the
+  route stays open for the rest of the process. The page's view never
+  loads on a held gate, so it never does this.
 - **Measuring.** `DirectMeasureRunner` runs one measurement at a time and
   bounds it at 35 s, just above the controller's own 30 s.
 

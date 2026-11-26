@@ -5947,6 +5947,44 @@ final class DirectPathAppTests: XCTestCase {
         XCTAssertEqual(app.runtimeOpenAttempt?.id, reopened)
     }
 
+    /// An Action Button take made before the instance was opened in this
+    /// process goes out with no route: 「仅直连和中继」 then waits for the
+    /// next launch. The stored choice is kept, never set back: the page
+    /// reads it as chosen and pending, and the revert rules do not run.
+    @MainActor
+    func testAVoiceTakeBeforeTheOpenLeavesDirectOnlyPendingNeverReverted() async throws {
+        let transport = StandInDirectTransport()
+        let app = try await makeApp(directTransport: transport)
+        let store = DirectPathPreferenceStore(defaults: try XCTUnwrap(appDefaults))
+        store.set(DirectPathPreference(mode: .direct), accountID: "account-1", origin: instance.serialized)
+
+        // The hidden view's load, on the App's current store.
+        let note = try XCTUnwrap(VoiceCaptureInstanceLoads.note)
+        note(instance, app.websiteDataStore.identifier)
+
+        _ = try await select("instance-1", in: app)
+        let read = try XCTUnwrap(try XCTUnwrap(app.directPreferenceProvider).read(instance))
+        XCTAssertEqual(read.mode, .direct)
+        XCTAssertTrue(read.pendingRelaunch)
+        XCTAssertNil(read.reverted)
+        XCTAssertEqual(
+            store.preference(accountID: "account-1", origin: instance.serialized),
+            DirectPathPreference(mode: .direct)
+        )
+
+        // What would set an enforced choice back changes nothing here.
+        try await eventually(timeout: WebKitReadiness.launchedTransportOperation) {
+            !transport.selections.isEmpty
+        }
+        let target = try XCTUnwrap(transport.selections.last)
+        transport.report(.answeredWithoutLink, for: target)
+        transport.report(.answeredWithoutLink, for: target)
+        XCTAssertEqual(
+            store.preference(accountID: "account-1", origin: instance.serialized),
+            DirectPathPreference(mode: .direct)
+        )
+    }
+
     /// A sign-in page in front is never replaced. A revert made while it
     /// shows sets the choice back and tells the controller, without opening
     /// the instance again.

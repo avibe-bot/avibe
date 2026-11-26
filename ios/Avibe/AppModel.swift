@@ -800,7 +800,7 @@ final class AppModel: ObservableObject {
             guard let self, storeIdentifier == self.websiteDataStore.identifier else {
                 return
             }
-            self.directOnlyControl?.noteInstanceLoad(forInstanceURL: origin.url)
+            self.directOnlyControl?.noteVoiceLoad(forInstanceURL: origin.url)
         }
         VoiceCaptureLoadGate.provider = { [weak self] origin, storeIdentifier in
             guard let self, let controller = self.directPathController else {
@@ -2647,16 +2647,20 @@ final class AppModel: ObservableObject {
     }
 
     /// The choice goes back to automatic, recording from what, and the page
-    /// is told.
+    /// is told. Without `notes` (rule b: three drops) nothing is recorded:
+    /// the page shows automatic and no line.
     private func storeReversion(
         of runtime: MobileRuntimeContext,
         origin: String,
-        from mode: DirectPathPreference.Mode
+        from mode: DirectPathPreference.Mode,
+        notes: Bool = true
     ) {
-        let reverted = DirectPathPreference(
-            mode: .automatic,
-            reverted: .init(at: Date(), reason: .unreachable, from: mode)
-        )
+        let reverted = notes
+            ? DirectPathPreference(
+                mode: .automatic,
+                reverted: .init(at: Date(), reason: .unreachable, from: mode)
+            )
+            : DirectPathPreference.automatic
         directPathPreferences.set(reverted, accountID: runtime.account.id, origin: origin)
         runtimeController?.deliverDirectPreferenceChanged(reverted)
     }
@@ -2823,7 +2827,9 @@ final class AppModel: ObservableObject {
         directOnlyWatch = watch
         switch decision {
         case .revert:
-            revertDirectOnly(runtime)
+            revertDirectOnly(runtime, notes: true)
+        case .revertWithoutNotice:
+            revertDirectOnly(runtime, notes: false)
         case .keep(let nextCheck, let reloadsForLink):
             if dropped {
                 // The link dropped: the controller only says so (it is not a
@@ -2859,13 +2865,13 @@ final class AppModel: ObservableObject {
     /// The rules found that 「仅直连和中继」 cannot reach the instance: back
     /// to automatic (`reverted.from` direct), the page told, and the
     /// instance opened again where it was.
-    private func revertDirectOnly(_ runtime: MobileRuntimeContext) {
+    private func revertDirectOnly(_ runtime: MobileRuntimeContext, notes: Bool) {
         let signInInFront = directOnlyWatch?.awayFromInstance == true
         endDirectOnlyWatch()
         guard let origin = preferenceOrigin(runtime) else {
             return
         }
-        storeReversion(of: runtime, origin: origin, from: .direct)
+        storeReversion(of: runtime, origin: origin, from: .direct, notes: notes)
         directOnlyControl?.setDirectOnly(false, forInstanceURL: runtime.instance.url)
         // A sign-in page in front is not replaced: the host is automatic
         // from here (the controller has moved its route), and the instance

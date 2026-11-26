@@ -31,6 +31,10 @@ protocol DirectOnlyControlling: AnyObject {
     /// The shell is about to load the instance in a WebView on the account
     /// store: called synchronously at the decision, never from a gate read.
     func noteInstanceLoad(forInstanceURL url: URL)
+    /// The same for the Action Button's hidden view, whose load must
+    /// arrive: where the host's route could not carry it now, the route is
+    /// opened and the choice waits for the next launch.
+    func noteVoiceLoad(forInstanceURL url: URL)
 }
 
 /// 「线路测速」: the controller measures both paths itself.
@@ -240,7 +244,12 @@ struct DirectOnlyRevertRules: Equatable {
         /// happens first. `reloadsForLink`: the link has just come up in
         /// this bootstrap; reload the view once.
         case keep(nextCheck: ContinuousClock.Instant?, reloadsForLink: Bool)
+        /// Back to automatic, recording when and from what (a1, a2, c):
+        /// the page says so under the choice.
         case revert
+        /// Back to automatic with nothing recorded (b): the page shows
+        /// automatic and no line.
+        case revertWithoutNotice
     }
 
     private var unlinkedBase: UInt64?
@@ -308,7 +317,7 @@ struct DirectOnlyRevertRules: Equatable {
         }
         // b: armed, and the instance answered in this bootstrap.
         if armed, unlinked > 0 || freshPageAt != nil || seen.linked {
-            return .revert
+            return .revertWithoutNotice
         }
         if seen.linked {
             establishedInBootstrap = true

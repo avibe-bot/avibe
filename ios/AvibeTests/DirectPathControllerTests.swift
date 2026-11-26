@@ -587,11 +587,14 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertEqual(controller.strictFailureCount(forInstanceURL: url), 0)
     }
 
-    /// A load on the host's own route, which has no failover, while the
-    /// listener is closed for the background (the Action Button's hidden
-    /// view): it cannot leave the route, so the choice stays in effect.
+    /// The Action Button's hidden view loads a direct-only host while the
+    /// listener is closed for the background: its route is opened to
+    /// failover and the choice waits for the next launch, in one step, and
+    /// the route stays open after the return (no silent re-strict). The
+    /// page's own kind of load, in the same state, does neither: it cannot
+    /// leave a route without failover.
     @MainActor
-    func testALoadOnTheStrictRouteWhileTheListenerIsClosedNeedsNoRelaunch() async throws {
+    func testAVoiceLoadOnAClosedStrictRouteOpensFailoverAndWaitsForTheNextLaunch() async throws {
         let harness = try Harness(test: self)
         let url = try XCTUnwrap(URL(string: "https://\(one)"))
         let controller = harness.controller
@@ -601,7 +604,39 @@ final class DirectPathControllerTests: XCTestCase {
         XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
         harness.enterBackground()
         try await eventually { controller.listenerState != .ready }
+
+        // The page's view never loads on a held gate; its note changes nothing.
         controller.noteInstanceLoad(forInstanceURL: url)
+        XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+        XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+
+        controller.noteVoiceLoad(forInstanceURL: url)
+        XCTAssertTrue(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+        XCTAssertTrue(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+
+        // Back in front with the link up: still open, and not linked as
+        // direct-only, for the rest of this process.
+        harness.enterForeground()
+        try await eventually { controller.listenerState == .ready }
+        try await eventually { harness.transport.selections.count > 1 }
+        harness.transport.report(.usable(generation: "g2"), for: try XCTUnwrap(harness.transport.selections.last))
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
+        XCTAssertFalse(controller.isDirectOnlyLinked(forInstanceURL: url))
+        XCTAssertTrue(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
+    }
+
+    /// While the listener serves, a voice load is the page's kind: nothing
+    /// is opened and nothing waits.
+    @MainActor
+    func testAVoiceLoadWhileTheListenerServesChangesNothing() async throws {
+        let harness = try Harness(test: self)
+        let url = try XCTUnwrap(URL(string: "https://\(one)"))
+        let controller = harness.controller
+        controller.setDirectOnly(true, forInstanceURL: url)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        controller.noteVoiceLoad(forInstanceURL: url)
         XCTAssertFalse(controller.directOnlyNeedsRelaunch(forInstanceURL: url))
         XCTAssertFalse(try XCTUnwrap(harness.currentRoutes.first).allowFailover)
     }

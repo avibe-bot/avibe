@@ -148,18 +148,19 @@ final class DirectPathSeamsTests: XCTestCase {
         XCTAssertEqual(rules.observe(seen(180, drops: 3)), .keep(nextCheck: nil, reloadsForLink: false))
         XCTAssertEqual(rules.observe(seen(900, drops: 3)), .keep(nextCheck: nil, reloadsForLink: false))
         // The instance answers a rendezvous.
-        XCTAssertEqual(rules.observe(seen(901, drops: 3, unlinked: 1)), .revert)
+        // Rule b sets the choice back with nothing recorded for the page.
+        XCTAssertEqual(rules.observe(seen(901, drops: 3, unlinked: 1)), .revertWithoutNotice)
 
         var byPage = bootstrapped()
         _ = byPage.observe(seen(0, drops: 0))
         _ = byPage.observe(seen(1, drops: 3))
         byPage.noteFreshPage(at: at(2))
-        XCTAssertEqual(byPage.observe(seen(2, drops: 3)), .revert)
+        XCTAssertEqual(byPage.observe(seen(2, drops: 3)), .revertWithoutNotice)
 
         var byLink = bootstrapped()
         _ = byLink.observe(seen(0, drops: 0))
         _ = byLink.observe(seen(1, drops: 3))
-        XCTAssertEqual(byLink.observe(seen(2, linked: true, drops: 3)), .revert)
+        XCTAssertEqual(byLink.observe(seen(2, linked: true, drops: 3)), .revertWithoutNotice)
 
         var spread = bootstrapped()
         _ = spread.observe(seen(0, drops: 0))
