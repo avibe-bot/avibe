@@ -618,3 +618,22 @@ def test_stages_wire_the_override_through_stage1_notes_only() -> None:
     (dispatch,) = [s for s in release_steps if s.get("name") == "Dispatch desktop Stage 2"]
     assert "unverified" not in dispatch["run"]
     assert any("UNVERIFIED_LINE" in s.get("env", {}) and "${UNVERIFIED_LINE:-}" in s.get("run", "") for s in release_steps)
+
+
+@pytest.mark.parametrize("tag", [TAG, RC_TAG])
+def test_stage2_never_reads_notes_when_the_backstop_is_green(tag: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # A stable release can still be a draft here; the get-by-tag lookup would 404.
+    api = NotesApi(body="unused", runs=[_run()], jobs={1: [_job()]})
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "out"))
+    monkeypatch.setattr(gate, "GitHubApi", lambda repository, token: api)
+
+    assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", tag, "--unverified-from-notes"]) == 0
+    assert not any(path.startswith("releases/") for path, _ in api.calls)
+
+
+def test_stage2_never_reads_notes_for_a_red_stable_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = NotesApi(body=LINE, **_red())
+    monkeypatch.setattr(gate, "GitHubApi", lambda repository, token: api)
+
+    assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", TAG, "--unverified-from-notes"]) == 1
+    assert not any(path.startswith("releases/") for path, _ in api.calls)

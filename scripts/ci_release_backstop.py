@@ -470,8 +470,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.unverified_from_notes:
             if unverified is not None or args.tag is None:
                 raise ReleaseBackstopError("--unverified-from-notes takes a tag and no override inputs")
-            unverified = unverified_from_notes(api, args.tag)
-        if args.source_sha is not None:
+            try:
+                proof = prove_release(api, tag=args.tag)
+            except ReleaseBackstopError:
+                # Only a red RC consults its notes; a green or stable tag never reads them.
+                unverified = unverified_from_notes(api, args.tag) if RC_TAG_RE.fullmatch(args.tag) else None
+                if unverified is None:
+                    raise
+                proof = prove_release(api, tag=args.tag, unverified=unverified)
+        elif args.source_sha is not None:
             if unverified is not None:
                 raise ReleaseBackstopError("An unverified-job exception is checked against a tag, not a bare SHA")
             proof = prove_backstop_sha(api, source_sha=args.source_sha)
