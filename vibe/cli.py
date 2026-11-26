@@ -16825,7 +16825,23 @@ def cmd_remote_reset(args):
 def cmd_remote_status(args):
     from vibe import remote_access, remote_rebind
 
-    result = remote_access.status()
+    try:
+        from config.v2_config import V2Config
+
+        config = V2Config.load()
+    except Exception:
+        config = None  # status() reports its defaults for a config that does not load.
+    result = remote_access.status(config)
+    if config is not None:
+        # The direct lifecycle lives in the UI process. This one only knows
+        # the setting, so ask the owner as `remote direct status` does: one
+        # bounded local read, and this process's own answer when none comes.
+        try:
+            live_direct = remote_access.live_direct_status(config)
+        except Exception:
+            live_direct = None  # The direct block is extra; status itself must still print.
+        if live_direct is not None:
+            result["direct"] = live_direct
     try:
         binding_state = remote_rebind.read_state()[0]
     except Exception:
