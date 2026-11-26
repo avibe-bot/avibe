@@ -342,7 +342,7 @@ def test_partial_or_ambiguous_snapshot_cannot_restore_any_proof(monkeypatch, dam
                 {
                     "missing_hint": "DELETE FROM hint",
                     "bad_count": "UPDATE hint SET used=-1",
-                    "bad_version": "INSERT INTO proof VALUES (zeroblob(32), 'unknown')",
+                    "bad_version": "UPDATE proof SET version='unknown'",
                     "duplicate_hint": "INSERT INTO hint SELECT 2, day, used, loss, until FROM hint",
                 }[damage]
             )
@@ -368,6 +368,102 @@ def test_successful_proof_revocation_is_not_republished_by_stale_unrelated_write
         assert db.execute("SELECT count(*) FROM proof").fetchone() == (0,)
 
 
+@pytest.mark.parametrize("aba", [False, True])
+def test_preloaded_controllers_cannot_consume_the_same_proof_twice(monkeypatch, aba):
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    route, version = b"A" * 32, "8.0.63"
+    monkeypatch.setenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", "1")
+    first, _ = ledger.reserve(route, 100, False, version=version)
+    ledger.settle(route, first, "bootstrap_proven")
+    publisher = ledger._state
+    monkeypatch.setattr(ledger, "_state", None)
+    second, reason = ledger.reserve(route, 100, False, version=version)
+    assert reason == "bootstrap_recheck"
+    if aba:
+        ledger.settle(route, second, "bootstrap_proven")
+    monkeypatch.setattr(ledger, "_state", publisher)  # Still holds the original, published generation.
+    assert ledger.reserve(route, 100, False, version=version)[1] == "bootstrap_daily_limit"
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(route, 100, False, version=version)[1] == (
+        "bootstrap_recheck" if aba else "bootstrap_daily_limit"
+    )
+
+
+@pytest.mark.parametrize("lock", ["BEGIN EXCLUSIVE", "BEGIN"])  # Busy at BEGIN or at COMMIT after a successful CAS.
+@pytest.mark.parametrize("limit,expected", [(1, "bootstrap_daily_limit"), (2, "bootstrap_trial")])
+def test_restored_exemption_requires_committed_consume(monkeypatch, lock, limit, expected):
+    import sqlite3
+    import time
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    monkeypatch.setenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", str(limit))
+    route = b"A" * 32
+    trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
+    ledger.settle(route, trial, "bootstrap_proven")
+    monkeypatch.setattr(ledger, "_state", ledger._load(time.time()))
+    with sqlite3.connect(get_state_dir() / "message-thread-bootstrap.sqlite") as other:
+        other.execute(lock)
+        assert other.execute("SELECT ready FROM proof").fetchone() == (1,)
+        trial, reason = ledger.reserve(route, 100, False, version="8.0.63")
+        assert reason == expected and ledger._state.used == limit
+        assert trial is None or not trial.proven
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_recheck"
+
+
+def test_fresh_unpublished_measurement_is_live_only(monkeypatch):
+    import sqlite3
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    route = b"A" * 32
+    monkeypatch.setenv("AVIBE_MESSAGE_THREAD_BOOTSTRAP_DAILY_LIMIT", "1")
+    path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    path.parent.mkdir(exist_ok=True, parents=True)
+    with sqlite3.connect(path) as other:
+        other.execute("BEGIN EXCLUSIVE")
+        trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
+        ledger.settle(route, trial, "bootstrap_proven")
+        assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_recheck"
+        assert ledger._state.used == 1
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_trial"
+
+
+def test_revoked_trial_cannot_publish_after_latest_loss_moves(monkeypatch):
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    a, b = b"A" * 32, b"B" * 32
+    old, _ = ledger.reserve(a, 100, False, version="8.0.63")
+    first_process = ledger._state
+    monkeypatch.setattr(ledger, "_state", None)
+    other, _ = ledger.reserve(b, 100, False)
+    ledger.settle(a, old, "bootstrap_read_loss")
+    ledger.settle(b, other, "bootstrap_read_loss")
+    monkeypatch.setattr(ledger, "_state", first_process)
+    ledger.settle(a, old, "bootstrap_proven")
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(a, 100, False, version="8.0.63")[1] == "bootstrap_trial"
+
+
+def test_repairing_missing_hint_cannot_restore_rejected_proofs(monkeypatch):
+    import sqlite3
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    a, b = b"A" * 32, b"B" * 32
+    trial, _ = ledger.reserve(a, 100, False, version="8.0.63")
+    ledger.settle(a, trial, "bootstrap_proven")
+    with sqlite3.connect(get_state_dir() / "message-thread-bootstrap.sqlite") as db:
+        db.execute("DELETE FROM hint")
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(b, 100, False)[1] == "bootstrap_trial"
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(a, 100, False, version="8.0.63")[1] == "bootstrap_trial"
+
+
 def test_busy_recheck_and_loss_keep_live_cooldown_but_cannot_revoke_old_disk_proof(monkeypatch):
     import sqlite3
     from config.paths import get_state_dir
@@ -380,7 +476,7 @@ def test_busy_recheck_and_loss_keep_live_cooldown_but_cannot_revoke_old_disk_pro
     with sqlite3.connect(path) as db:
         db.execute("BEGIN EXCLUSIVE")
         trial, reason = ledger.reserve(route, 100, False, version="8.0.63")
-        assert reason == "bootstrap_recheck"
+        assert reason == "bootstrap_trial" and ledger._state.used == 2
         assert ledger.settle(route, trial, "bootstrap_read_loss") == "bootstrap_read_loss"
         assert ledger.reserve(route, 100, False, version="8.0.63")[1] == "bootstrap_read_loss"
     monkeypatch.setattr(ledger, "_state", None)

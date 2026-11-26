@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import math
 import os
-import sqlite3
 import threading
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import closing
 from dataclasses import dataclass, field
 
 from core import anthropic_thread_engine as engine
-from config.paths import get_state_dir
+from core.agent_core.ai import thread_bootstrap_hint as hint
 
-DAY = 86400
+DAY = hint.DAY
 MAX_ROUTES = 4096
 
 
@@ -43,6 +40,7 @@ class Trial:
     proven: bool
     version: str | None = None
     lease: Lease | None = None
+    fenced: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +49,8 @@ class Entry:
     until: float = 0
     trial: Trial | None = None
     version: str | None = None
+    # Published or restored: this exact generation must be consumed by a committed write.
+    generation: str | None = None
 
     def blocks(self, now: float) -> bool:
         if self.trial and self.trial.lease:
@@ -78,86 +78,18 @@ class State:
         return False
 
 
-_state: State | None = None
-_lock = threading.Lock()
-
-
 def _load(now: float) -> State:
-    state = State(int(now // DAY))
-    try:
-        path = get_state_dir() / "message-thread-bootstrap.sqlite"
-        with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
-            db.execute("BEGIN")  # Validate all positive evidence against the very same snapshot.
-            rows = db.execute("SELECT id, day, used, loss, until FROM hint LIMIT 2").fetchall()
-            if len(rows) != 1 or rows[0][0] != 1:
-                return state
-            _, day, used, loss, until = rows[0]
-            valid_count = type(day) is int and 0 <= day <= state.day and type(used) is int and used >= 0
-            if valid_count and day == state.day:
-                state.used = used
-            valid_loss = (
-                isinstance(loss, bytes)
-                and type(until) in (int, float)
-                and math.isfinite(until)
-                and ((not loss and until == 0) or (len(loss) == 32 and 0 < until <= now + DAY))
-            )
-            if valid_loss and until > now:
-                state.last_loss, state.loss_until = loss, until
-                state.routes[loss] = Entry("bootstrap_read_loss", until)
-            if not (valid_count and valid_loss):
-                return state
-            proofs = db.execute("SELECT route, version FROM proof LIMIT ?", (MAX_ROUTES + 1,)).fetchall()
-            if len(proofs) + len(state.routes) > MAX_ROUTES:
-                return state
-            restored = {}
-            for route, version in proofs:
-                if (
-                    not isinstance(route, bytes)
-                    or len(route) != 32
-                    or not engine.version(version)
-                    or route in state.routes
-                    or route in restored
-                ):
-                    return state
-                restored[route] = Entry("bootstrap_proven", version=version)
-            state.routes.update(restored)
-    except (sqlite3.Error, OSError, ValueError):
-        pass  # Includes old count/loss-only databases and busy or partial snapshots.
+    snap = hint.load(now, MAX_ROUTES)
+    state = State(snap.day, snap.used, last_loss=snap.loss, loss_until=snap.until)
+    if snap.loss:
+        state.routes[snap.loss] = Entry("bootstrap_read_loss", snap.until)
+    for route, (version, generation) in snap.proofs.items():
+        state.routes[route] = Entry("bootstrap_proven", version=version, generation=generation)
     return state
 
 
-def _save(state: State, route: bytes, proof: str | None = None) -> None:
-    try:
-        path = get_state_dir() / "message-thread-bootstrap.sqlite"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(path, timeout=0)) as db, db:
-            db.execute("BEGIN IMMEDIATE")
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS hint (id INTEGER PRIMARY KEY, day INTEGER, used INTEGER, loss BLOB, until REAL)"
-            )
-            db.execute("CREATE TABLE IF NOT EXISTS proof (route BLOB PRIMARY KEY, version TEXT NOT NULL)")
-            db.execute(
-                """INSERT INTO hint VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-                   day=excluded.day, used=excluded.used,
-                   loss=CASE WHEN hint.until > excluded.until THEN hint.loss ELSE excluded.loss END,
-                   until=max(hint.until, excluded.until)""",
-                (state.day, state.used, state.last_loss, state.loss_until),
-            )
-            # If a previously busy write now publishes a live cooldown, revoke that proof in this transaction too.
-            db.execute("DELETE FROM proof WHERE route=(SELECT loss FROM hint WHERE id=1 AND until>?)", (time.time(),))
-            # Event-local mutation, NEVER republish the process's whole map: another controller may have revoked a proof.
-            db.execute("DELETE FROM proof WHERE route=?", (route,))
-            if proof is not None:
-                db.execute(
-                    "INSERT INTO proof SELECT ?,? WHERE NOT EXISTS (SELECT 1 FROM hint WHERE loss=? AND until>?)",
-                    (route, proof, route, time.time()),
-                )
-                db.execute(
-                    "DELETE FROM proof WHERE rowid IN (SELECT rowid FROM proof ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
-                    (MAX_ROUTES,),
-                )
-    except (sqlite3.Error, OSError, ValueError, OverflowError):
-        pass  # Never roll back local evidence or a slot, and never retry a cross-process lock.
+_state: State | None = None
+_lock = threading.Lock()
 
 
 def _limit() -> int:
@@ -180,20 +112,52 @@ def reserve(
             return None, "bootstrap_capacity"
         version = engine.version(version)
         entry = state.routes.get(route)
-        proven = bool(entry and entry.status == "bootstrap_proven" and entry.version == version)
         if entry and entry.blocks(now):
             return None, entry.status
+        candidate = entry if entry and entry.status == "bootstrap_proven" and entry.version == version else None
+        expected = candidate.generation if candidate else None
+        live_only = candidate is not None and expected is None
         day = max(state.day, int(now // DAY))
         used = state.used if day == state.day else 0
-        if not proven and used >= _limit():
+        can_charge = used < _limit()
+        if not candidate and not can_charge:
             return None, "bootstrap_daily_limit"
-        if not state.room(route, now, preview):
+        if not state.room(route, now, preview=True):
             return None, "bootstrap_capacity"
-        trial = Trial("" if preview else uuid.uuid4().hex, reads, proven, version, lease)
+        proven, fenced = live_only, False
+        ticket = "" if preview else uuid.uuid4().hex
+        if preview:
+            if expected is not None:
+                snap = hint.load(now, MAX_ROUTES)
+                proven = snap.proofs.get(route) == (version, expected)
+                if snap.loss == route:
+                    return None, "bootstrap_read_loss"
+        else:
+            try:
+                with hint.transaction(now, MAX_ROUTES) as (db, snap):
+                    if snap.loss == route:
+                        state.room(route, now)
+                        state.routes[route] = Entry("bootstrap_read_loss", snap.until)
+                        if snap.until >= state.loss_until:
+                            state.last_loss, state.loss_until = route, snap.until
+                        return None, "bootstrap_read_loss"
+                    consumed, fenced = hint.reserve(db, route, version, ticket, expected, can_charge, MAX_ROUTES)
+                    proven = live_only or consumed
+                    if proven or can_charge:
+                        hint.write_hint(db, state, snap, day, used + int(not proven), now)
+            except hint.ERRORS:
+                # Includes failure at COMMIT after the conditional UPDATE matched. No retry and no durable exemption.
+                if entry := state.routes.get(route):
+                    if entry.status == "bootstrap_read_loss" and entry.until > now:
+                        return None, entry.status
+                proven, fenced = live_only, False
+        if not proven and not can_charge:
+            return None, "bootstrap_daily_limit"
+        trial = Trial(ticket, reads, proven, version, lease, fenced)
         if not preview:
+            state.room(route, now)
             state.day, state.used = day, used + int(not proven)
             state.routes[route] = Entry("bootstrap_pending", now + DAY, trial)
-            _save(state, route)
         return trial, "bootstrap_recheck" if proven else "bootstrap_trial"
 
 
@@ -220,14 +184,27 @@ def settle(route: bytes, trial: Trial, status: str) -> str:
                 state.routes[route] = Entry(status, now + DAY)
             else:
                 state.paused_until = now + DAY
-            _save(state, route)
-        elif _owns(route, trial, now):
-            if status == "bootstrap_proven":
-                state.routes[route] = Entry(status, version=trial.version)
-                if trial.version:
-                    _save(state, route, trial.version)
-            else:
-                state.routes[route] = Entry(status, now + DAY)
-        else:
+            try:
+                with hint.transaction(now, MAX_ROUTES) as (db, snap):
+                    db.execute("DELETE FROM proof WHERE route=?", (route,))  # Revoke either proof or publication fence.
+                    hint.write_hint(db, state, snap, state.day, state.used, now)
+            except hint.ERRORS:
+                pass  # Never roll back live measured loss.
+        elif not _owns(route, trial, now):
             return "bootstrap_stale"
+        elif status == "bootstrap_proven":
+            generation = None
+            if trial.fenced:
+                try:
+                    with hint.transaction(now, MAX_ROUTES) as (db, _):
+                        if not hint.publish(db, route, trial):
+                            del state.routes[route]
+                            return "bootstrap_stale"
+                except hint.ERRORS:
+                    # Publication is uncertain. Require the durable CAS rather than mint a second local capability.
+                    pass
+                generation = trial.ticket
+            state.routes[route] = Entry(status, version=trial.version, generation=generation)
+        else:
+            state.routes[route] = Entry(status, now + DAY)
         return status

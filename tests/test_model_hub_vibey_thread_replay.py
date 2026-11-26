@@ -191,7 +191,7 @@ async def test_bootstrap_engine_pin_round_trip_and_hot_replacement(tmp_path, mon
                 assert facts[0]["bootstrap_outcome"] == "retained_smaller"
                 path = get_state_dir() / "message-thread-bootstrap.sqlite"
                 with sqlite3.connect(path) as db:
-                    assert db.execute("SELECT count(*) FROM proof").fetchone() == (0,)
+                    assert db.execute("SELECT count(*) FROM proof WHERE ready=1").fetchone() == (0,)
                 await req.thread_observation.after_commit()
                 with sqlite3.connect(path) as db:
                     assert db.execute("SELECT length(route), version FROM proof").fetchall() == [(32, "8.0.63-2")]
