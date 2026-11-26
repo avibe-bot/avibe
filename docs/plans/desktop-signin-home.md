@@ -50,8 +50,12 @@ consent or a binding error. It does not switch instances or sign out. Explicit
 restore destinations distinguish preserving the original document, returning to
 its home, and returning local. Native checks the current document's origin against
 the committed target before asking that WebView to navigate to its root, without
-its old query/fragment, and closes the account surface. Existing restoration and
-local-bootstrap handling remain authoritative. Root navigation is ordinary native
+its old query/fragment. It first closes the account surface and retires its
+return receipt under the existing native window lock. Home navigation refuses
+a live Account receipt. If a newer Cancel/ReturnLocal wins before navigation,
+the old callback cannot navigate; after navigation, a later Cancel restores the
+current Runtime without consulting the replaced document. Existing restoration
+and local-bootstrap handling remain authoritative. Root navigation is ordinary native
 WebView navigation; its command acceptance is not proof that the server loaded.
 
 ## Validation
@@ -62,7 +66,9 @@ WebView navigation; its command acceptance is not proof that the server loaded.
   is sent.
 - Rust coordinator fixtures cover signed-out refusal, generation fencing, retained
   account/instance, remote preservation, and ordinary cancel's document destination.
-  Native shell unit coverage checks local/remote home URL derivation.
+  Native shell unit coverage checks local/remote home URL derivation, refusal to
+  replace a document with a live Account receipt, stale pre-navigation ownership,
+  and cancellation after navigation has changed the Runtime document.
 - Production account assets run in isolated Chromium and WebKit against a fake
   native bridge. All egress is blocked except loopback static assets. These checks
   prove form-to-native-action wiring, not OS WebView focus or authenticated loading.

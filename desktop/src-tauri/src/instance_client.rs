@@ -324,6 +324,26 @@ impl Views {
                 && account.returning.as_ref() == Some(&(runtime.label.clone(), runtime.document))
         })
     }
+    fn check_return(&self) -> Result<(), ClientError> {
+        if self
+            .account
+            .as_ref()
+            .is_some_and(|account| !self.return_matches(account))
+        {
+            return Err(ClientError::new("instance_session_missing"));
+        }
+        Ok(())
+    }
+    /// Home replaces the retained document. Its account return receipt must
+    /// already be retired, so a later Cancel restores the current Runtime
+    /// rather than trying to restore an irreversibly replaced document.
+    fn home_destination(&self, epoch: &Epoch, label: &str, current: &Url) -> Result<Url, ClientError> {
+        epoch.check()?;
+        if self.account.is_some() || self.runtime.as_ref().is_none_or(|runtime| runtime.label != label) {
+            return Err(ClientError::new("stale_generation"));
+        }
+        Ok(workbench_home(current))
+    }
     /// The role on screen in the main window. An account document is on
     /// screen from the moment `open_account` shows it, including while it
     /// reloads (`loaded` is false from commit to finish). Until then, even when
@@ -3054,12 +3074,7 @@ impl ClientView for NativeView {
         self.presentation_epoch(owner)?;
         self.discard_candidate().await?;
         if destination != RestoreDestination::Local {
-            let views = self.views.lock().expect("views");
-            if let Some(account) = &views.account {
-                if !views.return_matches(account) {
-                    return Err(ClientError::new("instance_session_missing"));
-                }
-            }
+            self.views.lock().expect("views").check_return()?;
         }
         if let Some(runtime) = runtime_webview(&self.app) {
             let same = runtime.url().is_ok_and(|url| match &target {
@@ -3074,21 +3089,36 @@ impl ClientView for NativeView {
                 }
             });
             if same {
+                // This is the presentation boundary: retire the account and
+                // its return receipt before replacing the retained document.
+                // The windows lock serializes later Cancel/ReturnLocal restores.
+                // If they supersede us before navigation, the epoch check keeps
+                // the old route; afterward they restore the current Runtime.
+                self.close_account().await?;
                 if destination == RestoreDestination::Home {
-                    let home = workbench_home(&runtime.url().map_err(failure)?);
                     let checked = self.presentation_epoch(owner)?;
                     let returning = runtime.clone();
+                    let app = self.app.clone();
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     self.app
                         .run_on_main_thread(move || {
-                            let result = checked.check().and_then(|()| returning.navigate(home).map_err(failure));
+                            let result = (|| {
+                                let current = returning.url().map_err(failure)?;
+                                let home = app
+                                    .state::<Client>()
+                                    .view
+                                    .views
+                                    .lock()
+                                    .expect("views")
+                                    .home_destination(&checked, returning.label(), &current)?;
+                                returning.navigate(home).map_err(failure)
+                            })();
                             let _ = tx.send(result);
                         })
                         .map_err(failure)?;
                     rx.await.map_err(failure)??;
                     self.presentation_epoch(owner)?;
                 }
-                self.close_account().await?;
                 let epoch = self.presentation_epoch(owner)?;
                 let url = runtime.url().map_err(failure)?;
                 self.show(epoch, &runtime, &url).await?;
@@ -3182,6 +3212,70 @@ mod tests {
             ),
         ] {
             assert_eq!(workbench_home(&current.parse().unwrap()).as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn sign_in_home_retires_the_return_receipt_before_navigation_and_later_cancel() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        for superseded_before_navigation in [false, true] {
+            let current: Url = "https://studio.example/chat/session?draft=1".parse().unwrap();
+            let generation = Arc::new(AtomicU64::new(2));
+            let epoch = Epoch::new(generation.clone(), 2);
+            let mut views = Views {
+                runtime: Some(RuntimeDocument {
+                    label: "main-runtime-1".into(),
+                    window: 1,
+                    destination: current.clone(),
+                    disposable: true,
+                    directory: None,
+                    owner: 1,
+                    document: 4,
+                }),
+                account: Some(AccountDocument {
+                    claim: None,
+                    claim_visibility: 0,
+                    sheet_open: SheetOpen::default(),
+                    label: "main-account-2".into(),
+                    window: 1,
+                    destination: "tauri://localhost/account/index.html".parse().unwrap(),
+                    document: 1,
+                    admitted: true,
+                    loaded: true,
+                    shown: true,
+                    token: None,
+                    returning: Some(("main-runtime-1".into(), 4)),
+                    owner: 2,
+                }),
+                ..Views::default()
+            };
+            assert!(views.check_return().is_ok());
+            // The previous ordering navigated while this receipt was live.
+            // The native navigation callback now explicitly rejects that order.
+            assert!(views.home_destination(&epoch, "main-runtime-1", &current).is_err());
+            views.account.take(); // close_account retires admission before awaiting disposal
+            if superseded_before_navigation {
+                generation.store(3, Ordering::SeqCst);
+                assert!(views.home_destination(&epoch, "main-runtime-1", &current).is_err());
+                assert_eq!(views.runtime.as_ref().unwrap().document, 4);
+            } else {
+                assert_eq!(
+                    views
+                        .home_destination(&epoch, "main-runtime-1", &current)
+                        .unwrap()
+                        .as_str(),
+                    "https://studio.example/"
+                );
+                // Navigation has started; Cancel/ReturnLocal wins before the
+                // old callback finishes. Cancel must not inspect the old receipt.
+                views.runtime.as_mut().unwrap().document += 1;
+                generation.store(3, Ordering::SeqCst);
+                assert!(epoch.check().is_err());
+            }
+            assert!(views.check_return().is_ok());
+            assert_eq!(views.displayed(), Some("main-runtime-1"));
+            assert!(views.home_destination(&epoch, "main-runtime-1", &current).is_err());
         }
     }
 

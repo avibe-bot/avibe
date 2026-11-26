@@ -3182,3 +3182,44 @@ async fn completed_sign_in_returns_to_the_committed_remote_home() {
     assert_eq!(f.http.calls.lock().unwrap().len(), calls);
     assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
 }
+
+#[tokio::test]
+async fn newer_cancel_or_return_local_supersedes_a_queued_sign_in_home() {
+    for cancel in [true, false] {
+        let f = selected_for_update().await;
+        let remote = f.client.state().connection.committed;
+        let (entered, reached) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *f.view.invalidation.lock().unwrap() = Some((entered, released));
+        let client = f.client.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let home = tokio::task::spawn_blocking(move || runtime.block_on(action(&client, ClientAction::ReturnHome)));
+        reached.await.unwrap();
+        let newer = if cancel {
+            ClientAction::Cancel
+        } else {
+            ClientAction::ReturnLocal
+        };
+        assert!(action(&f.client, newer).await.ok);
+        let accepted = f.client.state();
+        release.send(()).unwrap();
+        let reply = home.await.unwrap();
+        assert!(!reply.ok);
+        assert_eq!(reply.error.unwrap().code, "stale_generation");
+        assert_eq!(f.client.state().generation, accepted.generation);
+        assert_eq!(f.client.state().connection.committed, accepted.connection.committed);
+        if cancel {
+            assert_eq!(accepted.connection.committed, remote);
+        } else {
+            assert!(accepted.connection.committed.is_local());
+        }
+        assert_eq!(
+            *f.view.destinations.lock().unwrap(),
+            vec![if cancel {
+                RestoreDestination::Document
+            } else {
+                RestoreDestination::Local
+            }]
+        );
+    }
+}
