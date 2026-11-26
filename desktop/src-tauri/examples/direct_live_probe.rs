@@ -14,8 +14,10 @@
 //! Where the session may go. It travels with its own origin, and the probe
 //! runs only if that origin is a managed one and is exactly the origin named
 //! on the command line; otherwise it reads nothing more and sends nothing.
-//! The session is put, as the instance's own host-only secure cookie, into
-//! this process's in-memory stores, and each view is held to that origin:
+//! The session is put, as the instance's own host-only secure cookie that
+//! script cannot read, into this process's in-memory stores; each store is
+//! read back, and a session is used only where it is held in that shape.
+//! Each view is held to that origin:
 //!
 //! - a main-frame navigation is allowed for the one URL the probe asked
 //!   for, once; every other main-frame navigation is cancelled before it is
@@ -34,7 +36,8 @@
 //!
 //! 1. Controls of WebKit itself in this environment, on loopback pages of
 //!    the probe's own: a cookie of the real one's shape, with a dummy
-//!    value, stored and read back (never sent);
+//!    value, stored and read back (never sent), and one that script could
+//!    read, which the check must refuse;
 //!    a load that carries a dummy session to its origin;
 //!    a redirect to another origin and one within the origin, neither
 //!    followed; a load through a route to a CONNECT listener; and a load
@@ -635,14 +638,20 @@ mod probe {
         http_only: bool,
     }
 
-    /// Says what the store holds, and whether it is the shape the instance's
-    /// own cookie has for an origin of this scheme.
+    /// The shape the instance's own session cookie has for an origin of this
+    /// scheme: for the host alone, out of script's reach, and secure when
+    /// the origin is. A session is used only in a store that holds it so.
+    fn seeded_ok(seeded: Seeded, secure: bool) -> bool {
+        seeded.host_only && seeded.http_only && seeded.secure == secure
+    }
+
+    /// Says what the store holds, and whether it is that shape.
     fn report_seeded(report: &Report, boundary: &'static str, seeded: Option<Seeded>, secure: bool) -> bool {
         let Some(seeded) = seeded else {
             report.failed(boundary, "cookie_not_stored");
             return false;
         };
-        let ok = seeded.host_only && seeded.secure == secure;
+        let ok = seeded_ok(seeded, secure);
         report.line(
             boundary,
             json!({ "ok": ok, "host_only": seeded.host_only, "secure": seeded.secure, "http_only": seeded.http_only }),
@@ -740,6 +749,12 @@ mod probe {
         /// and secure when the origin is. Then reads the store back: what
         /// it holds under that name, or `None` when it holds nothing.
         fn seed_session(&self, name: &str, session: &str) -> Option<Seeded> {
+            self.seed_cookie(name, session, true)
+        }
+
+        /// `seed_session`, or, with `http_only` off, a cookie script can
+        /// read: only the controls make one, to see the check refuse it.
+        fn seed_cookie(&self, name: &str, session: &str, http_only: bool) -> Option<Seeded> {
             let (scheme, authority) = self.origin.split_once("://")?;
             let host = authority.split(':').next().unwrap_or("").to_owned();
             let url = format!("{}/", self.origin);
@@ -748,8 +763,10 @@ mod probe {
                 ("Value", session),
                 ("OriginURL", url.as_str()),
                 ("Path", "/"),
-                ("HttpOnly", "TRUE"),
             ];
+            if http_only {
+                entries.push(("HttpOnly", "TRUE"));
+            }
             if scheme == "https" {
                 entries.push(("Secure", "TRUE"));
             }
@@ -962,6 +979,29 @@ mod probe {
         let held = shaped.seed_session(SESSION_COOKIE, control::SESSION);
         if !report_seeded(report, "control_host_cookie_stored", held, true) {
             return false;
+        }
+        // The check itself: a cookie that script can read must be refused.
+        // One is stored, in a store of its own, and read back as such.
+        let readable = View::new(mtm, &format!("https://{}", control::ROUTED));
+        match readable.seed_cookie(SESSION_COOKIE, control::SESSION, false) {
+            Some(seeded) if !seeded.http_only && !seeded_ok(seeded, true) => {
+                report.ok("control_script_readable_cookie_refused")
+            }
+            Some(seeded) => {
+                report.failed(
+                    "control_script_readable_cookie_refused",
+                    if seeded.http_only {
+                        "flag_not_observed"
+                    } else {
+                        "accepted"
+                    },
+                );
+                return false;
+            }
+            None => {
+                report.failed("control_script_readable_cookie_refused", "cookie_not_stored");
+                return false;
+            }
         }
 
         let plain = View::new(mtm, &origin);
