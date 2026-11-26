@@ -99,6 +99,23 @@ struct DirectIrohBinding: DirectIrohEngine {
             )
         }
 
+        var selectedPathRead: DirectSelectedPathRead? {
+            guard let path = connection.paths().first(where: \.isSelected) else {
+                return nil
+            }
+            return DirectSelectedPathRead(
+                // For a relay path the far address is the relay's URL, so
+                // another relay is another path, as another address is.
+                identity: "\(path.isRelay ? "relay" : "address") \(path.remoteAddr)",
+                labels: DirectSelectedPath(
+                    isRelay: path.isRelay,
+                    isIp: path.isIp,
+                    remoteAddress: path.remoteAddr,
+                    rttMs: path.rttMs
+                )
+            )
+        }
+
         func watchSelectedPath(
             _ onChange: @escaping @Sendable (DirectPathKind?) -> Void
         ) -> (any DirectPathWatch)? {

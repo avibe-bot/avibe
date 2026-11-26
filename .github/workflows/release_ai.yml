@@ -21,6 +21,21 @@ on:
         required: false
         type: string
         default: "200"
+      unverified_job:
+        description: "RC only: the one full-backstop job that never got a runner (exact job name)"
+        required: false
+        type: string
+        default: ""
+      unverified_reason:
+        description: "RC only: why that job is accepted unverified"
+        required: false
+        type: string
+        default: ""
+      unverified_go:
+        description: "RC only: Product's go for this exception, quoted"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -38,6 +53,7 @@ jobs:
       source_sha: ${{ steps.verify.outputs.source_sha }}
       run_id: ${{ steps.verify.outputs.run_id }}
       run_attempt: ${{ steps.verify.outputs.run_attempt }}
+      unverified_line: ${{ steps.verify.outputs.unverified_line }}
     permissions:
       actions: read
       # An RC is proven from its pull request's check runs.
@@ -52,12 +68,15 @@ jobs:
           # dispatch/tag input through the API and never trusts a workflow
           # context SHA as the release source.
           ref: ${{ github.ref }}
-      - name: Require the full master backstop, or an RC's green pull request
+      - name: Require the full master backstop at the tag's exact SHA
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate
+          RELEASE_UNVERIFIED_JOB: ${{ github.event.inputs.unverified_job }}
+          RELEASE_UNVERIFIED_REASON: ${{ github.event.inputs.unverified_reason }}
+          RELEASE_UNVERIFIED_GO: ${{ github.event.inputs.unverified_go }}
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
 
   resolve-show-runtime-ref:
     needs: release-backstop
@@ -716,6 +735,7 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
+          UNVERIFIED_LINE: ${{ needs.release-backstop.outputs.unverified_line }}
         run: |
           set -euo pipefail
           SOURCE_SHA="$(git rev-parse "refs/tags/${TAG}^{commit}")"
@@ -772,6 +792,28 @@ jobs:
           if [ "$has_marker" = "true" ] && ! grep -qE "$MARKER_COMMENT_RE" release.md; then
             echo "Prepending silent-update markers (current + legacy) to the generated release notes."
             { printf '<!-- avibe:update-notification=none -->\n<!-- vibe-remote:update-notification=none -->\n\n'; cat release.md; } > release.md.tmp
+            mv release.md.tmp release.md
+          fi
+
+          # The RC's one attested unverified job, as the release gate printed it, bound to
+          # this source by a marker Stage 2 checks. Only this step writes the marker.
+          # The ready marker is re-added below, so it always closes the notes.
+          grep -v -e '^<!-- avibe:rc-unverified ' -e '^<!-- avibe:release-notes=ready ' release.md > release.md.tmp || true
+          mv release.md.tmp release.md
+          if [ -n "${UNVERIFIED_LINE:-}" ]; then
+            grep -vxF -- "$UNVERIFIED_LINE" release.md > release.md.tmp || true
+            mv release.md.tmp release.md
+            LINE_SHA256="$(printf '%s' "$UNVERIFIED_LINE" | sha256sum | cut -d' ' -f1)"
+            # Its own paragraph ahead of the generated Markdown (after any leading silent-update
+            # markers), so an unclosed block in the generated body cannot hide or garble it.
+            UNVERIFIED_MARKER="<!-- avibe:rc-unverified source=${SOURCE_SHA} sha256=${LINE_SHA256} -->" \
+              awk 'BEGIN { done = 0 }
+                   !done && $0 != "<!-- avibe:update-notification=none -->" && $0 != "<!-- vibe-remote:update-notification=none -->" && $0 != "" {
+                     print ENVIRON["UNVERIFIED_LINE"]; print ENVIRON["UNVERIFIED_MARKER"]; print ""; done = 1
+                   }
+                   { print }
+                   END { if (!done) { print ENVIRON["UNVERIFIED_LINE"]; print ENVIRON["UNVERIFIED_MARKER"] } }' \
+              release.md > release.md.tmp
             mv release.md.tmp release.md
           fi
 
@@ -891,6 +933,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Stage 2 reads any override from this tag's published notes, never from inputs.
           if ! gh workflow run desktop-release.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref master \

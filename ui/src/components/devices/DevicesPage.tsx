@@ -142,7 +142,7 @@ export function DevicesPage() {
     }
     if (!owner || devices.status !== 'fulfilled') return result;
     // A device signed out lately is no longer listed: its sign-out receipt still has its name, so the
-    // activity says the same name as 「最近退出的设备」 on the same page.
+    // activity names it rather than saying 「一台已不在列表里的设备」.
     const byId = new Map<string, string>(devices.value.signedOut.flatMap((each) => (each.deviceId && each.device ? [[each.deviceId, each.device] as const] : [])));
     for (const each of devices.value.devices) byId.set(each.id, deviceName(t, each));
     const nameOf = (id: string | undefined) => (id ? byId.get(id) ?? null : null);
@@ -216,11 +216,13 @@ export function DevicesPage() {
   // An evaluation that is running, and a connector still starting or connecting, are followed until they end.
   const startingStill = justStarted && Boolean(status) && (!status?.paired || !hostOf(status) || !(status.running || status.pid_state === 'unknown'));
   const connecting = startingStill || (Boolean(status?.running) && tunnelFromStatus(status, now, justStarted).state === 'connecting');
+  // An unbinding the instance carries on with is followed too, until it settles.
+  const unbinding = snapshot.unbind?.state === 'unbinding';
   useEffect(() => {
-    if (!recovering && !connecting) return undefined;
+    if (!recovering && !connecting && !unbinding) return undefined;
     const timer = window.setInterval(() => { void load(); }, FOLLOW_MS);
     return () => window.clearInterval(timer);
-  }, [connecting, load, recovering]);
+  }, [connecting, load, recovering, unbinding]);
 
   const activity = feed.items;
   const nextCursor = feed.cursor;
@@ -415,7 +417,7 @@ export function DevicesPage() {
         const gone = new Set(answer.signedOut.flatMap((each) => (each.deviceId ? [each.deviceId] : [])));
         // The device in use stays even when a sibling sign-in on it was ended, and the computer itself too.
         setSnapshot((current) => ({ ...current, devices: current.devices.filter((each) => each.self || each.kind === 'host' || !gone.has(each.id)) }));
-        // One line; a device among them left signed in to the account says so in 「最近退出的设备」.
+        // One line, whatever avibe.bot did; the sign-outs also appear in 最近活动.
         showToast(t('devices.signedOut.toastOthers'), 'success');
       });
     }
@@ -464,8 +466,13 @@ export function DevicesPage() {
       viewerAccount={selfAccount}
       bulk={snapshot.bulk}
       unlinkedHealth={snapshot.unlinkedHealth}
-      signedOut={snapshot.signedOut}
       unrecognizedChange={unrecognizedChange}
+      // 「解除绑定」 as the instance reports it: running, or done, with the name it had and its day
+      // (30 days where the instance gives none).
+      unbind={snapshot.unbind?.state === 'unbinding' ? { state: 'unbinding' }
+        : snapshot.unbind?.state === 'unbound'
+          ? { state: 'done', host: snapshot.unbind.host, releaseAt: snapshot.unbind.releaseAt, holdDays: 30 }
+          : undefined}
       proxyAccess={snapshot.proxyAccess}
       rebindOffered={rebindOffered}
       problem={problem}

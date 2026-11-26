@@ -104,6 +104,14 @@ select_unit_test_files() {
     --budget-floor="$FILE_TIMEOUT" "$SHARD_INDEX" "$SHARD_TOTAL"
 }
 
+# Materialize the plan before starting pytest. A process substitution loses
+# its producer's exit status and can turn a broken planner into an empty pass.
+plan=$(mktemp) || exit 1
+trap 'rm -f "$plan"' EXIT
+select_unit_test_files > "$plan" || { echo 'Unit file planning failed' >&2; exit 1; }
+planned=$(wc -l < "$plan") || exit 1
+if [ "$planned" -eq 0 ]; then echo 'Empty unit file plan' >&2; exit 1; fi
+passed=0
 failed=""
 empty=""
 selected=0
@@ -119,7 +127,7 @@ while IFS=$'\t' read -r f budget baseline; do
   else
     echo "Starting $f (timeout ${budget}s)."
   fi
-  "${PYTEST[@]}" "$budget" "$f" -m "not integration" -p no:randomly -p no:faulthandler -o addopts="" -v
+  "${PYTEST[@]}" "$budget" "$f" -m "not integration" -p no:randomly -p no:faulthandler -o addopts="" -v </dev/null
   rc=$?
   finished_at=$(date +%s)
   elapsed=$((finished_at - started_at))
@@ -139,14 +147,15 @@ while IFS=$'\t' read -r f budget baseline; do
     echo "    Before blaming the named test, compare the 'Finished ... in Ns' lines in this shard against scripts/ci_unit_test_timings.json: if they are slow across the board, the runner was slow, not this file."
   fi
   if [ "$rc" -eq 0 ]; then
-    :
+    passed=$((passed + 1))
   elif [ "$rc" -eq 5 ]; then
     # exit 5 = no tests collected (e.g. a file that is entirely integration-marked)
     empty="$empty $f"
   else
     failed="$failed $f"
   fi
-done < <(select_unit_test_files)
+done < "$plan"
+if [ "$selected" -ne "$planned" ]; then echo 'Incomplete unit file plan execution' >&2; exit 1; fi
 
 discovered=$(find tests -name 'test_*.py' -not -path 'tests/e2e/*' | sort | wc -l | tr -d ' ')
 
@@ -162,4 +171,5 @@ if [ -n "$failed" ]; then
   for f in $failed; do echo "  $f"; done
   exit 1
 fi
+if [ "$passed" -eq 0 ]; then echo 'No unit file passed in this lane' >&2; exit 1; fi
 echo "All unit test files passed."

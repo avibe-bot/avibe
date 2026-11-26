@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { RemoteAccessStatus } from '@/context/ApiContext';
 import {
   activityFromWire, addressFromWire, claimProblem, connectionFromWire, devicesFromWire, rebindFromWire, rebindRefusal, rebindUnavailable,
-  renameRefusal, signedOutFromWire, tunnelFromStatus,
+  renameRefusal, signedOutFromWire, tunnelFromStatus, unbindFromWire,
 } from './wire';
 
 // Contracts: docs/plans/instance-device-registry.md, device-functions-activity.md,
@@ -119,27 +119,11 @@ describe('devicesFromWire', () => {
 });
 
 describe('signedOutFromWire', () => {
-  const receipt = (results: unknown[], extra: Record<string, unknown> = {}) => signedOutFromWire({ operation_id: 'o1', display_name: 'Chrome', kind: 'browser', account_results: results, ...extra });
-
-  it('never reads an accepted request as an ended sign-in, and keeps what it does not know unknown', () => {
-    expect(receipt([{ status: 'pending', reason: 'queued' }])?.results).toEqual(['queued']);
-    expect(receipt([{ status: 'pending', reason: 'retrying' }])?.results).toEqual(['retrying']);
-    expect(receipt([{ status: 'accepted', reason: null }])?.results).toEqual(['accepted']);
-    expect(receipt([{ status: 'not_applicable', reason: 'no_reference' }, { status: 'not_applicable', reason: 'not_eligible' }, { status: 'not_applicable', reason: 'binding_changed' }])?.results).toEqual(['localOnly']);
-    expect(receipt([{ status: 'not_applicable', reason: 'shared_sign_in' }])?.results).toEqual(['sharedSignIn']);
-    expect(receipt([{ status: 'not_applicable', reason: 'keeper_unknown' }])?.results).toEqual(['keeperUnknown']);
-    expect(receipt([{ status: 'refused', reason: 'credential' }])?.results).toEqual(['refusedCredential']);
-    expect(receipt([{ status: 'refused', reason: 'protocol' }])?.results).toEqual(['refused']);
-    expect(receipt([{ status: 'unconfirmed', reason: 'retry_exhausted' }])?.results).toEqual(['unconfirmed']);
-    expect(receipt([{ status: 'ended' }, {}])?.results).toEqual(['unknown']);
-  });
-
-  it('knows whose device it was only when the instance says so', () => {
-    expect(receipt([], { group: 'mine' })?.owner).toBe('mine');
-    expect(receipt([], { group: 'others' })?.owner).toBe('others');
-    expect(receipt([], { group: null })?.owner).toBe('unknown');
-    expect(receipt([])?.owner).toBe('unknown');
-    expect(receipt([], { group: 'unattributed' })?.owner).toBe('unknown');
+  it('keeps only which device it was and its name, from a receipt with an id', () => {
+    expect(signedOutFromWire({ operation_id: 'o1', device_id: 'chrome', display_name: 'Chrome', kind: 'browser', group: 'mine',
+      account_results: [{ status: 'accepted' }] })).toEqual({ deviceId: 'chrome', device: 'Chrome' });
+    expect(signedOutFromWire({ operation_id: 'o2' })).toEqual({ deviceId: undefined, device: null });
+    expect(signedOutFromWire({ display_name: 'no id' })).toBeNull();
   });
 });
 
@@ -212,6 +196,22 @@ describe('tunnelFromStatus', () => {
     expect(read({ tunnel_quality: sample() }, NOW + 200_000).state).toBe('unknown');
     expect(read({ paired: false, running: false }).state).toBe('unknown');
     expect(tunnelFromStatus(null).state).toBe('unknown');
+  });
+});
+
+describe('unbindFromWire', () => {
+  it('reads what the instance reports about unbinding, and nothing it does not know', () => {
+    expect(unbindFromWire({ state: 'unbinding' })).toEqual({ state: 'unbinding' });
+    expect(unbindFromWire({ state: 'unbound' })).toEqual({ state: 'unbound' });
+    expect(unbindFromWire({ state: 'unbound', host: 'max-app.avibe.bot', release_at: '2026-12-25T00:00:00Z' })).toEqual({ state: 'unbound', host: 'max-app.avibe.bot', releaseAt: '2026-12-25T00:00:00.000Z' });
+    expect(unbindFromWire({ state: 'unbound', host: null, release_at: null })).toEqual({ state: 'unbound' });
+    expect(unbindFromWire({ state: 'reset_repair_required' })).toEqual({ state: 'repair' });
+    expect(unbindFromWire({ state: 'not_unbound', reason_code: 'ineligible' })).toEqual({ state: 'notUnbound', reason: 'ineligible' });
+    expect(unbindFromWire({ state: 'not_unbound', reason_code: 'invalid_credential' })).toEqual({ state: 'notUnbound', reason: 'invalidCredential' });
+    expect(unbindFromWire({ state: 'not_unbound', reason_code: 'other' })).toBeUndefined();
+    expect(unbindFromWire({ state: 'later' })).toBeUndefined();
+    expect(unbindFromWire(undefined)).toBeUndefined();
+    expect(devicesFromWire({ mine: [], unbind: { state: 'unbinding' } }).unbind).toEqual({ state: 'unbinding' });
   });
 });
 

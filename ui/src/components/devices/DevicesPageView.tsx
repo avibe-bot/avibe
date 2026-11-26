@@ -22,17 +22,17 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { KeptTail } from '../ui/kept-tail';
 import { SegmentedRadio } from '../ui/segmented';
 import { OpenNewAddress } from './OpenNewAddress';
-import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, signedInText, timeParts, unrecognized, upperFirst } from './format';
+import { clientText, connectionText, deviceName, deviceTime, healthText, joinParts, longDay, signedInText, timeParts, unrecognized, upperFirst } from './format';
 import { BackToDevices, Confirm, IconTile, Notice, OptimizeRow } from './parts';
 import { SUPPORT_EMAIL } from '@/lib/support';
-import { claimProblemText } from './texts';
+import { claimProblemText, unbindNameKeptText } from './texts';
 import {
   RECENT_ACTIVITY_LIMIT, TESTFLIGHT_INVITE_URL, activityText, functionControl, instanceUrl, lockedOutCount,
   newestFirst, othersSignedIn, remoteDevices, signOutNeedsConfirm,
 } from './rules';
 import type {
   AddKind, Device, DeviceActivity, DeviceFunction, DevicesConfirm, FunctionKind, OptimizeState, ProxyAccess, Reach,
-  SignedOutDevice, UnlinkedHealth,
+  UnlinkedHealth,
 } from './types';
 
 const functionKeys = {
@@ -101,11 +101,11 @@ export type DevicesPageViewProps = DevicesPageActions & {
    *  every remote device. Null: nothing to sign out in bulk. */
   bulk?: 'other_sessions' | 'all_remote' | null;
   unlinkedHealth?: UnlinkedHealth[];
-  /** Devices signed out lately, each with what avibe.bot did about its account sign-in. */
-  signedOut?: SignedOutDevice[];
-  /** The answer of a sign-out just made on this page. */
   /** The address was changed somewhere else, with this computer's device key. */
   unrecognizedChange?: { hostname: string };
+  /** 「解除绑定」 as the Devices page says it: running (it continues by itself), or just done, with
+   *  the name it had and how long that stays the account's. */
+  unbind?: { state: 'unbinding' } | { state: 'done'; host?: string; releaseAt?: string; holdDays?: number };
   /** This instance has binding again (the row on 「连接方式」 and `vibe remote rebind`). On a build
    *  before it, no sentence points there. */
   rebindOffered?: boolean;
@@ -577,26 +577,11 @@ function UnlinkedHealthPanel({ items, onDisconnect }: { items: UnlinkedHealth[];
   );
 }
 
-/** Devices signed out lately: their names, and nothing more (owner, 2026-11-25). */
-function SignedOutPanel({ rows }: { rows: SignedOutDevice[] }) {
-  const { t } = useTranslation();
-  return (
-    <SettingsPanel title={t('devices.signedOut.title')}>
-      {rows.map((row) => (
-        <div key={row.id} className="flex items-center gap-3 border-b border-border px-5 py-3 last:border-b-0">
-          <LogOut className="size-4 shrink-0 text-muted" />
-          <div className="min-w-0 flex-1 text-[13px] font-medium text-foreground">{row.device ?? t('devices.kindName.unrecognized')}</div>
-        </div>
-      ))}
-    </SettingsPanel>
-  );
-}
-
 export function DevicesPageView({
-  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [], signedOut = [],
-  unrecognizedChange, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
+  reach, devices, list, activity = [], moreActivity, viewer = 'owner', operate = false, optimize, viewerAccount, bulk = null, unlinkedHealth = [],
+  unrecognizedChange, unbind, rebindOffered = true, problem, proxyAccess, detail, confirm, busy, view = 'page', add, ...actions
 }: DevicesPageViewProps) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   // The notice about an address changed elsewhere sends the owner to binding again (and then
   // 「更改域名」) only where this instance has binding again.
   const outsideWayOut = rebindOffered;
@@ -678,6 +663,22 @@ export function DevicesPageView({
       subtitle={owner ? t('devices.subtitle') : t('devices.subtitleMemberPlain')}
       activeTab="remote-access"
     >
+      {owner && unbind?.state === 'unbinding' && (
+        <Notice tone="plain">
+          <div className="flex items-center gap-2 text-[13px] text-foreground">
+            <LoaderCircle className="size-4 shrink-0 text-muted motion-safe:animate-spin" />
+            {t('devices.unbind.unbinding')}
+          </div>
+        </Notice>
+      )}
+      {owner && unbind?.state === 'done' && (
+        <Notice tone="plain">
+          <div className="text-balance text-[14px] font-semibold">{t('devices.unbind.done')}</div>
+          {unbind.host && (
+            <p className="mt-1"><KeptTail text={unbindNameKeptText(t, unbind.host, unbind.releaseAt ? longDay(unbind.releaseAt, i18n.language) : undefined, unbind.holdDays)} /></p>
+          )}
+        </Notice>
+      )}
       {owner && unrecognizedChange && (outsideWayOut ? (
         <Notice tone="danger" action={<Button variant="destructive" size="sm" onClick={actions.onOpenRebind}>{t('devices.outsideChange.action')}</Button>}>
           <div className="text-balance text-[14px] font-semibold">{t('devices.outsideChange.title')}</div>
@@ -701,7 +702,8 @@ export function DevicesPageView({
           the notice below says so, and the card does not add "cannot be read" to it. After this
           device shut itself out with 「只允许这台电脑」 nothing here can be asked of the instance any
           more, whatever was last read: the card and its 「开启远程访问」 are not offered. */}
-      {owner && problem !== 'restrictedFromAfar' && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
+      {/* While an unbinding runs, the notice above is all there is to say about remote access. */}
+      {owner && unbind?.state !== 'unbinding' && problem !== 'restrictedFromAfar' && !((problem === 'offFromAfar' || problem === 'closedFromAfar') && reach.state === 'unknown') && <ReachCard reach={reach} terminal={rebindOffered} actions={actions} />}
       {!owner && operate && (reach.state === 'on' || reach.state === 'paused') && <ReachCard reach={reach} operate optimize={optimize} actions={actions} />}
       {problem && (
         <Notice action={<Button variant="ghost" size="xs" onClick={actions.onDismissNotice}>{t('devices.notice.dismiss')}</Button>}>
@@ -785,7 +787,6 @@ export function DevicesPageView({
       )}
 
       {unlinkedHealth.length > 0 && <UnlinkedHealthPanel items={unlinkedHealth} onDisconnect={actions.onDisconnectHealth} />}
-      {signedOut.length > 0 && <SignedOutPanel rows={signedOut} />}
 
       {owner && latest.length > 0 && (
         <SettingsPanel

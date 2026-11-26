@@ -272,6 +272,11 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   );
   // Safari installs the top-level document, never an embedded Workbench Show.
   if (window.top !== window.self || standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
+  const userAgent = navigator.userAgent || '';
+  const ios = /iP(hone|ad|od)/.test(userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  // Mac users install through Safari or the share panel; never alter the Show body.
+  if (/Macintosh|Mac OS X/.test(userAgent) && !ios) return;
   const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
   const readPreference = () => {
     try {
@@ -372,24 +377,14 @@ _SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
   shadow.append(wrap);
   document.body.append(root);
 
-  const userAgent = navigator.userAgent || '';
-  const ios = /iP(hone|ad|od)/.test(userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
     !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
-  const mac = /Macintosh|Mac OS X/.test(userAgent) && !ios;
   if (ios) {
     button.textContent = copy.iosCta || copy.cta || 'Add to Home Screen';
-  } else if (mac) {
-    button.textContent = copy.macCta || copy.cta || 'Add to Dock';
   }
   if (ios && safari) {
     title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
     body.textContent = copy.iosBody || '';
-    steps.hidden = true;
-  } else if (mac && safari) {
-    title.textContent = copy.macTitle || copy.title || 'Add to Dock';
-    body.textContent = copy.macBody || '';
     steps.hidden = true;
   } else {
     title.textContent = copy.title || 'Add this Show Page';
@@ -953,7 +948,7 @@ def _is_mutation_guard_exempt() -> bool:
 
 def _is_cli_direct_suspend_request() -> bool:
     return (
-        request.path == "/api/remote-access/direct/suspend"
+        request.path in ("/api/remote-access/direct/suspend", "/api/remote-access/direct/release")
         and _is_direct_loopback_connection()
         and not _is_direct_ingress_request()
         and _cli_local_event_token_ok()
@@ -9290,9 +9285,26 @@ def remote_access_direct_suspend():
         return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
     from vibe import direct_lifecycle
 
-    if direct_lifecycle.stop_for_pairing_change(timeout_seconds=10.0):
-        return jsonify({"ok": True, "stopped": True})
+    token = direct_lifecycle.suspend_for_pairing_change(timeout_seconds=10.0)
+    if token is not False:
+        return jsonify({"ok": True, "stopped": True, **({"token": token} if isinstance(token, str) else {})})
     return jsonify({"ok": False, "error": "direct_suspend_unavailable"}), 503
+
+
+@app.route("/api/remote-access/direct/release", methods=["POST"])
+def remote_access_direct_release():
+    """Undo that stop when the binding change it fenced was refused and nothing changed."""
+
+    if not _is_cli_direct_suspend_request():
+        return jsonify({"ok": False, "error": "direct_suspend_forbidden"}), 403
+    from vibe import direct_lifecycle
+
+    body = request.get_json(silent=True)
+    token = body.get("token") if isinstance(body, dict) and set(body) == {"token"} else None
+    if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    direct_lifecycle.release_pairing_suspension(token)
+    return jsonify({"ok": True})
 
 
 def _remote_status_for_viewer(payload: dict) -> dict:
@@ -9392,6 +9404,7 @@ def direct_rendezvous():
             client_endpoint_id=payload["client_endpoint_id"],
         )
     rendezvous_state.log_listener_faults(payload.get("listener_faults"))
+    rendezvous_state.log_slow_store_removals(payload.get("slow_store_removals_ms"))
     response = jsonify(result)
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -9593,7 +9606,27 @@ def rebind_reset_confirm(claim_id):
     return _rebind_reset_route(claim_id, preview=False)
 
 
-def _rebind_reset_route(claim_id, *, preview):
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset/unbind/preview', methods=['POST'])
+def rebind_unbind_preview(claim_id):
+    return _rebind_reset_route(claim_id, preview=True, action='unbind')
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset/unbind', methods=['POST'])
+def rebind_unbind_confirm(claim_id):
+    return _rebind_reset_route(claim_id, preview=False, action='unbind')
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset/local-after-refusal/preview', methods=['POST'])
+def rebind_local_refusal_preview(claim_id):
+    return _rebind_reset_route(claim_id, preview=True, action='local_after_refusal')
+
+
+@app.route('/api/remote-access/rebind/claims/<claim_id>/reset/local-after-refusal', methods=['POST'])
+def rebind_local_refusal_confirm(claim_id):
+    return _rebind_reset_route(claim_id, preview=False, action='local_after_refusal')
+
+
+def _rebind_reset_route(claim_id, *, preview, action='legacy'):
     from vibe.personal_claim_client import ClaimError
 
     def reset(service):
@@ -9605,8 +9638,9 @@ def _rebind_reset_route(claim_id, *, preview):
                   for name, _, value in [item.strip().partition('=')] if name == 'avibe_rebind_initiator']
         if len(tokens) != 1:
             raise ClaimError('reset_not_eligible')
-        result = service.reset_request(claim_id, request.host_url.rstrip('/'), tokens[0], confirmation=body.get('confirmation_id'))
-        return jsonify(result), 202 if result.get('state') == 'resetting' else 200
+        result = service.reset_request(claim_id, request.host_url.rstrip('/'), tokens[0], action=action,
+                                       confirmation=body.get('confirmation_id'))
+        return jsonify(result), 202 if result.get('state') in ('unbinding', 'resetting') else 200
 
     return _claim_route(reset, constrained=True)
 
@@ -10151,6 +10185,13 @@ def _owner_proxy_fields():
     return policy.projection() if policy is not None else {}
 
 
+def _device_owner_fields():
+    from vibe import binding_unbind
+    fields = _owner_proxy_fields()
+    state = binding_unbind.device_state(_load_remote_access_config())
+    return {**fields, 'unbind': state} if state is not None else fields
+
+
 @app.route('/api/devices', methods=['GET'])
 async def device_list():
     from storage import device_catalog
@@ -10168,7 +10209,7 @@ async def device_list():
         config = _load_remote_access_config()
         if config and binding_state(config) is BindingState.UNBOUND and _is_setup_host_request(config):
             context = _request_authorization_context()
-            fields = await asyncio.to_thread(_owner_proxy_fields) if context and context.is_instance_owner else {}
+            fields = await asyncio.to_thread(_device_owner_fields) if context and context.is_instance_owner else {}
             return jsonify({'mine': [host], 'others': [], 'unattributed': [], 'bulk_action': None, 'recent_sign_outs': [], **fields})
         return jsonify({'error': 'device_access_forbidden'}), 403
     binding, subject, owner, caller = viewer
@@ -10203,7 +10244,7 @@ async def device_list():
         if effective=='ready' and await internal_client.health_identity() is None:
             effective = 'unavailable'
         host['functions'] = [{'kind':'computerUse','fixed':True,'can_change':False,'on':status.enabled,'status':effective}]
-    fields = await asyncio.to_thread(_owner_proxy_fields) if owner else {}
+    fields = await asyncio.to_thread(_device_owner_fields) if owner else {}
     return jsonify({**groups, **fields, 'unlinked_health':unlinked, 'recent_sign_outs':history, 'bulk_action': ('other_sessions' if caller else 'all_remote') if binding else None})
 
 
@@ -10347,6 +10388,70 @@ def device_sign_out(device_id=None):
     if caller in ids:
         _clear_remote_browser_cookie(response)
     return response
+
+
+_unbind_confirmations = {}
+_unbind_confirmation_lock = threading.Lock()
+
+
+def _unbind_request(*, preview):
+    from vibe import binding_admission, binding_reset
+    from vibe.authorization import current_invocation_authority
+    from vibe.personal_claim_client import ClaimError
+
+    def answer(body, status):
+        return _instance_address_response(body, status)
+
+    viewer = _device_viewer()
+    if (not viewer or not viewer[2] or current_invocation_authority() is not None
+            or 'X-Avibe-Delegated-Caller' in request.headers):
+        return answer({'error': 'owner_required'}, 403)
+    origin = _current_origin()
+    csrf = request.headers.get(CSRF_HEADER_NAME, '')
+    cookie = request.cookies.get(CSRF_COOKIE_NAME, '')
+    if (request.headers.getlist('Origin') != [origin] or not csrf or not csrf.isascii() or not cookie.isascii()
+            or not hmac.compare_digest(csrf, cookie)):
+        return answer({'error': 'browser_confirmation_required'}, 403)
+    if request.headers.get('Content-Type', '').partition(';')[0].strip().lower() != 'application/json':
+        return answer({'error': 'invalid_request'}, 400)
+    body = request.json
+    if not isinstance(body, dict) or set(body) != (set() if preview else {'confirmation_id'}):
+        return answer({'error': 'invalid_request'}, 400)
+    actor = (*viewer, origin, hashlib.sha256(csrf.encode()).digest())
+    try:
+        if preview:
+            evidence = binding_reset.unbind_snapshot()
+            key = secrets.token_urlsafe(32)
+            with _unbind_confirmation_lock:
+                now = time.monotonic()
+                for old in list(_unbind_confirmations):
+                    if _unbind_confirmations[old][0] <= now:
+                        del _unbind_confirmations[old]
+                if len(_unbind_confirmations) >= 256:
+                    return answer({'error': 'rate_limited'}, 429)
+                _unbind_confirmations[key] = (now + 120, actor, evidence)
+            return answer({'confirmation_id': key, 'instance_id': evidence['instance']}, 200)
+        key = body['confirmation_id']
+        with _unbind_confirmation_lock:
+            entry = _unbind_confirmations.get(key) if isinstance(key, str) and len(key) <= 64 else None
+            if not entry or entry[0] <= time.monotonic() or entry[1] != actor:
+                return answer({'error': 'confirmation_expired'}, 409)
+            del _unbind_confirmations[key]
+        return answer(binding_reset.accept_unbind(entry[2]), 202)
+    except binding_admission.OperationBusy:
+        return answer({'error': 'operation_in_progress'}, 409)
+    except ClaimError as exc:
+        return answer({'error': exc.code}, 409)
+
+
+@app.route('/api/remote-access/unbind/preview', methods=['POST'])
+def unbind_preview():
+    return _unbind_request(preview=True)
+
+
+@app.route('/api/remote-access/unbind/commit', methods=['POST'])
+def unbind_commit():
+    return _unbind_request(preview=False)
 
 
 def _instance_address_actor() -> tuple[str, ...] | None:

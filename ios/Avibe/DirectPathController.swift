@@ -1381,6 +1381,53 @@ final class DirectPathController {
         return plan
     }
 
+    /// For a measurement only (`DirectMeasure.swift`): the path usable for
+    /// the instance at `url`, under the conditions a plan's direct candidate
+    /// has, or nil. What it gives opens streams over that path and says
+    /// whether everything it was made under still holds. It makes no plan
+    /// and records nothing: no race, failure, stickiness, closure or count
+    /// is touched by a measurement.
+    ///
+    /// Which path it is, and its labels, are the transport's own reading at
+    /// this moment (`DirectMarkedPath`), not `currentPath`: the transport
+    /// may have found a move this controller is told of a turn later, and
+    /// the labels must be those of the path the mark is of. For the same
+    /// reason the status's `sequence` is no part of the fence: it advances
+    /// when that news arrives, and for closures and preferences, none of
+    /// which is a change of the path.
+    func measurementLink(forInstanceURL url: URL) -> DirectMeasureLink? {
+        let transport = transport
+        guard
+            let authority = DirectAuthority(instanceURL: url),
+            let tag = directStreamTag(for: authority),
+            let marked = transport.markedPath
+        else {
+            return nil
+        }
+        let fence = Fence(
+            selection: selection,
+            pathGeneration: pathGeneration,
+            accountEpoch: accountEpoch
+        )
+        let mark = marked.mark
+        return DirectMeasureLink(
+            authority: authority,
+            kind: marked.path.kind,
+            local: marked.path.local,
+            relayRegion: marked.path.relayRegion,
+            open: {
+                try await transport.openStream(for: tag)
+            },
+            isCurrent: { [weak self] in
+                guard let self else {
+                    return false
+                }
+                return self.isCurrent(fence, lease: tag.target.runtime)
+                    && transport.markedPath?.mark == mark
+            }
+        )
+    }
+
     /// A sticky direct attempt did not answer within its bound. Plans hedge
     /// again, at once. The path is not reported as failed: no probe is
     /// started and nothing it carries is closed, so a request already

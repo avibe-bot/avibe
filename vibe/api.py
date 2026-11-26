@@ -103,6 +103,8 @@ from vibe.upgrade import (
     get_latest_version_info,
     prerelease_updates_enabled,
     get_running_vibe_path,
+    exact_release_spec,
+    has_newer_version,
     get_safe_cwd,
     format_activation_failures,
     get_deferred_activation_log_path,
@@ -7913,11 +7915,15 @@ def get_version_info() -> dict:
     return result
 
 
-def do_upgrade(auto_restart: bool = True) -> dict:
+def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> dict:
     """Perform upgrade to latest version.
 
     Args:
         auto_restart: If True, restart vibe after successful upgrade
+        target_version: The release the caller resolved (the periodic check,
+            or an update notification's button). Exactly that release is
+            installed, and nothing when it is not newer than the running one.
+            Without it, an explicit upgrade takes the newest release.
 
     Returns:
         {
@@ -7939,7 +7945,42 @@ def do_upgrade(auto_restart: bool = True) -> dict:
         }
 
     current_vibe_path = get_running_vibe_path()
-    version_info = get_version_info()
+    if target_version is None or get_build_identity().kind == "source":
+        version_info = get_version_info()
+    else:
+        from vibe import __version__
+
+        if not has_newer_version(target_version, __version__):
+            return {
+                "ok": False,
+                "code": "no_update",
+                "message": "Already up to date.",
+                "output": None,
+                "activation_notice": None,
+                "restarting": False,
+            }
+        # Exactly the target: an unpinned upgrade would take the newest release, silent or not.
+        try:
+            version_info = {"latest": target_version, "package_spec": exact_release_spec(target_version)}
+        except LookupError as exc:
+            # Not a published, installable release (yanked, absent, or not a version at all).
+            return {
+                "ok": False,
+                "code": "no_update",
+                "message": "That release is not available.",
+                "output": str(exc),
+                "activation_notice": None,
+                "restarting": False,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "code": "update_check_failed",
+                "message": "Update check failed.",
+                "output": str(exc),
+                "activation_notice": None,
+                "restarting": False,
+            }
     try:
         plan = build_upgrade_plan(
             vibe_path=current_vibe_path,

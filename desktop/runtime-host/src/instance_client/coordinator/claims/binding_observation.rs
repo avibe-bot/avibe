@@ -94,7 +94,8 @@ impl Coordinator {
         epoch: Epoch,
     ) -> Result<BindingObservation<'_>> {
         let source = host
-            .claim_source()
+            .live_claim_source()
+            .await
             .ok_or_else(|| ClientError::new("local_runtime_upgrade_required"))?;
         let until = Instant::now() + Duration::from_secs(60);
         let (stop, mut stopped) = oneshot::channel();

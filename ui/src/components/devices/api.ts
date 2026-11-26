@@ -61,6 +61,11 @@ async function call<T = Record<string, unknown>>(path: string, init: { method?: 
     if (response.ok || GATEWAY_STATUS(response.status)) throw new LostAnswer();
   }
   if (!response.ok) {
+    // A gateway's own JSON (Cloudflare's problem details when the request asked for JSON: a numeric
+    // `error_code` and an `error_name`) has neither an `error` nor a `code` of the instance's: the
+    // instance did not answer, so the outcome is not known. The instance's own answers carry one of
+    // them (its claim routes answer `{state: 'error', code}`), and stay refusals.
+    if (GATEWAY_STATUS(response.status) && typeof body.error !== 'string' && typeof body.code !== 'string') throw new LostAnswer();
     const code = typeof body.error === 'string' ? body.error : typeof body.code === 'string' ? body.code : `http_${response.status}`;
     throw new DevicesApiError(response.status, code, body);
   }
@@ -222,17 +227,35 @@ export const devicesApi = {
   startRebind: async (locale: string) => claimForm(await post('/api/remote-access/rebind/claims', { locale })),
   rebindClaim: async (id: string) => claimState(await get(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}`)),
   cancelRebind: async (id: string) => { await post(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}/cancel`); },
-  previewReset: async (id: string): Promise<{ confirmationId: string; healthConnected: boolean }> => {
-    const body = await post(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}/reset/preview`);
+  /**
+   * Binding as a new computer, previewed. `unbind`: the binding at avibe.bot is deleted first.
+   * `localAfterRefusal`: after avibe.bot refused that because this computer's key no longer works,
+   * clear this computer only. (The older local-only reset answers `reload_required` now.)
+   */
+  previewReset: async (id: string, action: ResetAction): Promise<{ confirmationId: string; healthConnected: boolean }> => {
+    const body = await post(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}/reset${resetPath[action]}/preview`);
     if (typeof body.confirmation_id !== 'string') throw new LostAnswer();
     return { confirmationId: body.confirmation_id, healthConnected: body.health_connected === true };
   },
-  /** `unpaired` only when the reset finished; `resetting` when Avibe carries on with it. */
-  reset: async (id: string, confirmationId: string): Promise<'unpaired' | 'resetting'> => {
-    const body = await post(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}/reset`, { confirmation_id: confirmationId });
-    return body.state === 'unpaired' ? 'unpaired' : 'resetting';
+  /** `unpaired` only when the reset finished; `resetting` when Avibe carries on with it;
+   *  `unbinding` when it is deleting the binding at avibe.bot first. */
+  reset: async (id: string, confirmationId: string, action: ResetAction): Promise<'unpaired' | 'resetting' | 'unbinding'> => {
+    const body = await post(`/api/remote-access/rebind/claims/${encodeURIComponent(id)}/reset${resetPath[action]}`, { confirmation_id: confirmationId });
+    return body.state === 'unpaired' ? 'unpaired' : body.state === 'unbinding' ? 'unbinding' : 'resetting';
+  },
+
+  /** 「解除绑定」: a single-use confirmation, then the instance takes it over (202). */
+  unbindPreview: async (): Promise<string> => {
+    const body = await post('/api/remote-access/unbind/preview');
+    if (typeof body.confirmation_id !== 'string') throw new LostAnswer();
+    return body.confirmation_id;
+  },
+  unbindCommit: async (confirmationId: string): Promise<void> => {
+    await post('/api/remote-access/unbind/commit', { confirmation_id: confirmationId });
   },
 };
 
 export type DevicesApi = typeof devicesApi;
+export type ResetAction = 'unbind' | 'localAfterRefusal';
+const resetPath = { unbind: '/unbind', localAfterRefusal: '/local-after-refusal' } as const satisfies Record<ResetAction, string>;
 export type { DeviceFunction };

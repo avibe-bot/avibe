@@ -19,11 +19,16 @@ const ORIGIN: &str = "http://127.0.0.1:40123";
 struct Fixture {
     root: PathBuf,
     case: &'static str,
+    /// Nothing answers at the origin: the Runtime is restarting.
+    down: Arc<std::sync::atomic::AtomicBool>,
 }
 #[async_trait::async_trait]
 impl HealthProbe for Fixture {
     async fn presence(&self, origin: &LoopbackOrigin, _: Option<&str>) -> Presence {
         assert_eq!(origin.as_str(), ORIGIN);
+        if self.down.load(Ordering::SeqCst) {
+            return Presence::Absent;
+        }
         Presence::Unmanaged
     }
 }
@@ -71,6 +76,40 @@ impl Transport for Wire {
         assert!(!r.headers.contains_key(AUTHORIZATION));
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         eprintln!("observation fixture: transport call {call}");
+        if matches!(self.case, "old_cli" | "exits") {
+            // The pipe ended before its first frame: the Runtime is asked
+            // whether it has the claim route at all (an owner POST, as a GET
+            // reaches the static catch-all), and nothing else.
+            if call == 0 {
+                assert_eq!(
+                    (r.method, r.url.as_str()),
+                    (Method::GET, "http://127.0.0.1:40123/api/csrf-token")
+                );
+                headers.insert(SET_COOKIE, "vibe_csrf_token=probe; Path=/".parse().unwrap());
+                return Ok(Response {
+                    status: 200,
+                    body: br#"{"csrf_token":"probe"}"#.to_vec(),
+                    headers,
+                });
+            }
+            assert_eq!(call, 1);
+            assert_eq!(
+                (r.method, r.url.as_str(), r.body),
+                (
+                    Method::POST,
+                    "http://127.0.0.1:40123/api/desktop/claim/v1/admit",
+                    Some(json!({}))
+                )
+            );
+            assert_eq!(r.headers["x-vibe-csrf-token"], "probe");
+            // Missing: the unknown-API answer. Present: the handler refuses the empty body.
+            let status = if self.case == "old_cli" { 404 } else { 400 };
+            return Ok(Response {
+                status,
+                body: vec![],
+                headers,
+            });
+        }
         let (status, body) = match call {
             0 => {
                 assert_eq!(
@@ -116,6 +155,11 @@ impl Transport for Wire {
         Ok(Response { status, body, headers })
     }
 }
+/// One shell monitor probe while the Runtime is (or is no longer) down.
+async fn monitor_probe(host: &RuntimeHost, flag: &std::sync::atomic::AtomicBool, origin: &LoopbackOrigin, down: bool) {
+    flag.store(down, Ordering::SeqCst);
+    assert_eq!(host.is_serving(origin).await, !down);
+}
 fn request(generation: u64, action: Value) -> ClaimRequest {
     serde_json::from_value(json!({"expected_generation":generation,"action":action})).unwrap()
 }
@@ -124,7 +168,9 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     let fixture = Arc::new(Fixture {
         root: root.path().to_owned(),
         case,
+        down: Arc::default(),
     });
+    let down = fixture.down.clone();
     let host = RuntimeHost::new(fixture.clone(), fixture, RuntimeHostSettings::default());
     if case != "no_source" {
         assert_eq!(
@@ -133,6 +179,17 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
         );
     }
     eprintln!("observation fixture: bootstrap complete");
+    if case == "restarted" {
+        // A restart shorter than the shell's readiness-loss threshold: one
+        // missed monitor probe retires the claim channel, the next sees the
+        // Runtime again, and no recovery bootstrap follows. The observation
+        // below arms the channel again for the same Runtime.
+        let origin = LoopbackOrigin::parse(ORIGIN).unwrap();
+        monitor_probe(&host, &down, &origin, true).await;
+        assert!(host.claim_source().is_none());
+        monitor_probe(&host, &down, &origin, false).await;
+        assert!(host.claim_source().is_none());
+    }
     let wire = Arc::new(Wire {
         case,
         calls: AtomicU64::new(0),
@@ -207,6 +264,21 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
     }
     let pending = work.await;
     eprintln!("observation fixture: dispatch returned");
+    if matches!(case, "old_cli" | "exits") {
+        // Too old only when the Runtime has no claim route: a pipe that fails on
+        // a Runtime that has one keeps its own error.
+        let code = pending.unwrap().deliver().unwrap_err().code;
+        assert_eq!(
+            code,
+            if case == "old_cli" {
+                "local_runtime_too_old"
+            } else {
+                "invalid_machine_response"
+            }
+        );
+        assert_eq!(wire.calls.load(Ordering::SeqCst), 2);
+        return;
+    }
     if case == "no_source" {
         assert!(pending.is_err());
         assert_eq!(wire.calls.load(Ordering::SeqCst), 0);
@@ -268,7 +340,7 @@ async fn exercise(case: &'static str, root: &tempfile::TempDir) {
         ),
         _ => {
             let state = match case {
-                "owner" => "owner_observed",
+                "owner" | "restarted" => "owner_observed",
                 "shared" => "bound_owner_unconfirmed",
                 "absent" => "no_published_binding",
                 "legacy" => "legacy_review_required",
@@ -300,6 +372,9 @@ async fn current_binding_is_read_only_and_only_the_original_document_receives_it
         "drop",
         "naming",
         "no_source",
+        "old_cli",
+        "exits",
+        "restarted",
     ] {
         let root = tempfile::tempdir().unwrap();
         let run = exercise(case, &root);

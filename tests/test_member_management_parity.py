@@ -121,6 +121,12 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/remote-access/rebind/claims/{claim_id}/cancel"),
     ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/preview"),
     ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/unbind/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/unbind"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/local-after-refusal/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/local-after-refusal"),
+    ("POST", "/api/remote-access/unbind/preview"),
+    ("POST", "/api/remote-access/unbind/commit"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
@@ -130,6 +136,7 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/devices/connection"),
     ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
+    ("POST", "/api/remote-access/direct/release"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
     ("POST", "/api/users/{user_id}/admin"),
@@ -217,7 +224,8 @@ def test_complete_registered_api_management_inventory():
     # + 6 constrained local rebind/reset methods (Owner and local operator).
     # + 1 host network restriction (Owner, separately limited to unbound installations).
     # Three independent engine channel controls are owner-only, including metadata refresh.
-    assert len(endpoints) == 385
+    # Two Owner unbind methods and four direct-loopback-only RB2 confirmation methods.
+    assert len(endpoints) == 392
     for action in ("check", "update", "auto-update"):
         path = f"/api/dependencies/model-hub-engine/{action}"
         assert ("POST", path) in endpoints

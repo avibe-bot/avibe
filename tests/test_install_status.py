@@ -23,6 +23,11 @@ def standalone(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
     monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
+    # An automatic install takes exactly its target: a published release newer than the running one.
+    monkeypatch.setattr("vibe.__version__", "1.0", raising=False)
+    metadata = tmp_path / "pypi.json"
+    metadata.write_text('{"releases": {"1.0": [{}], "2.0": [{}]}}', encoding="utf-8")
+    monkeypatch.setenv("VIBE_UPDATE_METADATA_URL", metadata.as_uri())
     monkeypatch.setattr(api, "get_latest_version_info", lambda *a, **kw: {
         "current": "1.0", "latest": "2.0", "has_update": True, "error": None,
     })

@@ -154,6 +154,11 @@ struct DirectSelectedPath: Equatable, Sendable {
     let local: Bool?
     /// The path's round-trip time in milliseconds; nil until measured.
     let rttMs: Int?
+    /// Through the relay only: the region of the relay this path runs
+    /// through, when it is one of the known public ones
+    /// (`relayRegion(ofRelayURL:)`). Nil for any other relay, and for a
+    /// path to an address. A label, never the relay's address.
+    let relayRegion: String?
 
     /// From one of the connection's paths, as the binding reports it. Nil
     /// for a path that is neither the relay nor a numeric address.
@@ -161,9 +166,13 @@ struct DirectSelectedPath: Equatable, Sendable {
         if isRelay {
             kind = .relay
             local = nil
+            // For a relay path the binding's remote address is the relay's
+            // URL: the one this path is selected on, not one configured.
+            relayRegion = Self.relayRegion(ofRelayURL: remoteAddress)
         } else if isIp, let family = DirectPathKind.family(ofSocketAddress: remoteAddress) {
             kind = family
             local = Self.isLocalNetwork(socketAddress: remoteAddress)
+            relayRegion = nil
         } else {
             return nil
         }
@@ -171,11 +180,63 @@ struct DirectSelectedPath: Equatable, Sendable {
         self.rttMs = rttMs > 0 ? Int(min(rttMs, UInt64(Int.max))) : nil
     }
 
-    init(kind: DirectPathKind, local: Bool?, rttMs: Int?) {
+    init(kind: DirectPathKind, local: Bool?, rttMs: Int?, relayRegion: String? = nil) {
         self.kind = kind
         self.local = local
         self.rttMs = rttMs
+        self.relayRegion = kind == .relay ? relayRegion : nil
     }
+
+    /// The region label of one of the four public relays, by its URL, as
+    /// the desktop app names them (`desktop/src-tauri/src/direct/measure.rs`).
+    /// Nil for anything else: a region is never guessed from a name that is
+    /// not exactly one of the relays a dial may use
+    /// (`DirectTrialRelay.publicTrialRelayURLs`).
+    static func relayRegion(ofRelayURL url: String) -> String? {
+        relayEndpoint(url).flatMap { relayRegions[$0] }
+    }
+
+    /// A relay's URL as one comparable name: its host in lower case without
+    /// the root dot. Nil unless the URL is that relay's own root: `https`,
+    /// the default port (written or not), no path beyond `/`, and no user,
+    /// query or fragment. Another port or path on the same host is another
+    /// service, not that relay.
+    private static func relayEndpoint(_ url: String) -> String? {
+        guard
+            let components = URLComponents(string: url),
+            components.scheme?.lowercased() == "https",
+            components.user == nil,
+            components.password == nil,
+            components.query == nil,
+            components.fragment == nil,
+            components.port == nil || components.port == 443,
+            components.path.isEmpty || components.path == "/",
+            var host = components.host?.lowercased(),
+            !host.isEmpty
+        else {
+            return nil
+        }
+        if host.hasSuffix(".") {
+            host.removeLast()
+        }
+        return host
+    }
+
+    /// Each relay a dial may use, by `relayEndpoint`, with its region: the
+    /// first label of its name up to the hyphen (`euc1-1.…` is `euc1`).
+    private static let relayRegions: [String: String] = {
+        var regions: [String: String] = [:]
+        for url in DirectTrialRelay.publicTrialRelayURLs {
+            guard
+                let endpoint = relayEndpoint(url),
+                let region = endpoint.split(separator: "-").first
+            else {
+                continue
+            }
+            regions[endpoint] = String(region)
+        }
+        return regions
+    }()
 
     /// Whether a numeric socket address (`a.b.c.d:port` or `[x:...:x]:port`)
     /// is on a local network: IPv4 10/8, 172.16/12, 192.168/16, 169.254/16,
@@ -442,9 +503,52 @@ protocol DirectTransporting: AnyObject, Sendable {
     /// How often the path was checked again, and why.
     @MainActor
     var pathCounts: DirectPathCounts { get }
+
+    /// The path the usable connection runs on now, read now, with its
+    /// mark: for a measurement. Nil with no usable connection, once the
+    /// answer it was admitted under has run out (by the clock at this
+    /// read, not by a timer having run), with none of its paths selected or
+    /// one that has no kind, or when the transport cannot watch its paths.
+    @MainActor
+    var markedPath: DirectMarkedPath? { get }
+}
+
+/// A mark of the path a transport's connection runs on, for a measurement
+/// (`DirectMeasure.swift`). Two equal marks mean: the same connection, and
+/// the same path selected at every observation from the first to the
+/// second. An observation is a read of the connection's selected path made
+/// then: when the mark is read, and whenever the watch of the connection's
+/// paths reports. A report after which the selected path is the one it was
+/// changes nothing: the connection opens and closes other paths all the
+/// time while it looks for a better one. Another path of the same kind
+/// (another relay, another address) is another path. Counts only: which
+/// path it is, by its address or its relay, stays in the transport.
+///
+/// Not seen: a path that changed and changed back between two
+/// observations. The binding's watch reports once for changes that follow
+/// each other closely, so the read a report causes may find the path there
+/// was before.
+struct DirectPathMark: Equatable, Sendable {
+    /// Which of the transport's connections.
+    let connection: Int
+    /// How often an observation found another path selected than the one
+    /// before it.
+    let moves: Int
+}
+
+/// A path with its mark, both from one observation: the labels are the
+/// marked path's own, whatever the controller has been told so far.
+struct DirectMarkedPath: Equatable, Sendable {
+    let mark: DirectPathMark
+    let path: DirectSelectedPath
 }
 
 extension DirectTransporting {
+    @MainActor
+    var markedPath: DirectMarkedPath? {
+        nil
+    }
+
     @MainActor
     var pathCounts: DirectPathCounts {
         .zero

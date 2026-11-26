@@ -246,11 +246,15 @@ def matrix_size(job: dict, *, mode: str | None = None) -> int:
     if not isinstance(matrix, dict):
         return 1
     if matrix.get('python') == '${{ fromJSON(needs.changes.outputs.unit_python) }}':
-        from scripts.ci_scope import unit_python_versions
+        from scripts.ci_scope import unit_python_versions, unit_shards
 
         if mode is None:
             raise ValueError('Unit evidence requires a validated workflow mode')
         matrix = {**matrix, 'python': unit_python_versions(mode)}
+        if matrix.get('shard') == '${{ fromJSON(needs.changes.outputs.unit_shards) }}':
+            # Portfolio PRs do not produce scenario evidence. Legacy PRs and
+            # MASTER_FULL use exactly the same shard layout as the dispatcher.
+            matrix['shard'] = unit_shards(False)
     size = 1
     lists = [value for key, value in matrix.items() if key not in ("include", "exclude") and isinstance(value, list)]
     for value in lists:

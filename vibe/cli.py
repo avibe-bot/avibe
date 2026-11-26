@@ -16450,6 +16450,7 @@ _REMOTE_BINDING_STATUS_LINES = {
     "binding_rejected": "refused by avibe.bot. See: vibe remote rebind",
     "pairing_recovery_required": "an earlier attempt is unfinished. Continue it: vibe remote rebind",
     "resetting": "a reset is unfinished. Continue it: vibe remote rebind",
+    "unbinding": "being removed on avibe.bot. See: vibe remote rebind",
     "reset_repair_required": "a reset cannot finish. See: vibe remote rebind",
 }
 
@@ -16815,6 +16816,12 @@ def cmd_remote_rebind(args):
     return remote_rebind.run()
 
 
+def cmd_remote_reset(args):
+    from vibe import remote_rebind
+
+    return remote_rebind.run_reset()
+
+
 def cmd_remote_status(args):
     from vibe import remote_access, remote_rebind
 
@@ -16823,6 +16830,15 @@ def cmd_remote_status(args):
         binding_state = remote_rebind.read_state()[0]
     except Exception:
         binding_state = None  # The binding note is extra; status itself must still print.
+    if binding_state == "resetting":
+        try:
+            from config.v2_config import V2Config
+            from vibe import binding_unbind
+
+            if binding_unbind.device_state(V2Config.load()) == {"state": "unbinding"}:
+                binding_state = "unbinding"
+        except Exception:
+            pass  # Keep the generic reset line.
     if binding_state in _REMOTE_BINDING_STATUS_LINES:
         result["binding_state"] = binding_state
     if getattr(args, "json", False):
@@ -19760,6 +19776,16 @@ def build_parser():
         error_help_command="vibe remote rebind --help",
     )
 
+    from vibe.remote_rebind import TEXT as _rebind_text
+
+    remote_subparsers.add_parser(
+        "reset",
+        help=_rebind_text["local_reset_help"],
+        description=_rebind_text["local_reset_description"],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe remote reset --help",
+    )
+
     remote_status_parser = remote_subparsers.add_parser(
         "status",
         help="Show remote-access status",
@@ -21843,6 +21869,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("remote", "stop"): "member",
     ("remote", "pair"): "owner",
     ("remote", "rebind"): "owner",
+    ("remote", "reset"): "owner",
     ("remote", "direct", "on"): "owner",
     ("remote", "direct", "off"): "owner",
     ("remote", "direct", "status"): "member",
@@ -22236,6 +22263,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_remote_pair(args))
         if args.remote_command == "rebind":
             sys.exit(cmd_remote_rebind(args))
+        if args.remote_command == "reset":
+            sys.exit(cmd_remote_reset(args))
         if args.remote_command == "status":
             sys.exit(cmd_remote_status(args))
         if args.remote_command == "start":

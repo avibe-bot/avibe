@@ -540,6 +540,30 @@ final class DirectRendezvousTests: XCTestCase {
         DirectListenerFailure(step: step, code: code, backgroundSeconds: away, at: at)
     }
 
+    /// The App's slow store removals ride on the same request, as at most
+    /// five non-negative integers the instance accepts (milliseconds), and
+    /// no field when there are none.
+    func testTheRequestReportsSlowStoreRemovalsWithinTheInstancesLimits() throws {
+        let head = "{\"version\":1,\"client_endpoint_id\":\"\(client.hex)\""
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], slowStoreRemovalsMs: []),
+            head + "}"
+        )
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(clientEndpointID: client, listenerFaults: [], slowStoreRemovalsMs: [1_200, 485_000]),
+            head + ",\"slow_store_removals_ms\":[1200,485000]}"
+        )
+        XCTAssertEqual(
+            DirectRendezvous.requestBody(
+                clientEndpointID: client,
+                listenerFaults: [failure(.deadline)],
+                slowStoreRemovalsMs: [-5, 1, 2, 3, 4, Int.max]
+            ),
+            head + ",\"listener_faults\":[{\"step\":\"deadline\",\"code\":0,\"background_seconds\":0}]"
+                + ",\"slow_store_removals_ms\":[1,2,3,4,\(Int32.max)]}"
+        )
+    }
+
     /// `listener_faults` is what the instance accepts and nothing more: at
     /// most five entries, the newest, each with exactly a step (one it
     /// knows), a code and the seconds away, all within its bounds; no time,

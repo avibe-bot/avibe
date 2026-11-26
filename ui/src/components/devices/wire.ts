@@ -6,7 +6,7 @@
 import type { RemoteAccessSettings, RemoteAccessStatus } from '@/context/ApiContext';
 import { getTunnelQualityDisplayState, getTunnelRequestPathDisplayState } from '@/lib/tunnelQuality';
 import type {
-  AccountResult, AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
+  AddressState, ClaimProblem, ConnectionState, Device, DeviceActivity, DeviceFunction, DeviceKind,
   DirectState, HealthData, ProxyAccess, RebindRefusal, RebindState, RelayState, RenameDevice, RenameRefusal, RetiredName,
   SignedOutDevice, SwitchSetting, TunnelChange, TunnelSetting, TunnelStatus, UnlinkedHealth,
 } from './types';
@@ -91,30 +91,11 @@ export function deviceFromWire(raw: unknown, listed?: Device['group']): Device |
   };
 }
 
-function accountResult(raw: unknown): AccountResult {
-  const { status, reason } = record(raw);
-  if (status === 'pending') return reason === 'retrying' ? 'retrying' : 'queued';
-  if (status === 'accepted') return 'accepted';
-  if (status === 'not_applicable') return reason === 'shared_sign_in' ? 'sharedSignIn' : reason === 'keeper_unknown' ? 'keeperUnknown' : 'localOnly';
-  if (status === 'refused') return reason === 'credential' ? 'refusedCredential' : 'refused';
-  if (status === 'unconfirmed') return 'unconfirmed';
-  return 'unknown';
-}
-
+/** One sign-out receipt (`recent_sign_outs`, `sign_out_results`): the device and its name. */
 export function signedOutFromWire(raw: unknown): SignedOutDevice | null {
   const row = record(raw);
-  const id = text(row.operation_id);
-  if (!id) return null;
-  const results = [...new Set(list(row.account_results).map(accountResult))];
-  return {
-    id,
-    deviceId: text(row.device_id),
-    device: text(row.display_name) ?? null,
-    kind: KINDS[String(row.kind)]?.kind ?? null,
-    // The instance says whose it was when it can; nothing here is inferred from a name or a kind.
-    owner: row.group === 'mine' || row.group === 'others' ? row.group : 'unknown',
-    results,
-  };
+  if (!text(row.operation_id)) return null;
+  return { deviceId: text(row.device_id), device: text(row.display_name) ?? null };
 }
 
 /** The declared-proxy fact as the instance computed it. Nothing is inferred: without at least one
@@ -132,7 +113,38 @@ export type DevicesSnapshot = {
   signedOut: SignedOutDevice[];
   bulk: 'other_sessions' | 'all_remote' | null;
   proxyAccess?: ProxyAccess;
+  /** 「解除绑定」 as the instance reports it to the owner (`unbind`, for the current binding only). */
+  unbind?: UnbindReport;
 };
+
+/** `unbinding`: running, continues by itself. `unbound`: done. `notUnbound`: avibe.bot refused it,
+ *  as not eligible or because this computer's key no longer works. `repair`: only this computer can
+ *  sort it out. */
+export type UnbindReport =
+  | { state: 'unbinding' | 'repair' }
+  /** Done: the name it had and until when it stays the account's, where the instance says. */
+  | { state: 'unbound'; host?: string; releaseAt?: string }
+  | { state: 'notUnbound'; reason: 'ineligible' | 'invalidCredential' };
+
+export function unbindFromWire(raw: unknown): UnbindReport | undefined {
+  const body = record(raw);
+  switch (body.state) {
+    case 'unbinding':
+      return { state: 'unbinding' };
+    case 'unbound': {
+      const host = text(body.host) ?? undefined;
+      const releaseAt = instant(body.release_at) ?? undefined;
+      return { state: 'unbound', ...(host ? { host } : {}), ...(releaseAt ? { releaseAt } : {}) };
+    }
+    case 'reset_repair_required':
+      return { state: 'repair' };
+    case 'not_unbound':
+      return body.reason_code === 'ineligible' ? { state: 'notUnbound', reason: 'ineligible' }
+        : body.reason_code === 'invalid_credential' ? { state: 'notUnbound', reason: 'invalidCredential' } : undefined;
+    default:
+      return undefined;
+  }
+}
 
 export function devicesFromWire(raw: unknown): DevicesSnapshot {
   const body = record(raw);
@@ -149,6 +161,7 @@ export function devicesFromWire(raw: unknown): DevicesSnapshot {
     signedOut: list(body.recent_sign_outs).map(signedOutFromWire).filter((each): each is SignedOutDevice => each !== null),
     bulk: body.bulk_action === 'other_sessions' || body.bulk_action === 'all_remote' ? body.bulk_action : null,
     proxyAccess: proxyAccessFromWire(body.unauthenticated_proxy_access),
+    unbind: unbindFromWire(body.unbind),
   };
 }
 

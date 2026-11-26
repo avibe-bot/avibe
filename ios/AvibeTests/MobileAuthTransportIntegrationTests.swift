@@ -1904,7 +1904,8 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
 
         oldWebView?.stopLoading()
         oldWebView = nil
-        await accountStore.rotate()
+        // With its sweep: the store's removal must not outlive the test.
+        await accountStore.rotate()?.value
         releaseResponse.signal()
         await fulfillment(
             of: [lateResponseSent.expectation],
@@ -1919,7 +1920,11 @@ final class MobileAuthTransportIntegrationTests: XCTestCase {
     }
 
     func testNamedStoreLedgerNeverRemovesAnUnownedLiveIdentifier() async throws {
-        let before = await fetchAllNamedDataStoreIdentifiers()
+        // Without what an earlier test left to WebKit: WebKit may remove
+        // those while this test runs (`FixtureStoreRemoval`). Read first:
+        // a late answer handled during the fetch would drop one from it.
+        let leftToWebKit = FixtureStoreRemoval.leftToWebKit
+        let before = await fetchAllNamedDataStoreIdentifiers().subtracting(leftToWebKit)
         let defaults = makeDefaults()
         let registry = RealNamedDataStoreRegistry()
         var accountStore: AccountWebsiteDataStore? = AccountWebsiteDataStore(
