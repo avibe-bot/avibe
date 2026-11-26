@@ -1920,7 +1920,7 @@ final class AppModel: ObservableObject {
         guard automaticRemaining(for: attempt, at: runtimeOpenNow) <= .zero else {
             return false
         }
-        if revertTunnelOnlyIfUnreachable(attemptID: attemptID) {
+        if revertTunnelOnlyIfUnreachable(attemptID: attemptID) || revertDirectOnlyIfListenerDown(attemptID: attemptID) {
             // Opened again, automatic: this attempt is replaced.
             openRuntime(attempt.runtime)
             return true
@@ -2620,6 +2620,30 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// 「仅直连和中继」, and this open ran out of time while rule c's clock
+    /// ran (the listener failing past its first attempt): rule c is applied
+    /// here rather than let the open end first and take the watch with it,
+    /// which would leave the choice held for good. The caller opens again.
+    private func revertDirectOnlyIfListenerDown(attemptID: Int) -> Bool {
+        guard
+            let attempt = runtimeOpenAttempt,
+            attempt.id == attemptID,
+            ![.authenticating, .awaitingUser, .showingCachedLive].contains(attempt.phase),
+            let watch = directOnlyWatch,
+            watch.runtime == attempt.runtime,
+            watch.listenerClock.downSince != nil,
+            directPathPreference(for: attempt.runtime).mode == .direct,
+            sessionCoordinator.keepsSelectedRuntime(attempt.runtime),
+            let origin = preferenceOrigin(attempt.runtime)
+        else {
+            return false
+        }
+        endDirectOnlyWatch()
+        storeReversion(of: attempt.runtime, origin: origin, from: .direct)
+        directOnlyControl?.setDirectOnly(false, forInstanceURL: attempt.runtime.instance.url)
+        return true
+    }
+
     /// The choice goes back to automatic, recording from what, and the page
     /// is told.
     private func storeReversion(
@@ -2643,6 +2667,9 @@ final class AppModel: ObservableObject {
         var rules = DirectOnlyRevertRules()
         /// Rule c's clock (`DirectOnlyListenerClock`).
         var listenerClock = DirectOnlyListenerClock()
+        /// The link dropped while a sign-in page was in front: the reopen
+        /// waits for the instance's own page to come back.
+        var reopenOnInstancePage = false
         /// The controller's drop count last seen.
         var strictFailures: UInt64?
     }
@@ -2698,6 +2725,12 @@ final class AppModel: ObservableObject {
             event.destination == .instance,
             directOnlyWatch?.runtime == runtime
         else {
+            return
+        }
+        if directOnlyWatch?.reopenOnInstancePage == true {
+            // Back on the instance after a sign-in that a drop waited for.
+            directOnlyWatch?.reopenOnInstancePage = false
+            reopenRuntime(runtime, at: runtimeController?.instancePageURL)
             return
         }
         directOnlyWatch?.rules.noteFreshPage(at: .now)
@@ -2758,7 +2791,14 @@ final class AppModel: ObservableObject {
                 // The link dropped: the controller only says so (it is not a
                 // fallback). Re-establishing it takes one full reopen (stop,
                 // prepare the route, open), as for a fresh open; a reload of
-                // the same WebView would not reach the tunnel again.
+                // the same WebView would not reach the tunnel again. Not
+                // over a sign-in page in front: that waits for the
+                // instance's page to come back.
+                if runtimeController?.showsOtherThanInstance == true {
+                    watch.reopenOnInstancePage = true
+                    directOnlyWatch = watch
+                    return
+                }
                 reopenRuntime(runtime, at: runtimeController?.instancePageURL)
                 return
             }

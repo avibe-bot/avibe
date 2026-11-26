@@ -811,7 +811,10 @@ conforms to. Without a conforming controller the App offers neither:
   applied at the next evidence (b); the listener unable to serve in the
   foreground for 60 s from its first failed attempt that counts, not a
   first attempt, `waiting`, the background, or anything before a success
-  (c). Not while the choice waits for the next launch. The App then sets
+  (c); an open that runs out of time while c's clock runs applies c then,
+  so the choice is never held for good. Not while the choice waits for the next launch.
+  A drop while a sign-in page is in front reopens only once the instance's
+  page is back. The App then sets
   the host back with `setDirectOnly(false)` and opens the instance again.
 - **Measuring.** `DirectMeasureRunner` runs one measurement at a time and
   bounds it at 35 s, just above the controller's own 30 s.
