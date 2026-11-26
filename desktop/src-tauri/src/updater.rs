@@ -1063,34 +1063,45 @@ async fn releases(client: &reqwest::Client) -> Result<Vec<Release>, String> {
 /// Who started a check. A silent release (`update-notification=none`,
 /// docs/release.md) is not announced: automatic checks (startup and the
 /// auto-update tick) never see it, so they neither offer nor install it, and
-/// still find the newest announced release. An explicit request (the user's
-/// own check or channel switch, or a manager's check or install request)
-/// sees every release.
+/// still find the newest announced release. An explicit check (the user's own
+/// check or channel switch, or a manager's check) sees every release. A
+/// manager's install request sees a silent release only when it names it, so
+/// it resolves to whichever offer the manager was shown.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Discovery {
+enum Discovery<'a> {
     Automatic,
     Explicit,
+    Requested(&'a str),
 }
 
-impl Discovery {
-    fn of(interactive: bool) -> Self {
+impl Discovery<'_> {
+    fn of(interactive: bool) -> Discovery<'static> {
         if interactive {
-            Self::Explicit
+            Discovery::Explicit
         } else {
-            Self::Automatic
+            Discovery::Automatic
         }
     }
     /// The releases this check may select from.
     fn candidates(self, releases: Vec<Release>) -> Vec<Release> {
         releases
             .into_iter()
-            .filter(|release| self == Self::Explicit || !release.silent)
+            .filter(|release| match self {
+                Self::Automatic => !release.silent,
+                Self::Explicit => true,
+                Self::Requested(target) => {
+                    !release.silent
+                        || Channel::of(release.prerelease)
+                            .version(&release.tag)
+                            .is_ok_and(|version| version.to_string() == target)
+                }
+            })
             .collect()
     }
 }
 
 /// The newer release in `channel` that this check may see, verified.
-async fn find_update(app: &AppHandle, channel: Channel, discovery: Discovery) -> Result<Option<Manifest>, String> {
+async fn find_update(app: &AppHandle, channel: Channel, discovery: Discovery<'_>) -> Result<Option<Manifest>, String> {
     let client = client()?;
     let Some((version, release)) = channel.latest_for_target(discovery.candidates(releases(&client).await?), TARGET)
     else {
@@ -1524,8 +1535,8 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
         None,
     );
     let channel = app.state::<Updater>().state.lock().expect("updater state").channel;
-    // A remote request asked for this update, so a silent release is offered too.
-    match find_update(&app, channel, Discovery::Explicit).await {
+    // A remote request names its target, so a silent release it names is found too.
+    match find_update(&app, channel, Discovery::Requested(&request.target)).await {
         Ok(Some(manifest)) => {
             app.state::<Updater>()
                 .state
@@ -2058,7 +2069,7 @@ mod tests {
         };
         let silent_rc = signed("gh-v3.2.8rc1", true, "3.2.8-rc.1", true);
         let announced = signed("v3.2.7", false, "3.2.7", false);
-        let latest = |discovery: Discovery, releases: &[Release]| {
+        let latest = |discovery: Discovery<'_>, releases: &[Release]| {
             Channel::Test
                 .latest_for_target(discovery.candidates(releases.to_vec()), target)
                 .map(|(_, release)| release.tag)
@@ -2076,8 +2087,23 @@ mod tests {
         );
         // An explicit check finds the silent release.
         assert_eq!(
-            latest(Discovery::Explicit, &[silent_rc, announced]).as_deref(),
+            latest(Discovery::Explicit, &[silent_rc.clone(), announced.clone()]).as_deref(),
             Some("gh-v3.2.8rc1")
+        );
+        // A remote install request resolves to the offer the manager saw: the
+        // announced release an automatic check published, or the silent one
+        // an explicit check found. A newer announced release still wins, so a
+        // stale target fails the exact-target check.
+        let both = [silent_rc.clone(), announced.clone()];
+        assert_eq!(latest(Discovery::Requested("3.2.7"), &both).as_deref(), Some("v3.2.7"));
+        assert_eq!(
+            latest(Discovery::Requested("3.2.8-rc.1"), &both).as_deref(),
+            Some("gh-v3.2.8rc1")
+        );
+        let newer = signed("v3.2.9", false, "3.2.9", false);
+        assert_eq!(
+            latest(Discovery::Requested("3.2.7"), &[silent_rc, announced, newer]).as_deref(),
+            Some("v3.2.9")
         );
     }
 

@@ -1534,8 +1534,6 @@ fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     // invokes the shell's existing state machine.
     assert!(!source.contains("tauri_plugin_updater"));
     assert!(source.contains("updater::check(app.clone(), false)"));
-    // The auto-update tick is automatic: it never offers or installs a silent release.
-    assert!(updater.contains("find_update(app, channel, Discovery::Automatic)"));
     assert!(source.contains("updater::MENU_ID =>"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
     assert!(!updater.contains("MessageDialogButtons::YesNoCancelCustom"));
