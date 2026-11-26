@@ -45,13 +45,14 @@ it.each([['en', en], ['zh', zh]] as const)(
     );
     const page = view.container.querySelector('[data-account-login]')!;
     const welcome = copy.mobileApp.welcome;
-    // The App's hero, title and footer, word for word.
+    // The App's hero and title stay; Desktop omits the iOS footer.
     expect(screen.getByAltText(welcome.mascotAlt)).toBeTruthy();
     expect(screen.getByText(welcome.greeting)).toBeTruthy();
     expect(screen.getByRole('heading').textContent).toBe(`${welcome.titleLine1}${welcome.titleLine2}`);
-    expect(page.textContent).toContain(`${welcome.footerLine1}${welcome.footerLine2}`);
+    expect(page.textContent).not.toContain(welcome.footerLine1);
+    expect(page.textContent).not.toContain(welcome.footerLine2);
     // The Desktop's own subtitle, not the App's.
-    expect(page.textContent).toContain(`${copy.desktopAccount.welcomeLine1}${copy.desktopAccount.welcomeLine2}`);
+    expect(page.textContent).toContain(copy.desktopAccount.welcomeSubtitle);
     expect(page.textContent).not.toContain(welcome.bodyLine1);
     // No brand row; "continue on this computer" stays.
     expect(page.textContent).not.toContain(copy.mobileApp.brand.agentOs);
