@@ -77,6 +77,54 @@ def log_listener_faults(faults: Any) -> None:
         )
 
 
+# What a desktop client may say of a direct leg that did not end in a working
+# stream. Fixed words only: nothing a client sends is logged as it came. They
+# are the desktop transport's own classification (`Stage` and `FaultCode` in
+# desktop/src-tauri/src/direct/transport.rs), in snake case.
+_LEG_FAULT_STAGES = ("rendezvous", "dial", "open", "connect", "tls", "health", "handover", "revert")
+_LEG_FAULT_CODES = (
+    "timeout", "refused", "unreachable", "denied", "status", "closed_by_page", "closed_by_peer",
+    "lost_race", "proxy_auth", "expired", "other", "invalid_offer", "no_permitted_path",
+    "listener_closed", "superseded", "not_ready", "connection_ended", "invalid_head",
+)
+_LEG_FAULT_PATHS = ("lan", "punched", "relay", "none")
+
+
+def log_leg_faults(faults: Any) -> None:
+    """Log a desktop client's last failed direct legs and strict-mode reverts.
+
+    ``leg_faults`` is at most five entries, each with exactly ``stage``,
+    ``code`` and ``path`` (one of the fixed words above), ``strict`` (a
+    Boolean: the leg ran with only the direct path and the relay allowed),
+    ``ms`` (how long the stage ran) and ``count`` (how many equal entries in a
+    row this one stands for). A malformed, empty or over-five batch is ignored
+    in full. Like ``listener_faults`` it changes neither the answer nor the
+    admission, and nothing of it is kept.
+    """
+    if not isinstance(faults, list) or not 0 < len(faults) <= 5:
+        return
+    for fault in faults:
+        if (
+            not isinstance(fault, dict)
+            or fault.keys() != {"stage", "code", "path", "strict", "ms", "count"}
+            or not isinstance(fault["stage"], str) or fault["stage"] not in _LEG_FAULT_STAGES
+            or not isinstance(fault["code"], str) or fault["code"] not in _LEG_FAULT_CODES
+            or not isinstance(fault["path"], str) or fault["path"] not in _LEG_FAULT_PATHS
+            or type(fault["strict"]) is not bool
+            or type(fault["ms"]) is not int
+            or not 0 <= fault["ms"] < 2**31
+            or type(fault["count"]) is not int
+            or not 1 <= fault["count"] < 2**31
+        ):
+            return
+    for fault in faults:
+        logger.info(
+            "direct rendezvous leg_fault stage=%s code=%s path=%s strict=%s ms=%d count=%d",
+            fault["stage"], fault["code"], fault["path"], "yes" if fault["strict"] else "no",
+            fault["ms"], fault["count"],
+        )
+
+
 def log_slow_store_removals(durations: Any) -> None:
     """Log how long the iPhone App's slow WebKit store removals took.
 
