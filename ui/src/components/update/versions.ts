@@ -50,7 +50,7 @@ export function compareVersions(a: string, b: string): number | null {
     const match = PEP440.exec(normalizeVersion(value));
     if (!match) return null;
     const [, release, pre, preNumber, post, postNumber, dev, devNumber] = match;
-    const parts = release.split('.').map(Number);
+    const parts = (release ?? '').split('.').map(Number);
     while (parts.length > 1 && parts[parts.length - 1] === 0) parts.pop();
     const rank = pre ? ['a', 'b', 'rc'].indexOf(PRE_RELEASE[pre] ?? pre) : (dev && !post ? -1 : 3);
     return { parts, order: [rank, Number(preNumber || 0), post ? Number(postNumber || 0) : -1, dev ? Number(devNumber || 0) : Infinity] };
@@ -62,7 +62,8 @@ export function compareVersions(a: string, b: string): number | null {
     if (difference) return difference;
   }
   for (let index = 0; index < x.order.length; index += 1) {
-    if (x.order[index] !== y.order[index]) return x.order[index] < y.order[index] ? -1 : 1;
+    const [left, right] = [x.order[index] ?? 0, y.order[index] ?? 0];
+    if (left !== right) return left < right ? -1 : 1;
   }
   return 0;
 }
