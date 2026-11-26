@@ -1445,11 +1445,13 @@ test('a disclosure tapped on a row another opening still pushes down writes no s
   // taken at one moment and on time, at a frame or as the document changed: a slow runner can draw most of the way
   // before its next frame. No read before the first frame's is on time (the one before the tap, and those at the
   // changes of the task that taps, can be sampled a few ms apart with no frame between them), so across the tap
-  // the row is only held to not having jumped up: by no more than those few ms of its way down.
+  // the row is only held to not having jumped up: by no more than those few ms of its way down. A slow runner may
+  // draw the rest of the way before it draws a frame on time, so the reads on time are not required to see the
+  // row move; they must see it come to rest, which every runner draws on time (nothing starts after the motion).
   const tops = frames.filter(({ exact, onTime }) => exact && onTime).map(({ tapped }) => tapped);
+  expect(tops.length).toBeGreaterThanOrEqual(10);
   expect(tops[0]).toBeGreaterThanOrEqual(frames[0].tapped - 4);
   const steps = tops.slice(1).map((top, index) => top - tops[index]).filter((step) => Math.abs(step) > 0.5);
-  expect(steps.length).toBeGreaterThan(0);
   expect(steps.every((step) => step > 0)).toBe(true);
   const rest = tops.slice(-10);
   expect(Math.max(...rest) - Math.min(...rest)).toBeLessThanOrEqual(0.5);
