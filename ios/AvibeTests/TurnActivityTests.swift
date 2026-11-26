@@ -39,7 +39,7 @@ final class TurnActivityTests: XCTestCase {
             if let response { return try await response(target, method, path, body) }
             if path.contains("/turn?") { return .init(status: 200, json: ["turn": self.initial], redirected: false) }
             return .init(status: 200, json: ["activity": self.initial.merging(["status": "tracking"]) { _, new in new }], redirected: false)
-        }, mayRequest: mayRequest, isActive: active, beginBackgroundTask: background)
+        }, mayRequest: mayRequest, available: true, isActive: active, beginBackgroundTask: background)
         owner.selectTarget(target)
         return owner
     }
@@ -542,8 +542,10 @@ final class TurnActivityTests: XCTestCase {
     }
 
 
+    /// Switched off pending a redesign (11-26): the shell announces neither
+    /// capability, so no page shows the setting; the methods stay recognized.
     func testLockScreenProgressCapabilityReplacesLegacyCapability() {
-        XCTAssertEqual(NativeShellMetadata.capabilities["lockScreenProgress"], 1)
+        XCTAssertNil(NativeShellMetadata.capabilities["lockScreenProgress"])
         XCTAssertNil(NativeShellMetadata.capabilities["liveActivities"])
         for method in ["setting", "setSetting", "observe", "openSettings", "status", "start", "stop"] {
             guard case .success(let request) = NativeBridgeRequest.parse(["method": "liveActivity." + method, "params": [:]]) else {
@@ -607,6 +609,58 @@ final class TurnActivityTests: XCTestCase {
         XCTAssertFalse(calls.contains { $0.0 == "DELETE" })
     }
 
+
+    /// The shipped coordinator: a setting an earlier build stored on reads off
+    /// and is stored off; turning it on, an observation and a departure start
+    /// nothing and send nothing.
+    func testTheShippedCoordinatorRefusesEveryStart() async {
+        XCTAssertFalse(TurnActivityCoordinator.shipsLockScreenProgress)
+        defaults.set(true, forKey: "avibe.liveActivities.enabled")
+        let owner = shippedCoordinator()
+        XCTAssertFalse(owner.deviceEnabled)
+        XCTAssertFalse(defaults.bool(forKey: "avibe.liveActivities.enabled"))
+        await owner.setSetting(true)
+        XCTAssertEqual(owner.setting()["enabled"] as? Bool, false)
+        XCTAssertFalse(defaults.bool(forKey: "avibe.liveActivities.enabled"))
+        await observe(owner)
+        XCTAssertNil(owner.willDeactivate(registrationID: "registration-1"))
+        await owner.foreground(target: target)
+        await owner.reconcile(target: target)
+        XCTAssertTrue(cards.isEmpty)
+        XCTAssertTrue(calls.isEmpty)
+    }
+
+    /// A card an earlier build started ends at launch (what the App runs with
+    /// the setting off) and, if one shows again, when the App comes to the front.
+    func testTheShippedCoordinatorEndsRunningCardsAtLaunchAndInTheForeground() async {
+        let earlier = coordinator()
+        await start(earlier)
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertEqual(cards.first?.state, .active)
+
+        let relaunched = shippedCoordinator()
+        XCTAssertFalse(relaunched.deviceEnabled)
+        await relaunched.endAllLocally()
+        XCTAssertEqual(cards.first?.state, .dismissed)
+
+        let later = FakeTurnActivity(attributes: cards[0].attributes, content: cards[0].content)
+        cards.append(later)
+        await relaunched.foreground(target: target)
+        XCTAssertNotEqual(later.state, .active)
+    }
+
+    private func shippedCoordinator() -> TurnActivityCoordinator {
+        let owner = TurnActivityCoordinator(defaults: defaults, enabled: { true }, activities: { self.cards }, create: { attributes, state in
+            let card = FakeTurnActivity(attributes: attributes, content: state)
+            self.cards.append(card)
+            return card
+        }, request: { _, method, path, body in
+            self.calls.append((method, path, body))
+            return .init(status: 200, json: ["turn": self.initial], redirected: false)
+        }, mayRequest: { _ in true }, isActive: { true }, beginBackgroundTask: { _ in {} })
+        owner.selectTarget(target)
+        return owner
+    }
 
     func testDeviceSettingDefaultsOffAndPersistsWithoutStartingAnything() async {
         let owner = coordinator()
