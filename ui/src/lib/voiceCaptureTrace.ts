@@ -197,6 +197,13 @@ export type VoiceCaptureAttempt = {
   holdTapsW80?: number;
   holdTapsW100?: number;
   holdTapsW120?: number;
+  /** Of the lifted ones, those whose length is not known (their touch was gone when judged), and
+   *  how many of them surely ended before each judged time. */
+  holdTapsLost?: number;
+  holdTapsC50?: number;
+  holdTapsC80?: number;
+  holdTapsC100?: number;
+  holdTapsC120?: number;
 };
 
 export type VoiceNativeEnd = 'interrupted' | 'route' | 'background' | 'gone' | 'replaced' | 'action_button' | 'other';

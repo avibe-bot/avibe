@@ -121,6 +121,23 @@ const tapCounts = (taps: unknown): Partial<VoiceCaptureAttempt> => {
   };
 };
 
+/** Of those, the taps whose length the App does not know (`tapsLost`: `lost=3 c50=1 c80=2 c100=2
+ *  c120=3`: its touch was gone when it was judged, so it is counted in the bucket of the most it
+ *  can have lasted, and in no `w…`), and how many of them surely ended before each judged time.
+ *  Anything else is left out. */
+const lostTapCounts = (lost: unknown): Partial<VoiceCaptureAttempt> => {
+  if (typeof lost !== 'string') return {};
+  const match = /^lost=(\d{1,7}) c50=(\d{1,7}) c80=(\d{1,7}) c100=(\d{1,7}) c120=(\d{1,7})$/.exec(lost);
+  if (!match) return {};
+  return {
+    holdTapsLost: Number(match[1]),
+    holdTapsC50: Number(match[2]),
+    holdTapsC80: Number(match[3]),
+    holdTapsC100: Number(match[4]),
+    holdTapsC120: Number(match[5]),
+  };
+};
+
 /** The App's own timings of a hold, as the capture trace keeps them (ms from touch-down, except
  *  the two durations). Unknown values are left out. */
 const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<VoiceCaptureAttempt> => {
@@ -142,6 +159,7 @@ const holdTimings = (timings: NativeVoiceHoldTimings | undefined): Partial<Voice
     holdCatMs: count(timings.categoryMs),
     holdPrepMs: count(timings.prepareMs),
     ...tapCounts(timings.taps),
+    ...lostTapCounts(timings.tapsLost),
   };
   for (const key of Object.keys(fields) as (keyof VoiceCaptureAttempt)[]) {
     if (fields[key] === undefined) delete fields[key];

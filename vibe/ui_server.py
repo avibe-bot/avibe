@@ -15456,6 +15456,13 @@ _VOICE_CAPTURE_ATTEMPT_INTS = {
     "holdTapsW80",
     "holdTapsW100",
     "holdTapsW120",
+    # Of the lifted ones, those whose length the App does not know (their touch was gone
+    # when it judged them), and how many of those surely ended before each judged time.
+    "holdTapsLost",
+    "holdTapsC50",
+    "holdTapsC80",
+    "holdTapsC100",
+    "holdTapsC120",
 }
 _VOICE_RECORDER_TYPES = {"audio/mp4", "audio/webm", "audio/ogg"}
 _VOICE_CAPTURE_MAX_ATTEMPTS = 8
