@@ -21,7 +21,8 @@ from _github_wait_common import (  # noqa: E402
     filter_new,
     get_authenticated_login,
     get_token,
-    is_retryable_http_error,
+    github_request,
+    ResponseCache,
     list_paginated_with_count,
     max_id,
     min_interval_for_unauthenticated,
@@ -64,6 +65,7 @@ def _fetch_new_issue_state(
     token: str | None,
     *,
     stop_after_id: int | None = None,
+    cache: ResponseCache | None = None,
     max_pages: int | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
@@ -71,6 +73,7 @@ def _fetch_new_issue_state(
         f"https://api.github.com/repos/{encoded_repo}/issues?state=all&sort=created&direction=desc",
         token,
         stop_after_id=stop_after_id,
+        cache=cache,
         max_pages=max_pages,
     )
     issues = [item for item in raw_issues if not _is_pull_request_issue(item)]
@@ -83,12 +86,14 @@ def _fetch_issue_comment_state(
     token: str | None,
     *,
     stop_after_id: int | None = None,
+    cache: ResponseCache | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], int]:
     encoded_repo = urllib.parse.quote(repo, safe="/")
     comments, request_count = list_paginated_with_count(
         f"https://api.github.com/repos/{encoded_repo}/issues/{issue_number}/comments?sort=created&direction=desc",
         token,
         stop_after_id=stop_after_id,
+        cache=cache,
     )
     return {"issue_comments": comments}, request_count
 
@@ -206,7 +211,7 @@ def main() -> int:
     args = parser.parse_args()
 
     token = get_token()
-    viewer_login = None if args.include_self_comments else get_authenticated_login(token)
+    viewer_login = None
     if token is None and not args.allow_unauthenticated:
         print(
             (
@@ -222,41 +227,31 @@ def main() -> int:
     effective_interval = base_interval
     start = time.monotonic()
 
-    try:
-        if args.issue is not None:
-            initial_issue_comment_stop_after_id = None
-            if args.since_issue_comment_id is not None and not args.catch_up:
-                initial_issue_comment_stop_after_id = args.since_issue_comment_id
-            state, requests_per_poll_count = _fetch_issue_comment_state(
-                args.repo,
-                args.issue,
-                token,
-                stop_after_id=initial_issue_comment_stop_after_id,
-            )
-        else:
-            initial_raw_issue_stop_after_id = None
-            initial_raw_issue_max_pages = None
-            if args.since_raw_issue_id is not None and not args.catch_up:
-                initial_raw_issue_stop_after_id = args.since_raw_issue_id
-            elif args.since_issue_id is not None and not args.catch_up:
-                initial_raw_issue_stop_after_id = args.since_issue_id
-            elif not args.catch_up:
-                initial_raw_issue_max_pages = 1
-            state, requests_per_poll_count = _fetch_new_issue_state(
-                args.repo,
-                token,
-                stop_after_id=initial_raw_issue_stop_after_id,
-                max_pages=initial_raw_issue_max_pages,
-            )
-    except urllib.error.HTTPError as err:
-        print(f"GitHub API error: {err.code} {err.reason}", file=sys.stderr)
-        return RETRY_EXIT_CODE if is_retryable_http_error(err) else 1
-    except urllib.error.URLError as err:
-        print(f"GitHub network error: {err.reason}", file=sys.stderr)
-        return RETRY_EXIT_CODE
-    except Exception as err:  # noqa: BLE001
-        print(f"Failed to fetch initial issue state: {err}", file=sys.stderr)
-        return 1
+    quota_deadline = start + args.timeout if args.timeout > 0 else float("inf")
+    cache = ResponseCache()
+    if args.issue is not None and token and not args.include_self_comments:
+        viewer = github_request(lambda: get_authenticated_login(token, raise_on_error=True), quota_deadline=quota_deadline)
+        if viewer.error:
+            print(str(viewer.error), file=sys.stderr)
+            return RETRY_EXIT_CODE if viewer.error.retryable else viewer.error.exit_code
+        viewer_login = viewer.value
+
+    def fetch(stop_after_id: int | None, max_pages: int | None = None):
+        def operation():
+            if args.issue is not None:
+                return _fetch_issue_comment_state(args.repo, args.issue, token, stop_after_id=stop_after_id, cache=cache)
+            return _fetch_new_issue_state(args.repo, token, stop_after_id=stop_after_id, max_pages=max_pages, cache=cache)
+
+        return github_request(operation, unauthenticated=token is None, quota_deadline=quota_deadline)
+
+    stop_after = args.since_issue_comment_id if args.issue is not None else args.since_raw_issue_id
+    if args.issue is None and stop_after is None:
+        stop_after = args.since_issue_id
+    initial = fetch(None if args.catch_up else stop_after, max_pages=1 if not args.catch_up and stop_after is None else None)
+    if initial.error:
+        print(str(initial.error), file=sys.stderr)
+        return RETRY_EXIT_CODE if initial.error.retryable else initial.error.exit_code
+    state, requests_per_poll_count = initial.value
 
     if token is None:
         bootstrap_requests = requests_per_poll_count
@@ -346,34 +341,14 @@ def main() -> int:
 
         time.sleep(sleep_seconds)
 
-        try:
-            if args.issue is not None:
-                state, requests_per_poll_count = _fetch_issue_comment_state(
-                    args.repo,
-                    args.issue,
-                    token,
-                    stop_after_id=issue_comment_cursor if issue_comment_cursor > 0 else None,
-                )
-            else:
-                state, requests_per_poll_count = _fetch_new_issue_state(
-                    args.repo,
-                    token,
-                    stop_after_id=raw_issue_cursor if raw_issue_cursor > 0 else None,
-                )
-        except urllib.error.HTTPError as err:
-            if token is None and err.code in {403, 429}:
-                print(
-                    (
-                        f"GitHub unauthenticated polling hit a rate limit. {AUTHENTICATION_HINT}"
-                    ),
-                    file=sys.stderr,
-                )
-                return 1
-            print(f"GitHub API error during polling: {err.code} {err.reason}", file=sys.stderr)
-            continue
-        except Exception as err:  # noqa: BLE001
-            print(f"Polling failed: {err}", file=sys.stderr)
-            continue
+        cursor = issue_comment_cursor if args.issue is not None else raw_issue_cursor
+        polled = fetch(cursor if cursor > 0 else None)
+        if polled.error:
+            print(str(polled.error), file=sys.stderr)
+            if polled.error.retryable:
+                continue
+            return polled.error.exit_code
+        state, requests_per_poll_count = polled.value
 
         if token is None:
             unauthenticated_min = min_interval_for_unauthenticated(requests_per_poll_count)

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import http.client
 import importlib.util
+import io
 import json
 import urllib.error
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import pytest
 
 
 def _load_module():
@@ -118,6 +121,47 @@ def test_unauthenticated_rate_limit_is_terminal() -> None:
     assert result.error is not None
     assert result.error.retryable is False
     assert result.error.status_code == 429
+
+
+@pytest.mark.parametrize(("code", "headers", "body", "delays"), [
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1090"}, "", [93]),
+    (429, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1090"}, "", [93]),
+    (403, {"X-RateLimit-Remaining": "0"}, "", [60]),
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "999"}, "", [60]),
+    (429, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "bad"}, "", [60]),
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "9000"}, "", [3900]),
+    (403, {"Retry-After": "10"}, "", [10, 20, 40, 80]),
+    (429, {"Retry-After": "3000"}, "", [3000, 3900]),
+    (403, {}, "You have exceeded a secondary rate limit.", [60, 120]),
+    (403, {}, "Resource not accessible by integration", []),
+])
+def test_quota_recovery(code, headers, body, delays):
+    module = _load_module()
+    def refusal():
+        return urllib.error.HTTPError("https://example.invalid", code, "refused", headers,
+                                      io.BytesIO(json.dumps({"message": body}).encode()))
+    request = Mock(side_effect=[refusal() for _ in (delays or [0])] + ["recovered"])
+    with (
+        patch.object(module.time, "sleep") as sleep,
+        patch.object(module.time, "time", return_value=1000),
+        patch.object(module.random, "uniform", return_value=3),
+    ):
+        result = module.retry_initial_request(request, description="poll", quota_deadline=float("inf"))
+    assert [call.args[0] for call in sleep.call_args_list] == delays
+    if delays:
+        assert result.value == "recovered"
+    else:
+        assert not result.error.retryable
+        assert result.error.exit_code == 1
+
+
+def test_quota_recovery_respects_cycle_deadline():
+    module = _load_module()
+    error = urllib.error.HTTPError("https://example.invalid", 403, "refused", {"Retry-After": "100"}, None)
+    with patch.object(module.time, "monotonic", return_value=95), patch.object(module.time, "sleep") as sleep:
+        result = module.github_request(lambda: (_ for _ in ()).throw(error), quota_deadline=100)
+    sleep.assert_called_once_with(5)
+    assert result.error.exit_code == 124
 
 
 def test_http_incomplete_read_is_transient() -> None:

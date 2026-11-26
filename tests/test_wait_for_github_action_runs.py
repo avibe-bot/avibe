@@ -225,7 +225,7 @@ def test_main_waits_until_target_runs_complete() -> None:
     module = _load_module()
     calls = 0
 
-    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3, cache=None):
         nonlocal calls
         calls += 1
         assert repo == "cyhhao/sub2api"
@@ -278,7 +278,7 @@ def test_main_waits_until_target_runs_complete() -> None:
 def test_main_returns_zero_for_completed_failed_workflow() -> None:
     module = _load_module()
 
-    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3, cache=None):
         return (
             [
                 {
@@ -324,7 +324,7 @@ def test_main_uses_real_request_count_for_unauthenticated_interval() -> None:
     calls = 0
     sleep_intervals: list[float] = []
 
-    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3, cache=None):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -542,7 +542,7 @@ def test_main_recovers_from_retryable_actions_polling_failure() -> None:
 def test_main_only_on_failure_skips_agent_turn_for_green_run() -> None:
     module = _load_module()
 
-    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3, cache=None):
         return (
             [
                 {
@@ -595,7 +595,7 @@ def test_main_only_on_failure_skips_agent_turn_for_green_run() -> None:
 def test_main_only_on_failure_still_reports_failed_run() -> None:
     module = _load_module()
 
-    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3):
+    def _fake_fetch_workflow_runs(repo, token, *, branch=None, head_sha=None, max_pages=3, cache=None):
         return (
             [
                 {

@@ -566,6 +566,11 @@ GitHub-specific notes:
 - `--catch-up` reports activity that already exists at startup, and overrides saved
   cursors when a state file is present; an explicit `--since-*-id` still wins
 - without `--catch-up` or a `--state-file`, the waiter snapshots current PR activity as the baseline
+- an authenticated PR, Actions, or issue waiter that hits a primary limit waits for
+  the reset plus jitter. Secondary limits honor `Retry-After` and back off on
+  repeats. Missing or unusable timing defaults to one minute; one wait is at most
+  65 minutes and cannot extend `--timeout`. Neither case changes identity or
+  advances the cursor. An ordinary permission refusal still stops the waiter.
 - polling is cheap by design: mutable review/comment collections are fetched in full
   so edits and deletions remain observable, reactions are filtered server-side with
   `content=+1`, and unchanged pages revalidate to `304`, which GitHub does not charge
