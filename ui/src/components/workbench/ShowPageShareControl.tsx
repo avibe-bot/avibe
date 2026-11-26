@@ -16,14 +16,17 @@ import {
   hasNativeShareExport,
   isNativeShell,
   nativeSharePresent,
+  openNativeExternal,
   type NativeShareKind,
   type NativeShareResult,
 } from '../../lib/native';
+import { isIosDevice, isRealMobileSafari, isRealSafari, isStandalonePwa } from '../../lib/platform';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { copyHref, type ShowPageLinkInfo, type ShowPagePayload } from '../../lib/showPageLinks';
 import { cn, copyTextToClipboard } from '../../lib/utils';
 import { useShowPageInventory, type ShowPage } from '../useShowPages';
 import { ShowPageSharingSettings } from './ShowPageSharingSettings';
+import { ShowPageSystemEntryGuide, type ShowPageSystemEntryMode } from './ShowPageSystemEntryGuide';
 
 type ShowExportKind = Exclude<NativeShareKind, 'link'>;
 
@@ -142,6 +145,20 @@ export const ShowPageShareControl: React.FC<{
   // PDF and image exist only in a shell that exports: the phone app, or a desktop Show window. A
   // phone app that predates them explains the update instead.
   const showExport = (nativeShell || exportAvailable) && !!payload && frameVisible;
+  const iosStandalone = isIosDevice() && isStandalonePwa();
+  const safariBrowser = isRealSafari();
+  const iosSafari = isRealMobileSafari();
+  const systemEntryUnavailable = nativeShell && payload?.url_available === false;
+  const showSystemEntry = Boolean(payload && !offline && (link || systemEntryUnavailable));
+  const systemEntryMode: ShowPageSystemEntryMode = systemEntryUnavailable
+    ? 'unavailable'
+    : nativeShell
+      ? 'native'
+      : iosSafari || iosStandalone
+        ? 'ios'
+        : safariBrowser && !isIosDevice()
+          ? 'mac'
+          : 'other';
 
   const applyPayload = (next: ShowPagePayload) => {
     setLocalPayload(next);
@@ -249,6 +266,11 @@ export const ShowPageShareControl: React.FC<{
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const openInBrowser = async () => {
+    if (!link) return;
+    await openNativeExternal(link);
   };
 
   const reportShareResult = (result: NativeShareResult) => {
@@ -457,6 +479,15 @@ export const ShowPageShareControl: React.FC<{
           <p className="border-t border-border pt-3 text-[11px] leading-snug text-destructive-ink">
             {t('chat.showPage.accessLoadError')}
           </p>
+        ) : null}
+
+        {showSystemEntry ? (
+          <ShowPageSystemEntryGuide
+            mode={systemEntryMode}
+            link={link}
+            onOpenBrowser={openInBrowser}
+            onCopyLink={copyLink}
+          />
         ) : null}
 
         {payload && canPinToDock ? (
