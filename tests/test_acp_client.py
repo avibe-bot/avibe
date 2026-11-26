@@ -367,3 +367,26 @@ def test_parse_diff_blocks_extracts_valid_diffs() -> None:
         AcpDiffBlock(path="a.py", old_text=None, new_text="new\n", raw={"type": "diff", "path": "a.py", "newText": "new\n"}),
         AcpDiffBlock(path="b.py", old_text="1", new_text="2", raw={"type": "diff", "path": "b.py", "oldText": "1", "newText": "2"}),
     )
+
+
+@pytest.mark.asyncio
+async def test_acp_client_session_fork_applies_request_timeout() -> None:
+    from modules.agents.acp.client import AcpClient
+
+    client = AcpClient(["agy", "acp"], request_timeout=17.5)
+    recorded: list[tuple[str, dict[str, Any], float | None]] = []
+
+    async def _fake_send_request(method: str, params: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
+        recorded.append((method, dict(params or {}), timeout))
+        return {"sessionId": "forked-1"}
+
+    client.send_request = _fake_send_request  # type: ignore[method-assign]
+    resp = await client.session_fork("src-1", "/tmp/work", additional_directories=["/tmp/rules"])
+    assert resp == {"sessionId": "forked-1"}
+    assert recorded == [
+        (
+            "session/fork",
+            {"sessionId": "src-1", "cwd": "/tmp/work", "mcpServers": [], "additionalDirectories": ["/tmp/rules"]},
+            17.5,
+        )
+    ]

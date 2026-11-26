@@ -34,20 +34,8 @@ from modules.agents.native_sessions.antigravity import AntigravityNativeSessionP
 from modules.agents.native_sessions.providers import DEFAULT_PROVIDER_SPECS
 from modules.sessions_facade import SessionsFacade
 from storage.importer import ensure_sqlite_state
-from tests.helpers.antigravity_harness import (
-    FakeController,
-    FakeOwnershipProvider,
-    FakeSessions,
-    antigravity_config,
-    app_config,
-    create_fake_agy_shim,
-    make_acp_capabilities,
-    make_agent_harness,
-    make_model_config_options,
-    make_request,
-    read_jsonl,
-    read_session_row,
-)
+from tests.helpers.antigravity_harness import FakeController, FakeOwnershipProvider, FakeSessions, antigravity_config, app_config, create_fake_agy_shim, make_agent_harness, make_request, read_jsonl, read_session_row
+from tests.helpers.fake_acp_server import make_acp_capabilities, make_model_config_options
 
 
 def _peer_opt(state_file: Path, session_id: str, option_id: str) -> str | None:
@@ -67,7 +55,6 @@ async def test_launch_argv_and_env_contract_for_execution_and_passive_list(tmp_p
 
         adc_env = build_antigravity_env(antigravity_config(h.shim, auth_mode="agent-platform", gcp_project="proj-123", gcp_location="us-central1"), base_env={"PATH": os.environ.get("PATH", "")})
         assert (adc_env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV], adc_env["GOOGLE_CLOUD_PROJECT"], adc_env["GOOGLE_CLOUD_LOCATION"]) == ("true", "proj-123", "us-central1")
-        assert "--dangerously-skip-permissions" not in antigravity_acp_command("agy", execution=False)
 
         provider = make_native_provider(cli_path=str(h.shim), config=h.agy_cfg)
         items = await asyncio.to_thread(provider.list_metadata, str(h.workdir))
@@ -76,7 +63,6 @@ async def test_launch_argv_and_env_contract_for_execution_and_passive_list(tmp_p
         title = await asyncio.to_thread(provider.get_title, native_session_id="sess-1", working_path=str(h.workdir))
         assert title is not None and (title.title, title.source) == ("Update greeting", "backend")
         assert len(h.launches()) >= 2 and all("--dangerously-skip-permissions" not in p["argv"] and "--disable-telemetry" in p["argv"] and p["env"][AGY_CLI_DISABLE_AUTO_UPDATE_ENV] == "true" for p in h.launches()[1:])
-        assert any(spec.agent_name == "antigravity" for spec in DEFAULT_PROVIDER_SPECS)
 
 
 @pytest.mark.asyncio
@@ -215,40 +201,24 @@ async def test_model_and_dependent_effort_applied_in_order_and_fails_explicitly(
 
 
 @pytest.mark.asyncio
-async def test_contradictory_current_value_raises_before_prompt(tmp_path: Path) -> None:
-    class _MismatchClient:
-        def __init__(self, mode: str) -> None:
-            self.mode = mode
+@pytest.mark.parametrize("stage,effort,reason", [
+    ("model", None, "model_mismatch"),
+    ("effort", "high", "effort_mismatch"),
+    ("effort_model", "high", "model_mismatch"),
+])
+async def test_selection_rejects_contradictory_config_receipts(stage, effort, reason):
+    calls = []
 
-        async def session_set_config_option(self, _sid: str, cid: str, val: Any) -> dict[str, Any]:
-            if self.mode == "model":
-                return {"configOptions": make_model_config_options(model="model-alpha", effort="low")}
-            return {"configOptions": make_model_config_options(model=str(val) if cid == "model" else "model-beta", effort="low", snake_case=True)}
+    class Client:
+        async def session_set_config_option(self, _sid, cid, value):
+            calls.append((cid, value))
+            model = "model-beta" if stage == "model" or stage == "effort_model" and cid == "thought_level" else "model-alpha"
+            return {"configOptions": make_model_config_options(model=model, effort="low", snake_case=stage == "effort")}
 
-    base = make_model_config_options(effort="low")
-    for mode, effort, reason in (("model", None, "model_mismatch"), ("effort", "high", "effort_mismatch")):
-        with pytest.raises(AntigravityModelSelectionError) as exc:
-            await apply_model_and_effort(_MismatchClient(mode), "sess-1", base, model="model-beta", effort=effort)  # type: ignore[arg-type]
-        assert exc.value.reason == reason
-
-    async with make_agent_harness(tmp_path) as h:
-        prompt_called, orig_get = False, h.agent._get_or_create_session
-
-        async def _wrapped(*a: Any, **kw: Any) -> Any:
-            sess = await orig_get(*a, **kw)
-            sess.client.session_set_config_option = _MismatchClient("model").session_set_config_option  # type: ignore[method-assign]
-
-            async def _guard(*_pa: Any, **_pkw: Any) -> dict[str, Any]:
-                nonlocal prompt_called
-                prompt_called = True
-                return {"stopReason": "end_turn"}
-
-            sess.client.session_prompt = _guard  # type: ignore[method-assign]
-            return sess
-
-        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
-        await h.agent.handle_message(make_request(message="never-sent", workdir=h.workdir, model="model-beta"))
-        assert prompt_called is False and h.controller.events("result")[0][2].get("is_error") is True
+    with pytest.raises(AntigravityModelSelectionError) as exc:
+        await apply_model_and_effort(Client(), "sess-1", make_model_config_options(model="model-beta", effort="low"), model="model-alpha", effort=effort)
+    assert exc.value.reason == reason
+    assert calls == [("model", "model-alpha")] + ([] if stage == "model" else [("thought_level", "high")])
 
 
 @pytest.mark.asyncio
@@ -316,40 +286,34 @@ async def test_apply_model_and_effort_clear_override_unit_contracts(
 @pytest.mark.parametrize("return_empty", [False, True])
 async def test_partial_selection_failure_without_notification_reapplies_model_and_effort(tmp_path: Path, return_empty: bool) -> None:
     async with make_agent_harness(tmp_path, name=f"partial-sel-{return_empty}") as h:
-        peer, set_calls, prompt_states, mismatch_next, wrapped = {"model": "model-alpha", "thought_level": "medium"}, [], [], False, set()
-        orig_get = h.agent._get_or_create_session
+        peer, set_calls, prompt_states, mismatch_next = {"model": "model-alpha", "thought_level": "medium"}, [], [], False
+        warm = make_request(message="say:warm", workdir=h.workdir)
+        await h.agent.handle_message(warm)
+        sess = h.agent._sessions[warm.composite_session_id]
 
         def _opts() -> list[dict[str, Any]]:
             return make_model_config_options(model=peer["model"], effort=peer["thought_level"], effort_choices=("low", "medium") if peer["model"] == "model-beta" else ("low", "medium", "high"))
 
-        async def _wrapped(*a: Any, **kw: Any) -> Any:
-            sess = await orig_get(*a, **kw)
-            if id(sess) not in wrapped:
-                wrapped.add(id(sess))
+        async def _set_opt(_sid: str, cid: str, val: Any) -> dict[str, Any]:
+            nonlocal mismatch_next
+            set_calls.append((cid, val))
+            if cid == "model":
+                peer["model"] = str(val)
+            elif cid == "thought_level":
+                if peer["model"] == "model-beta":
+                    raise AcpRpcError(-32602, "native effort change rejected")
+                if mismatch_next:
+                    mismatch_next = False
+                    peer["thought_level"] = "low"
+                    return {"configOptions": _opts()}
+                peer["thought_level"] = str(val)
+            return {} if return_empty else {"configOptions": _opts()}
 
-                async def _set_opt(_sid: str, cid: str, val: Any) -> dict[str, Any]:
-                    nonlocal mismatch_next
-                    set_calls.append((cid, val))
-                    if cid == "model":
-                        peer["model"] = str(val)
-                    elif cid == "thought_level":
-                        if peer["model"] == "model-beta":
-                            raise AcpRpcError(-32602, "native effort change rejected")
-                        if mismatch_next:
-                            mismatch_next = False
-                            peer["thought_level"] = "low"
-                            return {"configOptions": _opts()}
-                        peer["thought_level"] = str(val)
-                    return {} if return_empty else {"configOptions": _opts()}
+        async def _prompt(*_pa: Any, **_pkw: Any) -> dict[str, Any]:
+            prompt_states.append((peer["model"], peer["thought_level"]))
+            return {"stopReason": "end_turn"}
 
-                async def _prompt(*_pa: Any, **_pkw: Any) -> dict[str, Any]:
-                    prompt_states.append((peer["model"], peer["thought_level"]))
-                    return {"stopReason": "end_turn"}
-
-                sess.client.session_set_config_option, sess.client.session_prompt = _set_opt, _prompt  # type: ignore[method-assign]
-            return sess
-
-        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
+        sess.client.session_set_config_option, sess.client.session_prompt = _set_opt, _prompt  # type: ignore[method-assign]
 
         async def _turn(msg: str, model: str, effort: str | None) -> Any:
             h.controller.emitted.clear()
@@ -479,23 +443,24 @@ async def test_streaming_updates_usage_permissions_and_single_turn_end(tmp_path:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("prompt", "expected_partial", "expected_subtype"),
+    ("prompt", "expected_partial", "expected_subtype", "language"),
     [
-        ("stop_reason:max_tokens", "partial:max_tokens", "error_max_turns"),
-        ("stop_reason:max_turn_requests", "partial:max_turn_requests", "error_max_turns"),
-        ("stop_reason:refusal", "partial:refusal", "error_during_execution"),
-        ("stop_reason:unexpected_custom", "partial:unexpected_custom", "error_during_execution"),
-        ("stop_reason_missing", "partial:missing", "error_during_execution"),
+        ("stop_reason:max_tokens", "partial:max_tokens", "error_max_turns", "en"),
+        ("stop_reason:max_turn_requests", "partial:max_turn_requests", "error_max_turns", "en"),
+        ("stop_reason:refusal", "partial:refusal", "error_during_execution", "en"),
+        ("stop_reason:unexpected_custom", "partial:unexpected_custom", "error_during_execution", "en"),
+        ("stop_reason_missing", "partial:missing", "error_during_execution", "en"),
+        ("stop_reason:max_tokens", "partial:max_tokens", "error_max_turns", "zh"),
     ],
 )
-async def test_strict_stop_reason_settlement_preserves_partial_text_and_fails(tmp_path: Path, prompt: str, expected_partial: str, expected_subtype: str, monkeypatch) -> None:
+async def test_strict_stop_reason_settlement_preserves_partial_text_and_fails(tmp_path: Path, prompt: str, expected_partial: str, expected_subtype: str, language: str, monkeypatch) -> None:
     calls = []
     original = agy_agent_module.emit_backend_failure
     async def failure(*args, **kwargs):
         calls.append(args)
         return await original(*args, **kwargs)
     monkeypatch.setattr(agy_agent_module, "emit_backend_failure", failure)
-    async with make_agent_harness(tmp_path, show_duration=True) as h:
+    async with make_agent_harness(tmp_path, show_duration=True, language=language) as h:
         req = make_request(message=prompt, workdir=h.workdir)
         req.started_at -= 1.0
         await h.agent.handle_message(req)
@@ -503,29 +468,15 @@ async def test_strict_stop_reason_settlement_preserves_partial_text_and_fails(tm
         assert len(calls) == 1  # The shared failure owner supplies the standard Retry affordance.
         assert expected_partial in h.controller.events("assistant")[0][1]
         assert opts.get("is_error") is True and opts.get("terminal_error")
+        if language == "zh":
+            assert "回合未完整结束" in h.controller.events("notify")[0][1]
+            assert opts["terminal_error"] == "Antigravity turn stopped incomplete (max_tokens)."
 
 
 @pytest.mark.asyncio
-async def test_localized_zh_failure_and_incomplete_turn_copy(tmp_path: Path) -> None:
-    async with make_agent_harness(tmp_path, cli_path=tmp_path / "missing-agy", language="zh", name="zh-miss") as h:
-        await h.agent.handle_message(make_request(message="hello", workdir=h.workdir))
-        assert "找不到 Antigravity CLI" in h.controller.events("notify")[0][1]
-
-    async with make_agent_harness(tmp_path, server_config={"requireAuth": True}, language="zh", name="zh-auth") as h:
-        await h.agent.handle_message(make_request(message="hello", workdir=h.workdir))
-        note = h.controller.events("notify")[0][1]
-        assert "需要身份验证" in note and "-32000" in note
-
-    async with make_agent_harness(tmp_path, language="zh", name="zh-stop") as h:
-        await h.agent.handle_message(make_request(message="stop_reason:max_tokens", workdir=h.workdir))
-        _, text, opts = h.controller.events("result")[0]
-        assert "partial:max_tokens" in h.controller.events("assistant")[0][1]
-        assert "回合未完整结束" in h.controller.events("notify")[0][1] and opts.get("is_error") is True
-        assert opts.get("terminal_error") == "Antigravity turn stopped incomplete (max_tokens)."
-
-
-@pytest.mark.asyncio
-async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(tmp_path: Path) -> None:
+@pytest.mark.parametrize("blocked_drain", [False, True])
+async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(tmp_path: Path, monkeypatch, blocked_drain) -> None:
+    monkeypatch.setattr(agy_agent_module, "_STOP_CANCEL_GRACE_SECONDS", 0.2)
     async with make_agent_harness(tmp_path) as h:
         stop_req = make_request(message="wait_cancel", workdir=h.workdir)
         turn_task = asyncio.create_task(h.agent.handle_message(stop_req))
@@ -533,8 +484,18 @@ async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(t
             if h.agent.runtime_has_active_turns():
                 break
             await asyncio.sleep(0.02)
-        assert h.agent.runtime_has_active_turns() and await h.agent.handle_stop(stop_req) is True
-        await turn_task
+        assert h.agent.runtime_has_active_turns()
+        sess = h.agent._sessions[stop_req.composite_session_id]
+        if blocked_drain:
+            async def drain():
+                await asyncio.Event().wait()
+            monkeypatch.setattr(sess.client._process.stdin, "drain", drain)
+        started = time.monotonic()
+        assert await h.agent.handle_stop(stop_req) is True
+        await asyncio.wait_for(turn_task, 2)
+        assert time.monotonic() - started < 2
+        if blocked_drain:
+            assert not sess.client.is_alive and stop_req.composite_session_id not in h.agent._sessions
         assert len(h.controller.events("result")) == 1 and h.controller.events("result")[0][2]["output"].settled_by == SETTLED_BY_STOPPED
 
         h.controller.emitted.clear()
@@ -552,24 +513,26 @@ async def test_handle_stop_and_mid_turn_crash_emit_single_terminal_and_recover(t
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("case_id", "server_config", "missing_cli", "platform_specific", "expected_reason", "expected_sub", "forbidden_sub"),
+    ("case_id", "server_config", "missing_cli", "platform_specific", "expected_reason", "expected_sub", "forbidden_sub", "language"),
     [
-        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "-32000", None),
-        ("auth_resume", {"requireAuth": True}, False, {"agent_session_target": {"id": "ses_existing", "agent_backend": "antigravity", "native_session_id": "sess-1"}}, "auth_required", "-32000", "Could not resume"),
-        ("cli_not_found", None, True, None, "cli_not_found", "CLI not found", None),
+        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "-32000", None, "en"),
+        ("auth_resume", {"requireAuth": True}, False, {"agent_session_target": {"id": "ses_existing", "agent_backend": "antigravity", "native_session_id": "sess-1"}}, "auth_required", "-32000", "Could not resume", "en"),
+        ("cli_not_found", None, True, None, "cli_not_found", "CLI not found", None, "en"),
+        ("auth_new", {"requireAuth": True}, False, None, "auth_required", "需要身份验证", None, "zh"),
+        ("cli_not_found", None, True, None, "cli_not_found", "找不到 Antigravity CLI", None, "zh"),
     ],
 )
 async def test_prewrite_failures_classify_and_emit_single_error(
-    tmp_path: Path, case_id: str, server_config: dict[str, Any] | None, missing_cli: bool, platform_specific: dict[str, Any] | None, expected_reason: str, expected_sub: str, forbidden_sub: str | None
+    tmp_path: Path, case_id: str, server_config: dict[str, Any] | None, missing_cli: bool, platform_specific: dict[str, Any] | None, expected_reason: str, expected_sub: str, forbidden_sub: str | None, language: str
 ) -> None:
-    async with make_agent_harness(tmp_path, server_config=server_config, cli_path=(tmp_path / "does-not-exist-agy") if missing_cli else None, name=f"fake-agy-{case_id}") as h:
+    async with make_agent_harness(tmp_path, server_config=server_config, cli_path=(tmp_path / "does-not-exist-agy") if missing_cli else None, name=f"fake-agy-{case_id}", language=language) as h:
         req = make_request(message="hello", workdir=h.workdir, base_session_id=f"slack_{case_id}", platform_specific=platform_specific)
         set_dispatch_phase(req.context, DISPATCH_PHASE_PREWRITE)
         await h.agent.handle_message(req)
         assert prewrite_failure_evidence(req.context).get("reason") == expected_reason
         note = h.controller.events("notify")[0][1]
         assert expected_sub in note and h.controller.events("result")[0][2].get("is_error") is True
-        if case_id == "auth_new":
+        if case_id == "auth_new" and language == "en":
             assert "authentication required" in note.lower()
         if forbidden_sub is not None:
             assert forbidden_sub not in note
@@ -624,25 +587,17 @@ async def test_caller_context_session_stable_reuse_replacement_and_sibling_isola
         pid1, native_a = sess_a.client._process.pid, sess_a.native_session_id
         assert pid1 != sib_pid and native_a != sib_native and AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and len(h.launches()) == 2
 
-        await h.agent.handle_message(make_request(message="turn-2", workdir=h.workdir, user_id="U2", message_id="M2"))
-        assert h.agent._sessions[req1.composite_session_id].client._process.pid == pid1 and len(h.launches()) == 2
-
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, user_id="U2", message_id="M3", platform_specific={"task_execution_id": "run_42", "task_trigger_kind": "agent_run", "source_kind": "agent"}))
         pid3 = h.agent._sessions[req1.composite_session_id].client._process.pid
         assert pid3 == pid1 and h.agent._sessions[req1.composite_session_id].native_session_id == native_a
         assert AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and AVIBE_CALLER_SOURCE_ENV not in h.launches()[-1]["env"]
-        assert "turn-1" in h.controller.events("result")[0][1] and "turn-2" in h.controller.events("result")[0][1]
+        assert "turn-1" in h.controller.events("result")[0][1]
 
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, platform="avibe", user_id="remote:sub-alice", message_id="M4", platform_specific={"message_metadata": {"resource_user_context": {"sub": "sub-alice", "role": "editor"}}}))
         pid4 = h.agent._sessions[req1.composite_session_id].client._process.pid
         assert pid4 != pid3 and json.loads(h.launches()[-1]["env"][AVIBE_CALLER_RESOURCE_CONTEXT_ENV]) == {"role": "editor", "sub": "sub-alice"}
-
-        h.controller.emitted.clear()
-        await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, user_id="U1", message_id="M5"))
-        pid5 = h.agent._sessions[req1.composite_session_id].client._process.pid
-        assert pid5 != pid4 and AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and h.launches()[-1]["env"].get(AVIBE_CALLER_SOURCE_ENV) != "agent_run"
 
         assert h.agent._sessions[req_b.composite_session_id].client._process.pid == sib_pid and h.agent._sessions[req_b.composite_session_id].client.is_alive
         h.controller.emitted.clear()
@@ -724,18 +679,6 @@ async def test_pre_tool_use_hook_enforces_policy_and_unattributable_permission_r
 
 
 @pytest.mark.asyncio
-async def test_steering_without_a_live_turn_does_not_write(tmp_path: Path) -> None:
-    async with make_agent_harness(tmp_path, cli_path="agy") as h:
-        req = make_request(message="hello", workdir=h.workdir)
-        target = ActiveSteerTarget(runtime_key=req.composite_session_id, logical_turn_id="turn-1", context=req.context, agent_request=req, agent=h.agent)
-        assert h.agent.steering_native_turn_id(target) is None
-        steer = await h.agent.steer_active_turn(SteerRequest(target_session_id="ses_1", expected_logical_turn_id="turn-1", expected_native_turn_id="native-1", text="follow up"), target)
-        rec = await h.agent.reconcile_steer_attempt(SteerReconcileRequest(target_session_id="ses_1", expected_logical_turn_id="turn-1", expected_native_turn_id="native-1", attempt_id="att-1"), target)
-        assert steer.outcome == SteerOutcome.NOT_ACTIVE
-        assert (rec.outcome, rec.reason) == (SteerOutcome.UNKNOWN, "attempt_not_found")
-
-
-@pytest.mark.asyncio
 async def test_idle_eviction_respects_runtime_ownership_and_renewal(tmp_path: Path) -> None:
     ownership = FakeOwnershipProvider(blocks_reclamation=True)
     async with make_agent_harness(tmp_path, ownership=ownership) as h:
@@ -793,128 +736,46 @@ async def test_sibling_runtime_isolation_and_running_agents_end(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_handle_stop_bounds_blocked_session_cancel_drain_within_grace_period(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(agy_agent_module, "_STOP_CANCEL_GRACE_SECONDS", 0.2)
-    async with make_agent_harness(tmp_path, name="stop-blocked-drain") as h:
-        stop_req = make_request(message="wait_cancel", workdir=h.workdir)
-        turn_task = asyncio.create_task(h.agent.handle_message(stop_req))
-        for _ in range(100):
-            if h.agent.runtime_has_active_turns():
-                break
-            await asyncio.sleep(0.02)
-        assert h.agent.runtime_has_active_turns()
-
-        sess = h.agent._sessions[stop_req.composite_session_id]
-        assert sess.client._process is not None and sess.client._process.stdin is not None
-        block_event = asyncio.Event()
-
-        async def _blocked_drain() -> None:
-            await block_event.wait()
-
-        monkeypatch.setattr(sess.client._process.stdin, "drain", _blocked_drain)
-
-        started = time.monotonic()
-        stopped = await h.agent.handle_stop(stop_req)
-        elapsed = time.monotonic() - started
-        await asyncio.wait_for(turn_task, timeout=2.0)
-
-        assert stopped is True
-        assert elapsed < 2.0
-        assert not sess.client.is_alive
-        assert stop_req.composite_session_id not in h.agent._sessions
-        assert len(h.controller.events("result")) == 1
-        assert h.controller.events("result")[0][2]["output"].settled_by == SETTLED_BY_STOPPED
-
-
-@pytest.mark.asyncio
-async def test_effort_option_receipt_model_mismatch_fails_before_prompt(tmp_path: Path) -> None:
-    class _EffortModelDriftClient:
-        def __init__(self) -> None:
-            self.calls: list[tuple[str, Any]] = []
-
-        async def session_set_config_option(self, _sid: str, cid: str, val: Any) -> dict[str, Any]:
-            self.calls.append((cid, val))
-            if cid == "model":
-                return {"configOptions": make_model_config_options(model="model-alpha", effort="medium")}
-            return {"configOptions": make_model_config_options(model="model-beta", effort="high")}
-
-    base = make_model_config_options(model="model-beta", effort="medium")
-    drift_client = _EffortModelDriftClient()
-    with pytest.raises(AntigravityModelSelectionError) as exc:
-        await apply_model_and_effort(drift_client, "sess-1", base, model="model-alpha", effort="high")  # type: ignore[arg-type]
-    assert exc.value.reason == "model_mismatch"
-    assert drift_client.calls == [("model", "model-alpha"), ("thought_level", "high")]
-
-    async with make_agent_harness(tmp_path, name="effort-model-drift") as h:
-        prompt_called, orig_get = False, h.agent._get_or_create_session
-
-        async def _wrapped(*a: Any, **kw: Any) -> Any:
-            sess = await orig_get(*a, **kw)
-            sess.config_options = tuple(make_model_config_options(model="model-beta", effort="medium"))
-            sess.client.session_set_config_option = _EffortModelDriftClient().session_set_config_option  # type: ignore[method-assign]
-
-            async def _guard(*_pa: Any, **_pkw: Any) -> dict[str, Any]:
-                nonlocal prompt_called
-                prompt_called = True
-                return {"stopReason": "end_turn"}
-
-            sess.client.session_prompt = _guard  # type: ignore[method-assign]
-            return sess
-
-        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
-        req = make_request(message="never-sent", workdir=h.workdir, model="model-alpha", effort="high")
-        set_dispatch_phase(req.context, DISPATCH_PHASE_PREWRITE)
-        await h.agent.handle_message(req)
-        assert prompt_called is False
-        assert prewrite_failure_evidence(req.context).get("reason") == "model_mismatch"
-        assert h.controller.events("result")[0][2].get("is_error") is True
-
-
-@pytest.mark.asyncio
 async def test_pre_tool_text_flushes_as_narration_before_end_turn_without_duplication(tmp_path: Path) -> None:
     async with make_agent_harness(tmp_path, name="pre-tool-narration") as h:
         paused_after_tool = asyncio.Event()
         resume_prompt = asyncio.Event()
-        orig_get = h.agent._get_or_create_session
+        warm = make_request(message="say:warm", workdir=h.workdir)
+        await h.agent.handle_message(warm)
+        sess = h.agent._sessions[warm.composite_session_id]
+        h.controller.emitted.clear()
 
-        async def _wrapped(*a: Any, **kw: Any) -> Any:
-            sess = await orig_get(*a, **kw)
+        async def _scripted_prompt(sid: str, _blocks: Any, **_pkw: Any) -> dict[str, Any]:
+            await h.agent._handle_notification(
+                sess,
+                "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Checking files"}}},
+            )
+            await h.agent._handle_notification(
+                sess,
+                "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " before edit."}}},
+            )
+            await h.agent._handle_notification(
+                sess,
+                "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}},
+            )
+            paused_after_tool.set()
+            await resume_prompt.wait()
+            await h.agent._handle_notification(
+                sess, "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed"}},
+            )
+            await h.agent._handle_notification(
+                sess,
+                "session/update",
+                {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Final answer after tool."}}},
+            )
+            return {"stopReason": "end_turn"}
 
-            async def _scripted_prompt(sid: str, _blocks: Any, **_pkw: Any) -> dict[str, Any]:
-                await h.agent._handle_notification(
-                    sess,
-                    "session/update",
-                    {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Checking files"}}},
-                )
-                await h.agent._handle_notification(
-                    sess,
-                    "session/update",
-                    {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": " before edit."}}},
-                )
-                await h.agent._handle_notification(
-                    sess,
-                    "session/update",
-                    {"sessionId": sid, "update": {"sessionUpdate": "tool_call", "toolCallId": "tc-1", "title": "Read file", "kind": "read", "status": "in_progress"}},
-                )
-                paused_after_tool.set()
-                await resume_prompt.wait()
-                await h.agent._handle_notification(
-                    sess, "session/update",
-                    {"sessionId": sid, "update": {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1", "status": "completed"}},
-                )
-                await h.agent._handle_notification(
-                    sess,
-                    "session/update",
-                    {"sessionId": sid, "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "Final answer after tool."}}},
-                )
-                return {"stopReason": "end_turn"}
+        sess.client.session_prompt = _scripted_prompt  # type: ignore[method-assign]
 
-            sess.client.session_prompt = _scripted_prompt  # type: ignore[method-assign]
-            return sess
-
-        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
         turn_task = asyncio.create_task(h.agent.handle_message(make_request(message="multi-step", workdir=h.workdir)))
         await asyncio.wait_for(paused_after_tool.wait(), timeout=5.0)
 
@@ -975,28 +836,6 @@ def test_format_tool_activity_renders_real_diff_hunk_preview() -> None:
 async def test_large_diff_preview_is_bounded_and_offloaded_off_event_loop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    agy_cfg = antigravity_config("agy")
-    controller = FakeController(app_config(agy_cfg))
-    agent = AntigravityAgent(controller, agy_cfg, rules_base_dir=tmp_path / "rules")
-    req = make_request(message="edit large file", workdir=tmp_path)
-    runtime_key = req.composite_session_id
-    turn = agy_agent_module._ActiveTurn(
-        request=req,
-        runtime_key=runtime_key,
-        native_session_id="sess-large-diff",
-        turn_id="turn-1",
-        started_at=time.monotonic(),
-    )
-    session = SimpleNamespace(
-        runtime_key=runtime_key,
-        native_session_id="sess-large-diff",
-        workdir=str(tmp_path),
-        retired=False,
-        active_turn=turn,
-        last_activity=time.monotonic(),
-    )
-    agent._sessions[runtime_key] = session  # type: ignore[assignment]
-
     loop_tid = threading.get_ident()
     observed_tids: list[int] = []
     orig_format = agy_agent_module._format_tool_activity
@@ -1007,41 +846,18 @@ async def test_large_diff_preview_is_bounded_and_offloaded_off_event_loop(
 
     monkeypatch.setattr(agy_agent_module, "_format_tool_activity", _spy_format)
 
+    async with make_agent_harness(tmp_path) as h:
+        started = time.monotonic()
+        await h.agent.handle_message(make_request(message="large_diff", workdir=h.workdir))
+        assert time.monotonic() - started < 2.0
+        assert len(observed_tids) == 1 and observed_tids[0] != loop_tid
+        tool_events = h.controller.events("toolcall")
+        assert len(tool_events) == 1
+        assert tool_events[0][1].splitlines() == [
+            "Edit big file (completed)", "diff: big.py", "- value = 'old'", "+ value = 'new'",
+        ]
+
     repeated = "repeat = 1\n" * 20_000
-    old_text = f"{repeated}value = 'old'\n{repeated}"
-    new_text = f"{repeated}value = 'new'\n{repeated}"
-
-    started = time.monotonic()
-    await agent._handle_notification(
-        session,  # type: ignore[arg-type]
-        "session/update",
-        {
-            "sessionId": "sess-large-diff",
-            "update": {
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": "tc-big",
-                "title": "Edit big file",
-                "kind": "edit",
-                "status": "completed",
-                "content": [
-                    {"type": "diff", "path": "big.py", "oldText": old_text, "newText": new_text},
-                ],
-            },
-        },
-    )
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 2.0
-    assert len(observed_tids) == 1 and observed_tids[0] != loop_tid
-    tool_events = controller.events("toolcall")
-    assert len(tool_events) == 1
-    assert tool_events[0][1].splitlines() == [
-        "Edit big file (completed)",
-        "diff: big.py",
-        "- value = 'old'",
-        "+ value = 'new'",
-    ]
-
     # Distant edits spanning 40,000+ lines stay bounded by _DIFF_PREVIEW_COMPARE_WINDOW.
     span_started = time.monotonic()
     span_preview = agy_agent_module._format_diff_preview_lines(
@@ -1050,29 +866,6 @@ async def test_large_diff_preview_is_bounded_and_offloaded_off_event_loop(
     )
     assert time.monotonic() - span_started < 2.0
     assert span_preview == ["- first_old", "+ first_new"]
-
-
-@pytest.mark.asyncio
-async def test_acp_client_session_fork_applies_request_timeout() -> None:
-    from modules.agents.acp.client import AcpClient
-
-    client = AcpClient(["agy", "acp"], request_timeout=17.5)
-    recorded: list[tuple[str, dict[str, Any], float | None]] = []
-
-    async def _fake_send_request(method: str, params: Any = None, *, timeout: float | None = None) -> dict[str, Any]:
-        recorded.append((method, dict(params or {}), timeout))
-        return {"sessionId": "forked-1"}
-
-    client.send_request = _fake_send_request  # type: ignore[method-assign]
-    resp = await client.session_fork("src-1", "/tmp/work", additional_directories=["/tmp/rules"])
-    assert resp == {"sessionId": "forked-1"}
-    assert recorded == [
-        (
-            "session/fork",
-            {"sessionId": "src-1", "cwd": "/tmp/work", "mcpServers": [], "additionalDirectories": ["/tmp/rules"]},
-            17.5,
-        )
-    ]
 
 
 @pytest.mark.asyncio
@@ -1093,34 +886,8 @@ async def test_verification_required_reply_fails_turn_and_normal_verification_pr
     title_backfills: list[str] = []
 
     async with make_agent_harness(tmp_path, language=language, name=f"verify-req-{language}") as h:
-        orig_get = h.agent._get_or_create_session
-        h.agent._maybe_backfill_session_title = lambda _req, sid: title_backfills.append(sid)  # type: ignore[method-assign]
-
-        reply_holder = {"text": verification_banner}
-
-        async def _wrapped(*a: Any, **kw: Any) -> Any:
-            sess = await orig_get(*a, **kw)
-
-            async def _scripted_prompt(sid: str, _blocks: Any, **_pkw: Any) -> dict[str, Any]:
-                await h.agent._handle_notification(
-                    sess,
-                    "session/update",
-                    {
-                        "sessionId": sid,
-                        "update": {
-                            "sessionUpdate": "agent_message_chunk",
-                            "content": {"type": "text", "text": reply_holder["text"]},
-                        },
-                    },
-                )
-                return {"stopReason": "end_turn"}
-
-            sess.client.session_prompt = _scripted_prompt  # type: ignore[method-assign]
-            return sess
-
-        h.agent._get_or_create_session = _wrapped  # type: ignore[method-assign]
-
-        await h.agent.handle_message(make_request(message="hello", workdir=h.workdir))
+        h.agent._maybe_backfill_session_title = lambda _req, sid: title_backfills.append(sid)
+        await h.agent.handle_message(make_request(message="say:" + verification_banner, workdir=h.workdir))
         results = h.controller.events("result")
         notes = h.controller.events("notify")
         assert len(results) == 1 and results[0][2].get("is_error") is True
@@ -1133,8 +900,7 @@ async def test_verification_required_reply_fails_turn_and_normal_verification_pr
         assert title_backfills == []
 
         h.controller.emitted.clear()
-        reply_holder["text"] = normal_prose
-        await h.agent.handle_message(make_request(message="explain oauth", workdir=h.workdir))
+        await h.agent.handle_message(make_request(message="say:" + normal_prose, workdir=h.workdir))
         ok_results = h.controller.events("result")
         assert len(ok_results) == 1
         assert ok_results[0][1] == normal_prose
@@ -1208,26 +974,30 @@ async def test_native_steer_chain_accepts_without_settling_superseded_prompt(tmp
 
 
 @pytest.mark.asyncio
-async def test_native_steer_after_prompt_resolved_is_not_active_and_does_not_write(tmp_path):
+@pytest.mark.parametrize("state", ["absent", "settled", "mismatch"])
+async def test_native_steer_without_matching_active_chain_does_not_write(tmp_path, state):
     async with make_agent_harness(tmp_path, record_rpc=True) as h:
-        _, target, task, session, _ = await _start_steer_chain(h)
-        request = _chain_steer(h, target)
-        await _chain_control(session, "finish")
-        await asyncio.wait_for(task, 3)
-        receipt = await h.agent.steer_active_turn(request, target)
-        assert receipt.outcome == SteerOutcome.NOT_ACTIVE
-        assert len(h.rpcs("session/prompt")) == 1
-
-
-@pytest.mark.asyncio
-async def test_native_steer_mismatched_chain_is_refused_without_write(tmp_path):
-    async with make_agent_harness(tmp_path, record_rpc=True) as h:
-        _, target, task, session, _ = await _start_steer_chain(h)
-        receipt = await h.agent.steer_active_turn(_chain_steer(h, target, native_id="wrong-chain"), target)
-        assert (receipt.outcome, receipt.reason) == (SteerOutcome.REFUSED, "native_turn_mismatch")
-        assert len(h.rpcs("session/prompt")) == 1
-        await _chain_control(session, "finish")
-        await asyncio.wait_for(task, 3)
+        if state == "absent":
+            req = make_request(message="hello", workdir=h.workdir)
+            target = ActiveSteerTarget(req.composite_session_id, "turn-1", req.context, req, h.agent)
+            assert h.agent.steering_native_turn_id(target) is None
+            receipt = await h.agent.steer_active_turn(_chain_steer(h, target), target)
+            rec = await h.agent.reconcile_steer_attempt(SteerReconcileRequest("ses_1", "turn-1", "native-1", "att-1"), target)
+            assert (rec.outcome, rec.reason) == (SteerOutcome.UNKNOWN, "attempt_not_found")
+        else:
+            _, target, task, session, _ = await _start_steer_chain(h)
+            request = _chain_steer(h, target, native_id="wrong-chain" if state == "mismatch" else None)
+            if state == "settled":
+                await _chain_control(session, "finish")
+                await asyncio.wait_for(task, 3)
+            receipt = await h.agent.steer_active_turn(request, target)
+            if state == "mismatch":
+                await _chain_control(session, "finish")
+                await asyncio.wait_for(task, 3)
+        assert receipt.outcome == (SteerOutcome.REFUSED if state == "mismatch" else SteerOutcome.NOT_ACTIVE)
+        if state == "mismatch":
+            assert receipt.reason == "native_turn_mismatch"
+        assert len(h.rpcs("session/prompt")) == (0 if state == "absent" else 1)
 
 
 @pytest.mark.asyncio

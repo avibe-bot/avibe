@@ -45,16 +45,37 @@ DEFAULT_MODELS: list[str] = ["model-alpha", "model-beta"]
 _TINY_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2dIAAAAASUVORK5CYII="
 
 
+def make_acp_capabilities(*, fork: bool = True, image: bool = True, logout: bool = True, additional_directories: bool = True) -> dict[str, Any]:
+    session_caps: dict[str, Any] = {"resume": {}, "list": {}, "close": {}}
+    if additional_directories:
+        session_caps["additionalDirectories"] = {}
+    if fork:
+        session_caps["fork"] = {}
+    caps: dict[str, Any] = {"loadSession": True, "promptCapabilities": {"image": image, "embeddedContext": True}, "sessionCapabilities": session_caps}
+    if logout:
+        caps["auth"] = {"logout": {}}
+    return caps
+
+
+def make_model_config_options(
+    *, model: str = "model-alpha", effort: str = "medium", effort_choices: tuple[str, ...] = ("low", "medium", "high"), default_effort: str | None = None, snake_case: bool = False
+) -> list[dict[str, Any]]:
+    k = "current_value" if snake_case else "currentValue"
+    effort_opt: dict[str, Any] = {"id": "thought_level", "category": "thought_level", k: effort, "options": [{"value": v} for v in effort_choices]}
+    if default_effort is not None:
+        effort_opt["defaultValue"] = default_effort
+    return [{"id": "model", "category": "model", k: model, "options": [{"value": "model-alpha"}, {"value": "model-beta"}]}, effort_opt]
+
+
+
 def fake_acp_server_command(
-    *, state_file: Path | None = None, config: Mapping[str, Any] | None = None, require_auth_method: str | None = None
+    *, state_file: Path | None = None, config: Mapping[str, Any] | None = None
 ) -> list[str]:
     cmd = [sys.executable, "-u", str(FAKE_ACP_SERVER_PATH)]
     if state_file is not None:
         cmd.extend(["--state-file", str(state_file)])
     if config is not None:
         cmd.extend(["--config-json", json.dumps(dict(config), separators=(",", ":"))])
-    if require_auth_method is not None:
-        cmd.extend(["--require-auth-method", require_auth_method])
     return cmd
 
 
@@ -71,12 +92,12 @@ def _prompt_text(blocks: Any) -> str:
 class FakeAcpServer:
     """Async JSON-RPC 2.0 ACP server speaking NDJSON over stdin/stdout."""
 
-    def __init__(self, *, state_file: Path | None, config: dict[str, Any], require_auth_method: str | None = None) -> None:
+    def __init__(self, *, state_file: Path | None, config: dict[str, Any]) -> None:
         self._state_file = state_file
         self._config = config
         self._agent_info = _copy(config.get("agentInfo", DEFAULT_AGENT_INFO))
         self._agent_capabilities = _copy(config.get("agentCapabilities", DEFAULT_AGENT_CAPABILITIES))
-        raw_req = require_auth_method if require_auth_method is not None else config.get("requireAuthMethod")
+        raw_req = config.get("requireAuthMethod")
         self._require_auth_method = str(raw_req).strip() if isinstance(raw_req, str) and raw_req.strip() else None
 
         if "authMethods" in config:
@@ -289,7 +310,7 @@ class FakeAcpServer:
             self._save_state()
             return self._send_result(req_id, self._session_payload(forked))
 
-        if method in {"session/resume", "session/load", "session/close", "session/set_config_option", "session/set_model", "session/set_mode"}:
+        if method in {"session/resume", "session/close", "session/set_config_option"}:
             if (session := self._get_session(req_id, params.get("sessionId"))) is None:
                 return
             sid = session["sessionId"]
@@ -299,11 +320,6 @@ class FakeAcpServer:
                         session[key] = params[key]
                 self._save_state()
                 return self._send_result(req_id, {"sessionId": sid, "configOptions": _copy(session["configOptions"])})
-            if method == "session/load":
-                for turn in session["history"]:
-                    self._send_text(sid, turn["prompt"], "user_message_chunk")
-                    self._send_text(sid, turn["reply"], "agent_message_chunk")
-                return self._send_result(req_id, {"configOptions": _copy(session["configOptions"])})
             if method == "session/close":
                 del self._state["sessions"][sid]
                 self._save_state()
@@ -322,22 +338,6 @@ class FakeAcpServer:
                 opts = _copy(session["configOptions"])
                 self._send_update(sid, {"sessionUpdate": "config_option_update", "configOptions": opts})
                 return self._send_result(req_id, {"configOptions": opts})
-            if method == "session/set_model":
-                model_id = params.get("modelId")
-                if model_id not in DEFAULT_MODELS:
-                    return self._send_error(req_id, -32602, f"Unsupported model: {model_id}")
-                session["model"] = model_id
-                for opt in session["configOptions"]:
-                    if opt["id"] == "model":
-                        opt["currentValue"] = model_id
-                self._save_state()
-                return self._send_result(req_id, {})
-            mode_id = params.get("modeId")
-            if mode_id not in DEFAULT_MODES:
-                return self._send_error(req_id, -32602, f"Unsupported mode: {mode_id}")
-            session["mode"] = mode_id
-            self._save_state()
-            return self._send_result(req_id, {})
 
         self._send_error(req_id, -32601, f"Method not found: {method}")
 
@@ -365,6 +365,12 @@ class FakeAcpServer:
                     self._send_update(sid, {"sessionUpdate": "tool_call", "toolCallId": "chain-tool", "title": "sleep 20", "status": "in_progress"})
                     self._send_update(sid, {"sessionUpdate": "usage_update", "used": 100, "size": 128000})
                 return
+            if text.startswith("say:"):
+                return self._finish_reply(req_id, session, text, text.removeprefix("say:"))
+            if text == "large_diff":
+                repeated = "repeat = 1\n" * 20_000
+                self._send_update(sid, {"sessionUpdate": "tool_call_update", "toolCallId": "tc-big", "title": "Edit big file", "kind": "edit", "status": "completed", "content": [{"type": "diff", "path": "big.py", "oldText": f"{repeated}value = 'old'\n{repeated}", "newText": f"{repeated}value = 'new'\n{repeated}"}]})
+                return self._finish_reply(req_id, session, text, "done")
             if text == "crash_mid_prompt":
                 self._send_text(sid, "starting before crash")
                 sys.stderr.write("fatal: simulated peer crash\n")
@@ -435,9 +441,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Scripted stdio fake ACP server")
     parser.add_argument("--state-file", type=Path, default=None)
     parser.add_argument("--config-json", type=str, default="{}")
-    parser.add_argument("--require-auth-method", type=str, default=None)
     args = parser.parse_args()
-    asyncio.run(FakeAcpServer(state_file=args.state_file, config=json.loads(args.config_json), require_auth_method=args.require_auth_method).run())
+    asyncio.run(FakeAcpServer(state_file=args.state_file, config=json.loads(args.config_json)).run())
 
 
 if __name__ == "__main__":

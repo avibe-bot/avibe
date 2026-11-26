@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import importlib.util
 import json
 import os
 import shlex
@@ -18,6 +17,12 @@ from unittest.mock import AsyncMock
 if TYPE_CHECKING:
     from modules.agents.base import AgentRequest
     from modules.im.base import FileAttachment
+
+# The shim runs this file directly from a test workspace.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from tests.helpers.fake_acp_server import FakeAcpServer
 
 HARNESS_PATH = Path(__file__).resolve()
 SENTINEL_SESSION_TITLE = "TOP-SECRET-EXISTING-SESSION-TITLE-999"
@@ -48,28 +53,6 @@ def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()] if path.exists() else []
-
-
-def make_acp_capabilities(*, fork: bool = True, image: bool = True, logout: bool = True, additional_directories: bool = True) -> dict[str, Any]:
-    session_caps: dict[str, Any] = {"resume": {}, "list": {}, "close": {}}
-    if additional_directories:
-        session_caps["additionalDirectories"] = {}
-    if fork:
-        session_caps["fork"] = {}
-    caps: dict[str, Any] = {"loadSession": True, "promptCapabilities": {"image": image, "embeddedContext": True}, "sessionCapabilities": session_caps}
-    if logout:
-        caps["auth"] = {"logout": {}}
-    return caps
-
-
-def make_model_config_options(
-    *, model: str = "model-alpha", effort: str = "medium", effort_choices: tuple[str, ...] = ("low", "medium", "high"), default_effort: str | None = None, snake_case: bool = False
-) -> list[dict[str, Any]]:
-    k = "current_value" if snake_case else "currentValue"
-    effort_opt: dict[str, Any] = {"id": "thought_level", "category": "thought_level", k: effort, "options": [{"value": v} for v in effort_choices]}
-    if default_effort is not None:
-        effort_opt["defaultValue"] = default_effort
-    return [{"id": "model", "category": "model", k: model, "options": [{"value": "model-alpha"}, {"value": "model-beta"}]}, effort_opt]
 
 
 def seed_fork_source_session(
@@ -440,22 +423,7 @@ def _run_login(cfg: dict[str, Any], state_file: Path) -> int:
     return 0
 
 
-def _load_fake_acp_server_class() -> type[Any]:
-    name = "_avibe_fake_acp_server"
-    if name in sys.modules:
-        return sys.modules[name].FakeAcpServer
-    spec = importlib.util.spec_from_file_location(name, HARNESS_PATH.with_name("fake_acp_server.py"))
-    if spec is None or spec.loader is None:
-        raise ImportError("Could not load fake ACP server")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod.FakeAcpServer
-
-
 def _run_acp(cfg: dict[str, Any], state_file: Path, rpc_log: Path | None, auth_mode: bool) -> int:
-    FakeAcpServer = _load_fake_acp_server_class()
-
     class _AuditingServer(FakeAcpServer):
         def _dispatch(self, msg: dict[str, Any]) -> None:
             if rpc_log is not None and "method" in msg:

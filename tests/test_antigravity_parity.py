@@ -47,14 +47,8 @@ from storage.agent_session_rows import create_agent_session_row
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.settings_service import upsert_scope
-from tests.helpers.antigravity_harness import (
-    make_acp_capabilities,
-    make_agent_harness,
-    make_model_config_options,
-    make_request,
-    read_session_row,
-    seed_fork_source_session,
-)
+from tests.helpers.antigravity_harness import make_agent_harness, make_request, read_session_row, seed_fork_source_session
+from tests.helpers.fake_acp_server import make_acp_capabilities, make_model_config_options
 
 
 def _write_agent_md(path: Path, body: str, **frontmatter: str) -> None:
