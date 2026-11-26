@@ -4,8 +4,11 @@
 
 Max requested this change on 2026-11-26 after a completed Desktop sign-in left
 him on Account. This local implementation starts from explicitly fetched master
-`ab1ff36d4b21b00551617077f60091b9a6f05f22`. No push, PR, packaging or installation
-is authorized for this branch.
+`ab1ff36d4b21b00551617077f60091b9a6f05f22`. Max subsequently authorized PR and
+gated merge on 2026-11-26 at 15:57 (main run `b99be2ddc213`). Main owns the next
+signed TEST RC; this lane does not package or install. Main independently reviewed
+two same-class local findings and authorized the terminal-boundary correction in
+run `a62b8cba907c`; another same-class finding requires a stop and escalation.
 
 AccountApp defaults to `view=account`. Its signed-out branch renders the shared
 sign-in UI; successful authentication removes that branch and reveals whichever
@@ -54,8 +57,14 @@ its old query/fragment. It first closes the account surface and retires its
 return receipt under the existing native window lock. Home navigation refuses
 a live Account receipt. If a newer Cancel/ReturnLocal wins before navigation,
 the old callback cannot navigate; after navigation, a later Cancel restores the
-current Runtime without consulting the replaced document. Existing restoration
-and local-bootstrap handling remain authoritative. Root navigation is ordinary native
+current Runtime without consulting the replaced document. After Account retirement,
+Home navigation and reveal use an action-owner fence rather than a lifecycle
+fence: a local Runtime stop/rebind cannot abandon terminal presentation work.
+Account retirement also clears the presentation flag synchronously, so local
+rebound never preserves a nonexistent Account. Cleanup/navigation errors are
+returned, but do not skip the attempted reveal of the retained Runtime. A newer
+action or physical window retirement still supersedes both callbacks. Existing
+restoration and local-bootstrap handling remain authoritative. Root navigation is ordinary native
 WebView navigation; its command acceptance is not proof that the server loaded.
 
 ## Validation
@@ -68,7 +77,11 @@ WebView navigation; its command acceptance is not proof that the server loaded.
   account/instance, remote preservation, and ordinary cancel's document destination.
   Native shell unit coverage checks local/remote home URL derivation, refusal to
   replace a document with a live Account receipt, stale pre-navigation ownership,
-  and cancellation after navigation has changed the Runtime document.
+  and cancellation after navigation has changed the Runtime document. Tauri mock
+  Runtime cases advance lifecycle separately from action ownership after Account
+  retirement, before navigation and before reveal, for both committed local and
+  remote instances. Coordinator tests use actual `local_origin` changes to verify
+  the terminal action fence survives lifecycle but loses to a newer escape.
 - Production account assets run in isolated Chromium and WebKit against a fake
   native bridge. All egress is blocked except loopback static assets. These checks
   prove form-to-native-action wiring, not OS WebView focus or authenticated loading.

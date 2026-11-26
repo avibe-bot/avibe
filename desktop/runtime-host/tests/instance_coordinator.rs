@@ -3223,3 +3223,32 @@ async fn newer_cancel_or_return_local_supersedes_a_queued_sign_in_home() {
         );
     }
 }
+
+#[tokio::test]
+async fn terminal_home_owner_survives_local_lifecycle_but_not_a_new_escape() {
+    for remote in [false, true] {
+        let f = if remote {
+            selected_for_update().await
+        } else {
+            let f = fixture(vec![]);
+            sign_in(&f, catalog("account-a", &["one"])).await;
+            f
+        };
+        assert!(action(&f.client, ClientAction::ReturnHome).await.ok);
+        let target = f.client.state().connection.committed;
+        let owner = f.client.presentation_owner();
+        let terminal = f.client.presentation_owner_epoch(owner).unwrap();
+        let lifecycle = f.client.presentation_epoch(owner).unwrap();
+        f.client.local_origin(Some(
+            avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:4999").unwrap(),
+        ));
+        assert!(lifecycle.check().is_err());
+        assert!(terminal.check().is_ok());
+        assert_eq!(f.client.presentation_owner(), owner);
+        assert_eq!(f.client.state().connection.committed, target);
+        assert!(f.client.presentation_epoch(owner).unwrap().value > lifecycle.value);
+        assert!(action(&f.client, ClientAction::Cancel).await.ok);
+        assert!(terminal.check().is_err());
+        assert!(f.client.presentation_owner_epoch(owner).is_err());
+    }
+}

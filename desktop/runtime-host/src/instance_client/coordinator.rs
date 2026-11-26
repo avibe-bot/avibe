@@ -387,6 +387,14 @@ impl Coordinator {
         }
         Ok(Epoch::new(self.generation.clone(), inner.state.generation))
     }
+    /// Terminal presentation work must survive local lifecycle changes after
+    /// retiring its Account document. Only a newer action or window retirement
+    /// may supersede it; this fence deliberately does not use `generation`.
+    pub fn presentation_owner_epoch(&self, owner: u64) -> Result<Epoch, ClientError> {
+        let epoch = Epoch::new(self.action_generation.clone(), owner);
+        epoch.check()?;
+        Ok(epoch)
+    }
     /// Receipt for the view selection that reached public state publication.
     /// Target equality cannot distinguish a reconnect to the same instance.
     pub fn committed_view_generation(&self) -> Option<u64> {
