@@ -1776,8 +1776,8 @@ def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path)
 
     env = captured["options"].env
     assert env["AVIBE_SESSION_ID"] == "ses-parent"
-    assert env["AVIBE_RUN_ID"] == "run-parent"
-    assert env["AVIBE_CALLER_SOURCE"] == "agent_run"
+    assert "AVIBE_RUN_ID" not in env
+    assert "AVIBE_CALLER_SOURCE" not in env
     assert env["AVIBE_CALLER_BACKEND"] == "claude"
     assert env["AVIBE_NATIVE_SESSION_ID"] == "claude-native"
 
@@ -1785,7 +1785,7 @@ def test_session_handler_injects_caller_context_env(monkeypatch, tmp_path: Path)
 def test_session_handler_injects_only_session_stable_creation_origin(
     monkeypatch, tmp_path: Path
 ) -> None:
-    """The creation origin a Claude session may carry, and the two ids it may not.
+    """The session-stable origin Claude may carry, and the delivery fields it may not.
 
     Round 14 gate item 3 (review comment 5121007240): a Harness definition created by
     ``vibe task add`` inside an Agent turn has to record the conversation it came from,
@@ -1797,6 +1797,7 @@ def test_session_handler_injects_only_session_stable_creation_origin(
     * the session-owned ids (platform, channel, session key, workspace) are baked in —
       that is what makes the notice able to name the conversation and rung (3) able to
       address it;
+    * Run id and source are absent too: a reused client serves distinct Runs and callbacks.
     * ``AVIBE_CALLER_USER_ID`` and ``AVIBE_CALLER_MESSAGE_ID`` are NOT. The message id
       changes every turn, so including it would respawn Claude on every message; the
       author changes per speaker in a shared channel, and
@@ -2168,8 +2169,9 @@ def test_session_handler_recreates_cached_client_when_git_path_changes(
     assert second_client.options.env["PATH"] == "/managed/git/bin:/gitless/bin"
 
 
-def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize("context_change", ["run", "session"])
+def test_session_handler_caches_claude_client_by_session_stable_caller_env(
+    monkeypatch, tmp_path: Path, context_change: str
 ) -> None:
     captured: dict[str, Any] = {"clients": []}
 
@@ -2201,18 +2203,26 @@ def test_session_handler_recreates_cached_claude_client_when_caller_env_changes(
     )
 
     first_client = _run_session(handler, context)
-    context.platform_specific["task_execution_id"] = "run-two"
+    if context_change == "run":
+        context.platform_specific["task_execution_id"] = "run-two"
+        context.platform_specific["task_trigger_kind"] = "task_callback"
+    else:
+        context.platform_specific["agent_session_target"]["id"] = "ses-other"
     second_client = _run_session(handler, context)
 
-    assert first_client is not second_client
-    assert first_client.disconnects == 1
-    assert len(captured["clients"]) == 2
-    assert first_client.options.env["AVIBE_RUN_ID"] == "run-one"
-    assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
+    recreated = context_change == "session"
+    assert (first_client is not second_client) is recreated
+    assert first_client.disconnects == int(recreated)
+    assert len(captured["clients"]) == 1 + int(recreated)
+    assert first_client.options.env["AVIBE_SESSION_ID"] == "ses-parent"
+    assert second_client.options.env["AVIBE_SESSION_ID"] == ("ses-other" if recreated else "ses-parent")
+    assert all("AVIBE_RUN_ID" not in client.options.env for client in captured["clients"])
+    assert all("AVIBE_CALLER_SOURCE" not in client.options.env for client in captured["clients"])
 
 
-def test_session_handler_recreates_cached_claude_subagent_when_caller_env_changes(
-    monkeypatch, tmp_path: Path
+@pytest.mark.parametrize("context_change", ["run", "session"])
+def test_session_handler_caches_claude_subagent_by_session_stable_caller_env(
+    monkeypatch, tmp_path: Path, context_change: str
 ) -> None:
     captured: dict[str, Any] = {"clients": []}
 
@@ -2252,14 +2262,21 @@ def test_session_handler_recreates_cached_claude_subagent_when_caller_env_change
     )
 
     first_client = _run_session(handler, context)
-    context.platform_specific["task_execution_id"] = "run-two"
+    if context_change == "run":
+        context.platform_specific["task_execution_id"] = "run-two"
+        context.platform_specific["task_trigger_kind"] = "task_callback"
+    else:
+        context.platform_specific["agent_session_target"]["id"] = "ses-other"
     second_client = _run_session(handler, context)
 
-    assert first_client is not second_client
-    assert first_client.disconnects == 1
-    assert len(captured["clients"]) == 2
-    assert first_client.options.env["AVIBE_RUN_ID"] == "run-one"
-    assert second_client.options.env["AVIBE_RUN_ID"] == "run-two"
+    recreated = context_change == "session"
+    assert (first_client is not second_client) is recreated
+    assert first_client.disconnects == int(recreated)
+    assert len(captured["clients"]) == 1 + int(recreated)
+    assert first_client.options.env["AVIBE_SESSION_ID"] == "ses-parent"
+    assert second_client.options.env["AVIBE_SESSION_ID"] == ("ses-other" if recreated else "ses-parent")
+    assert all("AVIBE_RUN_ID" not in client.options.env for client in captured["clients"])
+    assert all("AVIBE_CALLER_SOURCE" not in client.options.env for client in captured["clients"])
 
 
 def test_session_handler_reuses_cached_claude_subagent_after_ensuring_caller_env(
