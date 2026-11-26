@@ -72,10 +72,43 @@ final class DirectPathSeamsTests: XCTestCase {
         XCTAssertEqual(linked.observe(seen(19, linked: true)), .keep(nextCheck: nil, reloadsForLink: true))
         XCTAssertEqual(linked.observe(seen(40, linked: true)), .keep(nextCheck: nil, reloadsForLink: false))
 
+        // The link came up: the bootstrap succeeded. Its loss later is not
+        // a2 (the controller counts it as a drop, a new bootstrap), nor a1.
+        var established = bootstrapped()
+        established.noteFreshPage(at: at(0))
+        XCTAssertEqual(established.observe(seen(1, linked: true)), .keep(nextCheck: nil, reloadsForLink: true))
+        XCTAssertEqual(established.observe(seen(30)), .keep(nextCheck: nil, reloadsForLink: false))
+        XCTAssertEqual(established.observe(seen(31, unlinked: 2)), .keep(nextCheck: nil, reloadsForLink: false))
+
         var forgotten = bootstrapped()
         forgotten.noteFreshPage(at: at(0))
         forgotten.beginBootstrap(unlinkedRendezvous: 0, linked: false)
         XCTAssertEqual(forgotten.observe(seen(30)), .keep(nextCheck: nil, reloadsForLink: false))
+    }
+
+    /// Rule c's clock counts only what the rule counts: nothing before the
+    /// listener has served; not a return's first attempt (only its second);
+    /// a failure while serving in front, from that failure; never `waiting`.
+    func testTheListenerClockAppliesRuleCsExclusions() {
+        var clock = DirectOnlyListenerClock()
+        // Never served: the launch's failures do not count.
+        XCTAssertNil(clock.observe(recovery: (since: at(0), failureAt: at(1), waiting: false), serving: false))
+        XCTAssertNil(clock.observe(recovery: (since: at(0), failureAt: at(5), waiting: false), serving: false))
+        // Served once.
+        XCTAssertNil(clock.observe(recovery: nil, serving: true))
+        // A failure in front while serving: counts from it.
+        XCTAssertEqual(clock.observe(recovery: (since: at(10), failureAt: at(10), waiting: false), serving: false), at(10))
+        XCTAssertEqual(clock.observe(recovery: (since: at(10), failureAt: at(15), waiting: false), serving: false), at(10))
+        // Serving again: cleared.
+        XCTAssertNil(clock.observe(recovery: nil, serving: true))
+        // A return: its first attempt does not count, its second does.
+        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: nil, waiting: false), serving: false))
+        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: at(101), waiting: false), serving: false))
+        XCTAssertEqual(clock.observe(recovery: (since: at(100), failureAt: at(104), waiting: false), serving: false), at(104))
+        // `waiting` (no network) never starts it.
+        clock.reset()
+        XCTAssertNil(clock.observe(recovery: (since: at(200), failureAt: at(200), waiting: true), serving: false))
+        XCTAssertNil(clock.observe(recovery: (since: at(200), failureAt: at(203), waiting: true), serving: false))
     }
 
     /// b: three drops within 10 minutes arm it, and it is made only at the

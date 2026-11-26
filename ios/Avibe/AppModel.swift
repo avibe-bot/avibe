@@ -2641,9 +2641,8 @@ final class AppModel: ObservableObject {
     private struct DirectOnlyWatch {
         let runtime: MobileRuntimeContext
         var rules = DirectOnlyRevertRules()
-        /// The first failed listener attempt that counts for rule c in the
-        /// current recovery.
-        var listenerDownSince: ContinuousClock.Instant?
+        /// Rule c's clock (`DirectOnlyListenerClock`).
+        var listenerClock = DirectOnlyListenerClock()
         /// The controller's drop count last seen.
         var strictFailures: UInt64?
     }
@@ -2728,17 +2727,17 @@ final class AppModel: ObservableObject {
             return
         }
         guard runtimeOpenBackgroundedAt == nil else {
-            watch.listenerDownSince = nil
+            watch.listenerClock.reset()
             directOnlyWatch = watch
             return
         }
-        if let failure = directPathController?.listenerRecovery?.lastFailure,
-           failure.step != .waiting
-        {
-            watch.listenerDownSince = watch.listenerDownSince ?? failure.at
-        } else {
-            watch.listenerDownSince = nil
-        }
+        let recovery = directPathController?.listenerRecovery
+        let listenerDownSince = watch.listenerClock.observe(
+            recovery: recovery.map {
+                (since: $0.since, failureAt: $0.lastFailure?.at, waiting: $0.lastFailure?.step == .waiting)
+            },
+            serving: directPathController?.listenerState == .ready
+        )
         let strictFailures = control.strictFailureCount(forInstanceURL: url)
         let dropped = watch.strictFailures.map { strictFailures > $0 } ?? false
         watch.strictFailures = strictFailures
@@ -2748,7 +2747,7 @@ final class AppModel: ObservableObject {
                 linked: control.isDirectOnlyLinked(forInstanceURL: url),
                 strictFailures: strictFailures,
                 unlinkedRendezvous: control.unlinkedRendezvousCount(forInstanceURL: url),
-                listenerDownSince: watch.listenerDownSince
+                listenerDownSince: listenerDownSince
             )
         )
         directOnlyWatch = watch

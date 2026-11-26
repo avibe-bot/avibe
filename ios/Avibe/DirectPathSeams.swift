@@ -250,6 +250,10 @@ struct DirectOnlyRevertRules: Equatable {
     private var armed = false
     private var wasLinked = false
     private var reloadedForLink = false
+    /// The link came up in this bootstrap: it succeeded, and a1 and a2 no
+    /// longer apply to it. A later loss is the controller's to count (a
+    /// drop, which begins a new bootstrap).
+    private var establishedInBootstrap = false
 
     /// A new bootstrap: an open or a return to the foreground. (A drop
     /// begins one by itself, seen in `observe`.) Counts are the
@@ -259,6 +263,7 @@ struct DirectOnlyRevertRules: Equatable {
         freshPageAt = nil
         wasLinked = linked
         reloadedForLink = false
+        establishedInBootstrap = linked
     }
 
     /// A fresh response of the instance's page reached this phone. The
@@ -297,7 +302,10 @@ struct DirectOnlyRevertRules: Equatable {
         if armed, unlinked > 0 || freshPageAt != nil || seen.linked {
             return .revert
         }
-        if !seen.linked {
+        if seen.linked {
+            establishedInBootstrap = true
+        }
+        if !seen.linked, !establishedInBootstrap {
             // a1
             if unlinked >= Self.unlinkedRendezvousLimit {
                 return .revert
@@ -313,7 +321,7 @@ struct DirectOnlyRevertRules: Equatable {
         }
         wasLinked = seen.linked
         var next: ContinuousClock.Instant?
-        if !seen.linked, let page = freshPageAt {
+        if !seen.linked, !establishedInBootstrap, let page = freshPageAt {
             next = page.advanced(by: Self.pageWithoutLink)
         }
         if let since = seen.listenerDownSince {
@@ -321,6 +329,60 @@ struct DirectOnlyRevertRules: Equatable {
             next = next.map { min($0, due) } ?? due
         }
         return .keep(nextCheck: next, reloadsForLink: reloadsForLink)
+    }
+}
+
+/// Rule c's clock: from the listener's first failed attempt that counts,
+/// with the exclusions applied here (the controller's recovery reports
+/// every failure). Not counted: anything before the listener has served
+/// once; the first attempt of a recovery that began at a return (or the
+/// launch), as opposed to one that began with a failure while serving in
+/// front; and a failure that only means there is no network (`waiting`).
+/// The background is excluded by the caller, which resets it there.
+struct DirectOnlyListenerClock: Equatable {
+    private var hasServed = false
+    private var episode: ContinuousClock.Instant?
+    private var firstFailureAt: ContinuousClock.Instant?
+    private(set) var downSince: ContinuousClock.Instant?
+
+    /// `recovery` is the controller's while the listener does not serve
+    /// (`since`, and the last failure's instant and whether it was
+    /// `waiting`); `serving` whether it serves now.
+    mutating func observe(
+        recovery: (since: ContinuousClock.Instant, failureAt: ContinuousClock.Instant?, waiting: Bool)?,
+        serving: Bool
+    ) -> ContinuousClock.Instant? {
+        guard let recovery else {
+            if serving { hasServed = true }
+            reset()
+            return nil
+        }
+        if episode != recovery.since {
+            episode = recovery.since
+            firstFailureAt = nil
+            downSince = nil
+        }
+        guard hasServed, let failureAt = recovery.failureAt, !recovery.waiting else {
+            return downSince
+        }
+        if firstFailureAt == nil {
+            firstFailureAt = failureAt
+        }
+        // A recovery that began with this failure (in front, while serving)
+        // counts from it; one that began at a return counts from its
+        // second failed attempt.
+        let opensEpisode = failureAt == recovery.since
+        if opensEpisode || failureAt > (firstFailureAt ?? failureAt) {
+            downSince = downSince ?? failureAt
+        }
+        return downSince
+    }
+
+    /// The background, or the listener serving again.
+    mutating func reset() {
+        episode = nil
+        firstFailureAt = nil
+        downSince = nil
     }
 }
 
