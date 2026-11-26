@@ -764,8 +764,10 @@ final class NativeHoldCapture {
                 // no moves, and the lift only when it resets it, which a tap
                 // that raises the keyboard delays past this moment.
                 let touch = hold.touch?()
-                if let lifted = touch?.liftedAt {
-                    if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                if let touch, let lifted = touch.liftedAt {
+                    // A touch already gone lifted at a time not known: counted with its bound.
+                    if touch.gone { hold.lostTap = true }
+                    else if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
                     self.cancelHold(hold, why: "tap")
                     return
                 }
@@ -856,8 +858,10 @@ final class NativeHoldCapture {
             guard let self, let hold, self.hold === hold, !hold.begun, !hold.recognised else { return }
             hold.cancelStart = nil
             let touch = hold.touch?()
-            if let lifted = touch?.liftedAt {
-                if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+            if let touch, let lifted = touch.liftedAt {
+                // A touch already gone lifted at a time not known: counted with its bound.
+                if touch.gone { hold.lostTap = true }
+                else if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
                 self.cancelHold(hold, why: "tap")
                 return
             }

@@ -1497,6 +1497,45 @@ final class NativeHoldCaptureTests: XCTestCase {
         XCTAssertTrue(capture.setSurfaces([], for: webView))
         XCTAssertEqual(tapRecords.first?.surelyClosed, [50: true, 80: true, 100: true, 120: true])
         XCTAssertEqual(tapRecords.first?.opened, false)
+        capture.stop(webView: webView)
+        audio.answer()
+        drain()
+    }
+
+    /// The same when the start's look at the finger, or the cue's, finds its
+    /// touch already gone: counted with the bound of that moment, not as a
+    /// tap as long as the time of asking.
+    func testATapWhoseTouchWasGoneAtTheStartOrTheCueIsCountedWithItsBound() {
+        // At the start, 50 ms in.
+        startsAtTouchDown = true
+        var audio = FakeAudio()
+        var (capture, webView) = makeHoldCapture(audio)
+        tapRecords = []
+        clock = 0
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, touch: { .init(liftedAt: 51, point: nil, gone: true) })
+        clock = 50
+        XCTAssertTrue(startEarly())
+        XCTAssertEqual(audio.calls, ["arm", "disarm"])
+        XCTAssertEqual(tapRecords.map(\.ms), [50])
+        XCTAssertEqual(tapRecords.first?.lengthUnknown, true)
+        XCTAssertEqual(tapRecords.first?.wouldOpen, [:])
+        XCTAssertEqual(tapRecords.first?.surelyClosed, [50: false, 80: true, 100: true, 120: true])
+        capture.stop(webView: webView)
+
+        // At the cue, 200 ms in: it may have been down long enough for any threshold.
+        startsAtTouchDown = false
+        audio = FakeAudio()
+        (capture, webView) = makeHoldCapture(audio)
+        tapRecords = []
+        clock = 0
+        capture.touchDown(at: Self.onComposer, in: webView, timestamp: 50, touch: { .init(liftedAt: 51, point: nil, gone: true) })
+        clock = 200
+        XCTAssertTrue(fire(NativeHoldCapture.defaultHoldSeconds))
+        XCTAssertTrue(holdEvents.isEmpty)
+        XCTAssertEqual(tapRecords.map(\.ms), [200])
+        XCTAssertEqual(tapRecords.first?.lengthUnknown, true)
+        XCTAssertEqual(tapRecords.first?.surelyClosed, [50: false, 80: false, 100: false, 120: false])
+        capture.stop(webView: webView)
     }
 
     /// Such taps are in their bound's bucket and in no `w…` count, counted
