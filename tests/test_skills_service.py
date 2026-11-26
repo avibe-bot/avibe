@@ -171,7 +171,7 @@ def test_add_global_all(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "gh:o/r", scope="global", backends=["opencode"], all_skills=True))
-    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "--all", "-y"]
+    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--all", "-y"]
 
 
 def test_add_reports_nothing_installed_when_no_skill_matched(monkeypatch):
@@ -198,7 +198,7 @@ def test_add_multi_backend_uses_single_a(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "gh:o/r", scope="global", backends=["claude", "opencode", "codex"], all_skills=True))
-    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "--all", "-y"]
+    assert rec.calls[0]["args"] == ["add", "gh:o/r", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--all", "-y"]
 
 
 def test_add_project_has_no_p_flag_and_uses_cwd(monkeypatch):
@@ -206,7 +206,7 @@ def test_add_project_has_no_p_flag_and_uses_cwd(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "./pkg", scope="project", project_dir="/p", copy=True))
-    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "--copy", "-y"]
+    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "antigravity", "--copy", "-y"]
     assert rec.calls[0]["cwd"] == "/p"
 
 
@@ -214,7 +214,7 @@ def test_add_with_skill_selector(monkeypatch):
     rec = _Recorder({"ok": True, "action": "install"})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.add_skill("askill", "./pkg", scope="project", project_dir="/p", skill="formatter", backends=["opencode"]))
-    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "--skill", "formatter", "-y"]
+    assert rec.calls[0]["args"] == ["add", "./pkg", "-a", "claude-code", "opencode", "codex", "antigravity", "--skill", "formatter", "-y"]
 
 
 def test_preview_uses_list_flag(monkeypatch):
@@ -817,6 +817,7 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
                 "claude-code",
                 "opencode",
                 "codex",
+                "antigravity",
                 "--skill",
                 "private-skill",
                 "-y",
@@ -1004,7 +1005,7 @@ def test_active_org_member_can_replace_installed_legacy_skill(monkeypatch, tmp_p
         engine.dispose()
 
     assert [call["args"] for call in member_recorder.calls] == [
-        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "--skill", "legacy-skill", "-y"],
+        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--skill", "legacy-skill", "-y"],
     ]
     assert result == install_result
     assert policy is not None
@@ -1041,7 +1042,7 @@ def test_instance_owner_skill_add_does_not_require_organization_membership(
 
     assert result == install_result
     assert [call["args"] for call in recorder.calls] == [
-        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "--skill", "legacy-skill", "-y"]
+        ["add", "gh:owner/repo", "-g", "-a", "claude-code", "opencode", "codex", "antigravity", "--skill", "legacy-skill", "-y"]
     ]
 
 
@@ -1149,29 +1150,3 @@ def test_missing_project_dir_error_preserves_host_path_for_authorized_service_ca
         _run(skills._run_askill("askill", ["list"], cwd=str(missing)))
     assert info.value.code == "project_dir_missing"
     assert str(missing) in info.value.message
-
-
-def test_antigravity_skill_target_is_managed_cli_discovery_root():
-    # askill's codex target uses .agents/skills (project) and CODEX_HOME/skills (global),
-    # both read by the shared managed catalog; its antigravity target is IDE-only.
-    assert skills._agent_flags(["antigravity"]) == ["-a", "codex"]
-    assert skills._agent_flags(["codex", "antigravity"]) == ["-a", "codex"]
-
-
-def test_antigravity_local_install_is_discovered_without_ide_folder(tmp_path):
-    import shutil
-    from core.managed_skills import resolve_skills
-
-    executable = shutil.which("askill")
-    if executable is None:
-        pytest.skip("local askill CLI is unavailable")
-    source = tmp_path / "source" / "parity-probe"
-    source.mkdir(parents=True)
-    (source / "SKILL.md").write_text("---\nname: parity-probe\ndescription: Local parity probe\n---\nUse this probe.\n")
-    project = tmp_path / "project"
-    project.mkdir()
-    result = _run(skills.add_skill(executable, str(source), scope="project", project_dir=str(project), backends=["antigravity"], copy=True))
-    assert result["ok"], result
-    catalog = resolve_skills(cwd=project)
-    assert any(item.name == "parity-probe" for item in catalog)
-    assert not (project / ".agent").exists()

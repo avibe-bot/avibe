@@ -4,7 +4,7 @@ Owner-authorized backend lane for closed PR #4252. Compare with current Claude/C
 
 Each item is a separate commit with a regression at its owning boundary:
 
-- A2/F9: Skill installs use a managed-catalog discovery root and never the IDE-only `.agent` target. Existing CLI flag tests missed the target-path mismatch; verify a local installation is discoverable.
+- A2/F9 correction: retain the askill `antigravity` target. askill installs the canonical copy in `.agents/skills` and links agent directories to it; Avibe reads that canonical copy. The Codex remapping was incorrect and is reverted. Verify discovery through the canonical copy while preserving Antigravity attribution.
 - A4: Emit one completed/failed tool row, with readable paths, commands, bounded output and edit previews. Stream fixtures previously expected duplicate status rows.
 - A5: Script installs participate in idle updates, settled release selection, version readback and failure restoration. Never restore agy's native background updater. State installer pinning limits explicitly.
 - A6: Map an unavailable effort to the shared succession policy's offered value/default, report the effective choice, and permit models without an effort option. Previously unsupported selections failed the Turn.

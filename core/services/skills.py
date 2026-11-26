@@ -41,11 +41,9 @@ BACKEND_TO_AGENT: dict[str, str] = {
     "claude": "claude-code",
     "opencode": "opencode",
     "codex": "codex",
-    "antigravity": "codex",  # Shared CLI Skills roots; askill antigravity targets the IDE.
+    "antigravity": "antigravity",
 }
-AGENT_TO_BACKEND: dict[str, str] = {}
-for _backend, _agent in BACKEND_TO_AGENT.items():
-    AGENT_TO_BACKEND.setdefault(_agent, _backend)
+AGENT_TO_BACKEND: dict[str, str] = {agent: backend for backend, agent in BACKEND_TO_AGENT.items()}
 _SKILL_RESOURCE_SCOPES = frozenset({"global", "project"})
 
 
@@ -154,8 +152,7 @@ def _agent_flags(backends: Optional[list[str]]) -> list[str]:
         agent = BACKEND_TO_AGENT.get(backend)
         if not agent:
             raise SkillsError("invalid_backend", f"unknown backend: {backend}")
-        if agent not in agents:
-            agents.append(agent)
+        agents.append(agent)
     return ["-a", *agents] if agents else []
 
 
