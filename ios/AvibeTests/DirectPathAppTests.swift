@@ -4313,6 +4313,65 @@ final class DirectPathAppTests: XCTestCase {
         }
     }
 
+    // MARK: The listener wait, and this fixture's
+
+    /// An App waits a bounded time for its listener's first bind before a
+    /// host's first load. Past it the host loads on the public path: no
+    /// route, nothing selected, the listener stopped, and no failure on
+    /// record. An App that does not wait at all shows that fallback every
+    /// time. The App's own wait is one second; this fixture's Apps wait
+    /// until the bind ends, so that a slow CI simulator does not put the
+    /// tests that expect a routed host on the fallback (seen in runs
+    /// 44934936305 and 45784478069).
+    @MainActor
+    func testAnAppThatDoesNotWaitForItsFirstBindLeavesTheHostUnroutedAndRecordsNothing() async throws {
+        // What ships, and what the fixtures wait instead; nothing else differs.
+        let shipped = ContinuousRuntimeOpenTiming().directPathTiming
+        XCTAssertEqual(shipped.listenerWaitSeconds, 1)
+        for patient in [
+            LaunchTolerantRuntimeOpenTiming().directPathTiming,
+            RuntimeOpenManualTiming().directPathTiming,
+            WebKitReadiness.LaunchTolerantTiming().directPathTiming,
+        ] {
+            // Longer than the foreground deadline, which ends a bind that
+            // never finishes as a failure on record.
+            XCTAssertGreaterThan(patient.listenerWaitSeconds, patient.foregroundSeconds)
+            XCTAssertEqual(patient.rebindSeconds, shipped.rebindSeconds)
+            XCTAssertEqual(patient.foregroundSeconds, shipped.foregroundSeconds)
+            XCTAssertEqual(patient.strictOpenSeconds, shipped.strictOpenSeconds)
+            XCTAssertEqual(patient.retrySeconds, shipped.retrySeconds)
+        }
+
+        let transport = StandInDirectTransport()
+        var listening: Set<ListeningSocket> = []
+        let app = try await makeApp(
+            directTransport: transport,
+            runtimeOpenTiming: NoListenerWaitTiming()
+        ) {
+            listening = try listeningSockets()
+        }
+        let runtime = try await select("instance-1", in: app)
+
+        // The open stands, on the public path.
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertTrue(app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty)
+        XCTAssertTrue(app.directListenerFailures.isEmpty)
+        XCTAssertTrue(
+            whyNoHostIsRouted(by: app).hasPrefix("The App routed no host and recorded no listener failure")
+        )
+        // The listener nothing points at is stopped, and its late check
+        // changes nothing: no route, no selection, no failure.
+        try await eventually {
+            try newListeners(since: listening).filter { $0.address == "127.0.0.1" }.isEmpty
+        }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(app.route, .browser(runtime))
+        XCTAssertTrue(app.runtimeWebsiteDataStore.proxyConfigurations.isEmpty)
+        XCTAssertTrue(app.directListenerFailures.isEmpty)
+        XCTAssertTrue(transport.selections.isEmpty)
+        XCTAssertTrue(try newListeners(since: listening).filter { $0.address == "127.0.0.1" }.isEmpty)
+    }
+
     // MARK: An open across the push update it starts
 
     // Opening a runtime resumes push registration; on a device with
@@ -7588,7 +7647,9 @@ final class DirectPathAppTests: XCTestCase {
     /// to find, both by design: the listener's first bind or its check
     /// failed (seen on CI after one of the simulator's system services was
     /// interrupted, run 44934936305), or they were slower than the App's
-    /// listener wait (1 s). The App records only the first.
+    /// listener wait. The App records only the first. The second needs an
+    /// App that does not wait for its first bind: this fixture's does
+    /// (`WebKitReadiness.afterASlowFirstBind`), the App's own waits 1 s.
     @MainActor
     private func whyNoHostIsRouted(by app: AppModel) -> String {
         let failures = app.directListenerFailures
@@ -8043,10 +8104,18 @@ final class DirectPathAppTests: XCTestCase {
     /// Starts a push-management request and returns once the control plane
     /// is answering it. Until `hold.release` is signaled the request stays
     /// in flight, and the account coordinator is busy with it.
+    ///
+    /// A request that never gets there ends the test here, with that as its
+    /// one failure: the account transport's page did not load, which on the
+    /// CI simulator is a WebKit process that stalled (run 45758417964). What
+    /// a test checks after this wait is about a request in flight; checked
+    /// without one it only adds failures that say nothing.
     @MainActor
     private func holdPushManagement(
         _ hold: PushHold,
-        in app: AppModel
+        in app: AppModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
     ) async throws -> Task<Void, Error> {
         let request = Task { @MainActor in
             _ = try await app.mobileSessionCoordinator.pushManagementRequest(
@@ -8060,10 +8129,23 @@ final class DirectPathAppTests: XCTestCase {
         }
         // The request launches its own account transport first: the App
         // itself allows that the readiness and request deadlines together.
-        await fulfillment(
+        let budget = WebKitReadiness.launchedTransportOperationSeconds
+        let reached = await XCTWaiter.fulfillment(
             of: [hold.inFlight.expectation],
-            timeout: WebKitReadiness.launchedTransportOperationSeconds
+            timeout: budget
         )
+        guard reached == .completed else {
+            // Nothing is left held or running behind the failure.
+            hold.release.signal()
+            request.cancel()
+            throw recordThrown(
+                "The push request to \(hold.path) did not reach the control plane within \(budget) s "
+                    + "(the account transport's page did not load); nothing after this wait was checked",
+                DirectTestTimeout(),
+                file: file,
+                line: line
+            )
+        }
         return request
     }
 
@@ -8344,8 +8426,10 @@ private func nativeAccessibilityElements(
 
 /// The App's own clock, with account transports whose control-plane page
 /// may take a web content launch's time on the CI simulator
-/// (`WebKitReadiness.afterWebContentLaunch`). This rides on the App's
-/// existing timing injection rather than a test-only App parameter.
+/// (`WebKitReadiness.afterWebContentLaunch`), and a direct path controller
+/// that waits for its first bind (`WebKitReadiness.afterASlowFirstBind`).
+/// This rides on the App's existing timing injection rather than a
+/// test-only App parameter.
 @MainActor
 private final class LaunchTolerantRuntimeOpenTiming: RuntimeOpenTiming {
     private let clock = ContinuousRuntimeOpenTiming()
@@ -8354,6 +8438,38 @@ private final class LaunchTolerantRuntimeOpenTiming: RuntimeOpenTiming {
 
     var accountTransportDeadlines: MobileAuthTransportDeadlines {
         WebKitReadiness.afterWebContentLaunch
+    }
+
+    var directPathTiming: DirectPathTiming {
+        WebKitReadiness.afterASlowFirstBind
+    }
+
+    func schedule(
+        after delay: Duration,
+        _ action: @escaping @MainActor () -> Void
+    ) -> any RuntimeOpenTimer {
+        clock.schedule(after: delay, action)
+    }
+}
+
+/// The App's own clock and deadlines, with a direct path controller that
+/// does not wait for its listener's first bind at all: the App's fallback
+/// to the public path, every time.
+@MainActor
+private final class NoListenerWaitTiming: RuntimeOpenTiming {
+    private let clock = LaunchTolerantRuntimeOpenTiming()
+
+    var now: Duration { clock.now }
+
+    var accountTransportDeadlines: MobileAuthTransportDeadlines {
+        clock.accountTransportDeadlines
+    }
+
+    var directPathTiming: DirectPathTiming {
+        DirectPathTiming(
+            listenerWaitSeconds: 0,
+            rebindSeconds: DirectPathTiming.standard.rebindSeconds
+        )
     }
 
     func schedule(
@@ -8367,6 +8483,10 @@ private final class LaunchTolerantRuntimeOpenTiming: RuntimeOpenTiming {
 private final class RuntimeOpenManualTiming: RuntimeOpenTiming {
     var accountTransportDeadlines: MobileAuthTransportDeadlines {
         WebKitReadiness.afterWebContentLaunch
+    }
+
+    var directPathTiming: DirectPathTiming {
+        WebKitReadiness.afterASlowFirstBind
     }
 
     private final class Timer: RuntimeOpenTimer {
