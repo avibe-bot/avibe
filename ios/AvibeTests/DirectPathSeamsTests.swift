@@ -86,29 +86,43 @@ final class DirectPathSeamsTests: XCTestCase {
         XCTAssertEqual(forgotten.observe(seen(30)), .keep(nextCheck: nil, reloadsForLink: false))
     }
 
-    /// Rule c's clock counts only what the rule counts: nothing before the
-    /// listener has served; not a return's first attempt (only its second);
-    /// a failure while serving in front, from that failure; never `waiting`.
+    /// Rule c's clock counts only what the rule counts: not the first
+    /// attempt of a launch or a return (only from its second); a failure
+    /// while serving in front, from that failure; never `waiting`, which
+    /// starts the count over.
     func testTheListenerClockAppliesRuleCsExclusions() {
         var clock = DirectOnlyListenerClock()
-        // Never served: the launch's failures do not count.
-        XCTAssertNil(clock.observe(recovery: (since: at(0), failureAt: at(1), waiting: false), serving: false))
-        XCTAssertNil(clock.observe(recovery: (since: at(0), failureAt: at(5), waiting: false), serving: false))
-        // Served once.
-        XCTAssertNil(clock.observe(recovery: nil, serving: true))
         // A failure in front while serving: counts from it.
-        XCTAssertEqual(clock.observe(recovery: (since: at(10), failureAt: at(10), waiting: false), serving: false), at(10))
-        XCTAssertEqual(clock.observe(recovery: (since: at(10), failureAt: at(15), waiting: false), serving: false), at(10))
+        XCTAssertEqual(clock.observe(recovery: (since: at(10), failureAt: at(10), waiting: false)), at(10))
+        XCTAssertEqual(clock.observe(recovery: (since: at(10), failureAt: at(15), waiting: false)), at(10))
         // Serving again: cleared.
-        XCTAssertNil(clock.observe(recovery: nil, serving: true))
+        XCTAssertNil(clock.observe(recovery: nil))
         // A return: its first attempt does not count, its second does.
-        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: nil, waiting: false), serving: false))
-        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: at(101), waiting: false), serving: false))
-        XCTAssertEqual(clock.observe(recovery: (since: at(100), failureAt: at(104), waiting: false), serving: false), at(104))
-        // `waiting` (no network) never starts it.
-        clock.reset()
-        XCTAssertNil(clock.observe(recovery: (since: at(200), failureAt: at(200), waiting: true), serving: false))
-        XCTAssertNil(clock.observe(recovery: (since: at(200), failureAt: at(203), waiting: true), serving: false))
+        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: nil, waiting: false)))
+        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: at(101), waiting: false)))
+        XCTAssertEqual(clock.observe(recovery: (since: at(100), failureAt: at(104), waiting: false)), at(104))
+        // `waiting` (no network) stops it and starts the count over: the
+        // next failure is a first again.
+        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: at(110), waiting: true)))
+        XCTAssertNil(clock.observe(recovery: (since: at(100), failureAt: at(115), waiting: false)))
+        XCTAssertEqual(clock.observe(recovery: (since: at(100), failureAt: at(120), waiting: false)), at(120))
+    }
+
+    /// A direct-only launch whose listener never serves (the deferred first
+    /// route keeps failing) is not held for good: c counts from its second
+    /// failed attempt, and the rules revert 60 s after it.
+    func testALaunchWhoseListenerNeverServesRevertsAfterSixtySeconds() {
+        var clock = DirectOnlyListenerClock()
+        var rules = bootstrapped()
+        XCTAssertNil(clock.observe(recovery: (since: at(0), failureAt: at(1), waiting: false)))
+        let since = clock.observe(recovery: (since: at(0), failureAt: at(4), waiting: false))
+        XCTAssertEqual(since, at(4))
+        XCTAssertEqual(
+            rules.observe(seen(30, listenerDownSince: 4)),
+            .keep(nextCheck: at(64), reloadsForLink: false)
+        )
+        XCTAssertEqual(clock.observe(recovery: (since: at(0), failureAt: at(50), waiting: false)), at(4))
+        XCTAssertEqual(rules.observe(seen(64, listenerDownSince: 4)), .revert)
     }
 
     /// b: three drops within 10 minutes arm it, and it is made only at the

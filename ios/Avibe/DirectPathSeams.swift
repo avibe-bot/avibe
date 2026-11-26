@@ -334,26 +334,25 @@ struct DirectOnlyRevertRules: Equatable {
 
 /// Rule c's clock: from the listener's first failed attempt that counts,
 /// with the exclusions applied here (the controller's recovery reports
-/// every failure). Not counted: anything before the listener has served
-/// once; the first attempt of a recovery that began at a return (or the
-/// launch), as opposed to one that began with a failure while serving in
-/// front; and a failure that only means there is no network (`waiting`).
-/// The background is excluded by the caller, which resets it there.
+/// every failure). Not counted: the first attempt of a recovery that began
+/// at a return or at the launch (a launch whose listener never serves
+/// counts from its second failed attempt, so a direct-only phone is never
+/// held for good), as opposed to one that began with a failure while
+/// serving in front; and a failure that only means there is no network
+/// (`waiting`), which also starts the count over. The background is
+/// excluded by the caller, which resets it there.
 struct DirectOnlyListenerClock: Equatable {
-    private var hasServed = false
     private var episode: ContinuousClock.Instant?
     private var firstFailureAt: ContinuousClock.Instant?
     private(set) var downSince: ContinuousClock.Instant?
 
     /// `recovery` is the controller's while the listener does not serve
     /// (`since`, and the last failure's instant and whether it was
-    /// `waiting`); `serving` whether it serves now.
+    /// `waiting`); nil while it serves.
     mutating func observe(
-        recovery: (since: ContinuousClock.Instant, failureAt: ContinuousClock.Instant?, waiting: Bool)?,
-        serving: Bool
+        recovery: (since: ContinuousClock.Instant, failureAt: ContinuousClock.Instant?, waiting: Bool)?
     ) -> ContinuousClock.Instant? {
         guard let recovery else {
-            if serving { hasServed = true }
             reset()
             return nil
         }
@@ -362,8 +361,14 @@ struct DirectOnlyListenerClock: Equatable {
             firstFailureAt = nil
             downSince = nil
         }
-        guard hasServed, let failureAt = recovery.failureAt, !recovery.waiting else {
+        guard let failureAt = recovery.failureAt else {
             return downSince
+        }
+        if recovery.waiting {
+            // No network: nothing counts, and the count starts over.
+            firstFailureAt = nil
+            downSince = nil
+            return nil
         }
         if firstFailureAt == nil {
             firstFailureAt = failureAt

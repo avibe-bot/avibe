@@ -2735,8 +2735,7 @@ final class AppModel: ObservableObject {
         let listenerDownSince = watch.listenerClock.observe(
             recovery: recovery.map {
                 (since: $0.since, failureAt: $0.lastFailure?.at, waiting: $0.lastFailure?.step == .waiting)
-            },
-            serving: directPathController?.listenerState == .ready
+            }
         )
         let strictFailures = control.strictFailureCount(forInstanceURL: url)
         let dropped = watch.strictFailures.map { strictFailures > $0 } ?? false
