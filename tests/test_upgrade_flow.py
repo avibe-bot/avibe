@@ -1305,7 +1305,27 @@ def test_cmd_upgrade_prepares_show_runtime_before_activation_notice(monkeypatch,
     assert events == ["activate", "prepare", "notice"]
 
 
+PACKAGE_UNDER_TEST = "2.0.0"
+
+
+def test_package_build_refuses_an_offer_that_is_not_newer(monkeypatch):
+    # The path a stable release build takes: a package build at 3.2.8 offered an older release.
+    monkeypatch.setattr("vibe.__version__", "3.2.8")
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/custom/bin/vibe")
+    monkeypatch.setattr(api, "get_version_info", lambda **_kwargs: {"latest": "3.0.15rc1", "has_update": True})
+
+    result = api.do_upgrade(auto_restart=False)
+
+    assert result["ok"] is False
+    assert result["code"] == "no_update"
+
+
 def test_do_upgrade_includes_peer_activation_failures_in_output(monkeypatch, tmp_path):
+    # The package under test is older than every release these tests offer, whatever version this
+    # checkout carries: a stable release build stamps its real version before these run.
+    monkeypatch.setattr("vibe.__version__", PACKAGE_UNDER_TEST)
     launcher = tmp_path / "activated-vibe"
     peer = tmp_path / "peer-vibe"
     outcome = vibe_upgrade.ActivationOutcome(
@@ -1418,6 +1438,9 @@ def test_windows_activation_notices_label_powershell_for_each_failure(
 
 
 def test_do_upgrade_surfaces_deferred_activation_log(monkeypatch, tmp_path):
+    # The package under test is older than every release these tests offer, whatever version this
+    # checkout carries: a stable release build stamps its real version before these run.
+    monkeypatch.setattr("vibe.__version__", PACKAGE_UNDER_TEST)
     launcher = tmp_path / "bin" / "vibe.exe"
     candidate = tmp_path / "generation" / "bin" / "vibe.exe"
     log_path = tmp_path / "logs" / "upgrade-activation-test.log"
@@ -1550,6 +1573,9 @@ def test_an_exact_plan_never_asks_for_an_upgrade_and_always_forces_the_install(m
 
 
 def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
+    # The package under test is older than every release these tests offer, whatever version this
+    # checkout carries: a stable release build stamps its real version before these run.
+    monkeypatch.setattr("vibe.__version__", PACKAGE_UNDER_TEST)
     plan = UpgradePlan(
         command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
         env={"UV_TOOL_BIN_DIR": "/custom/bin"},

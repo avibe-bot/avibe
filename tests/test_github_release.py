@@ -601,3 +601,55 @@ def test_release_workflows_stage_then_finalize_once() -> None:
     assert 'elif [ "${{ github.event_name }}" = "push" ]' not in publish
     assert "<!-- avibe:update-notification=none -->" in notes
     assert "<!-- vibe-remote:update-notification=none -->" in notes
+
+
+MASTER_SHA = "b" * 40
+
+
+def _notes_run(**overrides):
+    run = {
+        "id": 44, "status": "completed", "conclusion": "success", "head_sha": SOURCE_SHA,
+        "head_branch": TAG, "event": "push", "path": ".github/workflows/release_ai.yml",
+        "html_url": "https://example.test/run/44",
+    }
+    run.update(overrides)
+    return run
+
+
+def _wait_as_master_dispatch(monkeypatch: pytest.MonkeyPatch, run: dict):
+    monkeypatch.setattr(
+        github_release,
+        "get_release",
+        lambda _repo, _tag: github_release.ReleaseState(
+            tag=TAG, draft=True, prerelease=False,
+            body=f"hand-written notes\n{github_release.notes_ready_marker(SOURCE_SHA, 44)}",
+            url="https://example.test/release",
+        ),
+    )
+    monkeypatch.setattr(github_release, "_get_workflow_run", lambda **_kwargs: run)
+    return github_release.wait_for_notes(
+        repo=REPO, tag=TAG, workflow="release_ai.yml", branch="master", run_sha=MASTER_SHA,
+        source_sha=SOURCE_SHA, event="workflow_dispatch", timeout=0, interval=0,
+    )
+
+
+def test_a_dispatched_recovery_accepts_the_tags_own_push_notes_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A publish re-dispatched from master for an existing tag reuses the notes its tag push wrote.
+    state = _wait_as_master_dispatch(monkeypatch, _notes_run())
+    assert state.body.startswith("hand-written notes")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"head_branch": "v3.0.13"},
+        {"head_sha": "c" * 40},
+        {"event": "workflow_dispatch"},
+        {"conclusion": "failure"},
+        {"path": ".github/workflows/other.yml"},
+    ],
+    ids=["other-tag", "other-source", "not-a-push", "failed", "other-workflow"],
+)
+def test_a_dispatched_recovery_refuses_any_other_notes_run(monkeypatch: pytest.MonkeyPatch, overrides) -> None:
+    with pytest.raises(github_release.ReleaseError):
+        _wait_as_master_dispatch(monkeypatch, _notes_run(**overrides))
