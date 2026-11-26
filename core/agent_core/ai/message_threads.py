@@ -62,7 +62,6 @@ class Parent:
     message_id: str | None  # None: ordinary full witness, never a server parent.
     tokens: int | None  # Only a server parent needs a size for delta admission.
     expires: float
-    reads: int | None = None
     terminal_mark: bool = False
     pinned_drop_block: bool = False
     carry_projection: str = ""
@@ -199,35 +198,6 @@ class Attempt:
     record: dict
     capture_witness: bool
     pinned_drop_block: bool = False
-    reported_reads: int | None = None
-
-    def observe_usage(self, raw, usage, *, attributable: bool) -> None:
-        # Missing counters are unknown, not zero. Start and delta may report different fields.
-        if not isinstance(raw, dict):
-            return
-        reads = raw.get("cache_read_input_tokens")
-        if type(reads) is int and reads >= 0:
-            self.reported_reads = reads
-            if self.mode == "create":
-                self.record["create_cache_reads"] = reads
-        if self.mode != "create":
-            return
-        self.record["create_usage_attribution"] = "verified" if attributable else "unverified"
-        if not attributable:
-            # The request was pinned, but these counters did not come from a verified serving hop.
-            for key in ("route_hash", "model", "prior_cache_reads"):
-                self.record.pop(key, None)
-        # Project the canonical stream revision; do not merge a second copy of the provider's write counters.
-        if usage is not None and (usage.cache_write_total_reported or usage.cache_writes_by_ttl is not None):
-            self.record["create_cache_writes"] = usage.cache_write_tokens
-            self.record["create_cache_write_basis"] = "reported" if usage.cache_write_total_reported else "derived"
-        else:
-            self.record.pop("create_cache_writes", None)
-            self.record.pop("create_cache_write_basis", None)
-        if usage is not None and usage.cache_writes_by_ttl is not None:
-            self.record["create_cache_writes_by_ttl"] = dict(usage.cache_writes_by_ttl)
-        else:
-            self.record.pop("create_cache_writes_by_ttl", None)
 
 
 def _cache_plan(full: dict) -> tuple[str | None, int | None]:
@@ -414,7 +384,6 @@ def prepare(
         if cache_reason == "native_history":
             ordinary = cache_reason
     matched_append = False
-    prior_reads = None
     capture_witness = False
     mode = "full" if ordinary or (get_state_dir() / "disable-message-threads").exists() else "create"
     if mode == "full":
@@ -435,7 +404,6 @@ def prepare(
             reason = "history_changed"
         else:
             matched_append = True
-            prior_reads = parent.reads
             suffix = msgs[n + 1 :]
             # Encoded bytes bound text, not the tokens billed for decoded pixels. Never rely on the
             # usage heuristic for a suffix containing images, including a tool's returned images.
@@ -502,10 +470,6 @@ def prepare(
     record = {"mode": mode, "reason": reason, "full_bytes": len(encoded(full)) if mode != "full" else 0}
     if delta_rejection and delta_rejection != reason:
         record["delta_rejection"] = delta_rejection
-    if mode == "create":
-        record.update(route_hash=route.hex(), model=ep.model_id, create_usage_attribution="unobserved")
-        if prior_reads is not None:
-            record["prior_cache_reads"] = prior_reads
     return Attempt(
         replace(wire, headers=headers, body=body),
         mode,

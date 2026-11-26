@@ -458,10 +458,7 @@ class AnthropicAdapter(ProviderAdapter):
                         mid = message.get("id")
                         response_id = mid if isinstance(mid, str) and 0 < len(mid) <= 256 and mid.isascii() else None
                         assembler.set_usage(response_usage)
-                        attributable = not self._gateway or served_as_pinned()
-                        if attempt:
-                            attempt.observe_usage(message.get("usage"), response_usage, attributable=attributable)
-                        if speculative and not attributable:
+                        if speculative and self._gateway and not served_as_pinned():
                             yield assembler.error("thread_origin_mismatch", kind="invalid_request")
                             return
                         if attempt and attempt.mode == "continue":
@@ -873,8 +870,6 @@ class AnthropicAdapter(ProviderAdapter):
                                     _refusal_detail(delta.get("stop_details")) if stop_reason == "refusal" else None
                                 )
                         response_usage = _anthropic_usage(usage, current=response_usage)
-                        if attempt:
-                            attempt.observe_usage(usage, response_usage, attributable=not self._gateway or served_as_pinned())
                         assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
                             response_counts = reported_counts(usage.get("server_tool_use"), bound=None)
@@ -1107,7 +1102,6 @@ class AnthropicAdapter(ProviderAdapter):
                                         (u.input_tokens + u.cache_read_tokens + u.cache_write_tokens + u.output_tokens)
                                         if speculative and u is not None else None,
                                         time.monotonic() + threads.PARENT_SECONDS,
-                                        attempt.reported_reads,
                                         threads.terminal_mark(wire.body),
                                         attempt.pinned_drop_block,
                                         observation.carry_projection,
@@ -1588,7 +1582,7 @@ def _error_event_shape_error(chunk: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _anthropic_usage(value: Any, *, current: Usage | None = None) -> Usage | None:
+def _anthropic_usage(value: Any, *, current: Any = None) -> Any:
     """Normalize start/delta with the field policy in conversion-tables.md.
 
     Tool request counts, tier and geography are not canonical token counters.
@@ -1597,30 +1591,54 @@ def _anthropic_usage(value: Any, *, current: Usage | None = None) -> Usage | Non
 
     if not isinstance(value, Mapping):
         return current
+    if current is None:
+        current = _usage()
     from core.agent_core.ai.cache_usage import write_ttls
 
-    if current is None:
-        current = Usage(cache_write_total_reported=False)
+    total = _anthropic_cache_write_tokens(value, current.cache_write_tokens)
+    return _usage(
+        _pick(value, "input_tokens", current.input_tokens),
+        _pick(value, "output_tokens", current.output_tokens),
+        _pick(value, "cache_read_input_tokens", current.cache_read_tokens),
+        total,
+        _pick_nested(value, "output_tokens_details", "thinking_tokens", current.reasoning_tokens),
+        write_ttls(value.get("cache_creation"),
+                   {"ephemeral_5m_input_tokens": "5m", "ephemeral_1h_input_tokens": "1h"}, total,
+                   current=current.cache_writes_by_ttl),
+    )
+
+
+def _anthropic_cache_write_tokens(value: Mapping[str, Any], fallback: int = 0) -> int:
+    """Keep Anthropic's aggregate cache count, falling back only when absent."""
+
     aggregate = value.get("cache_creation_input_tokens")
-    fields = {"ephemeral_5m_input_tokens": "5m", "ephemeral_1h_input_tokens": "1h"}
+    if "cache_creation_input_tokens" in value and aggregate is not None:
+        return _nonnegative(aggregate)
     breakdown = value.get("cache_creation")
-    detail = write_ttls(breakdown, fields, aggregate, current=current.cache_writes_by_ttl)
-    if aggregate is not None:
-        total, reported = aggregate, True
-    elif isinstance(breakdown, Mapping) and any(breakdown.get(key) is not None for key in fields):
-        # A revised TTL replaces that bucket, not the other bucket. Its sum is observed, not an explicit total.
-        total, reported = sum((detail or {}).values()), False
-    else:
-        total, reported = current.cache_write_tokens, current.cache_write_total_reported
+    if isinstance(breakdown, Mapping):
+        counters = [
+            breakdown[key]
+            for key in ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
+            if breakdown.get(key) is not None
+        ]
+        if counters:
+            return sum(_nonnegative(counter) for counter in counters)
+    return fallback
+
+
+def _usage(
+    input_tokens: int = 0, output_tokens: int = 0, cache_read: int = 0, cache_write: int = 0,
+    reasoning: int | None = None, writes_by_ttl: Mapping[str, int] | None = None,
+) -> Any:
+    from core.agent_core.messages import Usage
 
     return Usage(
-        input_tokens=_pick(value, "input_tokens", current.input_tokens),
-        output_tokens=_pick(value, "output_tokens", current.output_tokens),
-        cache_read_tokens=_pick(value, "cache_read_input_tokens", current.cache_read_tokens),
-        cache_write_tokens=total,
-        reasoning_tokens=_pick_nested(value, "output_tokens_details", "thinking_tokens", current.reasoning_tokens),
-        cache_writes_by_ttl=detail,
-        cache_write_total_reported=reported,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_read_tokens=cache_read,
+        cache_write_tokens=cache_write,
+        reasoning_tokens=reasoning,
+        cache_writes_by_ttl=writes_by_ttl,
     )
 
 
