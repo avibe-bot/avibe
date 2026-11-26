@@ -5,14 +5,23 @@ that with the rendezvous request (``direct_rendezvous.log_path_use``). They
 cannot count what never reaches their listener: a page that stays on a
 connection it made before the direct route existed sends everything through
 the tunnel, and its client sees nothing of it. The instance sees every
-request. So it counts, per remote session and per minute, how many
-authenticated requests arrived through the direct ingress and how many through
-the tunnel, and logs one line for each session and minute that had any.
+request. So it counts, per remote session and per minute, how many requests
+whose session it accepted arrived through the direct ingress and how many any
+other way, and logs one line for each session and minute that had any.
+
+``other`` is "not through the direct ingress", and no more than that. The
+instance knows a request of the direct ingress by its own listener; for the
+rest it checks the host name the request carries, not where the request came
+from. In practice that is the tunnel, but the number is not a verified count
+of tunnel traffic.
 
 Counts only. A session is named in the log by a small number given in the
 order sessions were first seen since this process started; nothing of its
-identity is logged or kept beyond the key the number stands for. WebSockets
-are not counted: a stream is one request here, as it is for the page.
+identity is logged or kept beyond the key the number stands for. The number
+is a pseudonym, not anonymity: lines with the same number are the same
+session for as long as its key is kept, and a session whose key was dropped
+for a newer one is numbered anew. WebSockets are not counted: a stream is one
+request here, as it is for the page.
 """
 
 from __future__ import annotations
@@ -38,13 +47,15 @@ class IngressCounts:
         # Session key -> its number in the log. The key never leaves this map.
         self._numbers: OrderedDict[Any, int] = OrderedDict()
         self._next_number = 1
-        # Minute -> session number -> [role, direct, tunnel].
+        # Minute -> session number -> [role, direct, other].
         self._minutes: dict[int, dict[int, list[Any]]] = {}
 
     def note(self, session: Any, *, direct: bool, owner: bool) -> None:
-        """Count one authenticated remote request, and log the minutes that are over."""
-        minute = int(self._clock() // 60)
+        """Count one request of an accepted remote session, and log the minutes that are over."""
         with self._lock:
+            # The clock is read under the lock: a minute that a drain found
+            # over cannot then be counted in again and logged a second time.
+            minute = int(self._clock() // 60)
             lines = self._drain_locked(minute)
             number = self._numbers.get(session)
             if number is None:
@@ -75,16 +86,16 @@ class IngressCounts:
         # A minute before the current one is over: nothing more is counted in it.
         lines = []
         for minute in [minute for minute in self._minutes if minute < current]:
-            for number, (role, direct, tunnel) in sorted(self._minutes.pop(minute).items()):
-                lines.append((number, role, current - minute, direct, tunnel))
+            for number, (role, direct, other) in sorted(self._minutes.pop(minute).items()):
+                lines.append((number, role, current - minute, direct, other))
         return lines
 
 
 def _log(lines: list[tuple[int, str, int, int, int]]) -> None:
-    for number, role, minutes_ago, direct, tunnel in lines:
+    for number, role, minutes_ago, direct, other in lines:
         logger.info(
-            "direct path_use ingress session=%d role=%s minutes_ago=%d direct=%d tunnel=%d",
-            number, role, minutes_ago, direct, tunnel,
+            "direct path_use ingress session=%d role=%s minutes_ago=%d direct=%d other=%d",
+            number, role, minutes_ago, direct, other,
         )
 
 

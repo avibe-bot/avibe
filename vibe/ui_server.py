@@ -1752,6 +1752,20 @@ def _trusted_browser_author_key() -> str | None:
     return f"avibe:remote:{subject.strip()}"
 
 
+def _note_remote_path_use(identity: dict[str, Any], *, owner: bool) -> None:
+    """Counts only: which way a remote session's requests arrive (direct_path_use).
+
+    Called where a request's session is accepted as current: the gate every
+    route that needs a session passes, and ``/api/session``, which reads the
+    session itself.
+    """
+    direct_path_use.counts.note(
+        (str(identity.get("sub")), str(identity.get("browser_session_id"))),
+        direct=_is_direct_ingress_request(),
+        owner=owner,
+    )
+
+
 def _resolved_remote_session_payload(config: V2Config) -> dict[str, Any] | None:
     existing = getattr(g, "remote_session_payload", None)
     if isinstance(existing, dict):
@@ -2832,12 +2846,7 @@ def enforce_remote_access_cookie():
             remote_access.register_device_session(config, identity, payload, request.headers)
         g.remote_session_payload = payload
         g.remote_authorization_resolution = resolution
-        # Counts only: which way this session's requests arrive (direct_path_use).
-        direct_path_use.counts.note(
-            (str(identity.get("sub")), str(identity.get("browser_session_id"))),
-            direct=_is_direct_ingress_request(),
-            owner=context.is_instance_owner,
-        )
+        _note_remote_path_use(identity, owner=context.is_instance_owner)
         if remote_access.session_needs_renewal(
             payload,
             instance_kind=config.remote_access.vibe_cloud.instance_kind,
@@ -10598,6 +10607,8 @@ def api_session():
                 if not identity.get('device_registered'):
                     remote_access.register_device_session(config, identity, payload, request.headers)
                 context = context_from_session_payload(payload)
+                # This route passes no gate; it is the page's routine session check.
+                _note_remote_path_use(identity, owner=context.is_instance_owner)
                 response = jsonify(
                     {
                         "remote": True,
