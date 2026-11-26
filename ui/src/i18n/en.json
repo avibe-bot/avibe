@@ -1119,7 +1119,7 @@
       "antigravitySignInButton": "Sign in to Antigravity",
       "antigravityCallbackCodeLabel": "Authorization code",
       "antigravityCallbackCodePlaceholder": "Paste the authorization code from your browser",
-      "antigravityCallbackCodeHint": "Complete sign-in in your browser, then paste the returned authorization code here.",
+      "antigravityCallbackCodeHint": "Complete sign-in in your browser, then paste the returned authorization code here. You can also paste the full URL from the browser address bar after approving.",
       "antigravityApiKeyLabel": "Gemini API key",
       "antigravityApiKeyPlaceholder": "AIza...",
       "antigravityApiKeyHint": "Used for Gemini Developer API requests.",

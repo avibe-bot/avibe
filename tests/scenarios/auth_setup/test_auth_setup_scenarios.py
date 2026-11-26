@@ -6982,7 +6982,7 @@ def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, t
 
 
 def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-931 — recovery, explicit probe, then Web re-login and account-scoped catalog cutover."""
+    """Scenario: AUTH-SETUP-931 — recovery, probe, manual-link Web re-login, callback URL and catalog cutover."""
     from tests.helpers.antigravity_harness import FakeAgyAuthFixture
     from modules.im import MessageContext
     import httpx
@@ -7089,8 +7089,17 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         process.stdin = SimpleNamespace(
             is_closing=lambda: False, write=accept_code, drain=AsyncMock(),
         )
-        start_login = AsyncMock(return_value=(process, None))
-        monkeypatch.setattr(service, "_start_antigravity_login_process", start_login)
+        # Observe the real launcher: a PTY would select agy's browser mode.
+        async def launch(*command, **kwargs):
+            assert command == (str(fake_agy.binary), "acp", "--login", "--disable-telemetry")
+            assert kwargs["stdin"] == asyncio.subprocess.PIPE
+            assert kwargs["stdout"] == asyncio.subprocess.PIPE
+            assert kwargs["stderr"] == asyncio.subprocess.STDOUT
+            return process
+
+        start_login = AsyncMock(side_effect=launch)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", start_login)
+        monkeypatch.setattr(os, "openpty", lambda: pytest.fail("Login must not open a PTY/browser"))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
             token = (await client.get("/api/csrf-token")).json()["csrf_token"]
             client.cookies.set("vibe_csrf_token", token, domain="localhost")
@@ -7110,8 +7119,13 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
                 assert status["state"] == "awaiting_code" and status["url"] == login_url
                 assert status["authorization_completed"] is False
                 start_login.assert_awaited_once()
+                assert process.returncode is None and not process.stdin.is_closing()
+                invalid = (await client.post(f"{base}/submit-code", headers=headers, json={
+                    "flow_id": flow_id, "code": "https://antigravity.google/oauth-callback?state=scenario",
+                })).json()
+                assert invalid == {"ok": False, "error": "invalid_format"} and codes == []
                 submitted = (await client.post(f"{base}/submit-code", headers=headers, json={
-                    "flow_id": flow_id, "code": "replacement-account-code",
+                    "flow_id": flow_id, "code": "  https://antigravity.google/oauth-callback?code=replacement-account-code&state=scenario  ",
                 })).json()
                 assert submitted == {"ok": True} and codes == [b"replacement-account-code\n"]
                 for _ in range(100):

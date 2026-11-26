@@ -1119,7 +1119,7 @@
       "antigravitySignInButton": "登录 Antigravity",
       "antigravityCallbackCodeLabel": "授权码",
       "antigravityCallbackCodePlaceholder": "粘贴浏览器返回的授权码",
-      "antigravityCallbackCodeHint": "在浏览器中完成登录后，将返回的授权码粘贴到这里。",
+      "antigravityCallbackCodeHint": "在浏览器中完成登录后，将返回的授权码粘贴到这里。也可以直接粘贴授权后浏览器地址栏里的完整链接。",
       "antigravityApiKeyLabel": "Gemini API Key",
       "antigravityApiKeyPlaceholder": "AIza...",
       "antigravityApiKeyHint": "用于调用 Gemini Developer API。",

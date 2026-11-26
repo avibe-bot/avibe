@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional
+from urllib.parse import unquote_plus
 from modules.agents.catalog import (
     AGENT_BACKENDS,
     NATIVE_CLI_BACKENDS,
@@ -1182,8 +1183,8 @@ class AgentAuthService:
             return
 
         if flow.backend == "antigravity":
-            raw = (code or "").strip()
-            if not raw or "\n" in raw or "\r" in raw or not flow.awaiting_code:
+            raw = self._parse_antigravity_code(code)
+            if raw is None or not flow.awaiting_code:
                 await self._send_message(context, f"❌ {self._t('command.setup.notAwaitingCode')}")
                 return
             if not await self._write_antigravity_code(flow, raw):
@@ -1702,6 +1703,17 @@ class AgentAuthService:
             stderr=asyncio.subprocess.STDOUT,
         )
 
+    @staticmethod
+    def _parse_antigravity_code(code: str) -> str | None:
+        raw = (code or "").strip()
+        if not raw or "\n" in raw or "\r" in raw:
+            return None
+        match = re.search(r"(?:[?&]|\b)code=([^&#\s]*)", raw)
+        if match:
+            value = unquote_plus(match.group(1)).strip()
+            return value if value and "\n" not in value and "\r" not in value else None
+        return None if URL_RE.search(raw) else raw
+
     async def _write_antigravity_code(self, flow: AgentAuthFlow | WebAuthFlow, raw: str) -> bool:
         payload = f"{raw}\n".encode("utf-8")
         if flow.pty_master_fd is not None:
@@ -1726,37 +1738,24 @@ class AgentAuthService:
         auth_method: str,
         on_irreversible_start: Callable[[], Callable[[], None] | None] | None = None,
     ) -> tuple[asyncio.subprocess.Process, int | None]:
-        """Launch ``agy acp --login --disable-telemetry`` in a PTY (never with permission bypass)."""
+        """Keep agy in paste-code mode: a TTY makes it open a browser."""
         env = build_antigravity_auth_env(self._resolve_backend_config("antigravity"), auth_mode=auth_method)
         binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
         cmd = antigravity_acp_command(binary, login=True)
         restore = on_irreversible_start() if on_irreversible_start is not None else None
-        master_fd: int | None = None
-        slave_fd: int | None = None
         try:
-            if hasattr(os, "openpty"):
-                master_fd, slave_fd = os.openpty()
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, env=env
-                )
-            else:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdin=asyncio.subprocess.PIPE,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    env=env,
-                )
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+            )
         except Exception:
-            if master_fd is not None:
-                os.close(master_fd)
             if restore is not None:
                 restore()
             raise
-        finally:
-            if slave_fd is not None:
-                os.close(slave_fd)
-        return process, master_fd
+        return process, None
 
     async def _start_claude_control_flow(
         self,
@@ -3051,8 +3050,8 @@ class AgentAuthService:
         if flow.backend == "antigravity":
             if flow.state != "awaiting_code" or not flow.awaiting_code:
                 return {"ok": False, "error": "not_awaiting_code"}
-            raw = (code or "").strip()
-            if not raw or "\n" in raw or "\r" in raw:
+            raw = self._parse_antigravity_code(code)
+            if raw is None:
                 return {"ok": False, "error": "invalid_format"}
             try:
                 if not await self._write_antigravity_code(flow, raw):
