@@ -10,6 +10,7 @@ check master's ruleset requires; the full backstop is then only reported.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -63,7 +64,9 @@ class UnverifiedJob:
         return f"not verified in this RC: `{self.job}` \u2014 `{self.reason}` (go: `{self.go}`)"
 
 
-NOTES_LINE_RE = re.compile(r"^not verified in this RC: `([^`]+)` \u2014 `([^`]+)` \(go: `([^`]+)`\)$", re.MULTILINE)
+NOTES_LINE_RE = re.compile(r"not verified in this RC: `([^`\r\n]+)` \u2014 `([^`\r\n]+)` \(go: `([^`\r\n]+)`\)")
+# Stage 1 binds the line it wrote to the tag's source; Stage 2 trusts no other prose.
+NOTES_MARKER_RE = re.compile(r"^<!-- avibe:rc-unverified source=([0-9a-f]{40}) sha256=([0-9a-f]{64}) -->$")
 
 
 @dataclass(frozen=True)
@@ -402,8 +405,9 @@ def prove_release(
             raise ReleaseBackstopError(f"An unverified-job exception applies only to gh-vX.Y.ZrcN tags, not {tag}")
         source_sha = resolve_tag_sha(api, tag)
         proof, state, run_id = _backstop(api, source_sha)
+        # The attestation replaces the verdict, green or not; the report keeps the observed state.
         if proof is not None:
-            return proof  # A green full backstop needs no override.
+            state, run_id = "success", proof.run_id
         return UnverifiedProof(source_sha=source_sha, unverified=unverified, backstop=state, backstop_run_id=run_id)
     if rc_pull_request_gate and RC_TAG_RE.fullmatch(tag):
         return prove_rc_pull_request(api, tag=tag)
@@ -420,22 +424,39 @@ def _unverified_from(job: str, reason: str, go: str) -> UnverifiedJob | None:
     for name, value in values.items():
         if not value:
             raise ReleaseBackstopError("An unverified-job exception needs the job, a reason and the go, all three")
-        if len(value) > _EXCEPTION_FIELD_LIMITS[name] or any(ord(ch) < 32 or ch == "`" for ch in value):
+        if len(value) > _EXCEPTION_FIELD_LIMITS[name] or any(ord(ch) < 32 or ch in "`<>" for ch in value):
+            # No backticks (literal rendering) and no angle brackets (release-control comments).
             raise ReleaseBackstopError(
                 f"The exception's {name} must be one plain line of at most {_EXCEPTION_FIELD_LIMITS[name]} "
-                "characters, without backticks"
+                "characters, without backticks or angle brackets"
             )
     return UnverifiedJob(**values)
 
 
 def unverified_from_notes(api: GitHubApi, tag: str) -> UnverifiedJob | None:
-    """Read the one override Stage 1 wrote into this exact tag's published notes, if any."""
+    """Read the one override Stage 1 wrote and bound into this exact tag's published notes, if any."""
     release = api.get(f"releases/tags/{urllib.parse.quote(tag, safe='')}")
     body = release.get("body") if isinstance(release, dict) else None
-    matches = NOTES_LINE_RE.findall(body) if isinstance(body, str) else []
-    if len(matches) > 1:
-        raise ReleaseBackstopError(f"The notes for {tag} carry more than one unverified-job line")
-    return UnverifiedJob(*matches[0]) if matches else None
+    lines = body.splitlines() if isinstance(body, str) else []
+    markers = [(i, NOTES_MARKER_RE.fullmatch(line)) for i, line in enumerate(lines)]
+    markers = [(i, m) for i, m in markers if m]
+    if not markers:
+        return None
+    if len(markers) > 1:
+        raise ReleaseBackstopError(f"The notes for {tag} carry more than one unverified-job marker")
+    index, marker = markers[0]
+    source, digest = marker.groups()
+    if source != resolve_tag_sha(api, tag):
+        raise ReleaseBackstopError(f"The unverified-job marker in {tag}'s notes names another source")
+    line = lines[index - 1] if index > 0 else ""
+    match = NOTES_LINE_RE.fullmatch(line)
+    if match is None or hashlib.sha256(line.encode("utf-8")).hexdigest() != digest:
+        raise ReleaseBackstopError(f"The unverified-job line in {tag}'s notes does not match its Stage 1 marker")
+    try:
+        unverified = _unverified_from(*match.groups())
+    except ReleaseBackstopError as exc:
+        raise ReleaseBackstopError(f"The unverified-job line in {tag}'s notes is not a valid override: {exc}") from None
+    return unverified
 
 
 def _parser() -> argparse.ArgumentParser:

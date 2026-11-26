@@ -79,6 +79,9 @@ def test_notes_shell_appends_the_rc_override_line_once_before_the_ready_marker(t
         assert result.returncode == 0, result.stdout + result.stderr
     text = notes.read_text(encoding="utf-8")
     assert text.count(line) == 1
+    digest = hashlib.sha256(line.encode()).hexdigest()
+    assert f"{line}\n<!-- avibe:rc-unverified source={source} sha256={digest} -->\n" in text
+    assert text.count("<!-- avibe:rc-unverified ") == 1
     assert text.index(line) < text.index(f"<!-- avibe:release-notes=ready source={source} run=42 -->")
     assert not (workspace / "pwned").exists()
 

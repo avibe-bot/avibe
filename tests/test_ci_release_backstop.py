@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 from typing import Any
@@ -534,10 +535,10 @@ def test_rc_override_replaces_a_red_verdict_and_reports_it() -> None:
     assert proof == gate.UnverifiedProof(source_sha=SOURCE_SHA, unverified=UNVERIFIED, backstop="failed", backstop_run_id=1)
 
 
-def test_rc_override_is_unused_when_the_full_backstop_is_green() -> None:
+def test_rc_override_keeps_its_record_when_the_backstop_is_green() -> None:
     proof = gate.prove_release(FakeApi(runs=[_run()], jobs={1: [_job()]}), tag=RC_TAG, unverified=UNVERIFIED)
 
-    assert proof == gate.BackstopProof(run_id=1, source_sha=SOURCE_SHA, event="push", run_attempt=2)
+    assert proof == gate.UnverifiedProof(source_sha=SOURCE_SHA, unverified=UNVERIFIED, backstop="success", backstop_run_id=1)
 
 
 def test_override_is_refused_for_a_stable_tag() -> None:
@@ -547,8 +548,11 @@ def test_override_is_refused_for_a_stable_tag() -> None:
 
 @pytest.mark.parametrize(
     ("job", "reason", "go"),
-    [("ruff", "", "go"), ("ruff", "why", ""), ("", "why", "go"), ("ruff", "why\nnext", "go"), ("ruff", "why", "a `b` c")],
-    ids=["no-reason", "no-go", "no-job", "two-lines", "backtick"],
+    [
+        ("ruff", "", "go"), ("ruff", "why", ""), ("", "why", "go"), ("ruff", "why\nnext", "go"), ("ruff", "why", "a `b` c"),
+        ("ruff", "<!-- avibe:update-notification=none -->", "go"),
+    ],
+    ids=["no-reason", "no-go", "no-job", "two-lines", "backtick", "release-control-comment"],
 )
 def test_override_needs_all_three_plain_fields(job: str, reason: str, go: str) -> None:
     with pytest.raises(gate.ReleaseBackstopError):
@@ -579,10 +583,21 @@ def test_rc_override_prints_the_line_for_the_summary_and_notes(
     assert f"::warning::{LINE}" in capsys.readouterr().out
 
 
+def _marker(line: str = LINE, source: str = SOURCE_SHA) -> str:
+    return f"<!-- avibe:rc-unverified source={source} sha256={hashlib.sha256(line.encode()).hexdigest()} -->"
+
+
 @pytest.mark.parametrize(
     ("body", "accepted"),
-    [(f"# Notes\n\n{LINE}\n\n<!-- ready -->", True), ("# Notes without the line", False), (f"{LINE}\n{LINE}", False)],
-    ids=["stage1-line", "no-line", "two-lines"],
+    [
+        (f"# Notes\n\n{LINE}\n{_marker()}\n\n<!-- ready -->", True),
+        ("# Notes without the line", False),
+        (f"# Generated prose quoting\n{LINE}\n", False),
+        (f"{LINE}\n{_marker(source='e' * 40)}", False),
+        (f"{LINE.replace('runner', 'Runner')}\n{_marker()}", False),
+        (f"{LINE}\n{_marker()}\n{LINE}\n{_marker()}", False),
+    ],
+    ids=["stage1-line", "no-line", "prose-without-marker", "other-source", "edited-line", "two-markers"],
 )
 def test_stage2_honours_only_the_stage1_notes_line(
     body: str, accepted: bool, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -599,7 +614,7 @@ def test_stage2_refuses_its_own_override_inputs(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("RELEASE_UNVERIFIED_JOB", UNVERIFIED.job)
     monkeypatch.setenv("RELEASE_UNVERIFIED_REASON", UNVERIFIED.reason)
     monkeypatch.setenv("RELEASE_UNVERIFIED_GO", UNVERIFIED.go)
-    monkeypatch.setattr(gate, "GitHubApi", lambda repository, token: NotesApi(body=LINE, **_red()))
+    monkeypatch.setattr(gate, "GitHubApi", lambda repository, token: NotesApi(body=f"{LINE}\n{_marker()}", **_red()))
 
     assert gate.main(["--repository", "fixture/release", "--token", "t", "--tag", RC_TAG, "--unverified-from-notes"]) == 1
 

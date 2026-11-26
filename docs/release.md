@@ -46,7 +46,9 @@ pull request is not full proof and the pipeline does not accept one for an RC.
 A tag-push run uses the workflow files at the tagged commit, so a tag on a
 commit from before this rule would still run the older, PR-gate Stage 1. The
 pre-tag check below is therefore mandatory for every tag, not a convenience
-(the one RC exception below replaces it with the operator's hand check):
+(the one RC exception below replaces it with the operator's hand check, but
+only for tags on commits that carry this rule; an older commit's tag-push
+Stage 1 still accepts the PR gate, so it always needs the full check):
 
 ```bash
 GH_TOKEN="$(gh auth token)" python3 scripts/ci_release_backstop.py \
@@ -64,16 +66,19 @@ still ship with Product's go:
 2. Dispatch `Release (AI Notes)` for the RC tag with `unverified_job` (the one
    job name), `unverified_reason` and `unverified_go` (Product's go, quoted;
    the operator attests that the quote is hers). All three are required
-   together, each one plain line without backticks. A stable tag or PyPI never
+   together, each one plain line without backticks or angle brackets. A
+   stable tag or PyPI never
    accepts them.
 3. The gate still reads the backstop and prints its full report in the run
-   summary, but the attestation replaces its verdict. The run summary and the
+   summary (green included), but the attestation replaces its verdict. The run summary and the
    RC's notes print
    `` not verified in this RC: `<job>` — `<reason>` (go: `<quote>`) ``, every
-   field in a code span so it renders literally.
-4. Desktop Stage 2 ignores dispatch inputs for this. It honours an exception
-   only if this exact tag's published notes, written by Stage 1, carry that
-   one line.
+   field in a code span so it renders literally, followed in the notes by a
+   hidden marker that binds the line to the tag's source.
+4. Desktop Stage 2 ignores dispatch inputs for this. When the full backstop is
+   not green on an RC, it honours an exception only if this exact tag's
+   published notes carry that one line with Stage 1's marker for the same
+   source and line digest. Prose that merely quotes the format does not count.
 
 There is no recheck at publication. If the named job later runs and fails, that
 is fixed forward in the next RC.

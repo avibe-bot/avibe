@@ -795,9 +795,17 @@ jobs:
             mv release.md.tmp release.md
           fi
 
-          # The RC's one accepted unverified job, as the release gate printed it.
-          if [ -n "${UNVERIFIED_LINE:-}" ] && ! grep -qF "$UNVERIFIED_LINE" release.md; then
-            printf '\n\n%s\n' "$UNVERIFIED_LINE" >> release.md
+          # The RC's one attested unverified job, as the release gate printed it, bound to
+          # this source by a marker Stage 2 checks. Only this step writes the marker.
+          # The ready marker is re-added below, so it always closes the notes.
+          grep -v -e '^<!-- avibe:rc-unverified ' -e '^<!-- avibe:release-notes=ready ' release.md > release.md.tmp || true
+          mv release.md.tmp release.md
+          if [ -n "${UNVERIFIED_LINE:-}" ]; then
+            grep -vxF -- "$UNVERIFIED_LINE" release.md > release.md.tmp || true
+            mv release.md.tmp release.md
+            LINE_SHA256="$(printf '%s' "$UNVERIFIED_LINE" | sha256sum | cut -d' ' -f1)"
+            printf '\n%s\n<!-- avibe:rc-unverified source=%s sha256=%s -->\n' \
+              "$UNVERIFIED_LINE" "$SOURCE_SHA" "$LINE_SHA256" >> release.md
           fi
 
           READY_MARKER="<!-- avibe:release-notes=ready source=${SOURCE_SHA} run=${GITHUB_RUN_ID} -->"
