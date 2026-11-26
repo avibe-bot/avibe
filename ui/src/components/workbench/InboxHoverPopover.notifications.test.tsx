@@ -44,6 +44,8 @@ describe('the sidebar Inbox popover notification view (Back to Inbox)', () => {
     });
     mount(invoke);
     fireEvent.click(await screen.findByRole('button', { name: 'workbench.inbox.notifications.enable' }));
+    // No injected provider: the default control still probes and saves through the real bridge.
+    expect(invoke).toHaveBeenCalledWith('desktop_notifications_state');
     expect(invoke).toHaveBeenCalledWith('desktop_notifications_set_enabled', { enabled: true });
     expect(screen.queryByText('workbench.inbox.notifications.enabled')).toBeNull();
     complete!();

@@ -1,15 +1,18 @@
-import { useEffect, useRef, useState } from 'react';
+import { useContext, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Bell } from 'lucide-react';
 
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { desktopNotificationsActions, listenDesktopNotifications } from '../../lib/desktopShell';
+import { DesktopNotificationActionsContext } from '../../context/DesktopNotificationActionsContext';
 
-/** Reuses the existing local Workbench contract; a rejected probe grants nothing. */
+/** Reuses the existing local Workbench contract; a rejected probe grants nothing.
+ * ui/design: sidebar/inbox-notifications/{off,on,denied,save-failed} */
 export function DesktopNotificationEnable() {
   const { t } = useTranslation();
-  const [actions] = useState(desktopNotificationsActions);
+  const providedActions = useContext(DesktopNotificationActionsContext);
+  const [actions] = useState(() => providedActions ?? desktopNotificationsActions());
   const [enabled, setEnabled] = useState<boolean | null>(null);
   const [denied, setDenied] = useState(false);
   const [unavailable, setUnavailable] = useState(!actions);
