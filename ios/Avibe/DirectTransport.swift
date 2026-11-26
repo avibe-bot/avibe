@@ -84,6 +84,8 @@ struct DirectStreamTag: Equatable, Sendable {
 }
 
 enum DirectPathReport: Equatable, Sendable {
+    /// A validated answer from the selected instance ended without an admitted link.
+    case answeredWithoutLink
     /// A path to the target's instance is usable. `generation` is the
     /// rendezvous answer's.
     case usable(generation: String)

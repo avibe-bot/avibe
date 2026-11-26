@@ -195,13 +195,22 @@ final class DirectRouteOwner {
 
     /// Every host written to any route in this process, in order.
     private(set) var allowedHosts: [String] = []
-    private var hostsByStore: [UUID: [String]] = [:]
+    /// A host and the WebKit policy currently requested for it on this store.
+    private struct RoutedHost {
+        let name: String
+        let allowsFailover: Bool
+    }
+    private var hostsByStore: [UUID: [RoutedHost]] = [:]
     /// Hosts a store loaded without a route. They are never added to that
     /// store later: WebKit would keep using its existing connections.
     private var excluded: Set<StoreHost> = []
 
     func routes(_ host: String, store: UUID) -> Bool {
-        hostsByStore[store]?.contains(host) == true
+        hostsByStore[store]?.contains { $0.name == host } == true
+    }
+
+    func allowsFailover(_ host: String, store: UUID) -> Bool {
+        hostsByStore[store]?.first { $0.name == host }?.allowsFailover == true
     }
 
     func isExcluded(_ host: String, store: UUID) -> Bool {
@@ -229,7 +238,10 @@ final class DirectRouteOwner {
     /// `port`. `false` when the host is excluded for this store or the
     /// process-wide cap is reached; the host then keeps WebKit's normal path.
     @discardableResult
-    func add(_ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) -> Bool {
+    func add(
+        _ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16,
+        allowsFailover: Bool = true
+    ) -> Bool {
         if routes(host, store: store) {
             return true
         }
@@ -242,13 +254,35 @@ final class DirectRouteOwner {
             }
             allowedHosts.append(host)
         }
-        let hosts = (hostsByStore[store] ?? []) + [host]
-        hostsByStore[store] = hosts
-        dataStore.proxyConfigurations = [Self.route(port: port, hosts: hosts)]
+        let hosts = (hostsByStore[store] ?? []) + [RoutedHost(name: host, allowsFailover: allowsFailover)]
+        write(hosts, store: store, dataStore: dataStore, port: port)
         return true
     }
 
-    static func route(port: UInt16, hosts: [String]) -> ProxyConfiguration {
+    /// Changes only an already-routed host. The caller drains its connections
+    /// before asking; reapplying a policy does not rewrite the store.
+    @discardableResult
+    func rewrite(_ host: String, store: UUID, dataStore: WKWebsiteDataStore, port: UInt16, allowsFailover: Bool) -> Bool {
+        guard var hosts = hostsByStore[store], let index = hosts.firstIndex(where: { $0.name == host }) else {
+            return false
+        }
+        if hosts[index].allowsFailover != allowsFailover {
+            hosts[index] = RoutedHost(name: host, allowsFailover: allowsFailover)
+            write(hosts, store: store, dataStore: dataStore, port: port)
+        }
+        return true
+    }
+
+    private func write(_ hosts: [RoutedHost], store: UUID, dataStore: WKWebsiteDataStore, port: UInt16) {
+        hostsByStore[store] = hosts
+        dataStore.proxyConfigurations = [false, true].compactMap { allowsFailover in
+            let domains = hosts.filter { $0.allowsFailover == allowsFailover }.map(\.name)
+            guard !domains.isEmpty else { return nil }
+            return Self.route(port: port, hosts: domains, allowsFailover: allowsFailover)
+        }
+    }
+
+    private static func route(port: UInt16, hosts: [String], allowsFailover: Bool) -> ProxyConfiguration {
         var route = ProxyConfiguration(
             httpCONNECTProxy: .hostPort(
                 host: "127.0.0.1",
@@ -259,7 +293,7 @@ final class DirectRouteOwner {
         route.matchDomains = hosts
         // A candidate safety net, not a guarantee (section 8): WebKit may
         // take its normal path when the listener cannot be reached.
-        route.allowFailover = true
+        route.allowFailover = allowsFailover
         return route
     }
 }
@@ -268,6 +302,7 @@ final class DirectRouteOwner {
 /// section 9). Not measurements.
 struct DirectPathTiming: Sendable {
     /// How long a runtime's first load waits for the listener and its route.
+    let strictOpenSeconds: TimeInterval
     let listenerWaitSeconds: TimeInterval
     /// How long the return to the foreground may take to re-bind and check
     /// the listener's port.
@@ -289,8 +324,10 @@ struct DirectPathTiming: Sendable {
         listenerWaitSeconds: TimeInterval,
         rebindSeconds: TimeInterval,
         foregroundSeconds: TimeInterval = 5,
+        strictOpenSeconds: TimeInterval = 10,
         retrySeconds: [TimeInterval] = [0.25, 0.5, 1, 2, 5]
     ) {
+        self.strictOpenSeconds = strictOpenSeconds
         self.listenerWaitSeconds = listenerWaitSeconds
         self.rebindSeconds = rebindSeconds
         self.foregroundSeconds = foregroundSeconds
@@ -530,6 +567,16 @@ final class DirectPathController {
     private var replacedGenerations: Set<String> = []
     /// The transport reported the accepted generation usable, and nothing
     /// has suspended that since.
+    private var requestedStrict: Set<String> = []
+    // WebKit may own a connection outside the listener: an unmanaged load, or
+    // a timed-out CONNECT still using a failover-enabled route during cutover.
+    private var hostsNeedingColdStore: Set<String> = []
+    private var armed: Set<String> = []
+    private var rewriting: Set<String> = []
+    private var policyGeneration: [String: UInt64] = [:]
+    private var strictFailures: [String: UInt64] = [:]
+    private var unlinkedAnswers: [String: UInt64] = [:]
+    private var lossWake: Task<Void, Never>?
     private var isUsable = false
     /// The kind of path the usable transport's connection runs on, as last
     /// reported; nil when none is usable or the transport cannot tell.
@@ -577,6 +624,18 @@ final class DirectPathController {
     private var completionAwaitingCloses: DirectRebindCompletion?
     /// Route preparations under way; the listener is kept while any is.
     private var preparations = 0
+    // The runtime whose first strict route was not ready. Unlike an excluded
+    // host it may prepare again: its gate has not admitted a WebKit load.
+    private struct FirstRouteWait {
+        let runtime: MobileRuntimeContext
+        let store: UUID
+        let since = ContinuousClock.now
+        var lastFailure: DirectListenerFailure?
+        var retries = 0
+    }
+    private var firstRouteWait: FirstRouteWait?
+    private var firstRouteWake: Task<Void, Never>?
+    private var firstRouteRetry: Task<Void, Never>?
 
     init(
         websiteDataStore: AccountWebsiteDataStore,
@@ -781,9 +840,10 @@ final class DirectPathController {
         preparations -= 1
         // A listener no route points at, and no open is waiting for, has
         // nothing to do.
-        if routeOwner.allowedHosts.isEmpty, preparations == 0, listener != nil {
+        if routeOwner.allowedHosts.isEmpty, preparations == 0, listener != nil, !firstRouteWanted {
             await stopListener()
         }
+        scheduleFirstRouteRetry()
     }
 
     private func addRoute(
@@ -800,7 +860,12 @@ final class DirectPathController {
         guard !routeOwner.isExcluded(authority.host, store: store) else {
             return
         }
-        let ready = await ensureListener()
+        if needsListener(authority.host), stillWanted(),
+           (firstRouteWait?.runtime != runtime || firstRouteWait?.store != store) {
+            cancelFirstRouteWait()
+            firstRouteWait = FirstRouteWait(runtime: runtime, store: store)
+        }
+        let ready = await ensureListener(for: authority.host)
         guard stillWanted(), websiteDataStore.identifier == store else {
             return
         }
@@ -810,7 +875,9 @@ final class DirectPathController {
             let listenerPort,
             listenerState == .ready
         else {
-            routeOwner.exclude(authority.host, store: store)
+            if !needsListener(authority.host) {
+                routeOwner.exclude(authority.host, store: store)
+            }
             return
         }
         // The listener accepts the host before WebKit can be routed to it.
@@ -838,13 +905,17 @@ final class DirectPathController {
                     authority.host,
                     store: store,
                     dataStore: websiteDataStore.dataStore,
-                    port: listenerPort
+                    port: listenerPort,
+                    allowsFailover: !needsListener(authority.host)
                 )
             })
         else {
-            routeOwner.exclude(authority.host, store: store)
+            if !needsListener(authority.host) {
+                routeOwner.exclude(authority.host, store: store)
+            }
             return
         }
+        if firstRouteWait?.runtime == runtime, firstRouteRetry == nil { cancelFirstRouteWait() }
     }
 
     /// Takes in a failure the lifecycle has recorded and this controller
@@ -873,17 +944,18 @@ final class DirectPathController {
     /// routed stays routed after its runtime closed, so its loads still go
     /// through the listener.
     func loadGate(forInstanceURL url: URL) -> DirectLoadGate {
-        guard
-            let authority = DirectAuthority(instanceURL: url),
-            routeOwner.routes(authority.host, store: websiteDataStore.identifier),
-            let listener
-        else {
-            // No route; or a route and no listener, which is not reachable
-            // (a listener a route was published to is never stopped or
-            // replaced) and would leave the port closed: WebKit's own path.
-            return .open
+        guard let authority = DirectAuthority(instanceURL: url) else { return .open }
+        let host = authority.host
+        if rewriting.contains(host) { return .held }
+        let strict = needsListener(host)
+        guard routeOwner.routes(host, store: websiteDataStore.identifier), let listener else {
+            return strict ? .held : .open
         }
-        return listenerGate(listener)
+        let gate = listenerGate(listener)
+        if strict, gate == .open {
+            guard case .serving = listener.lifecycle.phase else { return .held }
+        }
+        return gate
     }
 
     /// The gate of a host routed to `listener`, from its lifecycle and from
@@ -921,6 +993,87 @@ final class DirectPathController {
         return recovery?.lastFailure == nil ? .held : .open
     }
 
+    /// Records a real load decision, not a presentation read of the load gate.
+    func noteInstanceLoad(forInstanceURL url: URL) {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return }
+        if routeOwner.routes(host, store: websiteDataStore.identifier), let listener,
+           case .serving = listener.lifecycle.phase { return }
+        if hostsNeedingColdStore.insert(host).inserted, requestedStrict.contains(host) {
+            onAvailabilityChanged()
+        }
+    }
+
+    private func needsListener(_ host: String) -> Bool {
+        requestedStrict.contains(host) && !hostsNeedingColdStore.contains(host)
+    }
+
+    func directOnlyNeedsRelaunch(forInstanceURL url: URL) -> Bool {
+        guard let host = DirectAuthority(instanceURL: url)?.host else { return false }
+        return requestedStrict.contains(host) && hostsNeedingColdStore.contains(host)
+    }
+
+    func unlinkedRendezvousCount(forInstanceURL url: URL) -> UInt64 {
+        DirectAuthority(instanceURL: url).map { unlinkedAnswers[$0.host, default: 0] } ?? 0
+    }
+
+    func strictFailureCount(forInstanceURL url: URL) -> UInt64 {
+        DirectAuthority(instanceURL: url).map { strictFailures[$0.host, default: 0] } ?? 0
+    }
+
+    func isDirectOnlyLinked(forInstanceURL url: URL) -> Bool {
+        guard let authority = DirectAuthority(instanceURL: url) else { return false }
+        return armed.contains(authority.host) && !rewriting.contains(authority.host) && directAuthorized(for: authority)
+    }
+
+    func setDirectOnly(_ enabled: Bool, forInstanceURL url: URL) {
+        guard let authority = DirectAuthority(instanceURL: url) else { return }
+        let host = authority.host
+        if enabled {
+            guard requestedStrict.insert(host).inserted else { return }
+            policyGeneration[host, default: 0] &+= 1
+            if needsListener(host), !directAuthorized(for: authority), let port = listenerPort {
+                _ = routeOwner.rewrite(host, store: websiteDataStore.identifier,
+                                       dataStore: websiteDataStore.dataStore, port: port, allowsFailover: false)
+            }
+            if !hostsNeedingColdStore.contains(host), directAuthorized(for: authority) { cutover(host) }
+        } else {
+            guard requestedStrict.remove(host) != nil else { return }
+            if let wait = firstRouteWait, DirectAuthority(instanceURL: wait.runtime.instance.url)?.host == host {
+                cancelFirstRouteWait()
+            }
+            policyGeneration[host, default: 0] &+= 1
+            armed.remove(host)
+            if target?.authority.host == host { lossWake?.cancel(); lossWake = nil }
+            cutover(host)
+        }
+        onAvailabilityChanged()
+    }
+
+    /// One drain at a time per host. New plans wait; in-flight plans also
+    /// fail their commit check. Sample the latest choice after the drain so
+    /// a late completion cannot reverse a newer choice or touch another store.
+    private func cutover(_ host: String) {
+        let store = websiteDataStore.identifier
+        guard routeOwner.routes(host, store: store), let listener, let port = listenerPort,
+              rewriting.insert(host).inserted else { return }
+        policyGeneration[host, default: 0] &+= 1
+        Task { [weak self] in
+            await listener.drainHost(host)
+            guard let self else { return }
+            self.rewriting.remove(host)
+            if self.websiteDataStore.identifier == store, self.listener === listener {
+                let strict = self.requestedStrict.contains(host) && !self.hostsNeedingColdStore.contains(host)
+                    && self.target?.authority.host == host && self.isUsable && !self.isInBackground
+                    && self.listenerState == .ready
+                if self.routeOwner.rewrite(host, store: store, dataStore: self.websiteDataStore.dataStore,
+                                           port: port, allowsFailover: !self.requestedStrict.contains(host)), strict {
+                    self.armed.insert(host)
+                } else { self.armed.remove(host) }
+            }
+            self.onAvailabilityChanged()
+        }
+    }
+
     /// A runtime opened, after its route was prepared.
     func runtimeDidOpen(_ runtime: MobileRuntimeContext) {
         self.runtime = runtime
@@ -933,6 +1086,7 @@ final class DirectPathController {
     /// that selection close; public relays and closures are untouched (the
     /// documents that would act on a closure are gone).
     func runtimeDidStop() {
+        cancelFirstRouteWait()
         let hadSelection = runtime != nil || target != nil
         runtime = nil
         settleHeldReplies()
@@ -949,6 +1103,7 @@ final class DirectPathController {
     /// Every relay of both backends closes; nothing of the old account is
     /// kept. Not a closure: its documents are gone.
     func accountWillChange() {
+        cancelFirstRouteWait()
         runtime = nil
         settleHeldReplies()
         deselect()
@@ -992,6 +1147,9 @@ final class DirectPathController {
     /// same instance is selected again on the return, and what was recorded
     /// before is what a diagnosis after the return needs.
     private func deselect(stoppingTransport: Bool = true, keepingDiagnostics: Bool = false) {
+        if let host = target?.authority.host { armed.remove(host) }
+        lossWake?.cancel()
+        lossWake = nil
         isUsable = false
         currentPath = nil
         stickyDropped = false
@@ -1019,6 +1177,10 @@ final class DirectPathController {
             return
         }
         switch report {
+        case .answeredWithoutLink:
+            unlinkedAnswers[target.authority.host, default: 0] &+= 1
+            onAvailabilityChanged()
+            return
         case .usable(let generation):
             // Generations never repeat, so one that a newer answer replaced
             // can only be a late result.
@@ -1032,7 +1194,15 @@ final class DirectPathController {
                 closeRelays(.direct, countsAsClosure: true, loss: (.generationReplaced, currentPath))
             }
             acceptedGeneration = generation
+            let wasUsable = isUsable
             isUsable = true
+            lossWake?.cancel()
+            lossWake = nil
+            let host = target.authority.host
+            if requestedStrict.contains(host), !hostsNeedingColdStore.contains(host) {
+                if !armed.contains(host) { cutover(host) }
+                else if !wasUsable { onAvailabilityChanged() }
+            }
             let previous = currentPath
             currentPath = transport.pathDiagnostics.current
             stickyDropped = false
@@ -1083,6 +1253,22 @@ final class DirectPathController {
             return
         }
         updatePreference()
+        let host = target.authority.host
+        if armed.contains(host), lossWake == nil {
+            let seconds = timing.strictOpenSeconds
+            lossWake = Task { [weak self] in
+                do { try await Task.sleep(for: .seconds(seconds)) } catch { return }
+                guard let self, self.target == target, !self.isUsable,
+                      self.armed.contains(host) else { return }
+                // Leave the completed wake in place: another loss report in this
+                // outage is not a new episode. Only recovery, a deliberate new
+                // selection, or disabling the choice can reset it. In particular,
+                // an ordinary browser reconnect must not acquire a public opener.
+                self.strictFailures[host, default: 0] &+= 1
+                self.onAvailabilityChanged()
+            }
+            onAvailabilityChanged()
+        }
     }
 
     /// A direct candidate failed before anything was forwarded. Only a
@@ -1101,9 +1287,31 @@ final class DirectPathController {
 
     /// Decides one accepted CONNECT (section 6). `nil` refuses it.
     func plan(for authority: DirectAuthority) -> DirectConnectPlan? {
-        guard routeOwner.allowedHosts.contains(authority.host) else {
-            return nil
+        let host = authority.host
+        guard routeOwner.allowedHosts.contains(host) else { return nil }
+        if rewriting.contains(host) {
+            // Not a refusal: WebKit might still have the old failover route. Neither
+            // opener may run until the drain and rewrite have both finished.
+            var hold = DirectConnectPlan(scope: scope, generation: pathGeneration, openDirect: nil,
+                                         openPublic: nil, isCurrent: { false }, directFailed: {})
+            hold.rewriteWaitSeconds = timing.strictOpenSeconds
+            let store = websiteDataStore.identifier
+            let policy = policyGeneration[host, default: 0]
+            if requestedStrict.contains(host), routeOwner.allowsFailover(host, store: store) {
+                hold.rewriteTimedOut = { [weak self] in
+                    guard let self, self.websiteDataStore.identifier == store,
+                          self.policyGeneration[host] == policy, self.requestedStrict.contains(host) else { return }
+                    // This request was made on a failover-enabled route. A silent
+                    // timeout can leave an origin socket beyond the listener's reach.
+                    self.armed.remove(host)
+                    if self.hostsNeedingColdStore.insert(host).inserted { self.onAvailabilityChanged() }
+                }
+            }
+            return hold
         }
+        let policy = policyGeneration[host, default: 0]
+        let strictChoice = needsListener(host)
+        let strict = strictChoice && armed.contains(host)
         let fence = Fence(
             selection: selection,
             pathGeneration: pathGeneration,
@@ -1111,7 +1319,9 @@ final class DirectPathController {
         )
         let transport = transport
         let publicBackend = publicBackend
-        let directTag = directStreamTag(for: authority)
+        let directTag = strictChoice && !strict ? nil : directStreamTag(for: authority)
+        let openPublic: (@Sendable () async throws -> any DirectByteStream)?
+        if strict { openPublic = nil } else { openPublic = { try await publicBackend.open(authority) } }
         let openDirect: (@Sendable () async throws -> any DirectByteStream)?
         if let directTag {
             openDirect = {
@@ -1135,11 +1345,11 @@ final class DirectPathController {
             scope: scope,
             generation: pathGeneration,
             openDirect: openDirect,
-            openPublic: {
-                try await publicBackend.open(authority)
-            },
+            openPublic: openPublic,
             isCurrent: { [weak self] in
-                self?.isCurrent(fence, lease: lease) ?? false
+                guard let self, self.policyGeneration[host, default: 0] == policy,
+                      !self.rewriting.contains(host), self.armed.contains(host) == strict else { return false }
+                return self.isCurrent(fence, lease: lease)
             },
             directFailed: { [weak self] in
                 guard let directTag else {
@@ -1150,7 +1360,8 @@ final class DirectPathController {
                 }
             }
         )
-        plan.sticky = sticky
+        plan.strictWaitSeconds = strict ? timing.strictOpenSeconds : nil
+        plan.sticky = !strict && sticky
         plan.path = directTag == nil ? nil : currentPath
         plan.stickyMissed = { [weak self] in
             Task { @MainActor in
@@ -1496,7 +1707,7 @@ final class DirectPathController {
     /// Waits, at most the listener bound, for the listener to be ready:
     /// starting it if none exists, or letting a bind or a re-bind under way
     /// finish.
-    private func ensureListener() async -> Bool {
+    private func ensureListener(for host: String) async -> Bool {
         switch listenerState {
         case .ready:
             return true
@@ -1520,11 +1731,11 @@ final class DirectPathController {
             break
         }
         // The bind runs on its own; this wait is bounded either way.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(timing.listenerWaitSeconds))
-        while listenerState == .binding || listenerState == .rebinding,
-              ContinuousClock.now < deadline
-        {
-            try? await Task.sleep(for: .milliseconds(25))
+        let started = ContinuousClock.now
+        while listenerState == .binding || listenerState == .rebinding {
+            let seconds = needsListener(host) ? timing.strictOpenSeconds : timing.listenerWaitSeconds
+            guard !Task.isCancelled, ContinuousClock.now < started.advanced(by: .seconds(seconds)) else { break }
+            do { try await Task.sleep(for: .milliseconds(25)) } catch { return false }
         }
         return listenerState == .ready
     }
@@ -1671,6 +1882,13 @@ final class DirectPathController {
     /// `lastFailure` is `nil`. Every change of it is announced through
     /// `onAvailabilityChanged`.
     var listenerRecovery: DirectListenerRecovery? {
+        if let waiting = firstRouteWait, !isInBackground, isCurrentRuntime(waiting.runtime),
+           waiting.store == websiteDataStore.identifier,
+           let host = DirectAuthority(instanceURL: waiting.runtime.instance.url)?.host,
+           needsListener(host), !routeOwner.routes(host, store: waiting.store) {
+            return DirectListenerRecovery(since: waiting.since, lastFailure: waiting.lastFailure,
+                                          portMayBeForeign: portLastKnownForeign)
+        }
         guard
             let listener,
             let recovery,
@@ -1698,6 +1916,63 @@ final class DirectPathController {
     func retryListenerNow() {
         settleRecordedFault()
         startAttemptIfFailed()
+        retryFirstRouteIfNeeded()
+    }
+
+    private var firstRouteWanted: Bool {
+        guard let wait = firstRouteWait, isCurrentRuntime(wait.runtime), wait.store == websiteDataStore.identifier,
+              let host = DirectAuthority(instanceURL: wait.runtime.instance.url)?.host else { return false }
+        return needsListener(host) && !routeOwner.routes(host, store: wait.store)
+    }
+
+    private func cancelFirstRouteWait() {
+        firstRouteWake?.cancel()
+        firstRouteWake = nil
+        firstRouteRetry?.cancel()
+        firstRouteRetry = nil
+        firstRouteWait = nil
+        if preparations == 0, routeOwner.allowedHosts.isEmpty { retireAndStop() }
+    }
+
+    private func scheduleFirstRouteRetry() {
+        guard firstRouteWanted, !isInBackground, preparations == 0, firstRouteRetry == nil,
+              firstRouteWake == nil, let wait = firstRouteWait else { return }
+        let delays = timing.retrySeconds
+        let delay = delays.isEmpty ? 5 : delays[min(wait.retries, delays.count - 1)]
+        firstRouteWait?.retries += 1
+        firstRouteWake = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard !Task.isCancelled else { return }
+            self?.firstRouteWake = nil
+            self?.retryFirstRouteIfNeeded()
+        }
+    }
+
+    private func retryFirstRouteIfNeeded() {
+        guard preparations == 0, let waiting = firstRouteWait, isCurrentRuntime(waiting.runtime), !isInBackground,
+              waiting.store == websiteDataStore.identifier, firstRouteRetry == nil,
+              let host = DirectAuthority(instanceURL: waiting.runtime.instance.url)?.host,
+              needsListener(host), !routeOwner.routes(host, store: waiting.store) else { return }
+        firstRouteWake?.cancel()
+        firstRouteWake = nil
+        firstRouteRetry = Task { [weak self] in
+            guard !Task.isCancelled, let self else { return }
+            await self.prepareRoute(for: waiting.runtime) {
+                !Task.isCancelled && self.firstRouteWait?.runtime == waiting.runtime &&
+                    self.isCurrentRuntime(waiting.runtime) && !self.isInBackground &&
+                    self.websiteDataStore.identifier == waiting.store && self.needsListener(host)
+            }
+            guard !Task.isCancelled else { return }
+            self.firstRouteRetry = nil
+            if self.routeOwner.routes(host, store: waiting.store) {
+                self.firstRouteWait = nil
+                self.select()
+                self.updatePreference()
+            } else {
+                self.scheduleFirstRouteRetry()
+            }
+            self.onAvailabilityChanged()
+        }
     }
 
     /// The listening socket of `failed` failed, as its lifecycle recorded
@@ -1813,6 +2088,11 @@ final class DirectPathController {
             backgroundSeconds: awaySeconds,
             at: ContinuousClock.now
         )
+        // The diagnostic ring deduplicates equal failures across waits. Recovery
+        // presentation needs this attempt, even if it added no diagnostic row.
+        if let wait = firstRouteWait, failure.at >= wait.since, firstRouteWanted {
+            firstRouteWait?.lastFailure = failure
+        }
         if let last = listenerFailures.last,
            last.step == failure.step,
            last.code == failure.code,
@@ -1973,6 +2253,8 @@ final class DirectPathController {
             return
         }
         isInBackground = true
+        firstRouteWake?.cancel()
+        firstRouteWake = nil
         leftForegroundAt = ContinuousClock.now
         // Nothing is bound or watched while the App is away: this stay's
         // recovery ends here, and the return begins its own. An episode
@@ -1997,7 +2279,9 @@ final class DirectPathController {
         // under way has no route pointing at it: its listener is retired,
         // and a later open in the foreground makes a new one.
         if let listener {
-            if rebinds.inFlight {
+            if !listener.lifecycle.isPublished {
+                retireAndStop()
+            } else if rebinds.inFlight {
                 listener.lifecycle.beginClose()
             } else if listenerState == .ready {
                 listener.lifecycle.beginClose()
@@ -2031,6 +2315,10 @@ final class DirectPathController {
             return
         }
         isInBackground = false
+        if let wait = firstRouteWait {
+            firstRouteWait = FirstRouteWait(runtime: wait.runtime, store: wait.store)
+        }
+        retryFirstRouteIfNeeded()
         if let leftForegroundAt {
             awaySeconds = Int(leftForegroundAt.duration(to: ContinuousClock.now).components.seconds)
         }
