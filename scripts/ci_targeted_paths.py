@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 BOUNDARIES = {
+    # The wire comparison and its exception label exist only on pull requests.
+    'engine-wire': frozenset({'vibe/model_hub_runtime/cliproxyapi_manifest.json'}),
     'admission': frozenset({'vibe/binding_admission.py', 'vibe/personal_claims.py', 'core/agent_auth_service.py'}),
     'vault-policy': frozenset({'storage/vault_policy.py', 'storage/vault_service.py', 'storage/vault_protected.py', 'storage/vault_protected_hd.py', 'storage/vault_crypto.py', 'vibe/avault_authorization.py'}),
     'vault-window-macos': frozenset({'desktop/src-tauri/src/macos_vault_window.rs'}),

@@ -397,6 +397,9 @@ def test_named_files_and_manual_request_select_real_proofs():
         for path in paths:
             assert (ROOT / path).is_file()
             assert selected(scope(path))[1] - LINUX, path
+    assert selected(scope('vibe/model_hub_runtime/cliproxyapi_manifest.json')) == (
+        {'engine-wire'}, LINUX | {'model-hub-hosted-wire'},
+    )
     assert selected(scope('ui/src/components/update/versions.ts'))[1] == LINUX | {'desktop-shell'}
     assert selected(scope('storage/alembic/versions/new_revision.py'))[1] == LINUX | {'install-upgrade-shards'}
     assert selected(scope('ios/AvibeTests/MobileOnboardingTests.swift', 'ui/thread_bootstrap.ts'))[1] == LINUX
