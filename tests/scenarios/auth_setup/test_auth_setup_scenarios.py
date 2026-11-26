@@ -3760,6 +3760,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
         web_flow = await harness.service.start_web_setup(
             "codex",
             force_reset=False,
+            owner_ref="protected-source",
         )
         self.addAsyncCleanup(harness.service.cancel_web_flow, web_flow.flow_id)
         await harness.service.start_setup(
@@ -7131,3 +7132,57 @@ def test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt(pair
     # The completion names the old domain and the date avibe.bot froze with its receipt.
     assert browser.get("/api/devices").get_json()["unbind"] == {
         "state": "unbound", "host": "fixture.avibe.bot", "release_at": "2026-12-25T00:00:00Z"}
+
+
+@pytest.mark.asyncio
+async def test_abandoned_web_login_can_restart_and_complete(monkeypatch):
+    """AUTH-SETUP-934: returning to Settings recovers without an old flow id.
+
+    The API must return a fresh usable flow and commit its successful login;
+    unit ownership tests cannot cover the public start/status response loop.
+    """
+    from vibe import api as vibe_api
+
+    harness = AuthSetupScenarioHarness()
+    service = harness.service
+    processes = []
+
+    async def spawn(**_kwargs):
+        process = FakeProcess()
+        process.stdout.readline.side_effect = [
+            b"https://auth.openai.com/codex/device\n", b"ABCD-12345\n", b"",
+        ]
+        processes.append(process)
+        return process
+
+    service._start_codex_process = spawn
+    service._verify_web_login = AsyncMock(return_value=(True, "signed in"))
+    service._invoke_post_web_success_hook = AsyncMock()
+    monkeypatch.setattr(vibe_api, "_get_oauth_service", lambda: service)
+
+    first = await vibe_api.start_oauth_web_async("codex", force_reset=False)
+    assert first["ok"] is True
+    old = service._flows_by_id[first["flow_id"]]
+    await old.reader_task
+    assert vibe_api.get_oauth_web_status(old.flow_id)["state"] == "awaiting_code"
+    # Closing the browser sends no cancel request. Return with no stored flow id.
+    second = await vibe_api.start_oauth_web_async("codex", force_reset=False)
+    assert second["ok"] is True
+    assert second["flow_id"] != first["flow_id"]
+    new = service._flows_by_id[second["flow_id"]]
+    try:
+        await new.reader_task
+        status = vibe_api.get_oauth_web_status(new.flow_id)
+        assert status["state"] == "awaiting_code"
+        assert status["url"] == "https://auth.openai.com/codex/device"
+        assert old.state == "cancelled"
+        assert processes[0].terminate_calls == 1
+        processes[1].finish()
+        await new.waiter_task
+        status = vibe_api.get_oauth_web_status(new.flow_id)
+        assert status["state"] == "success"
+        assert status["authorization_completed"] is True
+        assert V2Config.load().agents.codex.auth_mode == "oauth"
+        service._invoke_post_web_success_hook.assert_awaited_once_with("codex", persist=False)
+    finally:
+        await service.cancel_web_flow(new.flow_id)
