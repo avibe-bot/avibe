@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
 import { showDockId } from '../../context/dockDoc';
-import { openNativeExternal } from '../../lib/native';
 import type { ShowPageAccess } from '../../lib/showPageAccess';
 import { ShowPageShareControl } from './ShowPageShareControl';
 import { ShowPageAnnotationHost } from './ShowPageAnnotationHost';
@@ -20,23 +19,10 @@ const permissionsApi = vi.hoisted(() => ({
   updateResourceAccess: vi.fn(),
 }));
 const native = vi.hoisted(() => ({ shell: false }));
-const platform = vi.hoisted(() => ({
-  ios: false,
-  safari: false,
-  standalone: false,
-}));
 
 vi.mock('../../lib/native', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../lib/native')>()),
   isNativeShell: () => native.shell,
-  openNativeExternal: vi.fn(async () => true),
-}));
-vi.mock('../../lib/platform', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../lib/platform')>()),
-  isIosDevice: () => platform.ios,
-  isRealMobileSafari: () => platform.ios && platform.safari,
-  isRealSafari: () => platform.safari,
-  isStandalonePwa: () => platform.standalone,
 }));
 
 vi.mock('@/features/permissions/api', async (importOriginal) => ({
@@ -101,9 +87,6 @@ beforeEach(() => {
   dock.isDocked.mockReturnValue(false);
   dock.isPinned.mockReturnValue(false);
   native.shell = false;
-  platform.ios = false;
-  platform.safari = false;
-  platform.standalone = false;
 });
 
 afterEach(() => {
@@ -193,34 +176,15 @@ describe('ShowPageShareControl installation guidance', () => {
     await screen.findByDisplayValue(/\/show\/ses-1\//);
   };
 
-  it('keeps the system-entry guidance in the native shell and offers Safari handoff', async () => {
-    platform.ios = true;
-    platform.safari = true;
-    await renderOpenControl();
-    expect(await screen.findByText('Add to Home Screen')).toBeTruthy();
-    cleanup();
-
-    native.shell = true;
-    await renderOpenControl();
-    expect(await screen.findByText('Add to Home Screen or Dock')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Open in browser' })).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Copy link' })).toHaveLength(2);
-    expect(screen.getByText(/default browser.*not Safari/i)).toBeTruthy();
-    const showUrl = (screen.getByDisplayValue(/\/show\/ses-1\//) as HTMLInputElement).value;
-    fireEvent.click(screen.getByRole('button', { name: 'Open in browser' }));
-    expect(openNativeExternal).toHaveBeenCalledWith(showUrl);
-  });
-
-  it('shows macOS Safari Dock guidance without using the Avibe Dock pin control', async () => {
-    platform.ios = false;
-    platform.safari = true;
+  it.each([false, true])('offers ordinary link sharing without installation guidance (native shell: %s)', async (shell) => {
+    native.shell = shell;
     await renderOpenControl();
 
-    expect(await screen.findByText('Add to Dock')).toBeTruthy();
-    expect(screen.getByText(/Open this Show Page.*Share.*File.*Add to Dock/)).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Open Show Page' }).getAttribute('href')).toContain('/show/ses-1/');
-    expect(screen.getByRole('link', { name: 'Open Show Page' }).getAttribute('target')).toBe('_blank');
-    expect(screen.queryByRole('switch', { name: 'Pin to Dock' })).toBeNull();
+    const url = (screen.getByDisplayValue(/\/show\/ses-1\//) as HTMLInputElement).value;
+    expect(screen.getByRole('link', { name: en.showPages.open }).getAttribute('href')).toBe(url);
+    expect(screen.getAllByRole('button', { name: 'Copy link' })).toHaveLength(1);
+    expect(screen.queryByText(/add to (home screen|dock)/i)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Open in browser' })).toBeNull();
   });
 });
 
