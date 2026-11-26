@@ -887,8 +887,12 @@ def test_every_rc_runs_the_stable_release_regressions_on_its_package():
         'cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"'
     )
     # The same overlay of the workflow revision's test files as the stable step.
-    loop = 'cp "release-automation/$test_file" "$test_file"'
-    assert loop in rc and loop in stable
+    def overlaid(run):
+        loop = re.search(r"for test_file in \\\n(.*?); do\n\s*cp \"release-automation/\$test_file\" \"\$test_file\"\n\s*done", run, re.S)
+        assert loop is not None and run.count("cp ") == 1
+        return [item.strip(" \\") for item in loop.group(1).split("\n") if item.strip(" \\")]
+
+    assert overlaid(rc) == overlaid(stable) == pytest_files(rc)
     checkout = _step(rc_job, "Checkout release verification")["with"]["sparse-checkout"].split()
     assert "scripts/release_dist_manifest.py" in checkout
     assert all(path in checkout for path in pytest_files(rc))
