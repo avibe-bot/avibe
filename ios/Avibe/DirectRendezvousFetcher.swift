@@ -53,6 +53,7 @@ enum DirectRendezvousFetcher {
         origin: WebOrigin,
         clientEndpointID: DirectEndpointID,
         listenerFaults: [DirectListenerFailure],
+        slowStoreRemovalsMs: [Int] = [],
         deadlineMilliseconds: Int = defaultDeadlineMilliseconds
     ) async throws -> Data {
         guard isShowing(origin, in: webView) else {
@@ -69,7 +70,8 @@ enum DirectRendezvousFetcher {
                     "origin": origin.serialized,
                     "body": DirectRendezvous.requestBody(
                         clientEndpointID: clientEndpointID,
-                        listenerFaults: listenerFaults
+                        listenerFaults: listenerFaults,
+                        slowStoreRemovalsMs: slowStoreRemovalsMs
                     ),
                     "deadlineMilliseconds": deadlineMilliseconds,
                     "maxBytes": DirectRendezvous.maxAnswerBytes,

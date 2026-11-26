@@ -15,6 +15,9 @@ def send(event, **fields):
 
 Path("peer-started").touch()
 case = sys.argv[1]
+if case in {"old_cli", "exits"}:
+    # As a CLI that does not know the claim pipe: it exits on the unknown command.
+    sys.exit(2)
 challenge = "e" * 64
 generation = "a" * 64
 assert receive() == {"v": 1, "op": "inspect", "origin": "http://127.0.0.1:40123"}

@@ -63,8 +63,8 @@ async def preview_wire_request(
                 gateway=gateway,
                 session=session_id,
                 parent=threads.parent_entry(session_id, claim=False)[0],
+                carry_projection=request.thread_observation.carry_projection if request.thread_observation else "",
                 repair=bool(prepared.hosted_render_omitted),
-                preview=True,
             )
         ).wire
     # AsyncClient.build_request delegates JSON serialization to Request, too.

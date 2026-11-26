@@ -276,6 +276,26 @@ class SQLiteTranscriptStore:
             await self._write(session_id, publish)
         return snapshot
 
+    async def load_for_preview(self, session_id: str, *, context_seq: int | None = None) -> RunTranscript:
+        """Project a current or historical snapshot without publishing checkpoint metadata."""
+        if context_seq is not None:
+            return await asyncio.to_thread(self._preview_cut, session_id, context_seq)
+        runtime, _ = await asyncio.to_thread(self._load_runtime, session_id)
+        return runtime
+
+    def _preview_cut(self, session_id: str, seq: int) -> RunTranscript:
+        from core.agent_core.harness.runtime import compact_runtime
+        from storage.carry_projection import read_projection
+
+        with self._engine.begin() as conn:
+            if not conn.connection.dbapi_connection.in_transaction:
+                conn.exec_driver_sql("BEGIN")
+            rows = _context_entries(conn, session_id)
+            if seq > (rows[-1].context_seq if rows else 0):
+                raise ValueError("context_seq is beyond the committed context")
+            mask = read_projection(conn, _ancestry(conn, session_id))
+            return compact_runtime(list(mask.apply(row for row in rows if row.context_seq <= seq)))
+
     def _load_runtime(self, session_id: str):
         from storage.agent_runtime_transcript import read_runtime
 
@@ -324,6 +344,11 @@ class SQLiteTranscriptStore:
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         if not isinstance(message, UserMessage):
             raise TypeError("consume_input takes a UserMessage")
+        from storage.carry_members import RenderedInput
+
+        rendered = message if isinstance(message, RenderedInput) else None
+        if rendered is not None:
+            message = UserMessage(rendered.content)
         model = _canonical({"version": PAYLOAD_VERSION, "message": message_to_dict(message)}, "input")
 
         def work(conn: Connection) -> ContextEntry:
@@ -333,6 +358,7 @@ class SQLiteTranscriptStore:
                     messages.c.type,
                     messages.c.context_seq,
                     messages.c.content_json,
+                    messages.c.metadata_json,
                     messages.c.created_at,
                 ).where(messages.c.id == message_id)
             ).mappings().first()
@@ -342,7 +368,26 @@ class SQLiteTranscriptStore:
                 raise TranscriptError(f"message {message_id} of type {row['type']!r} is not an input")
             content = _json_object(row["content_json"], message_id)
             seq = row["context_seq"]
+            meta = _json_object(row["metadata_json"], message_id)
+            render = {}
+            if (
+                rendered is not None
+                and row["type"] == "harness"
+                and meta.get("merged_delivery_ids")
+            ):
+                render = {
+                    "header": rendered.header,
+                    "body_text_block": rendered.body_text_block,
+                    "files": [list(item) for item in rendered.files],
+                }
+            if rendered is not None and rendered.handoff_chars:
+                # Even a singleton can be carried: acceptance already spent the
+                # switch marker, so its host context cannot be rebuilt on retry.
+                render["handoff_chars"] = rendered.handoff_chars
             if seq is not None:
+                # A replay may supply the decoded canonical message, without transient render bookkeeping.
+                if render and render != meta.get("carry_render"):
+                    raise TranscriptError(f"input {message_id} has different rendering facts")
                 # A retried commit of the same input is the committed entry; anything
                 # else would rewrite a context row after commit.
                 if content.get("model") != model:
@@ -352,10 +397,12 @@ class SQLiteTranscriptStore:
                 conn.execute(
                     messages.update()
                     .where(messages.c.id == message_id, messages.c.context_seq.is_(None))
-                    .values(context_seq=seq, content_json=json.dumps({**content, "model": model}), updated_at=_utc_now())
+                    .values(context_seq=seq, content_json=json.dumps({**content, "model": model}), updated_at=_utc_now(),
+                            **({"metadata_json": json.dumps({**meta, "carry_render": render})} if render else {}))
                 )
             return ContextEntry(
-                session_id, seq, "input", message_id, message=message, payload=model, created_at=_epoch(row["created_at"])
+                session_id, seq, "input", message_id, message=message,
+                payload={**model, **({"carry_render": render or meta["carry_render"]} if render or meta.get("carry_render") else {})}, created_at=_epoch(row["created_at"])
             )
 
         return await self._write(session_id, work)
@@ -422,7 +469,10 @@ class SQLiteTranscriptStore:
         stored_message = _with_response_metadata(message, row_metadata)
         response: dict[str, Any] = {"version": PAYLOAD_VERSION, "message": message_to_dict(stored_message)}
         if request is not None:
-            response["request"] = dict(request)  # C-9 ``ModelResponse.request``: the anchor's request facts
+            facts = dict(request)
+            if "carry_projection" in facts:
+                row_metadata["carry_projection"] = facts.pop("carry_projection")
+            response["request"] = facts
         if cache is not None:
             response["cache"] = dict(cache)
         model = _canonical(response, "response")
@@ -458,7 +508,7 @@ class SQLiteTranscriptStore:
             conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=seq))
             return ContextEntry(
                 session_id, seq, "response", row["id"], message=replace(stored_message, transcript_row_id=row["id"]),
-                payload=stored_model, created_at=_epoch(row["created_at"]),
+                payload=_with_carry_facts("response", stored_model, row_metadata), created_at=_epoch(row["created_at"]),
             )
 
         return await self._write(session_id, work)
@@ -581,8 +631,9 @@ class SQLiteTranscriptStore:
             session_id=session_id,
             platform=origin.platform,
             event_type=_EVENT_TYPE_BY_KIND[kind],
-            content=payload,
-            metadata={"hosted_media": hosted_media} if hosted_media else None,
+            content={k: v for k, v in payload.items() if k != "carry_projection"} if kind == "compaction" else payload,
+            metadata=({"carry_projection": payload["carry_projection"]} if kind == "compaction" and "carry_projection" in payload
+                      else {"hosted_media": hosted_media} if hosted_media else None),
             agent_name=origin.agent_name,
             backend=origin.backend,
             turn_id=origin.turn_id,
@@ -1097,7 +1148,7 @@ def _context_rows(conn: Connection, session_id: str, bound: Optional[int]) -> li
     entries: list[ContextEntry] = []
     for table, columns, to_entry in (
         (messages, (messages.c.type, messages.c.metadata_json), _message_entry),
-        (agent_events, (agent_events.c.event_type, agent_events.c.visibility), _event_entry),
+        (agent_events, (agent_events.c.event_type, agent_events.c.visibility, agent_events.c.metadata_json), _event_entry),
     ):
         conditions = [table.c.session_id == session_id, table.c.context_seq.is_not(None)]
         if bound is not None:
@@ -1116,7 +1167,7 @@ def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> li
     entries: list[ContextEntry] = []
     for table, index, owner, columns, to_entry in (
         ("messages", "ix_messages_turn_id", MESSAGE_TURN_ID_SQL, "type, metadata_json", _message_entry),
-        ("agent_events", "ix_agent_events_turn_sequence_id", "turn_id", "event_type, visibility", _event_entry),
+        ("agent_events", "ix_agent_events_turn_sequence_id", "turn_id", "event_type, visibility, metadata_json", _event_entry),
     ):
         query = text(
             f"SELECT id, context_seq, content_json, created_at, {columns} FROM {table} INDEXED BY {index} "
@@ -1156,6 +1207,19 @@ def _with_response_metadata(message: AssistantMessage, metadata: Mapping[str, An
     return replace(message, **changes)
 
 
+def _with_carry_facts(kind: str, payload: dict, metadata: Mapping[str, Any]) -> dict:
+    """Decode optional row annotations into runtime facts, never into durable v1 JSON."""
+    if kind == "input" and "carry_render" in metadata:
+        return {**payload, "carry_render": metadata["carry_render"]}
+    if "carry_projection" in metadata:
+        stamp = metadata["carry_projection"]
+        if kind == "response" and isinstance(payload.get("request"), dict):
+            return {**payload, "request": {**payload["request"], "carry_projection": stamp}}
+        if kind == "compaction":
+            return {**payload, "carry_projection": stamp}
+    return payload
+
+
 def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
     row_id = row["id"]
     if row["type"] in INPUT_TYPES:
@@ -1167,11 +1231,12 @@ def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
         raise TranscriptError(f"context row {row_id} has message type {row['type']!r}")
     payload = _versioned(_json_object(row["content_json"], row_id).get("model"), row_id)
     message = _message(payload.get("message"), expected, row_id)
+    try:
+        metadata = _json_object(row.get("metadata_json"), row_id)
+    except TranscriptError:
+        metadata = {}
+    payload = _with_carry_facts(kind, payload, metadata)
     if isinstance(message, AssistantMessage):
-        try:
-            metadata = _json_object(row.get("metadata_json"), row_id)
-        except TranscriptError:
-            metadata = {}
         message = replace(_with_response_metadata(message, metadata), transcript_row_id=row_id)
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
@@ -1184,6 +1249,12 @@ def _event_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
     if kind is None or row["visibility"] != CONTEXT_VISIBILITY:
         raise TranscriptError(f"context row {row_id} is a {row['visibility']} {row['event_type']!r} event")
     payload = _versioned(_json_object(row["content_json"], row_id), row_id)
+    if kind == "compaction":
+        try:
+            metadata = _json_object(row.get("metadata_json"), row_id)
+        except TranscriptError:
+            metadata = {}
+        payload = _with_carry_facts(kind, payload, metadata)
     message = _message(payload.get("message"), ToolResultMessage, row_id) if kind == "tool_result" else None
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])

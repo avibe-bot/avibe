@@ -592,7 +592,7 @@ scenarios:
     layer: scenario
     backend: personal-claims
     test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_constrained_browser_refusal_then_confirmed_reset
-    reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, and read back unpaired without redeeming a new key.
+    reason: Observe the machine's refusal and reset offer, preview without changing local identity, confirm once in the same browser, delete the binding on avibe.bot first (issuer peer, one request), and read back unpaired without redeeming a new key.
   - id: AUTH-SETUP-215
     name: Cancelled on avibe.bot, the initiating browser comes back to a declined bind-again attempt
     status: covered
@@ -1614,6 +1614,19 @@ scenarios:
       to the Devices page. The claim's server side (owner routes, browser
       cookie, return gate, redemption) is the closed loop of AUTH-SETUP-914.
   - id: AUTH-SETUP-930
+    name: An Owner unbinds this computer; it is removed on avibe.bot first and cleared here only on that exact receipt
+    status: covered
+    kind: authorization
+    layer: scenario
+    backend: remote-access
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_owner_unbind_survives_a_lost_reply_and_clears_on_the_exact_receipt
+    reason: >-
+      Real preview and commit routes with CSRF and a single-use confirmation, the
+      sealed operation, remote access stopped before the 202, the scheduled worker
+      and the Devices readback. The issuer is a socket-level peer that drops the
+      first reply; the same operation and key are sent again and only the exact
+      receipt clears the binding. The workspace stays; no claim starts.
+  - id: AUTH-SETUP-932
     name: Antigravity passive status, API-key and Agent Platform ADC settings save, and API-key removal complete through HTTP without inference
     status: covered
     kind: happy_path

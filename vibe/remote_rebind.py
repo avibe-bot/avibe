@@ -407,6 +407,123 @@ class _Context:
     bound: bool = False
 
 
+RESET_COMMAND = "  vibe remote reset"
+
+# Deleting on avibe.bot before binding as new, and the local-only `vibe remote reset`
+# (_tmp copy decided by the lead; sections 1-4).
+TEXT.update({
+    "local_reset_help": "Clear this computer's binding, here only (asks at the terminal)",
+    "local_reset_description": (
+        "Clear the remote-access binding saved on this computer. Nothing is deleted on\n"
+        "avibe.bot, and a request this computer already sent there is not taken back. It\n"
+        "asks first, and runs by hand only: not from an Agent, a Task, a script or a\n"
+        "pipe. An SSH session works. To bind the computer again afterwards, run\n"
+        "vibe remote rebind."
+    ),
+    "local_reset_title": "Clear this computer's binding",
+    "local_reset_intro": "This clears the binding saved on this computer, and nothing else.",
+    "local_reset_lose_people": "  - Everyone you gave access to can no longer reach this computer.",
+    "local_reset_unchanged": (
+        "This does not change:\n"
+        "  - Nothing is deleted on avibe.bot by this command. If {host} still exists, it\n"
+        "    keeps its name and its access list.\n"
+        "  - No credential is changed: not the tunnel credential, not model keys, not\n"
+        "    the Vault."
+    ),
+    "local_reset_received": (
+        "  - avibe.bot has already received this computer's request to delete {host}.\n"
+        "    It is not taken back: avibe.bot may still delete it."
+    ),
+    "local_reset_maybe_sent": (
+        "  - A request to delete {host} may already have been sent to avibe.bot. If\n"
+        "    it was, it is not taken back: avibe.bot may still delete it."
+    ),
+    "local_reset_question": "Type yes to clear this computer's binding. Press Enter to leave everything as it is: ",
+    "local_reset_again": "To bind it again:\n" + COMMAND,
+    "local_reset_nothing": "This computer is not bound. Nothing changed.",
+    "local_reset_busy": (
+        "Another change to this computer's binding or domain is running. Nothing changed.\n"
+        "When it has finished, run:\n" + RESET_COMMAND
+    ),
+    "local_reset_unfinished": (
+        "The reset started and did not finish. Remote access on this computer stays off\n"
+        "until it does. To continue it:\n" + RESET_COMMAND
+    ),
+    "unbind_intro": (
+        "This computer is bound to {host}.\n"
+        "\n"
+        "This deletes {host} on avibe.bot first. Its name stays with the account that owns\n"
+        "it for 30 days. {owner}\n"
+        "Then this computer's binding is cleared, and it is bound as a new computer, to\n"
+        "the account you sign in with next."
+    ),
+    "unbind_owner_unknown": (
+        "{host} may belong to another account than the one you use. If it\n"
+        "does, that account loses it."
+    ),
+    "unbind_owner_hint": "It belongs to the account {hint}.",
+    "unbind_lose_access": (
+        "  - {host} is deleted on avibe.bot, with its access list. Remote access through\n"
+        "    it stops at once."
+    ),
+    "unbind_lose_name": (
+        "  - {host} does not move with this computer. In those 30 days only the account\n"
+        "    that owns it can take the name back."
+    ),
+    "unbind_unchanged": (
+        "This does not change:\n"
+        "  - No credential is changed: not the tunnel credential, not model keys, not\n"
+        "    the Vault."
+    ),
+    "unbind_question": (
+        "Type yes to delete {host} and bind this computer as a new one. Press Enter to leave everything as it is: "
+    ),
+    "unbind_removed": "This computer's binding was removed.",
+    "unbind_pending": (
+        "avibe.bot has not finished. The request is kept and sent again while Avibe runs.\n"
+        "Remote access on this computer stays off.\n"
+        "To look again:\n" + COMMAND
+    ),
+    "unbind_ineligible": (
+        "avibe.bot refused: this computer is not allowed to delete {host}. Nothing changed,\n"
+        "and remote access is as it was.\n"
+        "To clear this computer's binding here only:\n" + RESET_COMMAND
+    ),
+    "unbind_needs_local": (
+        "avibe.bot gave an answer this computer cannot act on safely, so nothing more is\n"
+        "sent. Remote access stays off; your data on this computer is not affected.\n"
+        "To clear this computer's binding here only:\n" + RESET_COMMAND
+    ),
+    "name_back_deleted": (
+        "Taking the old name back\n"
+        "\n"
+        "A name that is given up is kept for the account that had it for 30 days;\n"
+        "during that time nobody else can claim it.\n"
+        "To use {old} again, choose it when avibe.bot asks you to name this computer's\n"
+        "Avibe, signed in as the account that had it. avibe.bot decides whether the name\n"
+        "can be taken; it is not guaranteed."
+    ),
+    "refusal_head": (
+        "avibe.bot did not delete {host}: it no longer accepts this computer's key.\n"
+        "That does not say whether {host} still exists, or whose it is now.\n"
+        "Nothing changed on this computer.\n"
+        "\n"
+        "This computer can still clear its binding here only, and then be bound as a new\n"
+        "one. Nothing on avibe.bot is deleted that way: if {host} still exists, it keeps\n"
+        "its name and its access list. On this computer, remote access, signed-in\n"
+        "devices and synced Health data go, as listed above."
+    ),
+    "refusal_question": (
+        "Type yes to clear this computer's binding and bind it as a new one. Press Enter to leave everything as it is: "
+    ),
+    "refusal_declined": (
+        "Nothing changed. This computer's binding is as it was, and avibe.bot no longer\n"
+        "accepts it, so remote access does not work with it.\n"
+        "To look again:\n" + COMMAND
+    ),
+})
+
+
 def _say(key: str, **values) -> None:
     print(TEXT[key].format(**values))
 
@@ -621,6 +738,243 @@ def _offer_reset(ctx: _Context, *, intro: str | None = None, bound: bool = True,
     return "stopped"
 
 
+def _ask(key: str, **values) -> bool:
+    try:
+        answer = input(TEXT[key].format(**values))
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer.strip().lower() == "yes"
+
+
+def _print_unbind_disclosure(ctx: _Context, hint: str | None = None) -> None:
+    """What deleting first discards and keeps; the two-ways list has just named it."""
+    host = ctx.host or TEXT["current_domain"]
+    owner = TEXT["unbind_owner_hint"].format(hint=hint) if hint else TEXT["unbind_owner_unknown"].format(host=host)
+    print()
+    _say("unbind_intro", host=host, owner=owner)
+    print()
+    _say("reset_lose_heading")
+    _say("unbind_lose_access", host=host)
+    _say("reset_lose_devices")
+    _say("reset_lose_links")
+    if _health_data_present():
+        _say("reset_lose_health")
+    _say("unbind_lose_name", host=host)
+    print()
+    _say("reset_keep")
+    print()
+    _say("unbind_unchanged")
+    print()
+    _say("reset_irreversible")
+
+
+def _offer_after_refusal(ctx: _Context, operation: object) -> str:
+    """This run's exact "not applied": its own question; the first yes does not count."""
+    from vibe import binding_reset
+    from vibe.binding_admission import OperationBusy
+    from vibe.personal_claim_client import ClaimError
+
+    host = ctx.host or TEXT["current_domain"]
+    print()
+    _say("refusal_head", host=host)
+    print()
+    try:
+        result = binding_reset.reset_after_refusal_interactively(
+            operation, confirm=lambda: _ask("refusal_question"))
+    except KeyboardInterrupt:
+        print()
+        result = {"state": "declined"}
+    except OperationBusy:
+        print()
+        _say("busy")
+        return "stopped"
+    except ClaimError as exc:
+        print()
+        code = exc.code
+        _say("reset_changed") if code == "local_binding_changed" else _say(
+            "reset_failed", code=code if _CODE.fullmatch(code) else "unknown")
+        return "stopped"
+    print()
+    state = result.get("state") if isinstance(result, dict) else None
+    if state == "unpaired":
+        _say("reset_done")
+        return "reset"
+    if state == "declined":
+        _say("refusal_declined")
+        return "refused"
+    _say("reset_unfinished")
+    return "stopped"
+
+
+def _unbind_outcome(ctx: _Context, view: dict) -> str:
+    host = ctx.host or TEXT["current_domain"]
+    state = view.get("state")
+    if state == "unpaired":
+        _say("unbind_removed")
+        _say("reset_done")
+        return "deleted"
+    if state == "unbinding":
+        _say("unbind_pending")
+        return "stopped"
+    if state == "resetting":
+        _say("reset_unfinished")
+        return "stopped"
+    if state == "not_unbound":
+        if view.get("reason_code") == "ineligible":
+            _say("unbind_ineligible", host=host)
+            return "stopped"
+        return _offer_after_refusal(ctx, view.get("operation"))
+    _say("unbind_needs_local")
+    return "stopped"
+
+
+def _offer_unbind(ctx: _Context) -> str:
+    """Bind as a new computer on a bound computer: delete it on avibe.bot first.
+
+    A computer with nothing avibe.bot could delete (refused key, no complete
+    binding, another issuer) keeps the local-only question (D1).
+    """
+    from vibe import binding_reset
+    from vibe.binding_admission import OperationBusy, reset_in_progress
+    from vibe.desktop_local_instance import LocalInstanceError
+    from vibe.personal_claim_client import ClaimError
+
+    host = ctx.host or TEXT["current_domain"]
+    asked = False
+
+    def confirm() -> bool:
+        nonlocal asked
+        asked = True
+        _print_unbind_disclosure(ctx)
+        return _ask("unbind_question", host=host)
+
+    try:
+        view = binding_reset.unbind_interactively(confirm=confirm)
+    except KeyboardInterrupt:
+        print()
+        if asked and reset_in_progress():
+            _say("unbind_pending")
+            return "stopped"
+        _say("reset_declined")
+        return "declined"
+    except OperationBusy:
+        print()
+        _say("busy")
+        return "stopped"
+    except ClaimError as exc:
+        if not asked and exc.code in ("binding_rejected", "not_bound"):
+            return _offer_reset(ctx)
+        print()
+        if exc.code == "local_operator_required":
+            _say("not_interactive")
+        elif reset_in_progress():
+            _say("unbind_pending")
+        elif exc.code == "local_binding_changed":
+            _say("reset_changed")
+        elif exc.code == "operation_in_progress":
+            _say("busy")
+        else:
+            _say("reset_failed", code=exc.code if _CODE.fullmatch(exc.code) else "unknown")
+        return "stopped"
+    except LocalInstanceError:
+        print()
+        _say("config_unreadable")
+        return "stopped"
+    except Exception:
+        # Exception text may carry local paths or record contents; print neither.
+        print()
+        _say("unbind_pending") if reset_in_progress() else _say("reset_failed", code="local_failure")
+        return "stopped"
+    print()
+    if view.get("state") == "declined":
+        _say("reset_declined")
+        return "declined"
+    return _unbind_outcome(ctx, view)
+
+
+def run_reset() -> int:
+    """`vibe remote reset`: clear the binding saved here; never a request to avibe.bot."""
+    from vibe import binding_reset
+    from vibe.binding_admission import OperationBusy, reset_in_progress
+    from vibe.desktop_local_instance import LocalInstanceError
+    from vibe.personal_claim_client import ClaimError
+
+    if not _interactive():
+        print(TEXT["not_interactive"], file=sys.stderr)
+        return 1
+    ctx = _context()
+    host = ctx.host or TEXT["current_domain"]
+
+    def confirm() -> bool:
+        evidence = binding_reset.dispatch_evidence()  # After the snapshot: later changes refuse.
+        print()
+        _say("local_reset_title")
+        print()
+        _say("local_reset_intro")
+        print()
+        _say("reset_lose_heading")
+        _say("reset_lose_access", host=host)
+        _say("reset_lose_devices")
+        _say("local_reset_lose_people")
+        _say("reset_lose_links")
+        if _health_data_present():
+            _say("reset_lose_health")
+        print()
+        _say("reset_keep")
+        print()
+        _say("local_reset_unchanged", host=host)
+        if evidence == "received":
+            _say("local_reset_received", host=host)
+        elif evidence == "maybe_sent":
+            _say("local_reset_maybe_sent", host=host)
+        print()
+        _say("reset_irreversible")
+        return _ask("local_reset_question")
+
+    try:
+        result = binding_reset.reset_local_only_interactively(confirm=confirm)
+    except KeyboardInterrupt:
+        print()
+        _say("local_reset_unfinished") if reset_in_progress() else _say("reset_declined")
+        return 1
+    except OperationBusy:
+        print()
+        _say("local_reset_unfinished" if reset_in_progress() else "local_reset_busy")
+        return 1
+    except ClaimError as exc:
+        print()
+        if exc.code == "not_bound":
+            _say("local_reset_nothing")
+            return 0
+        if exc.code == "local_operator_required":
+            _say("not_interactive")
+        elif exc.code == "local_binding_changed":
+            _say("reset_changed")
+        elif reset_in_progress():
+            _say("local_reset_unfinished")
+        elif exc.code == "operation_in_progress":
+            _say("local_reset_busy")
+        else:
+            _say("reset_failed", code=exc.code if _CODE.fullmatch(exc.code) else "unknown")
+        return 1
+    except LocalInstanceError:
+        print()
+        _say("config_unreadable")
+        return 1
+    print()
+    state = result.get("state") if isinstance(result, dict) else None
+    if state == "unpaired":
+        _say("reset_done")
+        _say("local_reset_again")
+        return 0
+    if state == "declined":
+        _say("reset_declined")
+        return 0
+    _say("local_reset_unfinished")
+    return 1
+
+
 def _resume(**confirmation) -> dict:
     """One bounded step of the operation that was already under way.
 
@@ -689,7 +1043,7 @@ def _offer_keep_binding(view: dict) -> dict | None:
     return result
 
 
-def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True) -> int:
+def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True, deleted: bool = False) -> int:
     from vibe import personal_claims
 
     accepted = False
@@ -712,7 +1066,7 @@ def _link(ctx: _Context, *, after_reset: bool, may_offer_reset: bool = True) -> 
 
     print()
     if after_reset:
-        _say("name_back", old=ctx.host or TEXT["old_name"])
+        _say("name_back_deleted" if deleted else "name_back", old=ctx.host or TEXT["old_name"])
         print()
     _say("link_intro")
     try:
@@ -780,9 +1134,9 @@ def _after_reset_offer(ctx: _Context, outcome: str, *, live_attempt: str = "reco
     """What follows the reset question: bind as new, or stop where the answer left it."""
     if outcome == "live_attempt":
         _say(live_attempt)
-    if outcome not in ("reset", "nothing"):
+    if outcome not in ("reset", "nothing", "deleted"):
         return 0 if outcome == "declined" else 1
-    return _link(ctx, after_reset=outcome == "reset")
+    return _link(ctx, after_reset=outcome in ("reset", "deleted"), deleted=outcome == "deleted")
 
 
 def _say_bound_now() -> None:
@@ -884,6 +1238,8 @@ def _continue_unfinished(ctx: _Context, started_as: str) -> int:
     if state == "unpaired":
         _say("reset_done")
         return _link(ctx, after_reset=True)
+    if state in ("unbinding", "not_unbound"):
+        return _after_reset_offer(ctx, _unbind_outcome(ctx, view))
     _say("state_unknown", code=state if isinstance(state, str) and _CODE.fullmatch(state) else "unknown")
     return 1
 
@@ -903,7 +1259,8 @@ def _from_state(ctx: _Context, state: str, tunnel: bool, reason: str | None, *, 
         return 1
     if state in ("bound", "binding_rejected"):
         _print_two_ways(ctx)
-        return _after_reset_offer(ctx, _offer_reset(ctx))
+        # A refused key cannot delete anything: that computer keeps the local-only question.
+        return _after_reset_offer(ctx, _offer_unbind(ctx) if state == "bound" else _offer_reset(ctx))
     if state == "damaged":
         return _after_reset_offer(ctx, _offer_reset(ctx, intro=TEXT["damaged_note"], bound=ctx.bound))
     if state == "unpaired":

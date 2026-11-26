@@ -224,6 +224,36 @@ final class DirectIrohTransport {
         case renewal
     }
 
+    /// Which path a connection was last found to have selected, and how
+    /// often that was another than the time before (`DirectPathMark`).
+    ///
+    /// Every observation is a read of the connection made now, under this
+    /// lock: after a report of the path watch, on whichever thread the
+    /// binding reports on, and at each read of the mark on the main actor.
+    /// What a report itself carries is not compared: it is the state as the
+    /// binding found it, and may be delivered after the path has moved on.
+    /// Reading under the lock keeps two observations from crossing, so the
+    /// paths noted are in the order they were selected.
+    private final class PathFence: @unchecked Sendable {
+        private let lock = NSLock()
+        private var path: String?
+        private var moves = 0
+
+        /// Reads the selected path with `read` and notes it. Returns what
+        /// was read and how often, so far, a read found another path than
+        /// the read before.
+        func observe(_ read: () -> DirectSelectedPathRead?) -> (path: DirectSelectedPathRead?, moves: Int) {
+            lock.withLock {
+                let found = read()
+                if found?.identity != path {
+                    path = found?.identity
+                    moves += 1
+                }
+                return (found, moves)
+            }
+        }
+    }
+
     /// One endpoint and one connection, for one accepted answer.
     private final class Session {
         let id: Int
@@ -244,6 +274,8 @@ final class DirectIrohTransport {
         /// that reports changes.
         var lastPath: DirectPathKind?
         var pathWatch: (any DirectPathWatch)?
+        /// For a measurement's fence (`markedPath`).
+        let pathFence = PathFence()
 
         init(id: Int, offer: DirectRendezvousOffer, link: Link, authority: DirectIrohAuthority) {
             self.id = id
@@ -1278,7 +1310,13 @@ final class DirectIrohTransport {
     /// runs on (relay, IPv4, IPv6) while the session is current and usable.
     private func watchPath(of session: Session) {
         let id = session.id
-        session.pathWatch = session.link.connection.watchSelectedPath { [weak self] kind in
+        let fence = session.pathFence
+        let connection = session.link.connection
+        session.pathWatch = connection.watchSelectedPath { [weak self, weak connection] kind in
+            // A report says that the paths changed: the selected one is
+            // read now, here, not a turn of the main actor later. Found to
+            // be the one it was, nothing changes (`PathFence`).
+            _ = fence.observe { connection?.selectedPathRead }
             Task { @MainActor [weak self] in
                 self?.pathDidChange(to: kind, session: id)
             }
@@ -1459,6 +1497,36 @@ extension DirectIrohTransport: DirectTransporting {
         return DirectPathDiagnostics(current: current, attempts: attempts, selected: selected)
     }
 
+    /// The path the usable session's connection runs on now, read now, with
+    /// its mark (`DirectMarkedPath`). The read is an observation like the
+    /// one a report of the watch causes: it finds a change of the selected
+    /// path that has not been reported yet, and the change stays counted if
+    /// the path changes back. Nil from the moment the answer the path was
+    /// admitted under has run out, by the clock.
+    var markedPath: DirectMarkedPath? {
+        // Without a watch nothing is told of a path that changed and
+        // changed back between two reads. The watch ends only with its
+        // connection, whose end ends the session.
+        guard let session, session.isUsable, session.pathWatch != nil else {
+            return nil
+        }
+        let connection = session.link.connection
+        let observed = session.pathFence.observe { connection.selectedPathRead }
+        // `isUsable` turns false at the answer's deadline only once the
+        // timer for it has run on this actor. Streams opened before go on
+        // carrying, so a request could be answered and counted in between.
+        // The deadline is read from the clock here, at the observation
+        // itself. Only read: ending the path stays the timer's work
+        // (`reconcileLease`).
+        guard session.authority.isWithinDeadline, let labels = observed.path?.labels else {
+            return nil
+        }
+        return DirectMarkedPath(
+            mark: DirectPathMark(connection: session.id, moves: observed.moves),
+            path: labels
+        )
+    }
+
     func select(
         _ target: DirectTarget,
         report: @escaping @MainActor (DirectPathReport) -> Void
@@ -1514,13 +1582,17 @@ final class DirectRendezvousWebViewSource {
             let faults = self?.faultReport.pending(
                 from: self?.appModel?.directListenerFailures ?? []
             ) ?? []
+            // And the App's slow store removals, the same way.
+            let removals = SlowStoreRemovals.shared.pending
             let answer = try await DirectRendezvousFetcher.fetch(
                 in: webView,
                 origin: origin,
                 clientEndpointID: clientEndpointID,
-                listenerFaults: faults
+                listenerFaults: faults,
+                slowStoreRemovalsMs: removals.map(\.milliseconds)
             )
             self?.faultReport.answered(faults)
+            SlowStoreRemovals.shared.answered(removals)
             return answer
         }
     }

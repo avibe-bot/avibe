@@ -121,6 +121,12 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/remote-access/rebind/claims/{claim_id}/cancel"),
     ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/preview"),
     ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/unbind/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/unbind"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/local-after-refusal/preview"),
+    ("POST", "/api/remote-access/rebind/claims/{claim_id}/reset/local-after-refusal"),
+    ("POST", "/api/remote-access/unbind/preview"),
+    ("POST", "/api/remote-access/unbind/commit"),
     ("POST", "/api/remote-access/claims"),
     ("GET", "/api/remote-access/claims/{claim_id}"),
     ("POST", "/api/remote-access/claims/{claim_id}/cancel"),
@@ -130,6 +136,7 @@ _RETAINED_OWNER_ROUTES = {
     ("GET", "/api/devices/connection"),
     ("PATCH", "/api/devices/connection"),
     ("POST", "/api/remote-access/direct/suspend"),
+    ("POST", "/api/remote-access/direct/release"),
     ("POST", "/api/wechat/qr_login/start"),
     ("POST", "/api/wechat/qr_login/poll"),
     ("POST", "/api/users/{user_id}/admin"),
@@ -219,7 +226,8 @@ def test_complete_registered_api_management_inventory():
     # + 2 Antigravity auth status/config methods (Member, like Claude/Codex auth) and
     #   1 Antigravity model catalog read (Editor, like Claude/Codex models).
     # Three independent engine channel controls are owner-only, including metadata refresh.
-    assert len(endpoints) == 388
+    # Two Owner unbind methods and four direct-loopback-only RB2 confirmation methods.
+    assert len(endpoints) == 395
     for method in ("GET", "POST"):
         assert (method, "/api/backend/antigravity/auth") in endpoints
         assert http_authorization_policy(method, "/api/backend/antigravity/auth").minimum_role == "member"

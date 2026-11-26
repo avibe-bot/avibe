@@ -165,7 +165,9 @@ function intersects(a, b) {
 
 for (const [name, width, height, agent] of [
   ['iPhone', 390, 844, 'Mozilla/5.0 (iPhone) Version/18.0 Mobile Safari/605.1.15'],
+  ['iPad', 390, 844, 'Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15'],
   ['Mac', 1440, 900, 'Mozilla/5.0 (Macintosh) Version/18.0 Safari/605.1.15'],
+  ['Mac Chrome', 1440, 900, 'Mozilla/5.0 (Macintosh) Chrome/130.0 Safari/537.36'],
 ]) {
   test(`${name}: entry and annotation remain independently usable`, async () => {
     const browser = await launchSafeBrowser({ contextOptions: { viewport: { width, height } } });
@@ -175,9 +177,11 @@ for (const [name, width, height, agent] of [
         contentType: 'text/html',
         body: '<!doctype html><body style="margin:0"><main style="min-height:calc(100vh - 140px);display:flex;flex-direction:column"><h1>Authored Show</h1><p id="last-line" style="margin-top:auto">END OF TEST CONTENT — this line must remain reachable.</p></main></body>',
       }));
-      await context.addInitScript((userAgent) => {
+      await context.addInitScript(({ userAgent, ipad }) => {
         Object.defineProperty(navigator, 'userAgent', { value: userAgent });
-      }, agent);
+        Object.defineProperty(navigator, 'platform', { value: 'MacIntel' });
+        Object.defineProperty(navigator, 'maxTouchPoints', { value: ipad ? 5 : 0 });
+      }, { userAgent: agent, ipad: name === 'iPad' });
       const page = await context.newPage();
       await page.goto('http://show.test/show/test/');
       await page.evaluate((config) => {
@@ -186,15 +190,26 @@ for (const [name, width, height, agent] of [
         meta.content = JSON.stringify(config);
         document.head.append(meta);
       }, { copy });
+      const authoredBody = await page.locator('body').innerHTML();
       await page.addScriptTag({ content: script });
+      if (name.startsWith('Mac')) {
+        assert.equal(await page.locator('[data-avibe-show-system-entry], [data-avibe-show-system-entry-spacer]').count(), 0);
+        // Script evaluation must leave authored geometry and content untouched.
+        assert.equal(await page.locator('body').innerHTML(), authoredBody);
+        await annotationFixture(page);
+        await page.getByRole('button', { name: 'Annotate', exact: true }).click();
+        await page.getByRole('button', { name: 'Exit annotation' }).click();
+        assert.equal(await page.evaluate(() => window.annotationListenerCount()), 0);
+        return;
+      }
       await annotationFixture(page); // The real overlay also mounts asynchronously.
-      const entry = page.getByRole('button', { name: name === 'Mac' ? 'Add to Dock' : 'Add to Home Screen', exact: true });
+      const entry = page.getByRole('button', { name: 'Add to Home Screen', exact: true });
       const fab = page.getByRole('button', { name: 'Annotate', exact: true });
       assert.equal(intersects(await entry.boundingBox(), await fab.boundingBox()), false);
       await entry.click({ timeout: 2000 });
       // Opening scrolls and focuses on the next animation frame; measure the settled UI.
       await page.waitForFunction(() => document.querySelector('[data-avibe-show-system-entry]')?.shadowRoot.activeElement?.classList.contains('collapse'));
-      const guide = page.getByRole('dialog', { name: name === 'Mac' ? 'Add to Dock' : 'Add to Home Screen' });
+      const guide = page.getByRole('dialog', { name: 'Add to Home Screen' });
       assert.equal(intersects(await guide.boundingBox(), await fab.boundingBox()), false);
       const lastLine = await page.locator('#last-line').boundingBox();
       const guideBox = await guide.boundingBox();

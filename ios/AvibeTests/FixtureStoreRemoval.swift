@@ -18,6 +18,11 @@ import XCTest
 /// and what WebKit still holds when the test bundle ends is printed with its
 /// age. It is not a failure: the App itself never needs a store removed at
 /// once (its sweep keeps a store listed until WebKit drops it).
+///
+/// WebKit's answer to a removal itself waits for that process: in the
+/// teardown of tests that had passed it took up to eight minutes. So a
+/// removal is waited for at most `removalAnswer`; one not answered by then
+/// is treated as WebKit's own hold.
 @MainActor
 enum FixtureStoreRemoval {
     /// A store WebKit still listed, with the reason WebKit gave.
@@ -25,16 +30,30 @@ enum FixtureStoreRemoval {
         let identifier: UUID
         let ownersAlive: Bool
         let error: Error?
+        /// WebKit did not answer the removal within `removalAnswer`.
+        var unanswered = false
 
         var description: String {
             "Fixture store still registered: \(identifier); something of the test still holds it: "
                 + "\(ownersAlive); error=\(String(describing: error))"
+                + (unanswered ? "; WebKit did not answer the removal within \(removalAnswer)" : "")
         }
     }
 
     /// Stores WebKit alone still held when their test removed them, and
     /// since when.
     private static var heldByWebKit: [UUID: Date] = [:]
+    /// Stores whose removal WebKit has not answered yet. That call goes on:
+    /// it removes the store whenever WebKit answers, in whatever test runs
+    /// then.
+    private static var unansweredRemovals: Set<UUID> = []
+
+    /// Stores that may still disappear during a later test, by WebKit's
+    /// hand: held by WebKit, or with a removal not yet answered. A test that
+    /// checks the App never removed someone else's store leaves these out.
+    static var leftToWebKit: Set<UUID> {
+        Set(heldByWebKit.keys).union(unansweredRemovals)
+    }
     private static var bundleEnd: BundleEnd?
 
     /// Removes `identifier`. `nil` when WebKit no longer lists it, or when
@@ -47,8 +66,15 @@ enum FixtureStoreRemoval {
     ) async -> StillRegistered? {
         await retryHeldByWebKit()
         var lastError: Error?
+        var unanswered = false
         for attempt in 0..<50 {
-            lastError = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+            guard let answer = await boundedRemoval(identifier) else {
+                // WebKit has not answered: it holds the store until a web
+                // process of its own for it exits, which has taken minutes.
+                unanswered = true
+                break
+            }
+            lastError = answer.error
             if await !registered().contains(identifier) {
                 heldByWebKit[identifier] = nil
                 print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true")
@@ -59,14 +85,17 @@ enum FixtureStoreRemoval {
             }
         }
         let alive = ownersAlive()
-        if !alive, isHeldByWebKitAlone(lastError) {
+        if !alive, unanswered || isHeldByWebKitAlone(lastError) {
             leaveToLaterRemovals(identifier)
             print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false, "
-                + "WebKit still holds it: left to a later removal")
+                + (unanswered
+                    ? "WebKit did not answer within \(removalAnswer): left to a later removal"
+                    : "WebKit still holds it: left to a later removal"))
             return nil
         }
-        print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false")
-        return StillRegistered(identifier: identifier, ownersAlive: alive, error: lastError)
+        print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=false"
+            + (unanswered ? ", WebKit did not answer within \(removalAnswer)" : ""))
+        return StillRegistered(identifier: identifier, ownersAlive: alive, error: lastError, unanswered: unanswered)
     }
 
     /// One try for each store WebKit still held at an earlier removal. A
@@ -76,8 +105,21 @@ enum FixtureStoreRemoval {
     /// message says so.
     static func retryHeldByWebKit() async {
         for (identifier, since) in heldByWebKit {
-            let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
             let age = Int(Date().timeIntervalSince(since))
+            // An earlier removal still waits on WebKit: no second one, only
+            // a look whether it is gone.
+            if unansweredRemovals.contains(identifier) {
+                if await !registered().contains(identifier) {
+                    heldByWebKit[identifier] = nil
+                    print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                        + "\(age) s after its test")
+                }
+                continue
+            }
+            // A try in passing, not a wait: not answered within a second,
+            // it is still WebKit's and tried again next time.
+            guard let answer = await boundedRemoval(identifier, within: .seconds(1)) else { continue }
+            let error = answer.error
             if await !registered().contains(identifier) {
                 heldByWebKit[identifier] = nil
                 print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
@@ -89,6 +131,64 @@ enum FixtureStoreRemoval {
                         + "and not for WebKit's own hold: \(identifier); error=\(String(describing: error))"
                 )
             }
+        }
+    }
+
+    /// What WebKit answered a removal: `nil` when it did not answer within
+    /// `removalAnswer`. Its completion comes only once a web process of its
+    /// own for the store has exited; on CI that took up to eight minutes,
+    /// in the teardown of tests that had passed.
+    nonisolated static let removalAnswer: Duration = .seconds(10)
+
+    private struct RemovalAnswer {
+        let error: Error?
+    }
+
+    private static func boundedRemoval(
+        _ identifier: UUID,
+        within bound: Duration = removalAnswer
+    ) async -> RemovalAnswer? {
+        await withCheckedContinuation { continuation in
+            let first = FirstAnswer(continuation)
+            Task { @MainActor in
+                let error = await AccountWebsiteDataStoreOperations.live.removeIdentifier(identifier)
+                if first.settle(RemovalAnswer(error: error)) {
+                    return
+                }
+                // A late answer: the store may be gone now.
+                unansweredRemovals.remove(identifier)
+                if heldByWebKit[identifier] != nil, await !registered().contains(identifier) {
+                    let age = heldByWebKit[identifier].map { Int(Date().timeIntervalSince($0)) } ?? 0
+                    heldByWebKit[identifier] = nil
+                    print("[iOS fixture] stage=store removal, identifier=\(identifier), removed=true, "
+                        + "\(age) s after its test, when WebKit answered")
+                }
+            }
+            Task { @MainActor in
+                try? await Task.sleep(for: bound)
+                if first.settle(nil) {
+                    unansweredRemovals.insert(identifier)
+                }
+            }
+        }
+    }
+
+    /// The first of the removal's answer and the bound.
+    @MainActor
+    private final class FirstAnswer {
+        private var continuation: CheckedContinuation<RemovalAnswer?, Never>?
+
+        init(_ continuation: CheckedContinuation<RemovalAnswer?, Never>) {
+            self.continuation = continuation
+        }
+
+        /// Whether this was the first.
+        @discardableResult
+        func settle(_ answer: RemovalAnswer?) -> Bool {
+            guard let continuation else { return false }
+            continuation.resume(returning: answer)
+            self.continuation = nil
+            return true
         }
     }
 

@@ -246,6 +246,29 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         set { lock.withLock { storedDetail = newValue } }
     }
 
+    private var storedIdentity: String?
+
+    /// Which path is selected, as the binding tells one from another: by
+    /// its kind alone until a test names it.
+    var selectedPathIdentity: String? {
+        get { lock.withLock { storedIdentity ?? storedPath?.rawValue } }
+        set { lock.withLock { storedIdentity = newValue } }
+    }
+
+    /// One read of what is selected now: its name and its labels together.
+    var selectedPathRead: DirectSelectedPathRead? {
+        lock.withLock {
+            guard let kind = storedPath else {
+                return nil
+            }
+            let detail = storedDetail.flatMap { $0.kind == kind ? $0 : nil }
+            return DirectSelectedPathRead(
+                identity: storedIdentity ?? kind.rawValue,
+                labels: detail ?? DirectSelectedPath(kind: kind, local: nil, rttMs: nil)
+            )
+        }
+    }
+
     private var pathWatcher: (@Sendable (DirectPathKind?) -> Void)?
 
     func watchSelectedPath(
@@ -262,12 +285,29 @@ final class DirectIrohFakeConnection: DirectIrohConnection, @unchecked Sendable 
         }
     }
 
-    /// The connection's paths changed: the selected one is now `kind`.
-    func movePath(to kind: DirectPathKind?) {
+    /// The connection's paths changed: the selected one is now `kind`,
+    /// named `identity`, or by its kind alone when none is given. The watch
+    /// reports it.
+    func movePath(to kind: DirectPathKind?, identity: String? = nil) {
         let watcher: (@Sendable (DirectPathKind?) -> Void)? = lock.withLock {
             storedPath = kind
+            storedIdentity = identity
             return pathWatcher
         }
+        watcher?(kind)
+    }
+
+    /// The watch reports and the selected path is the one it was: another
+    /// path was opened, or closed.
+    func reportOtherPaths() {
+        let (watcher, kind) = lock.withLock { (pathWatcher, storedPath) }
+        watcher?(kind)
+    }
+
+    /// The watch delivers a report it made earlier, when the selected path
+    /// was of `kind`: what is selected now is not touched.
+    func deliverEarlierReport(of kind: DirectPathKind?) {
+        let watcher = lock.withLock { pathWatcher }
         watcher?(kind)
     }
 

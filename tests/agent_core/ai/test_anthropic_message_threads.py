@@ -121,7 +121,7 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
     assert follow(36_406, "x" * 13_000).reason == "dense_delta_risk"
     assert follow(36_406, "结果 " * 8_000).reason == "large_static_or_delta"
 
-    # Both decisions survive on an actual-send receipt: a rejected delta and a cache-safe full.
+    # The delta is unsafe, but all history is present in the new create and only the older user mark is removed.
     marker = {"type": "ephemeral"}
     history = [
         {
@@ -144,7 +144,9 @@ def test_parent_budget_uses_tokens_for_tools_system_and_appended_tool_result(mon
     create = mt.prepare(wire, ep, True, None, route, None)
     assert create.mode == "create"
     attempt = follow(36_406, "x" * 13_000, mark_result=True)
-    assert attempt.mode == "full" and attempt.record["reason"] == "preserve_cache_breakpoints"
+    assert attempt.mode == "create" and attempt.record["reason"] == "full_history_create"
+    assert attempt.wire.body["thread"] == {"type": "create"}
+    assert len(attempt.wire.body["messages"]) == len(history) + 2
     assert attempt.record["delta_rejection"] == "dense_delta_risk"
 
 
@@ -348,6 +350,33 @@ async def test_continuation_admission_and_full_recovery(case, monkeypatch, tmp_p
         if case != "edit"
         else obs.attempts[0]["full_bytes"] > 0
     )
+
+
+async def test_same_byte_carry_reanchors_then_binds_only_the_new_epoch(monkeypatch, tmp_path):
+    from core.agent_core.ai.preview import preview_wire_request
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sends = []
+
+    def handle(wire):
+        sends.append(json.loads(wire.content))
+        stream = SUCCESS.replace('"usage":{"input_tokens":1}', f'"id":"msg_{len(sends)}","usage":{{"input_tokens":22000}}')
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=stream)
+
+    history = [UserMessage((TextBlock("same input"),))]
+    base = _request(messages=tuple(history))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        for epoch in ("", "a" * 64, "a" * 64, "a" * 64):
+            obs = ThreadObservation("carry-session", carry_projection=epoch)
+            req = replace(base, messages=tuple(history), thread_observation=obs)
+            preview = await preview_wire_request(req, session_id=obs.session_id)
+            events = [event async for event in adapter.stream(req, CancelToken())]
+            assert isinstance(events[-1], Done) and json.loads(preview.body) == sends[-1]
+            history.extend([events[-1].message, UserMessage((TextBlock("next"),))])
+    assert [body.get("thread") for body in sends] == [
+        {"type": "create"}, None, {"type": "create"}, {"type": "continue", "previous_message_id": "msg_3"},
+    ]
 
 
 async def test_resume_preserves_overlapping_lookup_windows():

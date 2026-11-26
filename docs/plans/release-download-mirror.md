@@ -112,8 +112,8 @@ only the releases that `vibe/ripgrep_runtime_manifest.json` and
 - `update_notification` is present, as `"none"`, only when the release notes
   carry the silent-update marker (`docs/release.md`), read as
   `core/update_checker.py` reads it. Consumers treat a missing field as an
-  announced release. The desktop updater does not prompt at startup for a
-  silent release.
+  announced release. The desktop updater's automatic checks skip a silent
+  release; explicit checks still offer it.
 - Producer: the release mirror workflow. Consumers: the desktop updater reads
   Avibe's index; the other repositories' have none yet.
   Planned: the CLI update checker, replacing its `api.github.com` discovery

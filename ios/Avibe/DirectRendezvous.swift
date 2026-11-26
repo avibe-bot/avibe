@@ -384,9 +384,15 @@ enum DirectRendezvous {
     /// before it as 0 seconds. One entry the instance does not accept makes
     /// it ignore them all. No wall time, address, port or identifier. An
     /// instance that does not know the field ignores it.
+    ///
+    /// `slow_store_removals_ms`, when there are any: how long the App's
+    /// recent WebKit store removals that took over a second took, in
+    /// milliseconds (`SlowStoreRemovals`), at most five non-negative
+    /// integers. An instance that does not know the field ignores it.
     static func requestBody(
         clientEndpointID: DirectEndpointID,
-        listenerFaults: [DirectListenerFailure]
+        listenerFaults: [DirectListenerFailure],
+        slowStoreRemovalsMs: [Int] = []
     ) -> String {
         let head = "{\"version\":\(version),\"client_endpoint_id\":\"\(clientEndpointID.hex)\""
         let faults = listenerFaults.suffix(maxListenerFaults).map { fault -> String in
@@ -396,10 +402,15 @@ enum DirectRendezvous {
             let seconds = min(max(fault.backgroundSeconds ?? 0, 0), DirectListenerFailure.maxBackgroundSeconds)
             return "{\"step\":\"\(fault.step.rawValue)\",\"code\":\(code),\"background_seconds\":\(seconds)}"
         }
-        guard !faults.isEmpty else {
-            return head + "}"
+        var body = head
+        if !faults.isEmpty {
+            body += ",\"listener_faults\":[" + faults.joined(separator: ",") + "]"
         }
-        return head + ",\"listener_faults\":[" + faults.joined(separator: ",") + "]}"
+        let removals = slowStoreRemovalsMs.suffix(SlowStoreRemovals.limit).map { min(max($0, 0), Int(Int32.max)) }
+        if !removals.isEmpty {
+            body += ",\"slow_store_removals_ms\":[" + removals.map(String.init).joined(separator: ",") + "]"
+        }
+        return body + "}"
     }
 
     /// Reads the answer native code fetched for itself and checks it against

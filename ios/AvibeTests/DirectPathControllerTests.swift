@@ -2407,6 +2407,19 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor var selectedPath: DirectSelectedPath?
     /// How often the stand-in says it checked its path again.
     @MainActor var counts = DirectPathCounts.zero
+    /// The mark the stand-in gives the path it has selected
+    /// (`DirectPathMark`); nil as a transport that cannot watch.
+    @MainActor var pathMark: DirectPathMark? = DirectPathMark(connection: 1, moves: 0)
+
+    /// As the transport reads it: the selected path with its mark, whatever
+    /// `currentPath` this stand-in has reported to the controller.
+    @MainActor
+    var markedPath: DirectMarkedPath? {
+        guard let pathMark, let selectedPath else {
+            return nil
+        }
+        return DirectMarkedPath(mark: pathMark, path: selectedPath)
+    }
 
     @MainActor
     var pathDiagnostics: DirectPathDiagnostics {
@@ -2451,5 +2464,114 @@ final class StandInDirectTransport: DirectTransporting, @unchecked Sendable {
     @MainActor
     func report(_ report: DirectPathReport, for target: DirectTarget) {
         reporters[target.selection]?(report)
+    }
+}
+
+// Apart from the tests above, so that tests added among them by another
+// change meet this one nowhere.
+extension DirectPathControllerTests {
+    // MARK: A measurement's link
+
+    /// 「线路测速」 measures the path in use through `measurementLink`: there
+    /// only under the conditions a plan's direct candidate has, labelled by
+    /// the path the transport reads as selected at that moment, and current
+    /// only while the transport's mark of that path is the same. Taking it,
+    /// and opening a stream over it, makes no plan and reports nothing to
+    /// the transport.
+    @MainActor
+    func testAMeasurementsLinkIsTheAdmittedPathAndIsCurrentOnlyWhileNothingChanged() async throws {
+        let harness = try Harness(test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let target = try XCTUnwrap(harness.transport.selections.last)
+        let one = harness.origin("instance-1").url
+        let two = harness.origin("instance-2").url
+        let relay = DirectSelectedPath(kind: .relay, local: nil, rttMs: 120, relayRegion: "euc1")
+
+        // No usable path: nothing to measure but the tunnel, whatever the
+        // transport could read.
+        harness.transport.selectedPath = relay
+        XCTAssertNil(harness.controller.measurementLink(forInstanceURL: one))
+
+        harness.transport.currentPath = .relay
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let relayed = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertEqual(relayed.authority.host, harness.origin("instance-1").host)
+        XCTAssertEqual(relayed.kind, .relay)
+        XCTAssertNil(relayed.local)
+        XCTAssertEqual(relayed.relayRegion, "euc1")
+        XCTAssertTrue(relayed.isCurrent())
+        // Another instance than the selected one has no link, and an
+        // address that is not an instance's has none.
+        XCTAssertNil(harness.controller.measurementLink(forInstanceURL: two))
+        XCTAssertNil(
+            harness.controller.measurementLink(forInstanceURL: try XCTUnwrap(URL(string: "http://127.0.0.1:8080")))
+        )
+
+        // A stream over it is the transport's, under the tag a plan would
+        // have. Nothing else is asked of the transport, then or later.
+        _ = try await relayed.open()
+        XCTAssertEqual(harness.transport.openedTags.values.count, 1)
+        XCTAssertEqual(harness.transport.openedTags.values.first?.target, target)
+        XCTAssertEqual(harness.transport.openedTags.values.first?.rendezvousGeneration, "g1")
+        XCTAssertTrue(harness.transport.failedTags.isEmpty)
+        XCTAssertEqual(harness.status("instance-1").closure, 0)
+        XCTAssertTrue(relayed.isCurrent())
+
+        // The connection moves to an address. The transport has read it,
+        // and this controller has not been told yet: it still says relay.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv6, local: false, rttMs: 30)
+        harness.transport.pathMark = DirectPathMark(connection: 1, moves: 1)
+        XCTAssertEqual(harness.status("instance-1").path, .relay)
+        // The link taken before the move is no longer the one measured,
+        XCTAssertFalse(relayed.isCurrent())
+        // and one taken now is labelled as the path the mark is of: an
+        // address across networks, with no relay's region.
+        let early = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertEqual(early.kind, .ipv6)
+        XCTAssertEqual(early.local, false)
+        XCTAssertNil(early.relayRegion)
+        XCTAssertTrue(early.isCurrent())
+        // The news of that same move reaches the controller. It is no
+        // second move: the link is still the one being measured.
+        harness.transport.currentPath = .ipv6
+        harness.transport.report(.pathChanged(.ipv6), for: target)
+        XCTAssertEqual(harness.status("instance-1").path, .ipv6)
+        XCTAssertTrue(early.isCurrent())
+
+        // Another path of the same kind: another address, on the same
+        // network this time. This controller is told nothing at all.
+        harness.transport.selectedPath = DirectSelectedPath(kind: .ipv6, local: true, rttMs: 4)
+        harness.transport.pathMark = DirectPathMark(connection: 1, moves: 2)
+        XCTAssertFalse(early.isCurrent())
+        let moved = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertEqual(moved.kind, .ipv6)
+        XCTAssertEqual(moved.local, true)
+        XCTAssertTrue(moved.isCurrent())
+        // Another connection of the transport's, or none it can mark.
+        harness.transport.pathMark = DirectPathMark(connection: 2, moves: 2)
+        XCTAssertFalse(moved.isCurrent())
+        harness.transport.pathMark = nil
+        XCTAssertNil(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertFalse(moved.isCurrent())
+        harness.transport.pathMark = DirectPathMark(connection: 2, moves: 2)
+        let direct = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+
+        // Being checked again, lost, in the background, or another
+        // selection: no link, and one taken before is no longer current.
+        XCTAssertTrue(direct.isCurrent())
+        harness.transport.report(.verifying, for: target)
+        XCTAssertFalse(direct.isCurrent())
+        XCTAssertNil(harness.controller.measurementLink(forInstanceURL: one))
+        harness.transport.report(.usable(generation: "g1"), for: target)
+        let recovered = try XCTUnwrap(harness.controller.measurementLink(forInstanceURL: one))
+        XCTAssertTrue(recovered.isCurrent())
+        XCTAssertFalse(direct.isCurrent())
+        harness.transport.report(.lost, for: target)
+        XCTAssertFalse(recovered.isCurrent())
+        XCTAssertNil(harness.controller.measurementLink(forInstanceURL: one))
+        // Nothing of all this told the transport a path had failed.
+        XCTAssertTrue(harness.transport.failedTags.isEmpty)
+        XCTAssertEqual(harness.transport.openedTags.values.count, 1)
     }
 }

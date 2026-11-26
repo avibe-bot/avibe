@@ -4409,7 +4409,11 @@ final class MobileOnboardingTests: XCTestCase {
         }
     }
 
-    func testStoreRotationRejectsSupersededAuthOperationsBeforeTheyUseTheNewTransport() async throws {
+    /// A rotation's sweep now runs behind it. One still listing when a newer
+    /// transition records a view that holds a store removes nothing; the
+    /// newer account stays current and opens. (Before, the old operation
+    /// waited inside that listing and ended stale; it no longer waits there.)
+    func testABackgroundSweepRemovesNothingOnceANewerTransitionRecordsARetainedView() async throws {
         for operation in ["bootstrap", "password", "OTP request"] {
             let defaults = makeDefaults()
             let registry = FakeNamedDataStoreRegistry()
@@ -4437,15 +4441,10 @@ final class MobileOnboardingTests: XCTestCase {
             var transitions = 0
             let transports = [original, resetting, replacement]
                 + (0..<3).map { _ in FakeMobileAuthTransport() }
-            var otpRequests = 0
-            for transport in transports {
-                transport.requestOTPHandler = { _ in otpRequests += 1; return 60 }
-            }
-            var created = 0
             var opened: MobileRuntimeContext?
             let coordinator = makeCoordinator(
                 defaults: defaults, websiteDataStore: store, transports: transports,
-                onCreateTransport: { created += 1 }, onOpen: { opened = $0 },
+                onOpen: { opened = $0 },
                 onPrepareAccountTransition: {
                     transitions += 1
                     // The NEW reset records a retained view after the old
@@ -4463,20 +4462,18 @@ final class MobileOnboardingTests: XCTestCase {
                 }
             }
             await fulfillment(of: [rotating], timeout: 30)
+            // The old operation does not wait for its sweep.
+            _ = await pending.result
             _ = try await coordinator.logout()
             _ = try await coordinator.verifyOTP(email: "account-2@example.com", code: "123456")
             _ = try coordinator.selectInstance(id: instance.id)
             let runtime = try XCTUnwrap(opened)
             releaseRotation.fulfill()
-            switch await pending.result {
-            case .success: XCTFail("Old \(operation) must be stale after store rotation")
-            case .failure(let error):
-                XCTAssertEqual((error as? MobileAccountError)?.code, "stale_session", operation)
-            }
+            // Every sweep started so far has ended once one queued after
+            // them (that removes nothing itself) has.
+            await store.startSweep(canSweep: { false }).value
             let state = try await coordinator.bootstrap()
             XCTAssertEqual(state, .signedIn(snapshot: accountB, selectedInstanceID: instance.id), operation)
-            XCTAssertEqual(otpRequests, 0, operation)
-            XCTAssertEqual(created, 3, operation)
             XCTAssertTrue(coordinator.isCurrentRuntime(runtime), operation)
             XCTAssertFalse(coordinator.isAccountSurfaceActive, operation)
             XCTAssertTrue(registry.removalAttempts.isEmpty, operation)
@@ -5789,7 +5786,7 @@ final class MobileOnboardingTests: XCTestCase {
         let oldIdentifier = store.identifier
         registry.failingIdentifiers.insert(oldIdentifier)
 
-        await store.rotate()
+        await store.rotate()?.value
 
         XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
         XCTAssertTrue(registry.identifiers.contains(store.identifier))
@@ -5826,7 +5823,7 @@ final class MobileOnboardingTests: XCTestCase {
         // back while its network session finishes closing (#3418).
         registry.returningIdentifiers.insert(oldIdentifier)
 
-        await store.rotate()
+        await store.rotate()?.value
 
         XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
         XCTAssertTrue(registry.identifiers.contains(oldIdentifier))
@@ -5860,6 +5857,176 @@ final class MobileOnboardingTests: XCTestCase {
             ).ownedIdentifiers,
             [gone.identifier]
         )
+    }
+
+    /// WebKit answers a removal only once the store's own web process has
+    /// exited, which can take minutes. A sign-out moves to the new store
+    /// and is done without waiting for that; the removal goes on behind it,
+    /// and the store is gone once WebKit answers.
+    func testASignOutDoesNotWaitForAStoreRemovalWebKitHasNotAnswered() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let old = store.identifier
+        registry.unansweredRemovals.insert(old)
+        let coordinator = makeCoordinator(
+            defaults: defaults, websiteDataStore: store,
+            transports: [FakeMobileAuthTransport(), FakeMobileAuthTransport(), FakeMobileAuthTransport()]
+        )
+        coordinator.activateAccountSurface()
+
+        let state = try await coordinator.logout()
+        XCTAssertEqual(state, .signedOut)
+        XCTAssertNotEqual(store.identifier, old)
+        try await registry.removalAsked(for: old)
+        XCTAssertTrue(registry.identifiers.contains(old), "WebKit has not answered yet")
+
+        registry.answerRemoval(of: old)
+        // A sweep asked for now runs after the one still going.
+        await store.sweepOrphans()
+        XCTAssertFalse(registry.identifiers.contains(old))
+        XCTAssertFalse(store.ownedIdentifiers.contains(old))
+    }
+
+    /// The launch's sweep is started, not waited for, and a later sweep
+    /// runs after it.
+    func testALaunchSweepIsStartedWithoutWaiting() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let orphan = UUID()
+        registry.identifiers.insert(orphan)
+        defaults.set([orphan.uuidString], forKey: "avibe.mobile.ownedWebsiteDataStoreIdentifiers")
+        registry.unansweredRemovals.insert(orphan)
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+
+        let sweep = store.startSweep()
+        try await registry.removalAsked(for: orphan)
+        XCTAssertTrue(registry.identifiers.contains(orphan))
+        registry.answerRemoval(of: orphan)
+        await sweep.value
+        XCTAssertFalse(registry.identifiers.contains(orphan))
+        XCTAssertTrue(registry.identifiers.contains(store.identifier))
+    }
+
+    /// A rotation while an earlier sweep still waits on WebKit: the store in
+    /// use after it is never removed (each sweep takes its candidates when
+    /// it starts, without the current store), and the stores before it are.
+    func testARotationDuringABackgroundSweepNeverRemovesTheNewCurrentStore() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let first = store.identifier
+        registry.unansweredRemovals.insert(first)
+
+        let firstSweep = await store.rotate()
+        try await registry.removalAsked(for: first)
+        let second = store.identifier
+        let secondSweep = await store.rotate()
+        let current = store.identifier
+
+        registry.answerRemoval(of: first)
+        await firstSweep?.value
+        await secondSweep?.value
+        XCTAssertFalse(registry.removalAttempts.contains(current))
+        XCTAssertTrue(registry.identifiers.contains(current))
+        XCTAssertFalse(registry.identifiers.contains(first))
+        XCTAssertFalse(registry.identifiers.contains(second))
+    }
+
+    /// A sign-out whose sweep waits behind a slow one, then a sign-in before
+    /// it runs: the signed-out account's store is still removed (a newer
+    /// account is no reason to skip it; only a view holding a store is).
+    func testASignOutsSweepStillRemovesTheStoreAfterALaterSignIn() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let orphan = UUID()
+        registry.identifiers.insert(orphan)
+        defaults.set([orphan.uuidString], forKey: "avibe.mobile.ownedWebsiteDataStoreIdentifiers")
+        registry.unansweredRemovals.insert(orphan)
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let signedOut = store.identifier
+        let launchSweep = store.startSweep()
+        try await registry.removalAsked(for: orphan)
+        let coordinator = makeCoordinator(
+            defaults: defaults, websiteDataStore: store,
+            transports: (0..<6).map { _ in FakeMobileAuthTransport() }
+        )
+        coordinator.activateAccountSurface()
+
+        _ = try await coordinator.logout()
+        XCTAssertNotEqual(store.identifier, signedOut)
+        _ = try await coordinator.requestOTP(email: "account-2@example.com")
+
+        registry.answerRemoval(of: orphan)
+        await launchSweep.value
+        await store.startSweep(canSweep: { false }).value
+        XCTAssertTrue(registry.removalAttempts.contains(signedOut))
+        XCTAssertFalse(registry.identifiers.contains(signedOut))
+        XCTAssertTrue(registry.identifiers.contains(store.identifier))
+    }
+
+    /// A transition that rotates while a view still holds the old store
+    /// leaves it; a later sweep gated as the launch's is (`canSweepStores`)
+    /// removes nothing while that view lives, and removes it once it is gone.
+    func testALaterSweepLeavesAStoreAViewStillHolds() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let old = store.identifier
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        var heldView: WKWebView? = WKWebView(frame: .zero, configuration: configuration)
+        let barrier = WebsiteDataStoreReleaseBarrier(webViews: [try XCTUnwrap(heldView)])
+        var transitions = 0
+        let coordinator = makeCoordinator(
+            defaults: defaults, websiteDataStore: store,
+            transports: (0..<4).map { _ in FakeMobileAuthTransport() },
+            onPrepareAccountTransition: {
+                transitions += 1
+                return transitions == 1 ? [barrier] : []
+            }
+        )
+        coordinator.activateAccountSurface()
+
+        _ = try await coordinator.logout()
+        XCTAssertNotEqual(store.identifier, old)
+        XCTAssertFalse(coordinator.canSweepStores)
+        await store.startSweep(canSweep: { coordinator.canSweepStores }).value
+        XCTAssertTrue(registry.removalAttempts.isEmpty)
+        XCTAssertTrue(registry.identifiers.contains(old))
+
+        heldView = nil
+        let released = await barrier.waitForRelease()
+        XCTAssertTrue(released)
+        XCTAssertTrue(coordinator.canSweepStores)
+        await store.startSweep(canSweep: { coordinator.canSweepStores }).value
+        XCTAssertEqual(registry.removalAttempts, [old])
+        XCTAssertFalse(registry.identifiers.contains(old))
+    }
+
+    /// A removal that took over a second is kept, in milliseconds, for the
+    /// next rendezvous request; one an answered request carried goes.
+    func testASlowStoreRemovalIsKeptForTheNextRendezvous() async throws {
+        let defaults = makeDefaults()
+        let registry = FakeNamedDataStoreRegistry()
+        let store = AccountWebsiteDataStore(defaults: defaults, operations: registry.operations)
+        let old = store.identifier
+        registry.unansweredRemovals.insert(old)
+        let recorded = SlowStoreRemovals.shared.pending.count
+
+        let sweep = await store.rotate()
+        try await registry.removalAsked(for: old)
+        // Longer than `slowRemoval`: the time it takes is what is measured.
+        try await Task.sleep(for: .milliseconds(1_200))
+        registry.answerRemoval(of: old)
+        await sweep?.value
+
+        let pending = SlowStoreRemovals.shared.pending
+        XCTAssertEqual(pending.count, min(recorded + 1, SlowStoreRemovals.limit))
+        let newest = try XCTUnwrap(pending.last)
+        XCTAssertGreaterThanOrEqual(newest.milliseconds, 1_000)
+        SlowStoreRemovals.shared.answered(pending)
+        XCTAssertTrue(SlowStoreRemovals.shared.pending.isEmpty)
     }
 
     func testLaunchSweepIgnoresUnownedStoresAndPreservesTheCurrentStore() async {
@@ -6060,7 +6227,10 @@ final class MobileOnboardingTests: XCTestCase {
         coordinator.activateAccountSurface()
 
         _ = try await coordinator.logout()
+        // The removal runs behind the sign-out: wait for it.
+        await store.sweepOrphans()
 
+        XCTAssertEqual(registry.removalAttempts, [oldIdentifier])
         XCTAssertTrue(releasedBeforeRemoval)
         XCTAssertNil(runtimeReference.value)
         XCTAssertNil(childReference.value)
@@ -6737,7 +6907,31 @@ private final class FakeNamedDataStoreRegistry {
     /// comes straight back), as WebKit's do while their session closes.
     var returningIdentifiers = Set<UUID>()
     var removalAttempts: [UUID] = []
+    /// Stores whose removal WebKit does not answer until `answerRemoval`,
+    /// as WebKit does while the store's web process has not exited.
+    var unansweredRemovals = Set<UUID>()
+    private var waitingRemovals: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     var beforeRemoval: ((UUID) -> Void)?
+
+    func answerRemoval(of identifier: UUID) {
+        unansweredRemovals.remove(identifier)
+        for waiting in waitingRemovals.removeValue(forKey: identifier) ?? [] {
+            waiting.resume()
+        }
+    }
+
+    /// Until a removal of `identifier` has been asked for.
+    func removalAsked(for identifier: UUID) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while !removalAttempts.contains(identifier) {
+            guard clock.now < deadline else {
+                XCTFail("No removal of \(identifier) was asked for")
+                throw CancellationError()
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+    }
     var listIdentifiersHandler: (() async -> Void)?
 
     var operations: AccountWebsiteDataStoreOperations {
@@ -6749,6 +6943,11 @@ private final class FakeNamedDataStoreRegistry {
             removeIdentifier: { [self] identifier in
                 beforeRemoval?(identifier)
                 removalAttempts.append(identifier)
+                if unansweredRemovals.contains(identifier) {
+                    await withCheckedContinuation { continuation in
+                        waitingRemovals[identifier, default: []].append(continuation)
+                    }
+                }
                 guard !failingIdentifiers.contains(identifier) else {
                     return NSError(
                         domain: "FakeNamedDataStoreRegistry",

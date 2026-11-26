@@ -113,3 +113,32 @@ export function optimizeNote(t: TFunction, optimize: OptimizeState | undefined):
   if (wait?.kind === 'automatic') return t('remoteAccess.automaticRetryAt', { time: wait.time });
   return wait?.kind === 'due' ? t('remoteAccess.automaticRetryDue') : undefined;
 }
+
+const CJK = /[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+/**
+ * A sentence with the computer's name in it. The templates set the name off with spaces, as a
+ * Latin name needs in Chinese; where the name begins or ends with a Chinese character next to a
+ * Chinese one, that space is dropped (「运行 Avibe 的那台电脑上」, not 「…那台电脑 上」).
+ */
+export function withComputer(t: TFunction, key: TranslationKey | 'devices.unbind.nameKeptDaysNamed', values: Record<string, unknown> & { computer: string }): string {
+  const mark = '\u0001';
+  const [before = '', ...rest] = String(t(key, { ...values, computer: mark })).split(mark);
+  const after = rest.join(mark);
+  const name = values.computer;
+  const head = before.endsWith(' ') && CJK.test(before.at(-2) ?? '') && CJK.test(name.at(0) ?? '') ? before.slice(0, -1) : before;
+  const tail = after.startsWith(' ') && CJK.test(after.at(1) ?? '') && CJK.test(name.at(-1) ?? '') ? after.slice(1) : after;
+  return head + name + tail;
+}
+
+/** How long a name given up by unbinding stays the account's, and where it can be taken back. */
+export function unbindNameKeptText(t: TFunction, host: string, date?: string, holdDays?: number, computer?: string): string {
+  // From another device the computer is named, never 「这台」.
+  if (computer) {
+    if (date) return withComputer(t, 'devices.unbind.nameKeptNamed', { host, date, computer });
+    if (typeof holdDays === 'number') return withComputer(t, 'devices.unbind.nameKeptDaysNamed', { host, count: holdDays, computer });
+    return withComputer(t, 'devices.unbind.nameKeptPlainNamed', { host, computer });
+  }
+  if (date) return t('devices.unbind.nameKept', { host, date });
+  if (typeof holdDays === 'number') return t('devices.unbind.nameKeptDays', { host, count: holdDays });
+  return t('devices.unbind.nameKeptPlain', { host });
+}

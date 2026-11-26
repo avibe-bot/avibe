@@ -172,9 +172,13 @@ def validate_plan(plan: object) -> dict:
             raise ValueError("Narrative-only PR must explicitly skip every producer")
     elif any(jobs[job] != "run" for job in (*FAST_JOBS, *PR_TEST_JOBS)):
         raise ValueError("Non-narrative PR must run every cheap Linux check")
-    if plan["mode"] == "PR" and jobs["ios-shell"] != "skip":
-        raise ValueError("PR iOS belongs to its separate advisory workflow until #3418 is fixed")
+    if plan['mode'] == 'PR' and jobs['ios-shell'] != 'skip':
+        raise ValueError('The PR simulator is advisory; master requires the real result')
     return plan
+
+
+def unit_shards(portfolio: bool = False) -> list[int]:
+    return list(range(16 if portfolio else 8))
 
 
 def unit_python_versions(mode: str) -> list[str]:
@@ -234,11 +238,16 @@ def check_gate(gate: str, needs: dict, *, event_name: str, ref: str) -> list[str
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_mutually_exclusive_group()
+    commands.add_argument('--portfolio-gate', choices=['fast-gate', 'sensitive-proof'])
     commands.add_argument("--gate", choices=[*GATES, "master-full-backstop"])
     commands.add_argument("--optional-ios", action="store_true", help="Route the standalone advisory PR iOS check")
     args = parser.parse_args()
     event_name, ref = os.environ.get("GITHUB_EVENT_NAME", ""), os.environ.get("GITHUB_REF", "")
     try:
+        if args.portfolio_gate:
+            from scripts.ci_fast_pr import verify
+            verify(args.portfolio_gate, json.loads(os.environ['NEEDS_JSON']))
+            return 0
         if args.gate:
             needs = json.loads(os.environ.get("NEEDS_JSON", ""))
             problems = check_gate(args.gate, needs, event_name=event_name, ref=ref)
@@ -265,12 +274,26 @@ def main() -> int:
             print(f"Advisory PR iOS: {route}. {scope.reason}")
             return 0
         plan = make_plan(mode, scope)
+        portfolio = mode == 'PR' and os.environ.get('FAST_PR_ENABLED') == 'true'
+        advisory_ios = heavy_routes(scope)['ios-shell'] if mode == 'PR' else 'skip'
+        dispatch = plan['jobs']
+        groups = set()
+        if portfolio:
+            from scripts.ci_fast_pr import selected
+            groups, chosen = selected(scope)
+            dispatch = {job: 'run' if job in chosen else 'skip' for job in PRODUCERS}
+            advisory_ios = 'skip'  # selected native PR paths call the real required job instead
+        shards = unit_shards(portfolio)
         serialized = json.dumps(plan, separators=(",", ":"))
         if output := os.environ.get("GITHUB_OUTPUT"):
             with Path(output).open("a", encoding="utf-8") as stream:
+                stream.write(f"advisory_ios={advisory_ios}\n")
+                stream.write(f"portfolio={str(portfolio).lower()}\nsensitive={str(bool(groups)).lower()}\n")
+                stream.write(f"unit_shards={json.dumps(shards)}\nunit_total=[{len(shards)}]\n")
+                stream.write(f"dispatch_jobs={json.dumps(dispatch)}\n")
                 stream.write(f"unit_python={json.dumps(unit_python_versions(mode))}\n")
                 stream.write(f"mode={mode}\ndocs_only={str(plan['docs_only']).lower()}\nplan={serialized}\n")
-        summary = f"## CI scope: {mode}\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in plan["jobs"].items()) + "\n"
+        summary = f"## CI scope: {mode} ({', '.join(sorted(groups)) or ('ordinary' if portfolio else 'legacy')})\n\n" + "\n".join(f"- `{job}`: **{route}**" for job, route in dispatch.items()) + "\n"
         if scope:
             summary += f"\n{scope.reason}\n"
         print(summary)

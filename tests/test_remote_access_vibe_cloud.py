@@ -30,8 +30,8 @@ def test_direct_suspend_route_requires_local_cli_token(monkeypatch):
     monkeypatch.setattr(ui_server, "_is_direct_ingress_request", lambda: False)
     monkeypatch.setattr(
         direct_lifecycle,
-        "stop_for_pairing_change",
-        lambda timeout_seconds=10.0: stopped.append(timeout_seconds) or True,
+        "suspend_for_pairing_change",
+        lambda timeout_seconds=10.0: stopped.append(timeout_seconds) or "c" * 32,
     )
 
     response = ui_server.app.test_client().post(
@@ -44,7 +44,8 @@ def test_direct_suspend_route_requires_local_cli_token(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "stopped": True}
+    # The token lets only this stop's caller undo it after a refused unbind.
+    assert response.get_json() == {"ok": True, "stopped": True, "token": "c" * 32}
     assert stopped == [10.0]
 
 
@@ -2614,7 +2615,7 @@ def test_direct_suspend_route_cannot_bypass_remote_or_csrf_boundary(monkeypatch,
     _config().save()
     stopped = []
     monkeypatch.setattr(ui_server, "show_cli_event_token", lambda: "test-cli-token")
-    monkeypatch.setattr(direct_lifecycle, "stop_for_pairing_change", lambda **kw: stopped.append(True))
+    monkeypatch.setattr(direct_lifecycle, "suspend_for_pairing_change", lambda **kw: stopped.append(True))
     headers = {"X-Vibe-Show-Client": "cli", "X-Vibe-Show-Cli-Token": "test-cli-token"}
     with ui_server.app.test_request_context(
         "/api/remote-access/direct/suspend", method="POST", headers=headers, base_url="http://127.0.0.1",

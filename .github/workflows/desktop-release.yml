@@ -36,12 +36,13 @@ jobs:
           # dispatch/tag input through the API and never trusts a workflow
           # context SHA as the release source.
           ref: ${{ github.ref }}
-      - name: Require the full master backstop, or an RC's green pull request
+      - name: Require the full master backstop at the tag's exact SHA
         id: verify
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
-        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --rc-pull-request-gate
+        # Honours only the one override line Stage 1 published in this tag's notes.
+        run: python scripts/ci_release_backstop.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --unverified-from-notes
       - name: Confirm Stage 1 source when supplied
         if: inputs.source_sha != ''
         env:

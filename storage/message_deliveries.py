@@ -1695,6 +1695,7 @@ def materialize_start_acceptance(
                 "kind": "start",
                 "attempt_id": turn.get("start_attempt_id"),
                 **_carry_envelope(row),
+                **_batch_member(row, rows),
                 "turn_id": turn_id,
                 "outcome": "accepted",
                 "evidence": evidence,
@@ -1866,6 +1867,7 @@ def materialize_steer_acceptance(
             history_event={
                 "kind": "steer",
                 **_carry_envelope(row),
+                **_batch_member(row, rows),
                 "attempt_id": expected_attempt_id,
                 "turn_id": turn_id,
                 "outcome": "accepted",
@@ -2118,6 +2120,16 @@ TURN_CARRY_EXHAUSTED_NOTICE = (
     "These inputs were carried forward once and the next Turn failed too. They will not be "
     "retried automatically; send them again if they still matter: {inputs}"
 )
+
+
+def _batch_member(row: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(rows) > 1:
+        payload = delivery_payload(row)
+        if payload['source'] == 'harness':
+            from storage.carry_members import member_record
+
+            return {'carry_member': member_record(payload)}
+    return {}
 
 
 def _carry_envelope(delivery: dict[str, Any]) -> dict[str, Any]:

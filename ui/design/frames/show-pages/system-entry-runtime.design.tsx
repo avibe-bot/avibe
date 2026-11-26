@@ -25,7 +25,7 @@ const designFrames = frames([
   },
   {
     name: 'mac-collapsed',
-    title: 'Show system entry · Mac 宽屏 · 收起后的入口',
+    title: 'Show · Mac · no installation prompt (saved collapsed)',
     width: 1280,
     height: 760,
     status: 'shipped',
@@ -35,7 +35,7 @@ const designFrames = frames([
   },
   {
     name: 'mac-expanded',
-    title: 'Show system entry · Mac · expanded above annotation controls',
+    title: 'Show · Mac · no installation prompt (saved expanded)',
     width: 1280,
     height: 760,
     status: 'shipped',

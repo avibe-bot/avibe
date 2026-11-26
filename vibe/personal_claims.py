@@ -651,6 +651,9 @@ class _RebindFlow(_Flow):
     reset_browser = None
     reset_confirmation = None
     reset_expiry = 0.
+    reset_action = None
+    unbind_evidence = None
+    unbind_operation = None
 
     def cancel(self):
         with self.lock:
@@ -776,12 +779,15 @@ class RebindClaims(RedirectClaims):
                 return {"state": "error", "code": "expired"}
         return view
 
-    def reset_request(self, claim_id, origin, browser, *, confirmation=None):
+    def reset_request(self, claim_id, origin, browser, *, confirmation=None, action='legacy'):
         """Preview never seals. Confirm requires the same browser, generation and unspent nonce."""
         from datetime import datetime, timezone
         from storage.mobile_store import MobileStore, mobile_store_path
         from vibe import binding_reset
 
+        if action == 'legacy':
+            # The page that confirmed only a local reset predates deleting on avibe.bot first.
+            raise ClaimError('reload_required')
         try:
             with admitted('reset'):
                 # Serialize superseding start/cancel with the validation + seal, not the cleanup.
@@ -799,18 +805,39 @@ class RebindClaims(RedirectClaims):
                         cfg = local._config()
                         if local.claim_revision(cfg, local._installation_id(), local._pending()) != flow.refused_revision:
                             raise ClaimError('local_binding_changed')
+                        if action not in ('unbind', 'local_after_refusal'):
+                            raise ClaimError('invalid_request')
+                        if action == 'local_after_refusal':
+                            from vibe import binding_unbind, binding_admission
+                            if (not flow.unbind_operation or binding_admission.reset_in_progress() or
+                                    binding_unbind.last_result(cfg, operation=flow.unbind_operation) !=
+                                    {'state': 'not_unbound', 'reason_code': 'invalid_credential'}):
+                                raise ClaimError('reset_not_eligible')
+                        elif flow.unbind_operation:
+                            raise ClaimError('reset_not_eligible')
                         if confirmation is None:
                             connected = mobile_store_path().is_file() and MobileStore(existing_only=True).active_device() is not None
+                            if action == 'unbind':
+                                flow.unbind_evidence = binding_reset._unbind_candidate(cfg)
+                            flow.reset_action = action
                             flow.reset_expiry = min(now + 120, flow.ticket.deadline)
                             flow.reset_confirmation = secrets.token_urlsafe(32)
                             return {'confirmation_id': flow.reset_confirmation, 'health_connected': connected,
-                                    'expires_at': datetime.fromtimestamp(flow.reset_expiry, timezone.utc).isoformat()}
-                        if not flow.reset_confirmation or not _matches(flow.reset_confirmation, confirmation):
+                                    'expires_at': datetime.fromtimestamp(flow.reset_expiry, timezone.utc).isoformat(),
+                                    **({'action': action, 'instance_id': cfg.remote_access.vibe_cloud.instance_id}
+                                       if action != 'legacy' else {})}
+                        if flow.reset_action != action or not flow.reset_confirmation or not _matches(flow.reset_confirmation, confirmation):
                             raise ClaimError('reset_not_eligible')
                         if now >= flow.reset_expiry:
                             raise ClaimError('confirmation_expired')
-                        binding_reset._seal(cfg)
-                        flow.reset_confirmation = flow.reset_browser = None
+                        if action != 'unbind':
+                            binding_reset._seal(cfg)
+                            flow.reset_browser = None
+                        flow.reset_confirmation = None
+                    if action == 'unbind':
+                        flow.unbind_operation = binding_reset.seal_unbind(flow.unbind_evidence)
+                if action == 'unbind':
+                    return binding_reset.stop_sealed_unbind()
                 try:
                     return binding_reset.resume()
                 except Exception:

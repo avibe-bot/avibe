@@ -10,8 +10,10 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import { KeptTail } from '../ui/kept-tail';
-import { rebindRefusalText } from './texts';
+import { longDay } from './format';
+import { rebindRefusalText, unbindNameKeptText } from './texts';
 import type { RebindDialog, RebindState } from './types';
+import { UnbindConsequences } from './UnbindViews';
 
 export type RebindActions = {
   onRebind?: () => void;
@@ -134,17 +136,6 @@ export function RebindRow({ state, canReset, needsBrowser, open, actions }: {
   );
 }
 
-function List({ title, items }: { title: string; items: Array<string | null> }) {
-  return (
-    <div>
-      <div className="text-[12px] font-semibold text-foreground">{title}</div>
-      <ul className="mt-1 flex list-disc flex-col gap-1 pl-4 text-[12px] leading-relaxed text-muted">
-        {items.filter((each): each is string => each !== null).map((item) => <li key={item}><KeptTail text={item} /></li>)}
-      </ul>
-    </div>
-  );
-}
-
 export function RebindDialogs({ dialog, state, host, busy, actions }: {
   dialog: RebindDialog;
   state: RebindState;
@@ -153,7 +144,7 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
   busy?: boolean;
   actions: RebindActions;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const close = (open: boolean) => { if (!open) actions.onRebindClose?.(); };
   const domain = host ?? t('devices.rebind.currentDomain');
   if (dialog.kind === 'confirm') {
@@ -175,40 +166,70 @@ export function RebindDialogs({ dialog, state, host, busy, actions }: {
       </Dialog>
     );
   }
-  if (dialog.kind === 'asNew') {
+  if (dialog.kind === 'asNewCloud') {
     const other = state.state === 'asNewOffered' && state.reason === 'other_account';
     const hint = state.state === 'asNewOffered' ? state.hint : undefined;
+    const date = dialog.releaseAt ? longDay(dialog.releaseAt, i18n.language) : undefined;
+    // The same consequences as unbinding: the binding at avibe.bot is deleted first. The name stays
+    // with the account that held it, which is another one's when it is another account's Avibe.
+    const nameLine = other
+      ? (date
+        ? t('devices.rebind.asNewCloud.loseName', { host: domain, date })
+        : typeof dialog.holdDays === 'number'
+          ? t('devices.rebind.asNewCloud.loseNameDays', { host: domain, count: dialog.holdDays })
+          : t('devices.rebind.asNewCloud.loseNamePlain', { host: domain }))
+      : unbindNameKeptText(t, domain, date, dialog.holdDays);
     return (
-      <Dialog open onOpenChange={close}>
-        <DialogContent className="max-w-xl content-start" mobileSheetHeight="tall" closeLabel={t('common.close')}>
+      <Dialog open onOpenChange={(open) => { if (!busy) close(open); }}>
+        <DialogContent
+          className={`max-w-md content-start ${busy ? '[&>button.absolute]:hidden' : ''}`}
+          mobileSheetHeight="tall"
+          keepOnOutsideClick={busy}
+          closeLabel={t('common.close')}
+        >
           <DialogHeader>
-            <DialogTitle className="text-balance">{t('devices.rebind.asNewAction')}</DialogTitle>
+            <DialogTitle className="text-balance">{t('devices.rebind.asNewCloud.title', { host: domain })}</DialogTitle>
             <DialogDescription>
-              {/* Whose Avibe it is comes first when it is another account's: the masked hint, nothing more. */}
               {other && <><KeptTail text={hint ? t('devices.rebind.asNew.whose', { hint }) : t('devices.rebind.asNew.whosePlain')} /><br /></>}
-              <KeptTail text={t('devices.rebind.asNew.intro')} />
+              <KeptTail text={t('devices.rebind.asNewCloud.intro', { host: domain })} />
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col gap-3 rounded-lg bg-field px-4 py-3">
-            <List
-              title={t('devices.rebind.asNew.lose')}
-              items={[
-                t('devices.rebind.asNew.loseAccess', { host: domain }),
-                t('devices.rebind.asNew.loseDevices'),
-                t('devices.rebind.asNew.losePeople'),
-                t('devices.rebind.asNew.loseLinks'),
-                dialog.healthConnected ? t('devices.rebind.asNew.loseHealth') : null,
-                t('devices.rebind.asNew.loseName', { host: domain }),
-              ]}
-            />
-            <List title={t('devices.rebind.asNew.keep')} items={[t('devices.rebind.asNew.keepAll')]} />
-            <List title={t('devices.rebind.asNew.unchanged')} items={[t('devices.rebind.asNew.unchangedAvibe'), t('devices.rebind.asNew.unchangedCredentials')]} />
-          </div>
-          <p className="text-[13px] leading-relaxed text-foreground"><KeptTail text={t('devices.rebind.asNew.copiedData')} /></p>
-          <p className="text-[13px] font-medium text-foreground">{t('devices.rebind.asNew.irreversible')}</p>
+          <UnbindConsequences healthConnected={dialog.healthConnected} nameLine={nameLine} />
+          <p className="rounded-lg bg-field/60 px-3.5 py-2.5 text-[12px] leading-relaxed text-muted">
+            <KeptTail fill text={t('devices.rebind.asNewCloud.next')} />
+          </p>
           <DialogFooter>
-            <Button variant="ghost" onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
+            <Button variant="ghost" disabled={busy} onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
             <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNewAction')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
+  // avibe.bot did not accept deleting the old binding: its key no longer works (the record is gone,
+  // or was taken over elsewhere). A separate question: clear this computer only, touching nothing at
+  // avibe.bot, then bind as a new computer. Offered at the computer only, as binding again is.
+  if (dialog.kind === 'asNewLocal') {
+    return (
+      <Dialog open onOpenChange={(open) => { if (!busy) close(open); }}>
+        <DialogContent
+          className={`max-w-md content-start ${busy ? '[&>button.absolute]:hidden' : ''}`}
+          mobileSheetHeight="tall"
+          keepOnOutsideClick={busy}
+          closeLabel={t('common.close')}
+        >
+          <DialogHeader>
+            <DialogTitle className="text-balance">{t('devices.rebind.asNewLocal.title')}</DialogTitle>
+            <DialogDescription><KeptTail text={t('devices.rebind.asNew.refusedLead')} /></DialogDescription>
+          </DialogHeader>
+          <UnbindConsequences healthConnected={dialog.healthConnected} />
+          <p className="text-[13px] font-medium leading-relaxed text-foreground"><KeptTail fill text={t('devices.rebind.asNewLocal.untouched')} /></p>
+          <p className="rounded-lg bg-field/60 px-3.5 py-2.5 text-[12px] leading-relaxed text-muted">
+            <KeptTail fill text={t('devices.rebind.asNewLocal.next')} />
+          </p>
+          <DialogFooter>
+            <Button variant="ghost" disabled={busy} onClick={actions.onRebindClose}>{t('common.cancel')}</Button>
+            <Button variant="destructive" disabled={busy} onClick={actions.onRebindAsNewConfirm}>{t('devices.rebind.asNew.localAction')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

@@ -87,23 +87,9 @@ export type DeviceActivity = {
 /** A Health connection no listed device can be proven to own. */
 export type UnlinkedHealth = { id: string; device: string; data: HealthData[]; lastSeenAt?: string };
 
-/** What avibe.bot did about a signed-out device's account sign-in (`status/reason` of the
- *  contract); anything this page does not know is `unknown`. */
-export type AccountResult =
-  | 'queued' | 'retrying' | 'accepted'
-  | 'localOnly' | 'sharedSignIn' | 'keeperUnknown'
-  | 'refusedCredential' | 'refused' | 'unconfirmed' | 'unknown';
-
-/** A device signed out lately: it is out of this Avibe; the account side is its own story. */
-export type SignedOutDevice = {
-  id: string;
-  deviceId?: string;
-  device: string | null;
-  kind: DeviceKind | null;
-  /** Whose device it was, where that is known without guessing; it decides which advice applies. */
-  owner: 'mine' | 'others' | 'unknown';
-  results: AccountResult[];
-};
+/** A device a sign-out ended, as far as this page uses it: which row leaves at once, and its name
+ *  for the activity once it is no longer listed. The page lists no signed-out devices (owner, 2026-11-26). */
+export type SignedOutDevice = { deviceId?: string; device: string | null };
 
 /** Why a claim (turning remote access on) did not go through: the local outcome names of
  *  `personal-installation-claims-runtime.md`, and `unknown` with the raw code for the rest. */
@@ -336,10 +322,47 @@ export type RebindState =
 /** Open dialogs of the bind-again row. */
 export type RebindDialog =
   | { kind: 'confirm' }
-  | { kind: 'asNew'; healthConnected: boolean }
+  /** After avibe.bot did not accept deleting the old binding (this computer's key no longer
+   *  works): clear this computer only, then bind as a new computer. */
+  | { kind: 'asNewLocal'; healthConnected: boolean }
+  /** Binding as a new computer by first deleting the old binding at avibe.bot (the instance's new
+   *  preview). `releaseAt` / `holdDays`: how long the name stays the original account's. */
+  | { kind: 'asNewCloud'; healthConnected: boolean; releaseAt?: string; holdDays?: number }
   /** The reset finished: this computer is no longer bound. `oldHost`: the name it had. */
   | { kind: 'resetDone'; oldHost?: string }
   /** Bound again. */
   | { kind: 'bound'; disposition: 'existing' | 'new' | 'unknown'; host?: string };
+
+// ── 解除绑定 (docs: the instance's unbind states) ───────────────────────────────────────────────
+
+/** What 连接方式 says about unbinding this computer. `ready`: the entry is offered. `unbinding`: the
+ *  instance is doing it and continues by itself. `notChanged`: avibe.bot did not accept it and
+ *  remote access is as it was before. `needsRepair`: only this computer can sort it out. */
+export type UnbindState =
+  | { state: 'ready' }
+  /** This page's own ask was refused before anything began (a preview or a confirmation that did
+   *  not go through): the page's 「没有完成，请再试一次。」, and the entry stays. */
+  | { state: 'failed' }
+  /** The instance says this Avibe cannot be unbound here: no entry, as for 「更改域名」. */
+  | { state: 'ineligible' }
+  | { state: 'unbinding' }
+  /** avibe.bot refused it as not eligible: nothing changed, remote access's switch is as before.
+   *  (A key that no longer works is the page's existing binding-rejected state, not this.) */
+  | { state: 'notChanged' }
+  | { state: 'needsRepair' };
+
+/** The confirmation, open. `remote`: pressed from a device away from the computer, which loses this
+ *  page at once. `releaseAt` / `holdDays`: how long the name stays the account's, as the instance
+ *  says. */
+export type UnbindConfirmState = {
+  remote: boolean;
+  /** The computer's name as the Devices page lists it. Pressed from another device, the sentences
+   *  name the computer rather than say 「这台电脑」 / 「那台电脑」; without a name, 「运行 Avibe 的那台电脑」. */
+  computer?: string;
+  healthConnected: boolean;
+  releaseAt?: string;
+  holdDays?: number;
+  busy?: boolean;
+};
 
 export type { DeviceUsing };

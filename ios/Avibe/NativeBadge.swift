@@ -9,27 +9,39 @@ protocol AppBadgeCentering: AnyObject {
     func setBadgeCount(_ count: Int) async throws
 }
 
+/// The system's notification center, called on `NotificationCenterQueue`
+/// (never on the main thread).
 final class SystemAppBadgeCenter: AppBadgeCentering {
-    private let center: UNUserNotificationCenter
+    private let queue: NotificationCenterQueue
 
-    init(center: UNUserNotificationCenter = .current()) {
-        self.center = center
+    init(queue: NotificationCenterQueue = .system) {
+        self.queue = queue
     }
 
     func badgeAllowed() async -> Bool {
-        let settings = await center.notificationSettings()
-        switch settings.authorizationStatus {
-        case .authorized, .provisional, .ephemeral:
-            return settings.badgeSetting == .enabled
-        case .denied, .notDetermined:
-            return false
-        @unknown default:
-            return false
+        await queue.value { answer in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                switch settings.authorizationStatus {
+                case .authorized, .provisional, .ephemeral:
+                    answer(settings.badgeSetting == .enabled)
+                case .denied, .notDetermined:
+                    answer(false)
+                @unknown default:
+                    answer(false)
+                }
+            }
         }
     }
 
     func setBadgeCount(_ count: Int) async throws {
-        try await center.setBadgeCount(count)
+        let failure: Error? = await queue.value { answer in
+            UNUserNotificationCenter.current().setBadgeCount(count) { error in
+                answer(error)
+            }
+        }
+        if let failure {
+            throw failure
+        }
     }
 }
 
