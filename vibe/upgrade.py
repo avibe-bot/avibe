@@ -1716,6 +1716,7 @@ def get_latest_version_info(
     *,
     prereleases: bool = False,
     announced_only: bool = False,
+    listed_only: bool = False,
 ) -> dict:
     """The newest release to offer: stable from PyPI, plus release candidates when opted in.
 
@@ -1727,6 +1728,8 @@ def get_latest_version_info(
     release index marks silent and reports ``announced``, whether the index
     lists the offer without the marker. An offer the index does not (yet) list
     is unclassified; the automatic caller reads its notes before acting.
+    ``listed_only`` (with ``announced_only``) offers only releases the index
+    lists as announced, while the index can be read.
     """
 
     result = {"current": current_version, "latest": None, "has_update": False, "error": None}
@@ -1742,7 +1745,10 @@ def get_latest_version_info(
     listed = release_index_notifications(index) if index is not None else {}
 
     def sees(version: str) -> bool:
-        return not (announced_only and listed.get(version, False))
+        silent = listed.get(version)
+        if listed_only and index is not None and silent is None:
+            return False
+        return not (announced_only and silent)
 
     try:
         url = get_update_metadata_url()

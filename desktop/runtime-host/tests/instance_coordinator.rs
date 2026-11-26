@@ -62,8 +62,10 @@ impl Transport for Http {
             assert!(!cookies.contains("private-account"));
             let expected = match path.as_str() {
                 "/api/update/check" => json!({}),
-                "/api/upgrade" => json!({"confirm_interrupt": true}),
-                "/api/desktop/update/request" => json!({"target_version":"3.2.8-rc.4","confirm_interrupt":true}),
+                // Both owners install exactly the version on screen.
+                "/api/upgrade" | "/api/desktop/update/request" => {
+                    json!({"target_version":"3.2.8-rc.4","confirm_interrupt":true})
+                }
                 _ => json!({"enabled":true}),
             };
             assert_eq!(request.body.as_ref(), Some(&expected));
@@ -1967,6 +1969,54 @@ async fn instance_update_uses_the_instance_sign_in_and_never_persists_it() {
         .contains("rotated-by-instance"));
     // The local updater was never involved.
     assert!(f.view.update_calls.lock().unwrap().is_empty());
+}
+
+// A silent release (docs/release.md): a standalone instance's unprompted
+// version reads leave it out, the user's own check finds it, later reads keep
+// that offer while the instance runs the same version, and the install names it.
+#[tokio::test]
+async fn instance_update_keeps_the_offer_the_users_check_found() {
+    let f = selected_for_update().await;
+    let mut announced = offer();
+    announced["latest"] = json!("3.2.7rc1");
+    announced["has_update"] = json!(false);
+    update_reads(&f, true, announced.clone());
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["has_update"], false);
+
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/update/check", ok(json!({"ok": true, "snapshot": offer()}))));
+    let reply = action(&f.client, ClientAction::InstanceUpdateCheck {}).await;
+    assert!(reply.ok, "{:?}", reply.error);
+    update_reads(&f, true, announced.clone());
+    assert!(refresh(&f).await.ok);
+    let snapshot = update(&f)["snapshot"].clone();
+    assert_eq!(
+        (&snapshot["latest"], &snapshot["has_update"]),
+        (&json!("3.2.8-rc.4"), &json!(true))
+    );
+
+    f.http
+        .replies
+        .lock()
+        .unwrap()
+        .push_back(("/api/upgrade", ok(json!({"ok": true}))));
+    let install = ClientAction::InstanceUpdateInstall {
+        target_version: "3.2.8-rc.4".into(),
+    };
+    let reply = action(&f.client, install).await;
+    assert!(reply.ok, "{:?}", reply.error);
+
+    // Running another version, the instance's own reads decide again.
+    let mut moved = announced;
+    moved["current"] = json!("3.2.8rc4");
+    moved["latest"] = json!("3.2.8rc4");
+    update_reads(&f, true, moved);
+    assert!(refresh(&f).await.ok);
+    assert_eq!(update(&f)["snapshot"]["has_update"], false);
 }
 
 // B1 display data: a known field that does not validate makes the answer

@@ -164,8 +164,8 @@ def test_standalone_channel_is_transactional_and_checks_the_updated_preference(m
     config.save()
     before = json.loads((tmp_path / "config" / "config.json").read_text())
     observed = []
-    def check():
-        observed.append(V2Config.load().update.prereleases)
+    def check(*, explicit=False):
+        observed.append((V2Config.load().update.prereleases, explicit))
         return {"current": "3.2.6", "latest": "3.2.7rc1", "has_update": True, "error": None}
     monkeypatch.setattr(api, "get_version_info", check)
     client = app.test_client()
@@ -175,7 +175,8 @@ def test_standalone_channel_is_transactional_and_checks_the_updated_preference(m
     before["update"]["prereleases"] = True
     assert before == after
     assert post(client).status_code == 200
-    assert observed == [True, True]  # each explicit check calls the owner afresh
+    # Each check calls the owner afresh, and both are the user's own, so a silent release is found.
+    assert observed == [(True, True), (True, True)]
 
 
 def test_standalone_auto_update_reuses_the_runtime_policy(monkeypatch, tmp_path):
@@ -187,8 +188,10 @@ def test_standalone_auto_update_reuses_the_runtime_policy(monkeypatch, tmp_path)
     monkeypatch.setattr(
         api,
         "get_latest_version_info",
-        lambda current, *, prereleases: {
+        lambda current, *, prereleases, announced_only, listed_only: {
             "current": current, "latest": None, "has_update": False, "error": None,
+            # A setting change is not a check: the snapshot stays an unprompted read.
+            **({} if announced_only and listed_only else {"error": "explicit read"}),
         },
     )
     client = app.test_client()
@@ -203,7 +206,7 @@ def test_standalone_auto_update_reuses_the_runtime_policy(monkeypatch, tmp_path)
 
 def test_standalone_check_failure_is_not_reported_as_success(monkeypatch):
     monkeypatch.delenv("AVIBE_DESKTOP_MANAGED_RUNTIME", raising=False)
-    monkeypatch.setattr(api, "get_version_info", lambda: {"error": "network unavailable"})
+    monkeypatch.setattr(api, "get_version_info", lambda **_: {"error": "network unavailable"})
     response = post(app.test_client())
     assert response.status_code == 502
     assert response.get_json()["error"] == "update_check_failed"

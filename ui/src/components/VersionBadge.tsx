@@ -26,7 +26,7 @@ import { useInstanceAuthorization } from '../context/InstanceAuthorizationContex
 import type { PanelModels, UpdatePanelActions } from './update/UpdatePanel';
 import { lazyPage } from '../lib/lazyPage';
 import type { UpdatePanelModel } from './update/updatePanelModel';
-import { normalizeVersion, remoteRequestSettled } from './update/versions';
+import { keepCheckedOffer, normalizeVersion, remoteRequestSettled } from './update/versions';
 import { useAcceptedInstall } from './update/useAcceptedInstall';
 import { useFollowInstall, useReadOnReturn } from './update/useFollowInstall';
 import { useDesktopClientProjection, usePresentDesktopClient } from '../desktop/useDesktopClient';
@@ -78,7 +78,13 @@ export const VersionBadge: React.FC<{
   const [desktopUpdaterStatus, setDesktopUpdaterStatus] = React.useState<'pending' | 'available' | 'unavailable'>(
     shellActions ? 'pending' : 'unavailable',
   );
-  const [versionInfo, setVersionInfo] = React.useState<VersionInfo | null>(null);
+  const [versionRead, setVersionInfo] = React.useState<VersionInfo | null>(null);
+  // A standalone Runtime's offer from the user's own check, which may be a silent release unprompted reads leave out.
+  const [checkedOffer, setCheckedOffer] = React.useState<VersionInfo | null>(null);
+  const versionInfo = React.useMemo(
+    () => versionRead && keepCheckedOffer(versionRead, checkedOffer),
+    [versionRead, checkedOffer],
+  );
   const [desktopUpdateState, setDesktopUpdateState] = React.useState<DesktopUpdateState | null>(null);
   const [isPopupOpen, setIsPopupOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
@@ -397,7 +403,12 @@ export const VersionBadge: React.FC<{
       console.error('Failed to check desktop update state:', e);
     }
     try {
-      const info = await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);
+      // A manager's check on a standalone Runtime is the user's own: it also finds a silent release.
+      const checked = fresh && !actions && standaloneManager
+        ? await api.requestUpdateControl('check').then((result) => ('snapshot' in result ? result.snapshot : undefined))
+        : undefined;
+      if (checked) setCheckedOffer(checked);
+      const info = checked ?? await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);
       setVersionInfo(info);
       setVersionLoadFailed(false);
       setCheckedAt(new Date().toISOString());
@@ -509,9 +520,11 @@ export const VersionBadge: React.FC<{
       if (upgrading) return;
       setUpgrading(true);
       setUpgradeResult(null);
-      setUpgradeTarget(versionInfo?.latest ?? null);
+      const target = versionInfo?.latest ?? undefined;
+      setUpgradeTarget(target ?? null);
       try {
-        const result = await api.doUpgrade(options);
+        // Exactly the version on screen: the Runtime refuses one that is not a newer published release.
+        const result = await api.doUpgrade({ ...options, targetVersion: target });
         setUpgradeResult(result);
         if (result.ok && result.restarting) {
           setRestarting(true);
@@ -558,6 +571,7 @@ export const VersionBadge: React.FC<{
   };
 
   const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
+  const standaloneManager = Boolean(versionInfo) && !isDesktopManaged && capabilities.can_manage_instance;
   const remoteDesktopWeb = isDesktopManaged && !inDesktopShell && desktopUpdaterStatus === 'unavailable';
   const canRequestRemoteUpdate = remoteDesktopWeb && capabilities.can_manage_instance;
   const remoteRequest = versionInfo?.remote_request ?? null;

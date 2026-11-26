@@ -88,6 +88,9 @@ def test_failed_upgrade_keeps_running_process_and_old_launcher(monkeypatch, tmp_
     version = {"error": None, "has_update": True, "latest": "3.2.6"}
     monkeypatch.setattr(cli, "get_latest_version", lambda: version)
     monkeypatch.setattr(api, "get_version_info", lambda: version)
+    # The Runtime installs exactly the offer it shows; this test drives the installer, not that lookup.
+    monkeypatch.setattr("vibe.__version__", "1.0", raising=False)
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
     monkeypatch.setattr(api, "_configured_backend_language", lambda: "zh")

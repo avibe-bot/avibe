@@ -2307,11 +2307,18 @@ _RC_SHA = "c" * 64
 
 
 def _write_release_feeds(
-    tmp_path, monkeypatch, *, stable: list[str], candidates: list[str], silent: tuple[str, ...] = ()
+    tmp_path,
+    monkeypatch,
+    *,
+    stable: list[str],
+    candidates: list[str],
+    silent: tuple[str, ...] = (),
+    indexed: tuple[str, ...] = (),
 ) -> None:
     """PyPI metadata with the stable releases, and the mirror index with the GitHub-only candidates.
 
-    The index marks every version in ``silent`` ``update_notification: "none"``.
+    The index marks every version in ``silent`` ``update_notification: "none"``,
+    and also lists the stable releases in ``indexed`` as announced.
     """
 
     pypi = tmp_path / "pypi.json"
@@ -2336,6 +2343,10 @@ def _write_release_feeds(
         {"tag": f"v{version}", "prerelease": False, "commit": "0" * 40, "assets": [], "update_notification": "none"}
         for version in stable
         if version in silent
+    ]
+    releases += [
+        {"tag": f"v{version}", "prerelease": False, "commit": "0" * 40, "assets": []}
+        for version in indexed
     ]
     # Neither a candidate without its core wheel digest nor a full release under a gh-v tag is offered.
     releases += [
@@ -2408,6 +2419,31 @@ def test_get_latest_version_info_offers_silent_releases_only_to_explicit_discove
 
 
 @pytest.mark.parametrize(
+    ("indexed", "silent", "index_available", "latest"),
+    [
+        # An unprompted read offers only what the release index lists as announced:
+        # 3.2.7 is on the package index but not listed yet (it may still turn out silent)...
+        (("3.2.6",), (), True, "3.2.6"),
+        (("3.2.6",), ("3.2.7",), True, "3.2.6"),
+        # ...and is offered once listed.
+        (("3.2.6", "3.2.7"), (), True, "3.2.7"),
+        # With the release index unreachable, the package index alone decides.
+        ((), (), False, "3.2.7"),
+    ],
+)
+def test_unprompted_version_read_offers_only_releases_the_index_announces(
+    monkeypatch, tmp_path, indexed, silent, index_available, latest
+):
+    _write_release_feeds(tmp_path, monkeypatch, stable=["3.2.6", "3.2.7"], candidates=[], silent=silent, indexed=indexed)
+    if not index_available:
+        monkeypatch.setenv("AVIBE_RELEASE_INDEX_URL", (tmp_path / "missing.json").as_uri())
+
+    info = get_latest_version_info("3.2.5", announced_only=True, listed_only=True)
+
+    assert (info["latest"], info["has_update"], info["error"]) == (latest, True, None)
+
+
+@pytest.mark.parametrize(
     ("target", "index_available", "spec", "code"),
     [
         # Exactly the named stable release, pinned below a newer silent one.
@@ -2455,6 +2491,29 @@ def test_do_upgrade_installs_exactly_the_named_release(monkeypatch, tmp_path, ta
         wheel = (tmp_path / "releases" / f"gh-v{target}" / f"avibe_os-{target}-py3-none-any.whl").as_uri()
         spec = f"avibe-os @ {wheel}#sha256={_RC_SHA}"
     assert [plan["package_spec"] for plan in plans] == ([spec] if spec else [])
+
+
+def test_do_upgrade_without_a_version_installs_exactly_the_unprompted_offer(monkeypatch, tmp_path):
+    """An older page or Desktop names no version: it gets the offer it was shown, not a newer silent one."""
+    _write_release_feeds(tmp_path, monkeypatch, stable=["3.2.6", "3.2.7"], candidates=[], silent=("3.2.7",))
+    monkeypatch.setattr("vibe.__version__", "3.2.5", raising=False)
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/tmp/vibe")
+    monkeypatch.setattr(api, "get_version_info", lambda: {"current": "3.2.5", "latest": "3.2.6", "has_update": True})
+    monkeypatch.delenv("AVIBE_UPGRADE_PACKAGE_SPEC", raising=False)
+    monkeypatch.delenv("VIBE_UPGRADE_PACKAGE_SPEC", raising=False)
+    plans = []
+
+    def capture_plan(**kwargs):
+        plans.append(kwargs)
+        raise ValueError("stop after planning")
+
+    monkeypatch.setattr(api, "build_upgrade_plan", capture_plan)
+
+    api.do_upgrade(auto_restart=False)
+
+    assert [(plan["target_version"], plan["package_spec"]) for plan in plans] == [("3.2.6", "avibe-os==3.2.6")]
 
 
 def test_pinned_stable_release_plans_keep_the_pin(monkeypatch):

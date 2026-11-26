@@ -399,6 +399,9 @@ def test_repeated_real_upgrade_callers_retire_history(installation, monkeypatch,
     version = {"error": None, "has_update": True, "latest": "99"}
     monkeypatch.setattr(cli, "get_latest_version", lambda: version)
     monkeypatch.setattr(api, "get_version_info", lambda: version)
+    # The Runtime installs exactly the offer it shows; this test drives the installer, not that lookup.
+    monkeypatch.setattr("vibe.__version__", "1.0", raising=False)
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(cli, "_prepare_show_runtime_after_install", lambda *_: None)
     for index in range(5):
         exported = candidate(root, f"{index:032x}")

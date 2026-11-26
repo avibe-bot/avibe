@@ -25,6 +25,10 @@ pub struct InstanceUpdate {
     /// For an install: a desktop-managed host's request id. Native only.
     #[serde(skip)]
     pub(crate) install_ref: Option<String>,
+    /// The snapshot a standalone Runtime answered the user's own check with.
+    /// Native only.
+    #[serde(skip)]
+    pub(crate) checked: Option<Value>,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -86,6 +90,7 @@ impl InstanceUpdate {
             fetched_at: None,
             request_seen: false,
             install_ref: None,
+            checked: None,
         }
     }
 
@@ -175,6 +180,25 @@ impl InstanceUpdate {
             }
         }
     }
+}
+
+/// A standalone Runtime's unprompted version reads leave silent releases out
+/// (docs/release.md); the user's own check finds them. That check's offer
+/// stands over later reads while the instance runs the same version, until the
+/// next check answers. The Workbench's `keepCheckedOffer` does the same.
+pub(crate) fn keep_checked_offer(mut read: Value, checked: Option<&Value>) -> Value {
+    let Some(checked) = checked.filter(|checked| checked["has_update"] == true && checked["latest"].is_string()) else {
+        return read;
+    };
+    if !read["managed_by"].is_null()
+        || read["current"] != checked["current"]
+        || (read["has_update"] == true && read["latest"] == checked["latest"])
+    {
+        return read;
+    }
+    read["latest"] = checked["latest"].clone();
+    read["has_update"] = json!(true);
+    read
 }
 
 /// The instance reports the accepted action still running.

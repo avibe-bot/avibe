@@ -44,6 +44,18 @@ export function releaseNotesUrl(version: string): string {
   return `https://github.com/avibe-bot/avibe/releases/tag/${encodeURIComponent(tag)}`;
 }
 
+/** A standalone Runtime's unprompted version reads leave silent releases out (docs/release.md); the user's own
+ *  check finds them. That check's offer stands over later reads while the Runtime runs the same version, until
+ *  the next check answers. */
+export function keepCheckedOffer<T extends UpdateSnapshot>(read: T, checked: UpdateSnapshot | null): T {
+  if (!checked?.has_update || !checked.latest || read.managed_by
+    || normalizeVersion(read.current) !== normalizeVersion(checked.current)
+    || (read.has_update && read.latest === checked.latest)) {
+    return read;
+  }
+  return { ...read, latest: checked.latest, has_update: true };
+}
+
 const TERMINAL_REMOTE_PHASES = ['completed', 'failed', 'declined', 'expired'];
 
 /** A remote install request has ended: failed, declined, expired, or completed and confirmed by the running version. */

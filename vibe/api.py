@@ -7863,8 +7863,12 @@ def _runtime_process_was_running() -> bool:
     )
 
 
-def get_version_info() -> dict:
+def get_version_info(*, explicit: bool = False) -> dict:
     """Get package version, deployed build identity, and available updates.
+
+    A standalone Runtime's read is unprompted unless ``explicit`` (the update
+    panel's check): it offers only releases the release index lists as
+    announced, so a silent release never appears on its own (docs/release.md).
 
     Returns:
         {
@@ -7896,7 +7900,12 @@ def get_version_info() -> dict:
     elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
-        result = get_latest_version_info(__version__, prereleases=prerelease_updates_enabled())
+        result = get_latest_version_info(
+            __version__,
+            prereleases=prerelease_updates_enabled(),
+            announced_only=not explicit,
+            listed_only=not explicit,
+        )
     result["build"] = build.as_dict()
     if managed_by:
         result["managed_by"] = managed_by
@@ -7921,9 +7930,10 @@ def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> 
     Args:
         auto_restart: If True, restart vibe after successful upgrade
         target_version: The release the caller resolved (the periodic check,
-            or an update notification's button). Exactly that release is
-            installed, and nothing when it is not newer than the running one.
-            Without it, an explicit upgrade takes the newest release.
+            an update notification's button, or the version an update panel
+            shows). Exactly that release is installed, and nothing when it is
+            not newer than the running one. Without it, the offer an unprompted
+            version read shows is installed, exactly.
 
     Returns:
         {
@@ -7945,9 +7955,13 @@ def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> 
         }
 
     current_vibe_path = get_running_vibe_path()
-    if target_version is None or get_build_identity().kind == "source":
+    source_build = get_build_identity().kind == "source"
+    if target_version is None:
         version_info = get_version_info()
-    else:
+        # An older page or Desktop names no version: install the offer it was shown.
+        if not source_build and version_info.get("has_update") and version_info.get("latest"):
+            target_version = version_info["latest"]
+    if target_version is not None and not source_build:
         from vibe import __version__
 
         if not has_newer_version(target_version, __version__):
