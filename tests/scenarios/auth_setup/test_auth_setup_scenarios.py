@@ -6981,9 +6981,11 @@ def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, t
 
 
 def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-931 — recovery, explicit probe, then account-scoped catalog cutover."""
+    """Scenario: AUTH-SETUP-931 — recovery, explicit probe, then Web re-login and account-scoped catalog cutover."""
     from tests.helpers.antigravity_harness import FakeAgyAuthFixture
     from modules.im import MessageContext
+    import httpx
+    from vibe import api
 
     fake_agy = FakeAgyAuthFixture(tmp_path)
     config = V2Config.default()
@@ -7010,6 +7012,8 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         session_handler=None,
     )
     service = AgentAuthService(controller)
+    service._post_web_success_hook = lambda _backend: None
+    monkeypatch.setattr(api, "_get_oauth_service", lambda: service)
 
     from modules.agents import acp
     from tests.helpers.acp_probe_stub import make_probe_client
@@ -7021,7 +7025,18 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         chunks=[("sess-probe-1", "echo:Hi")],
         authenticated=lambda: json.loads(fake_agy.state_file.read_text())["authenticated"],
     )
-    monkeypatch.setattr(acp, "AcpClient", Client)
+    class LoginProbeClient(Client):
+        auth_methods = [{"id": "oauth-personal"}]
+        supports_logout = False
+        supports_list = True
+        agent_info = {"version": "fixture"}
+
+        async def session_list(self):
+            if not json.loads(fake_agy.state_file.read_text())["authenticated"]:
+                raise acp.AcpRpcError(acp.ACP_AUTH_REQUIRED, "Authentication required")
+            return {"sessions": []}
+
+    monkeypatch.setattr(acp, "AcpClient", LoginProbeClient)
     ctx = MessageContext(user_id="u1", channel_id="c1", platform="slack")
 
     async def _run():
@@ -7057,10 +7072,57 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         from modules.agents.antigravity.models import read_antigravity_live_models
 
         assert read_antigravity_live_models(config)[0]["id"] == "gemini-4-neon"
-        # A verified OAuth consent can leave the selected auth method unchanged;
-        # the old account's menu must still stop governing subsequent pickers.
-        await service._persist_backend_auth_mode("antigravity", "oauth-personal", strict=True)
-        assert read_antigravity_live_models(config) == []
+        # Exercise the Web wire contract with valid credentials: the HTTP
+        # start must publish the CLI URL and accept code before committing.
+        process = FakeProcess()
+        login_url = "https://accounts.google.com/o/oauth2/auth?state=scenario-relogin"
+        process.stdout = SimpleNamespace(readline=AsyncMock(side_effect=[
+            f"Open URL: {login_url}\nPaste code: ".encode(), b"",
+        ]))
+        codes = []
+
+        def accept_code(payload):
+            codes.append(payload)
+            process.finish()
+
+        process.stdin = SimpleNamespace(
+            is_closing=lambda: False, write=accept_code, drain=AsyncMock(),
+        )
+        start_login = AsyncMock(return_value=(process, None))
+        monkeypatch.setattr(service, "_start_antigravity_login_process", start_login)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://localhost") as client:
+            token = (await client.get("/api/csrf-token")).json()["csrf_token"]
+            client.cookies.set("vibe_csrf_token", token, domain="localhost")
+            headers = {"Origin": "http://localhost", "X-Vibe-CSRF-Token": token}
+            base = "/api/backend/antigravity/auth/oauth"
+            started = (await client.post(f"{base}/start", headers=headers, json={
+                "force_reset": False, "auth_mode": "oauth-personal",
+            })).json()
+            assert started["ok"] is True
+            flow_id = started["flow_id"]
+            try:
+                for _ in range(100):
+                    status = (await client.get(f"{base}/status/{flow_id}")).json()
+                    if status.get("url"):
+                        break
+                    await asyncio.sleep(0.01)
+                assert status["state"] == "awaiting_code" and status["url"] == login_url
+                assert status["authorization_completed"] is False
+                start_login.assert_awaited_once()
+                submitted = (await client.post(f"{base}/submit-code", headers=headers, json={
+                    "flow_id": flow_id, "code": "replacement-account-code",
+                })).json()
+                assert submitted == {"ok": True} and codes == [b"replacement-account-code\n"]
+                for _ in range(100):
+                    status = (await client.get(f"{base}/status/{flow_id}")).json()
+                    if status["state"] in {"success", "failed"}:
+                        break
+                    await asyncio.sleep(0.01)
+                assert status["state"] == "success" and status["authorization_completed"] is True
+                assert V2Config.load().agents.antigravity.auth_mode == "oauth-personal"
+                assert read_antigravity_live_models(config) == []
+            finally:
+                await service.cancel_web_flow(flow_id)
 
         for command, env in observed["commands"]:
             assert "--dangerously-skip-permissions" not in command and "--disable-telemetry" in command

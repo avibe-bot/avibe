@@ -1653,7 +1653,7 @@ scenarios:
       - tests/test_antigravity_auth_and_install.py::test_antigravity_auth_save_validation_uses_configured_language
       - tests/test_antigravity_auth_and_install.py::test_agent_platform_adc_detection_and_gcp_settings
   - id: AUTH-SETUP-931
-    name: Antigravity auth recovery, explicit probe, and credential cutover keep the model catalog account-scoped
+    name: Antigravity auth recovery, explicit probe, and Web re-login with valid credentials reach fresh consent and account-scoped catalog cutover
     status: covered
     kind: recovery
     layer: scenario

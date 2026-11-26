@@ -111,7 +111,6 @@ async def test_every_web_backend_publishes_deadline_after_startup_with_waiter(
     service._start_codex_process = start_codex
     service._start_claude_control_flow = start_claude
     service._start_antigravity_login_process = start_antigravity
-    service._try_reuse_antigravity_login = AsyncMock(return_value=False)
     service._lease_opencode_server = lease_returning(server)
     service._wait_for_codex_completion_web = AsyncMock()
     service._wait_for_claude_completion_web = AsyncMock()
@@ -170,7 +169,6 @@ async def test_every_im_native_backend_publishes_deadline_after_startup_with_wai
     service._start_claude_control_flow = start_claude
     service._start_opencode_process = start_opencode
     service._start_antigravity_login_process = start_antigravity
-    service._try_reuse_antigravity_login = AsyncMock(return_value=False)
     service._read_codex_output = AsyncMock()
     service._read_pty_output = AsyncMock()
     service._wait_for_completion = AsyncMock()

@@ -1632,34 +1632,22 @@ class AgentAuthService:
                     if isinstance(flow, WebAuthFlow) and resolved_method == "oauth-business":
                         flow.terminal_command = "agy"
                         flow.instructions = self._t("command.setup.antigravityBusinessFallback", command="agy")
-                    if not force_reset and await self._try_reuse_antigravity_login(flow):
-                        if isinstance(flow, WebAuthFlow):
-                            await self._commit_web_login(flow)
-                            flow.state = "success"
-                        else:
-                            await self._persist_backend_auth_mode(backend, resolved_method)
-                            await self._refresh_backend_runtime(backend)
-                            await self._send_message(flow.context, f"✅ {self._t('command.setup.success', backend=backend)}")
-                        await finish_native_operation(self._cleanup_native_flow(flow))
-                        if isinstance(flow, AgentAuthFlow):
-                            self._flow_registry.drop(flow)
+                    flow.process, flow.pty_master_fd = await self._start_antigravity_login_process(
+                        auth_method=resolved_method,
+                        on_irreversible_start=on_irreversible_start,
+                    )
+                    if isinstance(flow, WebAuthFlow):
+                        flow.callback_kind = "code"
+                        flow.reader_task = asyncio.create_task(self._read_antigravity_output_web(flow))
+                        self._arm_flow_waiter(flow, self._wait_for_antigravity_completion_web(flow))
                     else:
-                        flow.process, flow.pty_master_fd = await self._start_antigravity_login_process(
-                            auth_method=resolved_method,
-                            on_irreversible_start=on_irreversible_start,
+                        reader = (
+                            self._read_pty_output(flow.process, flow.pty_master_fd, context, backend)
+                            if flow.pty_master_fd is not None
+                            else self._read_codex_output(flow.process, context, backend)
                         )
-                        if isinstance(flow, WebAuthFlow):
-                            flow.callback_kind = "code"
-                            flow.reader_task = asyncio.create_task(self._read_antigravity_output_web(flow))
-                            self._arm_flow_waiter(flow, self._wait_for_antigravity_completion_web(flow))
-                        else:
-                            reader = (
-                                self._read_pty_output(flow.process, flow.pty_master_fd, context, backend)
-                                if flow.pty_master_fd is not None
-                                else self._read_codex_output(flow.process, context, backend)
-                            )
-                            flow.reader_task = asyncio.create_task(reader)
-                            self._arm_flow_waiter(flow, self._wait_for_completion(flow))
+                        flow.reader_task = asyncio.create_task(reader)
+                        self._arm_flow_waiter(flow, self._wait_for_completion(flow))
                 else:
                     if context is not None and not native_cli:
                         flow.awaiting_code = True
@@ -1727,21 +1715,6 @@ class AgentAuthService:
             return candidate
         configured = (getattr(self._resolve_backend_config("antigravity"), "auth_mode", None) or "").strip()
         return configured if configured in ANTIGRAVITY_OAUTH_METHODS else "oauth-personal"
-
-    async def _try_reuse_antigravity_login(self, flow: AgentAuthFlow | WebAuthFlow) -> bool:
-        """Reuse an existing OAuth login only when saved auth_mode already matches."""
-        cfg = self._resolve_backend_config("antigravity")
-        configured_mode = (getattr(cfg, "auth_mode", None) or "").strip()
-        requested_mode = (flow.auth_method or "").strip()
-        if requested_mode not in ANTIGRAVITY_OAUTH_METHODS or configured_mode != requested_mode:
-            return False
-        binary = await _native_auth_thread(self._get_cli_binary, "antigravity")
-        probe = await probe_antigravity_passive_status(
-            binary,
-            config=cfg,
-            auth_mode=requested_mode,
-        )
-        return bool(probe.get("authenticated"))
 
     async def _start_antigravity_login_process(
         self,
