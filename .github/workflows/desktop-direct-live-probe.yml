@@ -100,8 +100,8 @@ jobs:
       - name: Check that it refuses an empty input
         run: |
           set -uo pipefail
-          out="$(target/debug/examples/direct_live_probe < /dev/null)"
-          code=$?
+          code=0
+          out="$(target/debug/examples/direct_live_probe < /dev/null)" || code=$?
           printf '%s\n' "$out"
           [ "$code" -eq 2 ] || { echo "expected exit code 2, got $code" >&2; exit 1; }
           printf '%s\n' "$out" | grep -q '"boundary":"input"' || { echo "no input line" >&2; exit 1; }
