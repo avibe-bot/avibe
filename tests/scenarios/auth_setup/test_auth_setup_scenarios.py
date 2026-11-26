@@ -6981,7 +6981,7 @@ def test_antigravity_auth_settings_and_passive_status_closed_loop(monkeypatch, t
 
 
 def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypatch, tmp_path):
-    """Scenario: AUTH-SETUP-931 — -32000 recovery card and explicit probe distinguishing auth, catalog, and inference."""
+    """Scenario: AUTH-SETUP-931 — recovery, explicit probe, then account-scoped catalog cutover."""
     from modules.agents import acp
     from modules.im import MessageContext
 
@@ -7107,6 +7107,14 @@ def test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop(monkeypa
         assert r_ok["catalog_available"] is True
         assert r_ok["inference_verified"] is True
         assert r_ok["excerpt"] == "OK"
+
+        from modules.agents.antigravity.models import read_antigravity_live_models
+
+        assert read_antigravity_live_models(config)[0]["id"] == "gemini-4-neon"
+        # A verified OAuth consent can leave the selected auth method unchanged;
+        # the old account's menu must still stop governing subsequent pickers.
+        await service._persist_backend_auth_mode("antigravity", "oauth-personal", strict=True)
+        assert read_antigravity_live_models(config) == []
 
         for cmd, env in _FakeAcpClient.observed_commands:
             assert "--dangerously-skip-permissions" not in cmd

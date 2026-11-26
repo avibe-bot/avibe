@@ -746,6 +746,12 @@ def _read_raw_live_models_cache(cache_path: Path) -> dict[str, Any]:
     )
 
 
+def invalidate_antigravity_live_models() -> None:
+    """Discard account observations on OAuth cutover, whose config may be unchanged."""
+    with _LIVE_MODELS_CACHE_LOCK:
+        _antigravity_models_cache_path().unlink(missing_ok=True)
+
+
 def record_antigravity_live_models(
     config: Any,
     payload: Mapping[str, Any] | Sequence[Mapping[str, Any]],

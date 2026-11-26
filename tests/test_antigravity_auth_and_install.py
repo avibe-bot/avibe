@@ -208,6 +208,46 @@ async def test_pty_paste_code_oauth_personal_flow_and_acp_logout(fake_agy: FakeA
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transition", ["login", "logout"])
+async def test_oauth_credential_cutover_discards_previous_account_model_menu(
+    fake_agy: FakeAgyAuthFixture, transition: str,
+) -> None:
+    """OAuth accounts can change while every auth-config field remains identical.
+
+    Existing cache tests changed an API key/mode, so they missed this cutover.
+    """
+    from modules.agents.antigravity.models import (
+        auth_config_fingerprint, read_antigravity_live_models, record_antigravity_live_models,
+    )
+    from vibe.backend_model_catalog import backend_model_snapshot
+
+    cfg = V2Config.load().agents.antigravity
+    before_fingerprint = auth_config_fingerprint(cfg)
+    record_antigravity_live_models(cfg, {"configOptions": [{
+        "id": "model", "category": "model", "currentValue": "account-a-only",
+        "options": [{"value": "account-a-only"}],
+    }]})
+    assert read_antigravity_live_models(cfg)[0]["id"] == "account-a-only"
+    service = _make_auth_service()
+
+    if transition == "login":
+        fake_agy.set_state(authenticated=False)
+        fake_agy.set_config({"expected_code": "new-account-code"})
+        flow = await service.start_web_setup("antigravity", force_reset=True, auth_method="oauth-personal")
+        await _poll_flow(service, flow.flow_id, {"awaiting_code"}, require_url=True)
+        assert await service.submit_web_code(flow.flow_id, "new-account-code") == {"ok": True}
+        assert (await _poll_flow(service, flow.flow_id, {"success", "failed"}))["state"] == "success"
+    else:
+        fake_agy.set_state(authenticated=True)
+        assert await service.remove_web_auth("antigravity") == {"ok": True}
+
+    current = V2Config.load().agents.antigravity
+    assert auth_config_fingerprint(current) == before_fingerprint
+    assert read_antigravity_live_models(current) == []
+    assert backend_model_snapshot("antigravity", schedule_refresh=False)["authoritative"] is False
+
+
+@pytest.mark.asyncio
 async def test_try_reuse_rejects_cross_mode_switch_and_oauth_url_buffers_split_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
     probe_calls: list[str] = []
 

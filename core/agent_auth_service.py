@@ -3251,6 +3251,9 @@ class AgentAuthService:
         if backend == "codex":
             logout_ok, logout_error = await self._run_utility_command(binary, "logout")
         elif backend == "antigravity":
+            from modules.agents.antigravity.models import invalidate_antigravity_live_models
+
+            await _native_auth_thread(invalidate_antigravity_live_models)
             logout_ok, logout_error = await logout_antigravity_via_acp(
                 binary, config=self._resolve_backend_config("antigravity")
             )
@@ -4976,6 +4979,12 @@ class AgentAuthService:
 
     async def _persist_backend_auth_mode(self, backend: str, auth_mode: str, *, strict: bool = False) -> None:
         """Persist V2Config.agents.<backend>.auth_mode for web and IM flows."""
+        if backend == "antigravity":
+            from modules.agents.antigravity.models import invalidate_antigravity_live_models
+
+            # A verified OAuth login may change accounts without changing any
+            # config field. Invalidate even when the config patch is a no-op.
+            await _native_auth_thread(invalidate_antigravity_live_models)
         captured_codex_relay: dict | None = None
         observed_codex_api_key_auth = False
         if backend == "claude" and auth_mode == "oauth":
