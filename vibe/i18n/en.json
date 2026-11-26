@@ -1962,5 +1962,11 @@
       "summaryFork": "This fork starts from a summary of the conversation, not its full history.",
       "effortAdjusted": "{model} uses thinking level {effort}.",
       "noEffort": "{model} runs without a thinking level."
+  },
+  "antigravityAuth": {
+    "invalidPayload": "Send the Antigravity settings as an object.",
+    "invalidMode": "Choose a valid Antigravity sign-in method.",
+    "fieldString": "Enter text for {field}.",
+    "apiKeyRequired": "Enter a Gemini API key before saving."
   }
 }

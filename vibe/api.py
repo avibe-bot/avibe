@@ -14491,19 +14491,20 @@ def save_antigravity_auth(payload: dict) -> dict:
     """
     from core.agent_auth_service import ANTIGRAVITY_AUTH_MODES, detect_antigravity_adc
 
+    language = _configured_backend_language()
     if not isinstance(payload, dict):
-        return {"ok": False, "message": "Payload must be an object"}
+        return {"ok": False, "message": backend_t("antigravityAuth.invalidPayload", language)}
 
     auth_mode = payload.get("auth_mode")
     if auth_mode not in ANTIGRAVITY_AUTH_MODES:
         return {
             "ok": False,
-            "message": f"auth_mode must be one of {list(ANTIGRAVITY_AUTH_MODES)}",
+            "message": backend_t("antigravityAuth.invalidMode", language),
         }
 
     raw_api_key = payload.get("api_key")
     if raw_api_key is not None and not isinstance(raw_api_key, str):
-        return {"ok": False, "message": "api_key must be a string"}
+        return {"ok": False, "message": backend_t("antigravityAuth.fieldString", language, field="api_key")}
     api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else None
 
     def _parse_optional_str(field_name: str) -> tuple[bool, Optional[str], Optional[str]]:
@@ -14511,7 +14512,7 @@ def save_antigravity_auth(payload: dict) -> dict:
             return False, None, None
         raw_val = payload.get(field_name)
         if raw_val is not None and not isinstance(raw_val, str):
-            return True, None, f"{field_name} must be a string"
+            return True, None, backend_t("antigravityAuth.fieldString", language, field=field_name)
         cleaned = raw_val.strip() if isinstance(raw_val, str) else None
         return True, (cleaned or None), None
 
@@ -14538,7 +14539,7 @@ def save_antigravity_auth(payload: dict) -> dict:
         target = cfg.agents.antigravity
         effective_key = api_key if api_key else (target.api_key or "").strip() or None
         if auth_mode == "gemini-api-key" and not effective_key:
-            validation_error["message"] = "api_key is required when auth_mode='gemini-api-key'"
+            validation_error["message"] = backend_t("antigravityAuth.apiKeyRequired", language)
             return
         target.auth_mode = auth_mode
         if auth_mode == "gemini-api-key":

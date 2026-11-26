@@ -1962,5 +1962,11 @@
       "summaryFork": "此分支从对话摘要开始，不包含完整历史。",
       "effortAdjusted": "{model} 使用思考级别 {effort}。",
       "noEffort": "{model} 不使用思考级别。"
+  },
+  "antigravityAuth": {
+    "invalidPayload": "请以对象格式提交 Antigravity 设置。",
+    "invalidMode": "请选择有效的 Antigravity 登录方式。",
+    "fieldString": "请为 {field} 输入文本。",
+    "apiKeyRequired": "请先填写 Gemini API Key，再保存。"
   }
 }

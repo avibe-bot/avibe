@@ -325,6 +325,37 @@ async def test_api_key_save_authenticate_and_remove_never_touches_gemini_dir(fak
     assert (r.api_key, r.base_url, r.auth_mode) == (None, None, "oauth-personal")
 
 
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize(("payload", "english", "chinese"), [
+    ([], "Send the Antigravity settings as an object.", "请以对象格式提交 Antigravity 设置。"),
+    ({"auth_mode": "unknown"}, "Choose a valid Antigravity sign-in method.", "请选择有效的 Antigravity 登录方式。"),
+    ({"auth_mode": "gemini-api-key", "api_key": 123}, "Enter text for api_key.", "请为 api_key 输入文本。"),
+    ({"auth_mode": "oauth-personal", "base_url": []}, "Enter text for base_url.", "请为 base_url 输入文本。"),
+    ({"auth_mode": "agent-platform", "gcp_project": []}, "Enter text for gcp_project.", "请为 gcp_project 输入文本。"),
+    ({"auth_mode": "agent-platform", "gcp_location": []}, "Enter text for gcp_location.", "请为 gcp_location 输入文本。"),
+    ({"auth_mode": "gemini-api-key"}, "Enter a Gemini API key before saving.", "请先填写 Gemini API Key，再保存。"),
+])
+def test_antigravity_auth_save_validation_uses_configured_language(
+    fake_agy: FakeAgyAuthFixture, monkeypatch, language, payload, english, chinese,
+):
+    """Rejected form saves render localized guidance, including a key removed since readback.
+
+    Successful-save tests never checked the display text of rejected inputs.
+    """
+    cfg = V2Config.load()
+    cfg.language = language
+    cfg.agents.antigravity.api_key = None
+    cfg.save()
+    restart = []
+    monkeypatch.setattr(api, "restart_backend", lambda *_args, **_kwargs: restart.append(True))
+
+    result = api.save_antigravity_auth(payload)
+
+    assert result["ok"] is False
+    assert result["message"] == (chinese if language == "zh" else english)
+    assert restart == [] and fake_agy.invocations() == []
+
+
 @pytest.mark.asyncio
 async def test_agent_platform_adc_detection_and_gcp_settings(fake_agy: FakeAgyAuthFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(api, "restart_backend", lambda *_a, **_kw: {"ok": True})
