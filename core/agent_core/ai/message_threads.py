@@ -60,7 +60,7 @@ class Parent:
     history: bytes
     assistant: bytes
     message_id: str | None  # None: ordinary full witness, never a server parent.
-    tokens: int
+    tokens: int | None  # Only a server parent needs a size for delta admission.
     expires: float
     reads: int | None = None
     terminal_mark: bool = False
@@ -217,10 +217,13 @@ class Attempt:
             # The request was pinned, but these counters did not come from a verified serving hop.
             for key in ("route_hash", "model", "prior_cache_reads"):
                 self.record.pop(key, None)
-        writes = raw.get("cache_creation_input_tokens")
-        if type(writes) is int and writes >= 0:
-            self.record["create_cache_writes"] = writes
-        # Use the canonical start/delta reconciliation. A revised aggregate may invalidate older TTL detail.
+        # Project the canonical stream revision; do not merge a second copy of the provider's write counters.
+        if usage is not None and (usage.cache_write_total_reported or usage.cache_writes_by_ttl is not None):
+            self.record["create_cache_writes"] = usage.cache_write_tokens
+            self.record["create_cache_write_basis"] = "reported" if usage.cache_write_total_reported else "derived"
+        else:
+            self.record.pop("create_cache_writes", None)
+            self.record.pop("create_cache_write_basis", None)
         if usage is not None and usage.cache_writes_by_ttl is not None:
             self.record["create_cache_writes_by_ttl"] = dict(usage.cache_writes_by_ttl)
         else:
@@ -440,7 +443,7 @@ def prepare(
                 mode, reason = "full", "image_delta"
             elif parent.message_id is None:
                 pass  # A full-history create neither restores parent tokens nor needs a small suffix.
-            elif parent.tokens < MIN_PARENT_TOKENS:
+            elif parent.tokens is None or parent.tokens < MIN_PARENT_TOKENS:
                 reason = "small_parent"
             elif budget_reason := _continuation_budget(full, suffix, parent.tokens):
                 reason = budget_reason

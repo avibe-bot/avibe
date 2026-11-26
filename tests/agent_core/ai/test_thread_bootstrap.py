@@ -225,6 +225,125 @@ async def test_origin_rejected_create_keeps_unattributed_reported_usage_then_rep
     assert facts["create_usage_attribution"] == "unverified" and "route_hash" not in facts and "model" not in facts
 
 
+def stream_usage(start, delta):
+    frames = []
+    for line in served(22000).text.splitlines(keepends=True):
+        if line.startswith("data: "):
+            event = json.loads(line[6:])
+            if event["type"] in ("message_start", "message_delta"):
+                obj, fields = (event["message"], start) if event["type"] == "message_start" else (event, delta)
+                obj.pop("usage", None)
+                if fields is not None:
+                    obj["usage"] = fields
+                line = "data: " + json.dumps(event) + "\n"
+        frames.append(line)
+    return httpx.Response(200, text="".join(frames))
+
+
+@pytest.mark.parametrize("envelope", [None, {}, {"output_tokens": 1}])
+async def test_continue_without_first_event_input_replays_full_once(envelope):
+    bodies = []
+
+    def handle(wire):
+        bodies.append(json.loads(wire.content))
+        if len(bodies) == 2:
+            # Even a large input report in a later delta would be too late.
+            return stream_usage(envelope, {"input_tokens": 45000})
+        return served(22000)
+
+    req = replace(_request(messages=(user("large " * 11000),)), thread_observation=ThreadObservation("first-input"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        follow = await send(adapter, req)
+        await send(adapter, follow)
+    assert [body.get("thread", {}).get("type", "full") for body in bodies] == ["create", "continue", "full"]
+    assert len(bodies[2]["messages"]) == len(follow.messages)
+    assert follow.thread_observation.attempts[0]["failure"] == "thread_usage_mismatch"
+
+
+@pytest.mark.parametrize("envelope", [None, {}, {"output_tokens": 1}])
+async def test_usage_optional_for_exact_full_witness_not_for_delta(envelope):
+    bodies = []
+
+    def handle(wire):
+        bodies.append(json.loads(wire.content))
+        return stream_usage(envelope, None) if len(bodies) <= 2 else served(22000)
+
+    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("usage-witness"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        root = await send(adapter, req)
+        follow = await send(adapter, root)
+        await send(adapter, follow)
+    assert req.thread_observation.attempts[0]["binding"] == "full_witness"
+    assert bodies[1]["thread"] == {"type": "create"} and len(bodies[1]["messages"]) == len(root.messages)
+    assert "prior_cache_reads" not in root.thread_observation.attempts[0]
+    assert root.thread_observation.attempts[0]["binding"] == ("missing_usage" if envelope is None else "bound")
+    assert bodies[2].get("thread", {}).get("type") != "continue"
+
+
+@pytest.mark.parametrize("initial", ["neither", "total", "detail", "both"])
+@pytest.mark.parametrize("revision", ["neither", "total", "detail", "both"])
+async def test_create_write_receipt_matches_canonical_revision(initial, revision):
+    a = {
+        "neither": {},
+        "total": {"cache_creation_input_tokens": 0},
+        "detail": {"cache_creation": {"ephemeral_5m_input_tokens": 5}},
+        "both": {"cache_creation_input_tokens": 11, "cache_creation": {"ephemeral_5m_input_tokens": 5}},
+    }[initial]
+    b = {
+        "neither": {},
+        "total": {"cache_creation_input_tokens": 0},
+        "detail": {"cache_creation": {"ephemeral_1h_input_tokens": 75}},
+        "both": {"cache_creation_input_tokens": 9, "cache_creation": {"ephemeral_1h_input_tokens": 9}},
+    }[revision]
+    req = replace(_request(messages=(user("small"),)), thread_observation=ThreadObservation("receipt-matrix"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: stream_usage(a, b))) as client:
+        follow = await send(AnthropicAdapter(client), req)
+    usage = follow.messages[-2].usage
+    receipt = req.thread_observation.attempts[0]
+    old_detail = initial in ("detail", "both")
+    if revision == "neither":
+        total, basis = {
+            "neither": (None, None),
+            "total": (0, "reported"),
+            "detail": (5, "derived"),
+            "both": (11, "reported"),
+        }[initial]
+        detail = {"5m": 5} if old_detail else None
+    elif revision == "total":
+        total, basis, detail = 0, "reported", None
+    elif revision == "detail":
+        total, basis = (80 if old_detail else 75), "derived"
+        detail = {"5m": 5, "1h": 75} if old_detail else {"1h": 75}
+    else:
+        total, basis, detail = 9, "reported", None if old_detail else {"1h": 9}
+    assert (
+        receipt.get("create_cache_writes"),
+        receipt.get("create_cache_write_basis"),
+        receipt.get("create_cache_writes_by_ttl"),
+    ) == (total, basis, detail)
+    assert (usage.cache_write_tokens, usage.cache_write_total_reported, usage.cache_writes_by_ttl) == (
+        total or 0,
+        basis == "reported",
+        detail,
+    )
+
+
+@pytest.mark.parametrize("revised", [0, 75])
+async def test_replaced_ttl_counter_is_not_added_to_older_revision(revised):
+    start = {"cache_creation_input_tokens": 10, "cache_creation": {"ephemeral_5m_input_tokens": 10}}
+    delta = {"cache_creation_input_tokens": None, "cache_creation": {"ephemeral_5m_input_tokens": revised}}
+    req = replace(_request(messages=(user("small"),)), thread_observation=ThreadObservation("replace-ttl"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: stream_usage(start, delta))) as client:
+        follow = await send(AnthropicAdapter(client), req)
+    usage = follow.messages[-2].usage
+    receipt = req.thread_observation.attempts[0]
+    assert receipt["create_cache_writes"] == usage.cache_write_tokens == revised
+    assert receipt["create_cache_writes_by_ttl"] == usage.cache_writes_by_ttl == {"5m": revised}
+    assert receipt["create_cache_write_basis"] == "derived" and not usage.cache_write_total_reported
+
+
 async def test_revised_zero_create_total_drops_obsolete_ttl_detail():
     req = replace(_request(messages=(user("small"),)), thread_observation=ThreadObservation("revised"))
     text = (
