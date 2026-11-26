@@ -779,13 +779,16 @@ def test_desktop_ready_request_body_has_one_deadline_and_size_bound(monkeypatch,
     try:
         monkeypatch.setattr(runtime, "resolve_service_owner_pid", lambda **kwargs: 1234)
         monkeypatch.setattr(runtime, "pid_alive", lambda _pid: True)
+        # A retry cycle takes ~130 ms, plus cold client setup on loaded runners.
+        timeout = 1.0 if response_kind == "starting" else 0.2
+        wall_bound = 1.5 if response_kind == "starting" else 0.5
         started = time.monotonic()
         assert runtime.wait_for_desktop_startup_ready(
-            1234, "127.0.0.1", server.server_address[1], timeout=0.2,
+            1234, "127.0.0.1", server.server_address[1], timeout=timeout,
         ) is None
-        assert time.monotonic() - started < 0.5
+        assert time.monotonic() - started < wall_bound
         if response_kind == "starting":
-            assert len(requests) >= 2, "retries consume the original total deadline"
+            assert 2 <= len(requests) <= 12, "retries consume the original total deadline and stop"
         assert completed.wait(2)
     finally:
         server.shutdown()
