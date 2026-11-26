@@ -334,6 +334,9 @@ jobs:
             scripts/release_package_version.py
             .github/actions/sqlite-predecessor-contract/action.yml
             tests/test_distribution_artifacts.py
+            tests/test_upgrade_flow.py
+            tests/test_install_script.py
+            tests/e2e/test_install_command.py
           sparse-checkout-cone-mode: false
 
       - name: Setup Node.js
@@ -479,15 +482,27 @@ jobs:
           fi
 
       - name: Run release install and upgrade regressions
+        # The tag's code is built and installed; only these test files come from the
+        # workflow's commit, like the release scripts, so a test fixed after tagging
+        # needs no new tag. The built distributions are fixed before and checked after.
         run: |
           set -euo pipefail
           docker info
+          sha256sum dist/* > "$RUNNER_TEMP/dist-before.sha256"
+          for test_file in \
+            tests/test_upgrade_flow.py \
+            tests/test_install_script.py \
+            tests/e2e/test_install_command.py; do
+            cp "release-automation/$test_file" "$test_file"
+          done
           export VIBE_INSTALL_TEST_WHEEL="$(ls dist/avibe_os-*.whl)"
           pytest \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
+          sha256sum --check --strict "$RUNNER_TEMP/dist-before.sha256"
+          git checkout -- tests/test_upgrade_flow.py tests/test_install_script.py tests/e2e/test_install_command.py
 
       - name: Upload GitHub release assets
         env:
