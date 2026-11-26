@@ -106,9 +106,16 @@ def resolve_antigravity_cli_path(raw_cli_path: str | None) -> str:
     return _normalize_explicit_cli_path(selected)
 
 
-def antigravity_acp_command(binary: str, *, login: bool = False) -> list[str]:
-    """Build argv for Antigravity auth/status/logout/probe ACP calls (never permission bypass)."""
-    return [binary, "acp", *(["--login"] if login else []), "--disable-telemetry"]
+def antigravity_acp_command(
+    binary: str, *, login: bool = False, execution: bool = False, subagent_name: str | None = None,
+) -> list[str]:
+    """Build ACP argv; only managed turns receive the permission bypass."""
+    argv = [binary, "acp", *(["--login"] if login else []), "--disable-telemetry"]
+    if execution:
+        argv.append("--dangerously-skip-permissions")
+        if subagent_name:
+            argv.extend(["--agent", subagent_name])
+    return argv
 
 
 def extract_antigravity_oauth_url(raw_buffer: str, *, eof: bool = False) -> str | None:

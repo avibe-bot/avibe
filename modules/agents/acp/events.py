@@ -67,25 +67,6 @@ class AcpUsageUpdate:
 
 
 @dataclass(frozen=True)
-class AcpAvailableCommand:
-    """One slash-command entry inside an ``available_commands_update``."""
-
-    name: str
-    description: str
-    input_hint: str | None
-    raw: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class AcpAvailableCommandsUpdate:
-    """An ``available_commands_update`` notification."""
-
-    session_id: str
-    commands: tuple[AcpAvailableCommand, ...]
-    raw: dict[str, Any]
-
-
-@dataclass(frozen=True)
 class AcpConfigOptionUpdate:
     """A ``config_option_update`` notification."""
 
@@ -118,7 +99,6 @@ AcpSessionUpdate = (
     | AcpThoughtChunkUpdate
     | AcpToolCallUpdate
     | AcpUsageUpdate
-    | AcpAvailableCommandsUpdate
     | AcpConfigOptionUpdate
     | AcpSessionInfoUpdate
     | AcpUnknownUpdate
@@ -171,30 +151,6 @@ def parse_diff_blocks(content: Any) -> tuple[AcpDiffBlock, ...]:
             )
         )
     return tuple(diffs)
-
-
-def _parse_available_commands(raw_commands: Any) -> tuple[AcpAvailableCommand, ...]:
-    if not isinstance(raw_commands, list):
-        return ()
-    commands: list[AcpAvailableCommand] = []
-    for item in raw_commands:
-        if not isinstance(item, Mapping):
-            continue
-        name = item.get("name")
-        if not isinstance(name, str):
-            continue
-        description = item.get("description") if isinstance(item.get("description"), str) else ""
-        input_spec = item.get("input")
-        input_hint = _opt_str(input_spec.get("hint")) if isinstance(input_spec, Mapping) else None
-        commands.append(
-            AcpAvailableCommand(
-                name=name,
-                description=description,
-                input_hint=input_hint,
-                raw=dict(item),
-            )
-        )
-    return tuple(commands)
 
 
 def parse_session_update(params: Mapping[str, Any]) -> AcpSessionUpdate:
@@ -268,13 +224,6 @@ def parse_session_update(params: Mapping[str, Any]) -> AcpSessionUpdate:
             used=_opt_int(update.get("used")),
             size=_opt_int(update.get("size")),
             cost=cost,
-            raw=raw,
-        )
-
-    if update_type == "available_commands_update":
-        return AcpAvailableCommandsUpdate(
-            session_id=session_id,
-            commands=_parse_available_commands(update.get("availableCommands")),
             raw=raw,
         )
 

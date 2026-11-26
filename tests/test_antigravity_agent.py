@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.helpers.antigravity_harness import make_native_provider
+
 import asyncio
 import json
 import os
@@ -21,18 +23,11 @@ from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure
 from core.run_settlement import SETTLED_BY_STOPPED
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerReconcileRequest, SteerRequest
 from core.services.running_agents import _resolve_live_state, end_running_agent, snapshot_running_agents
-from modules.agents.acp import AcpRpcError
-from modules.agents.antigravity import (
-    AGY_CLI_DISABLE_AUTO_UPDATE_ENV,
-    MAX_RULE_FILE_BYTES,
-    MAX_RULE_TOTAL_BYTES,
-    AntigravityAgent,
-    AntigravityModelSelectionError,
-    apply_model_and_effort,
-    build_antigravity_command,
-    build_antigravity_env,
-    render_session_rules,
-)
+from modules.agents.acp.client import AcpRpcError
+from modules.agents.antigravity.agent import AGY_CLI_DISABLE_AUTO_UPDATE_ENV, AntigravityAgent, build_antigravity_env
+from modules.agents.antigravity.rules import MAX_RULE_FILE_BYTES, MAX_RULE_TOTAL_BYTES, render_session_rules
+from modules.agents.antigravity.models import AntigravityModelSelectionError, apply_model_and_effort
+from modules.agents.antigravity.auth import antigravity_acp_command
 from modules.agents.antigravity import agent as agy_agent_module
 from modules.agents.antigravity.agent import resolve_antigravity_cli_path
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
@@ -62,19 +57,19 @@ def _peer_opt(state_file: Path, session_id: str, option_id: str) -> str | None:
 
 @pytest.mark.asyncio
 async def test_launch_argv_and_env_contract_for_execution_and_passive_list(tmp_path: Path) -> None:
-    async with make_agent_harness(tmp_path, auth_mode="gemini-api-key", api_key="test-gemini-key", base_url="https://gemini.example.test/v1", extra_args=["--sandbox"]) as h:
+    async with make_agent_harness(tmp_path, auth_mode="gemini-api-key", api_key="test-gemini-key", base_url="https://gemini.example.test/v1") as h:
         await h.agent.handle_message(make_request(message="stream_all", workdir=h.workdir, model="model-alpha", subagent_name="reviewer"))
         launches = h.launches()
-        assert len(launches) == 1 and launches[0]["argv"] == ["acp", "--disable-telemetry", "--dangerously-skip-permissions", "--sandbox", "--agent", "reviewer"]
+        assert len(launches) == 1 and launches[0]["argv"] == ["acp", "--disable-telemetry", "--dangerously-skip-permissions", "--agent", "reviewer"]
         assert (launches[0]["env"][AGY_CLI_DISABLE_AUTO_UPDATE_ENV], launches[0]["env"]["GEMINI_API_KEY"], launches[0]["env"]["GOOGLE_GEMINI_BASE_URL"], launches[0]["env"][AVIBE_SESSION_ID_ENV]) == (
             "true", "test-gemini-key", "https://gemini.example.test/v1", "ses_1"
         )
 
         adc_env = build_antigravity_env(antigravity_config(h.shim, auth_mode="agent-platform", gcp_project="proj-123", gcp_location="us-central1"), base_env={"PATH": os.environ.get("PATH", "")})
         assert (adc_env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV], adc_env["GOOGLE_CLOUD_PROJECT"], adc_env["GOOGLE_CLOUD_LOCATION"]) == ("true", "proj-123", "us-central1")
-        assert "--dangerously-skip-permissions" not in build_antigravity_command("agy", execution=False)
+        assert "--dangerously-skip-permissions" not in antigravity_acp_command("agy", execution=False)
 
-        provider = AntigravityNativeSessionProvider(cli_path=str(h.shim), config=h.agy_cfg)
+        provider = make_native_provider(cli_path=str(h.shim), config=h.agy_cfg)
         items = await asyncio.to_thread(provider.list_metadata, str(h.workdir))
         assert len(items) == 1 and (items[0].agent, items[0].agent_prefix, items[0].native_session_id) == ("antigravity", "ag", "sess-1")
         assert provider.hydrate_preview(items[0]).last_agent_message == "Update greeting"
@@ -122,7 +117,7 @@ async def test_live_env_never_inherits_gemini_api_key_and_missing_key_fails_with
         note = h.controller.events("notify")[0][1]
         assert "-32000" in note and "Gemini API key is not configured." in note
 
-        provider = AntigravityNativeSessionProvider(cli_path=str(h.shim), config=h.agy_cfg)
+        provider = make_native_provider(cli_path=str(h.shim), config=h.agy_cfg)
         assert await asyncio.to_thread(provider.list_metadata, str(h.workdir)) == []
         assert h.launches() == []
 
@@ -184,13 +179,13 @@ async def test_post_initialize_authenticate_for_adapter_and_native_sessions(tmp_
         await h2.agent.handle_message(make_request(message="recall", workdir=workdir))
         assert "stream_all" in h2.controller.events("result")[0][1]
 
-    listed = await asyncio.to_thread(AntigravityNativeSessionProvider(cli_path=str(shim), config=agy_cfg).list_metadata, str(workdir))
+    listed = await asyncio.to_thread(make_native_provider(cli_path=str(shim), config=agy_cfg).list_metadata, str(workdir))
     assert len(listed) == 1 and listed[0].native_session_id == "sess-1" and listed[0].locator["title"] == "Update greeting"
 
     async with make_agent_harness(tmp_path, workdir=workdir, cli_path=shim, auth_mode="oauth-personal", name=f"unauth-{auth_mode}") as h_bad:
         await h_bad.agent.handle_message(make_request(message="hello", workdir=workdir, base_session_id="unauth"))
         assert "-32000" in h_bad.controller.events("notify")[0][1]
-    assert await asyncio.to_thread(AntigravityNativeSessionProvider(cli_path=str(shim), config=antigravity_config(shim, auth_mode="oauth-personal")).list_metadata, str(workdir)) == []
+    assert await asyncio.to_thread(make_native_provider(cli_path=str(shim), config=antigravity_config(shim, auth_mode="oauth-personal")).list_metadata, str(workdir)) == []
 
 
 @pytest.mark.asyncio
@@ -621,35 +616,35 @@ async def test_caller_context_session_stable_reuse_replacement_and_sibling_isola
     async with make_agent_harness(tmp_path) as h:
         req_b = make_request(message="sibling-marker", workdir=h.workdir, base_session_id="slack_sibling_B", session_key="slack::channel::CB")
         await h.agent.handle_message(req_b)
-        sib_pid, sib_native = h.agent._sessions[req_b.composite_session_id].client.pid, h.agent._sessions[req_b.composite_session_id].native_session_id
+        sib_pid, sib_native = h.agent._sessions[req_b.composite_session_id].client._process.pid, h.agent._sessions[req_b.composite_session_id].native_session_id
 
         req1 = make_request(message="turn-1", workdir=h.workdir, user_id="U1", message_id="M1")
         await h.agent.handle_message(req1)
         sess_a = h.agent._sessions[req1.composite_session_id]
-        pid1, native_a = sess_a.client.pid, sess_a.native_session_id
+        pid1, native_a = sess_a.client._process.pid, sess_a.native_session_id
         assert pid1 != sib_pid and native_a != sib_native and AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and len(h.launches()) == 2
 
         await h.agent.handle_message(make_request(message="turn-2", workdir=h.workdir, user_id="U2", message_id="M2"))
-        assert h.agent._sessions[req1.composite_session_id].client.pid == pid1 and len(h.launches()) == 2
+        assert h.agent._sessions[req1.composite_session_id].client._process.pid == pid1 and len(h.launches()) == 2
 
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, user_id="U2", message_id="M3", platform_specific={"task_execution_id": "run_42", "task_trigger_kind": "agent_run", "source_kind": "agent"}))
-        pid3 = h.agent._sessions[req1.composite_session_id].client.pid
+        pid3 = h.agent._sessions[req1.composite_session_id].client._process.pid
         assert pid3 == pid1 and h.agent._sessions[req1.composite_session_id].native_session_id == native_a
         assert AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and AVIBE_CALLER_SOURCE_ENV not in h.launches()[-1]["env"]
         assert "turn-1" in h.controller.events("result")[0][1] and "turn-2" in h.controller.events("result")[0][1]
 
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, platform="avibe", user_id="remote:sub-alice", message_id="M4", platform_specific={"message_metadata": {"resource_user_context": {"sub": "sub-alice", "role": "editor"}}}))
-        pid4 = h.agent._sessions[req1.composite_session_id].client.pid
+        pid4 = h.agent._sessions[req1.composite_session_id].client._process.pid
         assert pid4 != pid3 and json.loads(h.launches()[-1]["env"][AVIBE_CALLER_RESOURCE_CONTEXT_ENV]) == {"role": "editor", "sub": "sub-alice"}
 
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, user_id="U1", message_id="M5"))
-        pid5 = h.agent._sessions[req1.composite_session_id].client.pid
+        pid5 = h.agent._sessions[req1.composite_session_id].client._process.pid
         assert pid5 != pid4 and AVIBE_RUN_ID_ENV not in h.launches()[-1]["env"] and h.launches()[-1]["env"].get(AVIBE_CALLER_SOURCE_ENV) != "agent_run"
 
-        assert h.agent._sessions[req_b.composite_session_id].client.pid == sib_pid and h.agent._sessions[req_b.composite_session_id].client.is_alive
+        assert h.agent._sessions[req_b.composite_session_id].client._process.pid == sib_pid and h.agent._sessions[req_b.composite_session_id].client.is_alive
         h.controller.emitted.clear()
         await h.agent.handle_message(make_request(message="recall", workdir=h.workdir, base_session_id="slack_sibling_B", session_key="slack::channel::CB"))
         sib_reply = h.controller.events("result")[0][1]
@@ -759,7 +754,7 @@ async def test_idle_eviction_respects_runtime_ownership_and_renewal(tmp_path: Pa
         await h.agent.reap_runtime_generations()
         assert req.composite_session_id in h.agent._sessions
 
-        await h.agent.renew_runtime(antigravity_config(h.shim, extra_args=["--sandbox"]), config_save=True)
+        await h.agent.renew_runtime(antigravity_config(h.shim, auth_mode="oauth-business"), config_save=True)
         await h.agent.reap_runtime_generations()
         assert req.composite_session_id not in h.agent._sessions and not session2.client.is_alive
 
@@ -772,7 +767,7 @@ async def test_sibling_runtime_isolation_and_running_agents_end(tmp_path: Path) 
         await asyncio.gather(h.agent.handle_message(req_a), h.agent.handle_message(req_b))
 
         sess_a, sess_b = h.agent._sessions[req_a.composite_session_id], h.agent._sessions[req_b.composite_session_id]
-        assert sess_a.client.pid != sess_b.client.pid and sess_a.activation != sess_b.activation and sess_a.spec.rules_dirs != sess_b.spec.rules_dirs
+        assert sess_a.client._process.pid != sess_b.client._process.pid and sess_a.activation != sess_b.activation and sess_a.spec.rules_dirs != sess_b.spec.rules_dirs
         texts = [text for _, text, _ in h.controller.events("result")]
         assert any("echo:hello-a" in t for t in texts) and any("echo:hello-b" in t for t in texts) and h.agent.runtime_activation_identity_for_request(req_a) == sess_a.activation
 
@@ -1371,7 +1366,7 @@ async def test_genuine_launch_input_changes_replace_same_key_runtime(tmp_path, c
         elif change == "renewal":
             await h.agent.renew_runtime(h.agy_cfg)
         else:
-            await h.agent.renew_runtime(antigravity_config(h.shim, auth_mode="gemini-api-key", api_key="test-key", extra_args=["--sandbox"]), config_save=True)
+            await h.agent.renew_runtime(antigravity_config(h.shim, auth_mode="gemini-api-key", api_key="test-key", base_url="https://new.example.test/v1"), config_save=True)
         await h.agent.handle_message(next_req)
         second = h.agent._sessions[req.composite_session_id]
         assert second.client is not first.client and len(h.launches()) == 2

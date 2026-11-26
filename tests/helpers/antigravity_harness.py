@@ -321,10 +321,18 @@ class FakeController:
 def antigravity_config(cli_path: Path | str, **overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(
         **{
-            "enabled": True, "cli_path": str(cli_path), "auth_mode": "oauth", "api_key": None, "base_url": None,
-            "gcp_project": None, "gcp_location": None, "extra_args": [], "idle_timeout_seconds": 600, **overrides,
+            "enabled": True, "cli_path": str(cli_path), "auth_mode": "oauth-personal", "api_key": None, "base_url": None,
+            "gcp_project": None, "gcp_location": None, "idle_timeout_seconds": 600, **overrides,
         }
     )
+
+
+def make_native_provider(*, cli_path="agy", config=None):
+    from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
+
+    provider = AntigravityNativeSessionProvider()
+    provider._effective_config = lambda: config if config is not None else antigravity_config(cli_path)
+    return provider
 
 
 def app_config(agy_cfg: Any, *, show_duration: bool = False, language: str = "en") -> SimpleNamespace:
@@ -398,7 +406,7 @@ def make_agent_harness(
     name: str = "fake-agy",
     **cfg_overrides: Any,
 ) -> AntigravityHarness:
-    from modules.agents.antigravity import AntigravityAgent
+    from modules.agents.antigravity.agent import AntigravityAgent
 
     repo = workdir or (tmp_path / "repo")
     repo.mkdir(parents=True, exist_ok=True)

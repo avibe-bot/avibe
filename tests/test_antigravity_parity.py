@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.helpers.antigravity_harness import make_native_provider
+
 import asyncio
 import base64
 import json
@@ -32,7 +34,7 @@ from core.services.session_fork import (
 )
 from core.session_handoff import HANDOFF_BUDGET_CHARS
 from core.vibe_agents import VibeAgentStore, parse_agent_file
-from modules.agents.antigravity import AGY_CLI_DISABLE_AUTO_UPDATE_ENV
+from modules.agents.antigravity.agent import AGY_CLI_DISABLE_AUTO_UPDATE_ENV
 from modules.agents.antigravity import agent as agy_agent_module
 from modules.agents.base import AgentRequest
 from modules.agents.native_sessions.antigravity import AntigravityNativeSessionProvider
@@ -157,7 +159,7 @@ async def test_antigravity_title_backfill_and_native_discovery_do_not_block_even
         return [{"sessionId": "ag-sess-slow", "cwd": path, "title": "Offloaded Antigravity Title", "updatedAt": "2026-07-26T08:01:00Z"}]
 
     monkeypatch.setattr(AntigravityNativeSessionProvider, "_list_raw_sessions", _slow_list)
-    provider = AntigravityNativeSessionProvider(cli_path="agy")
+    provider = make_native_provider(cli_path="agy")
     for call in (lambda: provider.list_metadata(str(workdir)), lambda: provider.get_title(native_session_id="ag-sess-slow", working_path=str(workdir))):
         with pytest.raises(RuntimeError, match="running event loop"):
             call()
@@ -169,8 +171,6 @@ async def test_antigravity_title_backfill_and_native_discovery_do_not_block_even
 
     async_items, elapsed = await asyncio.gather(provider.list_metadata_async(str(workdir)), _timer())
     assert elapsed < 0.1 and [i.native_session_id for i in async_items] == ["ag-sess-slow"]
-    async_title = await provider.get_title_async(working_path=str(workdir), native_session_id="ag-sess-slow")
-    assert async_title is not None and async_title.title == "Offloaded Antigravity Title"
 
     thread_items, t_elapsed = await asyncio.gather(asyncio.to_thread(provider.list_metadata, str(workdir)), _timer())
     assert t_elapsed < 0.1 and len(thread_items) == 1 and seen_threads[-1] != loop_tid
@@ -385,23 +385,23 @@ async def test_message_handler_routes_antigravity_subagent_with_isolated_process
         await handler.handle_user_message(_ctx("m1"), "parent-secret-marker")
         parent_key, subagent_key = f"slack_thread_1:{workspace}", f"slack_thread_1:reviewer:{workspace}"
         parent_sess = h.agent._sessions[parent_key]
-        parent_pid, parent_native_id = parent_sess.client.pid, parent_sess.native_session_id
+        parent_pid, parent_native_id = parent_sess.client._process.pid, parent_sess.native_session_id
         assert parent_native_id == "sess-1"
 
         ctrl.emitted.clear()
         await handler.handle_user_message(_ctx("m2"), "reviewer: audit-subagent-marker")
         sub_sess = h.agent._sessions[subagent_key]
-        assert sub_sess.client.pid != parent_pid and sub_sess.native_session_id != parent_native_id and sub_sess.spec.rules_dirs != parent_sess.spec.rules_dirs
+        assert sub_sess.client._process.pid != parent_pid and sub_sess.native_session_id != parent_native_id and sub_sess.spec.rules_dirs != parent_sess.spec.rules_dirs
         assert (sub_sess.current_model, sub_sess.current_effort) == ("model-beta", "high") and parent_sess.client.is_alive and sessions._by_id[parent_row_id]["native_session_id"] == parent_native_id
         assert len(h.launches()) == 2 and "--agent" not in h.launches()[0]["argv"] and h.launches()[1]["argv"][-2:] == ["--agent", "reviewer"]
 
         ctrl.emitted.clear()
         await handler.handle_user_message(_ctx("m3"), "reviewer: subagent-followup")
-        assert "subagent-followup" in ctrl.events("result")[0][1] and "model=model-beta" in ctrl.events("result")[0][1] and h.agent._sessions[subagent_key].client.pid == sub_sess.client.pid
+        assert "subagent-followup" in ctrl.events("result")[0][1] and "model=model-beta" in ctrl.events("result")[0][1] and h.agent._sessions[subagent_key].client._process.pid == sub_sess.client._process.pid
 
         ctrl.emitted.clear()
         await handler.handle_user_message(_ctx("m4"), "parent-followup")
-        assert "parent-followup" in ctrl.events("result")[0][1] and "model=model-alpha" in ctrl.events("result")[0][1] and h.agent._sessions[parent_key].client.pid == parent_pid and len(h.launches()) == 2
+        assert "parent-followup" in ctrl.events("result")[0][1] and "model=model-alpha" in ctrl.events("result")[0][1] and h.agent._sessions[parent_key].client._process.pid == parent_pid and len(h.launches()) == 2
 
         by_sess: dict[str, list[str]] = {}
         for msg in h.rpcs("session/prompt"):

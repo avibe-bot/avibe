@@ -1382,7 +1382,9 @@ def backend_model_snapshot(backend: str, *, schedule_refresh: bool = True) -> di
         sources = _claude_sources(remote_catalog, bundled_catalog)
         blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     elif backend_key == "antigravity":
-        local_catalog = _read_antigravity_models_cache()
+        from modules.agents.antigravity.models import read_antigravity_live_models
+
+        local_catalog = read_antigravity_live_models()
         sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
         blocked = (
             set()
@@ -1496,7 +1498,9 @@ def backend_builtin_snapshot(
         )
         blocked = _claude_blocked_model_ids(remote_catalog, bundled_catalog)
     elif backend_key == "antigravity":
-        local_catalog = _read_antigravity_models_cache()
+        from modules.agents.antigravity.models import read_antigravity_live_models
+
+        local_catalog = read_antigravity_live_models()
         local_complete = True
         sources = _antigravity_sources(remote_catalog, bundled_catalog, local_catalog=local_catalog)
         blocked = (
@@ -1758,26 +1762,16 @@ def _bundled_retired_model_ids(
     }
 
 
-def _read_antigravity_models_cache() -> list[dict[str, Any]]:
-    from modules.agents.antigravity.models import read_antigravity_live_models
-
-    return read_antigravity_live_models()
-
-
 def _antigravity_sources(
     remote_catalog: dict[str, Any],
     bundled_catalog: dict[str, Any],
-    local_catalog: Sequence[dict[str, Any]] | None = None,
+    local_catalog: Sequence[dict[str, Any]],
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     remote_entries = backend_model_entries("antigravity", remote_catalog)
     visible_remote = [entry for entry in remote_entries if not _model_hidden(entry)]
     bundled_entries = backend_model_entries("antigravity", bundled_catalog)
 
-    live_entries = (
-        list(local_catalog)
-        if local_catalog is not None
-        else _read_antigravity_models_cache()
-    )
+    live_entries = local_catalog
     normalized_live = [
         entry
         for item in live_entries

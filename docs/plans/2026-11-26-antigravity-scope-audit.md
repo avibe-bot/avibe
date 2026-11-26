@@ -10,7 +10,7 @@ Owner decision: PR #4252 contains only Antigravity and shared changes its integr
 | `ui/src/components/VaultSandboxAppearanceBridge.tsx` | Unrelated Vault appearance wiring in an owner-gated security area. | Remove via normal revert `f4e7bb567` (`f2ace7dbf`). |
 | `ui/src/lib/vaultSandboxClient.ts` | Same Vault workaround; no Antigravity dependency. | Remove via the same normal revert. |
 | `ui/src/lib/vaultSandboxIntegrity.test.ts` | Only tests that reverted Vault wiring. | Remove via the same normal revert. |
-| `docs/plans/model-hub-implementation.md` | Incidental insertion of an Antigravity test into an old ownership ledger; no build/test dependency. | Remove; restore master's text. |
+| `docs/plans/model-hub-implementation.md` | Register the Antigravity registration test in the live Model Hub authority closure; its generated ownership check requires this path. | Keep — shared, required by Antigravity |
 
 The three Vault files and Show sharing control have no remaining PR diff. Existing Vault cryptography, appearance delivery and authorization are unchanged.
 

@@ -14403,6 +14403,8 @@ async def get_antigravity_auth_async() -> dict:
         resolve_antigravity_cli_path,
     )
 
+    from modules.agents.antigravity.auth import _passive_status
+
     try:
         config = await asyncio.to_thread(load_config)
         cfg = getattr(getattr(config, "agents", None), "antigravity", None)
@@ -14426,21 +14428,11 @@ async def get_antigravity_auth_async() -> dict:
         )
         probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
     else:
-        probe = {
-            "ok": False,
-            "authenticated": False,
-            "credentials_present": (
-                bool(api_key)
-                if auth_mode == "gemini-api-key"
-                else (bool(adc["present"]) if auth_mode == "agent-platform" else False)
-            ),
-            "catalog_available": False,
-            "inference_verified": False,
-            "uncertain": True,
-            "auth_methods": list(ANTIGRAVITY_AUTH_MODES),
-            "supports_logout": False,
-            "error": "cli_not_found" if cli_health["status"] == "missing" else "cli_broken",
-        }
+        probe = _passive_status(
+            ok=False,
+            uncertain=True,
+            error="cli_not_found" if cli_health["status"] == "missing" else "cli_broken",
+        )
 
     authenticated = bool(probe.get("authenticated"))
     if auth_mode == "gemini-api-key":
@@ -14475,11 +14467,6 @@ async def get_antigravity_auth_async() -> dict:
         "has_oauth_credentials": authenticated and auth_mode in {"oauth-personal", "oauth-business"},
         "error": probe.get("error"),
     }
-
-
-def get_antigravity_auth() -> dict:
-    """Synchronous non-HTTP wrapper around ``get_antigravity_auth_async``."""
-    return _submit_oauth_coro(get_antigravity_auth_async(), timeout=20.0)
 
 
 @_native_auth_write("antigravity")

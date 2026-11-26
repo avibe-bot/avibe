@@ -89,6 +89,7 @@ from modules.agents.acp import (
     parse_session_update,
 )
 from modules.agents.antigravity.auth import (
+    antigravity_acp_command,
     authenticate_antigravity_client,
     build_antigravity_auth_env,
     is_antigravity_verification_required_reply,
@@ -212,38 +213,9 @@ def _config_cli_path(config: Any) -> str:
     return text or "agy"
 
 
-def _config_extra_args(config: Any) -> tuple[str, ...]:
-    raw = getattr(config, "extra_args", None)
-    if not raw:
-        return ()
-    return tuple(str(arg) for arg in raw if str(arg))
-
-
 def _config_str(config: Any, field_name: str) -> str:
     value = getattr(config, field_name, None)
     return str(value).strip() if value is not None else ""
-
-
-def build_antigravity_command(
-    cli_path: str,
-    *,
-    execution: bool,
-    extra_args: Sequence[str] = (),
-    subagent_name: str | None = None,
-) -> tuple[str, ...]:
-    """Build the argv for an ``agy acp`` child process.
-
-    Managed execution sessions pass ``--dangerously-skip-permissions``. Passive
-    operations (such as ``native_sessions`` listing) MUST pass ``execution=False``
-    and never include ``--dangerously-skip-permissions``.
-    """
-    argv = [cli_path, "acp", "--disable-telemetry"]
-    if execution:
-        argv.append("--dangerously-skip-permissions")
-    argv.extend(str(arg) for arg in extra_args if str(arg))
-    if execution and subagent_name:
-        argv.extend(["--agent", subagent_name])
-    return tuple(argv)
 
 
 def build_antigravity_env(
@@ -272,7 +244,6 @@ def build_antigravity_env(
         env.update(caller_env)
 
     env = build_antigravity_auth_env(antigravity_config, base_env=env)
-    env[AGY_CLI_DISABLE_AUTO_UPDATE_ENV] = "true"
     return env
 
 
@@ -772,13 +743,11 @@ class AntigravityAgent(BaseAgent):
             resolve_antigravity_cli_path,
             _config_cli_path(self.antigravity_config),
         )
-        extra_args = _config_extra_args(self.antigravity_config)
-        command = build_antigravity_command(
+        command = tuple(antigravity_acp_command(
             cli_path,
             execution=True,
-            extra_args=extra_args,
             subagent_name=request.subagent_name,
-        )
+        ))
 
         caller_env = self._caller_env(request)
         skills_project_base = managed_skill_project_base(request.context)
@@ -1118,15 +1087,6 @@ class AntigravityAgent(BaseAgent):
                 if restored is not None:
                     session.default_efforts.update(restored.default_efforts)
                     session.current_effort = restored.current_effort
-                seeded_default = extract_initial_default_effort(
-                    session.config_options,
-                    allow_current_value=False,
-                )
-                if seeded_default is not None:
-                    init_model, init_effort = seeded_default
-                    session.default_efforts[init_model] = init_effort
-                if session.default_efforts or session.current_effort is not None:
-                    await self._persist_session_selection_state(session)
             elif fork_handoff_mode == FORK_HANDOFF_MODE_NATIVE and isinstance(pending_fork, Mapping):
                 source_native_id = str(pending_fork.get("source_native_session_id") or "").strip()
                 source_session_id = str(
@@ -1142,25 +1102,17 @@ class AntigravityAgent(BaseAgent):
                 if inherited is not None:
                     session.default_efforts.update(inherited.default_efforts)
                     session.current_effort = inherited.current_effort
-                seeded_default = extract_initial_default_effort(
-                    session.config_options,
-                    allow_current_value=False,
-                )
-                if seeded_default is not None:
-                    init_model, init_effort = seeded_default
-                    session.default_efforts[init_model] = init_effort
-                if session.default_efforts or session.current_effort is not None:
-                    await self._persist_session_selection_state(session)
-            else:
-                seeded_default = extract_initial_default_effort(
-                    session.config_options,
-                    allow_current_value=True,
-                )
-                if seeded_default is not None:
-                    init_model, init_effort = seeded_default
-                    session.default_efforts[init_model] = init_effort
-                if session.default_efforts:
-                    await self._persist_session_selection_state(session)
+            seeded_default = extract_initial_default_effort(
+                session.config_options,
+                allow_current_value=not stored_native_id and not (
+                    fork_handoff_mode == FORK_HANDOFF_MODE_NATIVE and isinstance(pending_fork, Mapping)
+                ),
+            )
+            if seeded_default is not None:
+                init_model, init_effort = seeded_default
+                session.default_efforts[init_model] = init_effort
+            if session.default_efforts or session.current_effort is not None:
+                await self._persist_session_selection_state(session)
             if fork_handoff_mode == FORK_HANDOFF_MODE_SUMMARY:
                 await emit_output(self.controller, request.context, Notice(text=i18n_t(
                     "antigravityNotice.summaryFork", self._language(),
@@ -1216,8 +1168,7 @@ class AntigravityAgent(BaseAgent):
         ):
             raise AcpRpcError(-32602, "Invalid session/request_permission shape")
         turn = session.active_turn
-        execution = "--dangerously-skip-permissions" in session.spec.command
-        if not execution or session.retired or turn is None or turn.settled or turn.cancelled:
+        if session.retired or turn is None or turn.settled or turn.cancelled:
             return {"outcome": {"outcome": "cancelled"}}
         for option in options:
             if option["kind"] == "allow_once":

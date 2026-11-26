@@ -1,53 +1,20 @@
-"""Controller-independent Agent Client Protocol (ACP) stdio client and event parser."""
+"""Shared ACP client and consumed event types."""
 
 from modules.agents.acp.client import (
     ACP_AUTH_REQUIRED,
-    DEFAULT_PROTOCOL_VERSION,
-    JSONRPC_INTERNAL_ERROR,
-    JSONRPC_METHOD_NOT_FOUND,
     AcpClient,
     AcpRpcError,
     AcpTransportError,
-    NotificationCallback,
-    ServerRequestCallback,
+    JSONRPC_METHOD_NOT_FOUND,
 )
 from modules.agents.acp.events import (
-    AcpAvailableCommand,
-    AcpAvailableCommandsUpdate,
     AcpConfigOptionUpdate,
-    AcpDiffBlock,
     AcpMessageChunkUpdate,
     AcpSessionInfoUpdate,
-    AcpSessionUpdate,
     AcpThoughtChunkUpdate,
     AcpToolCallUpdate,
-    AcpUnknownUpdate,
     AcpUsageUpdate,
-    parse_diff_blocks,
     parse_session_update,
 )
 
-__all__ = [
-    "ACP_AUTH_REQUIRED",
-    "DEFAULT_PROTOCOL_VERSION",
-    "JSONRPC_INTERNAL_ERROR",
-    "JSONRPC_METHOD_NOT_FOUND",
-    "AcpAvailableCommand",
-    "AcpAvailableCommandsUpdate",
-    "AcpClient",
-    "AcpConfigOptionUpdate",
-    "AcpDiffBlock",
-    "AcpMessageChunkUpdate",
-    "AcpRpcError",
-    "AcpSessionInfoUpdate",
-    "AcpSessionUpdate",
-    "AcpThoughtChunkUpdate",
-    "AcpToolCallUpdate",
-    "AcpTransportError",
-    "AcpUnknownUpdate",
-    "AcpUsageUpdate",
-    "NotificationCallback",
-    "ServerRequestCallback",
-    "parse_diff_blocks",
-    "parse_session_update",
-]
+__all__ = ['ACP_AUTH_REQUIRED', 'AcpClient', 'AcpConfigOptionUpdate', 'AcpMessageChunkUpdate', 'AcpRpcError', 'AcpSessionInfoUpdate', 'AcpThoughtChunkUpdate', 'AcpToolCallUpdate', 'AcpTransportError', 'AcpUsageUpdate', 'JSONRPC_METHOD_NOT_FOUND', 'parse_session_update']

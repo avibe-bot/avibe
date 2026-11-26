@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from tests.helpers.antigravity_harness import make_native_provider
+
 import asyncio
 import hashlib
 import io
@@ -34,7 +36,7 @@ from core.agent_auth_service import (
     probe_antigravity_passive_status,
 )
 from modules.agents import acp
-from modules.agents.antigravity import AntigravityAgent
+from modules.agents.antigravity.agent import AntigravityAgent
 from modules.agents.antigravity import agent as agy_agent_module
 from modules.agents.antigravity.auth import (
     extract_antigravity_oauth_url,
@@ -755,7 +757,7 @@ async def test_desktop_runtime_resolves_bare_agy_before_command_and_env(tmp_path
     monkeypatch.setattr(agy_agent_module, "desktop_backend_subprocess_environment", _fake_desktop_env)
 
     bare_cfg = antigravity_config("agy")
-    provider = AntigravityNativeSessionProvider(cli_path="agy", config=bare_cfg)
+    provider = make_native_provider(cli_path="agy", config=bare_cfg)
     command, env = provider._build_launch(str(workdir), config=bare_cfg)
     assert command[0] == str(private_shim) and "--dangerously-skip-permissions" not in command and desktop_env_calls[-1] == str(private_shim)
     assert env["AVIBE_DESKTOP_TEST_MARKER"] == "derived-from-resolved-path" and ("agy", False) in resolve_calls

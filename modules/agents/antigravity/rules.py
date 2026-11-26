@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from config.atomic_io import write_atomic
+
 import hashlib
 import json
 import logging
@@ -10,7 +12,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -116,20 +117,6 @@ def split_rule_content(
         remaining = remaining[advance:].lstrip("\n")
 
     return tuple(chunks)
-
-
-def _atomic_write_text(target: Path, text: str, *, mode: int | None = None) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".agents-md-", suffix=".tmp", dir=str(target.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
-        if mode is not None:
-            os.chmod(tmp_name, mode)
-        os.replace(tmp_name, target)
-    except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
-        raise
 
 
 def _quote_executable(executable: str) -> str:
@@ -284,10 +271,10 @@ def render_session_rules(
                 entry.unlink(missing_ok=True)
 
     for part_dir, chunk in zip(expected_dirs, chunks, strict=True):
-        _atomic_write_text(part_dir / _RULE_FILENAME, chunk)
+        write_atomic(part_dir / _RULE_FILENAME, chunk)
 
-    _atomic_write_text(hooks_config_path, hooks_json)
-    _atomic_write_text(hooks_script_path, hook_script, mode=0o755)
+    write_atomic(hooks_config_path, hooks_json)
+    write_atomic(hooks_script_path, hook_script, mode=0o755)
 
     return RenderedRules(
         directories=tuple(str(d) for d in expected_dirs),

@@ -14,35 +14,17 @@ from typing import Any
 import psutil
 import pytest
 
-from modules.agents.acp import (
-    ACP_AUTH_REQUIRED,
-    JSONRPC_METHOD_NOT_FOUND,
-    AcpAvailableCommandsUpdate,
-    AcpClient,
-    AcpConfigOptionUpdate,
-    AcpDiffBlock,
-    AcpMessageChunkUpdate,
-    AcpRpcError,
-    AcpSessionInfoUpdate,
-    AcpThoughtChunkUpdate,
-    AcpToolCallUpdate,
-    AcpTransportError,
-    AcpUnknownUpdate,
-    AcpUsageUpdate,
-    parse_diff_blocks,
-    parse_session_update,
-)
+from modules.agents.acp.client import ACP_AUTH_REQUIRED, JSONRPC_METHOD_NOT_FOUND, AcpClient, AcpRpcError, AcpTransportError
+from modules.agents.acp.events import AcpConfigOptionUpdate, AcpDiffBlock, AcpMessageChunkUpdate, AcpSessionInfoUpdate, AcpThoughtChunkUpdate, AcpToolCallUpdate, AcpUnknownUpdate, AcpUsageUpdate, parse_diff_blocks, parse_session_update
 from tests.helpers.fake_acp_server import fake_acp_server_command
 
 _CAP_ATTRS = (
     "supports_resume",
-    "supports_load",
     "supports_list",
     "supports_fork",
     "supports_close",
     "supports_logout",
     "supports_images",
-    "supports_embedded_context",
     "supports_additional_directories",
 )
 
@@ -59,13 +41,13 @@ async def test_initialize_capabilities_full_and_minimal(
 ) -> None:
     """Empty-object ACP capability markers evaluate True; omitted ones evaluate False."""
     async with AcpClient(fake_acp_server_command(config=config), cwd=tmp_path) as client:
-        assert client.is_alive and isinstance(client.pid, int) and client.pid > 0 and client.exit_code is None
+        assert client.is_alive and isinstance(client._process.pid, int) and client._process.pid > 0 and client._process.returncode is None
         resp = await client.initialize(client_info={"name": "avibe-test", "version": "0.1.0"})
-        assert resp["protocolVersion"] == 1 and client.protocol_version == 1
+        assert resp["protocolVersion"] == 1
         assert client.agent_info["name"] == "fake-acp-server"
         assert [m["id"] for m in client.auth_methods] == expected_auth
         assert all(getattr(client, attr) is expected_cap for attr in _CAP_ATTRS)
-    assert client.is_alive is False and client.pid is None and client.exit_code == 0
+    assert client.is_alive is False and client._process.returncode == 0
 
 
 async def test_auth_required_authenticate_and_logout(tmp_path: Path) -> None:
@@ -136,8 +118,7 @@ async def test_session_new_and_streaming_session_updates(tmp_path: Path) -> None
     assert (parsed[3].text or "") + (parsed[4].text or "") == "Updated hello.py."
     assert isinstance(parsed[5], AcpUsageUpdate) and (parsed[5].used, parsed[5].size) == (1200, 128000)
     assert parsed[5].cost == {"amount": 0.01, "currency": "USD"}
-    assert isinstance(parsed[6], AcpAvailableCommandsUpdate)
-    assert (parsed[6].commands[0].name, parsed[6].commands[0].input_hint) == ("review", "optional path")
+    assert isinstance(parsed[6], AcpUnknownUpdate) and parsed[6].update_type == "available_commands_update"
     assert isinstance(parsed[7], AcpSessionInfoUpdate)
     assert (parsed[7].title, parsed[7].updated_at) == ("Update greeting", "2026-11-24T12:00:00Z")
     assert isinstance(parsed[8], AcpUnknownUpdate) and parsed[8].update_type == "plan"
@@ -200,8 +181,8 @@ async def test_session_cancel_during_prompt(tmp_path: Path) -> None:
         assert (await asyncio.wait_for(prompt_task, timeout=5.0))["stopReason"] == "cancelled"
 
 
-async def test_session_set_config_option_model_and_mode(tmp_path: Path) -> None:
-    """Config option, model, and mode mutations propagate updates and surface -32602 errors."""
+async def test_session_set_config_option_model(tmp_path: Path) -> None:
+    """Config option model mutations propagate updates and surface -32602 errors."""
     config_updates: list[AcpConfigOptionUpdate] = []
     replies: list[str] = []
 
@@ -229,13 +210,12 @@ async def test_session_set_config_option_model_and_mode(tmp_path: Path) -> None:
         assert bad_val.value.code == -32602
 
         await client.session_set_config_option(sid, "model", "model-alpha")
-        await client.session_set_mode(sid, "plan")
         await client.session_prompt(sid, [{"type": "text", "text": "check"}])
 
-    assert replies == ["echo:check|model=model-alpha|mode=plan"]
+    assert replies == ["echo:check|model=model-alpha|mode=code"]
 
 
-async def test_cross_process_session_resume_list_load_and_close(tmp_path: Path) -> None:
+async def test_cross_process_session_resume_list_and_close(tmp_path: Path) -> None:
     """Sessions survive across fresh subprocesses via resume without replaying live updates."""
     extra_dir = str(tmp_path / "extra-rules")
     cmd = fake_acp_server_command(state_file=tmp_path / "acp_state.json", config={"listPageSize": 1})
@@ -266,11 +246,6 @@ async def test_cross_process_session_resume_list_load_and_close(tmp_path: Path) 
         assert len(updates) == 1 and isinstance(updates[0], AcpMessageChunkUpdate)
         assert "remember-marker" in (updates[0].text or "") and extra_dir in (updates[0].text or "")
 
-        updates.clear()
-        await second.session_load(s1, str(tmp_path))
-        assert any(isinstance(u, AcpUnknownUpdate) and u.update_type == "user_message_chunk" for u in updates)
-        assert any(isinstance(u, AcpMessageChunkUpdate) for u in updates)
-
         with pytest.raises(AcpRpcError) as missing:
             await second.session_resume("sess-does-not-exist", str(tmp_path))
         assert missing.value.code == -32002
@@ -290,13 +265,13 @@ async def test_subprocess_exit_mid_prompt_and_lifecycle_guards(tmp_path: Path) -
         with pytest.raises(AcpTransportError) as exc_info:
             await client.session_prompt(sid, [{"type": "text", "text": "crash_mid_prompt"}])
         assert "exited with code 2" in str(exc_info.value) and "fatal: simulated peer crash" in str(exc_info.value)
-        assert client.is_alive is False and client.exit_code == 2 and "fatal: simulated peer crash" in client.stderr_tail
+        assert client.is_alive is False and client._process.returncode == 2 and "fatal: simulated peer crash" in client._stderr_tail
     finally:
         await client.close()
         await client.close()
 
     unstarted = AcpClient(fake_acp_server_command(), cwd=tmp_path)
-    assert unstarted.is_alive is False and unstarted.pid is None and unstarted.exit_code is None
+    assert unstarted.is_alive is False and unstarted._process is None
     with pytest.raises(AcpTransportError):
         await unstarted.initialize()
 
@@ -307,7 +282,7 @@ async def test_subprocess_exit_mid_prompt_and_lifecycle_guards(tmp_path: Path) -
     await sleeper.start()
     assert sleeper.is_alive is True
     await sleeper.close(graceful_timeout=0.05, terminate_timeout=2.0)
-    assert sleeper.is_alive is False and sleeper.exit_code not in (None, 0)
+    assert sleeper.is_alive is False and sleeper._process.returncode not in (None, 0)
 
 
 def _pid_running(pid: int) -> bool:
@@ -348,12 +323,12 @@ async def test_close_reaps_surviving_tool_children_after_leader_exits(tmp_path: 
 
         if leader_mode == "crash_before_close":
             crash_deadline = time.monotonic() + 5.0
-            while client.exit_code is None and time.monotonic() < crash_deadline:
+            while client._process.returncode is None and time.monotonic() < crash_deadline:
                 await asyncio.sleep(0.05)
-            assert client.exit_code == 2 and _pid_running(in_group_pid) and _pid_running(detached_pid)
+            assert client._process.returncode == 2 and _pid_running(in_group_pid) and _pid_running(detached_pid)
 
         await client.close(graceful_timeout=5.0, terminate_timeout=2.0)
-        assert client.exit_code == (0 if leader_mode == "eof_exit_zero" else 2)
+        assert client._process.returncode == (0 if leader_mode == "eof_exit_zero" else 2)
         assert not any(_pid_running(pid) for pid in (leader_pid, in_group_pid, detached_pid))
     finally:
         await client.close(graceful_timeout=1.0, terminate_timeout=1.0)

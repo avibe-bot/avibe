@@ -10,11 +10,11 @@ from typing import Any
 
 from modules.agents.acp import ACP_AUTH_REQUIRED, AcpClient, AcpRpcError, AcpTransportError
 from modules.agents.antigravity.agent import (
-    build_antigravity_command,
     build_antigravity_env,
     resolve_antigravity_cli_path,
 )
 from modules.agents.antigravity.auth import (
+    antigravity_acp_command,
     authenticate_antigravity_client,
     normalize_antigravity_auth_mode,
 )
@@ -67,22 +67,7 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
     agent_name = "antigravity"
     _PLACEHOLDER_TITLES = {"new session", "untitled session", "未命名会话"}
 
-    def __init__(
-        self,
-        *,
-        cli_path: str | None = None,
-        extra_args: Sequence[str] = (),
-        config: Any = None,
-        request_timeout: float = 15.0,
-    ) -> None:
-        self._cli_path = cli_path
-        self._extra_args = tuple(extra_args)
-        self._config = config
-        self._request_timeout = request_timeout
-
     def _effective_config(self) -> Any:
-        if self._config is not None:
-            return self._config
         return _load_persisted_antigravity_config()
 
     def _build_launch(
@@ -93,19 +78,13 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
     ) -> tuple[tuple[str, ...], dict[str, str]]:
         effective_config = config if config is not None else self._effective_config()
         raw_cli_path = (
-            self._cli_path
-            or getattr(effective_config, "cli_path", None)
+            getattr(effective_config, "cli_path", None)
             or getattr(effective_config, "binary", None)
             or "agy"
         )
         resolved_cli = resolve_antigravity_cli_path(raw_cli_path)
-        extra_args = self._extra_args or tuple(getattr(effective_config, "extra_args", None) or ())
-        # Passive session listing MUST NOT pass --dangerously-skip-permissions.
-        command = build_antigravity_command(
-            resolved_cli,
-            execution=False,
-            extra_args=extra_args,
-        )
+        # Passive listing never requests a managed turn's permission bypass.
+        command = tuple(antigravity_acp_command(resolved_cli))
         env = build_antigravity_env(
             effective_config,
             cli_path=resolved_cli,
@@ -125,7 +104,7 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
             command,
             cwd=working_path or None,
             env=env,
-            request_timeout=self._request_timeout,
+            request_timeout=15.0,
         )
         sessions: list[dict[str, Any]] = []
         try:
@@ -234,22 +213,6 @@ class AntigravityNativeSessionProvider(NativeSessionProvider):
     @classmethod
     def is_placeholder_title(cls, title: str) -> bool:
         return title.strip().lower() in cls._PLACEHOLDER_TITLES
-
-    async def get_title_async(
-        self,
-        *,
-        working_path: str,
-        native_session_id: str,
-        first_user_message: str | None = None,
-    ) -> BackendSessionTitle | None:
-        if not native_session_id:
-            return derive_first_prompt_title(first_user_message or "")
-        items = await self.list_metadata_async(working_path)
-        return self._resolve_title(
-            items,
-            native_session_id=native_session_id,
-            first_user_message=first_user_message,
-        )
 
     def get_title(
         self,

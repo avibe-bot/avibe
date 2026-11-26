@@ -128,7 +128,6 @@ class AcpClient:
         self._notify_cond = asyncio.Condition()
 
         # Negotiated state populated by initialize()
-        self._protocol_version: int | None = None
         self._agent_capabilities: dict[str, Any] = {}
         self._agent_info: dict[str, Any] = {}
         self._auth_methods: tuple[dict[str, Any], ...] = ()
@@ -155,7 +154,6 @@ class AcpClient:
         self._notify_stopped = False
         self._notify_queue = asyncio.Queue()
         self._notify_cond = asyncio.Condition()
-        self._protocol_version = None
         self._agent_capabilities = {}
         self._agent_info = {}
         self._auth_methods = ()
@@ -249,31 +247,11 @@ class AcpClient:
     @property
     def pid(self) -> int | None:
         proc = self._process
-        if proc is None or proc.returncode is not None:
-            return None
-        return proc.pid
-
-    @property
-    def exit_code(self) -> int | None:
-        if self._process is None:
-            return None
-        return self._process.returncode
-
-    @property
-    def stderr_tail(self) -> tuple[str, ...]:
-        return tuple(self._stderr_tail)
+        return proc.pid if proc is not None and proc.returncode is None else None
 
     # ------------------------------------------------------------------
     # Capabilities from initialize()
     # ------------------------------------------------------------------
-
-    @property
-    def protocol_version(self) -> int | None:
-        return self._protocol_version
-
-    @property
-    def agent_capabilities(self) -> dict[str, Any]:
-        return dict(self._agent_capabilities)
 
     @property
     def agent_info(self) -> dict[str, Any]:
@@ -300,12 +278,6 @@ class AcpClient:
         return _capability_enabled(self._session_capabilities().get("resume"))
 
     @property
-    def supports_load(self) -> bool:
-        return _capability_enabled(self._agent_capabilities.get("loadSession")) or _capability_enabled(
-            self._session_capabilities().get("load")
-        )
-
-    @property
     def supports_list(self) -> bool:
         return _capability_enabled(self._session_capabilities().get("list"))
 
@@ -324,10 +296,6 @@ class AcpClient:
     @property
     def supports_images(self) -> bool:
         return _capability_enabled(self._prompt_capabilities().get("image"))
-
-    @property
-    def supports_embedded_context(self) -> bool:
-        return _capability_enabled(self._prompt_capabilities().get("embeddedContext"))
 
     @property
     def supports_additional_directories(self) -> bool:
@@ -370,10 +338,6 @@ class AcpClient:
 
         result = await self.send_request("initialize", params, timeout=self._request_timeout)
 
-        negotiated = result.get("protocolVersion")
-        self._protocol_version = (
-            negotiated if isinstance(negotiated, int) and not isinstance(negotiated, bool) else None
-        )
         raw_caps = result.get("agentCapabilities")
         self._agent_capabilities = dict(raw_caps) if isinstance(raw_caps, Mapping) else {}
         raw_info = result.get("agentInfo")
@@ -392,6 +356,15 @@ class AcpClient:
     async def logout(self) -> dict[str, Any]:
         return await self.send_request("logout", {}, timeout=self._request_timeout)
 
+    @staticmethod
+    def _session_params(cwd, mcp_servers, additional_directories, session_id=None) -> dict[str, Any]:
+        params = {"cwd": cwd, "mcpServers": [dict(server) for server in mcp_servers]}
+        if session_id is not None:
+            params["sessionId"] = session_id
+        if additional_directories is not None:
+            params["additionalDirectories"] = list(additional_directories)
+        return params
+
     async def session_new(
         self,
         cwd: str,
@@ -399,12 +372,7 @@ class AcpClient:
         mcp_servers: Sequence[Mapping[str, Any]] = (),
         additional_directories: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "cwd": cwd,
-            "mcpServers": [dict(server) for server in mcp_servers],
-        }
-        if additional_directories is not None:
-            params["additionalDirectories"] = list(additional_directories)
+        params = self._session_params(cwd, mcp_servers, additional_directories)
         return await self.send_request("session/new", params, timeout=self._request_timeout)
 
     async def session_resume(
@@ -415,31 +383,8 @@ class AcpClient:
         mcp_servers: Sequence[Mapping[str, Any]] = (),
         additional_directories: Sequence[str] | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "sessionId": session_id,
-            "cwd": cwd,
-            "mcpServers": [dict(server) for server in mcp_servers],
-        }
-        if additional_directories is not None:
-            params["additionalDirectories"] = list(additional_directories)
+        params = self._session_params(cwd, mcp_servers, additional_directories, session_id)
         return await self.send_request("session/resume", params, timeout=self._request_timeout)
-
-    async def session_load(
-        self,
-        session_id: str,
-        cwd: str,
-        *,
-        mcp_servers: Sequence[Mapping[str, Any]] = (),
-        additional_directories: Sequence[str] | None = None,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "sessionId": session_id,
-            "cwd": cwd,
-            "mcpServers": [dict(server) for server in mcp_servers],
-        }
-        if additional_directories is not None:
-            params["additionalDirectories"] = list(additional_directories)
-        return await self.send_request("session/load", params, timeout=self._request_timeout)
 
     async def session_fork(
         self,
@@ -450,13 +395,7 @@ class AcpClient:
         additional_directories: Sequence[str] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        params: dict[str, Any] = {
-            "sessionId": session_id,
-            "cwd": cwd,
-            "mcpServers": [dict(server) for server in mcp_servers],
-        }
-        if additional_directories is not None:
-            params["additionalDirectories"] = list(additional_directories)
+        params = self._session_params(cwd, mcp_servers, additional_directories, session_id)
         effective_timeout = self._request_timeout if timeout is None else timeout
         return await self.send_request("session/fork", params, timeout=effective_timeout)
 
@@ -505,13 +444,6 @@ class AcpClient:
             timeout=self._request_timeout,
         )
 
-
-    async def session_set_mode(self, session_id: str, mode_id: str) -> dict[str, Any]:
-        return await self.send_request(
-            "session/set_mode",
-            {"sessionId": session_id, "modeId": mode_id},
-            timeout=self._request_timeout,
-        )
 
     # ------------------------------------------------------------------
     # Low-level JSON-RPC Transport
