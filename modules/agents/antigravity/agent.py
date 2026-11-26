@@ -1561,6 +1561,8 @@ class AntigravityAgent(BaseAgent):
             turn.settled = True
             await self._flush_partial_reply(turn)
         diagnostic, display_text, _ = self._classify_failure(error, language=self._language())
+        # The chat text omits protocol detail (ACP code, capability name); keep it in the log.
+        logger.warning("Antigravity turn failed: %s", diagnostic)
         if session is not None and not session.client.is_alive:
             session.exit_failure = (diagnostic, display_text)
             await self._close_session(session, intentional=False, retire_activation=True)
