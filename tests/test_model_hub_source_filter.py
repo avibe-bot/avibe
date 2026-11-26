@@ -7,6 +7,7 @@ back by Vibey's own reader. Only the search vendor's HTTP adapter is faked, as i
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import textwrap
@@ -130,6 +131,7 @@ async def test_a_before_answer_sends_nothing_upstream_and_still_passes_after(tmp
     ("sys.exit(3)", "source_filter_failed", False),
     ('print("not json")', "source_filter_failed", False),
     ('json.dump({"action": "replace"}, sys.stdout)', "source_filter_failed", False),
+    ('json.dump({"action": []}, sys.stdout)', "source_filter_failed", False),
 ])
 async def test_a_blocking_or_broken_before_hook_stops_the_call(tmp_path, hooks, monkeypatch, script, code, ran_upstream):
     hooks("before_search", script)
@@ -170,6 +172,23 @@ async def test_a_hook_that_runs_too_long_is_stopped_and_blocks(tmp_path, hooks, 
     assert calls == []
     assert answer["record"]["error_code"] == "source_filter_failed"
     assert "timed out" in service.source_filter_status()["hooks"]["before_search"]["last_failure"]["reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
+async def test_nothing_a_timed_out_hook_started_outlives_the_call(tmp_path, hooks, monkeypatch):
+    marker = tmp_path / "late-write"
+    hooks("before_search", f'''
+        import subprocess, time
+        subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.5); open({str(marker)!r}, 'w').write('x')"])
+        time.sleep(30)
+    ''')
+    service = filtered_owner(tmp_path)
+    service._source_filter_hooks.timeout = 0.5
+    answers(monkeypatch, service, wire())
+    assert (await search(service))["record"]["error_code"] == "source_filter_failed"
+    await asyncio.sleep(2.5)
+    assert not marker.exists()
 
 
 @pytest.mark.asyncio

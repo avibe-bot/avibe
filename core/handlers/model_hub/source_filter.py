@@ -23,6 +23,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -117,8 +119,8 @@ def _validate(name: str, response: object) -> dict[str, Any]:
     action = response.get("action")
     before = name.startswith("before_")
     allowed = {"pass", "replace", "respond", "block"} if before else {"pass", "replace", "block"}
-    if action not in allowed:
-        raise HookFailed(f"unknown action {action!r}")
+    if not isinstance(action, str) or action not in allowed:
+        raise HookFailed(f"unknown action {str(action)[:40]!r}")
     if action == "replace" and before and not isinstance(response.get("args"), dict):
         raise HookFailed("replace needs an args object")
     if action == "respond" or (action == "replace" and not before):
@@ -223,6 +225,7 @@ class SourceFilterHooks:
         # A fetch request carries a whole page: encoded off the controller loop.
         data = await asyncio.to_thread(lambda: json.dumps(request, ensure_ascii=False).encode("utf-8"))
         try:
+            # Its own process group (session), so whatever the script starts ends with the call.
             process = await asyncio.create_subprocess_exec(
                 python, str(script),
                 cwd=str(script.parent),
@@ -230,21 +233,17 @@ class SourceFilterHooks:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **_own_group(),
             )
         except OSError as error:
             raise HookFailed(f"it could not start ({type(error).__name__})") from None
         try:
             out, err = await asyncio.wait_for(_exchange(process, data), timeout=self.timeout)
         except asyncio.TimeoutError:
-            await _kill(process)
             raise HookFailed(f"it timed out after {int(self.timeout)} s") from None
-        except HookFailed:
+        finally:
+            # On every path, a stopped turn included: nothing the script started outlives the call.
             await _kill(process)
-            raise
-        except BaseException:
-            # The call was stopped (the turn ended): the script does not outlive it.
-            await _kill(process)
-            raise
         if err:
             logger.info("Source filter hook %s stderr: %s", name, err.decode("utf-8", "replace")[-1000:])
         if process.returncode != 0:
@@ -256,12 +255,31 @@ class SourceFilterHooks:
         return _validate(name, response)
 
 
+def _own_group() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
 async def _kill(process: asyncio.subprocess.Process) -> None:
-    if process.returncode is None:
+    """End the hook and every process it started (its process group; the process tree on Windows)."""
+
+    if os.name == "nt":
+        if process.returncode is None:
+            try:
+                killer = await asyncio.create_subprocess_exec(
+                    "taskkill", "/F", "/T", "/PID", str(process.pid),
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                )
+                await asyncio.wait_for(killer.wait(), timeout=5)
+            except (OSError, asyncio.TimeoutError):
+                process.kill()
+    else:
         try:
-            process.kill()
-        except ProcessLookupError:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
             pass
+    if process.returncode is None:
         try:
             await asyncio.wait_for(process.wait(), timeout=5)
         except asyncio.TimeoutError:
