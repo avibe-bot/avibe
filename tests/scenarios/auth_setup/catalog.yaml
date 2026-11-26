@@ -1408,6 +1408,7 @@ scenarios:
       - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: signs in with an email code on the same steps"
       - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 iPhone: drops a verification an account change ended while it ran"
       - "ui/src/sign-in/signInMatrix.test.tsx::AUTH-SETUP-182 Desktop: drops a verification an account change ended while it ran"
+      - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus"
     reason: >-
       #3946 moved the sign-in steps into ui/src/sign-in, reached through one
       adapter per app. The matrix runs every case against both adapters: the
@@ -1427,7 +1428,10 @@ scenarios:
       reports avibe.bot switched on (only Google, Apple off, all off, missing,
       only passkey, every way). Fakes prove the wiring, not real accounts, providers
       or devices; the existing MobileOnboarding cases still own the iPhone
-      shell.
+      shell. Code-entry focus tests cover Desktop/non-touch browser entry,
+      paste, clearing, busy/error retry, deliberate focus leaving, and the
+      preserved iOS/touch tap-to-focus behavior. The real browser check also
+      verifies the focus-dependent caret and ring against built CSS.
   - id: AUTH-SETUP-183
     name: Desktop signs in with Google, GitHub or Apple through the default browser and loopback PKCE
     status: partial

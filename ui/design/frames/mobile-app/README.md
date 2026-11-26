@@ -130,8 +130,10 @@ to the product's locale catalogs when implemented.
   an inline alert linked through `aria-describedby`; sending disables repeats.
 - Code uses one labeled Input with `type=text`, `inputMode=numeric`,
   `autocomplete=one-time-code`, `pattern=[0-9]{6}` and `maxLength=6`. The six cells
-  are `aria-hidden`; no six-focus-stop implementation. Blank/partial frames show
-  the current cell's mint border/ring/caret; full codes enable verification.
+  are `aria-hidden`; no six-focus-stop implementation. While the real input is
+  focused, blank/partial codes show the current cell's mint border/ring/caret;
+  full codes enable verification. Desktop code steps focus on entry and after
+  verification unlocks; touch browsers and iOS still wait for a tap.
   Errors use destructive cells and a text alert, never color alone.
 - Production must synchronize typing, paste and autofill to the display, normalize
   digits, focus the underlying field when any cell is tapped, expose a visible
