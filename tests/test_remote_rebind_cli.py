@@ -3,6 +3,7 @@
 The backend functions are the real ones; avibe.bot is the contract peer from
 ``test_personal_claims``. No real account, connector, clipboard or keychain.
 """
+import argparse
 import builtins
 import json
 import sys
@@ -702,3 +703,14 @@ def test_other_account_names_only_the_confirming_address_and_offers_no_reset(ter
         assert "vibe remote rebind" not in out
     else:
         assert "gave no reason" in out and "not under" not in out and "Injected" not in out and "***" not in out
+
+
+def test_rebind_help_says_binding_as_new_deletes_first(monkeypatch):
+    """Since 3.2.8 binding as new deletes the Avibe on avibe.bot first; the help must not say otherwise."""
+    monkeypatch.setenv("COLUMNS", "80")
+    remote = next(a for a in cli.build_parser()._actions if isinstance(a, argparse._SubParsersAction)).choices["remote"]
+    rebind = next(a for a in remote._actions if isinstance(a, argparse._SubParsersAction)).choices["rebind"]
+    shown = " ".join(rebind.format_help().split())
+
+    assert "Deletes this computer's Avibe on avibe.bot first" in shown
+    assert "is not deleted" not in shown and "delete the old Avibe on avibe.bot first" not in shown

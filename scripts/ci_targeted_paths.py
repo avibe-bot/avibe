@@ -8,6 +8,16 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 BOUNDARIES = {
+    # ios-shell stages iroh, builds the mobile UI (including tsc -b), verifies
+    # license notices and consumes XCTest fixtures outside the Xcode project.
+    'ios-app': frozenset({
+        '.github/workflows/ios-shell.yml', 'Dockerfile', 'scripts/cargo_notices.py',
+        'assets/mascot/cloud-tuanzi-v2.png', 'vibe/message_types.json',
+        'tests/fixtures/system_schedule_contract_vectors.json',
+        'ui/package.json', 'ui/package-lock.json', 'ui/mobile.html', 'ui/agentation.d.ts',
+        'ui/tsconfig.json', 'ui/tsconfig.app.json', 'ui/tsconfig.node.json',
+        'ui/vite.config.ts', 'ui/vite.desktop.config.ts', 'ui/vite.mobile.config.ts',
+    }),
     # The wire comparison and its exception label exist only on pull requests.
     'engine-wire': frozenset({'vibe/model_hub_runtime/cliproxyapi_manifest.json'}),
     'admission': frozenset({'vibe/binding_admission.py', 'vibe/personal_claims.py', 'core/agent_auth_service.py'}),
@@ -27,6 +37,9 @@ BOUNDARIES = {
 
 def matched_proofs(path: str) -> set[str]:
     result = {name for name, files in BOUNDARIES.items() if path in files}
+    if path.startswith(('ios/', 'ui/src/', 'ui/scripts/', 'packaging/iroh-apple/', 'vibe/data/',
+                        'tests/fixtures/push/', 'tests/fixtures/live_activity/')):
+        result.add('ios-app')
     p = PurePosixPath(path)
     if p.parent.as_posix() == 'storage/alembic/versions' and p.suffix == '.py':
         result.add('migration')

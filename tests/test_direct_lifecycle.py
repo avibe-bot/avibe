@@ -930,6 +930,7 @@ async def test_retryable_certificate_failure_preserves_tunnel_and_provider_deadl
 async def test_daily_turnover_latches_and_retries_failed_stop_before_replacement(reports, monkeypatch):
     clock = [100.0]
     monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(module, 'ENDPOINT_TURNOVER_SECONDS', 60)
     monkeypatch.setattr(module, 'INSTALL_RETRY_INITIAL_SECONDS', 0.04)
     monkeypatch.setattr(module, 'INSTALL_RETRY_MAX_SECONDS', 0.08)
     monkeypatch.setattr(module, 'TICK_SECONDS', 0.005)
@@ -946,7 +947,8 @@ async def test_daily_turnover_latches_and_retries_failed_stop_before_replacement
         await _wait(lambda: owner.status().state == 'running')
         before = owner._generation
         clock[0] = owner._endpoint_retire_at
-        # Model a binding with a renewed receipt when the old key expires.
+        # Permission stays fresh during the simulated turnover, even if the
+        # runner observes the expired endpoint before this renewal is processed.
         await _permission(owner, config)
         await _wait(lambda: len(attempts) == 1)
         await _permission(owner, config)

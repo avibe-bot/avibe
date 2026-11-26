@@ -136,6 +136,20 @@ remain mandatory.
 - The workflow emits both current and legacy `vibe-remote` update markers for
   installed-client compatibility.
 
+## Completing a stable release
+
+A stable `v*` release is done only when every item below holds. The release
+Session checks each one before it reports the release complete.
+
+- Core and PyPI are published, and the desktop installers are complete in the
+  release.
+- The mirror index lists the release with all its assets, and the `latest/`
+  installer links point at it.
+- **The iPhone App ships in the same step.** The iOS coordinator moves the
+  latest TestFlight build from the internal group to the public group when
+  the stable is published. The public group follows the internal group's
+  latest build, with no waiting day.
+
 ## Workflow ownership and artifacts
 
 The desktop packaging cache is intentionally separate from release correctness.
