@@ -305,10 +305,10 @@ Pi's separate `cacheWrite1h` (`:840-847`) has no canonical counterpart.
 | `input_tokens` | `input_tokens`, already excludes cache read/write; no subtraction |
 | `output_tokens` | `output_tokens`, inclusive of thinking |
 | `cache_read_input_tokens` | `cache_read_tokens` |
-| `cache_creation_input_tokens` | `cache_write_tokens`; non-null aggregate wins over every TTL value, including when aggregate is zero |
-| `cache_creation` | Nullable TTL breakdown container. If aggregate is missing/null, sum its non-null counters as the reported snapshot; missing/null/empty/all-null breakdown preserves current aggregate. Do not add a TTL snapshot to previous usage. |
-| `cache_creation.ephemeral_5m_input_tokens` | Part of the transient `Usage.cache_writes_by_ttl["5m"]` diagnostic when the aggregate is compatible; absent/null contributes nothing. Explicit zero is a reported value. It is never added to canonical totals or persisted in canonical `Usage`. |
-| `cache_creation.ephemeral_1h_input_tokens` | Same transient diagnostic policy for `"1h"`; never added on top of an aggregate. Model Hub's separate usage ledger meters the one-hour part (`cache_write_1h_input_tokens`, `model-hub-contracts/api.md`). |
+| `cache_creation_input_tokens` | A non-null aggregate sets `cache_write_tokens` and marks the total **reported**, including explicit zero. TTL buckets allocate this total; they never increase it. |
+| `cache_creation` | Reconcile start and delta identically. Replace the buckets supplied by this event, keeping omitted buckets when compatible. If their combined sum exceeds a new explicit total, discard inherited buckets and keep the current event's buckets alone. If those alone exceed the total, retain the total without a breakdown. Any unallocated remainder has unknown TTL. |
+| `cache_creation.ephemeral_5m_input_tokens` | Updates the transient `Usage.cache_writes_by_ttl["5m"]`. Zero replaces that bucket; absent/null does not. With new buckets but no explicit total, `cache_write_tokens` is the **derived** sum of the reconciled buckets (`cache_write_total_reported=False`), not a complete billing measurement. |
+| `cache_creation.ephemeral_1h_input_tokens` | Same rule for `"1h"`. If neither bucket nor aggregate is supplied, carry the prior count, buckets and provenance forward. With no write evidence yet, canonical numeric zero is only a default: total not reported, no breakdown. Model Hub's separate usage ledger meters the one-hour part (`cache_write_1h_input_tokens`, `model-hub-contracts/api.md`). |
 | `output_tokens_details` | Nullable decomposition container; not itself a count |
 | `output_tokens_details.thinking_tokens` | `reasoning_tokens`; non-null merge at both message start and delta. This observability subset does not increase `output_tokens`. |
 | `server_tool_use` | Ignored: server-side request-count metadata, not tokens or canonical tool calls |
