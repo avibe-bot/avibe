@@ -55,18 +55,14 @@ it.each([['en', 'instances'], ['en', 'account'], ['zh', 'instances'], ['zh', 'ac
   }
   const beforeNavigation = invoke.mock.calls.length;
   expect(document.querySelector('[data-instance-id="offline-control"] button')?.hasAttribute('disabled')).toBe(true);
-  if (view === 'account') {
-    fireEvent.click(screen.getByRole('button', { name: state.account.identity!.email, exact: true }));
-    expect(document.querySelector('[data-account-details]')).toBeTruthy();
-    expect(screen.queryByText(notice)).toBeNull();
-    fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Instances' : '实例', exact: true }));
-    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
-  }
+  fireEvent.click(screen.getByText(state.account.identity!.email));
+  expect(document.querySelector('[data-account-details]')).toBeNull();
+  expect(invoke).toHaveBeenCalledTimes(beforeNavigation);
   expect(screen.queryByText(notice)).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: lng === 'en' ? 'Back to Workbench' : '返回工作台' }));
-  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + (view === 'account' ? 2 : 1)));
+  await waitFor(() => expect(invoke).toHaveBeenCalledTimes(beforeNavigation + 1));
   expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(
-    view === 'account' ? ['get_state', 'refresh_instances', 'refresh_instances', 'cancel'] : ['get_state', 'cancel']);
+    view === 'account' ? ['get_state', 'refresh_instances', 'cancel'] : ['get_state', 'cancel']);
   expect(state.remote_auxiliary).toBe('disabled_incomplete');
   expect(state.connection.committed.kind).toBe('remote');
 });
@@ -407,14 +403,13 @@ it('shows a native get_state cleanup error without manufacturing a sign-out rece
   }
 });
 
-// The entry and details are distinct surfaces: the previous test checked email
-// only after navigation, allowing the entry to ship a fixed Account label.
+// The inline card keeps identity/fallback text current across native broadcasts.
 it.each([
   { identityEmail: 'identity@example.test', email: 'fallback@example.test', label: 'identity@example.test' },
   { identityEmail: null, email: 'fallback@example.test', label: 'fallback@example.test' },
   { identityEmail: null, email: null, label: 'Account' },
   { identityEmail: undefined, email: undefined, label: 'Account' },
-])('account entry identifies the current account before navigation ($label/$identityEmail)', async ({ identityEmail, email, label }) => {
+])('inline account identifies the current account without navigation ($label/$identityEmail)', async ({ identityEmail, email, label }) => {
   let state = { ...states.signed_in, account: { ...states.signed_in.account,
     identity: identityEmail ? { id: 'entry-account', email: identityEmail } : null, email } };
   let finishRefresh: (() => void) | undefined;
@@ -432,22 +427,24 @@ it.each([
   fireEvent.click(within(details).getByRole('button', { name: 'Instances', exact: true }));
   await waitFor(() => expect(finishRefresh).toBeDefined());
   // The list's entry names the account itself, not a fixed Account label.
-  const entry = screen.getByRole('button', { name: label, exact: true });
-  expect(within(entry).getByText(label)).toBeTruthy();
+  const entry = document.querySelector('[data-instance-account] > div') as HTMLElement;
+  const emailText = within(entry).getByText(label);
+  expect(emailText.closest('button')).toBeNull();
   expect(screen.getByRole('heading', { name: 'Account', level: 2 })).toBeTruthy();
-  expect(screen.getByRole('button', { name: label, exact: true }).hasAttribute('disabled')).toBe(true);
-  fireEvent.click(screen.getByRole('button', { name: label, exact: true }));
+  expect(within(entry).getByRole('button', { name: en.desktopClient.signOut }).hasAttribute('disabled')).toBe(true);
+  fireEvent.click(emailText);
   expect(document.querySelector('[data-account-details]')).toBeNull();
   await act(async () => finishRefresh!());
   state = { ...state, generation: state.generation + 1, revision: state.revision + 1,
     account: { ...state.account, identity: { id: 'next-account', email: 'next@example.test' }, email: 'next@example.test' } };
   fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: state }));
-  expect(screen.getByRole('button', { name: 'next@example.test' })).toBeTruthy();
-  expect(screen.queryByRole('button', { name: label, exact: true })).toBeNull();
+  expect(within(entry).getByText('next@example.test')).toBeTruthy();
+  expect(within(entry).queryByText(label)).toBeNull();
   fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: { ...state, generation: state.generation + 1,
     account: { ...state.account, identity: null, email: null },
     connection: { ...state.connection, status: 'switching', pending: { kind: 'remote', name: 'Pending', instance_id: 'pending', canonical_origin: 'https://pending.example.test' } } } }));
-  const cleared = screen.getByRole('button', { name: 'Account', exact: true });
+  expect(within(entry).getByText('Account')).toBeTruthy();
+  const cleared = within(entry).getByRole('button', { name: en.desktopClient.signOut });
   expect(cleared.hasAttribute('disabled')).toBe(true);
   fireEvent.click(cleared);
   expect(screen.queryByText('next@example.test')).toBeNull();

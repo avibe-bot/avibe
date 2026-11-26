@@ -511,20 +511,12 @@ it('a binding not under this account offers signing in with that account, or che
   expect(screen.getByRole('button', { name: copy.checkAgain })).toBeTruthy();
 });
 
-it('another document never sends claim commands; its Account card opens a real Account document', async () => {
-  const assign = vi.fn();
-  const location = new Proxy({} as Location, { get: (_t, key) => key === 'assign' ? assign : Reflect.get(window.location, key) });
-  const original = window;
-  const receiver: Window = new Proxy(original, { get(target, key) {
-    if (key === 'location') return location;
-    if (key === 'top') return receiver;
-    const value = Reflect.get(target, key, target);
-    return typeof value === 'function' && !String(key).startsWith('HTML') ? value.bind(target) : value;
-  } });
+it('the instances account card signs out without opening an Account document or sending claim commands', async () => {
   const page = mount({}, signedIn, 'instances');
-  vi.stubGlobal('window', receiver);
-  fireEvent.click(await screen.findByRole('button', { name: signedIn.account.identity!.email, exact: true }));
-  expect(assign).toHaveBeenCalledWith('avibe://desktop/account?locale=en');
+  fireEvent.click(await screen.findByText(signedIn.account.identity!.email));
+  expect(document.querySelector('[data-account-details]')).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: en.desktopClient.signOut }));
+  expect(page.leaves()).toEqual(['sign_out']);
   expect(page.actions).toEqual([]);
 });
 
