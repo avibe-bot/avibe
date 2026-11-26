@@ -1554,7 +1554,32 @@ def _is_yanked_release(files: object) -> bool:
     return bool(yanked_flags) and all(yanked_flags)
 
 
-def select_latest_update_version(metadata: Mapping[str, object], current_version: str) -> str:
+def release_index_notifications(index: Mapping[str, object]) -> dict[str, bool]:
+    """Each version the release index lists, and whether it is silent.
+
+    A silent release carries ``update_notification: "none"`` (docs/release.md);
+    the index lists a release only once its assets are mirrored.
+    """
+
+    if index.get("schema_version") != 1 or index.get("repository") != RELEASE_INDEX_REPOSITORY:
+        return {}
+    releases = index.get("releases")
+    listed: dict[str, bool] = {}
+    for release in releases if isinstance(releases, list) else []:
+        if not isinstance(release, Mapping):
+            continue
+        tag = str(release.get("tag") or "")
+        version = tag.removeprefix("gh-v") if tag.startswith("gh-v") else tag.removeprefix("v")
+        listed[version] = release.get("update_notification") == "none"
+    return listed
+
+
+def select_latest_update_version(
+    metadata: Mapping[str, object],
+    current_version: str,
+    *,
+    sees: Callable[[str], bool] = lambda _version: True,
+) -> str:
     allow_prereleases = _is_prerelease_version(current_version)
     releases = metadata.get("releases")
 
@@ -1568,7 +1593,7 @@ def select_latest_update_version(metadata: Mapping[str, object], current_version
                 continue
             if not allow_prereleases and _is_prerelease_version(version_str):
                 continue
-            if _is_yanked_release(files):
+            if _is_yanked_release(files) or not sees(version_str):
                 continue
             candidates.append((parsed, version_str))
 
@@ -1577,7 +1602,7 @@ def select_latest_update_version(metadata: Mapping[str, object], current_version
         return candidates[-1][1]
 
     latest = str((metadata.get("info") or {}).get("version") or "")
-    if latest and (allow_prereleases or not _is_prerelease_version(latest)):
+    if latest and sees(latest) and (allow_prereleases or not _is_prerelease_version(latest)):
         return latest
     return ""
 
@@ -1629,8 +1654,13 @@ def prerelease_updates_enabled() -> bool:
     return isinstance(update, dict) and update.get("prereleases") is True
 
 
-def select_latest_prerelease(index: Mapping[str, object], index_url: str) -> tuple[str, str] | None:
-    """The newest release candidate with a mirrored core wheel, and its install spec.
+def select_latest_prerelease(
+    index: Mapping[str, object],
+    index_url: str,
+    *,
+    sees: Callable[[str], bool] = lambda _version: True,
+) -> tuple[str, str] | None:
+    """The newest release candidate ``sees`` admits with a mirrored core wheel, and its install spec.
 
     The spec pins the wheel's mirrored URL and SHA-256 from the index, so pip
     and uv verify the bytes they install.
@@ -1649,6 +1679,8 @@ def select_latest_prerelease(index: Mapping[str, object], index_url: str) -> tup
         match = _PRERELEASE_TAG_RE.fullmatch(str(release.get("tag") or ""))
         parsed = _parse_version(match["version"]) if match else None
         if parsed is None or (best is not None and parsed <= best[0]):
+            continue
+        if not sees(match["version"]):
             continue
         version = match["version"]
         wheel = f"{wheel_prefix}-{version}-py3-none-any.whl"
@@ -1669,22 +1701,48 @@ def select_latest_prerelease(index: Mapping[str, object], index_url: str) -> tup
     return None if best is None else (best[1], best[2])
 
 
-def _fetch_latest_prerelease() -> tuple[str, str] | None:
+def _fetch_release_index() -> tuple[Mapping[str, object], str]:
     url = get_release_index_url()
     req = urllib.request.Request(url, headers={"User-Agent": PACKAGE_NAME})
     with urllib.request.urlopen(req, timeout=10) as resp:
-        return select_latest_prerelease(json.loads(resp.read().decode("utf-8")), url)
+        index = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(index, Mapping):
+        raise ValueError("invalid release index")
+    return index, url
 
 
-def get_latest_version_info(current_version: str, *, prereleases: bool = False) -> dict:
+def get_latest_version_info(
+    current_version: str,
+    *,
+    prereleases: bool = False,
+    announced_only: bool = False,
+) -> dict:
     """The newest release to offer: stable from PyPI, plus release candidates when opted in.
 
     An offered release candidate also carries ``package_spec``, the requirement
     that installs it. Turning pre-releases off never offers a downgrade: an
     older stable release is not newer than the running candidate.
+
+    ``announced_only`` is automatic discovery: it skips every release the
+    release index marks silent and reports ``announced``, whether the index
+    lists the offer without the marker. An offer the index does not (yet) list
+    is unclassified; the automatic caller reads its notes before acting.
     """
 
     result = {"current": current_version, "latest": None, "has_update": False, "error": None}
+
+    index: Mapping[str, object] | None = None
+    index_url = ""
+    if prereleases or announced_only:
+        try:
+            index, index_url = _fetch_release_index()
+        except Exception as exc:
+            # Stable releases remain on offer when the release index is unreachable.
+            logger.warning("Release index check failed: %s", exc)
+    listed = release_index_notifications(index) if index is not None else {}
+
+    def sees(version: str) -> bool:
+        return not (announced_only and listed.get(version, False))
 
     try:
         url = get_update_metadata_url()
@@ -1692,7 +1750,7 @@ def get_latest_version_info(current_version: str, *, prereleases: bool = False) 
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
-        latest = select_latest_update_version(data, current_version)
+        latest = select_latest_update_version(data, current_version, sees=sees)
         result["latest"] = latest
 
         if latest and latest != current_version:
@@ -1701,18 +1759,46 @@ def get_latest_version_info(current_version: str, *, prereleases: bool = False) 
         result["error"] = str(e)
         return result
 
-    if prereleases:
-        try:
-            candidate = _fetch_latest_prerelease()
-        except Exception as exc:
-            # Stable releases remain on offer when the pre-release index is unreachable.
-            logger.warning("Pre-release update check failed: %s", exc)
-            candidate = None
+    if prereleases and index is not None:
+        candidate = select_latest_prerelease(index, index_url, sees=sees)
         if candidate and (not result["latest"] or has_newer_version(candidate[0], result["latest"])):
             result["latest"], result["package_spec"] = candidate
             result["has_update"] = has_newer_version(candidate[0], current_version)
 
+    if announced_only:
+        result["announced"] = listed.get(str(result["latest"] or "")) is False
     return result
+
+
+def exact_release_spec(version: str) -> str:
+    """The requirement that installs exactly ``version``, never a newer release.
+
+    A release candidate installs its mirrored wheel from the release index;
+    a stable release pins the package, once the package index shows it
+    published and not yanked (a pin would install a yanked release). A
+    configured custom package spec cannot carry a pin and is returned as it
+    is. Raises ``LookupError`` when the release is not available, and other
+    errors when an index cannot be read.
+    """
+
+    if _parse_version(version) is None:
+        raise LookupError(f"{version!r} is not a release version")
+    if _PRERELEASE_TAG_RE.fullmatch(f"gh-v{version}"):
+        index, index_url = _fetch_release_index()
+        candidate = select_latest_prerelease(index, index_url, sees=lambda listed: listed == version)
+        if candidate is None:
+            raise LookupError(f"release candidate {version} is not in the release index")
+        return candidate[1]
+    package_spec = get_upgrade_package_spec()
+    if package_spec != PACKAGE_NAME:
+        return package_spec
+    req = urllib.request.Request(get_update_metadata_url(), headers={"User-Agent": PACKAGE_NAME})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        releases = json.loads(resp.read().decode("utf-8")).get("releases")
+    files = releases.get(version) if isinstance(releases, Mapping) else None
+    if files is None or _is_yanked_release(files):
+        raise LookupError(f"release {version} is not available")
+    return pinned_package_spec(version, package_name=PACKAGE_NAME)
 
 
 def is_uv_tool_install(python_executable: str | None = None) -> bool:
