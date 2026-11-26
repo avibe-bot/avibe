@@ -65,7 +65,7 @@ def test_plan_shards_rejects_invalid_shard_total(tmp_path: Path, shard_total: in
         plan_shards([_test_file(tmp_path, "test_one.py")], shard_total)
 
 
-@pytest.mark.parametrize("shard_total", [1, 8, 16])
+@pytest.mark.parametrize("shard_total", [1, 8, 16, 48])
 def test_measured_plan_runs_every_discovered_file_exactly_once(shard_total: int) -> None:
     files = discover_unit_test_files()
     shards = plan_shards(files, shard_total, load_timings())
@@ -117,6 +117,13 @@ def test_main_emits_budgets_only_when_a_floor_is_requested(
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CI_PR_SHARD_WEIGHTS", "true")
+    (tmp_path / "scripts" / "ci_pr_unit_weights.json").write_text(
+        json.dumps({"tests/test_measured.py": 10, "tests/test_new.py": 600}), encoding="utf-8"
+    )
+    assert main(["0", "2"]) == 0
+    assert capsys.readouterr().out.splitlines() == ["tests/test_new.py"]
+    # Despite changing placement, the PR-only weights must not change file deadlines.
     assert measured.is_file()
 
     assert main(["0", "1"]) == 0

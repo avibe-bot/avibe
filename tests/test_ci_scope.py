@@ -327,7 +327,7 @@ def test_real_scope_cli_routes_docs_and_advisory_ios_from_the_same_git_diff(tmp_
               '.github/PULL_REQUEST_TEMPLATE.md': {'manifest-consistency'}}.get(path, set())
     assert routed['portfolio'] == 'true' and routed['sensitive'] == str(bool(extras)).lower()
     assert {k for k, v in json.loads(routed['dispatch_jobs']).items() if v == 'run'} == LINUX | extras
-    assert json.loads(routed['unit_shards']) == list(range(16))
+    assert json.loads(routed['unit_shards']) == list(range(24))
     assert routed['advisory_ios'] == 'skip'
     output.unlink()
     result = subprocess.run([*command, "--optional-ios"], cwd=repo, env=env, capture_output=True, text=True)

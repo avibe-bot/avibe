@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import statistics
 import sys
@@ -153,13 +154,18 @@ def main(argv: list[str] | None = None) -> int:
 
     files = discover_unit_test_files()
     timings = load_timings()
-    shards = plan_shards(files, shard_total, timings)
+    # Scheduling weights are not timeout evidence. Keep watchdog budgets and the
+    # master matrix on their original baseline even when PR weights are newer.
+    planning = timings
+    if os.environ.get("CI_PR_SHARD_WEIGHTS") == "true":
+        planning = {**timings, **load_timings(Path("scripts/ci_pr_unit_weights.json"))}
+    shards = plan_shards(files, shard_total, planning)
     selected = sorted(shards[shard_index][1])
     print(
         f"Planned {len(files)} unit test file(s) across {shard_total} shard(s); "
         f"shard {shard_index} has {len(selected)} file(s), "
         f"estimated weight {shards[shard_index][0]:.0f}s "
-        f"({len(timings)} historical timing samples).",
+        f"({len(planning)} planning weights).",
         file=sys.stderr,
     )
     for path in selected:

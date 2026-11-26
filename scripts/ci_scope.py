@@ -178,7 +178,7 @@ def validate_plan(plan: object) -> dict:
 
 
 def unit_shards(portfolio: bool = False) -> list[int]:
-    return list(range(16 if portfolio else 8))
+    return list(range(24 if portfolio else 8))
 
 
 def unit_python_versions(mode: str) -> list[str]:
