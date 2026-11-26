@@ -253,218 +253,8 @@ _SHOW_RUNTIME_MODULE_SCRIPT_RE = re.compile(
     r"<script\b(?=[^>]*\btype\s*=\s*['\"]module['\"])[^>]*>",
     re.IGNORECASE,
 )
-_SHOW_SYSTEM_ENTRY_META = "avibe-show-system-entry"
 _SHOW_SYSTEM_ENTRY_MANIFEST = "__show/manifest.webmanifest"
 _SHOW_SYSTEM_ENTRY_ICON = "__show/icon"
-_SHOW_SYSTEM_ENTRY_SCRIPT = "__show/system-entry.js"
-_SHOW_SYSTEM_ENTRY_SCRIPT_BODY = r"""
-(() => {
-  const meta = document.querySelector('meta[name="avibe-show-system-entry"]');
-  if (!meta) return;
-  let config;
-  try {
-    config = JSON.parse(meta.content || '{}');
-  } catch {
-    return;
-  }
-  const standalone = Boolean(
-    (navigator.standalone === true) ||
-    (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
-  );
-  // Safari installs the top-level document, never an embedded Workbench Show.
-  if (window.top !== window.self || standalone || document.querySelector('[data-avibe-show-system-entry]')) return;
-  const userAgent = navigator.userAgent || '';
-  const ios = /iP(hone|ad|od)/.test(userAgent) ||
-    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  // Mac users install through Safari or the share panel; never alter the Show body.
-  if (/Macintosh|Mac OS X/.test(userAgent) && !ios) return;
-  const storageKey = `avibe-show-system-entry:${window.location.pathname}`;
-  const readPreference = () => {
-    try {
-      return window.localStorage.getItem(storageKey);
-    } catch {
-      return null;
-    }
-  };
-  const savePreference = (value) => {
-    try {
-      window.localStorage.setItem(storageKey, value);
-    } catch {
-      // Private browsing may deny storage; the entry still works for this page load.
-    }
-  };
-  if (readPreference() === 'dismissed') return;
-  const copy = config.copy || {};
-  const root = document.createElement('div');
-  root.setAttribute('data-avibe-show-system-entry', 'true');
-  root.setAttribute('aria-label', copy.title || copy.cta || 'Show Page');
-  const shadow = root.attachShadow({ mode: 'open' });
-  const style = document.createElement('style');
-  style.textContent = `
-    :host { all: initial; display: block; flex: 0 0 auto; min-width: 0; }
-    .wrap { position: fixed; left: max(12px, env(safe-area-inset-left)); bottom: max(12px, env(safe-area-inset-bottom)); z-index: 2147483000; max-width: calc(100vw - 24px); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17202a; }
-    .wrap[hidden] { display: none; }
-    .wrap[data-expanded="true"] { position: relative; left: auto; bottom: auto; margin: 12px; padding-bottom: calc(84px + env(safe-area-inset-bottom)); }
-    .button, .copy, .close { border: 1px solid rgba(23,32,42,.18); border-radius: 999px; background: rgba(255,255,255,.94); color: #17202a; box-shadow: 0 8px 26px rgba(23,32,42,.16); cursor: pointer; font: 600 13px/1.2 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .button { max-width: 100%; padding: 9px 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .button:hover, .copy:hover, .close:hover { background: #f4f7f8; }
-    .panel { box-sizing: border-box; width: min(330px, calc(100vw - 24px)); max-height: min(40vh, 300px); overflow: auto; padding: 14px; border: 1px solid rgba(23,32,42,.14); border-radius: 16px; background: rgba(255,255,255,.98); box-shadow: 0 16px 42px rgba(23,32,42,.2); }
-    .panel[hidden] { display: none; }
-    .panel-head { display: flex; align-items: flex-start; gap: 10px; }
-    .title { min-width: 0; flex: 1; margin: 0 0 6px; font: 700 14px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .close { display: grid; width: 24px; height: 24px; flex: 0 0 auto; place-items: center; padding: 0; box-shadow: none; font-size: 18px; line-height: 1; }
-    .collapse { margin-top: 10px; }
-    .body { margin: 0; color: #53616d; font: 400 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .steps { margin: 10px 0 0; padding-left: 20px; color: #17202a; font: 500 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .copy { display: none; margin-top: 10px; padding: 7px 10px; }
-    .copy[data-visible="true"] { display: inline-block; }
-    .status { min-height: 18px; margin: 8px 0 0; color: #187c62; font: 500 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    @media (prefers-color-scheme: dark) {
-      .wrap { color: #eef4f6; }
-      .button, .copy, .close, .panel { border-color: rgba(238,244,246,.18); background: rgba(26,34,39,.96); color: #eef4f6; }
-      .button:hover, .copy:hover, .close:hover { background: #313d44; }
-      .body { color: #aebbc1; }
-      .steps { color: #eef4f6; }
-    }
-  `;
-  shadow.append(style);
-
-  const wrap = document.createElement('div');
-  wrap.className = 'wrap';
-  const panel = document.createElement('section');
-  panel.className = 'panel';
-  panel.setAttribute('role', 'dialog');
-  const panelId = 'avibe-show-system-entry-panel';
-  const titleId = 'avibe-show-system-entry-title';
-  panel.id = panelId;
-  panel.setAttribute('aria-labelledby', titleId);
-  const title = document.createElement('h2');
-  title.className = 'title';
-  title.id = titleId;
-  const body = document.createElement('p');
-  body.className = 'body';
-  const steps = document.createElement('ol');
-  steps.className = 'steps';
-  const copyButton = document.createElement('button');
-  copyButton.className = 'copy';
-  copyButton.type = 'button';
-  copyButton.textContent = copy.copyLink || 'Copy link';
-  copyButton.setAttribute('data-visible', 'false');
-  const status = document.createElement('p');
-  status.className = 'status';
-  status.setAttribute('aria-live', 'polite');
-  const panelHead = document.createElement('div');
-  panelHead.className = 'panel-head';
-  const closeButton = document.createElement('button');
-  closeButton.className = 'close';
-  closeButton.type = 'button';
-  closeButton.textContent = '×';
-  closeButton.setAttribute('aria-label', copy.close || 'Close');
-  closeButton.title = copy.close || 'Close';
-  panelHead.append(title, closeButton);
-  const collapseButton = document.createElement('button');
-  collapseButton.className = 'button collapse';
-  collapseButton.type = 'button';
-  collapseButton.textContent = copy.collapse || copy.cta || 'Collapse guidance';
-  collapseButton.setAttribute('aria-label', copy.collapse || 'Collapse guidance');
-  panel.append(panelHead, body, steps, copyButton, status, collapseButton);
-  const button = document.createElement('button');
-  button.className = 'button';
-  button.type = 'button';
-  button.textContent = copy.cta || 'Add to Home Screen or Dock';
-  button.setAttribute('aria-expanded', 'false');
-  button.setAttribute('aria-controls', panelId);
-  wrap.append(panel, button);
-  shadow.append(wrap);
-  document.body.append(root);
-
-  const safari = /Safari/.test(userAgent) && /Version\//.test(userAgent) &&
-    !/CriOS|FxiOS|EdgiOS|OPiOS|Android|Chrome|Chromium/i.test(userAgent);
-  if (ios) {
-    button.textContent = copy.iosCta || copy.cta || 'Add to Home Screen';
-  }
-  if (ios && safari) {
-    title.textContent = copy.iosTitle || copy.title || 'Add to Home Screen';
-    body.textContent = copy.iosBody || '';
-    steps.hidden = true;
-  } else {
-    title.textContent = copy.title || 'Add this Show Page';
-    body.textContent = copy.otherBody || '';
-    steps.hidden = true;
-    copyButton.setAttribute('data-visible', 'true');
-  }
-
-  const safeArea = document.createElement('div');
-  safeArea.setAttribute('aria-hidden', 'true');
-  safeArea.setAttribute('data-avibe-show-system-entry-spacer', 'true');
-  safeArea.style.cssText = 'width:1px;height:0;pointer-events:none;';
-  document.body.append(safeArea);
-  const updateSafeArea = () => {
-    // Expanded guidance participates in document flow, so it cannot cover the last line.
-    // The collapsed entry and annotation button still need clearance at the page end.
-    safeArea.style.height = panel.hidden && !wrap.hidden ? '80px' : '0px';
-  };
-  const setPanelOpen = (open) => {
-    panel.hidden = !open;
-    button.hidden = open;
-    wrap.setAttribute('data-expanded', String(open));
-    button.setAttribute('aria-expanded', String(open));
-    savePreference(open ? 'expanded' : 'collapsed');
-    window.requestAnimationFrame(updateSafeArea);
-  };
-  setPanelOpen(readPreference() === 'expanded');
-
-  // Annotation owns the page while it is active, including its mobile bottom sheet.
-  // Subscribe to the existing Runtime API; its bootstrap may mount after this script.
-  let unsubscribeAnnotation;
-  const bindAnnotation = () => {
-    const api = window.__AVIBE_SHOW__?.annotation?.api;
-    if (!api || unsubscribeAnnotation) return;
-    const syncAnnotation = (state) => {
-      wrap.hidden = Boolean(state.enabled && state.available);
-      window.requestAnimationFrame(updateSafeArea);
-    };
-    unsubscribeAnnotation = api.subscribe(syncAnnotation);
-    syncAnnotation(api.getState());
-    annotationReady.disconnect();
-  };
-  const annotationReady = new MutationObserver(bindAnnotation);
-  annotationReady.observe(document.body, { childList: true });
-  bindAnnotation();
-  button.addEventListener('click', () => {
-    setPanelOpen(true);
-    window.requestAnimationFrame(() => {
-      root.scrollIntoView({ block: 'end', behavior: 'instant' });
-      collapseButton.focus({ preventScroll: true });
-    });
-  });
-  collapseButton.addEventListener('click', () => {
-    setPanelOpen(false);
-    button.focus({ preventScroll: true });
-  });
-  panel.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape') {
-      setPanelOpen(false);
-      button.focus({ preventScroll: true });
-    }
-  });
-  closeButton.addEventListener('click', () => {
-    savePreference('dismissed');
-    annotationReady.disconnect();
-    unsubscribeAnnotation?.();
-    safeArea.remove();
-    root.remove();
-  });
-  copyButton.addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText(window.location.href);
-      status.textContent = copy.copied || 'Link copied';
-    } catch {
-      status.textContent = window.location.href;
-    }
-  });
-})();
-"""
 
 _SHOW_RUNTIME_IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _SHOW_PAGE_ASSET_SUFFIXES = frozenset(
@@ -18199,7 +17989,6 @@ def _is_show_system_entry_asset(asset_path: str) -> bool:
     return relative in {
         _SHOW_SYSTEM_ENTRY_MANIFEST,
         _SHOW_SYSTEM_ENTRY_ICON,
-        _SHOW_SYSTEM_ENTRY_SCRIPT,
     }
 
 
@@ -20040,14 +19829,10 @@ async def _show_page_runtime_response(
         )
         content = _inject_show_system_entry(
             content,
-            _show_system_entry_config(
-                title=_show_page_title(session_id, _request_ui_language()),
+            title=_show_page_title(session_id, _request_ui_language()),
+            icon_url=_show_system_entry_icon_url(
                 base_path=base_path,
-                icon_url=_show_system_entry_icon_url(
-                    base_path=base_path,
-                    session_id=session_id,
-                ),
-                language=_request_ui_language(),
+                session_id=session_id,
             ),
             base_path=base_path,
         )
@@ -20611,56 +20396,25 @@ def _show_page_title(session_id: str, language: str) -> str:
     return title or t("show.systemEntry.defaultTitle", language)
 
 
-def _show_system_entry_config(
-    *,
-    title: str,
-    base_path: str,
-    icon_url: str,
-    language: str,
-) -> dict[str, Any]:
-    return {
-        "title": title,
-        "basePath": base_path,
-        "iconUrl": icon_url,
-        "copy": {
-            "cta": t("show.systemEntry.cta", language),
-            "iosCta": t("show.systemEntry.iosCta", language),
-            "macCta": t("show.systemEntry.macCta", language),
-            "title": t("show.systemEntry.title", language),
-            "iosTitle": t("show.systemEntry.iosTitle", language),
-            "macTitle": t("show.systemEntry.macTitle", language),
-            "iosBody": t("show.systemEntry.iosBody", language),
-            "macBody": t("show.systemEntry.macBody", language),
-            "otherBody": t("show.systemEntry.otherBody", language),
-            "copyLink": t("show.systemEntry.copyLink", language),
-            "copied": t("show.systemEntry.copied", language),
-            "close": t("show.systemEntry.close", language),
-            "collapse": t("show.systemEntry.collapse", language),
-        },
-    }
-
-
 def _inject_show_system_entry(
     content: bytes,
-    config: dict[str, Any],
     *,
+    title: str,
+    icon_url: str,
     base_path: str,
 ) -> bytes:
+    """Add Safari's native install metadata; Avibe draws no install prompt of its own."""
     try:
         document = content.decode("utf-8")
     except UnicodeDecodeError:
         return content
-    payload = json.dumps(config, ensure_ascii=False, separators=(",", ":"))
-    escaped_payload = html.escape(payload, quote=True)
     base = base_path.rstrip("/") + "/"
     tags = (
         f'<link rel="manifest" href="{html.escape(base + _SHOW_SYSTEM_ENTRY_MANIFEST, quote=True)}" crossorigin="use-credentials">'
-        f'<link rel="apple-touch-icon" href="{html.escape(str(config["iconUrl"]), quote=True)}">'
+        f'<link rel="apple-touch-icon" href="{html.escape(icon_url, quote=True)}">'
         f'<meta name="apple-mobile-web-app-capable" content="yes">'
         f'<meta name="mobile-web-app-capable" content="yes">'
-        f'<meta name="apple-mobile-web-app-title" content="{html.escape(str(config["title"]), quote=True)}">'
-        f'<meta name="{_SHOW_SYSTEM_ENTRY_META}" content="{escaped_payload}">'
-        f'<script defer src="{html.escape(base + _SHOW_SYSTEM_ENTRY_SCRIPT, quote=True)}"></script>'
+        f'<meta name="apple-mobile-web-app-title" content="{html.escape(title, quote=True)}">'
     )
     # Locate a real token, not a head-shaped string inside a comment or a
     # quoted attribute. Keep the prologue/doctype and all authored bytes intact.
@@ -20729,10 +20483,6 @@ def _show_system_entry_response(
     language: str,
 ):
     relative = (asset_path or "").strip("/")
-    if relative == _SHOW_SYSTEM_ENTRY_SCRIPT:
-        response = Response(_SHOW_SYSTEM_ENTRY_SCRIPT_BODY, mimetype="text/javascript")
-        response.headers["Cache-Control"] = "no-store"
-        return response
     icon_url = _show_system_entry_icon_url(base_path=base_path, session_id=page.session_id)
     if relative == _SHOW_SYSTEM_ENTRY_MANIFEST:
         from core.show_pages import show_page_web_app_manifest
