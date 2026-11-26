@@ -299,26 +299,47 @@ def output_of(tool: str, answer: Mapping[str, Any]) -> dict[str, Any]:
     """The protocol output for a gateway answer: what the model would read."""
 
     record = answer.get("record") or {}
+    results = [
+        {key: value for key, value in source.items() if key in ("url", "title", "snippet", "page_age")}
+        for source in record.get("sources") or () if isinstance(source, Mapping)
+    ]
     if record.get("status") == "completed":
         if tool == "web_search":
-            return {"ok": True, "result": {"results": [
-                {key: value for key, value in source.items() if key in ("url", "title", "snippet", "page_age")}
-                for source in record.get("sources") or () if isinstance(source, Mapping)
-            ]}}
+            return {"ok": True, "result": {"results": results}}
         return {"ok": True, "result": {
             "url": record.get("requested_url"),
             "final_url": record.get("final_url"),
             "title": record.get("title"),
             "content": record.get("content", ""),
         }}
-    return {"ok": False, "error": {
+    failed: dict[str, Any] = {"ok": False, "error": {
         "code": record.get("error_code") or ("search_failed" if tool == "web_search" else "fetch_unavailable"),
         "message": record.get("error") or "The call failed.",
     }}
+    if tool == "web_search" and results:
+        # A search that ended early may keep the sources it found; the model reads them, so the hook sees them too.
+        failed["result"] = {"results": results}
+    return failed
 
 
 def _text(value: object, bound: int) -> Optional[str]:
     return value[:bound] if isinstance(value, str) else None
+
+
+def _sources(result: Mapping[str, Any]) -> list[dict[str, str]]:
+    results = result.get("results")
+    if not isinstance(results, list):
+        raise HookFailed("a search result needs a results array")
+    sources = []
+    for item in results[:_MAX_RESULTS]:
+        if not isinstance(item, dict) or not isinstance(item.get("url"), str) or not item["url"].strip():
+            raise HookFailed("each search result needs a url")
+        source = {"url": item["url"][:_URL_MAX]}
+        for field, bound in _SOURCE_BOUNDS:
+            if (value := _text(item.get(field), bound)) is not None:
+                source[field] = value
+        sources.append(source)
+    return sources
 
 
 def search_record(output: Mapping[str, Any], *, attempts: object = None) -> dict[str, Any]:
@@ -326,22 +347,16 @@ def search_record(output: Mapping[str, Any], *, attempts: object = None) -> dict
 
     record: dict[str, Any]
     if output["ok"]:
-        results = output["result"].get("results")
-        if not isinstance(results, list):
-            raise HookFailed("a search result needs a results array")
-        sources = []
-        for item in results[:_MAX_RESULTS]:
-            if not isinstance(item, dict) or not isinstance(item.get("url"), str) or not item["url"].strip():
-                raise HookFailed("each search result needs a url")
-            source = {"url": item["url"][:_URL_MAX]}
-            for field, bound in _SOURCE_BOUNDS:
-                if (value := _text(item.get(field), bound)) is not None:
-                    source[field] = value
-            sources.append(source)
-        record = {"status": "completed", "sources": sources}
+        record = {"status": "completed", "sources": _sources(output["result"])}
     else:
         error = output["error"]
-        record = {"status": "failed", "error": error["message"][:HOSTED_ERROR_MAX_CHARS], "sources": []}
+        # A failed output may keep the sources the search found before it ended.
+        partial = output.get("result")
+        record = {
+            "status": "failed",
+            "error": error["message"][:HOSTED_ERROR_MAX_CHARS],
+            "sources": _sources(partial) if isinstance(partial, dict) else [],
+        }
         if (code := _code(error.get("code"))) is not None:
             record["error_code"] = code
     if isinstance(attempts, list):

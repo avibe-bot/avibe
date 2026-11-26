@@ -7718,7 +7718,8 @@ class ModelHubService:
         if not isinstance(enabled, bool):
             raise ModelHubError("invalid_parameter", status=400)
         async with self._mutation_lock:
-            previous = self.store.load()
+            # The config grows with use: read it off the controller loop.
+            previous = await asyncio.to_thread(self.store.load)
             setting = hosted_tool_setting(previous, "web_search")
             if setting.source_filter != enabled:
                 config = self._clone_config(previous)

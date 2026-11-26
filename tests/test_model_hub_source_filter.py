@@ -194,6 +194,27 @@ async def test_nothing_a_timed_out_hook_started_outlives_the_call(tmp_path, hook
 
 
 @pytest.mark.asyncio
+async def test_sources_a_failed_search_kept_reach_the_after_hook(tmp_path, hooks):
+    """A search that ended early keeps the sources it found; the model reads them, so the hook decides them too."""
+
+    hooks("after_search", """
+        out = req["output"]
+        assert not out["ok"] and [r["url"] for r in out["result"]["results"]] == ["https://a.example/", "https://b.example/"]
+        out["result"]["results"] = out["result"]["results"][1:]
+        json.dump({"action": "replace", "output": out}, sys.stdout)
+    """)
+
+    async def run(arguments):
+        return {"record": {"status": "incomplete", "error": "The executor's response ended as incomplete.",
+                           "sources": [{"url": "https://a.example/"}, {"url": "https://b.example/"}]}}
+
+    answer = await source_filter_module.filtered_call(
+        source_filter_module.SourceFilterHooks(), "web_search", {"query": "q"}, run, lambda key, **params: key,
+    )
+    assert [s.url for s in _hosted_result("web_search", answer).record.sources] == ["https://b.example/"]
+
+
+@pytest.mark.asyncio
 async def test_after_fetch_may_rewrite_the_page_and_its_urls(tmp_path, hooks):
     """A fetch output with the script's own URL, final URL and content is a readable, bounded fetch record."""
 
