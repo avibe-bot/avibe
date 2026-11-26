@@ -57,6 +57,16 @@ pub enum FaultCode {
     NotReady,
     ConnectionEnded,
     InvalidHead,
+    // The instance answered that it has nothing to dial ("unavailable"), by
+    // the family of the reason it gave. Not a malformed offer.
+    NotReadyCertificate,
+    NotReadyOwnerRequired,
+    NotReadyNotRunning,
+    NotReadyPermission,
+    NotReadyTransport,
+    NotReadyDisabled,
+    NotReadyNoAddress,
+    NotReadyOther,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Fault(pub Stage, pub FaultCode);

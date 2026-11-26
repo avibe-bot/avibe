@@ -337,7 +337,10 @@ impl Client {
             )
         }) else {
             self.retire().await;
-            return Err(Fault(Stage::Rendezvous, FaultCode::InvalidOffer));
+            return Err(Fault(
+                Stage::Rendezvous,
+                answer.map_or(FaultCode::InvalidOffer, unusable_answer),
+            ));
         };
         if self.links.borrow().as_ref().is_some_and(|link| link.renew(&offer)) {
             return Ok(());
@@ -455,6 +458,42 @@ impl Client {
         }));
     }
 }
+/// What an answer that is not a usable offer says. The instance's own
+/// "unavailable" is not a malformed offer: it is classified by the family of
+/// the reason the instance gave, and nothing of the answer is kept. What is
+/// done about it does not change: the link is retired either way.
+fn unusable_answer(body: &str) -> FaultCode {
+    #[derive(serde::Deserialize)]
+    struct Unavailable {
+        version: u8,
+        status: String,
+        #[serde(default)]
+        reason: String,
+    }
+    use FaultCode::*;
+    if body.len() > rendezvous::MAX_ANSWER_BYTES {
+        return InvalidOffer;
+    }
+    let Ok(answer) = serde_json::from_str::<Unavailable>(body) else {
+        return InvalidOffer;
+    };
+    if answer.version != 1 || answer.status != "unavailable" {
+        return InvalidOffer;
+    }
+    match answer.reason.as_str() {
+        "certificate_not_ready" => NotReadyCertificate,
+        "owner_required" => NotReadyOwnerRequired,
+        "not_running" | "starting" | "stopped" | "state_changed" | "sidecar_exited" => NotReadyNotRunning,
+        "permission_denied" | "permission_required" | "permission_expired" => NotReadyPermission,
+        "transport_installing" | "transport_install_failed" | "transport_not_installed" | "transport_start_failed" => {
+            NotReadyTransport
+        }
+        "setting_off" | "unpaired" | "hostname_not_direct" => NotReadyDisabled,
+        "no_reachable_address" => NotReadyNoAddress,
+        _ => NotReadyOther,
+    }
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
         self.listener.retire();
@@ -471,8 +510,32 @@ mod diagnosis_tests {
     async fn refresh_keeps_disposition_and_returns_only_classified_failures() {
         use rendezvous::Reply;
         let mut client = Client::new("desk-app.avibe.bot", "fixture".into()).await.unwrap();
+        let unavailable = |reason: &str| {
+            Reply::Ready(format!(
+                r#"{{"version":1,"instance_id":"fixture","hostname":"desk-app.avibe.bot","status":"unavailable","reason":"{reason}","retry_after_seconds":60}}"#
+            ))
+        };
         for (reply, code) in [
             (Reply::Ready("not a wire offer".into()), FaultCode::InvalidOffer),
+            // The instance's own "nothing to dial" is not a malformed offer.
+            (unavailable("certificate_not_ready"), FaultCode::NotReadyCertificate),
+            (unavailable("owner_required"), FaultCode::NotReadyOwnerRequired),
+            (unavailable("not_running"), FaultCode::NotReadyNotRunning),
+            (unavailable("stopped"), FaultCode::NotReadyNotRunning),
+            (unavailable("permission_expired"), FaultCode::NotReadyPermission),
+            (unavailable("transport_not_installed"), FaultCode::NotReadyTransport),
+            (unavailable("hostname_not_direct"), FaultCode::NotReadyDisabled),
+            (unavailable("no_reachable_address"), FaultCode::NotReadyNoAddress),
+            (unavailable("a reason of a later instance"), FaultCode::NotReadyOther),
+            // Another version, or a status that is neither, stays unreadable.
+            (
+                Reply::Ready(r#"{"version":2,"status":"unavailable","reason":"not_running"}"#.into()),
+                FaultCode::InvalidOffer,
+            ),
+            (
+                Reply::Ready(r#"{"version":1,"status":"later","reason":"not_running"}"#.into()),
+                FaultCode::InvalidOffer,
+            ),
             (Reply::NotReady, FaultCode::NotReady),
             (Reply::Refused(403), FaultCode::Denied),
             (Reply::Refused(503), FaultCode::Status),
