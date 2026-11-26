@@ -86,12 +86,15 @@ remain mandatory.
   input. Put `<!-- avibe:update-notification=none -->` in the tag annotation
   when the release should suppress update and post-update notifications while
   automatic updates remain enabled.
-- The marker also silences the desktop app: its automatic startup check does
-  not prompt for a silent release, which still shows as available and is
-  offered by an explicit check or a remote install request. The shell reads
-  the marker from the mirror index's `update_notification` field, or from the
+- The marker also silences the desktop app: its automatic checks (the startup
+  check and the auto-update tick) skip a silent release, so they neither offer
+  nor install it, while still finding any newer announced release. An explicit
+  check, a channel switch, or a remote check still finds and offers it, and a
+  remote install request that names it installs it. The shell reads the
+  marker from the mirror index's `update_notification` field, or from the
   release notes when it falls back to the GitHub API. Desktop apps built
-  before this rule still prompt.
+  before this rule still offer, and with automatic updates on install, a
+  silent release.
 - Push the tag and let the official workflows create the release. Do not
   pre-create or manually edit a GitHub Release.
 - The workflow emits both current and legacy `vibe-remote` update markers for
