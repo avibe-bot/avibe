@@ -105,9 +105,28 @@ BinaryResolver = Callable[[V2Config], str | Path | None]
 
 
 def _effective_relay(config: V2Config) -> bool:
+    """The user's side of the public relay: wanted unless they turned it off.
+
+    This grants nothing by itself. The relay policy is used only while the
+    server's fresh ``public_traversal_allowed`` is true (``_observe_permission``).
+    No host enrollment and no local opt-in is required.
+    """
+    cloud = config.remote_access.vibe_cloud
+    if cloud.public_relay_choice == "off":
+        return False
+    if cloud.public_relay_trial or cloud.public_relay_choice == "on":
+        return True
+    # No recorded choice and the setting off. Before choices were recorded,
+    # off was the untouched default everywhere except on a pairing the host
+    # had enrolled: there it was once on, and someone turned it off.
     from vibe.connection_settings import relay_enrolled
 
-    return bool(config.remote_access.vibe_cloud.public_relay_trial and relay_enrolled(config))
+    return not relay_enrolled(config)
+
+
+def _decline_relay(private_copy: V2Config) -> None:
+    """Ask about the policy without the relay, on a copy that is never saved."""
+    private_copy.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
 
 
 def resolve_direct_transport_binary(config: V2Config) -> Path | None:
@@ -538,7 +557,7 @@ class DirectAccessLifecycle:
             if not binary:
                 # An installed pin rejected only by trial policy isn't missing.
                 if _effective_relay(config):
-                    config.remote_access.vibe_cloud.public_relay_trial = False
+                    _decline_relay(config)
                     missing = self._binary_resolver(config) is None
                 else:
                     missing = True
@@ -598,7 +617,7 @@ class DirectAccessLifecycle:
         if not self._public_traversal_allowed:
             # A LAN-only grant needs only the ordinary pin capabilities. Never
             # edit the persisted user preference to inspect a different policy.
-            binary_config.remote_access.vibe_cloud.public_relay_trial = False
+            _decline_relay(binary_config)
         self._binary_task = asyncio.create_task(asyncio.to_thread(
             self._resolve_binary, self._generation, self._loop.time(), binary_config,
         ), name="direct-binary-observation")

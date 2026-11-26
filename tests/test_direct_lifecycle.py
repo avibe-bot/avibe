@@ -379,41 +379,162 @@ async def test_auto_install_once_only_when_enabled(reports, published, monkeypat
         assert attempts == [1] and len(published[2]) == 1 and rv.endpoint is not None
 
 
-def test_enrollment_only_changes_the_effective_policy_for_its_pairing(tmp_path, monkeypatch):
+def test_the_relay_is_wanted_unless_the_user_turned_it_off(tmp_path, monkeypatch):
     from vibe import connection_settings as cs
 
     monkeypatch.setattr(cs, "_relay_enrollment_path", lambda: tmp_path / "enrollment.json")
     config = _config()
     cloud = config.remote_access.vibe_cloud
-    cloud.public_relay_trial = True
-    not_enrolled = module._config_signature(config)
-    assert not not_enrolled[-1]
-    cs.enroll_from_host(config)
+    # Untouched: no host enrollment and no local opt-in. This grants nothing
+    # by itself; the server's fresh bit is asked for with every report.
+    assert (cloud.public_relay_trial, cloud.public_relay_choice) == (False, "default")
+    assert not cs.relay_enrolled(config)
     assert module._config_signature(config)[-1] is True
-    # No change to the config file or its enabled bit was needed to advance the policy.
-    assert module._config_signature(config) != not_enrolled
-    cloud.enabled = False
-    cloud.session_secret = "rotated-browser-cookie-key"
-    cloud.public_url = "https://renamed-app.avibe.bot"
-    assert cs.relay_enrolled(config)
-    cloud.enabled = True
-    assert module._config_signature(config)[-1] is True
-    cloud.instance_secret = "different-pairing-credential"
+    # An explicit off wins, with or without an enrollment, and across a save.
+    cloud.set_path_choice("public_relay_trial", False)
     assert module._config_signature(config)[-1] is False
-    assert cloud.public_relay_trial is True
+    cs.enroll_from_host(config)
+    assert module._config_signature(config)[-1] is False
+    config.save()
+    reloaded = V2Config.load()
+    assert reloaded.remote_access.vibe_cloud.public_relay_choice == "off"
+    assert module._config_signature(reloaded)[-1] is False
+    cloud.set_path_choice("public_relay_trial", True)
+    assert module._config_signature(config)[-1] is True
+
+
+def test_an_enrolled_pairing_whose_trial_was_switched_off_before_choices_were_recorded_stays_off(tmp_path, monkeypatch):
+    from vibe import connection_settings as cs
+
+    monkeypatch.setattr(cs, "_relay_enrollment_path", lambda: tmp_path / "enrollment.json")
+    config = _config()
+    cs.enroll_from_host(config)
+    config.save()
+    path = paths.get_config_path()
+    payload = json.loads(path.read_text())
+    stored = payload["remote_access"]["vibe_cloud"]
+    # What the released writer left after `public-trial on` and then off:
+    # the setting false, and nothing that says who made it so.
+    stored["public_relay_trial"] = False
+    stored.pop("public_relay_choice", None)
+    path.write_text(json.dumps(payload))
+    switched_off = V2Config.load()
+    cloud = switched_off.remote_access.vibe_cloud
+    assert (cloud.public_relay_trial, cloud.public_relay_choice) == (False, "default")
+    assert cs.relay_enrolled(switched_off)
+    assert module._config_signature(switched_off)[-1] is False
+    # The same stored shape on a pairing the host never enrolled is the
+    # untouched default, and follows the server.
+    cloud.instance_secret = "different-pairing-credential"
+    assert not cs.relay_enrolled(switched_off)
+    assert module._config_signature(switched_off)[-1] is True
+    # Enrolled and left on: the released writer's true is an explicit on.
+    stored["public_relay_trial"] = True
+    path.write_text(json.dumps(payload))
+    left_on = V2Config.load()
+    assert left_on.remote_access.vibe_cloud.public_relay_choice == "on"
+    assert module._config_signature(left_on)[-1] is True
+
+
+@pytest.mark.parametrize("grant", [{}, {"public_traversal_allowed": False}, {"public_traversal_allowed": "true"},
+                                   {"public_traversal_allowed": 1}, {"public_traversal_allowed": None}])
+async def test_without_the_servers_true_bit_no_public_relay_policy_is_used(reports, grant):
+    config = _config()
+    policies = []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    async with _owner(config, reports, supervisor_type=Recorder) as (owner, calls, _, rv):
+        await _permission(owner, config, **grant)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == [None] and owner._public_traversal_allowed is False
+        # The bit, fresh and true, is all it takes; a renewal without it
+        # retires the public endpoint and ordinary direct goes on.
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: policies == [None, "public-trial-v1"] and owner.status().state == "running")
+        await _permission(owner, config, **grant)
+        await _wait(lambda: policies == [None, "public-trial-v1", None] and owner.status().state == "running")
+        assert calls.count("supervisor_stop") == 2
+
+
+async def test_the_public_relay_ends_when_the_servers_grant_expires_or_is_denied(reports, monkeypatch):
+    config = _config()
+    monkeypatch.setattr(module, "PERMISSION_MAX_AGE_SECONDS", 0.3)
+    policies = []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    async with _owner(config, reports, supervisor_type=Recorder) as (owner, calls, _, rv):
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == ["public-trial-v1"] and owner._public_traversal_allowed is True
+        # Nothing renews it: the grant ages out, and the relay with it.
+        await _wait(lambda: owner.status().reason == "permission_expired")
+        assert owner._public_traversal_allowed is False
+        assert rv.endpoint is None and "supervisor_stop" in calls
+        assert policies == ["public-trial-v1"]
+        # An expired true is not carried into the next grant.
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == ["public-trial-v1", None]
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: len(policies) == 3 and owner.status().state == "running")
+        # A denial of direct itself takes the relay too, whatever else it says.
+        await _permission(owner, config, False, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().reason == "permission_denied")
+        assert owner._public_traversal_allowed is False and rv.endpoint is None
+        assert policies == ["public-trial-v1", None, "public-trial-v1"]
+
+
+async def test_an_explicit_off_wins_over_the_servers_true_bit(reports):
+    config = _config()
+    config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
+    policies, asked = [], []
+    class Recorder(FakeSupervisor):
+        def __init__(self, *args, relay_policy=None):
+            super().__init__(*args)
+            policies.append(relay_policy)
+
+    def resolver(config):
+        asked.append(module._effective_relay(config))
+        return "/injected/test-sidecar"
+
+    async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=resolver) as (owner, calls, _, rv):
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == [None] and owner._public_traversal_allowed is False
+        # Turned on again, the next fresh true bit gives the relay; off again
+        # retires it at once, without waiting for the server.
+        config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", True)
+        owner.notify_config_changed(config)
+        await _wait(lambda: owner.status().state == "waiting-permission")
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: policies == [None, "public-trial-v1"] and owner.status().state == "running")
+        config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
+        owner.notify_config_changed(config)
+        await _wait(lambda: owner.status().state == "waiting-permission" and rv.endpoint is None)
+        await _permission(owner, config, public_traversal_allowed=True)
+        await _wait(lambda: policies == [None, "public-trial-v1", None] and owner.status().state == "running")
+    # The pin is asked for the relay only while the relay may be used, and
+    # the user's stored choice is never what was edited to ask.
+    assert True in asked and asked[0] is False and asked[-1] is False
+    assert config.remote_access.vibe_cloud.public_relay_choice == "off"
 
 
 async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_then_retires_on_off(reports, published, monkeypatch):
     from core.direct_transport_runtime import DirectTransportRuntimeManager
 
-    from vibe.connection_settings import enroll_from_host
-
+    # No host enrollment and no local opt-in: the server's bit decides.
     config = _config()
-    config.remote_access.vibe_cloud.public_relay_trial = True
-    enroll_from_host(config)
     manager = DirectTransportRuntimeManager()
     assert manager.ensure()["ok"]
     monkeypatch.setattr(module, "BINARY_REFRESH_INTERVAL_SECONDS", 0.02)
+    installs, ensure = [], DirectTransportRuntimeManager.ensure
+    monkeypatch.setattr(DirectTransportRuntimeManager, "ensure", lambda self, **kw: (installs.append(1), ensure(self, **kw))[1])
     policies = []
     class Recorder(FakeSupervisor):
         def __init__(self, *args, relay_policy=None):
@@ -421,35 +542,44 @@ async def test_trial_lifecycle_requires_compatible_install_and_fresh_permission_
             policies.append(relay_policy)
 
     async with _owner(config, reports, supervisor_type=Recorder, binary_resolver=module.resolve_direct_transport_binary) as (owner, calls, _, rv):
+        # Without the bit the ordinary pin is all that is asked for, so a pin
+        # that is not a reviewed one still serves ordinary direct.
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == "running")
+        assert policies == [None]
         await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "transport-not-installed")
-        assert not policies
+        assert policies == [None]
+        # The installed pin is only not a reviewed one: it is not missing,
+        # and several observations later nothing has tried to install it.
+        await asyncio.sleep(0.2)
+        assert installs == [] and owner.status().state == "transport-not-installed"
         await _permission(owner, config, False)
         payload, manifest, _, _ = published
         payload["provenance"] = {"source_sha": "578659184dfa38bc87261a6fa832f9b4c65a1c90"}
         manifest.write_text(json.dumps(payload))
         assert DirectTransportRuntimeManager().ensure()["ok"]
         await _wait(lambda: owner.status().state == "waiting-permission")
-        assert not policies
+        assert policies == [None]
         await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "running")
-        assert policies == ["public-trial-v1"]
+        assert policies == [None, "public-trial-v1"]
         # A valid ordinary-direct renewal from an older backend removes only
-        # the public policy. The same local enrollment never grants it again.
+        # the public policy. Nothing local grants it again.
         await _permission(owner, config)
-        await _wait(lambda: policies == ["public-trial-v1", None] and owner.status().state == "running")
+        await _wait(lambda: policies == [None, "public-trial-v1", None] and owner.status().state == "running")
         assert "supervisor_stop" in calls
         await _permission(owner, config, public_traversal_allowed=True)
-        await _wait(lambda: len(policies) == 3 and owner.status().state == "running")
+        await _wait(lambda: len(policies) == 4 and owner.status().state == "running")
         assert policies[-1] == "public-trial-v1"
         generation = owner._generation
-        config.remote_access.vibe_cloud.public_relay_trial = False
+        config.remote_access.vibe_cloud.set_path_choice("public_relay_trial", False)
         owner.notify_config_changed(config)
         await _wait(lambda: owner.status().state == "waiting-permission" and rv.endpoint is None)
         assert owner._generation > generation and "supervisor_stop" in calls
-        await _permission(owner, config)
+        await _permission(owner, config, public_traversal_allowed=True)
         await _wait(lambda: owner.status().state == "running")
-        assert policies == ["public-trial-v1", None, "public-trial-v1", None]
+        assert policies == [None, "public-trial-v1", None, "public-trial-v1", None]
 
 
 async def test_managed_install_reaches_publication_only_after_all_lifecycle_gates(reports, published, monkeypatch):
