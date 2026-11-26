@@ -2999,3 +2999,146 @@ extension DirectPathControllerTests {
         XCTAssertEqual(harness.transport.openedTags.values.count, 1)
     }
 }
+
+extension DirectPathControllerTests {
+    // MARK: The background's load gate
+
+    /// A load made in the background (a voice take) asks the port itself:
+    /// the synchronous gate cannot know what took the port since the App
+    /// left. In front the two are the same. In the background a refused
+    /// connection leaves the gate's answer, anything that accepts is a
+    /// fault, and neither is asked before the listener's own socket has
+    /// closed. Asking records nothing.
+    @MainActor
+    func testInTheBackgroundAStrangerOnThePortIsAFaultAndAClosedPortIsTheGatesOwnAnswer() async throws {
+        let listening = try listeningSockets()
+        let harness = try Harness(timing: .recovering, test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let controller = harness.controller
+        let routed = try XCTUnwrap(harness.lastOpened).instance.url
+        let unrouted = harness.origin("instance-2").url
+        let port = try harness.listenerPort(since: listening)
+
+        // In front: the synchronous gate, whatever it says.
+        XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .open)
+        let inFront = await controller.backgroundLoadGate(forInstanceURL: routed)
+        XCTAssertEqual(inFront, .open)
+
+        // The App leaves, and the gate is asked in the same turn: the
+        // listener's own socket is still open, and would accept. The answer
+        // waits until it has closed, and is then that nothing listens.
+        harness.enterBackground()
+        XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .held)
+        let leaving = await controller.backgroundLoadGate(forInstanceURL: routed)
+        XCTAssertEqual(leaving, .held)
+        let stillListening = await LoopbackClient.canConnect(to: port)
+        XCTAssertFalse(stillListening)
+        XCTAssertEqual(controller.listenerState, .closedForBackground)
+
+        // Another process takes the port. The synchronous gate still says
+        // held, on which a background take loads; the port says otherwise.
+        let stranger = try ControlListener(
+            family: AF_INET,
+            address: "127.0.0.1",
+            port: port.rawValue,
+            reuseAddress: true
+        )
+        defer { stranger.close() }
+        XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .held)
+        let taken = await controller.backgroundLoadGate(forInstanceURL: routed)
+        XCTAssertEqual(taken, .fault)
+        // Nothing was recorded or changed by asking.
+        XCTAssertEqual(controller.loadGate(forInstanceURL: routed), .held)
+        XCTAssertTrue(controller.listenerFailures.isEmpty)
+        XCTAssertNil(controller.listenerRecovery)
+        XCTAssertEqual(controller.listenerState, .closedForBackground)
+        // A host with no route is not sent to the port: nothing is asked.
+        XCTAssertEqual(controller.loadGate(forInstanceURL: unrouted), .open)
+        let other = await controller.backgroundLoadGate(forInstanceURL: unrouted)
+        XCTAssertEqual(other, .open)
+
+        // The stranger lets the port go: nothing listens, the gate's own.
+        stranger.close()
+        try await eventually {
+            await controller.backgroundLoadGate(forInstanceURL: routed) == .held
+        }
+
+        // Back in front the port is the listener's again, and it is not
+        // asked: the answer is the gate's, also while the return is held.
+        harness.enterForeground()
+        let returning = controller.loadGate(forInstanceURL: routed)
+        let asked = await controller.backgroundLoadGate(forInstanceURL: routed)
+        XCTAssertTrue([returning, .open].contains(asked), "\(asked) after \(returning)")
+        try await eventually { controller.listenerState == .ready }
+        let served = await controller.backgroundLoadGate(forInstanceURL: routed)
+        XCTAssertEqual(served, .open)
+    }
+
+    /// The wait for the listener's own socket has a bound, and what is
+    /// still unknown at the bound is a fault. An attempt to bind that was
+    /// running when the App left is waited for like a close.
+    @MainActor
+    func testInTheBackgroundTheListenersOwnSocketIsWaitedForUpToABound() async throws {
+        // No time at all for the wait: asked in the turn the App leaves,
+        // the listener's socket is still open, and that is all that is known.
+        let impatient = try Harness(
+            timing: DirectPathTiming(
+                listenerWaitSeconds: 30, rebindSeconds: 10, foregroundSeconds: 600,
+                retrySeconds: [0.1], ownCloseSeconds: 0
+            ),
+            test: self
+        )
+        try await impatient.signIn()
+        try await impatient.select("instance-1")
+        let url = try XCTUnwrap(impatient.lastOpened).instance.url
+        impatient.enterBackground()
+        let unknown = await impatient.controller.backgroundLoadGate(forInstanceURL: url)
+        XCTAssertEqual(unknown, .fault)
+        // Once it has closed there is nothing to wait for, bound or not.
+        try await eventually { impatient.controller.listenerState == .closedForBackground }
+        try await eventually {
+            await impatient.controller.backgroundLoadGate(forInstanceURL: url) == .held
+        }
+
+        // The App returns and leaves again at once: the return's attempt to
+        // bind the port is under way. Asked now, the answer waits for that
+        // attempt to end and its socket to close.
+        let listening = try listeningSockets()
+        let harness = try Harness(timing: .recovering, test: self)
+        try await harness.signIn()
+        try await harness.select("instance-1")
+        let routed = try XCTUnwrap(harness.lastOpened).instance.url
+        let port = try harness.listenerPort(since: listening)
+        harness.enterBackground()
+        try await eventually { harness.controller.listenerState == .closedForBackground }
+        harness.enterForeground()
+        harness.enterBackground()
+        let waited = await harness.controller.backgroundLoadGate(forInstanceURL: routed)
+        XCTAssertEqual(waited, .held)
+        let stillListening = await LoopbackClient.canConnect(to: port)
+        XCTAssertFalse(stillListening)
+        XCTAssertEqual(harness.controller.listenerState, .closedForBackground)
+    }
+
+    /// What the port's answer makes of the gate, case by case.
+    func testThePortsAnswerDecidesOnlyInTheStayItWasAskedIn() {
+        typealias Controller = DirectPathController
+        for gate in [DirectLoadGate.open, .held] {
+            // Refused: nothing listens, so the gate's own answer.
+            XCTAssertEqual(Controller.backgroundGate(.refused, stay: .same, otherwise: gate), gate)
+            // Accepted by something, or no answer within the bound.
+            XCTAssertEqual(Controller.backgroundGate(.accepted, stay: .same, otherwise: gate), .fault)
+            XCTAssertEqual(Controller.backgroundGate(.undecided, stay: .same, otherwise: gate), .fault)
+            for probe in [DirectPortProbe.accepted, .refused, .undecided] {
+                // Back in front: the listener's own port, and the gate's answer.
+                XCTAssertEqual(Controller.backgroundGate(probe, stay: .ended, otherwise: gate), gate)
+                // Away again after a return: nothing was learnt of this stay.
+                XCTAssertEqual(Controller.backgroundGate(probe, stay: .another, otherwise: gate), .fault)
+            }
+        }
+        XCTAssertEqual(Controller.backgroundGate(.refused, stay: .same, otherwise: .fault), .fault)
+        XCTAssertEqual(DirectPathTiming.standard.portProbeSeconds, 0.3)
+        XCTAssertEqual(DirectPathTiming.standard.ownCloseSeconds, 3)
+    }
+}
