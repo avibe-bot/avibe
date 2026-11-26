@@ -1,6 +1,7 @@
 import { useLayoutEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useTheme } from '../context/ThemeContext';
+import { getActiveVaultSandboxClient } from '../lib/vaultSandboxClient';
 import {
   normalizeVaultSandboxLocale,
   setVaultSandboxAppearance,
@@ -17,6 +18,7 @@ export function VaultSandboxAppearanceBridge() {
       theme: resolvedTheme,
     };
     setVaultSandboxAppearance(appearance);
+    getActiveVaultSandboxClient()?.setAppearance(appearance);
   }, [i18n.language, resolvedTheme]);
 
   return null;
