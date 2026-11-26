@@ -11,7 +11,7 @@ import pytest
 
 from config.v2_config import ModelHubRouteConfig, ModelHubRouteHopConfig
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
-from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES, ResolutionDecision, classify_outcome
+from core.handlers.model_hub.classification import UPSTREAM_DIAGNOSTIC_CODES, ResolutionDecision, classify_outcome
 from core.handlers.model_hub.provenance import (
     BoundedProvenanceStore, TurnCorrelationRegistry, produce_turn_outcome, render_turn_outcome_copy,
 )
@@ -723,7 +723,7 @@ def test_terminal_diagnostic_schema_uses_the_production_machine_code_authority()
     enum = schema["properties"]["terminal_error"]["properties"]["upstream_error_code"]["enum"]
     # Each code is listed once; the set comparison below would collapse a duplicate.
     assert len(enum) == len(set(enum))
-    assert set(enum) - {None} == UPSTREAM_MACHINE_ERROR_CODES
+    assert set(enum) - {None} == UPSTREAM_DIAGNOSTIC_CODES
     assert "engine_down" not in enum
 
 

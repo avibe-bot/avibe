@@ -170,6 +170,9 @@ MACHINE_ERROR_CODES: Final = frozenset(_MACHINE_ERROR_TAXONOMY)
 UPSTREAM_MACHINE_ERROR_CODES: Final = frozenset(
     code for code, rule in _MACHINE_ERROR_TAXONOMY.items() if rule.upstream_visible
 )
+# Display-only facts are not routing rules (in particular, not 408 retry evidence).
+UPSTREAM_POLICY_CODES: Final = frozenset({"misalignment_policy_violation"})
+UPSTREAM_DIAGNOSTIC_CODES: Final = UPSTREAM_MACHINE_ERROR_CODES | UPSTREAM_POLICY_CODES
 _QUOTA_PATTERNS = re.compile(
     r"(?:quota[_ -]?(?:exhausted|exceeded)|insufficient[_ -]?(?:quota|credits)|"
     r"billing[_ -]?(?:limit|exhausted)|usage[_ -]?limit|credit[_ -]?balance)",

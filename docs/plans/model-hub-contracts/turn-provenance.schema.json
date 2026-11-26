@@ -113,6 +113,11 @@
             "maximum": 599,
             "description": "Optional actual upstream HTTP status, independent of the native-compatible recovery-exhausted gateway response. Absent for unobserved/native transport failures and historical records."
           },
+          "upstream_error_code": {
+            "enum": ["misalignment_policy_violation"],
+            "description": "Optional structured policy code observed on this exact attempt; independent of the fallback reason."
+          },
+          "upstream_error_type": { "$ref": "#/properties/terminal_error/properties/upstream_error_type" },
           "upstream_detail": {
             "type": "string",
             "minLength": 1,
@@ -247,6 +252,7 @@
             "request_too_large",
             "invalid_parameter",
             "invalid_request_error",
+            "misalignment_policy_violation",
             "validation_error",
             "context_length_exceeded",
             "model_not_found",
@@ -272,7 +278,12 @@
             "upstream_error",
             null
           ],
-          "description": "Optional observed machine code from classification.UPSTREAM_MACHINE_ERROR_CODES. If model_not_found was observed and classification returned upstream_request_invalid, retain that specific code over a co-occurring generic invalid_request_error type; otherwise use existing specificity order. This diagnostic selection never reranks or changes classification. Never derive a code from invalid_parameter; unknown codes, bodies, headers and credentials are not retained. Absent evidence is null; historical records may omit the field."
+          "description": "Optional allowlisted upstream diagnostic. A structured policy error.code is retained independently of routing. Otherwise model_not_found is preferred for upstream_request_invalid, then the existing machine-code specificity order applies. Never inferred from the message or classification; unknown values are not retained. Historical records may omit it."
+        },
+        "upstream_error_type": {
+          "type": "string",
+          "allOf": [{ "$ref": "#/properties/terminal_error/properties/upstream_error_code" }],
+          "description": "Optional allowlisted upstream error.type, when distinct from the selected diagnostic code. Historical records may omit it."
         },
         "upstream_detail": {
           "type": "string",
@@ -305,6 +316,7 @@
               "anyOf": [
                 { "required": ["http_status"] },
                 { "required": ["upstream_error_code"] },
+                { "required": ["upstream_error_type"] },
                 { "required": ["upstream_detail"] },
                 { "required": ["response_correlation_ids"] }
               ]

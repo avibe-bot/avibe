@@ -1575,8 +1575,12 @@ it using the same validated OS formatter; upstream error codes cannot populate
 it. Runtime status retains path, reason, and errno from one installed inspection.
 
 New `terminal_error` records may contain `http_status` (integer 100-599 or null) and
-`upstream_error_code` (a recognized upstream machine code or null). The existing
-`UPSTREAM_MACHINE_ERROR_CODES` authority owns code membership. When `model_not_found`
+`upstream_error_code` (a recognized upstream machine code or null). Structured policy
+codes such as `misalignment_policy_violation` are display-only: retain the exact code
+from the upstream error envelope, not from its message. If present, the recognized envelope
+`type` accompanying a policy code is retained separately in `upstream_error_type`.
+The same two diagnostic fields belong to the exact `failed_attempts[]` entry when an
+attempt is left behind; they never drive a retry. Without a policy code, when `model_not_found`
 was observed and classification returned `upstream_request_invalid`, retain it over a
 co-occurring generic `invalid_request_error` type; otherwise use existing specificity
 order. This is diagnostic selection, not a classifier rank/decision change. Never infer
@@ -1622,7 +1626,7 @@ is a no-op; it must not freeze out later gateway evidence. The supersession rule
 applies before backend acknowledgment. Once the backend acknowledges an existing
 gateway terminal, that terminal is frozen against later requests while its exact
 copy remains readable; explicit user cancellation continues to suppress live copy.
-Backend-error records prohibit `http_status`, `upstream_error_code`, and
+Backend-error records prohibit `http_status`, `upstream_error_type`, `upstream_error_code`, and
 `upstream_detail` (including null-valued members), so no upstream verdict can be
 presented as a backend-only fact. A null `terminal_error` remains valid for all
 other turn outcomes.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -11,8 +12,12 @@ from aiohttp import web
 import pytest
 
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+from core.handlers.model_hub.classification import classify_outcome
+from core.handlers.model_hub.provenance import BoundedProvenanceStore, TurnCorrelationRegistry
+from core.run_settlement import SETTLED_BY_TERMINAL_RESULT
 from core.handlers.model_hub.retry import retry_after_deadline
 from core.handlers.model_hub.stream_wire import ProtocolUsageReport
+from tests.test_model_hub_l3 import _assert_valid
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
 from vibe.model_hub_runtime.state import SourceRecord
@@ -148,6 +153,53 @@ async def test_failed_response_carries_only_allowlisted_correlation_ids(protocol
         ("x-request-id", "relay-request-1"),
     )
     assert body == b""
+
+
+@pytest.mark.parametrize("stream", [False, True], ids=["http-400", "sse-200"])
+@pytest.mark.parametrize("error_type,code,expected", [
+    ("invalid_request_error", "misalignment_policy_violation", "misalignment_policy_violation"),
+    (None, "misalignment_policy_violation", "misalignment_policy_violation"),
+    ("invalid_request_error", None, "invalid_request_error"),
+    ("invalid_request_error", "unknown_private_value", "invalid_request_error"),
+])
+async def test_policy_diagnostic_survives_wire_to_turn_record(tmp_path, stream, error_type, code, expected):
+    # Even the literal policy name in prose is not a structured error code.
+    error = {"message": "Request blocked: misalignment_policy_violation."}
+    if error_type is not None:
+        error["type"] = error_type
+    if code is not None:
+        error["code"] = code
+
+    async def respond(_request):
+        if stream:
+            event = {"type": "response.failed", "response": {"error": error}}
+            return web.Response(text=f"event: response.failed\ndata: {json.dumps(event)}\n\n",
+                                content_type="text/event-stream")
+        return web.json_response({"error": error}, status=400)
+
+    async with _engine(respond) as (client, requests):
+        outcome, _ = await _invoke(client, "openai_responses", stream)
+    assert len(requests) == 1
+    decision = classify_outcome(outcome)
+    fallback = stream and error_type is None
+    if fallback:
+        assert (decision.action, decision.reason) == ("fallback", "unclassified_error")
+    else:
+        assert (decision.action, decision.error_code) == ("surface", "upstream_request_invalid")
+    store = BoundedProvenanceStore(tmp_path / "records.json")
+    registry = TurnCorrelationRegistry(store)
+    token = registry.credentials("claude", "fixture", "turn-policy")
+    turn_id = registry.begin_gateway_request(backend="claude", token=token, requested_model_id="model-a")
+    registry.begin_attempt(turn_id, source_id=outcome.source_id, resolved_model_id="model-a", channel="hub", via_mapping=False)
+    registry.finish_attempt(turn_id, outcome=outcome, decision=decision)
+    registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+    record = store.get(turn_id)
+    _assert_valid("turn-provenance.schema.json", record)
+    attempt = record["failed_attempts"][0] if fallback else record["terminal_error"]
+    assert attempt["upstream_error_code"] == expected
+    assert attempt.get("upstream_error_type") == (error_type if code == expected else None)
+    assert attempt["http_status"] == (200 if stream else 400)
+    assert "unknown_private_value" not in store.path.read_text()
 
 
 @pytest.mark.parametrize("protocol", WIRE)

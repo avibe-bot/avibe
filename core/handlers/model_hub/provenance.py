@@ -30,6 +30,7 @@ from vibe.i18n import t as i18n_t
 from .adapter import RawCallOutcome, sanitize_response_correlation_ids
 from .classification import (
     UPSTREAM_MACHINE_ERROR_CODES,
+    UPSTREAM_POLICY_CODES,
     ResolutionDecision,
     ResolutionReason,
     machine_error_codes,
@@ -2681,6 +2682,12 @@ class TurnCorrelationRegistry:
                 "upstream_detail": outcome.upstream_detail
             } if outcome.upstream_detail else {}
             detail.update(_response_correlation_payload(outcome.response_correlation_ids))
+            if outcome.upstream_policy_code in UPSTREAM_POLICY_CODES:
+                # Preserve the exact refusal even when routing classified the attempt by
+                # its generic envelope type (or by HTTP status when the type was absent).
+                detail["upstream_error_code"] = outcome.upstream_policy_code
+                if outcome.error_type in UPSTREAM_MACHINE_ERROR_CODES:
+                    detail["upstream_error_type"] = outcome.error_type
             logger.warning(
                 "Model Hub attempt failed turn=%s source=%s model=%s http_status=%s reason=%s "
                 "stream_started=%s detail=%s",
@@ -2697,12 +2704,13 @@ class TurnCorrelationRegistry:
                 )
                 return
             if decision.action == "surface":
-                observed_codes = machine_error_codes(outcome)
-                diagnostic_code = (
-                    "model_not_found"
-                    if decision.error_code == "upstream_request_invalid" and "model_not_found" in observed_codes
-                    else next((code for code in observed_codes if code in UPSTREAM_MACHINE_ERROR_CODES), None)
-                )
+                if "upstream_error_code" not in detail:
+                    observed_codes = machine_error_codes(outcome)
+                    detail["upstream_error_code"] = (
+                        "model_not_found"
+                        if decision.error_code == "upstream_request_invalid" and "model_not_found" in observed_codes
+                        else next((code for code in observed_codes if code in UPSTREAM_MACHINE_ERROR_CODES), None)
+                    )
                 trace.terminal_error = {
                     **identity.payload(),
                     "reason": _terminal_reason(decision),
@@ -2712,7 +2720,6 @@ class TurnCorrelationRegistry:
                         if type(outcome.http_status) is int and 100 <= outcome.http_status <= 599
                         else None
                     ),
-                    "upstream_error_code": diagnostic_code,
                     **detail,
                 }
                 trace.terminal_error_by = (request_id, trace.terminal_error)
