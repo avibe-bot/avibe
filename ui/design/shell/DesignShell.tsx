@@ -20,6 +20,7 @@ import type { VaultRequest } from '@/context/ApiContext';
 import { isReviewableVaultRequest } from '@/lib/vaultPendingRequests';
 import { WorkbenchProjectsContext, type WorkbenchProjectsTree } from '@/context/WorkbenchProjectsContext';
 import { unreadByCategory } from '@/lib/notificationPreferences';
+import { DesktopNotificationActionsContext } from '@/context/DesktopNotificationActionsContext';
 
 import type { DesignTheme, FrameRoute } from '../frame';
 
@@ -34,6 +35,20 @@ function inert<T extends object>(known: Partial<T>): T {
       return () => Promise.resolve(null);
     },
   }) as T;
+}
+
+function notificationActions(preference: WorkbenchFixtures['desktopNotifications']) {
+  if (!preference) return undefined;
+  let enabled = preference.enabled;
+  return {
+    get: async () => enabled,
+    set: async (value: boolean) => {
+      if (preference.failSave) throw new Error('Design notification preference save rejected');
+      enabled = value;
+      return enabled;
+    },
+    authorization: async () => preference.authorization,
+  };
 }
 
 /** The Bots' Sessions, which the Inbox files under Bots rather than Sessions. */
@@ -138,6 +153,7 @@ export function DesignShell({
   const pendingVaultRequests = useMemo(() => pendingVaultRequestsValue(fixtures), [fixtures]);
   const projects = useMemo(() => projectsValue(fixtures), [fixtures]);
   const status = useMemo(() => statusValue(fixtures), [fixtures]);
+  const desktopNotifications = useMemo(() => notificationActions(fixtures.desktopNotifications), [fixtures.desktopNotifications]);
   const themeValue = useMemo(() => ({ mode: theme, resolvedTheme: theme, setMode: () => {}, cycleMode: () => {} }), [theme]);
   const authorization = useMemo(
     () => ({
@@ -152,6 +168,7 @@ export function DesignShell({
   return (
     <MemoryRouter initialEntries={[route]}>
       <FixturesContext.Provider value={fixtures}>
+      <DesktopNotificationActionsContext.Provider value={desktopNotifications}>
       <ToastProvider initial={initialToasts}>
         <ApiProvider>
           <InstanceAuthorizationContext.Provider value={authorization}>
@@ -181,6 +198,7 @@ export function DesignShell({
           </InstanceAuthorizationContext.Provider>
         </ApiProvider>
       </ToastProvider>
+      </DesktopNotificationActionsContext.Provider>
       </FixturesContext.Provider>
     </MemoryRouter>
   );

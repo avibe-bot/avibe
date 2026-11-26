@@ -59,6 +59,12 @@ export interface WorkbenchFixtures {
   botStatus?: Record<string, BotRuntimeStatus>;
   /** The page is the Avibe desktop app's own window (`isDesktopShell()`), not a browser tab. */
   desktopShell?: boolean;
+  /** Design-only native notification preference; never reads or writes the host's settings. */
+  desktopNotifications?: {
+    enabled: boolean;
+    authorization: import('@/lib/desktopShell').DesktopNotificationAuthorization;
+    failSave?: boolean;
+  };
   /** The desktop shell answers Computer Use's native actions: turning it on, or on and off
    *  (`computerUseShellActions()`). Its calls never settle, so a frame shows a change in flight. */
   desktopComputerUse?: 'on' | 'on-off';
