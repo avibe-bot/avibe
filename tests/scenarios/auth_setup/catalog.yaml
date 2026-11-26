@@ -1455,13 +1455,17 @@ scenarios:
       code with its own verifier and reuses the email code's session endpoint
       and two-step gate. Rust tests in desktop/runtime-host own the boundary:
       loopback.rs (exact GET /callback with this Host and state, the fixed
-      Supabase callback grammar, bounds, single consumption, port release on
-      success, generation change and timeout) and tests/instance_sign_in.rs
+      Supabase callback grammar, bounds, single consumption, immutable result pages for ten minutes after
+      success, cancellation and timeout, then port release) and tests/instance_sign_in.rs
       (the forged callback is never redeemed, the verifier matches the
       challenge, tokens never reach published state, each ending's code, abort
-      frees the port and cannot sign a signed-in account out). The browser's
+      prevents exchange while preserving its result page and cannot sign a signed-in account out). The browser's
       last page speaks the asking page's language, from the product catalogs
-      (desktopBootstrap.providerCallback), one language at a time. The public
+      (desktopBootstrap.providerCallback), one language at a time. The
+      result page persists after authentication ends; refresh cannot redeem again.
+      A production UI browser probe (desktop/scripts/provider-callback-browser-probe.mjs)
+      drives the actual native listener in both languages with isolated synthetic
+      replies, including fragment errors, cancellation and expiry. The public
       switches are avibe.bot's, not the account's: an account change during
       the read does not drop them, a commit or rollback that began earlier
       keeps them, and reads show in the order they started. "Use a different

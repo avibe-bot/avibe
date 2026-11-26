@@ -228,11 +228,7 @@ pub(crate) fn ask_vibey_notice(notice: AskVibeyNotice) -> String {
 }
 
 /// The browser's last page after a Google, GitHub or Apple sign-in.
-#[derive(Clone, Deserialize)]
-struct NativeProviderCallbackCatalog {
-    done: String,
-    failed: String,
-}
+type NativeProviderCallbackCatalog = avibe_runtime_host::instance_client::loopback::CallbackCopy;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2497,6 +2493,13 @@ fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item =
         app_lock::EntryKind::Action
     };
     if app_lock::defer_kind(app, kind, move |app| receive_native_deep_link(app, deferred)) {
+        return;
+    }
+    // Result pages only restore the existing account surface; they cannot navigate it.
+    if arguments.iter().all(|argument| argument == "avibe://open") && !arguments.is_empty() {
+        if app.try_state::<Shell>().is_some() {
+            focus_or_restore_main_window(app);
+        }
         return;
     }
     let mut updates_requested = false;

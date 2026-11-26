@@ -198,9 +198,26 @@
       "disabledDetail": "此构建未配置桌面自动更新，请手动安装新的签名版本。",
       "error": "更新失败，可重试"
     },
+    "providerError": {
+      "accountConflict": "这个邮箱关联了多个账号。请换一种登录方式，或联系支持。",
+      "serverError": "登录服务未能完成请求。请重试，或换一种登录方式。",
+      "denied": "此次登录未获得授权。请重试，或换一种登录方式。",
+      "timedOut": "登录已超时，请重试。",
+      "failed": "未能完成登录。请重试，或换一种登录方式。"
+    },
     "providerCallback": {
-      "done": "可以关闭此页，回到 Avibe。",
-      "failed": "登录没有完成，请回到 Avibe 重试。"
+      "done": "登录完成，可以回到 Avibe。",
+      "failed": "未能完成登录。",
+      "verifyInApp": "请回到 Avibe 完成身份验证。",
+      "cancelled": "这次登录已取消。",
+      "timedOut": "这次登录已超时。",
+      "accountConflict": "这个邮箱关联了多个账号，无法通过此方式完成登录。",
+      "serverError": "登录服务未能完成请求。",
+      "denied": "此次登录未获得授权。",
+      "emailUnverified": "请先在登录服务中验证邮箱。",
+      "retry": "请回到 Avibe 重试，或换一种登录方式。",
+      "details": "详细信息",
+      "openApp": "打开 Avibe"
     }
   },
   "installHint": {

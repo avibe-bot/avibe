@@ -22,6 +22,11 @@ export type SignInErrorKey =
   | PasskeySignInErrorKey;
 /** What a Google, GitHub or Apple sign-in that did not finish says on the first step. */
 export type ProviderErrorKey =
+  | 'desktopBootstrap.providerError.accountConflict'
+  | 'desktopBootstrap.providerError.serverError'
+  | 'desktopBootstrap.providerError.denied'
+  | 'desktopBootstrap.providerError.timedOut'
+  | 'desktopBootstrap.providerError.failed'
   | 'mobileApp.provider.unavailable'
   | 'mobileApp.provider.googleEmailUnverified'
   | 'mobileApp.provider.githubEmailUnverified'
@@ -131,6 +136,16 @@ export const providerErrorKey = (
     case 'provider_cancelled':
     case 'stale_session':
       return null;
+    case 'provider_account_conflict':
+      return 'desktopBootstrap.providerError.accountConflict';
+    case 'provider_server_error':
+      return 'desktopBootstrap.providerError.serverError';
+    case 'provider_denied':
+      return 'desktopBootstrap.providerError.denied';
+    case 'provider_timeout':
+      return 'desktopBootstrap.providerError.timedOut';
+    case 'provider_failed':
+      return 'desktopBootstrap.providerError.failed';
     case 'provider_unavailable':
       return 'mobileApp.provider.unavailable';
     case 'provider_email_unverified':

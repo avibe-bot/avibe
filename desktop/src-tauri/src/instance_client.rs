@@ -641,11 +641,7 @@ fn provider_callback_copy(locale: UiLocale) -> CallbackCopy {
         UiLocale::En => "en",
         UiLocale::Zh => "zh",
     };
-    let catalog = crate::native_catalog_for_locales([tag.to_owned()]).provider_callback;
-    CallbackCopy {
-        done: catalog.done,
-        failed: catalog.failed,
-    }
+    crate::native_catalog_for_locales([tag.to_owned()]).provider_callback
 }
 
 const INSTANCE_UPDATE_POLL: std::time::Duration = std::time::Duration::from_secs(4);
@@ -3407,8 +3403,7 @@ mod tests {
         ] {
             let copy = provider_callback_copy(locale);
             let expected = catalog(source);
-            assert_eq!(copy.done, expected["done"].as_str().unwrap());
-            assert_eq!(copy.failed, expected["failed"].as_str().unwrap());
+            assert_eq!(copy, serde_json::from_value::<CallbackCopy>(expected).unwrap());
         }
         assert_ne!(
             provider_callback_copy(UiLocale::En).done,
