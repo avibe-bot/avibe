@@ -332,7 +332,7 @@
       "forgotTitle": "忘记密码了？",
       "forgotSubtitle": "邮件登录始终可用。",
       "account": "账号",
-      "signInNowTitle": "现在登录",
+      "signInNowTitle": "用验证码登录",
       "signInNowBody": "验证码会发到这个邮箱，在这里输入就能登录。",
       "newPasswordTitle": "设置新密码",
       "newPasswordBody": "在 Safari 中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。",

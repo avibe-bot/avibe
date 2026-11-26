@@ -44,6 +44,17 @@ const variants: Variant[] = [
   { name: 'start', title: '登录第一页 · 单行副标题，无底部实例说明', native: signedOut },
   { name: 'email', title: '邮箱 · 发送验证码', native: signedOut, click: [continueWithEmail] },
   {
+    name: 'forgot',
+    title: '忘记密码 · 用验证码登录或在浏览器设置新密码',
+    native: signedOut,
+    click: [
+      continueWithEmail,
+      { fill: 'input[type="email"]', text: EMAIL },
+      'role=button[name="{t:mobileApp.password.entry}"]',
+      'role=button[name="{t:mobileApp.password.forgot}"]',
+    ],
+  },
+  {
     name: 'password',
     title: '邮箱 · 密码登录',
     native: signedOut,

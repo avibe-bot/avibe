@@ -12,6 +12,8 @@ import logo from '@/assets/logo.png';
 import mailMascot from '@/assets/pet/vibey-message.png';
 import heroMascot from '../../../assets/mascot/cloud-tuanzi-v2.png';
 import { cn } from '@/lib/utils';
+import en from '@/i18n/en.json';
+import zh from '@/i18n/zh.json';
 import { PhoneScreen } from '../shell/PhoneScreen';
 
 export type MobileLocale = 'zh' | 'en';
@@ -238,7 +240,7 @@ export function ForgotPasswordPage({ email }: { email: string }) {
   const t = useCopy();
   return <CloudScreen><Brand back /><div className="flex flex-col items-center pt-8 pb-6"><PageMark /><h1 className="text-center text-3xl font-semibold leading-tight tracking-tight">{t('忘记密码了？', 'Forgot your password?')}</h1><p className="mt-3 text-center text-sm leading-6 text-muted">{t('邮件登录始终可用。', 'Email sign-in always works.')}</p></div>
     <div className="pb-7 text-center"><p className="text-sm leading-7 text-muted">{t('账号', 'Account')}</p><p className="break-all text-sm font-medium leading-6">{email}</p></div>
-    <section className={cn(raised, 'flex flex-col gap-4')}><div><h2 className="text-base font-semibold">{t('现在登录', 'Sign in now')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('验证码会发到这个邮箱，在这里输入就能登录。', 'We’ll email a code to this address. Enter it here to sign in.')}</p></div><Primary>{t('发送验证码', 'Send verification code')}</Primary></section>
+    <section className={cn(raised, 'flex flex-col gap-4')}><div><h2 className="text-base font-semibold">{t(zh.mobileApp.password.signInNowTitle, en.mobileApp.password.signInNowTitle)}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('验证码会发到这个邮箱，在这里输入就能登录。', 'We’ll email a code to this address. Enter it here to sign in.')}</p></div><Primary>{t('发送验证码', 'Send verification code')}</Primary></section>
     <section className={cn(raised, 'mt-4 flex flex-col gap-4')}><div><h2 className="text-base font-semibold">{t('设置新密码', 'Set a new password')}</h2><p className="mt-2 text-sm leading-6 text-muted">{t('在 Safari 中打开 avibe.bot 的「账号安全」，用邮件登录后，选择「设置或修改密码」。', 'Open Account security on avibe.bot in Safari. Sign in with your email, then choose Set or change password.')}</p></div><Button variant="outline" size="lg" className="w-full gap-2 whitespace-normal rounded-full"><ExternalLink className="size-4 shrink-0" />{t('在 Safari 中打开', 'Open in Safari')}</Button></section>
   </CloudScreen>;
 }

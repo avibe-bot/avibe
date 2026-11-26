@@ -332,7 +332,7 @@
       "forgotTitle": "Forgot your password?",
       "forgotSubtitle": "Email sign-in always works.",
       "account": "Account",
-      "signInNowTitle": "Sign in now",
+      "signInNowTitle": "Sign in with an email code",
       "signInNowBody": "We’ll email a code to this address. Enter it here to sign in.",
       "newPasswordTitle": "Set a new password",
       "newPasswordBody": "Open Account security on avibe.bot in Safari. Sign in with your email, then choose Set or change password.",
