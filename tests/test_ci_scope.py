@@ -415,6 +415,7 @@ def test_named_files_and_manual_request_select_real_proofs():
     '.github/workflows/ios-shell.yml', 'ui/src/components/MobileChrome.tsx', 'ui/mobile.html',
     'ui/package-lock.json', 'ui/scripts/bundleNotices.mjs', 'packaging/iroh-apple/release.json',
     'tests/fixtures/live_activity/contract_vectors.json', 'scripts/cargo_notices.py',
+    'tests/fixtures/system_schedule_contract_vectors.json',
 ])
 def test_app_build_input_alone_requires_simulator_proof(path):
     from scripts.ci_fast_pr import LINUX, selected

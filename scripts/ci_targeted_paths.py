@@ -13,6 +13,7 @@ BOUNDARIES = {
     'ios-app': frozenset({
         '.github/workflows/ios-shell.yml', 'Dockerfile', 'scripts/cargo_notices.py',
         'assets/mascot/cloud-tuanzi-v2.png', 'vibe/message_types.json',
+        'tests/fixtures/system_schedule_contract_vectors.json',
         'ui/package.json', 'ui/package-lock.json', 'ui/mobile.html', 'ui/agentation.d.ts',
         'ui/tsconfig.json', 'ui/tsconfig.app.json', 'ui/tsconfig.node.json',
         'ui/vite.config.ts', 'ui/vite.desktop.config.ts', 'ui/vite.mobile.config.ts',
