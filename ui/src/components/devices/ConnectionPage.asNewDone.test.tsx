@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { InstanceAuthorizationContext } from '@/context/InstanceAuthorizationContext';
@@ -23,6 +23,13 @@ vi.mock('@/context/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn()
 const host = 'max-app.avibe.bot';
 const empty: DevicesSnapshot = { devices: [], unlinkedHealth: [], signedOut: [], bulk: null };
 
+/** Back to 连接方式 the way the Devices page goes there: with this document's navigation state. */
+function BackToConnection() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  return <button type="button" onClick={() => navigate('/settings/remote-access/connection', { state: location.state })}>back-to-connection</button>;
+}
+
 function mount() {
   const capabilities = { ...DENIED_INSTANCE_CAPABILITIES, can_manage_instance: true, is_instance_owner: true };
   return render(
@@ -30,7 +37,7 @@ function mount() {
       <MemoryRouter initialEntries={['/settings/remote-access/connection']}>
         <Routes>
           <Route path="/settings/remote-access/connection" element={<ConnectionPage />} />
-          <Route path="/settings/remote-access" element={<DevicesPage />} />
+          <Route path="/settings/remote-access" element={<><DevicesPage /><BackToConnection /></>} />
         </Routes>
       </MemoryRouter>
     </InstanceAuthorizationContext.Provider>,
@@ -97,5 +104,23 @@ describe('binding as a new computer, deleting first, done on the Devices page', 
     mount();
     await bindAsNewAndFinish('2026-12-25T00:00:00.000Z');
     expect(screen.getByText(said(`${host} 在你的账号下保留到 12月25日，这期间可以在这台或别的电脑上领回。`))).toBeTruthy();
+  });
+
+  it('another account\'s first, then this account\'s own in the same document, says 「在你的账号下」 the second time', async () => {
+    const rebind = vi.spyOn(devicesApi, 'rebind').mockResolvedValue({ state: 'asNewOffered', reason: 'other_account', hint: 'm***@gmail.com' });
+    mount();
+    await bindAsNewAndFinish('2026-12-25T00:00:00.000Z');
+    expect(screen.getByText(said(`${host} 为原来的账号保留到 12月25日；之后别人可以领取。`))).toBeTruthy();
+
+    // Bound again, and this time it is this account's own Avibe.
+    rebind.mockResolvedValue({ state: 'asNewOffered', reason: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'rebindClaim').mockResolvedValue({ state: 'error', code: 'installation_unverified', reasonCode: 'predecessor_unrecoverable' });
+    vi.spyOn(devicesApi, 'status').mockResolvedValue({ ok: true, enabled: true, paired: true, running: true, public_url: `https://${host}` } as never);
+    devices.mockResolvedValue(empty);
+    writeClaimMarker({ kind: 'rebind', id: 'rebind-2', at: Date.now() });
+    fireEvent.click(screen.getByRole('button', { name: 'back-to-connection' }));
+    await bindAsNewAndFinish('2026-12-25T00:00:00.000Z');
+    expect(screen.getByText(said(`${host} 在你的账号下保留到 12月25日，这期间可以在这台或别的电脑上领回。`))).toBeTruthy();
+    expect(document.body.textContent).not.toContain('为原来的账号');
   });
 });

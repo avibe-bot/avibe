@@ -718,7 +718,8 @@ export function ConnectionPage() {
     otherAccountsName.current = false;
     navigate(DEVICES_PATH, {
       replace: true,
-      state: originalAccount ? { ...(location.state as Record<string, unknown> | null), [NAME_WITH_ORIGINAL_ACCOUNT]: true } : location.state,
+      // Always said, so an earlier run's word carried in this document's state is not reused.
+      state: { ...(location.state as Record<string, unknown> | null), [NAME_WITH_ORIGINAL_ACCOUNT]: originalAccount },
     });
   }, [followed, location.state, navigate, unbound]);
   useEffect(() => {
