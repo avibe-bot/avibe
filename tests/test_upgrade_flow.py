@@ -63,14 +63,17 @@ def _tree_is_not_an_installed_distribution(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_latest_release_lookup(monkeypatch):
-    """``do_upgrade`` asks PyPI for the latest release before it builds its plan.
+    """``do_upgrade`` installs exactly the offer a version read shows.
 
-    The tests here drive the upgrade, not that lookup, so they see what an offline
-    machine sees; a test that needs a target names one, and the lookup's own tests
-    call ``get_latest_version_info`` directly.
+    The tests here drive the upgrade, not that lookup, so they see one offer
+    and install it by the package name; a test that needs a target names one,
+    and the lookup's own tests call ``get_latest_version_info`` directly.
     """
 
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": None})
+    monkeypatch.setattr(
+        api, "get_version_info", lambda: {"current": "1.0", "latest": "99.0", "has_update": True, "error": None}
+    )
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: vibe_upgrade.PACKAGE_NAME)
 
 
 def test_build_upgrade_plan_stages_custom_legacy_uv_launcher(monkeypatch):
@@ -1315,7 +1318,7 @@ def test_do_upgrade_includes_peer_activation_failures_in_output(monkeypatch, tmp
         method="uv",
         activation=AtomicActivation(launcher, tmp_path / "candidate" / "vibe"),
     )
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "2.2.0"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "2.2.0", "has_update": True})
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
@@ -1433,7 +1436,7 @@ def test_do_upgrade_surfaces_deferred_activation_log(monkeypatch, tmp_path):
 
     monkeypatch.setattr(api, "os", WindowsOsProxy())
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "2.2.0"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "2.2.0", "has_update": True})
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
     monkeypatch.setattr(api, "_configured_backend_language", lambda: "en")
@@ -1555,7 +1558,9 @@ def test_do_upgrade_uses_upgrade_plan_env_and_restarts(monkeypatch):
     calls: dict[str, Any] = {}
 
     rc_spec = "avibe-os @ https://dl.avibe.bot/releases/gh-v3.0.15rc1/avibe_os-3.0.15rc1-py3-none-any.whl#sha256=" + "a" * 64
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15rc1", "package_spec": rc_spec})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "3.0.15rc1", "has_update": True})
+    # A release candidate installs its own mirrored wheel.
+    monkeypatch.setattr(api, "exact_release_spec", lambda version: rc_spec if version == "3.0.15rc1" else None)
     monkeypatch.setattr(
         api,
         "build_upgrade_plan",
@@ -2427,8 +2432,8 @@ def test_get_latest_version_info_offers_silent_releases_only_to_explicit_discove
         (("3.2.6",), ("3.2.7",), True, "3.2.6"),
         # ...and is offered once listed.
         (("3.2.6", "3.2.7"), (), True, "3.2.7"),
-        # With the release index unreachable, the package index alone decides.
-        ((), (), False, "3.2.7"),
+        # With the release index unreachable nothing is offered unprompted; a check still finds it.
+        ((), (), False, ""),
     ],
 )
 def test_unprompted_version_read_offers_only_releases_the_index_announces(
@@ -2440,7 +2445,7 @@ def test_unprompted_version_read_offers_only_releases_the_index_announces(
 
     info = get_latest_version_info("3.2.5", announced_only=True, listed_only=True)
 
-    assert (info["latest"], info["has_update"], info["error"]) == (latest, True, None)
+    assert (info["latest"], info["has_update"], info["error"]) == (latest, bool(latest), None)
 
 
 @pytest.mark.parametrize(
@@ -2462,6 +2467,7 @@ def test_unprompted_version_read_offers_only_releases_the_index_announces(
     ],
 )
 def test_do_upgrade_installs_exactly_the_named_release(monkeypatch, tmp_path, target, index_available, spec, code):
+    monkeypatch.setattr(api, "exact_release_spec", vibe_upgrade.exact_release_spec)
     _write_release_feeds(tmp_path, monkeypatch, stable=["3.2.6", "3.2.7"], candidates=["3.2.8rc1"], silent=("3.2.7",))
     pypi = tmp_path / "pypi.json"
     metadata = json.loads(pypi.read_text(encoding="utf-8"))
@@ -2493,14 +2499,26 @@ def test_do_upgrade_installs_exactly_the_named_release(monkeypatch, tmp_path, ta
     assert [plan["package_spec"] for plan in plans] == ([spec] if spec else [])
 
 
-def test_do_upgrade_without_a_version_installs_exactly_the_unprompted_offer(monkeypatch, tmp_path):
-    """An older page or Desktop names no version: it gets the offer it was shown, not a newer silent one."""
+@pytest.mark.parametrize(
+    ("read", "plans_expected", "code"),
+    [
+        ({"current": "3.2.5", "latest": "3.2.6", "has_update": True, "error": None}, [("3.2.6", "avibe-os==3.2.6")], None),
+        # No unprompted offer (only a silent release is newer): an unpinned upgrade would take it, so nothing runs.
+        ({"current": "3.2.5", "latest": None, "has_update": False, "error": None}, [], "no_update"),
+        ({"current": "3.2.5", "latest": None, "has_update": False, "error": "offline"}, [], "update_check_failed"),
+    ],
+)
+def test_do_upgrade_without_a_version_installs_exactly_the_unprompted_offer(
+    monkeypatch, tmp_path, read, plans_expected, code
+):
+    """An older page or Desktop names no version: it gets the offer it was shown, never a newer silent one."""
+    monkeypatch.setattr(api, "exact_release_spec", vibe_upgrade.exact_release_spec)
     _write_release_feeds(tmp_path, monkeypatch, stable=["3.2.6", "3.2.7"], candidates=[], silent=("3.2.7",))
     monkeypatch.setattr("vibe.__version__", "3.2.5", raising=False)
     monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="package"))
     monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/tmp/vibe")
-    monkeypatch.setattr(api, "get_version_info", lambda: {"current": "3.2.5", "latest": "3.2.6", "has_update": True})
+    monkeypatch.setattr(api, "get_version_info", lambda: read)
     monkeypatch.delenv("AVIBE_UPGRADE_PACKAGE_SPEC", raising=False)
     monkeypatch.delenv("VIBE_UPGRADE_PACKAGE_SPEC", raising=False)
     plans = []
@@ -2511,9 +2529,27 @@ def test_do_upgrade_without_a_version_installs_exactly_the_unprompted_offer(monk
 
     monkeypatch.setattr(api, "build_upgrade_plan", capture_plan)
 
-    api.do_upgrade(auto_restart=False)
+    result = api.do_upgrade(auto_restart=False)
 
-    assert [(plan["target_version"], plan["package_spec"]) for plan in plans] == [("3.2.6", "avibe-os==3.2.6")]
+    assert result.get("code") == code
+    assert [(plan["target_version"], plan["package_spec"]) for plan in plans] == plans_expected
+
+
+def test_source_build_upgrade_ignores_a_named_version(monkeypatch):
+    """A source checkout has no published release to pin; a named one must not break it."""
+    monkeypatch.setattr(api, "get_build_identity", lambda: SimpleNamespace(kind="source"))
+    monkeypatch.setattr(api, "is_desktop_managed_runtime", lambda: False)
+    monkeypatch.setattr(api, "get_running_vibe_path", lambda: "/tmp/vibe")
+    plans = []
+
+    def capture_plan(**kwargs):
+        plans.append(kwargs)
+        raise ValueError("stop after planning")
+
+    monkeypatch.setattr(api, "build_upgrade_plan", capture_plan)
+
+    assert api.do_upgrade(auto_restart=False, target_version="3.2.6")["ok"] is False
+    assert len(plans) == 1
 
 
 def test_pinned_stable_release_plans_keep_the_pin(monkeypatch):

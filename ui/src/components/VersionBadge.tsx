@@ -405,7 +405,7 @@ export const VersionBadge: React.FC<{
     try {
       // A manager's check on a standalone Runtime is the user's own: it also finds a silent release.
       const checked = fresh && !actions && standaloneManager
-        ? await api.requestUpdateControl('check').then((result) => ('snapshot' in result ? result.snapshot : undefined))
+        ? await api.requestUpdateControl('check').then((result) => (result.ok ? result.snapshot : undefined))
         : undefined;
       if (checked) setCheckedOffer(checked);
       const info = checked ?? await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);

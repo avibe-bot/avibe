@@ -184,21 +184,107 @@ impl InstanceUpdate {
 
 /// A standalone Runtime's unprompted version reads leave silent releases out
 /// (docs/release.md); the user's own check finds them. That check's offer
-/// stands over later reads while the instance runs the same version, until the
-/// next check answers. The Workbench's `keepCheckedOffer` does the same.
+/// stands over later reads while the instance runs the same version on the
+/// same channel, unless a read offers a newer release; the next check replaces
+/// it. The Workbench's `keepCheckedOffer` does the same.
 pub(crate) fn keep_checked_offer(mut read: Value, checked: Option<&Value>) -> Value {
     let Some(checked) = checked.filter(|checked| checked["has_update"] == true && checked["latest"].is_string()) else {
         return read;
     };
     if !read["managed_by"].is_null()
         || read["current"] != checked["current"]
-        || (read["has_update"] == true && read["latest"] == checked["latest"])
+        || read.get("prereleases").unwrap_or(&Value::Null) != checked.get("prereleases").unwrap_or(&Value::Null)
     {
         return read;
+    }
+    if read["has_update"] == true {
+        let newer = match (checked["latest"].as_str(), read["latest"].as_str()) {
+            (Some(checked), Some(read)) => pep440_key(checked).zip(pep440_key(read)).is_some_and(|(c, r)| c > r),
+            _ => false,
+        };
+        if !newer {
+            return read;
+        }
     }
     read["latest"] = checked["latest"].clone();
     read["has_update"] = json!(true);
     read
+}
+
+/// PEP 440 ordering for the version forms a Runtime reports (`3.2.8`,
+/// `3.2.8rc4`, `3.2.8.post1`, `3.2.9.dev5`); `None` for anything else.
+fn pep440_key(value: &str) -> Option<(Vec<u64>, i8, u64, i64, u64)> {
+    let value = value.split('+').next()?;
+    let end = value
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(value.len());
+    let (release, mut rest) = value.split_at(end);
+    let mut parts = release
+        .trim_end_matches('.')
+        .split('.')
+        .map(|part| part.parse().ok())
+        .collect::<Option<Vec<u64>>>()?;
+    while parts.len() > 1 && parts.last() == Some(&0) {
+        parts.pop();
+    }
+    fn number(s: &str) -> Option<(u64, &str)> {
+        let end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+        Some((s[..end].parse().ok()?, &s[end..]))
+    }
+    let mut pre = None;
+    for (tag, rank) in [("rc", 2), ("a", 0), ("b", 1)] {
+        if let Some(after) = rest.strip_prefix(tag) {
+            let (n, after) = number(after)?;
+            pre = Some((rank, n));
+            rest = after;
+            break;
+        }
+    }
+    let mut post = -1;
+    if let Some(after) = rest.strip_prefix(".post").or_else(|| rest.strip_prefix("post")) {
+        let (n, after) = number(after)?;
+        post = i64::try_from(n).ok()?;
+        rest = after;
+    }
+    let mut dev = u64::MAX;
+    if let Some(after) = rest.strip_prefix(".dev").or_else(|| rest.strip_prefix("dev")) {
+        let (n, after) = number(after)?;
+        dev = n;
+        rest = after;
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    let (rank, pre_n) = match pre {
+        Some(pre) => pre,
+        None if dev != u64::MAX && post < 0 => (-1, 0),
+        None => (3, 0),
+    };
+    Some((parts, rank, pre_n, post, dev))
+}
+
+#[cfg(test)]
+mod checked_offer_tests {
+    use super::*;
+
+    #[test]
+    fn pep440_orders_the_forms_a_runtime_reports() {
+        let ordered = [
+            "3.2.8.dev1",
+            "3.2.8a1",
+            "3.2.8b2",
+            "3.2.8rc1",
+            "3.2.8rc10",
+            "3.2.8",
+            "3.2.8.post1",
+            "3.2.9",
+        ];
+        for pair in ordered.windows(2) {
+            assert!(pep440_key(pair[0]) < pep440_key(pair[1]), "{pair:?}");
+        }
+        assert_eq!(pep440_key("3.2"), pep440_key("3.2.0"));
+        assert_eq!(pep440_key("3.2.8-rc.4"), None);
+    }
 }
 
 /// The instance reports the accepted action still running.

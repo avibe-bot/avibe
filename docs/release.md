@@ -119,8 +119,9 @@ remain mandatory.
   app's panel for the instance, an update notification's button) still sees
   a silent release. Unprompted version reads (`GET /api/version`, which the
   Web badge and those panels poll) offer only releases the mirror index lists
-  as announced. A check's offer stays on screen until the next check or a
-  version change, and Update installs exactly the version shown.
+  as announced, and nothing while the index cannot be read. A check's offer
+  stays on screen until the next check, a newer announced offer, a channel
+  change, or a version change, and Update installs exactly the version shown.
 - The marker also silences the desktop app: its automatic checks (the startup
   check and the auto-update tick) skip a silent release, so they neither offer
   nor install it, while still finding any newer announced release. An explicit

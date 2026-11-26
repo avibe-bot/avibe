@@ -7956,11 +7956,22 @@ def do_upgrade(auto_restart: bool = True, target_version: str | None = None) -> 
 
     current_vibe_path = get_running_vibe_path()
     source_build = get_build_identity().kind == "source"
-    if target_version is None:
+    if target_version is None or source_build:
         version_info = get_version_info()
-        # An older page or Desktop names no version: install the offer it was shown.
-        if not source_build and version_info.get("has_update") and version_info.get("latest"):
-            target_version = version_info["latest"]
+    if target_version is None and not source_build:
+        # An older page or Desktop names no version: install exactly the offer it
+        # was shown, and nothing without one (an unpinned upgrade takes a silent release).
+        if not (version_info.get("has_update") and version_info.get("latest")):
+            failed = bool(version_info.get("error"))
+            return {
+                "ok": False,
+                "code": "update_check_failed" if failed else "no_update",
+                "message": "Update check failed." if failed else "Already up to date.",
+                "output": None,
+                "activation_notice": None,
+                "restarting": False,
+            }
+        target_version = version_info["latest"]
     if target_version is not None and not source_build:
         from vibe import __version__
 

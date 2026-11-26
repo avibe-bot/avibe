@@ -1266,6 +1266,23 @@ describe('a silent release on a standalone Runtime', () => {
     await act(async () => finish({ ok: true, message: 'Upgrade successful', output: null, restarting: false }));
   });
 
+  it('lets a newer announced release or another running version replace the kept offer', async () => {
+    api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.7', has_update: false });
+    await openBrowserPopup('v3.2.7');
+    api.requestUpdateControl.mockResolvedValueOnce({
+      ok: true, snapshot: { current: '3.2.7', latest: '3.2.8rc1', has_update: true, error: null },
+    });
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('update.action.check') }));
+    expect(await screen.findByRole('button', { name: i18n.t('update.action.update') })).toBeTruthy();
+
+    // A newer announced release, read unprompted, is the one offered.
+    api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.9', has_update: true });
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledWith({ cache: false, background: true }));
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('update.action.update') }));
+    expect(api.doUpgrade).toHaveBeenLastCalledWith({ confirmInterrupt: true, targetVersion: '3.2.9' });
+  });
+
   it('shows no offer to a member, whose reads are all unprompted', async () => {
     authorization.capabilities.can_manage_instance = false;
     api.getVersion.mockResolvedValue({ current: '3.2.7', latest: '3.2.7', has_update: false });

@@ -1701,13 +1701,30 @@ def select_latest_prerelease(
     return None if best is None else (best[1], best[2])
 
 
-def _fetch_release_index() -> tuple[Mapping[str, object], str]:
+# Unprompted version reads (every open page polls them) reuse one index read for
+# a while; a failed read is retried sooner. Checks always read afresh.
+_RELEASE_INDEX_TTL_SECONDS = (300.0, 60.0)
+_release_index_reads: dict[str, tuple[float, Mapping[str, object] | Exception]] = {}
+
+
+def _fetch_release_index(*, cached: bool = False) -> tuple[Mapping[str, object], str]:
     url = get_release_index_url()
-    req = urllib.request.Request(url, headers={"User-Agent": PACKAGE_NAME})
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        index = json.loads(resp.read().decode("utf-8"))
-    if not isinstance(index, Mapping):
-        raise ValueError("invalid release index")
+    if cached:
+        expires, kept = _release_index_reads.get(url, (0.0, None))
+        if kept is not None and time.monotonic() < expires:
+            if isinstance(kept, Exception):
+                raise kept
+            return kept, url
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": PACKAGE_NAME})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            index = json.loads(resp.read().decode("utf-8"))
+        if not isinstance(index, Mapping):
+            raise ValueError("invalid release index")
+    except Exception as exc:
+        _release_index_reads[url] = (time.monotonic() + _RELEASE_INDEX_TTL_SECONDS[1], exc)
+        raise
+    _release_index_reads[url] = (time.monotonic() + _RELEASE_INDEX_TTL_SECONDS[0], index)
     return index, url
 
 
@@ -1728,8 +1745,9 @@ def get_latest_version_info(
     release index marks silent and reports ``announced``, whether the index
     lists the offer without the marker. An offer the index does not (yet) list
     is unclassified; the automatic caller reads its notes before acting.
-    ``listed_only`` (with ``announced_only``) offers only releases the index
-    lists as announced, while the index can be read.
+    ``listed_only`` (with ``announced_only``) is an unprompted read: it offers
+    only releases the index lists as announced, and nothing while the index
+    cannot be read; it reuses a recent index read.
     """
 
     result = {"current": current_version, "latest": None, "has_update": False, "error": None}
@@ -1738,15 +1756,16 @@ def get_latest_version_info(
     index_url = ""
     if prereleases or announced_only:
         try:
-            index, index_url = _fetch_release_index()
+            index, index_url = _fetch_release_index(cached=listed_only)
         except Exception as exc:
-            # Stable releases remain on offer when the release index is unreachable.
-            logger.warning("Release index check failed: %s", exc)
+            # Checks keep offering stable releases when the release index is unreachable;
+            # unprompted reads (polled by every open page) offer nothing and log quietly.
+            (logger.debug if listed_only else logger.warning)("Release index check failed: %s", exc)
     listed = release_index_notifications(index) if index is not None else {}
 
     def sees(version: str) -> bool:
         silent = listed.get(version)
-        if listed_only and index is not None and silent is None:
+        if listed_only and silent is None:
             return False
         return not (announced_only and silent)
 

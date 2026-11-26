@@ -1130,7 +1130,8 @@ def test_api_postcommit_notice_failure_keeps_committed_generation(
         method="uv",
         activation=upgrade.AtomicActivation(launcher, exported),
     )
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99", "has_update": True})
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: True)
@@ -1174,7 +1175,8 @@ def test_api_postcommit_owner_failure_keeps_committed_generation(
         method="uv",
         activation=upgrade.AtomicActivation(launcher, exported),
     )
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99", "has_update": True})
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
@@ -1226,7 +1228,8 @@ def test_deferred_parent_posthandoff_diagnostic_failure_keeps_generation(
 
     monkeypatch.setattr(api, "os", WindowsOsProxy())
     monkeypatch.setattr(api, "build_upgrade_plan", lambda **_kwargs: plan)
-    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99"})
+    monkeypatch.setattr(api, "get_version_info", lambda: {"latest": "99", "has_update": True})
+    monkeypatch.setattr(api, "exact_release_spec", lambda _version: "avibe-os")
     monkeypatch.setattr(api, "get_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(api, "_runtime_process_was_running", lambda: False)
     monkeypatch.setattr(api, "activation_block_reason", lambda _activation: None)

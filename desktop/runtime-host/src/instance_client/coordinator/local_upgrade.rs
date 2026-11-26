@@ -80,13 +80,26 @@ impl Coordinator {
             }
             version = self.local_version(&mut session()).await.ok_or_else(failed)?;
         }
+        // The user asked for this upgrade: read the offer as the Workbench's
+        // check does, which also finds a silent release (docs/release.md) the
+        // unprompted version read leaves out. A Runtime without the route has
+        // only that read.
+        if let Some(checked) = self.local_check(&mut session()).await {
+            version = checked;
+        }
         if version["has_update"] != true {
             return Err(ClientError::new("local_runtime_still_too_old"));
         }
         let before = version["current"].as_str().unwrap_or_default().to_owned();
         // The released endpoint: no `confirm_interrupt`, exactly as an older
-        // Workbench sends it. Its reply can be lost to the restart it starts.
-        match local_mutation(&mut session(), "/api/upgrade", json!({})).await {
+        // Workbench sends it, naming the offer so a Runtime that knows the field
+        // installs exactly it (an older one ignores it). Its reply can be lost
+        // to the restart it starts.
+        let body = match version["latest"].as_str() {
+            Some(latest) => json!({"target_version": latest}),
+            None => json!({}),
+        };
+        match local_mutation(&mut session(), "/api/upgrade", body).await {
             Ok(reply) => {
                 let body = reply.json().unwrap_or(Value::Null);
                 if body["code"] == "desktop_managed_runtime" {
@@ -153,6 +166,14 @@ impl Coordinator {
     async fn local_version(&self, session: &mut NativeSession) -> Option<Value> {
         let reply = session.request(Method::GET, "/api/version", None).await.ok()?;
         reply.success().then(|| reply.json().ok()).flatten()
+    }
+
+    /// The snapshot the Runtime answers a check with, or `None` when it has no
+    /// such route (before standalone checks) or the check fails.
+    async fn local_check(&self, session: &mut NativeSession) -> Option<Value> {
+        let reply = local_mutation(session, "/api/update/check", json!({})).await.ok()?;
+        let snapshot = reply.success().then(|| reply.json().ok()).flatten()?["snapshot"].take();
+        snapshot.is_object().then_some(snapshot)
     }
 
     /// Whether this computer's Runtime already does what this Desktop needs of
