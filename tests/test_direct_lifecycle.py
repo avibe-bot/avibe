@@ -953,6 +953,44 @@ async def test_daily_turnover_latches_and_retries_failed_stop_before_replacement
         assert rv.endpoint and owner._turnover_retry_at is None
 
 
+@pytest.mark.parametrize('final_stop', ['success', 'raises', 'stalls', 'already_in_flight'])
+async def test_shutdown_bypasses_turnover_backoff_once_without_replacement(reports, monkeypatch, final_stop):
+    clock = [100.0]
+    release = asyncio.Event()
+    attempts = []
+    monkeypatch.setattr(module, 'suspend_elapsed', lambda: clock[0])
+    monkeypatch.setattr(module, 'TURNOVER_SHUTDOWN_WAIT_SECONDS', 0.05)
+    class FaultyStop(FakeSupervisor):
+        async def stop(self):
+            attempts.append(self)
+            if len(attempts) == 1 and final_stop != 'already_in_flight':
+                raise OSError('first retirement attempt failed')
+            if final_stop == 'raises':
+                raise OSError('final teardown failed')
+            if final_stop in {'stalls', 'already_in_flight'}:
+                await release.wait()
+            await super().stop()
+    config = _config()
+    async with _owner(config, reports, supervisor_type=FaultyStop) as (owner, calls, _, rv):
+        await _permission(owner, config)
+        await _wait(lambda: owner.status().state == 'running')
+        clock[0] = owner._endpoint_retire_at
+        await _permission(owner, config)
+        if final_stop == 'already_in_flight':
+            await _wait(lambda: len(attempts) == 1)
+        else:
+            await _wait(lambda: (owner._turnover_retry_at or 0) > owner._loop.time() + 20)
+        try:
+            await asyncio.wait_for(owner.stop(), timeout=0.5)
+            assert len(attempts) == (1 if final_stop == 'already_in_flight' else 2)
+            assert rv.endpoint is None and calls.count('supervisor_start') == 1
+            assert (owner._supervisor is None) == (final_stop == 'success')
+        finally:
+            release.set()
+            if owner._turnover_stop is not None:
+                await asyncio.wait_for(owner._turnover_stop, timeout=0.5)
+
+
 async def test_start_error_backs_off_then_publishes_without_tunnel_change(reports, monkeypatch):
     monkeypatch.setattr(module, "INSTALL_RETRY_INITIAL_SECONDS", 0.2)
     attempts = []

@@ -33,6 +33,7 @@ PERMISSION_MAX_AGE_SECONDS = 15 * 60
 # Start replacing the supervised process a minute before the 24h key limit.
 # Its ephemeral QUIC identity is unrelated to the instance TLS certificate.
 ENDPOINT_TURNOVER_SECONDS = 24 * 3600 - 60
+TURNOVER_SHUTDOWN_WAIT_SECONDS = 15.0
 CONFIG_POLL_INTERVAL_SECONDS = 0.5
 BINARY_REFRESH_INTERVAL_SECONDS = 5.0
 BINARY_OBSERVATION_MAX_AGE_SECONDS = 15.0
@@ -303,6 +304,7 @@ class DirectAccessLifecycle:
         self._supervisor: Any = None
         self._endpoint_retire_at: float | None = None
         self._turnover_retry_at: float | None = None
+        self._turnover_stop: asyncio.Task | None = None
         self._turnover_delay = INSTALL_RETRY_INITIAL_SECONDS
         self._resource_generation: int | None = None
         self._failed_generation: int | None = None
@@ -600,7 +602,7 @@ class DirectAccessLifecycle:
             pass  # An unreadable optional runtime is unavailable, not a Web UI failure.
         return generation, started, binary, missing
 
-    def _binary_check_done(self, task: asyncio.Task) -> None:
+    def _worker_done(self, task: asyncio.Task) -> None:
         if not task.cancelled():
             task.exception()
         self._wake.set()
@@ -641,7 +643,7 @@ class DirectAccessLifecycle:
                             self._install_pin, self._generation, self._signature,
                             self._permission_received_at + PERMISSION_MAX_AGE_SECONDS,
                         ), name="direct-transport-install")
-                        self._install_task.add_done_callback(self._binary_check_done)
+                        self._install_task.add_done_callback(self._worker_done)
                         return
         config = self._config
         if (self._binary_task is not None or self._shutdown or self._pairing_suspended
@@ -654,7 +656,7 @@ class DirectAccessLifecycle:
         self._binary_task = asyncio.create_task(asyncio.to_thread(
             self._resolve_binary, self._generation, self._loop.time(), binary_config,
         ), name="direct-binary-observation")
-        self._binary_task.add_done_callback(self._binary_check_done)
+        self._binary_task.add_done_callback(self._worker_done)
 
     def _clear_binary(self) -> None:
         self._binary = None
@@ -714,6 +716,9 @@ class DirectAccessLifecycle:
     async def _run(self) -> None:
         while True:
             self._wake.clear()
+            if self._shutdown and self._turnover_retry_at is not None:
+                await self._finish_turnover_on_shutdown()
+                return
             try:
                 if self._permission_allowed is True and not self._permission_fresh():
                     self._deny("permission_expired")
@@ -741,6 +746,30 @@ class DirectAccessLifecycle:
             self._next_start = self._loop.time() + self._start_delay
             self._start_delay = min(INSTALL_RETRY_MAX_SECONDS, self._start_delay * 2)
 
+    def _begin_turnover_stop(self) -> asyncio.Task:
+        self._turnover_stop = asyncio.create_task(self._stop_direct('generation_changed'), name='direct-endpoint-retire')
+        self._turnover_stop.add_done_callback(self._worker_done)
+        return self._turnover_stop
+
+    async def _finish_turnover_on_shutdown(self) -> None:
+        # stop() already withdrew publication and invalidated the generation.
+        # Reuse an in-flight teardown. After a failed attempt, skip its backoff
+        # and try once more. Never start a second stop alongside the first.
+        task = self._turnover_stop
+        if task is None or (task.done() and (task.cancelled() or task.exception() is not None)):
+            task = self._begin_turnover_stop()
+        done, _ = await asyncio.wait((task,), timeout=TURNOVER_SHUTDOWN_WAIT_SECONDS)
+        if not done:
+            # Keep ownership: cancellation could interrupt child reaping. If
+            # this owner restarts, it must collect this stop before replacing it.
+            logger.warning('Direct endpoint teardown still pending at shutdown')
+        elif task.cancelled() or task.exception() is not None:
+            self._turnover_stop = None
+            logger.warning('Direct endpoint teardown failed at shutdown')
+        else:
+            self._turnover_stop = None
+            self._turnover_retry_at = None
+
     async def _reconcile(self) -> None:
         if self._turnover_retry_at is None and self._endpoint_retire_at is not None and suspend_elapsed() >= self._endpoint_retire_at:
             # Retire once. Ordinary permission renewals and further ticks must
@@ -751,9 +780,14 @@ class DirectAccessLifecycle:
         if self._turnover_retry_at is not None:
             if self._loop.time() < self._turnover_retry_at:
                 return
-            try:
-                await self._stop_direct('generation_changed')
-            except Exception:
+            task = self._turnover_stop
+            if task is None:
+                self._begin_turnover_stop()
+                return
+            if not task.done():
+                return
+            self._turnover_stop = None
+            if task.cancelled() or task.exception() is not None:
                 self._turnover_retry_at = self._loop.time() + self._turnover_delay
                 self._turnover_delay = min(INSTALL_RETRY_MAX_SECONDS, self._turnover_delay * 2)
                 logger.warning('Direct endpoint retirement incomplete; retrying teardown after backoff')
