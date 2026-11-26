@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { expect, test } from '../support/browserTest';
 import { open, serveProduct } from './support';
 import { clientState, signIn } from '../desktop-client/bridge-fixture';
@@ -60,6 +61,55 @@ for (const lang of ['en', 'zh'] as const) for (const theme of ['light', 'dark'] 
     expect(geometry.statusGap).toBe(6);
     await page.mouse.move(700, 400);
     await page.screenshot({ path: info.outputPath('online.png'), animations: 'disabled' });
+    await menu.screenshot({ path: info.outputPath('account-menu.png'), animations: 'disabled' });
+    const menuMetrics = await menu.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      const css = getComputedStyle(node);
+      const email = node.querySelector<HTMLElement>('[data-menu-email]')!;
+      const instance = node.querySelector<HTMLElement>('[data-menu-instance]')!;
+      const actions = Array.from(node.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+      const divider = node.querySelector<HTMLElement>('[data-menu-divider]') ?? instance.nextElementSibling as HTMLElement;
+      const bounds = (el: HTMLElement) => ({ x: el.getBoundingClientRect().x - box.x, y: el.getBoundingClientRect().y - box.y, width: el.getBoundingClientRect().width, height: el.getBoundingClientRect().height, padding: getComputedStyle(el).padding, lineHeight: getComputedStyle(el).lineHeight });
+      return { width: box.width, height: box.height, radius: css.borderRadius, padding: css.padding, email: bounds(email), instance: bounds(instance), divider: bounds(divider), actions: actions.map(bounds) };
+    });
+    await page.keyboard.press('Escape');
+    await expect(menu).toBeHidden();
+    await page.locator('[data-version-chip]').click();
+    const update = page.getByRole('dialog', { name: copy.dashboard.versionAndUpdate });
+    await expect(update.locator('[data-update-panel]')).toBeVisible();
+    await expect(update).toHaveCSS('opacity', '1');
+    await page.mouse.move(700, 400);
+    await update.screenshot({ path: info.outputPath('version-update.png'), animations: 'disabled' });
+    const updateMetrics = await update.evaluate((node) => {
+      const css = getComputedStyle(node);
+      const panel = node.querySelector('[data-update-panel]')!;
+      const header = panel.children[0];
+      const body = panel.children[1];
+      return { width: node.getBoundingClientRect().width, radius: css.borderRadius, padding: css.padding,
+        headerPadding: getComputedStyle(header).padding, headerHeight: header.getBoundingClientRect().height,
+        bodyPadding: getComputedStyle(body).padding, rowLineHeight: getComputedStyle(body.children[0]).lineHeight,
+        rowGap: body.children[1].getBoundingClientRect().top - body.children[0].getBoundingClientRect().bottom };
+    });
+    await writeFile(info.outputPath('spacing-metrics.json'), JSON.stringify({ menu: menuMetrics, update: updateMetrics }, null, 2));
+    await info.attach('spacing-metrics', { body: JSON.stringify({ menu: menuMetrics, update: updateMetrics }, null, 2), contentType: 'application/json' });
+    // The divider reaches both inner border edges; content shares UpdatePanel's 16px inset
+    // and 20px lines on a 32px pitch. The previous inset divider fails this browser contract.
+    expect(menuMetrics.divider.x).toBe(1);
+    expect(menuMetrics.divider.width).toBe(menuMetrics.width - 2);
+    expect(menuMetrics.radius).toBe('8px');
+    expect(menuMetrics.padding).toBe('0px');
+    expect(menuMetrics.email.x).toBe(17);
+    expect(menuMetrics.instance.x).toBe(17);
+    expect(menuMetrics.instance.y - menuMetrics.email.y - menuMetrics.email.height).toBe(12);
+    expect(menuMetrics.email.lineHeight).toBe(updateMetrics.rowLineHeight);
+    expect(menuMetrics.actions[0].x).toBe(9);
+    expect(menuMetrics.actions[0].padding).toBe('6px 8px');
+    expect(menuMetrics.actions[0].height).toBe(32);
+    expect(menuMetrics.actions[1].y - menuMetrics.actions[0].y).toBe(32);
+    await page.keyboard.press('Escape');
+    await trigger.click();
+    await expect(change).toBeFocused();
+
     await page.keyboard.press('ArrowUp');
     await expect(signOut).toBeFocused();
     await page.keyboard.press('ArrowDown');
