@@ -1,11 +1,8 @@
-//! Provider sign-in's return to the Desktop app: a one-transaction loopback
-//! listener (RFC 8252 §7.3) and the PKCE secrets it is bound to.
-//!
-//! The listener binds `127.0.0.1:0` only, before the browser opens. It answers
-//! exactly `GET /callback` with this transaction's `Host` and `state`, consumes
-//! the first such answer once, and is dropped (port released) on success,
-//! failure, cancel, timeout or generation change. Request bytes, the code and
-//! the verifier are never logged or reflected; replies are fixed text.
+//! A state-validated provider callback and its bounded, read-only result page.
+//! Authentication ends once; its ephemeral port remains reachable for ten minutes.
+mod page;
+pub use page::CallbackCopy;
+
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
@@ -22,6 +19,8 @@ pub const CALLBACK_PATH: &str = "/callback";
 /// Longest time a browser sign-in may take before the attempt ends: GoTrue's default PKCE flow
 /// state lives 300 s after authorize, so a later code could not be redeemed anyway.
 pub const WAIT: Duration = Duration::from_secs(300);
+/// Presentation only: this never extends authentication or permits another exchange.
+const RESULT_GRACE: Duration = Duration::from_secs(600);
 /// How often an idle wait looks at the account generation.
 const TICK: Duration = Duration::from_millis(250);
 /// One request's head must arrive within this time and size.
@@ -56,43 +55,62 @@ impl Secrets {
     }
 }
 
-/// How the provider's round trip ended, from a callback that carried this state.
+/// A safe failure category for the App, with bounded secondary browser detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProviderFailure {
+    pub code: &'static str,
+    pub description: Option<String>,
+}
+impl ProviderFailure {
+    pub fn from_code(code: &str) -> Self {
+        Self {
+            code: match code {
+                "provider_account_conflict" => "provider_account_conflict",
+                "provider_email_unverified" => "provider_email_unverified",
+                "provider_denied" => "provider_denied",
+                "provider_server_error" => "provider_server_error",
+                _ => "provider_failed",
+            },
+            description: None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Callback {
     Code(String),
-    /// Supabase's `error_code=provider_email_needs_verification`.
-    EmailUnverified,
-    /// Any other error Supabase returned (`error` with its fixed companions).
-    Failed,
+    Failed(ProviderFailure),
 }
 
-/// One request's verdict: answered for this transaction, or not ours.
+#[derive(Clone, Debug)]
+pub enum ResultPage {
+    Complete,
+    VerifyInApp,
+    Failed(ProviderFailure),
+    Cancelled,
+    TimedOut,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Verdict {
     Done(Callback),
+    Fragment,
     NotFound,
     Rejected,
 }
 
-/// What the browser shows once the redirect arrives, in the page's language:
-/// the native catalog's `desktopBootstrap.providerCallback`, as plain text.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CallbackCopy {
-    /// The sign-in reached Avibe.
-    pub done: String,
-    /// The provider or the person ended it without a code.
-    pub failed: String,
-}
-
+/// Owns the listener until the complete native account action settles. Dropping an
+/// unfinished owner cancels authentication but still gives late browsers an answer.
 pub struct Loopback {
-    listener: TcpListener,
+    listener: Option<TcpListener>,
     port: u16,
-    done: String,
-    failed: String,
+    copy: CallbackCopy,
+    pending: Option<TcpStream>,
+    result: Option<ResultPage>,
+    waited: bool,
 }
 
 impl Loopback {
-    /// Binds the IPv4 loopback address only, on a port the OS picks.
     pub async fn bind(copy: &CallbackCopy) -> Result<Self, ClientError> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -102,24 +120,32 @@ impl Loopback {
             .map_err(|_| ClientError::new("provider_unavailable"))?
             .port();
         Ok(Self {
-            listener,
+            listener: Some(listener),
             port,
-            done: page(&copy.done),
-            failed: page(&copy.failed),
+            copy: copy.clone(),
+            pending: None,
+            result: None,
+            waited: false,
         })
     }
 
-    /// `http://127.0.0.1:<port>/callback?state=<state>`; Supabase keeps this
-    /// query and adds `code`, or `error` with `error_code`/`error_description`.
     pub fn redirect_uri(&self, state: &str) -> Url {
         let mut url = Url::parse(&format!("http://127.0.0.1:{}{CALLBACK_PATH}", self.port)).expect("loopback URL");
         url.query_pairs_mut().append_pair("state", state);
         url
     }
 
-    /// Waits for this transaction's callback. Ends on the first valid answer,
-    /// the deadline, the generation moving, or too many stray connections.
-    pub async fn wait(self, state: &str, epoch: &Epoch, wait: Duration) -> Result<Callback, ClientError> {
+    /// Finalized by the coordinator, after persistence, never merely on code arrival.
+    pub fn complete(&mut self, result: ResultPage) {
+        if self.result.is_none() {
+            self.result = Some(result);
+        }
+    }
+
+    pub async fn wait(&mut self, state: &str, epoch: &Epoch, wait: Duration) -> Result<Callback, ClientError> {
+        if std::mem::replace(&mut self.waited, true) {
+            return Err(ClientError::new("invalid_action"));
+        }
         let deadline = Instant::now() + wait;
         let host = format!("127.0.0.1:{}", self.port);
         let mut connections = 0usize;
@@ -127,48 +153,116 @@ impl Loopback {
             epoch.check()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                self.complete(ResultPage::TimedOut);
                 return Err(ClientError::new("provider_timeout"));
             }
-            let accepted = match tokio::time::timeout(remaining.min(TICK), self.listener.accept()).await {
+            let accepted = match tokio::time::timeout(
+                remaining.min(TICK),
+                self.listener.as_ref().expect("owned listener").accept(),
+            )
+            .await
+            {
                 Err(_) => continue,
                 Ok(accepted) => accepted,
             };
             connections += 1;
             if connections > MAX_CONNECTIONS {
-                return Err(ClientError::new("invalid_or_expired"));
+                self.complete(ResultPage::Failed(ProviderFailure::from_code("provider_failed")));
+                return Err(ClientError::new("provider_failed"));
             }
-            let Ok((stream, peer)) = accepted else { continue };
+            let Ok((mut stream, peer)) = accepted else { continue };
             if !peer.ip().is_loopback() {
                 continue;
             }
-            let verdict = respond(stream, &host, state, (&self.done, &self.failed)).await;
-            if let Some(Verdict::Done(callback)) = verdict {
-                // A late generation change still wins over a delivered answer.
-                epoch.check()?;
-                return Ok(callback);
+            let head = tokio::time::timeout(remaining.min(READ_TIMEOUT), read_head(&mut stream))
+                .await
+                .ok()
+                .flatten();
+            if let Err(error) = epoch.check() {
+                self.pending = Some(stream);
+                return Err(error);
+            }
+            if Instant::now() >= deadline {
+                self.pending = Some(stream);
+                self.complete(ResultPage::TimedOut);
+                return Err(ClientError::new("provider_timeout"));
+            }
+            let Some(head) = head else { continue };
+            match judge(&head, &host, state) {
+                Verdict::Done(callback) => {
+                    // Hold the first browser response through token exchange and persistence.
+                    // A cancelled or failed native action cannot leave a success page behind.
+                    self.pending = Some(stream);
+                    if let Callback::Failed(failure) = &callback {
+                        self.complete(ResultPage::Failed(failure.clone()));
+                    }
+                    return Ok(callback);
+                }
+                Verdict::Fragment => send_page(&mut stream, "200 OK", &page::fragment(&self.copy)).await,
+                Verdict::NotFound => send_page(&mut stream, "404 Not Found", "").await,
+                Verdict::Rejected => send_page(&mut stream, "400 Bad Request", "").await,
             }
         }
     }
 }
 
-async fn respond(mut stream: TcpStream, host: &str, state: &str, (done, failed): (&str, &str)) -> Option<Verdict> {
-    let head = tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream))
-        .await
-        .ok()??;
-    let verdict = judge(&head, host, state);
-    let (status, body) = match &verdict {
-        Verdict::Done(Callback::Code(_)) => ("200 OK", done),
-        Verdict::Done(_) => ("200 OK", failed),
-        Verdict::NotFound => ("404 Not Found", ""),
-        Verdict::Rejected => ("400 Bad Request", ""),
+impl Drop for Loopback {
+    fn drop(&mut self) {
+        let Some(listener) = self.listener.take() else { return };
+        // Runtime shutdown is App exit: no background responder survives it.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let body = page::result(&self.copy, &self.result.take().unwrap_or(ResultPage::Cancelled));
+        let pending = self.pending.take();
+        runtime.spawn(serve_result(listener, pending, body, RESULT_GRACE));
+    }
+}
+
+/// Only rendered HTML reaches this task: no state, code, verifier, or account jar.
+async fn serve_result(listener: TcpListener, pending: Option<TcpStream>, body: String, grace: Duration) {
+    let work = async {
+        let body = std::sync::Arc::new(body);
+        let mut replies = tokio::task::JoinSet::new();
+        if let Some(mut stream) = pending {
+            let body = body.clone();
+            replies.spawn(async move {
+                send_page(&mut stream, "200 OK", &body).await;
+            });
+        }
+        loop {
+            // Bound idle preconnects without letting one block every ordinary browser request.
+            if replies.len() >= MAX_CONNECTIONS {
+                let _ = replies.join_next().await;
+            }
+            tokio::select! {
+                Some(_) = replies.join_next(), if !replies.is_empty() => {},
+                accepted = listener.accept() => {
+                    let Ok((mut stream, _)) = accepted else { break };
+                    let body = body.clone();
+                    replies.spawn(async move {
+                        if tokio::time::timeout(READ_TIMEOUT, read_head(&mut stream)).await.ok().flatten().is_some() {
+                            send_page(&mut stream, "200 OK", &body).await;
+                        }
+                    });
+                }
+            }
+        }
     };
+    // Dropping the future also aborts its JoinSet; no socket outlives this deadline.
+    let _ = tokio::time::timeout(grace, work).await;
+}
+
+async fn send_page(stream: &mut TcpStream, status: &str, body: &str) {
     let reply = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'sha256-{}'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
+        body.len(), page::script_hash()
     );
-    let _ = tokio::time::timeout(READ_TIMEOUT, stream.write_all(reply.as_bytes())).await;
-    let _ = stream.shutdown().await;
-    Some(verdict)
+    let _ = tokio::time::timeout(READ_TIMEOUT, async {
+        stream.write_all(reply.as_bytes()).await?;
+        stream.shutdown().await
+    })
+    .await;
 }
 
 /// Reads up to the end of the request head, bounded in size.
@@ -216,7 +310,15 @@ fn judge(head: &str, host: &str, state: &str) -> Verdict {
     if path != CALLBACK_PATH {
         return Verdict::NotFound;
     }
+    if query_state_only(query, state) {
+        return Verdict::Fragment;
+    }
     parse_callback(query, state).map_or(Verdict::Rejected, Verdict::Done)
+}
+
+fn query_state_only(query: &str, expected: &str) -> bool {
+    let pairs: Vec<_> = url::form_urlencoded::parse(query.as_bytes()).collect();
+    pairs.len() == 1 && pairs[0].0 == "state" && constant_time_eq(pairs[0].1.as_bytes(), expected.as_bytes())
 }
 
 /// Supabase's callback grammar (GoTrue v2.198.0): our `state`, plus `code`, or
@@ -246,23 +348,34 @@ fn parse_callback(query: &str, expected_state: &str) -> Option<Callback> {
     }
     match (code, error) {
         (Some(code), None) if error_code.is_none() && description.is_none() => Some(Callback::Code(code)),
-        (None, Some(_)) => Some(if error_code.as_deref() == Some("provider_email_needs_verification") {
-            Callback::EmailUnverified
-        } else {
-            Callback::Failed
-        }),
+        (None, Some(error)) => {
+            let code = if error_code.as_deref() == Some("provider_email_needs_verification") {
+                "provider_email_unverified"
+            } else if error_code.as_deref() == Some("unexpected_failure")
+                && description.as_ref().is_some_and(|text| {
+                    text.to_ascii_lowercase()
+                        .contains("multiple accounts with the same email address in the same linking domain")
+                })
+            {
+                "provider_account_conflict"
+            } else if error == "access_denied" {
+                "provider_denied"
+            } else if matches!(error.as_str(), "server_error" | "temporarily_unavailable") {
+                "provider_server_error"
+            } else {
+                "provider_failed"
+            };
+            Some(Callback::Failed(ProviderFailure {
+                code,
+                description: description.filter(|text| !text.is_empty()),
+            }))
+        }
         _ => None,
     }
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     left.len() == right.len() && left.iter().zip(right).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
-}
-
-/// One line of catalog copy as the whole page, escaped.
-fn page(text: &str) -> String {
-    let escaped = text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    format!("<!doctype html><meta charset=\"utf-8\"><title>Avibe</title><p>{escaped}</p>")
 }
 
 #[cfg(test)]
@@ -276,6 +389,12 @@ mod tests {
         CallbackCopy {
             done: "Done <here> & now".into(),
             failed: "没有完成".into(),
+            denied: "没有授权".into(),
+            cancelled: "Cancelled".into(),
+            timed_out: "Timed out".into(),
+            server_error: "Service failed".into(),
+            account_conflict: "Multiple accounts".into(),
+            ..Default::default()
         }
     }
     /// The listener tests run one at a time, so no other one's socket is on
@@ -309,23 +428,26 @@ mod tests {
                 "state=s1-state&error=access_denied&error_code=provider_email_needs_verification&error_description=x",
                 STATE
             ),
-            Some(Callback::EmailUnverified)
+            Some(Callback::Failed(ProviderFailure {
+                code: "provider_email_unverified",
+                description: Some("x".into())
+            }))
         );
         assert_eq!(
             parse_callback("state=s1-state&error=server_error", STATE),
-            Some(Callback::Failed)
+            Some(Callback::Failed(ProviderFailure::from_code("provider_server_error")))
         );
         // A provider's bare refusal, as GoTrue v2.198.0 forwards it (empty description).
         assert_eq!(
             parse_callback("error=access_denied&error_description=&state=s1-state", STATE),
-            Some(Callback::Failed)
+            Some(Callback::Failed(ProviderFailure::from_code("provider_denied")))
         );
         assert_eq!(
             parse_callback(
                 "error=server_error&error_code=&error_description=&state=s1-state",
                 STATE
             ),
-            Some(Callback::Failed)
+            Some(Callback::Failed(ProviderFailure::from_code("provider_server_error")))
         );
         for bad in [
             "",
@@ -388,31 +510,6 @@ mod tests {
         );
     }
 
-    /// A late callback to a finished transaction gets no Avibe page: nothing
-    /// in this process serves its port any more. Whether the port refuses the
-    /// connection cannot be the check here: on macOS a socket becomes
-    /// close-on-exec only after it exists, so a child that another test in
-    /// this binary spawns at that moment (the launcher and receipt tests run
-    /// Python) inherits the listener and keeps the port open after this
-    /// process closes its own (reproduced: 3 of 20 runs beside those tests,
-    /// 0 of 200 alone).
-    async fn unanswered(port: u16) -> bool {
-        let late = async {
-            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await else {
-                return String::new();
-            };
-            let request = format!("GET /callback?state={STATE}&code=late HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n");
-            let _ = stream.write_all(request.as_bytes()).await;
-            let mut reply = String::new();
-            let _ = stream.read_to_string(&mut reply).await;
-            reply
-        };
-        let reply = tokio::time::timeout(Duration::from_millis(500), late)
-            .await
-            .unwrap_or_default();
-        !reply.contains("<title>Avibe</title>")
-    }
-
     async fn get(port: u16, target: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
         stream
@@ -420,87 +517,136 @@ mod tests {
             .await
             .unwrap();
         let mut reply = String::new();
-        stream.read_to_string(&mut reply).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), stream.read_to_string(&mut reply))
+            .await
+            .unwrap()
+            .unwrap();
         reply
     }
 
     #[tokio::test]
-    async fn consumes_the_first_valid_callback_once_and_releases_the_port() {
+    async fn consumes_only_once_and_serves_immutable_result_to_every_late_path() {
         let _ports = PORTS.lock().await;
-        let generation = Arc::new(AtomicU64::new(7));
-        let epoch = Epoch::new(generation.clone(), 7);
-        let loopback = Loopback::bind(&copy()).await.unwrap();
+        let epoch = Epoch::new(Arc::new(AtomicU64::new(7)), 7);
+        let mut loopback = Loopback::bind(&copy()).await.unwrap();
         let port = loopback.port;
-        assert_eq!(loopback.redirect_uri(STATE).host_str(), Some("127.0.0.1"));
-        let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(5)).await });
-        // Stray requests neither succeed nor end the wait; replies never echo the query.
+        let waiting = tokio::spawn(async move {
+            let callback = loopback.wait(STATE, &epoch, Duration::from_secs(5)).await.unwrap();
+            assert_eq!(callback, Callback::Code("secret-code".into()));
+            assert_eq!(
+                loopback.wait(STATE, &epoch, WAIT).await.unwrap_err().code,
+                "invalid_action"
+            );
+            loopback.complete(ResultPage::Complete);
+            loopback.complete(ResultPage::Cancelled); // terminal result cannot change
+        });
         assert!(get(port, "/favicon.ico").await.starts_with("HTTP/1.1 404"));
         let wrong = get(port, "/callback?state=other&code=leaked").await;
         assert!(wrong.starts_with("HTTP/1.1 400") && !wrong.contains("leaked"));
         let done = get(port, "/callback?state=s1-state&code=secret-code").await;
         assert!(done.starts_with("HTTP/1.1 200") && !done.contains("secret-code"));
-        // The catalog's line, escaped: the copy is text, never markup.
-        assert!(done.ends_with("<p>Done &lt;here&gt; &amp; now</p>"), "{done}");
-        assert!(matches!(waiting.await.unwrap(), Ok(Callback::Code(code)) if code == "secret-code"));
-        // The listener is gone with the transaction: a late callback cannot land.
-        assert!(unanswered(port).await);
-    }
-
-    /// A provider's bare refusal ends the wait at once with the failure page.
-    #[tokio::test]
-    async fn a_bare_provider_refusal_ends_the_wait_at_once() {
-        let _ports = PORTS.lock().await;
-        let generation = Arc::new(AtomicU64::new(5));
-        let epoch = Epoch::new(generation, 5);
-        let loopback = Loopback::bind(&copy()).await.unwrap();
-        let port = loopback.port;
-        let started = Instant::now();
-        let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(3)).await });
-        let reply = get(port, "/callback?error=access_denied&error_description=&state=s1-state").await;
-        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
-        // The catalog's failure line, alone: one language, no other text.
-        assert!(reply.ends_with("<title>Avibe</title><p>没有完成</p>"), "{reply}");
-        assert!(matches!(waiting.await.unwrap(), Ok(Callback::Failed)));
-        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
-        assert!(unanswered(port).await);
-    }
-
-    #[tokio::test]
-    async fn a_generation_change_ends_the_wait() {
-        let _ports = PORTS.lock().await;
-        let generation = Arc::new(AtomicU64::new(3));
-        let epoch = Epoch::new(generation.clone(), 3);
-        let loopback = Loopback::bind(&copy()).await.unwrap();
-        let port = loopback.port;
-        let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(5)).await });
-        generation.store(4, std::sync::atomic::Ordering::SeqCst);
-        assert_eq!(waiting.await.unwrap().unwrap_err().code, "stale_generation");
-        assert!(unanswered(port).await);
-    }
-
-    #[tokio::test]
-    async fn a_deadline_and_a_connection_cap_end_the_wait() {
-        let _ports = PORTS.lock().await;
-        let generation = Arc::new(AtomicU64::new(1));
-        let loopback = Loopback::bind(&copy()).await.unwrap();
-        let epoch = Epoch::new(generation.clone(), 1);
-        assert_eq!(
-            loopback
-                .wait(STATE, &epoch, Duration::from_millis(300))
-                .await
-                .unwrap_err()
-                .code,
-            "provider_timeout"
-        );
-        let loopback = Loopback::bind(&copy()).await.unwrap();
-        let port = loopback.port;
-        let epoch = Epoch::new(generation, 1);
-        let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, Duration::from_secs(10)).await });
-        for _ in 0..=MAX_CONNECTIONS {
-            if TcpStream::connect(("127.0.0.1", port)).await.is_err() {
-                break;
-            }
+        assert!(done.contains("Done &lt;here&gt; &amp; now"), "{done}");
+        waiting.await.unwrap();
+        for target in [
+            "/callback",
+            "/callback?state=s1-state&code=secret-code",
+            "/favicon.ico",
+            "/prefetch",
+            "/callback?state=wrong&error=server_error",
+        ] {
+            assert_eq!(get(port, target).await, done);
         }
-        assert_eq!(waiting.await.unwrap().unwrap_err().code, "invalid_or_expired");
+    }
+
+    #[tokio::test]
+    async fn errors_are_readable_escaped_and_immutable() {
+        let epoch = Epoch::new(Arc::new(AtomicU64::new(5)), 5);
+        let mut loopback = Loopback::bind(&copy()).await.unwrap();
+        let port = loopback.port;
+        let waiting = tokio::spawn(async move { loopback.wait(STATE, &epoch, WAIT).await });
+        let reply = get(
+            port,
+            "/callback?state=s1-state&error=server_error&error_description=%3Cscript%3Eevil%3C%2Fscript%3E",
+        )
+        .await;
+        assert!(reply.starts_with("HTTP/1.1 200") && reply.contains("Service failed"));
+        assert!(reply.contains("&lt;script&gt;evil&lt;/script&gt;"));
+        assert!(!reply.contains("<script>evil"));
+        assert!(matches!(waiting.await.unwrap(), Ok(Callback::Failed(f)) if f.code == "provider_server_error"));
+        assert_eq!(get(port, "/callback?state=s1-state&code=late").await, reply);
+    }
+
+    #[tokio::test]
+    async fn cancellation_timeout_and_dropped_owner_keep_a_page_without_authentication() {
+        for ending in ["cancel", "timeout", "drop"] {
+            let generation = Arc::new(AtomicU64::new(3));
+            let epoch = Epoch::new(generation.clone(), 3);
+            let mut loopback = Loopback::bind(&copy()).await.unwrap();
+            let port = loopback.port;
+            if ending == "cancel" {
+                generation.store(4, std::sync::atomic::Ordering::SeqCst);
+            }
+            if ending != "drop" {
+                let err = loopback
+                    .wait(STATE, &epoch, Duration::from_millis(20))
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    err.code,
+                    if ending == "cancel" {
+                        "stale_generation"
+                    } else {
+                        "provider_timeout"
+                    }
+                );
+            }
+            drop(loopback);
+            let page = get(port, "/callback?state=s1-state&code=late").await;
+            assert!(page.starts_with("HTTP/1.1 200"));
+            assert!(page.contains(if ending == "timeout" { "Timed out" } else { "Cancelled" }));
+            assert_eq!(get(port, "/callback").await, page);
+        }
+    }
+
+    #[tokio::test]
+    async fn grace_deadline_releases_the_listener_and_idle_connections() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let serving = tokio::spawn(serve_result(listener, None, "final".into(), Duration::from_millis(100)));
+        let mut idle = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        assert!(get(port, "/callback").await.ends_with("final"));
+        serving.await.unwrap();
+        let mut data = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), idle.read(&mut data))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        // Rebinding proves the listener released its address without relying on a race-prone connect.
+        let _rebound = TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    }
+
+    #[test]
+    fn account_conflict_and_fragment_bridge_preserve_state_validation() {
+        let conflict = parse_callback("state=s1-state&error=server_error&error_code=unexpected_failure&error_description=Multiple+accounts+with+the+same+email+address+in+the+same+linking+domain+detected%3A+default", STATE).unwrap();
+        assert!(matches!(conflict, Callback::Failed(f) if f.code == "provider_account_conflict"));
+        assert_eq!(
+            judge(
+                "GET /callback?state=s1-state HTTP/1.1\r\nHost: 127.0.0.1:4100\r\n\r\n",
+                "127.0.0.1:4100",
+                STATE
+            ),
+            Verdict::Fragment
+        );
+        assert_eq!(
+            judge(
+                "GET /callback?state=wrong HTTP/1.1\r\nHost: 127.0.0.1:4100\r\n\r\n",
+                "127.0.0.1:4100",
+                STATE
+            ),
+            Verdict::Rejected
+        );
     }
 }
