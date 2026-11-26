@@ -61,6 +61,7 @@ def test_default_config_is_fresh_and_needs_setup():
     assert config.platforms.enabled == []
     assert config.platforms.primary == "avibe"
     assert {agent.mode for agent in config.model_hub.agents.values()} == {"hub"}
+    assert "antigravity" not in config.model_hub.agents
 
 
 def test_load_config_or_default_returns_default_without_persisting(isolated_state, tmp_path):

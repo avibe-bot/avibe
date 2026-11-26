@@ -41,6 +41,7 @@ BACKEND_TO_AGENT: dict[str, str] = {
     "claude": "claude-code",
     "opencode": "opencode",
     "codex": "codex",
+    "antigravity": "antigravity",
 }
 AGENT_TO_BACKEND: dict[str, str] = {agent: backend for backend, agent in BACKEND_TO_AGENT.items()}
 _SKILL_RESOURCE_SCOPES = frozenset({"global", "project"})

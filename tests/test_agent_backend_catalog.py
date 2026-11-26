@@ -22,7 +22,7 @@ from vibe import api
 
 def test_agent_catalog_is_backend_management_source_of_truth() -> None:
     # The built-in backend leads every backend list; the default backend is unchanged.
-    assert AGENT_BACKENDS == ("vibey", "opencode", "claude", "codex")
+    assert AGENT_BACKENDS == ("vibey", "opencode", "claude", "codex", "antigravity")
     assert DEFAULT_AGENT_BACKEND == "opencode"
 
     for backend in NATIVE_CLI_BACKENDS:
@@ -56,7 +56,7 @@ def test_agent_backend_catalog_payload_exposes_public_metadata() -> None:
     payload = agent_backend_catalog_payload()
 
     assert [item["id"] for item in payload] == list(AGENT_BACKENDS)
-    assert [item["builtin"] for item in payload] == [True, False, False, False]
+    assert [item["builtin"] for item in payload] == [True, False, False, False, False]
     assert payload[1]["settings_route"] == "/settings/backends/opencode"
     assert payload[1]["capabilities"]["supports_runtime_refresh"] is True
 

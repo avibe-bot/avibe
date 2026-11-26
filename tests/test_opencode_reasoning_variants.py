@@ -109,9 +109,12 @@ def test_catalog_declared_tiers_round_trip_through_the_opencode_overlay(
         )
 
     for model_id, efforts in declared.items():
-        assert _written_model(tmp_path, "deepseek", model_id)["variants"] == {
-            effort: {"reasoningEffort": effort} for effort in efforts
-        }
+        model = _written_model(tmp_path, "deepseek", model_id)
+        if efforts:
+            assert model["variants"] == {effort: {"reasoningEffort": effort} for effort in efforts}
+        else:
+            # An explicit empty catalog menu means no reasoning variants.
+            assert "variants" not in model
 
 
 def test_family_default_suggestions_never_claim_ultra() -> None:

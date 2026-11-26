@@ -768,7 +768,7 @@ export interface McpServerSummary {
   name: string;
   description?: string;
   transport?: string;
-  source?: 'avibe' | 'claude' | 'codex' | 'opencode' | 'project';
+  source?: 'avibe' | 'claude' | 'codex' | 'opencode' | 'antigravity' | 'project';
   sourcePath?: string;
   /** `global`, or the project scope of a row from the project's `.mcp.json`. */
   scope?: string;
@@ -904,7 +904,9 @@ export type ApiContextType = {
   saveCodexAuth: (payload: CodexAuthPayload) => Promise<CodexAuthSaveResult>;
   getClaudeAuth: () => Promise<ClaudeAuthState>;
   saveClaudeAuth: (payload: ClaudeAuthPayload) => Promise<ClaudeAuthSaveResult>;
-  startOAuthWeb: (backend: 'claude' | 'codex', forceReset?: boolean) => Promise<OAuthWebStartResult>;
+  getAntigravityAuth: () => Promise<AntigravityAuthState>;
+  saveAntigravityAuth: (payload: AntigravityAuthPayload) => Promise<AntigravityAuthSaveResult>;
+  startOAuthWeb: (backend: 'claude' | 'codex' | 'antigravity', forceReset?: boolean, authMode?: string) => Promise<OAuthWebStartResult>;
   startOAuthWebForOpencodeProvider: (
     providerId: string,
     forceReset?: boolean,
@@ -922,15 +924,15 @@ export type ApiContextType = {
     backend: WebOAuthBackend,
     flowId: string,
   ) => Promise<OAuthWebMutationResult>;
-  removeBackendAuth: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
+  removeBackendAuth: (backend: 'claude' | 'codex' | 'antigravity') => Promise<OAuthWebMutationResult>;
   removeClaudeOAuthCredentials: () => Promise<OAuthWebMutationResult>;
   // Selectively clear just the stored API key — leave OAuth credentials
   // intact. Symmetric to OpenCode's per-provider DELETE: lets the user
   // drop a stale key without re-signing in. The backend runtime is
   // refreshed so cached sessions observe the change on the next request.
-  removeBackendApiKey: (backend: 'claude' | 'codex') => Promise<OAuthWebMutationResult>;
+  removeBackendApiKey: (backend: 'claude' | 'codex' | 'antigravity') => Promise<OAuthWebMutationResult>;
   testBackendAuth: (
-    backend: 'claude' | 'codex',
+    backend: 'claude' | 'codex' | 'antigravity',
     options?: { model?: string },
   ) => Promise<BackendAuthTestResult>;
   testOpencodeProvider: (
@@ -981,6 +983,7 @@ export type ApiContextType = {
   claudeModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
   codexAgents: (cwd?: string) => Promise<{ ok: boolean; agents?: { id: string; name: string; path: string; source?: string; description?: string }[]; error?: string }>;
   codexModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
+  antigravityModels: () => Promise<{ ok: boolean; models?: string[]; reasoning_options?: Record<string, { value: string; label: string }[]>; model_labels?: Record<string, string>; catalog_refresh_pending?: boolean; error?: string }>;
   /** Picker-safe persisted catalog. Null tells pickers to use the native fallback. */
   readModelHubAgentCatalogForModelPicker: (
     backend: string,
@@ -2480,7 +2483,8 @@ export type BackendRuntimeInfo = {
   ok: boolean;
   name?: string;
   enabled?: boolean;
-  auto_update?: boolean;
+  auto_update?: boolean | null;
+  auto_update_supported?: boolean;
   cli_path?: string;
   resolved_path?: string | null;
   installed?: boolean;
@@ -2630,6 +2634,50 @@ export type ClaudeAuthSaveResult = ClaudeAuthState & {
   reauth_channel?: 'hub';
 };
 
+export type AntigravityAuthMode =
+  | 'oauth-personal'
+  | 'oauth-business'
+  | 'gemini-api-key'
+  | 'agent-platform';
+
+export type AntigravityAuthState = {
+  ok: boolean;
+  auth_mode: AntigravityAuthMode | null;
+  active_auth_mode?: ActiveAuthMode | AntigravityAuthMode;
+  auth_mode_uncertain?: boolean;
+  authenticated: boolean;
+  credentials_present: boolean;
+  catalog_available: boolean;
+  cli_installed: boolean;
+  cli_version: string | null;
+  has_api_key: boolean;
+  api_key_masked: string | null;
+  base_url: string | null;
+  gcp_project: string | null;
+  gcp_location: string | null;
+  adc_present: boolean;
+  adc_command: string | null;
+  error?: string | null;
+  message?: string;
+};
+
+export type AntigravityAuthPayload = {
+  auth_mode: AntigravityAuthMode;
+  api_key?: string | null;
+  base_url?: string | null;
+  gcp_project?: string | null;
+  gcp_location?: string | null;
+};
+
+export type AntigravityAuthSaveResult = AntigravityAuthState & {
+  restart?: BackendRestartResult;
+  notices?: BackendNotice[];
+  partial?: boolean;
+  warning?: string;
+  detail?: string;
+  reauth_channel?: 'hub';
+};
+
 // One entry in the OpenCode provider grid. The full catalog is built
 // dynamically on the server by merging ``/provider`` + ``/provider/auth``
 // + ``/config/providers`` — there is **no** hard-coded list in the UI.
@@ -2654,6 +2702,8 @@ export type OAuthWebStartResult = {
   device_code?: string | null;
   awaiting_code?: boolean;
   callback_kind?: 'code' | 'device' | 'redirect' | null;
+  terminal_command?: string | null;
+  instructions?: string | null;
   error?: string;
   detail?: string;
   reauth_channel?: 'hub';
@@ -2669,6 +2719,8 @@ export type OAuthWebStatus = {
   device_code?: string | null;
   awaiting_code?: boolean;
   callback_kind?: 'code' | 'device' | 'redirect' | null;
+  terminal_command?: string | null;
+  instructions?: string | null;
   error?: string | null;
   reauth_channel?: 'hub';
 };
@@ -2698,6 +2750,9 @@ export type BackendAuthTestResult = {
   error?: string;
   detail?: string;
   reauth_channel?: 'hub';
+  authenticated?: boolean;
+  catalog_available?: boolean;
+  inference_verified?: boolean;
 };
 
 export type OpencodeProvider = {
@@ -4597,9 +4652,12 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     saveCodexAuth: (payload) => postJson('/api/backend/codex/auth', payload),
     getClaudeAuth: () => getJson('/api/backend/claude/auth'),
     saveClaudeAuth: (payload) => postJson('/api/backend/claude/auth', payload),
-    startOAuthWeb: (backend, forceReset = true) =>
+    getAntigravityAuth: () => getJson('/api/backend/antigravity/auth'),
+    saveAntigravityAuth: (payload) => postJson('/api/backend/antigravity/auth', payload),
+    startOAuthWeb: (backend, forceReset = true, authMode) =>
       postJson(`/api/backend/${encodeURIComponent(backend)}/auth/oauth/start`, {
         force_reset: forceReset,
+        ...(authMode ? { auth_mode: authMode } : {}),
       }),
     startOAuthWebForOpencodeProvider: (providerId, forceReset = true) =>
       postJson(
@@ -4688,6 +4746,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     claudeModels: () => getJson('/api/claude/models'),
     codexAgents: (cwd) => cwd ? getJson(`/api/codex/agents?cwd=${encodeURIComponent(cwd)}`) : getJson('/api/codex/agents'),
     codexModels: () => getJson('/api/codex/models'),
+    antigravityModels: () => getJson('/api/antigravity/models'),
     // Direct mode, rolling upgrades, and a temporarily unreadable Hub catalog
     // all keep the existing native picker behavior without surfacing a toast.
     readModelHubAgentCatalogForModelPicker: (backend) =>

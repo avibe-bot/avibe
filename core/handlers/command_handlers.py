@@ -112,6 +112,9 @@ class CommandHandlers(BaseHandler):
             "claude-code": "claude",
             "cx": "codex",
             "codex": "codex",
+            "ag": "antigravity",
+            "agy": "antigravity",
+            "antigravity": "antigravity",
         }
         return aliases.get(normalized)
 
@@ -217,6 +220,14 @@ class CommandHandlers(BaseHandler):
             sessions = [item for item in sessions if item.agent in allowed_agents]
         return working_path, sessions
 
+    async def _list_recent_native_sessions_async(
+        self,
+        context: MessageContext,
+        *,
+        limit: int = 100,
+    ) -> tuple[str, list[NativeResumeSession]]:
+        return await asyncio.to_thread(self._list_recent_native_sessions, context, limit=limit)
+
     @staticmethod
     def _format_resume_time(item: NativeResumeSession) -> str:
         dt = item.updated_at or item.created_at
@@ -252,7 +263,7 @@ class CommandHandlers(BaseHandler):
 
     async def _send_wechat_resume_page(self, context: MessageContext, *, page: int) -> None:
         page_size = self._wechat_resume_page_size
-        working_path, sessions = self._list_recent_native_sessions(context, limit=100)
+        working_path, sessions = await self._list_recent_native_sessions_async(context, limit=100)
         channel_context = self._get_channel_context(context)
         if not sessions:
             await self._get_im_client(channel_context).send_message(
@@ -346,7 +357,7 @@ class CommandHandlers(BaseHandler):
         )
 
     async def _handle_wechat_resume_latest(self, context: MessageContext, *, agent: Optional[str] = None) -> None:
-        _, sessions = self._list_recent_native_sessions(context, limit=100)
+        _, sessions = await self._list_recent_native_sessions_async(context, limit=100)
         if agent:
             sessions = [item for item in sessions if item.agent == agent]
         if not sessions:
@@ -864,7 +875,7 @@ class CommandHandlers(BaseHandler):
             interaction = context.platform_specific.get("interaction") if context.platform_specific else None
             if interaction and hasattr(im_client, "open_resume_session_modal"):
                 try:
-                    _, sessions = self._list_recent_native_sessions(context, limit=25)
+                    _, sessions = await self._list_recent_native_sessions_async(context, limit=25)
                     await im_client.run_on_client_loop(
                         im_client.open_resume_session_modal(
                             trigger_id=interaction,
@@ -883,7 +894,7 @@ class CommandHandlers(BaseHandler):
         if platform == "telegram":
             if hasattr(im_client, "open_resume_session_modal"):
                 try:
-                    _, sessions = self._list_recent_native_sessions(context, limit=25)
+                    _, sessions = await self._list_recent_native_sessions_async(context, limit=25)
                     await im_client.run_on_client_loop(
                         im_client.open_resume_session_modal(
                             trigger_id=context,
@@ -905,7 +916,7 @@ class CommandHandlers(BaseHandler):
         if platform == "lark":
             if hasattr(im_client, "open_resume_session_modal"):
                 try:
-                    _, sessions = self._list_recent_native_sessions(context, limit=100)
+                    _, sessions = await self._list_recent_native_sessions_async(context, limit=100)
                     await im_client.run_on_client_loop(
                         im_client.open_resume_session_modal(
                             trigger_id=context,
@@ -936,7 +947,7 @@ class CommandHandlers(BaseHandler):
             return
 
         try:
-            _, sessions = self._list_recent_native_sessions(context, limit=100)
+            _, sessions = await self._list_recent_native_sessions_async(context, limit=100)
             await im_client.run_on_client_loop(
                 im_client.open_resume_session_modal(
                     trigger_id=trigger_id,

@@ -174,6 +174,31 @@ def _check_workflow(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
     )
 
 
+def _check_antigravity_schedule(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
+    return _deny(
+        "A backend-native schedule is session-only and stops firing once this "
+        "agent process exits.\n"
+        "Use the durable Harness instead:\n"
+        "  vibe task add --at <ISO-8601> --message ...   (one-shot)\n"
+        '  vibe task add --cron "<expr>" --message ...   (recurring)\n'
+        '  vibe task add --cron "<expr>" --shell "<cmd>"   (command, no Agent turn)\n'
+        "If you are waiting on an external signal rather than a clock, use "
+        "`vibe watch add` instead.\n"
+        f"{_HARNESS_HINT}"
+    )
+
+
+def _check_antigravity_subagent(tool_input: Dict[str, Any]) -> ToolPolicyDecision:
+    return _deny(
+        "A backend-native subagent dies with this agent process and its result "
+        "is never delivered once the session ends.\n"
+        "Use the durable Harness instead:\n"
+        "  vibe agent run --agent <name> --message-file <path> "
+        "--callback-session-id $AVIBE_SESSION_ID\n"
+        f"{_HARNESS_HINT}"
+    )
+
+
 # Tool name -> predicate. Registering a name here is all a new backend-native
 # background primitive needs; every adapter picks it up automatically.
 _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyDecision]] = {
@@ -182,6 +207,11 @@ _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyD
     "ScheduleWakeup": _check_schedule_wakeup,
     "CronCreate": _check_cron_create,
     "Workflow": _check_workflow,
+    "run_workflow": _check_workflow,
+    "swarm": _check_antigravity_subagent,
+    "schedule": _check_antigravity_schedule,
+    "invoke_subagent": _check_antigravity_subagent,
+    "define_subagent": _check_antigravity_subagent,
 }
 
 # Tools that are session-only under every input, so a name-level deny list is a
@@ -193,7 +223,14 @@ _SESSION_ONLY_BACKGROUND_TOOLS: Dict[str, Callable[[Dict[str, Any]], ToolPolicyD
 # policy never denies it. On a backend without argument-aware enforcement those
 # calls go unchecked; that is the honest cost of a name-only backstop, and the
 # injected prompt says so rather than claiming a gate that is not there.
-ALWAYS_SESSION_ONLY_TOOL_NAMES: Tuple[str, ...] = ("Workflow",)
+ALWAYS_SESSION_ONLY_TOOL_NAMES: Tuple[str, ...] = (
+    "Workflow",
+    "run_workflow",
+    "swarm",
+    "schedule",
+    "invoke_subagent",
+    "define_subagent",
+)
 
 
 def session_only_background_tool_names() -> Tuple[str, ...]:

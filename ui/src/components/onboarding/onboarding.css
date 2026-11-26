@@ -1397,6 +1397,21 @@ details.onboarding-assistant-error > summary { margin-top: 0; }
    reference's desktop rows to adapt: the content box stops growing on its own, and the
    card answers to the window rather than to a breakpoint, so 1366, 1440 and 1920 are
    three readings of one rule rather than three layouts. */
+/* Five cards in the standard desktop band (1024–1599px, where the content column is
+   <= 1040px) leave 168–189px per track; tighten card horizontal chrome so assistant
+   names and single-row actions stay legible and within the tier's reserved stage floor. */
+@media (min-width: 1024px) and (max-width: 1599px) {
+  .onboarding-shell {
+    --ob-card-ph: 14px;
+    --ob-id-gap: 6px;
+    --ob-card-logo: 24px;
+    --ob-card-name: 14px;
+  }
+  .onboarding-method-row, .onboarding-method-connected {
+    padding-inline: 10px;
+  }
+}
+
 /* Below 1024 the cards cannot stand side by side without breaking an assistant's name
    mid-word, so the story and the assistants fold into two columns of two. The wires go
    with the single row — a handoff drawn across a fold describes nothing — exactly as

@@ -29,6 +29,7 @@ import {
   SettingsBackendsPage,
   SettingsClaudeProviderPage,
   SettingsCodexProviderPage,
+  SettingsAntigravityProviderPage,
   SettingsComputerUsePage,
   SettingsDependenciesPage,
   SettingsDiagnosticsPage,
@@ -870,6 +871,7 @@ const settingsRoute = () => (
     <Route path="backends/opencode" element={<SettingsOpencodeProviderPage />} />
     <Route path="backends/claude" element={<SettingsClaudeProviderPage />} />
     <Route path="backends/codex" element={<SettingsCodexProviderPage />} />
+    <Route path="backends/antigravity" element={<SettingsAntigravityProviderPage />} />
     <Route path="backends/vibey" element={<SettingsBackendPage backend="vibey" />} />
     <Route
       path="models"

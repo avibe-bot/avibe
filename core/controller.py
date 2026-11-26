@@ -17,12 +17,13 @@ from config.v2_config import (
     DEFAULT_AGENT_BACKEND,
     DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     DEFAULT_AGENT_PROGRESS_STYLE,
+    MODEL_HUB_NATIVE_BACKENDS,
 )
 from modules.im import BaseIMClient, MessageContext, IMFactory
 from modules.im.multi import MultiIMClient
 from modules.agent_router import AgentRouter
 from modules.agents.service import AgentService
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
+from modules.agents.catalog import AGENT_BACKENDS, default_cli_for_backend
 from modules.claude_client import ClaudeClient
 from modules.session_manager import SessionManager
 from modules.settings_manager import SettingsManager, MultiSettingsManager
@@ -395,7 +396,7 @@ class Controller:
 
         store = self.vibe_agent_store
         selections = []
-        for backend in sorted(NATIVE_CLI_BACKENDS):
+        for backend in sorted(MODEL_HUB_NATIVE_BACKENDS):
             agent = store.get_builtin_default_agent_for_backend(backend)
             model = str(getattr(agent, "model", None) or "").strip()
             if model:
@@ -890,6 +891,14 @@ class Controller:
                 self.agent_service.register(OpenCodeAgent(self, self.config.opencode))
             except Exception as e:
                 logger.error(f"Failed to initialize OpenCode agent: {e}")
+        antigravity_config = getattr(self.config, "antigravity", None)
+        if antigravity_config and getattr(antigravity_config, "enabled", True):
+            try:
+                from modules.agents.antigravity import AntigravityAgent
+
+                self.agent_service.register(AntigravityAgent(self, antigravity_config))
+            except Exception as e:
+                logger.error(f"Failed to initialize Antigravity agent: {e}")
         # Built in: always registered, never unregistered.
         self.agent_service.register(VibeyAgent(self))
 
@@ -2644,6 +2653,29 @@ class Controller:
                             await codex_agent.evict_idle_transports(codex_timeout)
                         except Exception as e:
                             logger.error("Codex idle cleanup failed: %s", e, exc_info=True)
+
+                antigravity_agent = self.agent_service.agents.get("antigravity")
+                if antigravity_agent and hasattr(antigravity_agent, "evict_idle_transports"):
+                    antigravity_config = getattr(self.config, "antigravity", None)
+                    antigravity_timeout = (
+                        int(
+                            max(
+                                0,
+                                getattr(
+                                    antigravity_config,
+                                    "idle_timeout_seconds",
+                                    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+                                )
+                                or 0,
+                            )
+                        )
+                        if antigravity_config is not None
+                        else 0
+                    )
+                    try:
+                        await antigravity_agent.evict_idle_transports(antigravity_timeout)
+                    except Exception as e:
+                        logger.error("Antigravity idle cleanup failed: %s", e, exc_info=True)
         except asyncio.CancelledError:
             logger.info("Idle cleanup loop stopped.")
             raise
@@ -2835,6 +2867,12 @@ class Controller:
                 _stop_loop_coroutine(codex_agent.shutdown_runtime(), "Codex runtime")
         except Exception as e:
             logger.debug(f"Codex runtime cleanup skipped: {e}")
+        try:
+            antigravity_agent = self.agent_service.agents.get("antigravity")
+            if antigravity_agent and hasattr(antigravity_agent, "shutdown_runtime"):
+                _stop_loop_coroutine(antigravity_agent.shutdown_runtime(), "Antigravity runtime")
+        except Exception as e:
+            logger.debug(f"Antigravity runtime cleanup skipped: {e}")
         try:
             # A disabled backend whose stop failed has no other owner: its
             # agent is out of routing and the idle sweep that retries it is
@@ -3135,7 +3173,7 @@ class Controller:
             backends: tuple[str, ...] | None = None,
         ) -> None:
             nonlocal cli_presence, next_cli_presence_generation
-            selected_backends = backends or tuple(sorted(NATIVE_CLI_BACKENDS))
+            selected_backends = backends or tuple(sorted(MODEL_HUB_NATIVE_BACKENDS))
             with cli_presence_lock:
                 next_cli_presence_generation += 1
                 generation = next_cli_presence_generation
@@ -3152,7 +3190,9 @@ class Controller:
             for backend in selected_backends:
                 backend_config = getattr(getattr(v2_config, "agents", None), backend, None)
                 configured_paths[backend] = str(
-                    getattr(backend_config, "cli_path", None) or backend
+                    getattr(backend_config, "cli_path", None)
+                    or default_cli_for_backend(backend)
+                    or backend
                 )
             try:
                 resolved_paths = resolve_cli_paths(

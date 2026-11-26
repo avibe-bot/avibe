@@ -255,12 +255,12 @@ describe('assistant installation presentation', () => {
     // The cards are the whole section: the design keeps each assistant's name at the top
     // of its own card and gives the section no heading of its own. The built-in one
     // stands first, with no switch: it is always on.
-    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Vibey', 'Claude Code', 'Codex', 'OpenCode']);
+    expect(screen.getAllByRole('heading', { level: 3 }).map((node) => node.textContent)).toEqual(['Vibey', 'Claude Code', 'Codex', 'OpenCode', 'Antigravity']);
     expect(within(row('Vibey').getByRole('heading', { name: 'Vibey' }).closest('.onboarding-card-identity') as HTMLElement)
       .queryByRole('switch')).toBeNull();
     // "Connection state replaces roles with enable switches": the switch belongs to the
     // same identity header as the name, not to a separate strip.
-    for (const name of ['Claude Code', 'Codex', 'OpenCode']) {
+    for (const name of ['Claude Code', 'Codex', 'OpenCode', 'Antigravity']) {
       const identity = screen.getByRole('heading', { name }).closest('.onboarding-card-identity')!;
       expect(within(identity as HTMLElement).getByRole('switch', { name: `Enable ${name}` })).toBeTruthy();
     }
@@ -469,9 +469,9 @@ describe('assistant installation presentation', () => {
     mock.api.detectCli.mockRejectedValue(new Error('Probe failed'));
     render(wrap(<AgentDetection data={{ ...data(), __onboardingDetected: false }} onNext={vi.fn()} />));
     // Folded, each failed assistant still says so; the error itself is on its card.
-    await waitFor(() => expect(screen.getAllByText(en.onboarding.setup.moreAssistantsAttention)).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByText(en.onboarding.setup.moreAssistantsAttention)).toHaveLength(4));
     unfold();
-    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(3));
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(4));
     expect(row('Claude Code').queryByRole('button', { name: 'Install' })).toBeNull();
     expect(row('Claude Code').getByRole('button', { name: 'Retry' })).toBeTruthy();
   });
@@ -1575,5 +1575,37 @@ describe('settled wizard enablement follows persistence and latest intent', () =
     await act(async () => config.resolve(data()));
     expect(checkedOf(checkbox)).toBe(false);
     expect(screen.getByRole('button', { name: 'Enter workspace' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('shows healthy Direct-only Antigravity as connected and ready without requiring a Hub supply', async () => {
+    const saved = {
+      ...data(),
+      capabilities: { model_hub: { enabled: true } },
+      agents: {
+        ...data().agents,
+        claude: { enabled: false, cli_path: 'claude', status: 'missing' },
+        codex: { enabled: false, cli_path: 'codex', status: 'missing' },
+        opencode: { enabled: false, cli_path: 'opencode', status: 'missing' },
+        antigravity: { enabled: true, cli_path: 'agy', status: 'ok' },
+      },
+    };
+    mock.models.listSources.mockResolvedValue([setupSource]);
+    mock.api.getBackendConnection.mockImplementation(async (backend) => backend === 'antigravity'
+      ? { ok: true, backend, installed: true, enabled: true, auth: 'subscription', application: 'applied', ready: true, entry_eligible: true, supply_mode: 'direct' }
+      : { ok: true, backend, installed: false, enabled: false, auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'hub' });
+    const emptyHubReads = {
+      ...hubReads,
+      read: async () => ({ kind: 'current' as const, value: [] }),
+      refresh: vi.fn(async () => { throw new Error('hub_down'); }),
+    };
+    const onNext = vi.fn();
+    render(wrap(<AgentDetection data={saved} onNext={onNext} onNavigate={vi.fn()} agentReads={emptyHubReads} />));
+
+    expect(await row('Antigravity').findByRole('button', { name: en.onboarding.setup.subscriptionConnected })).toBeTruthy();
+    expect(row('Antigravity').queryByText(en.settings.models.routeDialog.fail.reconcileRead)).toBeNull();
+    const enter = screen.getByRole<HTMLButtonElement>('button', { name: 'Enter workspace' });
+    await waitFor(() => expect(enter.disabled).toBe(false));
+    fireEvent.click(enter);
+    await waitFor(() => expect(onNext).toHaveBeenCalledWith(expect.objectContaining({ readyBackends: ['antigravity'] })));
   });
 });

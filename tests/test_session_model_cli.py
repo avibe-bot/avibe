@@ -55,6 +55,10 @@ HUB = {
         "mode": "hub",
         "catalog_models": [_hub_row("claude-opus-5-5", fast=True), _hub_row("claude-sonnet-5-5")],
     },
+    "antigravity": {
+        "mode": "direct",
+        "catalog_models": [],
+    },
 }
 
 
@@ -264,15 +268,15 @@ def test_agent_run_speed_applies_only_to_a_new_session(monkeypatch, tmp_path, ca
     assert refused.value.code == "model_override_with_existing_session"
 
     with pytest.raises(cli.TaskCliError) as refused:
-        cli._session_model_override_fields(
+        cli._new_session_model_overrides(
             backend="vibey", agent_label="vibey", model="grok/grok-4.6", reasoning_effort="low",
             speed="fast", hub_agent_reader=_hub_reader, help_command="vibe agent run --help",
         )
     assert refused.value.code == "fast_unavailable"
-    assert cli._session_model_override_fields(
+    assert cli._new_session_model_overrides(
         backend="vibey", agent_label="vibey", model="claude-opus-5-5", reasoning_effort="high",
         speed="fast", hub_agent_reader=_hub_reader, help_command="vibe agent run --help",
-    ) == {}
+    )[1] == {}
 
 
 def test_session_models_reports_an_explicitly_pinned_null_as_the_sessions_own(monkeypatch, tmp_path, capsys):
@@ -291,3 +295,96 @@ def test_session_models_reports_an_explicitly_pinned_null_as_the_sessions_own(mo
     assert pinned["current"]["from"] == {"model": "session", "reasoning_effort": "session"}
     assert (inherited["current"]["model"], inherited["current"]["reasoning_effort"]) == ("gpt-6.1-sol", "high")
     assert inherited["current"]["from"] == {"model": "agent", "reasoning_effort": "agent"}
+
+
+def test_antigravity_direct_models_use_authoritative_live_menu(monkeypatch, tmp_path, capsys):
+    from config.v2_config import V2Config
+    from modules.agents.antigravity.models import record_antigravity_live_models
+
+    engine = _setup(monkeypatch, tmp_path)
+
+    cfg = V2Config.default()
+    cfg.save()
+    record_antigravity_live_models(cfg, {
+        "configOptions": [{
+            "id": "model", "category": "model", "currentValue": "gemini-4-neon",
+            "options": [{"value": "gemini-4-neon"}, {"value": "claude-sonnet-5-5"}],
+        }],
+    })
+    _seed(engine, "sesag", backend="antigravity", model="gemini-4-neon", effort=None)
+
+    for model in ("gemini-4-neon", "claude-sonnet-5-5"):
+        code, payload = _update(capsys, "sesag", "--model", model)
+        assert code == 0, payload
+        assert payload["session"]["model"] == model
+        assert _row(engine, "sesag") == (model, None, None)
+        assert cli._new_session_model_overrides(
+            backend="antigravity", agent_label="antigravity", model=model,
+            reasoning_effort=None, hub_agent_reader=_hub_reader,
+            help_command="vibe agent run --help",
+        )[1] == {}
+
+    code, menu = _run(cli.cmd_session_models, ["session", "models", "--session-id", "sesag"], capsys)
+    assert code == 0, menu
+    assert not any("only Gemini models" in note for note in menu["notes"])
+    assert api.route_menu_options("antigravity", hub_agent_reader=_hub_reader)["authoritative"] is True
+
+    status, err = _update(capsys, "sesag", "--model", "gemini-4-carbon-medium")
+    assert status == 1 and err["code"] == "session_model_unavailable"
+    assert _row(engine, "sesag") == ("claude-sonnet-5-5", None, None)
+    with pytest.raises(cli.TaskCliError) as refused:
+        cli._new_session_model_overrides(
+            backend="antigravity", agent_label="antigravity", model="gemini-4-carbon-medium",
+            reasoning_effort=None, hub_agent_reader=_hub_reader,
+            help_command="vibe agent run --help",
+        )
+    assert refused.value.code == "session_model_unavailable"
+
+
+@pytest.mark.parametrize("explicit_effort", [False, True])
+@pytest.mark.parametrize("backend,model,default_effort,offered", [
+    ("antigravity", "gemini-pro-orchestrator", "medium", []),
+    ("antigravity", "gemini-4-carbon", "xhigh", ["low", "medium", "high"]),
+    ("antigravity", "gemini-4-carbon", "high", ["low", "medium", "high"]),
+    ("vibey", "plain-model", "medium", []),
+])
+def test_agent_run_model_change_clears_only_inherited_incompatible_effort(
+    monkeypatch, tmp_path, capsys, backend, model, default_effort, offered, explicit_effort,
+):
+    # Exercise reservation, authoritative validation and the queued Run together: existing
+    # override tests supplied a compatible explicit effort and missed inherited defaults.
+    from config.v2_config import V2Config
+    from modules.agents.antigravity.models import record_antigravity_live_models
+
+    engine = _setup(monkeypatch, tmp_path)
+    if backend == "antigravity":
+        cfg = V2Config.default()
+        cfg.save()
+        options = [{"id": "model", "category": "model", "currentValue": model,
+                    "options": [{"value": model}]}]
+        if offered:
+            options.append({"id": "thought_level", "category": "thought_level", "currentValue": "high",
+                            "options": [{"value": value} for value in offered]})
+        record_antigravity_live_models(cfg, {"configOptions": options})
+    agent = cli._agent_store().create(
+        name="tuned", backend=backend, model="gemini-4-neon" if backend == "antigravity" else "gpt-6.1-sol",
+        reasoning_effort=default_effort,
+    )
+    flags = ["--reasoning-effort", default_effort] if explicit_effort else []
+    with patch.object(lent, "model_hub_service", SimpleNamespace(read_agent_sources=_read_agent_sources)):
+        code, payload = _run(cli.cmd_agent_run, [
+            "agent", "run", "--agent", agent.name, "--model", model, *flags, "--no-callback", "--message", "hello",
+        ], capsys)
+
+    incompatible = default_effort not in offered
+    if explicit_effort and incompatible:
+        assert code == 1, payload
+        assert payload["code"] == "session_effort_unavailable"
+        return
+    assert code == 0, payload
+    expected_effort = None if incompatible else default_effort
+    assert _row(engine, payload["run"]["session_id"]) == (model, expected_effort, None)
+    run = cli._task_request_store().get_run(payload["run"]["id"])
+    assert run["model"] == model and run["reasoning_effort"] == expected_effort
+    assert any(default_effort in note and "cleared" in note for note in payload.get("warnings", [])) == incompatible
+    assert cli._agent_store().get(agent.name).reasoning_effort == default_effort

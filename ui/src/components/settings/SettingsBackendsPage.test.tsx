@@ -67,18 +67,18 @@ describe('built-in backend settings', () => {
     const vibey = await rowOf('Vibey');
     const rows = [...document.querySelectorAll('.rounded-xl')];
     expect(rows.map((row) => row.querySelector('span.font-semibold')?.textContent)).toEqual([
-      'Vibey', 'Claude Code', 'Codex', 'OpenCode',
+      'Vibey', 'Claude Code', 'Codex', 'OpenCode', 'Antigravity',
     ]);
     expect(within(vibey).getByText('Built-in')).toBeTruthy();
     expect(within(vibey).queryByRole('switch')).toBeNull();
     expect(within(vibey).queryByTestId('lifecycle-vibey')).toBeNull();
-    for (const name of ['OpenCode', 'Claude Code', 'Codex']) {
+    for (const name of ['OpenCode', 'Claude Code', 'Codex', 'Antigravity']) {
       const row = await rowOf(name);
       expect(within(row).getByRole('switch')).toBeTruthy();
       expect(within(row).queryByText('Built-in')).toBeNull();
     }
-    await waitFor(() => expect(mocks.api.detectCli).toHaveBeenCalledTimes(3));
-    expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary).sort()).toEqual(['claude', 'codex', 'opencode']);
+    await waitFor(() => expect(mocks.api.detectCli).toHaveBeenCalledTimes(4));
+    expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary).sort()).toEqual(['agy', 'claude', 'codex', 'opencode']);
     const configure = within(vibey).getByRole('link', { name: 'Configure' });
     expect(configure.getAttribute('href')).toBe('/settings/backends/vibey');
     fireEvent.click(configure);
@@ -90,7 +90,7 @@ describe('built-in backend settings', () => {
     expect(screen.queryByRole('button', { name: /Detect|Install|Restart|Save|Sign in/i })).toBeNull();
     expect(screen.queryByTestId('lifecycle-vibey')).toBeNull();
     expect(mocks.api.mutateConfig).not.toHaveBeenCalled();
-    expect(mocks.api.detectCli).toHaveBeenCalledTimes(3);
+    expect(mocks.api.detectCli).toHaveBeenCalledTimes(4);
     expect(mocks.api.getBackendRuntime).not.toHaveBeenCalled();
     expect(mocks.api.installAgent).not.toHaveBeenCalled();
     expect(mocks.api.restartBackend).not.toHaveBeenCalled();

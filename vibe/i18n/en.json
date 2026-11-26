@@ -534,6 +534,7 @@
       "opencode": "Enable the OpenCode backend, install the OpenCode CLI, or set OPENCODE_CLI_PATH.",
       "claude": "Enable the Claude Code backend and make sure the Claude Code CLI path is configured.",
       "codex": "Enable the Codex backend, install the Codex CLI, or set CODEX_CLI_PATH.",
+      "antigravity": "Enable the Antigravity backend, install the Antigravity CLI (agy), or configure its CLI path.",
       "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
     },
     "processMessageFailed": "Error: {error}",
@@ -567,6 +568,16 @@
     "codexCliPermissionDenied": "Codex could not start because the system did not allow the Codex CLI to run. Retrying alone will not fix this. Make the Codex CLI executable or reinstall Codex, then retry this input.",
     "codexCliNotFound": "Codex could not start because its CLI was not found. Install Codex or set its CLI path on the Backends page in Settings, then retry this input.",
     "agentRuntimeRetired": "{agent} was turned off, or Avibe is stopping, so this message was not started. Send it again once {agent} is enabled.",
+    "antigravityAuthRequired": "Antigravity authentication required (ACP {code}): {detail}",
+    "antigravityVerificationRequired": "Antigravity account verification is required. Run `agy` once in a terminal to complete Google verification, then retry.\n\n{detail}",
+    "antigravityCapabilityMissing": "Antigravity ACP server does not advertise {capability}, so Avibe cannot attach Agent instructions and tool-policy rules. Upgrade the Antigravity CLI (agy) or enable {capability} support before retrying.",
+    "antigravityCliNotFound": "Antigravity CLI not found: {detail}",
+    "antigravityLaunchFailed": "Antigravity CLI failed to launch: {detail}",
+    "antigravityError": "Antigravity error: {detail}",
+    "antigravityTurnIncomplete": "Antigravity turn stopped incomplete ({reason}).",
+    "antigravityTurnRefused": "Antigravity refused to complete the turn (refusal).",
+    "antigravityTurnUnexpectedStop": "Antigravity turn ended with unexpected stopReason: {reason}.",
+    "antigravityTurnMissingStopReason": "Antigravity turn ended without a stopReason.",
     "codexResponseTooLarge": "Codex returned a response larger than {limitMiB} MiB, so this connection cannot continue. Check or update Codex before retrying.",
     "opencodeRuntimeConfigInvalid": "OpenCode could not start because OPENCODE_CONFIG_CONTENT is invalid. Fix the runtime configuration and retry.",
     "opencodeDirectoryBootstrapTimeout": "OpenCode is still finishing its first-time setup. Send your message again shortly.",
@@ -839,6 +850,10 @@
       "manualFallback": "If inline buttons are unavailable, run `/setup {backend}`.",
       "codexInstructions": "Codex setup started.\n\n1. Open this URL in your browser:\n{url}\n\n2. Enter this one-time code:\n`{code}`\n\nThe bot will keep waiting here and confirm when login finishes.",
       "claudeInstructions": "Claude setup started.\n\nOpen this URL in your browser and finish the login flow:\n{url}\n\nWhen the browser callback page shows the final `authorizationCode#state` value, send it back directly in this chat.",
+      "antigravityPersonalNotice": "With a personal Google sign-in, Google allows Antigravity for work you direct yourself. Google says this sign-in does not cover unattended runs or task queues, such as scheduled Tasks, Watches, or work passed from one Agent to another. For automation, sign in with an API key or Agent Platform instead; both are billed by usage.",
+      "antigravityInstructions": "Antigravity setup started.\n\nOpen this URL in your browser and finish signing in:\n{url}\n\nWhen the browser shows the authorization code, send it back directly in this chat.",
+      "antigravityBusinessFallback": "If Gemini Enterprise does not show a paste-code prompt here, run `{command}` in a terminal to complete sign-in.",
+      "antigravityAdcRecoveryPrompt": "Antigravity Agent Platform requires valid Application Default Credentials. Run `{command}` in a terminal or check Settings, then retry.",
       "claudeCodePrompt": "Claude is waiting for a follow-up value. Send it directly in this chat.",
       "opencodeDeviceInstructions": "OpenCode setup started.\n\n1. Open this URL in your browser:\n{url}\n\n2. Enter this one-time code:\n`{code}`\n\nThe bot will keep waiting here and confirm when authorization finishes.",
       "opencodeInstructions": "OpenCode setup started for `{provider}`.\n\nOpen this page to create or retrieve a credential:\n{url}\n\nWhen you get the key, reply with it directly in this chat.",
@@ -1942,5 +1957,16 @@
       "refreshTitle": "{name} requests a health data update",
       "notificationBody": "Open Avibe on iPhone to handle this request."
     }
+  },
+  "antigravityNotice": {
+      "summaryFork": "This fork starts from a summary of the conversation, not its full history.",
+      "effortAdjusted": "{model} uses thinking level {effort}.",
+      "noEffort": "{model} runs without a thinking level."
+  },
+  "antigravityAuth": {
+    "invalidPayload": "Send the Antigravity settings as an object.",
+    "invalidMode": "Choose a valid Antigravity sign-in method.",
+    "fieldString": "Enter text for {field}.",
+    "apiKeyRequired": "Enter a Gemini API key before saving."
   }
 }

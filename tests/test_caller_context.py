@@ -424,6 +424,7 @@ def test_a_caller_with_no_message_context_captures_no_origin() -> None:
         AVIBE_RUN_ID_ENV,
         AVIBE_CALLER_SOURCE_ENV,
     }
+    assert context.session_stable().to_env() == {AVIBE_SESSION_ID_ENV: "ses123"}
 
 
 def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
@@ -431,9 +432,10 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
 
     The Claude SDK client is spawned once per session with a fixed environment, and that
     same environment is the value compared to decide whether a cached client may be
-    reused. Three fields make that combination unsafe, for different reasons, and all
+    reused. Per-delivery fields make that combination unsafe, for different reasons, and all
     are worse than the information they carry:
 
+    * ``run_id`` and ``source`` change with Harness deliveries, even in the same Session;
     * ``turn_id`` changes every turn and is instead injected into each Claude
       Bash tool invocation;
     * ``message_id`` changes every turn, so leaving it in would respawn the Agent on
@@ -465,6 +467,8 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
     )
     assert stable.session_id == captured.session_id
 
+    assert AVIBE_RUN_ID_ENV not in stable.to_env()
+    assert AVIBE_CALLER_SOURCE_ENV not in stable.to_env()
     assert AVIBE_CALLER_USER_ID_ENV not in stable.to_env()
     assert AVIBE_CALLER_MESSAGE_ID_ENV not in stable.to_env()
     assert AVIBE_CALLER_SESSION_KEY_ENV in stable.to_env()
@@ -486,6 +490,8 @@ def test_a_session_scoped_caller_env_drops_only_the_per_turn_origin() -> None:
     assert set(full) - set(scoped) == {
         AVIBE_CALLER_USER_ID_ENV,
         AVIBE_CALLER_MESSAGE_ID_ENV,
+        AVIBE_RUN_ID_ENV,
+        AVIBE_CALLER_SOURCE_ENV,
     }
 
 

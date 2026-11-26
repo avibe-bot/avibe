@@ -36,6 +36,7 @@ def test_path_resolution_per_backend(tmp_path: Path):
         global_instruction_path("opencode", tmp_path)
         == tmp_path / ".config" / "opencode" / "AGENTS.md"
     )
+    assert global_instruction_path("antigravity", tmp_path) == tmp_path / ".gemini" / "AGENTS.md"
 
 
 def test_path_resolution_unknown_backend_raises(tmp_path: Path):
@@ -96,7 +97,7 @@ def test_read_existing_file(tmp_path: Path):
 def test_read_all_covers_every_backend(tmp_path: Path):
     results = read_all_global_agents_md(tmp_path)
     # Catalog order, the built-in backend first.
-    assert [r["backend"] for r in results] == ["vibey", "opencode", "claude", "codex"]
+    assert [r["backend"] for r in results] == ["vibey", "opencode", "claude", "codex", "antigravity"]
 
 
 # --- write ----------------------------------------------------------------
@@ -142,12 +143,15 @@ def test_write_many_single_backend_only_writes_that_one(tmp_path: Path):
 
 
 def test_write_many_all_backends_syncs_identical_content(tmp_path: Path):
-    result = write_many_global_agents_md(["vibey", "claude", "codex", "opencode"], "shared", tmp_path)
+    result = write_many_global_agents_md(
+        ["vibey", "claude", "codex", "opencode", "antigravity"], "shared", tmp_path
+    )
     assert (tmp_path / ".avibe" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
     assert (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8") == "shared"
     assert (tmp_path / ".codex" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
     assert (tmp_path / ".config" / "opencode" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
-    # The refreshed seed reflects all four as existing with the synced content.
+    assert (tmp_path / ".gemini" / "AGENTS.md").read_text(encoding="utf-8") == "shared"
+    # The refreshed seed reflects all five as existing with the synced content.
     assert all(entry["exists"] and entry["content"] == "shared" for entry in result)
 
 

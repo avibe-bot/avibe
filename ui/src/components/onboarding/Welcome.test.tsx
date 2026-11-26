@@ -79,8 +79,8 @@ describe('Welcome', () => {
     render(wrap(<Intro data={{ agents: { claude: { cli_path: '/custom/claude' } } }} onNext={next} />));
     fireEvent.click(screen.getByRole('button', { name: 'Get started' }));
     await waitFor(() => expect(next).toHaveBeenCalledOnce());
-    expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary)).toEqual(['/custom/claude', 'codex', 'opencode']);
-    expect(next.mock.calls[0][0]).toMatchObject({ __onboardingDetected: true, agents: { claude: { status: 'ok' }, codex: { status: 'missing' }, opencode: { status: 'ok' } } });
+    expect(mocks.api.detectCli.mock.calls.map(([binary]) => binary)).toEqual(['/custom/claude', 'codex', 'opencode', 'agy']);
+    expect(next.mock.calls[0][0]).toMatchObject({ __onboardingDetected: true, agents: { claude: { status: 'ok' }, codex: { status: 'missing' }, opencode: { status: 'ok' }, antigravity: { status: 'ok' } } });
   });
   it('retains a failed detection on Welcome and permits retry', async () => {
     mocks.api.detectCli.mockRejectedValueOnce(new Error('Probe unavailable')).mockResolvedValue({ found: false, status: 'missing' as const });

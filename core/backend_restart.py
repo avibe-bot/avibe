@@ -157,7 +157,7 @@ class NativeCredentialLease:
         if config_recovery_refusal(config, *AGENT_CREDENTIAL_SECTIONS) is not None:
             raise NativeMigrationBlockedError("config_recovery", (backend,))
         hub = config.model_hub
-        if hub.agents[backend].mode == "direct":
+        if backend not in hub.agents or hub.agents[backend].mode == "direct":
             return
         vendor = {"claude": "anthropic", "codex": "openai"}.get(backend)
         if source_id is not None and vendor is not None:

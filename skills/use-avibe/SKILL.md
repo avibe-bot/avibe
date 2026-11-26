@@ -12,7 +12,7 @@ Use this skill when the user asks you to configure, repair, explain, or operate 
 Typical requests include:
 
 - enable a Slack, Discord, Telegram, Lark/Feishu, or WeChat scope
-- route one channel or DM user to OpenCode, Claude, or Codex
+- route one channel or DM user to OpenCode, Claude, Codex, or Antigravity
 - set a working directory for a channel or DM user
 - choose a backend model, subagent, or reasoning level
 - show or hide intermediate message types
@@ -60,7 +60,7 @@ Use this order when changing Avibe configuration:
    - `PATCH /api/settings/scope` for one channel's, topic's, or DM user's routing, working directory, visibility, enablement, and mention policy
    - `/api/users` and `/api/bind-codes` for DM user binding and user-scope settings
    - `/api/remote-access/*` for Avibe Cloud pairing and tunnel control
-   - host backend config instead of Avibe when the request is OpenCode, Claude Code, or Codex native behavior
+   - host backend config instead of Avibe when the request is OpenCode, Claude Code, Codex, or Antigravity native behavior
 3. Fetch the current state from the matching GET endpoint.
 4. Merge the requested change in memory.
 5. Send the mutating request through the Web UI API with CSRF protection.
@@ -81,7 +81,7 @@ Paths below are relative to this Skill directory; scripts remain under
 | Change channel/DM routing, models, cwd, visibility, mention policy, or bind users | [Scopes and routing](references/scopes-and-routing.md) |
 | Pair, inspect, repair, or control the Avibe Cloud tunnel | [Remote access](references/remote-access.md) |
 | Run or delegate Agent work, schedule tasks, manage watches or Session queues | Load the `use-avibe-harness` Skill |
-| Choose backend/subagent settings or change native OpenCode, Claude, or Codex config | [Backends](references/backends.md) |
+| Choose backend/subagent settings or change native OpenCode, Claude, Codex, or Antigravity config | [Backends](references/backends.md) |
 | Inspect runtime paths, logs, or health; restart or upgrade the service; macOS login session and launch at login | [Operations and troubleshooting](references/operations.md) |
 | Turn a problem or a wish in this conversation into a bug report, feedback, or feature request | [Feedback and feature requests](references/feedback.md) |
 
@@ -98,7 +98,7 @@ Always follow these constraints:
 - never read, query, or hand-edit Avibe's internal state storage — go through the Web UI API or `vibe` CLI
 - never expose bind codes, pairing keys, tunnel tokens, instance secrets, or session secrets unless the user explicitly asks
 - never paste a credentialed `proxy_url` (`user:pass@host`) back into chat — mask the credentials portion when echoing the value
-- always say when a requested change actually belongs in OpenCode, Claude Code, or Codex config instead of Avibe
+- always say when a requested change actually belongs in OpenCode, Claude Code, Codex, or Antigravity config instead of Avibe
 - never publish anything derived from this conversation until that exact content, destination, and posting identity are authorized — a destination is a host, a repository, and an acting account, never whatever the environment happens to supply; sanitize first, and keep the authorization to one concrete yes rather than a prompt per step; ordinary reads and generic public searches are already covered by the task
 - never splice a generated or user-supplied value into a shell command string; pass it as its own argument
 

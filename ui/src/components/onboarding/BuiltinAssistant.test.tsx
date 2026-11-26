@@ -199,12 +199,12 @@ describe('the built-in assistant card', () => {
     await card().findByText(en.onboarding.setup.noteBuiltinUnset);
     await waitFor(() => expect(mock.api.getBackendConnection).toHaveBeenCalledWith('vibey'));
     // A retained screen coming back detects whatever it holds as assistants, and Rescan
-    // does too: three CLIs, and never the built-in backend.
+    // does too: the native CLIs, and never the built-in backend.
     view.rerender(wrap(<AgentDetection data={{ ...data(), __onboardingDetected: false }} active={false} onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
     view.rerender(wrap(<AgentDetection data={{ ...data(), __onboardingDetected: false }} active onNext={vi.fn()} onNavigate={vi.fn()} agentReads={reads} />));
-    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledTimes(4));
     fireEvent.click(screen.getByRole('button', { name: en.agentDetection.rescan }));
-    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledTimes(6));
+    await waitFor(() => expect(mock.api.detectCli).toHaveBeenCalledTimes(8));
     expect(mock.api.detectCli.mock.calls.map(([binary]) => binary)).not.toContain('vibey');
   });
 

@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 SUBAGENT_REACTION_EMOJI = "🤖"
 
 
+def _uses_namespaced_subagent_session(backend: Optional[str]) -> bool:
+    """Native CLI backends whose subagents run under a namespaced session/process."""
+    return bool(backend) and backend in NATIVE_CLI_BACKENDS and backend != "opencode"
+
+
 def _target_agent_variant(value: Any, backend: Optional[str], agent_name: Optional[str] = None) -> Optional[str]:
     if value is None:
         return None
@@ -417,6 +422,8 @@ class MessageHandler(BaseHandler):
                     routing_agent = getattr(routing, "claude_agent", None)
                 elif agent_name == "codex":
                     routing_agent = getattr(routing, "codex_agent", None)
+                elif agent_name == "antigravity":
+                    routing_agent = getattr(routing, "antigravity_agent", None)
             if not routing_agent and agent_name in AGENT_BACKENDS:
                 routing_agent = _target_agent_variant(
                     resolved_target.get("agent_variant"),
@@ -492,6 +499,11 @@ class MessageHandler(BaseHandler):
                 materialize = getattr(self.sessions, "materialize_agent_session_route", None)
                 if callable(materialize):
                     try:
+                        if not session_target.get("reasoning_effort"):
+                            effective_reasoning_effort = await self._inherited_effort_for_model(
+                                agent_name, effective_model, effective_reasoning_effort,
+                            )
+                            inherited_reasoning_effort = effective_reasoning_effort
                         materialize(
                             str(session_target["id"]),
                             agent_id=vibe_agent.id if materialized_agent_identity else None,
@@ -546,8 +558,9 @@ class MessageHandler(BaseHandler):
                     context.platform_specific = spec
             elif agent_name in NATIVE_CLI_BACKENDS:
                 from modules.agents.subagent_router import (
-                    load_codex_subagent,
+                    load_antigravity_subagent,
                     load_claude_subagent,
+                    load_codex_subagent,
                     normalize_subagent_name,
                     parse_subagent_prefix,
                 )
@@ -588,7 +601,7 @@ class MessageHandler(BaseHandler):
                                 subagent_reasoning_effort = subagent_def.reasoning_effort
                         except Exception as err:
                             logger.warning(f"Failed to resolve Claude subagent: {err}")
-                    else:
+                    elif agent_name == "codex":
                         try:
                             from pathlib import Path
 
@@ -602,18 +615,34 @@ class MessageHandler(BaseHandler):
                                 subagent_reasoning_effort = subagent_def.reasoning_effort
                         except Exception as err:
                             logger.warning(f"Failed to resolve Codex subagent: {err}")
+                    elif agent_name == "antigravity":
+                        try:
+                            from pathlib import Path
+
+                            subagent_def = await asyncio.to_thread(
+                                load_antigravity_subagent,
+                                normalized,
+                                project_root=Path(working_path),
+                            )
+                            if subagent_def:
+                                subagent_name = subagent_def.name
+                                subagent_model = subagent_def.model
+                                subagent_reasoning_effort = subagent_def.reasoning_effort
+                        except Exception as err:
+                            logger.warning(f"Failed to resolve Antigravity subagent: {err}")
 
                     if subagent_name:
                         matched_prefix = parsed.name
                         subagent_message = parsed.message
 
+            namespaced_subagent_backend = _uses_namespaced_subagent_session(agent_name)
             if restored_route is None:
                 if subagent_name and subagent_message:
                     message = subagent_message
-                    if agent_name in {"claude", "codex"}:
+                    if namespaced_subagent_backend:
                         base_session_id = f"{base_session_id}:{subagent_name}"
                         composite_key = f"{base_session_id}:{working_path}"
-                elif agent_name in {"claude", "codex"} and routing_agent and not subagent_name:
+                elif namespaced_subagent_backend and routing_agent and not subagent_name:
                     # Update session IDs for routing-based agent to match SessionHandler
                     base_session_id = f"{base_session_id}:{routing_agent}"
                     composite_key = f"{base_session_id}:{working_path}"
@@ -635,7 +664,7 @@ class MessageHandler(BaseHandler):
                 else None
             )
 
-            if agent_name in {"claude", "codex"} and subagent_name:
+            if namespaced_subagent_backend and subagent_name:
                 spec = dict(context.platform_specific or {})
                 spec["backend_base_session_id"] = base_session_id
                 spec["backend_composite_session_id"] = composite_key
@@ -1892,6 +1921,47 @@ class MessageHandler(BaseHandler):
             agent = None
         backend = getattr(agent, "backend", None)
         return str(backend) if is_agent_backend(str(backend)) else None
+
+    async def _inherited_effort_for_model(
+        self, backend: str, model: str | None, effort: str | None,
+    ) -> str | None:
+        """Resolve an inherited effort before pinning the route the header and Turn share."""
+        if not model or not effort:
+            return effort
+        from config.v2_config import MODEL_HUB_BACKENDS
+
+        service = getattr(self.controller, "model_hub_service", None)
+        read_sources = getattr(service, "read_agent_sources", None)
+        hub_agent = None
+        if backend in MODEL_HUB_BACKENDS and callable(read_sources):
+            try:
+                hub_agent = await read_sources(backend)
+            except Exception:
+                logger.debug("Model Hub menu unavailable for %s", backend, exc_info=True)
+
+        def read_menu():
+            from vibe.api import route_menu_options
+
+            return route_menu_options(
+                backend, hub_agent_reader=lambda _backend: hub_agent, cached_only=True,
+            )
+
+        try:
+            menu = await asyncio.to_thread(read_menu)
+        except Exception:
+            logger.debug("Cached model menu unavailable for %s", backend, exc_info=True)
+            return effort
+        entry = next((row for row in menu.get("models", []) if row.get("value") == model), None)
+        if entry is None:
+            return None if menu.get("authoritative") else effort
+        offered = list(entry.get("reasoning_efforts") or [])
+        if not offered:
+            return None
+        if effort in offered:
+            return effort
+        from core.session_route_succession import _nearest_effort
+
+        return _nearest_effort(effort, offered)
 
     async def _succeed_retired_session_route(
         self,

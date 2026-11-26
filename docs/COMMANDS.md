@@ -134,6 +134,8 @@ Backend aliases used by `/resume` and `/setup`:
 | `cc` | `claude` |
 | `claude-code` | `claude` |
 | `cx` | `codex` |
+| `ag` | `antigravity` |
+| `agy` | `antigravity` |
 
 ## 3. In-Chat Command Reference
 
@@ -292,6 +294,7 @@ Resume a recent native agent session from the current working directory.
 /resume latest oc
 /resume latest cc
 /resume latest cx
+/resume latest ag
 /resume <backend> <session_id>
 ```
 
@@ -305,6 +308,9 @@ Resume a recent native agent session from the current working directory.
 - `claude-code`
 - `cx`
 - `codex`
+- `ag`
+- `agy`
+- `antigravity`
 
 #### What it does by platform
 
@@ -363,10 +369,12 @@ Repair backend login or provider auth through the IM flow.
 /setup claude
 /setup codex
 /setup opencode
+/setup antigravity
 /setup vibey
 /setup cc
 /setup cx
 /setup oc
+/setup agy
 /setup code <value>
 /setup code <backend> <value>
 ```
@@ -374,7 +382,7 @@ Repair backend login or provider auth through the IM flow.
 #### What it does
 
 - resolves the backend for the current scope, unless an explicit backend is given
-- for Claude Code, Codex and OpenCode: starts a backend-specific auth recovery flow, sends browser links, device
+- for Claude Code, Codex, OpenCode and Antigravity: starts a backend-specific auth recovery flow, sends browser links, device
   codes, or follow-up prompts into chat, then waits for completion and verifies login status
 - for Vibey: starts no flow, because Vibey signs in to nothing; it replies where Vibey's models come from (see below)
 
@@ -406,6 +414,23 @@ Repair backend login or provider auth through the IM flow.
 ```text
 /setup code <value>
 ```
+
+##### Antigravity
+
+- uses the sign-in method saved in Web Settings › Backends › Antigravity; chat sign-in covers the Google account
+  and Gemini Enterprise methods
+- for a personal Google account, first sends a notice: Google allows this sign-in for work the user directs, and
+  says it does not cover unattended runs such as scheduled Tasks, Watches, or work passed between Agents; for
+  automation, use the Gemini API key or Agent Platform method instead
+- sends the Google sign-in link into chat; when the browser shows an authorization code, the user sends it back
+  directly or with:
+
+```text
+/setup code <value>
+```
+
+- the Gemini API key and Agent Platform methods are set in Web Settings; when their sign-in fails, the reply says
+  to replace the key or names the Google Cloud login command to run
 
 ##### Vibey
 

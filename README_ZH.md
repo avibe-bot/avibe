@@ -203,14 +203,14 @@ Avibe 开源（MIT）、免费。订阅或 API Key 由你自己带，钱直接�
 </details>
 
 <details>
-<summary><b>需要先装 Claude Code、Codex 或 OpenCode 吗？</b></summary>
+<summary><b>需要先装 Claude Code、Codex、OpenCode 或 Antigravity 吗？</b></summary>
 
 不需要。歪比是内置的。这几个编码 Agent 是可选的，设置向导可以帮你装上选中的那些。
 </details>
 
 ## 给开发者
 
-**带上你的编码 Agent。** 官方的 Claude Code、Codex、OpenCode 命令行原样运行，和歪比并排，各自可以设模型和推理强度。歪比能给它们派活，**Runs** 会画出谁启动了哪个会话、结果回报给谁。设置向导会找到你已经装好的，并装上你选中的。
+**带上你的编码 Agent。** 官方的 Claude Code、Codex、OpenCode、Antigravity 命令行原样运行，和歪比并排，各自可以设模型和推理强度。歪比能给它们派活，**Runs** 会画出谁启动了哪个会话、结果回报给谁。设置向导会找到你已经装好的，并装上你选中的。
 
 **指令文件。** 每一轮开始时，歪比会先读 `~/.avibe/AGENTS.md`，再从文件系统根目录到工作目录，逐级读取各目录的 `AGENTS.md`（或 `CLAUDE.md`）。详见 [Vibey](https://docs.avibe.bot/zh/agents/vibey)。
 

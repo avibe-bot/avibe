@@ -65,6 +65,7 @@
     "/settings/backends/opencode",
     "/settings/backends/claude",
     "/settings/backends/codex",
+    "/settings/backends/antigravity",
     "/settings/models",
     "/settings/dependencies",
     "/settings/replies",

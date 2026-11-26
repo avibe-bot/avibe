@@ -48,6 +48,21 @@
         {"id": "gpt-5.4-mini", "label": "GPT-5.4-Mini", "priority": 23, "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
         {"id": "gpt-5.2", "label": "GPT-5.2", "priority": 29, "visibility": "hide", "reasoning_efforts": ["low", "medium", "high", "xhigh"]}
       ]
+    },
+    "antigravity": {
+      "models": [
+        {"id": "gemini-4-neon", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-4-carbon", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-4-argon", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gemini-4-hydrogen", "reasoning_efforts": ["low", "medium", "high", "xhigh"]},
+        {"id": "gemini-pro-orchestrator-neon", "reasoning_efforts": []},
+        {"id": "gemini-pro-orchestrator", "reasoning_efforts": []},
+        {"id": "gemini-pro-orchestrator-argon", "reasoning_efforts": []},
+        {"id": "gemini-3.8-flash", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "claude-opus-5-5", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "claude-sonnet-5-5", "reasoning_efforts": ["low", "medium", "high"]},
+        {"id": "gpt-oss-120b-medium", "reasoning_efforts": []}
+      ]
     }
   },
   "providers": {

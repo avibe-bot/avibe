@@ -6,8 +6,13 @@ import { expect, test, type Page } from '../support/browserTest';
 import { PHASES, VIEWPORTS, freezeAt, openOnboarding, openSetup, serveProduct, showMoreAssistants, size } from './support';
 import { CONTRACT_VERSION } from '../../src/components/settings/models/types';
 
-const LINEUP = ['vibey', 'claude', 'codex', 'opencode'];
-const NATIVE_MODELS: Record<string, string> = { claude: 'claude-opus-5-5', codex: 'gpt-5.6-sol', opencode: 'openai/gpt-5.6-sol' };
+const LINEUP = ['vibey', 'claude', 'codex', 'opencode', 'antigravity'];
+const NATIVE_MODELS: Record<string, string> = {
+  claude: 'claude-opus-5-5',
+  codex: 'gpt-5.6-sol',
+  opencode: 'openai/gpt-5.6-sol',
+  antigravity: 'gemini-4-neon',
+};
 
 /** Every backend on the Hub with a runnable route, except the built-in one unless it is
  *  given a model. `ready: false` leaves every connection unready, so entry is held and
@@ -71,9 +76,11 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
   const intro = await boxes(page, '.onboarding-collaboration-card');
   expect(await page.locator('.onboarding-collaboration-card').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-backend'))))
     .toEqual(LINEUP);
-  // 242-wide cards with 24 between them, in the 1040 column from 80 to 1120.
-  expect(intro.map((box) => Math.round(box.x))).toEqual([80, 346, 612, 878]);
-  for (const box of intro) expect(box.width).toBeCloseTo(242, 0);
+  // Equal tracks with 24 between them, in the 1040 column from 80 to 1120.
+  const trackWidth = (1040 - 24 * (LINEUP.length - 1)) / LINEUP.length;
+  const expectedTracks = LINEUP.map((_, index) => Math.round(80 + index * (trackWidth + 24)));
+  expect(intro.map((box) => Math.round(box.x))).toEqual(expectedTracks);
+  for (const box of intro) expect(box.width).toBeCloseTo(trackWidth, 0);
   const action = (await boxes(page, '.onboarding-primary-action'))[0];
   expect(action.width).toBeCloseTo(299, 0);
   expect(action.x + action.width / 2).toBeCloseTo(600, 0);
@@ -83,10 +90,11 @@ test('the lineup stands the built-in assistant first, on the reference tracks of
   // The built-in card grows to offer its models; the others keep the card's own height.
   const vibey = page.locator('.onboarding-assistant[data-backend="vibey"]');
   await expect(vibey.getByRole('button', { name: /gpt-5\.6-sol/ })).toBeVisible();
-  // Folded, the CLI assistants share the three tracks their cards take unfolded.
+  // Folded, the CLI assistants share the tracks their cards take unfolded.
   const folded = await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant');
   expect(folded.map((box) => Math.round(box.x))).toEqual(intro.slice(0, 2).map((box) => Math.round(box.x)));
-  expect(Math.round(folded[1].x + folded[1].width)).toBe(Math.round(intro[3].x + intro[3].width));
+  const lastIntro = intro[intro.length - 1];
+  expect(Math.round(folded[1].x + folded[1].width)).toBe(Math.round(lastIntro.x + lastIntro.width));
   await showMoreAssistants(page, 'en');
   const assistants = await boxes(page, '[data-setup-screen="assistants"] .onboarding-assistant');
   expect(assistants.map((box) => Math.round(box.x))).toEqual(intro.map((box) => Math.round(box.x)));

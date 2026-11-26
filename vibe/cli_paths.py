@@ -8,11 +8,27 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
+from modules.agents.catalog import AGENT_BACKEND_REGISTRY
 from vibe.desktop_backends import is_desktop_backend_path, resolve_published_desktop_backend
 
 logger = logging.getLogger(__name__)
+
+_DESKTOP_BACKEND_BY_CLI: dict[str, str] = {}
+for _descriptor in AGENT_BACKEND_REGISTRY.values():
+    if not _descriptor.capabilities.supports_cli:
+        continue
+    _DESKTOP_BACKEND_BY_CLI[_descriptor.id] = _descriptor.id
+    if _descriptor.default_cli:
+        _DESKTOP_BACKEND_BY_CLI[_descriptor.default_cli] = _descriptor.id
+
+
+def desktop_backend_for_cli(cli_name: str) -> str | None:
+    """Map a backend id or catalog default CLI name (e.g. ``agy``) to its backend id."""
+    if not cli_name:
+        return None
+    normalized = Path(cli_name).stem if cli_name.lower().endswith(".exe") else cli_name
+    return _DESKTOP_BACKEND_BY_CLI.get(normalized)
 
 def _ordered_cli_candidates(
     binary: str,
@@ -319,9 +335,9 @@ def resolve_cli_path(
     expanded = Path(os.path.expanduser(binary))
     has_path_separator = os.sep in binary or (os.altsep is not None and os.altsep in binary)
     if expanded.is_absolute() and is_desktop_backend_path(expanded):
-        lookup_name = expanded.stem if expanded.suffix.lower() == ".exe" else expanded.name
-        if include_desktop and lookup_name in NATIVE_CLI_BACKENDS:
-            return resolve_published_desktop_backend(lookup_name)
+        backend = desktop_backend_for_cli(expanded.name)
+        if include_desktop and backend is not None:
+            return resolve_published_desktop_backend(backend)
         return None
     if expanded.is_absolute() or has_path_separator:
         basename = expanded.name
@@ -341,8 +357,9 @@ def resolve_cli_path(
                 return fallback
     if include_desktop:
         lookup_name = expanded.name if expanded.is_absolute() or has_path_separator else binary
-        if lookup_name in NATIVE_CLI_BACKENDS:
-            return resolve_published_desktop_backend(lookup_name)
+        backend = desktop_backend_for_cli(lookup_name)
+        if backend is not None:
+            return resolve_published_desktop_backend(backend)
     return None
 
 

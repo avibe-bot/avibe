@@ -99,16 +99,25 @@ async def test_every_web_backend_publishes_deadline_after_startup_with_waiter(
         startup_finished = datetime.now(timezone.utc)
         return {"url": "https://provider.example/oauth"}
 
+    async def start_antigravity(**_kwargs):
+        nonlocal startup_finished
+        startup_finished = datetime.now(timezone.utc)
+        return _SyntheticProcess(), None
+
     server = SimpleNamespace(
         get_provider_auth=AsyncMock(return_value={}),
         start_provider_oauth=start_provider_oauth,
     )
     service._start_codex_process = start_codex
     service._start_claude_control_flow = start_claude
+    service._start_antigravity_login_process = start_antigravity
+    service._try_reuse_antigravity_login = AsyncMock(return_value=False)
     service._lease_opencode_server = lease_returning(server)
     service._wait_for_codex_completion_web = AsyncMock()
     service._wait_for_claude_completion_web = AsyncMock()
     service._wait_for_opencode_oauth_web = AsyncMock()
+    service._read_antigravity_output_web = AsyncMock()
+    service._wait_for_antigravity_completion_web = AsyncMock()
 
     flow = await service.start_web_setup(
         backend,
@@ -151,10 +160,17 @@ async def test_every_im_native_backend_publishes_deadline_after_startup_with_wai
         startup_finished = datetime.now(timezone.utc)
         return process, 1, "oauth-provider"
 
+    async def start_antigravity(**_kwargs):
+        nonlocal startup_finished
+        startup_finished = datetime.now(timezone.utc)
+        return process, None
+
     service._resolve_opencode_provider = AsyncMock(return_value="oauth-provider")
     service._start_codex_process = start_codex
     service._start_claude_control_flow = start_claude
     service._start_opencode_process = start_opencode
+    service._start_antigravity_login_process = start_antigravity
+    service._try_reuse_antigravity_login = AsyncMock(return_value=False)
     service._read_codex_output = AsyncMock()
     service._read_pty_output = AsyncMock()
     service._wait_for_completion = AsyncMock()

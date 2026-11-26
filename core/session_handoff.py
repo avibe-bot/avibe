@@ -15,10 +15,12 @@ it again from what is true then.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from sqlalchemy import and_, or_, select
 from sqlalchemy.engine import Connection
 
 from modules.agents.catalog import display_name_for_backend
@@ -175,6 +177,155 @@ def render_backend_handoff(
         transcript_block = []
     return "\n\n".join(
         "\n".join(block) for block in (head, work_block, transcript_block, tail) if block
+    )
+
+
+def _row_message_text(row: Mapping[str, Any]) -> str:
+    text = row.get("content_text")
+    if text:
+        return str(text)
+    try:
+        content = json.loads(row.get("content_json") or "{}")
+    except (TypeError, ValueError):
+        return ""
+    if isinstance(content, dict):
+        return str(content.get("text") or "")
+    return ""
+
+
+def build_fork_summary_handoff(
+    conn: Connection,
+    source_session_id: str,
+    *,
+    backend: str,
+    source_message_id: str | None = None,
+    budget: int = HANDOFF_BUDGET_CHARS,
+) -> str:
+    """Render a bounded summary handoff for a forked session without native fork."""
+
+    from storage.messages_service import list_session_messages, transcript_order_value
+    from storage.models import messages as messages_table
+
+    anchor_id = str(source_message_id or "").strip() or None
+    if anchor_id is not None:
+        order_value = transcript_order_value()
+        anchor_order_at = conn.execute(
+            select(order_value)
+            .where(
+                messages_table.c.session_id == source_session_id,
+                messages_table.c.id == anchor_id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if anchor_order_at is None:
+            return render_fork_summary_handoff(
+                source_session_id,
+                backend=backend,
+                messages=(),
+                has_older=False,
+                budget=budget,
+            )
+        rows = (
+            conn.execute(
+                select(
+                    messages_table.c.id,
+                    messages_table.c.type,
+                    messages_table.c.content_text,
+                    messages_table.c.content_json,
+                    messages_table.c.created_at,
+                )
+                .where(
+                    messages_table.c.session_id == source_session_id,
+                    messages_table.c.type.in_(tuple(_TRANSCRIPT_LABELS)),
+                    or_(
+                        order_value < anchor_order_at,
+                        and_(order_value == anchor_order_at, messages_table.c.id <= anchor_id),
+                    ),
+                )
+                .order_by(order_value.desc(), messages_table.c.id.desc())
+                .limit(_TRANSCRIPT_FETCH_LIMIT + 1)
+            )
+            .mappings()
+            .all()
+        )
+        has_older = len(rows) > _TRANSCRIPT_FETCH_LIMIT
+        bounded = list(rows[:_TRANSCRIPT_FETCH_LIMIT])
+        bounded.reverse()
+        bounded_messages = [
+            {
+                "id": row["id"],
+                "type": row["type"],
+                "created_at": row["created_at"],
+                "text": _row_message_text(row),
+            }
+            for row in bounded
+        ]
+        return render_fork_summary_handoff(
+            source_session_id,
+            backend=backend,
+            messages=bounded_messages,
+            has_older=has_older,
+            budget=budget,
+        )
+
+    page = list_session_messages(
+        conn,
+        session_id=source_session_id,
+        types=tuple(_TRANSCRIPT_LABELS),
+        tail=True,
+        limit=_TRANSCRIPT_FETCH_LIMIT,
+    )
+    return render_fork_summary_handoff(
+        source_session_id,
+        backend=backend,
+        messages=page.get("messages") or [],
+        has_older=bool(page.get("next_before_id")),
+        budget=budget,
+    )
+
+
+def render_fork_summary_handoff(
+    source_session_id: str,
+    *,
+    backend: str,
+    messages: Sequence[Mapping[str, Any]],
+    has_older: bool,
+    budget: int = HANDOFF_BUDGET_CHARS,
+) -> str:
+    """Render a bounded summary handoff clearly labeled as a summary, not full native history."""
+
+    backend_label = display_name_for_backend(backend) if backend else "this"
+    source_ref = source_session_id or "unknown"
+    head = [
+        "[Avibe handoff]",
+        (
+            f"This session is a bounded summary handoff forked from Avibe session `{source_ref}` "
+            f"on the {backend_label} backend. Native session fork is unavailable on this backend, "
+            "so this carries a bounded summary of recent messages rather than full native history."
+        ),
+        (
+            "Continue the work from the summary below. Earlier turns, tool calls, and their outputs "
+            "are not included; read files or query the source transcript when you need them."
+        ),
+    ]
+    query = _history_query(source_session_id) if source_session_id else None
+    tail = ["[End of Avibe handoff]"]
+    if query:
+        tail.insert(0, f"The full source conversation is in Avibe's transcript. For example:\n{query}")
+
+    heading_omitted = "Recent conversation, oldest first (earlier messages omitted):"
+    remaining = budget - _size(head) - _size(tail)
+    transcript = _transcript_lines(messages, max(0, remaining - len(heading_omitted) - 2))
+    if transcript:
+        omitted = has_older or len(transcript) < len(messages)
+        transcript_block = [
+            heading_omitted if omitted else "Recent conversation, oldest first:",
+            *transcript,
+        ]
+    else:
+        transcript_block = []
+    return "\n\n".join(
+        "\n".join(block) for block in (head, transcript_block, tail) if block
     )
 
 

@@ -11437,6 +11437,16 @@ def codex_models():
     return jsonify(api.codex_models())
 
 
+@app.get("/api/antigravity/models", include_in_schema=False)
+async def antigravity_models(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+
+        return jsonify(await asyncio.to_thread(api.antigravity_models))
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/agent/<name>/install", methods=["POST"])
 def agent_install(name):
     """Install an agent CLI tool (opencode, claude, codex)."""
@@ -11635,19 +11645,52 @@ def backend_claude_auth_post():
     return jsonify(api.save_claude_auth(payload))
 
 
+@app.get("/api/backend/antigravity/auth", include_in_schema=False)
+async def backend_antigravity_auth_get(starlette_request: FastAPIRequest):
+    """Read passive Antigravity auth state via ACP ``session/list``."""
+    async def handler():
+        from vibe import api
+
+        response = jsonify(await api.get_antigravity_auth_async())
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
+@app.post("/api/backend/antigravity/auth", include_in_schema=False)
+async def backend_antigravity_auth_post(starlette_request: FastAPIRequest):
+    """Persist Antigravity auth settings into V2Config without triggering inference."""
+    async def handler():
+        from vibe import api
+
+        payload = request.json or {}
+        return jsonify(await asyncio.to_thread(api.save_antigravity_auth, payload))
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.route("/api/backend/<backend>/auth/oauth/start", methods=["POST"])
 async def backend_oauth_web_start(backend: str):
-    """Kick off a Settings → Backends OAuth flow for Claude or Codex.
+    """Kick off a Settings → Backends OAuth flow for Claude, Codex, or Antigravity.
 
-    Body: ``{force_reset?: bool}``. Returns ``{flow_id, state, url?,
-    device_code?, awaiting_code?}``. The caller polls ``GET .../status/<flow_id>``
-    while the user completes login externally.
+    Body: ``{force_reset?: bool, auth_mode?: string, auth_method?: string}``.
+    Returns ``{flow_id, state, url?, device_code?, awaiting_code?,
+    terminal_command?, instructions?}``. The caller polls
+    ``GET .../status/<flow_id>`` while the user completes login externally.
     """
     from vibe import api
 
     payload = request.json or {}
     force_reset = bool(payload.get("force_reset", True))
-    return jsonify(await api.start_oauth_web_async(backend, force_reset=force_reset))
+    raw_auth_method = payload.get("auth_mode") or payload.get("auth_method")
+    return jsonify(
+        await api.start_oauth_web_async(
+            backend,
+            force_reset=force_reset,
+            auth_method=raw_auth_method if isinstance(raw_auth_method, str) else None,
+        )
+    )
 
 
 @app.route("/api/backend/<backend>/auth/oauth/status/<flow_id>", methods=["GET"])
@@ -17824,6 +17867,7 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                         opencode_agent=modal_values.get("opencode_agent"),
                         claude_agent=modal_values.get("claude_agent"),
                         codex_agent=modal_values.get("codex_agent"),
+                        antigravity_agent=modal_values.get("antigravity_agent"),
                     )
                     store.save()
                     return jsonify({"ok": True, "action": action})

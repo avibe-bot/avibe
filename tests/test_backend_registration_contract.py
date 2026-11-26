@@ -16,7 +16,7 @@ from collections import Counter
 from pathlib import Path
 from typing import get_args
 
-from config.v2_config import MODEL_HUB_BACKENDS
+from config.v2_config import MODEL_HUB_BACKENDS, MODEL_HUB_NATIVE_BACKENDS
 from core.handlers.model_hub.events import EventAgent
 from core.handlers.model_hub.resolver import BackendName
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, AgentBackend, NativeCliBackend
@@ -27,6 +27,8 @@ from scripts.generate_agent_backend_catalog import render
 ROOT = Path(__file__).resolve().parents[1]
 AGENTS = frozenset(AGENT_BACKENDS)
 NATIVE = frozenset(NATIVE_CLI_BACKENDS)
+HUB_BACKENDS = frozenset(MODEL_HUB_BACKENDS)
+HUB_NATIVE = frozenset(MODEL_HUB_NATIVE_BACKENDS)
 
 # (path, AST kind, backend members) -> (occurrences, relation, reason).
 # Counts matter: copying even an already-classified literal creates an
@@ -37,55 +39,51 @@ PYTHON_DECLARATIONS = {
     ("config/v2_config.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Built-in model catalogs and legacy vendor credentials."),
     ("config/v2_config.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Released two-vendor model/credential migration."),
     ("config/v2_config.py", "Pairs", NATIVE): (1, "native", "Per-CLI auto-update config objects."),
-    ("core/agent_auth_service.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Two vendor-specific login implementations."),
+    ("core/agent_auth_service.py", "Set", frozenset({"claude", "codex", "antigravity"})): (3, "native_subset", "Account-level native auth/test/logout backends."),
     ("core/agent_auth_service.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Login-output noise tokens, not a backend selector."),
     ("core/backend_restart.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Vendor-to-native-custody mapping."),
     ("core/handlers/command_handlers.py", "Dict", NATIVE): (1, "native", "Native resume command aliases."),
-    ("core/handlers/message_handler.py", "Set", frozenset({"claude", "codex"})): (3, "native_subset", "Native subagent names and prompt injection."),
     ("core/handlers/settings_handler.py", "Dict", AGENTS): (1, "agent", "IM route menu loaders: where each backend's agents, models and efforts come from; the routing form itself is backend-neutral."),
     ("core/handlers/model_hub/migration.py", "Dict", frozenset({"claude", "codex"})): (2, "native_subset", "Vendor credential and native environment maps."),
-    ("core/handlers/model_hub/migration.py", "Dict", NATIVE): (1, "native", "Native migration vendor descriptors."),
+    ("core/handlers/model_hub/migration.py", "Dict", HUB_NATIVE): (1, "native_subset", "Model Hub native migration vendor descriptors."),
     ("core/handlers/model_hub/migration.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "First-party subscription import."),
     ("core/handlers/model_hub/migration.py", "Tuple", frozenset({"claude", "codex"})): (2, "native_subset", "Subscription provider Literal types."),
-    ("core/handlers/model_hub/migration_files.py", "Pairs", NATIVE): (1, "native", "Native credential document paths."),
+    ("core/handlers/model_hub/migration_files.py", "Pairs", HUB_NATIVE): (1, "native_subset", "Model Hub native credential document paths."),
     ("core/handlers/model_hub/migration_journal.py", "Set", frozenset({"claude", "codex"})): (2, "native_subset", "OAuth journal providers."),
-    ("core/handlers/model_hub/migration_persisted.py", "Dict", NATIVE): (2, "native", "Native persisted credential snapshots."),
+    ("core/handlers/model_hub/migration_persisted.py", "Dict", HUB_NATIVE): (2, "native_subset", "Model Hub native persisted credential snapshots."),
     ("core/handlers/model_hub/service.py", "Dict", frozenset({"claude", "codex"})): (2, "native_subset", "Native API-key environment and OAuth event reasons."),
     ("core/handlers/model_hub/service.py", "Tuple", frozenset({"claude", "codex"})): (3, "native_subset", "Backends with bundled model lists."),
     ("core/handlers/model_hub/provenance.py", "Set", frozenset({"codex", "opencode"})): (2, "native_subset", "Request-scoped native gateway attribution for Codex and OpenCode multiplexing."),
     ("core/services/session_fork.py", "Set", frozenset({"codex", "opencode"})): (1, "native_subset", "Native forks that can trim a running turn."),
     ("modules/agents/model_hub.py", "Set", frozenset({"codex", "opencode"})): (2, "native_subset", "Request-scoped native gateway attribution for Codex and OpenCode multiplexing."),
     ("core/services/skills.py", "Dict", NATIVE): (1, "native", "askill native CLI ids."),
-    ("core/session_turns.py", "Set", frozenset({"claude", "codex", "vibey"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
+    ("core/session_turns.py", "Set", frozenset({"claude", "codex", "antigravity", "vibey"})): (1, "agent_subset", "Runtimes whose accepted turns cannot survive a service restart (process-bound, including Avibe's in-process loop)."),
     ("core/vibe_agents.py", "Dict", NATIVE): (1, "native", "Native recommendations; Avibe uses its configured Hub catalog."),
     ("scripts/ci_scenario_evidence.py", "Tuple", frozenset({"codex", "opencode"})): (1, "native_subset", "Versions a release E2E shard must name: the two agent CLIs its workflow installs from npm; Claude Code arrives inside claude-agent-sdk."),
     ("scripts/incus_tenant.py", "Dict", NATIVE): (1, "native", "Bootstrap config with backend-specific fields."),
     ("scripts/prepare_regression.py", "Dict", NATIVE): (2, "native", "Regression config with backend-specific fields; known legacy CLI executable paths."),
     ("vibe/api.py", "Dict", NATIVE): (1, "native", "Public runtime config plus the avault tool; the built-in backend has no section."),
-    ("vibe/api.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "OAuth relay configuration."),
-    ("vibe/api.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Masked vendor credentials."),
-    ("vibe/backend_model_catalog.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Bundled model catalog files."),
-    ("vibe/backend_model_catalog.py", "Set", frozenset({"claude", "codex"})): (1, "native_subset", "Backends with bundled model catalogs."),
-    ("vibe/cli.py", "Tuple", frozenset({"claude", "codex"})): (1, "native_subset", "Native-only model picker refresh."),
-    ("vibe/cli.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "The one model family each single-vendor native CLI runs (Session model refusals)."),
+    ("vibe/api.py", "Set", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Account-level native API-key removal backends."),
+    ("vibe/api.py", "Tuple", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Masked vendor credentials."),
+    ("vibe/backend_model_catalog.py", "Dict", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Bundled model catalog files."),
+    ("vibe/backend_model_catalog.py", "Set", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Backends with bundled model catalogs."),
+    ("vibe/cli.py", "Tuple", frozenset({"claude", "codex", "antigravity"})): (1, "native_subset", "Native-only model picker refresh."),
+    ("vibe/cli.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Single-vendor native CLIs for Session model family refusals; Antigravity uses a live multi-vendor menu."),
     ("vibe/desktop_backends.py", "Dict", NATIVE): (1, "native", "CLI package install specifications."),
     ("vibe/cli_health.py", "Dict", NATIVE): (1, "native", "Backend-specific native CLI version grammars, not another Agent universe."),
     ("vibe/cli_repair.py", "Dict", NATIVE): (2, "native", "npm package and Homebrew formula coordinates for source-preserving native CLI repair."),
     ("vibe/global_agents_md.py", "Dict", NATIVE): (1, "native", "Native global instruction filenames."),
-    ("core/mcp_hub/native.py", "Tuple", frozenset({"claude", "codex", "opencode"})): (1, "native", "Native MCP config files Hub reads as the connection store."),
+    ("core/mcp_hub/native.py", "Tuple", NATIVE): (1, "native", "Native MCP config files Hub reads as the connection store."),
     ("vibe/model_hub_runtime/adapter.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Native subscription vendors."),
     ("vibe/model_hub_runtime/state.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Vendor aliases, including provider names."),
-    ("storage/alembic/versions/20260529_0007_backfill_scope_agent_names.py", "Set", NATIVE): (1, "native", "Immutable released migration predating Avibe."),
-    ("storage/alembic/versions/20260530_0008_remove_legacy_default_agent.py", "Set", NATIVE): (1, "native", "Immutable released migration predating Avibe."),
+    ("storage/alembic/versions/20260529_0007_backfill_scope_agent_names.py", "Set", frozenset({"claude", "codex", "opencode"})): (1, "native_subset", "Immutable released migration predating Avibe and Antigravity."),
+    ("storage/alembic/versions/20260530_0008_remove_legacy_default_agent.py", "Set", frozenset({"claude", "codex", "opencode"})): (1, "native_subset", "Immutable released migration predating Avibe and Antigravity."),
 }
 
 TYPESCRIPT_DECLARATIONS = {
-    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex", "opencode"})): (1, "native", "MCP Hub native source labels."),
-    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex"})): (
+    ("ui/src/context/ApiContext.tsx", NATIVE): (1, "native", "MCP Hub native source labels."),
+    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex", "antigravity"})): (
         4, "native_subset", "Account-level native auth endpoints; OpenCode uses provider auth.",
-    ),
-    ("ui/src/components/settings/BackendTestPanel.tsx", frozenset({"claude", "codex"})): (
-        1, "native_subset", "Account-level native auth testing.",
     ),
     ("ui/src/lib/effortOptions.ts", frozenset({"claude", "codex"})): (
         1, "native_subset", "Backends with shared-default reasoning effort metadata.",
@@ -128,7 +126,9 @@ def _schema_enums(value, location=""):
 
 
 def test_backend_universes_are_catalog_owned_and_literals_are_classified():
-    assert set(get_args(AgentBackend)) == set(get_args(BackendName)) == set(MODEL_HUB_BACKENDS) == AGENTS
+    assert set(get_args(AgentBackend)) == set(get_args(BackendName)) == AGENTS
+    assert HUB_BACKENDS == AGENTS - {"antigravity"}
+    assert HUB_NATIVE == NATIVE - {"antigravity"}
     assert set(get_args(NativeCliBackend)) == set(get_args(AgentName)) == NATIVE
     assert set(get_args(EventAgent)) == AGENTS | {"system"}  # C-8 superset: runtime events also name the system.
     assert (ROOT / "ui/src/lib/agentBackendCatalog.generated.ts").read_text() == render()
@@ -161,13 +161,13 @@ def test_backend_universes_are_catalog_owned_and_literals_are_classified():
     for path in (ROOT / "docs/plans/model-hub-contracts").glob("*.json"):
         for location, members in _schema_enums(json.loads(path.read_text())):
             if path.name == "migration-scan.schema.json":
-                expected = NATIVE  # Native credential migration only.
+                expected = HUB_NATIVE  # Model Hub native credential migration only.
             elif path.name == "resolution-event.schema.json" and location == "/properties/agent/enum":
-                expected = AGENTS | {"system"}
+                expected = HUB_BACKENDS | {"system"}
             elif path.name == "agent-supply.schema.json" and location == "/allOf/8/if/properties/backend/enum":
-                expected = AGENTS - {"opencode"}  # Fixed menus do not expose OpenCode's provider menu.
+                expected = HUB_BACKENDS - {"opencode"}  # Fixed menus do not expose OpenCode's provider menu.
             else:
-                expected = AGENTS
+                expected = HUB_BACKENDS
             assert members == expected, (path.name, location, members)
 
     # TS needs its checked-in projection to infer literal types at build time.

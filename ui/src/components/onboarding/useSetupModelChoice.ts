@@ -7,7 +7,7 @@ import { useLatestRef } from '@/lib/useLatestRef';
 import { draftRowFor, type ChosenCandidate } from '../settings/models/backendCatalog';
 import type { CollectionReadAuthority } from '../settings/models/collectionReadAuthority';
 import { apiFailure, type ModelsApi } from '../settings/models/modelsApi';
-import type { AgentSupply } from '../settings/models/types';
+import { isModelHubBackend, type AgentSupply } from '../settings/models/types';
 import type { BuiltinModelOffer } from './builtinModelOffer';
 
 /** The server's refusal of a pick whose suppliers moved after the card showed them. */
@@ -74,6 +74,7 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
   const followers = useRef<Partial<Record<AgentBackendId, string | null>>>({});
 
   const read = useCallback(async (backend: AgentBackendId) => {
+    if (!isModelHubBackend(backend)) return;
     const token = (tokens.current[backend] ?? 0) + 1;
     tokens.current[backend] = token;
     const showing = latest.current.epoch();
@@ -93,7 +94,7 @@ export function useSetupModelChoice(deps: SetupModelChoiceDeps) {
   const choose = useCallback(async (backend: AgentBackendId, pick: ChosenCandidate) => {
     const { api, models, agentReads, target: targetOf } = latest.current;
     const target = targetOf(backend);
-    if (!target || !agentReads || writing.current[backend]) return;
+    if (!target || !agentReads || !isModelHubBackend(backend) || writing.current[backend]) return;
     writing.current[backend] = true;
     const model = pick.candidate.id;
     setChoices((current) => ({ ...current, [backend]: { pick, writing: true, failure: null } }));

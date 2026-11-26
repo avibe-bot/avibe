@@ -188,7 +188,10 @@ MIN_CHAT_MESSAGE_FONT_SIZE_PX = 12
 MAX_CHAT_MESSAGE_FONT_SIZE_PX = 20
 DEFAULT_AGENT_PROGRESS_STYLE = "off"
 MODEL_HUB_ENABLED_ENV = "VIBE_MODEL_HUB_ENABLED"
-MODEL_HUB_BACKENDS = AGENT_BACKENDS
+MODEL_HUB_BACKENDS = tuple(backend for backend in AGENT_BACKENDS if backend != "antigravity")
+MODEL_HUB_NATIVE_BACKENDS = tuple(
+    backend for backend in NATIVE_CLI_BACKENDS if backend in MODEL_HUB_BACKENDS
+)
 MODEL_HUB_LEGACY_CREATED_AT = "1970-01-01T00:00:00Z"
 _LEGACY_CLAUDE_FAMILY_ALIASES = {
     "fable": "fable",
@@ -1031,7 +1034,7 @@ def _recovery_section_for_error(error: BaseException) -> Optional[str]:
             return "platforms"
         if path.startswith("agents."):
             backend = path.split(".", 2)[1]
-            if backend in MODEL_HUB_BACKENDS or backend == "avault":
+            if backend in AGENT_BACKENDS or backend == "avault":
                 return f"agents.{backend}"
         return path.split(".", 1)[0]
 
@@ -1214,6 +1217,7 @@ def _reset_recoverable_config_section(
             "opencode": dict(defaults.opencode.__dict__),
             "claude": dict(defaults.claude.__dict__),
             "codex": dict(defaults.codex.__dict__),
+            "antigravity": dict(defaults.antigravity.__dict__),
             "avault": dict(defaults.avault.__dict__),
         }
         return True
@@ -1683,6 +1687,8 @@ def hub_supply_block(backend: str, hub: Optional["ModelHubConfig"]) -> Optional[
     turned the gateway off in Models. Without a Hub config only the switch can be read.
     """
 
+    if backend not in MODEL_HUB_BACKENDS:
+        return None
     if not is_model_hub_enabled():
         return None if backend in NATIVE_CLI_BACKENDS else "hub_disabled"
     if hub is None:
@@ -2127,6 +2133,19 @@ class CodexConfig:
 
 
 @dataclass
+class AntigravityConfig:
+    enabled: bool = False
+    cli_path: str = "agy"
+    auto_update: bool = True  # See ``OpenCodeConfig.auto_update``.
+    idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+    auth_mode: Literal["oauth-personal", "oauth-business", "gemini-api-key", "agent-platform"] = "oauth-personal"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    gcp_project: Optional[str] = None
+    gcp_location: Optional[str] = None
+
+
+@dataclass
 class AVaultConfig:
     cli_path: str = "avault"
 
@@ -2137,6 +2156,7 @@ class AgentsConfig:
     opencode: OpenCodeConfig = field(default_factory=OpenCodeConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
+    antigravity: AntigravityConfig = field(default_factory=AntigravityConfig)
     avault: AVaultConfig = field(default_factory=AVaultConfig)
 
 
@@ -4134,6 +4154,10 @@ class V2Config:
                 opencode=OpenCodeConfig(enabled=default_enabled_for_backend("opencode"), cli_path="opencode"),
                 claude=ClaudeConfig(enabled=default_enabled_for_backend("claude"), cli_path="claude"),
                 codex=CodexConfig(enabled=default_enabled_for_backend("codex"), cli_path="codex"),
+                antigravity=AntigravityConfig(
+                    enabled=default_enabled_for_backend("antigravity"),
+                    cli_path="agy",
+                ),
             ),
             model_hub=ModelHubConfig(),
             platform=WORKBENCH_PLATFORM_ID,
@@ -4493,6 +4517,10 @@ class V2Config:
         if not isinstance(codex_payload, dict):
             raise ValueError("Config 'agents.codex' must be an object")
 
+        antigravity_payload = agents_payload.get("antigravity") or {}
+        if not isinstance(antigravity_payload, dict):
+            raise ValueError("Config 'agents.antigravity' must be an object")
+
         avault_payload = agents_payload.get("avault") or {}
         if not isinstance(avault_payload, dict):
             raise ValueError("Config 'agents.avault' must be an object")
@@ -4500,7 +4528,13 @@ class V2Config:
         opencode = OpenCodeConfig(**_filter_dataclass_fields(OpenCodeConfig, opencode_payload))
         claude = ClaudeConfig(**_filter_dataclass_fields(ClaudeConfig, claude_payload))
         codex = CodexConfig(**_filter_dataclass_fields(CodexConfig, codex_payload))
-        for backend_name, backend_config in (("opencode", opencode), ("claude", claude), ("codex", codex)):
+        antigravity = AntigravityConfig(**_filter_dataclass_fields(AntigravityConfig, antigravity_payload))
+        for backend_name, backend_config in (
+            ("opencode", opencode),
+            ("claude", claude),
+            ("codex", codex),
+            ("antigravity", antigravity),
+        ):
             # Unattended upgrades run on this switch, so ``"false"`` must read as off.
             backend_config.auto_update = _named_bool(
                 f"agents.{backend_name}.auto_update", backend_config.auto_update
@@ -4511,6 +4545,7 @@ class V2Config:
             opencode=opencode,
             claude=claude,
             codex=codex,
+            antigravity=antigravity,
             avault=avault,
         )
 
@@ -4821,6 +4856,7 @@ class V2Config:
                 "opencode": self.agents.opencode.__dict__,
                 "claude": self.agents.claude.__dict__,
                 "codex": self.agents.codex.__dict__,
+                "antigravity": self.agents.antigravity.__dict__,
                 "avault": self.agents.avault.__dict__,
             },
             "model_hub": self.model_hub.to_payload(),

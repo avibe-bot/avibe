@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -10,11 +12,17 @@ import platform
 import re
 import shutil
 import signal
+import stat
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
+import zipfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -60,7 +68,22 @@ logger = logging.getLogger(__name__)
 CURRENT_DESCRIPTOR_SCHEMA_VERSION = 1
 MAX_DESCRIPTOR_BYTES = 16 * 1024
 MAX_INSTALL_OUTPUT_CHARS = 8192
+MAX_RELEASE_ARCHIVE_BYTES = 512 * 1024 * 1024
+MAX_EXTRACTED_ARCHIVE_BYTES = 1024 * 1024 * 1024
+MAX_CHECKSUM_BYTES = 256 * 1024
 NPM_REGISTRY = "https://registry.npmjs.org/"
+GITHUB_API_RELEASES_BASE = "https://api.github.com/repos"
+_SHA256_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+_REQUESTED_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz", ".tar.xz", ".zip")
+_ANTIGRAVITY_ARCHIVE_PLATFORMS: dict[tuple[str, str], str] = {
+    ("darwin", "arm64"): "mac_arm64",
+    ("darwin", "x64"): "mac_x64",
+    ("linux", "x64"): "linux_x64",
+    ("linux", "arm64"): "linux_arm64",
+    ("win32", "x64"): "windows_x64",
+    ("win32", "arm64"): "windows_arm64",
+}
 DESKTOP_BACKEND_LOCK_TIMEOUT_SECONDS = 30.0
 # Removal runs once the Runtime has stopped, when no install should be left to
 # wait for.
@@ -79,14 +102,15 @@ INSTALL_RECORD_SCHEMA_VERSION = 1
 class DesktopBackendSpec:
     package: str
     package_path: tuple[str, ...]
+    install_kind: str = "npm"
 
 
 @dataclass(frozen=True)
 class DesktopBackendToolchain:
     runtime_root: Path
     backends_root: Path
-    node: Path
-    npm_cli: Path
+    node: Path | None = None
+    npm_cli: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +142,11 @@ BACKEND_SPECS: dict[str, DesktopBackendSpec] = {
         package="opencode-ai",
         package_path=("opencode-ai",),
     ),
+    "antigravity": DesktopBackendSpec(
+        package="google-antigravity/antigravity-cli",
+        package_path=("antigravity",),
+        install_kind="release_archive",
+    ),
 }
 
 
@@ -126,16 +155,26 @@ ActivationCallback = Callable[[str], None]
 
 def desktop_backend_toolchain(
     base_env: Mapping[str, str] | None = None,
+    *,
+    backend: str | None = None,
 ) -> DesktopBackendToolchain | None:
-    """Return the complete launcher-supplied private install contract."""
+    """Return the complete launcher-supplied private install contract.
+
+    Release-archive backends (such as ``antigravity``) do not require Node/npm
+    in the launcher toolchain; npm backends require ``node`` and ``npm_cli``.
+    """
 
     from vibe.desktop_runtime import private_desktop_runtime_root
 
     runtime_root = private_desktop_runtime_root(base_env)
     backends_root = private_desktop_backends_root(base_env)
+    if runtime_root is None or backends_root is None:
+        return None
     node = private_desktop_node_bin(base_env)
     npm_cli = private_desktop_npm_cli(base_env)
-    if runtime_root is None or backends_root is None or node is None or npm_cli is None:
+    spec = BACKEND_SPECS.get(backend) if backend is not None else None
+    requires_npm = spec is None or spec.install_kind == "npm"
+    if requires_npm and (node is None or npm_cli is None):
         return None
     return DesktopBackendToolchain(
         runtime_root=runtime_root,
@@ -244,7 +283,31 @@ def desktop_backend_subprocess_environment(
     environment = dict(source)
     if runtime_paths:
         _prepend_path_entries(environment, runtime_paths)
+    if backend == "antigravity":
+        environment["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
     return environment
+
+
+def _normalize_requested_version(version: str | None) -> str | None:
+    if version is None:
+        return None
+    if not isinstance(version, str):
+        raise DesktopBackendError(
+            "Requested desktop backend version must be a string.",
+            code="invalid_version",
+        )
+    normalized = version.strip()
+    if (
+        not normalized
+        or ".." in normalized
+        or not _REQUESTED_VERSION_RE.fullmatch(normalized)
+        or not normalized.lstrip("vV")
+    ):
+        raise DesktopBackendError(
+            f"Invalid requested desktop backend version: {version!r}",
+            code="invalid_version",
+        )
+    return normalized
 
 
 def install_desktop_backend(
@@ -253,6 +316,7 @@ def install_desktop_backend(
     base_env: Mapping[str, str] | None = None,
     activate: ActivationCallback | None = None,
     timeout_seconds: float = DESKTOP_BACKEND_INSTALL_TIMEOUT_SECONDS,
+    version: str | None = None,
 ) -> DesktopBackendInstallResult:
     """Install or update one backend and atomically publish its descriptor.
 
@@ -267,7 +331,8 @@ def install_desktop_backend(
             f"Unknown desktop backend: {backend}",
             code="unknown_backend",
         )
-    toolchain = desktop_backend_toolchain(base_env)
+    requested_version = _normalize_requested_version(version)
+    toolchain = desktop_backend_toolchain(base_env, backend=backend)
     if toolchain is None:
         raise DesktopBackendError(
             "The desktop backend installer is unavailable.",
@@ -285,57 +350,79 @@ def install_desktop_backend(
     installer_undrained = False
     try:
         staging.mkdir(mode=0o700)
-        user_config = staging / "npm-user.conf"
-        global_config = staging / "npm-global.conf"
-        user_config.write_text("", encoding="utf-8")
-        global_config.write_text("", encoding="utf-8")
-        command = [
-            str(toolchain.node),
-            str(toolchain.npm_cli),
-            "install",
-            "--prefix",
-            str(staging),
-            "--no-save",
-            "--package-lock=false",
-            "--omit=dev",
-            "--ignore-scripts",
-            "--no-audit",
-            "--no-fund",
-            f"--registry={NPM_REGISTRY}",
-            spec.package,
-        ]
-        logger.info("Installing desktop backend package %s", spec.package)
-        completed = _run_command(
-            command,
-            cwd=staging,
-            env=_npm_environment(toolchain, staging, user_config, global_config, base_env),
-            timeout_seconds=timeout_seconds,
-        )
-        output = _bounded_output(completed.stdout, completed.stderr)
-        if completed.returncode != 0:
-            raise DesktopBackendError(
-                f"Desktop backend install failed (exit code {completed.returncode})",
-                code="npm_install_failed",
-                output=output,
+        if spec.install_kind == "release_archive":
+            installed_version, executable, output = _stage_release_archive_backend(
+                backend,
+                spec,
+                staging=staging,
+                toolchain=toolchain,
+                base_env=base_env,
+                timeout_seconds=timeout_seconds,
+                version=requested_version,
             )
-        _remove_internal_directory(staging / ".npm-cache", staging)
-        user_config.unlink(missing_ok=True)
-        global_config.unlink(missing_ok=True)
+        else:
+            assert toolchain.node is not None and toolchain.npm_cli is not None
+            user_config = staging / "npm-user.conf"
+            global_config = staging / "npm-global.conf"
+            user_config.write_text("", encoding="utf-8")
+            global_config.write_text("", encoding="utf-8")
+            package_spec = f"{spec.package}@{requested_version}" if requested_version is not None else spec.package
+            command = [
+                str(toolchain.node),
+                str(toolchain.npm_cli),
+                "install",
+                "--prefix",
+                str(staging),
+                "--no-save",
+                "--package-lock=false",
+                "--omit=dev",
+                "--ignore-scripts",
+                "--no-audit",
+                "--no-fund",
+                f"--registry={NPM_REGISTRY}",
+                package_spec,
+            ]
+            logger.info("Installing desktop backend package %s", package_spec)
+            completed = _run_command(
+                command,
+                cwd=staging,
+                env=_npm_environment(toolchain, staging, user_config, global_config, base_env),
+                timeout_seconds=timeout_seconds,
+            )
+            output = _bounded_output(completed.stdout, completed.stderr)
+            if completed.returncode != 0:
+                raise DesktopBackendError(
+                    f"Desktop backend install failed (exit code {completed.returncode})",
+                    code="npm_install_failed",
+                    output=output,
+                )
+            _remove_internal_directory(staging / ".npm-cache", staging)
+            user_config.unlink(missing_ok=True)
+            global_config.unlink(missing_ok=True)
 
-        package_dir = staging / "node_modules" / Path(*spec.package_path)
-        version = _installed_package_version(package_dir, spec.package)
-        executable = _installed_native_executable(backend, spec, staging, package_dir)
-        runtime_paths = _backend_runtime_path_entries(backend, executable, root=staging)
-        _verify_backend_executable(
-            backend,
-            executable,
-            root=staging,
-            env=_backend_command_environment(
-                toolchain,
-                base_env,
-                runtime_paths=runtime_paths,
-            ),
-        )
+            package_dir = staging / "node_modules" / Path(*spec.package_path)
+            installed_version = _installed_package_version(package_dir, spec.package)
+            if (
+                requested_version is not None
+                and installed_version.strip().lstrip("vV") != requested_version.lstrip("vV")
+            ):
+                raise DesktopBackendError(
+                    f"Installed {backend} version {installed_version} does not match requested version {requested_version}.",
+                    code="version_mismatch",
+                )
+            executable = _installed_native_executable(backend, spec, staging, package_dir)
+            runtime_paths = _backend_runtime_path_entries(backend, executable, root=staging)
+            _verify_backend_executable(
+                backend,
+                executable,
+                root=staging,
+                env=_backend_command_environment(
+                    toolchain,
+                    base_env,
+                    runtime_paths=runtime_paths,
+                    backend=backend,
+                ),
+            )
 
         releases_root = backend_root / "releases"
         releases_root.mkdir(mode=0o700, exist_ok=True)
@@ -348,7 +435,7 @@ def install_desktop_backend(
             "schema_version": CURRENT_DESCRIPTOR_SCHEMA_VERSION,
             "backend": backend,
             "package": spec.package,
-            "version": version,
+            "version": installed_version,
             "executable": relative_executable,
         }
         descriptor_path = backend_root / "current.json"
@@ -372,7 +459,7 @@ def install_desktop_backend(
         return DesktopBackendInstallResult(
             backend=backend,
             package=spec.package,
-            version=version,
+            version=installed_version,
             path=str(published_executable),
             output=output,
         )
@@ -442,14 +529,467 @@ def _backend_command_environment(
     base_env: Mapping[str, str] | None,
     *,
     runtime_paths: tuple[Path, ...] = (),
+    backend: str | None = None,
 ) -> dict[str, str]:
     source = os.environ if base_env is None else base_env
     env = _safe_process_environment(source)
-    entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
-    node_dir = str(toolchain.node.parent)
-    env["PATH"] = os.pathsep.join([node_dir, *(entry for entry in entries if entry != node_dir)])
+    if toolchain.node is not None:
+        entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+        node_dir = str(toolchain.node.parent)
+        env["PATH"] = os.pathsep.join([node_dir, *(entry for entry in entries if entry != node_dir)])
     _prepend_path_entries(env, runtime_paths)
+    if backend == "antigravity":
+        env["AGY_CLI_DISABLE_AUTO_UPDATE"] = "true"
     return env
+
+
+def _release_archive_platform_tag(backend: str) -> str:
+    if backend != "antigravity":
+        raise DesktopBackendError(
+            f"{backend} does not support release-archive installation.",
+            code="unsupported_platform",
+        )
+    target = _native_target()
+    tag = _ANTIGRAVITY_ARCHIVE_PLATFORMS.get(target)
+    if tag is None:
+        raise DesktopBackendError(
+            f"Unsupported desktop platform for {backend}.",
+            code="unsupported_platform",
+        )
+    return tag
+
+
+def _validate_release_url(url: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise DesktopBackendError(
+            "Release archive URL must use HTTPS.",
+            code="archive_download_failed",
+        )
+    return url
+
+
+def _fetch_github_release(
+    repo: str,
+    *,
+    version: str | None = None,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    normalized = _normalize_requested_version(version)
+    if normalized is None:
+        urls = [_validate_release_url(f"{GITHUB_API_RELEASES_BASE}/{repo}/releases/latest")]
+    else:
+        bare = normalized.lstrip("vV")
+        candidate_tags: list[str] = []
+        for tag in (f"v{bare}", bare, normalized):
+            if tag and tag not in candidate_tags:
+                candidate_tags.append(tag)
+        urls = [
+            _validate_release_url(
+                f"{GITHUB_API_RELEASES_BASE}/{repo}/releases/tags/{urllib.parse.quote(tag, safe='')}"
+            )
+            for tag in candidate_tags
+        ]
+
+    last_not_found: Exception | None = None
+    for url in urls:
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Avibe-Desktop-Installer",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=min(timeout_seconds, 30.0)) as resp:  # noqa: S310
+                raw = resp.read(MAX_CHECKSUM_BYTES * 4)
+            payload = json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if normalized is not None and exc.code == 404:
+                last_not_found = exc
+                continue
+            raise DesktopBackendError(
+                f"Failed to fetch release metadata for {repo}: {exc}",
+                code="archive_download_failed",
+            ) from exc
+        except (urllib.error.URLError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DesktopBackendError(
+                f"Failed to fetch release metadata for {repo}: {exc}",
+                code="archive_download_failed",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise DesktopBackendError(
+                f"Invalid release metadata for {repo}.",
+                code="archive_download_failed",
+            )
+        return payload
+
+    raise DesktopBackendError(
+        f"Release {normalized} was not found for {repo}.",
+        code="archive_download_failed",
+    ) from last_not_found
+
+
+def _fetch_text_asset(url: str, *, timeout_seconds: float) -> str:
+    _validate_release_url(url)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Avibe-Desktop-Installer"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=min(timeout_seconds, 30.0)) as resp:  # noqa: S310
+            raw = resp.read(MAX_CHECKSUM_BYTES + 1)
+    except (urllib.error.URLError, OSError) as exc:
+        raise DesktopBackendError(
+            f"Failed to download checksum asset: {exc}",
+            code="archive_download_failed",
+        ) from exc
+    if len(raw) > MAX_CHECKSUM_BYTES:
+        raise DesktopBackendError("Checksum asset exceeds size limit.", code="invalid_archive")
+    return raw.decode("utf-8", errors="replace")
+
+
+def _download_release_asset(url: str, destination: Path, *, timeout_seconds: float) -> None:
+    _validate_release_url(url)
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Avibe-Desktop-Installer"},
+    )
+    written = 0
+    try:
+        with (
+            urllib.request.urlopen(request, timeout=timeout_seconds) as resp,  # noqa: S310
+            destination.open("wb") as handle,
+        ):
+            while True:
+                chunk = resp.read(65536)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_RELEASE_ARCHIVE_BYTES:
+                    raise DesktopBackendError(
+                        "Release archive exceeds size limit.",
+                        code="invalid_archive",
+                    )
+                handle.write(chunk)
+    except DesktopBackendError:
+        destination.unlink(missing_ok=True)
+        raise
+    except (urllib.error.URLError, OSError) as exc:
+        destination.unlink(missing_ok=True)
+        raise DesktopBackendError(
+            f"Failed to download release archive: {exc}",
+            code="archive_download_failed",
+        ) from exc
+
+
+def _parse_sha256_digest(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if text.lower().startswith("sha256:"):
+        text = text.split(":", 1)[1].strip()
+    if _SHA256_HEX_RE.fullmatch(text):
+        return text.lower()
+    return None
+
+
+def _parse_checksum_manifest(text: str, asset_name: str) -> str | None:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) == 1:
+        single = _parse_sha256_digest(lines[0])
+        if single is not None:
+            return single
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        digest = _parse_sha256_digest(parts[0])
+        if digest is None:
+            continue
+        listed_name = parts[-1].lstrip("*").rsplit("/", 1)[-1]
+        if listed_name == asset_name:
+            return digest
+    return None
+
+
+def _select_release_archive_asset(
+    backend: str,
+    release: Mapping[str, Any],
+    *,
+    timeout_seconds: float,
+) -> tuple[str, str, str]:
+    """Return ``(asset_name, download_url, expected_sha256)`` for *backend*."""
+    platform_tag = _release_archive_platform_tag(backend)
+    prefix = f"agy_cli_{platform_tag}"
+    raw_assets = release.get("assets")
+    assets = [item for item in raw_assets if isinstance(item, Mapping)] if isinstance(raw_assets, list) else []
+
+    matched: Mapping[str, Any] | None = None
+    for asset in assets:
+        name = str(asset.get("name") or "")
+        lowered = name.lower()
+        if not name.startswith(prefix):
+            continue
+        if not any(lowered.endswith(suffix) for suffix in _ARCHIVE_SUFFIXES):
+            continue
+        matched = asset
+        break
+    if matched is None:
+        raise DesktopBackendError(
+            f"No release archive asset found for {prefix}.",
+            code="unsupported_platform",
+        )
+
+    asset_name = str(matched["name"])
+    download_url = str(matched.get("browser_download_url") or "")
+    if not download_url:
+        raise DesktopBackendError(
+            f"Release asset {asset_name} is missing a download URL.",
+            code="archive_download_failed",
+        )
+
+    expected_sha256 = _parse_sha256_digest(matched.get("digest"))
+    if expected_sha256 is None:
+        checksum_candidates = (
+            f"{asset_name}.sha256",
+            f"{asset_name}.sha256sum",
+            "checksums.txt",
+            "SHA256SUMS",
+            "sha256sums.txt",
+        )
+        assets_by_name = {
+            str(asset.get("name") or ""): asset
+            for asset in assets
+            if isinstance(asset.get("name"), str)
+        }
+        for candidate_name in checksum_candidates:
+            checksum_asset = assets_by_name.get(candidate_name)
+            if checksum_asset is None:
+                continue
+            checksum_url = str(checksum_asset.get("browser_download_url") or "")
+            if not checksum_url:
+                continue
+            checksum_text = _fetch_text_asset(checksum_url, timeout_seconds=timeout_seconds)
+            expected_sha256 = _parse_checksum_manifest(checksum_text, asset_name)
+            if expected_sha256 is not None:
+                break
+
+    if expected_sha256 is None:
+        raise DesktopBackendError(
+            f"Published SHA-256 digest is missing for {asset_name}.",
+            code="missing_checksum",
+        )
+    return asset_name, download_url, expected_sha256
+
+
+def _verify_file_sha256(path: Path, expected_sha256: str) -> None:
+    hasher = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(65536)
+            if not chunk:
+                break
+            hasher.update(chunk)
+    actual = hasher.hexdigest().lower()
+    if not hmac.compare_digest(actual, expected_sha256.lower()):
+        raise DesktopBackendError(
+            f"SHA-256 verification failed for {path.name}.",
+            code="checksum_mismatch",
+        )
+
+
+def _safe_extract_member_path(target_dir: Path, member_name: str) -> Path | None:
+    normalized = member_name.replace("\\", "/")
+    if not normalized or normalized.endswith("/"):
+        return None
+    relative = PurePosixPath(normalized)
+    if relative.is_absolute() or ".." in relative.parts or any(":" in part for part in relative.parts):
+        raise DesktopBackendError(
+            f"Archive contains unsafe member path: {member_name}",
+            code="invalid_archive",
+        )
+    clean_parts = [part for part in relative.parts if part not in {"", "."}]
+    if not clean_parts:
+        return None
+    destination = target_dir.joinpath(*clean_parts)
+    try:
+        destination.resolve(strict=False).relative_to(target_dir.resolve(strict=True))
+    except ValueError as exc:
+        raise DesktopBackendError(
+            f"Archive member escapes target directory: {member_name}",
+            code="invalid_archive",
+        ) from exc
+    return destination
+
+
+def _extract_release_archive(archive_path: Path, target_dir: Path) -> None:
+    target_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lowered = archive_path.name.lower()
+    extracted_bytes = 0
+
+    if lowered.endswith(".zip"):
+        try:
+            with zipfile.ZipFile(archive_path) as zf:
+                for info in zf.infolist():
+                    mode = info.external_attr >> 16
+                    if stat.S_ISLNK(mode):
+                        raise DesktopBackendError(
+                            f"Archive contains forbidden symlink: {info.filename}",
+                            code="invalid_archive",
+                        )
+                    if info.is_dir():
+                        continue
+                    destination = _safe_extract_member_path(target_dir, info.filename)
+                    if destination is None:
+                        continue
+                    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    with zf.open(info, "r") as src, destination.open("wb") as dst:
+                        while True:
+                            chunk = src.read(65536)
+                            if not chunk:
+                                break
+                            extracted_bytes += len(chunk)
+                            if extracted_bytes > MAX_EXTRACTED_ARCHIVE_BYTES:
+                                raise DesktopBackendError(
+                                    "Extracted archive exceeds size limit.",
+                                    code="invalid_archive",
+                                )
+                            dst.write(chunk)
+                    if os.name != "nt" and (mode & 0o111):
+                        destination.chmod(0o755)
+        except DesktopBackendError:
+            raise
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise DesktopBackendError(
+                f"Failed to extract zip archive: {exc}",
+                code="invalid_archive",
+            ) from exc
+        return
+
+    try:
+        with tarfile.open(archive_path, mode="r:*") as tf:
+            for member in tf.getmembers():
+                if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                    raise DesktopBackendError(
+                        f"Archive contains forbidden entry type: {member.name}",
+                        code="invalid_archive",
+                    )
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    continue
+                destination = _safe_extract_member_path(target_dir, member.name)
+                if destination is None:
+                    continue
+                destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                with extracted, destination.open("wb") as dst:
+                    while True:
+                        chunk = extracted.read(65536)
+                        if not chunk:
+                            break
+                        extracted_bytes += len(chunk)
+                        if extracted_bytes > MAX_EXTRACTED_ARCHIVE_BYTES:
+                            raise DesktopBackendError(
+                                "Extracted archive exceeds size limit.",
+                                code="invalid_archive",
+                            )
+                        dst.write(chunk)
+                if os.name != "nt" and (member.mode & 0o111):
+                    destination.chmod(0o755)
+    except DesktopBackendError:
+        raise
+    except (tarfile.TarError, OSError) as exc:
+        raise DesktopBackendError(
+            f"Failed to extract tar archive: {exc}",
+            code="invalid_archive",
+        ) from exc
+
+
+def _find_extracted_archive_executable(backend: str, staging: Path, unpacked_dir: Path) -> Path:
+    os_name, _arch = _native_target()
+    if backend == "antigravity":
+        allowed_names = {"agy.exe", "antigravity.exe"} if os_name == "win32" else {"agy", "antigravity"}
+    else:
+        allowed_names = {f"{backend}.exe" if os_name == "win32" else backend}
+
+    unique: dict[Path, Path] = {}
+    for candidate in unpacked_dir.rglob("*"):
+        if candidate.is_symlink() or not candidate.is_file():
+            continue
+        name = candidate.name.lower() if os_name == "win32" else candidate.name
+        if name not in allowed_names:
+            continue
+        if os.name != "nt":
+            candidate.chmod(0o755)
+        try:
+            unique[candidate.resolve(strict=True)] = candidate
+        except OSError:
+            continue
+
+    if len(unique) != 1:
+        raise DesktopBackendError(
+            f"Extracted {backend} archive contains no unique target-native executable.",
+            code="native_executable_missing",
+        )
+    executable = next(iter(unique))
+    if not _verified_direct_executable(executable, root=staging, require_native=True):
+        raise DesktopBackendError(
+            f"Extracted {backend} executable failed validation.",
+            code="invalid_executable",
+        )
+    return executable
+
+
+def _stage_release_archive_backend(
+    backend: str,
+    spec: DesktopBackendSpec,
+    *,
+    staging: Path,
+    toolchain: DesktopBackendToolchain,
+    base_env: Mapping[str, str] | None,
+    timeout_seconds: float,
+    version: str | None = None,
+) -> tuple[str, Path, str | None]:
+    logger.info("Installing desktop backend release archive %s", spec.package)
+    release = _fetch_github_release(spec.package, version=version, timeout_seconds=timeout_seconds)
+    asset_name, download_url, expected_sha256 = _select_release_archive_asset(
+        backend,
+        release,
+        timeout_seconds=timeout_seconds,
+    )
+    archive_path = staging / asset_name
+    _download_release_asset(download_url, archive_path, timeout_seconds=timeout_seconds)
+    # Fail closed on SHA-256 mismatch before any extraction occurs.
+    _verify_file_sha256(archive_path, expected_sha256)
+
+    unpacked_dir = staging / "unpacked"
+    _extract_release_archive(archive_path, unpacked_dir)
+    archive_path.unlink(missing_ok=True)
+
+    executable = _find_extracted_archive_executable(backend, staging, unpacked_dir)
+    probed_version = _verify_backend_executable(
+        backend,
+        executable,
+        root=staging,
+        env=_backend_command_environment(toolchain, base_env, backend=backend),
+    )
+    raw_tag = str(release.get("tag_name") or "").strip().lstrip("vV")
+    if version is not None:
+        expected_bare = version.lstrip("vV")
+        probed_bare = probed_version.strip().lstrip("vV")
+        if probed_bare != expected_bare or (raw_tag and raw_tag != expected_bare):
+            raise DesktopBackendError(
+                f"Installed {backend} version {probed_version} does not match requested version {version}.",
+                code="version_mismatch",
+            )
+        resolved_version = probed_version
+    else:
+        resolved_version = raw_tag if raw_tag and len(raw_tag) <= 128 else probed_version
+    return resolved_version, executable, f"Installed {asset_name} ({resolved_version})"
 
 
 def _prepend_path_entries(environment: dict[str, str], paths: tuple[Path, ...]) -> None:
@@ -1191,7 +1731,7 @@ def _verify_backend_executable(
     *,
     root: Path,
     env: Mapping[str, str],
-) -> None:
+) -> str:
     if not _verified_direct_executable(executable, root=root, require_native=True):
         raise DesktopBackendError(
             f"Installed {backend} executable failed validation.",
@@ -1219,12 +1759,14 @@ def _verify_backend_executable(
             f"Installed {backend} executable could not be started.",
             code="executable_probe_failed",
         ) from exc
-    if result.returncode != 0 or not cli_version(backend, result.stdout, result.stderr):
+    version = cli_version(backend, result.stdout, result.stderr)
+    if result.returncode != 0 or not version:
         raise DesktopBackendError(
             f"Installed {backend} executable did not report a valid version.",
             code="executable_probe_failed",
             output=_bounded_output(result.stdout, result.stderr),
         )
+    return version
 
 
 def _verified_direct_executable(path: Path, *, root: Path, require_native: bool) -> bool:

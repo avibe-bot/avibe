@@ -4829,9 +4829,9 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
         # The pair the Session would run on: an effort override over the Agent's default model...
         ({"model": "claude-opus-5-5"}, ["--reasoning-effort", "medium"], None,
          "reasoning_effort 'medium' is not valid for model 'claude-opus-5-5'"),
-        # ...and a model override over the Agent's default effort.
+        # A model override clears an incompatible inherited Agent effort.
         ({"model": "claude-opus-5-5", "reasoning_effort": "xhigh"}, ["--model", "gpt-6-astra"], None,
-         "reasoning_effort 'xhigh' is not valid for model 'gpt-6-astra'"),
+         None),
         # A menu that cannot be loaded vouches for nothing.
         ({}, ["--model", "claude-opus-5-5"], {"ok": False, "error": "config_unavailable"},
          "the vibey model catalog could not be loaded, so the model and reasoning effort cannot be checked"),
@@ -4839,12 +4839,12 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
     ids=["unknown-model", "effort-the-model-does-not-take", "effort-on-a-model-that-takes-none",
          "effort-over-the-agents-model", "model-over-the-agents-effort", "menu-unavailable"],
 )
-def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_and_keeps_no_session(
+def test_agent_run_checks_vibey_menu_and_distinguishes_inherited_effort(
     tmp_path: Path, capsys, sqlite_schema_db_factory, defaults, extra, catalog, message
 ) -> None:
-    """The effective pair a new Vibey Session would run on (each override over the Agent's default) is checked against
-    the Model Hub menu, which is authoritative: a pair it does not offer, or a menu that cannot load, is refused with the
-    catalog hint; the reserved Session is released and no run is queued."""
+    """Explicit choices must pass the authoritative menu; an incompatible inherited
+    effort clears with a warning. A refusal releases the Session and queues no Run.
+    """
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = vibe_agents.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="vibey", **defaults)
@@ -4855,6 +4855,18 @@ def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_and_keeps_no_se
             tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", *extra, "--message", "hi"]
         )
 
+    if message is None:
+        assert result == 0, payload
+        assert any("xhigh" in note and "cleared" in note for note in payload["warnings"])
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                "select model, reasoning_effort from agent_sessions where id = ?", (payload["run"]["session_id"],)
+            ).fetchone()
+        assert row == ("gpt-6-astra", None)
+        queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
+        assert queued["reasoning_effort"] is None
+        assert agent_store.get("worker").reasoning_effort == "xhigh"
+        return
     assert result == 1
     assert (payload["code"], payload["error"]) == ("session_model_unavailable", message)
     assert payload["hint"] == "Run `vibe agent models worker` to list valid models and reasoning efforts."

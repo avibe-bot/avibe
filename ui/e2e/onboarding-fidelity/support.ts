@@ -53,6 +53,7 @@ const CONFIG = {
     claude: { enabled: true, cli_path: 'claude' },
     codex: { enabled: true, cli_path: 'codex' },
     opencode: { enabled: true, cli_path: 'opencode' },
+    antigravity: { enabled: true, cli_path: 'agy' },
   },
   agent: { default_cwd: '/fixture/work' },
   show_duration: false,

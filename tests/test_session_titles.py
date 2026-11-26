@@ -179,7 +179,9 @@ def test_request_title_fallback_uses_user_message_when_no_message_row(monkeypatc
 
     async def _run() -> None:
         _TitleBackfillAgent(controller)._maybe_backfill_session_title(request, "claude-native-2")
-        await asyncio.sleep(0)
+        pending = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending)
 
     asyncio.run(_run())
 

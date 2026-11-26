@@ -79,6 +79,7 @@ RECOMMENDED_AGENT_MODELS = {
     "claude": "claude-opus-5-5",
     "codex": "gpt-5.6-sol",
     "opencode": "openai/gpt-5.6-sol",
+    "antigravity": "gemini-4-neon",
 }
 _UNSET = object()
 
@@ -2096,18 +2097,27 @@ def parse_agent_file(path: Path, *, backend: str) -> AgentImportCandidate:
     name = str(header.get("name") or path.stem).strip()
     description = header.get("description")
     model = header.get("model")
-    reasoning_effort = header.get("reasoning_effort") or header.get("reasoningEffort")
+    effort_keys = (
+        ("reasoning_effort", "reasoningEffort", "thought_level", "thoughtLevel")
+        if backend == "antigravity"
+        else ("reasoning_effort", "reasoningEffort")
+    )
+    reasoning_effort = next(
+        (cleaned for key in effort_keys if (cleaned := _clean_optional(header.get(key))) is not None),
+        None,
+    )
+    consumed_keys = {"name", "description", "model", *effort_keys}
     metadata = {
         key: value
         for key, value in header.items()
-        if key not in {"name", "description", "model", "reasoning_effort", "reasoningEffort"}
+        if key not in consumed_keys
     }
     return AgentImportCandidate(
         name=name,
         backend=backend,
         description=str(description).strip() if description else None,
         model=str(model).strip() if model else None,
-        reasoning_effort=str(reasoning_effort).strip() if reasoning_effort else None,
+        reasoning_effort=reasoning_effort,
         system_prompt=body or None,
         source="file",
         source_ref=str(path),
@@ -2221,7 +2231,13 @@ def iter_global_agent_files(source: str) -> list[tuple[Path, str]]:
             home / ".config" / "opencode" / "agents",
         ]
         return [(path, "opencode") for directory in search_dirs for path in sorted(directory.glob("*.md"))]
-    raise ValueError("--from must be one of: claude, codex, opencode")
+    if source_key == "antigravity":
+        search_dirs = [
+            home / ".gemini" / "config" / "agents",
+            home / ".agents" / "agents",
+        ]
+        return [(path, "antigravity") for directory in search_dirs for path in sorted(directory.glob("*.md"))]
+    raise ValueError("--from must be one of: claude, codex, opencode, antigravity")
 
 
 def _clean_optional(value: Any) -> Optional[str]:

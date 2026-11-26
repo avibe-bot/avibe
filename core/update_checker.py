@@ -568,6 +568,7 @@ class UpdateChecker:
                 if not (
                     runtime.get("ok")
                     and runtime.get("enabled")
+                    and runtime.get("auto_update_supported", True)
                     and runtime.get("auto_update")
                     and runtime.get("installed")
                     and (broken or runtime.get("has_update"))
@@ -600,7 +601,7 @@ class UpdateChecker:
                     count = attempt["count"] + 1 if attempt and attempt["version"] == release else 1
                     self.state.backend_auto_update_attempts[name] = {"version": release, "count": count}
                     self.state.save()
-                    if previous:
+                    if previous and result.get("code") != "pinned_version_unsupported" and result.get("restore") != "restored":
                         result = {**result, "restore": await self._restore_backend(name, previous)}
                     return result
 
@@ -643,8 +644,25 @@ class UpdateChecker:
             logger.warning("Backend %s restore after a failed upgrade raised: %s", name, exc)
             return "failed"
         if restored.get("ok"):
-            logger.warning("Backend %s upgrade left it unable to start; restored %s", name, previous)
-            return "restored"
+            try:
+                after = await asyncio.to_thread(api.get_backend_runtime, name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Backend %s post-restore readback raised: %s", name, exc)
+                return "failed"
+            observed_status = after.get("status")
+            observed_version = str(after.get("current_version") or "").strip()
+            expected = previous.strip().lstrip("vV")
+            if observed_status == "ok" and observed_version.lstrip("vV") == expected:
+                logger.warning("Backend %s upgrade left it unable to start; restored %s", name, previous)
+                return "restored"
+            logger.error(
+                "Backend %s restore verification failed: requested %s, observed version=%r status=%r",
+                name,
+                previous,
+                observed_version or None,
+                observed_status,
+            )
+            return "failed"
         logger.error("Backend %s upgrade left it unable to start, and restoring %s failed: %s",
                      name, previous, restored.get("message"))
         return "failed"

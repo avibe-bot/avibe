@@ -1485,3 +1485,81 @@ def test_update_state_without_backend_attempts_loads_released_fields(monkeypatch
     assert state.last_activity_at == 1767225600.0
     assert state.backend_auto_update_attempts == loaded
     assert state.backend_releases_seen == {}
+
+
+@pytest.mark.parametrize(
+    ("observed_version", "observed_status"),
+    [("0.5.0", "ok"), ("0.4.0", "broken")],
+)
+def test_restore_backend_fails_when_readback_version_or_status_mismatches(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, observed_version, observed_status
+):
+    """_restore_backend must verify post-restore status and exact version before returning 'restored'."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    SettingsStore.reset_instance()
+    checker = UpdateChecker(_StubController(SettingsStore.get_instance()), UpdateConfig())
+
+    runtime_reads = iter(
+        [
+            {"ok": True, "status": "broken", "current_version": None},
+            {"ok": True, "status": observed_status, "current_version": observed_version},
+        ]
+    )
+    monkeypatch.setattr("vibe.api.get_backend_runtime", lambda _name: next(runtime_reads))
+    install_calls = []
+    monkeypatch.setattr(
+        "vibe.api.install_agent",
+        lambda name, version=None: install_calls.append((name, version)) or {"ok": True},
+    )
+
+    outcome = asyncio.run(checker._restore_backend("antigravity", "0.4.0"))
+
+    assert install_calls == [("antigravity", "0.4.0")]
+    assert outcome == "failed"
+
+
+@pytest.mark.parametrize(
+    "antigravity_runtime",
+    [
+        {"auto_update_supported": False, "auto_update": True},
+    ],
+)
+def test_backend_auto_update_skips_antigravity_when_auto_update_unsupported(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, antigravity_runtime
+):
+    """UpdateChecker must not attempt installs or record retry attempts when auto_update_supported is False."""
+    admissions = []
+    install_calls = []
+
+    class _Coordinator:
+        async def run_when_idle(self, backend, operation):
+            admissions.append(backend)
+            return await operation()
+
+    def install(name, **kwargs):
+        install_calls.append((name, kwargs))
+        return {"ok": False, "code": "pinned_version_unsupported"}
+
+    runtimes = {
+        "codex": {"auto_update": False, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
+        "claude": {"auto_update": False, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
+        "opencode": {"auto_update": False, "has_update": False, "latest_version": "1.0.0", "status": "ok"},
+        "antigravity": {
+            "has_update": True,
+            "current_version": "0.4.0",
+            "latest_version": "0.5.0",
+            "status": "ok",
+            **antigravity_runtime,
+        },
+    }
+    checker = _backend_auto_update_checker(
+        monkeypatch, tmp_path, sqlite_schema_db_factory, _Coordinator(), runtimes, install
+    )
+    _settled(checker, antigravity="0.5.0")
+
+    asyncio.run(checker._reconcile_backend_auto_updates())
+
+    assert admissions == []
+    assert install_calls == []
+    assert checker.state.backend_auto_update_attempts == {}

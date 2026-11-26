@@ -1640,4 +1640,27 @@ scenarios:
       and the Devices readback. The issuer is a socket-level peer that drops the
       first reply; the same operation and key are sent again and only the exact
       receipt clears the binding. The workspace stays; no claim starts.
+  - id: AUTH-SETUP-932
+    name: Antigravity passive status, API-key and Agent Platform ADC settings save, and API-key removal complete through HTTP without inference
+    status: covered
+    kind: happy_path
+    layer: scenario
+    backend: antigravity
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_antigravity_auth_settings_and_passive_status_closed_loop
+    supporting_tests:
+      - tests/test_antigravity_auth_and_install.py::test_passive_status_uses_session_list_never_infers_or_exposes_sessions
+      - tests/test_antigravity_auth_and_install.py::test_api_key_save_authenticate_and_remove_never_touches_gemini_dir
+      - tests/test_antigravity_auth_and_install.py::test_antigravity_auth_save_validation_uses_configured_language
+      - tests/test_antigravity_auth_and_install.py::test_agent_platform_adc_detection_and_gcp_settings
+  - id: AUTH-SETUP-931
+    name: Antigravity auth recovery, explicit probe, and credential cutover keep the model catalog account-scoped
+    status: covered
+    kind: recovery
+    layer: scenario
+    backend: antigravity
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_antigravity_auth_error_recovery_and_explicit_probe_closed_loop
+    supporting_tests:
+      - tests/test_antigravity_auth_and_install.py::test_pty_paste_code_oauth_personal_flow_and_acp_logout
+      - tests/test_antigravity_auth_and_install.py::test_oauth_credential_cutover_discards_previous_account_model_menu
+      - tests/test_antigravity_auth_and_install.py::test_oauth_business_surfaces_terminal_fallback_when_paste_code_unsupported
 next_priority: []

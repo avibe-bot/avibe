@@ -315,6 +315,39 @@ def _collect_vibey(controller: "Controller") -> list[dict[str, Any]]:
     return rows
 
 
+def _collect_antigravity(controller: "Controller", now: float) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    agent = _get_agent(controller, "antigravity")
+    if agent is None:
+        return rows
+    sessions = getattr(agent, "_sessions", {}) or {}
+    for runtime_key, session in _safe_items(sessions):
+        turn = session.active_turn
+        is_active = bool(turn is not None and not turn.settled)
+        alive = not session.retired and session.client.is_alive
+        if not alive and not is_active:
+            continue
+        if is_active:
+            ts = session.turn_started_at if isinstance(session.turn_started_at, (int, float)) else session.last_activity
+        else:
+            ts = session.last_activity
+        elapsed = (now - ts) if isinstance(ts, (int, float)) else None
+        rows.append(
+            _make_row(
+                backend="antigravity",
+                state="active" if is_active else "idle",
+                base_session_id=session.base_session_id,
+                composite_key=runtime_key,
+                workdir=session.workdir or None,
+                pid=session.client.pid,
+                native_session_id=session.native_session_id,
+                model=session.current_model,
+                elapsed_seconds=elapsed,
+            )
+        )
+    return rows
+
+
 def _collect_orphans(seen_native: dict[str, Optional[int]], seen_pids: set[int]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     try:
@@ -679,6 +712,33 @@ async def _end_codex(controller: "Controller", base_session_id: Optional[str]) -
     }
 
 
+async def _end_antigravity(controller: "Controller", base_session_id: Optional[str]) -> dict[str, Any]:
+    if not base_session_id:
+        return {"ok": False, "error": "base_session_id_required"}
+    agent = _get_agent(controller, "antigravity")
+    if agent is None:
+        return {"ok": False, "error": "antigravity_unavailable"}
+    end_session = getattr(agent, "end_session", None)
+    if not callable(end_session):
+        return {"ok": False, "error": "antigravity_registries_unavailable"}
+    try:
+        ended = await end_session(base_session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("end: antigravity teardown failed for %s", base_session_id, exc_info=True)
+        return {
+            "ok": False,
+            "error": "transport_retire_failed",
+            "detail": str(exc),
+        }
+    return {
+        "ok": True,
+        "action": "ended",
+        "backend": "antigravity",
+        "interrupted": bool(ended.get("interrupted")),
+        "process_killed": bool(ended.get("process_killed")),
+    }
+
+
 async def _end_opencode(controller: "Controller", base_session_id: Optional[str]) -> dict[str, Any]:
     if not base_session_id:
         return {"ok": False, "error": "base_session_id_required"}
@@ -824,6 +884,12 @@ def _live_workdir_for_backend(
                 req_info = None
             if req_info and len(req_info) >= 2:
                 return req_info[1]
+    elif backend == "antigravity":
+        agent = _get_agent(controller, "antigravity")
+        sessions = getattr(agent, "_sessions", {}) or {}
+        for _key, session in _safe_items(sessions):
+            if session.base_session_id == base_session_id and session.workdir:
+                return session.workdir
     return None
 
 
@@ -1215,6 +1281,22 @@ def _resolve_live_state(
         except Exception:  # noqa: BLE001
             return "active"
 
+    if backend == "antigravity":
+        agent = _get_agent(controller, "antigravity")
+        sessions = getattr(agent, "_sessions", {}) or {}
+        matched = False
+        for key, session in _safe_items(sessions):
+            if (composite_key and key == composite_key) or (
+                base_session_id and session.base_session_id == base_session_id
+            ):
+                turn = session.active_turn
+                is_active = bool(turn is not None and not turn.settled)
+                if is_active:
+                    return "active"
+                if not session.retired and session.client.is_alive:
+                    matched = True
+        return "idle" if matched else None
+
     return None
 
 
@@ -1300,6 +1382,15 @@ async def end_running_agent(
             # and its row, so End did not finish: report the teardown failure.
             return teardown if isinstance(teardown, dict) else stop_result
 
+        if backend == "antigravity":
+            teardown = await _end_antigravity(controller, base_session_id)
+            if isinstance(teardown, dict) and teardown.get("ok"):
+                result = dict(stop_result) if stop_ok else {"ok": True, "action": "ended", "backend": "antigravity"}
+                if teardown.get("process_killed"):
+                    result["process_killed"] = True
+                return result
+            return teardown if isinstance(teardown, dict) else stop_result
+
         if not stop_ok:
             return stop_result
         if backend == "opencode":
@@ -1328,6 +1419,8 @@ async def end_running_agent(
         result = await _end_codex(controller, base_session_id)
     elif backend == "opencode":
         result = await _end_opencode(controller, base_session_id)
+    elif backend == "antigravity":
+        result = await _end_antigravity(controller, base_session_id)
     elif isinstance(pid, int):
         # Fallback: a pid-only target with no backend is treated as an orphan kill.
         return await _end_orphan_pid(pid)
@@ -1374,6 +1467,7 @@ def snapshot_running_agents(
     rows.extend(_collect_codex(controller))
     rows.extend(_collect_opencode(controller))
     rows.extend(_collect_vibey(controller))
+    rows.extend(_collect_antigravity(controller, now))
     rows.extend(_collect_orphans(seen_native, seen_pids))
 
     _enrich_from_db(rows)

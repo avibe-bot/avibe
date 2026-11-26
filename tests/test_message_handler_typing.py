@@ -17,6 +17,8 @@ sys.path.insert(0, str(ROOT))
 from modules.im import MessageContext
 from modules.sessions_facade import SessionsFacade
 from core.processing_indicator import ProcessingIndicatorService
+# Keep SQLAlchemy's Cython traversal enums loaded when the stub loader restores sys.modules.
+from storage.db import get_cached_sqlite_engine
 
 
 def _load_message_handler_class():
@@ -1439,6 +1441,103 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.handle_user_message(context, "hello")
 
         controller.settings_manager.sessions.materialize_agent_session_route.assert_not_called()
+
+    async def test_workbench_materializes_only_the_models_offered_inherited_effort(self):
+        """The header pins the effort dispatch will use, rather than an incompatible
+        Agent default. Existing materialization tests did not use model-dependent menus.
+        Exercise the real shared menu and SQLite writer, including a model switch.
+        """
+        import threading
+
+        from config.v2_config import V2Config
+        from config.v2_sessions import SessionsStore
+        from core.services import sessions as sessions_service
+        from modules.agents.antigravity.models import record_antigravity_live_models
+        from vibe import api
+
+        cfg = V2Config.default()
+        cfg.save()
+        models = ("gemini-pro-orchestrator", "gemini-4-carbon", "gemini-4-neon")
+        for model, levels in zip(models, ((), ("low", "medium", "high"), ("low", "medium", "high", "xhigh"))):
+            options = [{"id": "model", "category": "model", "currentValue": model,
+                        "options": [{"value": value} for value in models]}]
+            if levels:
+                options.append({"id": "thought_level", "category": "thought_level", "currentValue": "high",
+                                "options": [{"value": value} for value in levels]})
+            record_antigravity_live_models(cfg, {"configOptions": options})
+
+        menu_reads = []
+        loop_thread = threading.get_ident()
+        original_menu = api.route_menu_options
+
+        def read_menu(*args, **kwargs):
+            menu_reads.append((threading.get_ident(), kwargs.get("cached_only")))
+            return original_menu(*args, **kwargs)
+
+        sessions_store = SessionsStore()
+        try:
+            cases = (
+                # backend, selected model, inherited effort, switched, wholly inherited, applied effort
+                ("antigravity", "gemini-pro-orchestrator", "medium", False, False, None),
+                ("antigravity", "gemini-4-carbon", "xhigh", True, False, "high"),
+                ("antigravity", "gemini-4-neon", "medium", False, False, "medium"),
+                ("antigravity", "gemini-4-neon", "medium", False, True, "medium"),
+                ("vibey", "hub-model", "xhigh", False, False, "high"),
+                ("codex", "future-unlisted-model", "medium", False, False, "medium"),
+                ("opencode", "uncached/model", "medium", False, False, "medium"),
+            )
+            with (
+                patch.object(api, "route_menu_options", side_effect=read_menu),
+                patch.object(api, "opencode_options") as native_options,
+                patch.dict(api._OPENCODE_OPTIONS_CACHE, {}, clear=True),
+                patch("vibe.backend_model_catalog.schedule_remote_catalog_refresh") as refresh,
+            ):
+                for index, (backend, model, inherited, switched, wholly_inherited, applied) in enumerate(cases):
+                    with self.subTest(backend=backend, model=model, wholly_inherited=wholly_inherited):
+                        controller = _StubController(platform="avibe", ack_mode="reaction", typing_result=True)
+                        controller.settings_manager.sessions = SessionsFacade(sessions_store)
+                        if backend == "vibey":
+                            async def read_sources(_backend):
+                                return {"mode": "hub", "catalog_models": [{
+                                    "id": "hub-model", "routeable": True, "reasoning_efforts": ["low", "high"],
+                                }]}
+                            controller.model_hub_service = types.SimpleNamespace(read_agent_sources=read_sources)
+                        agent = controller.resolve_vibe_agent_for_context(None)
+                        agent.backend, agent.model, agent.reasoning_effort = backend, model, inherited
+                        controller.resolve_vibe_agent_for_context = lambda *_args, **_kwargs: agent
+                        session_id = sessions_service.reserve_standalone_agent_session(
+                            agent_backend=backend, session_anchor=f"inherited-{index}",
+                            agent_id=agent.id, agent_name=agent.name,
+                            model=None if wholly_inherited else "gemini-4-neon" if switched else model,
+                            reasoning_effort="xhigh" if switched else None,
+                        )
+                        if switched:
+                            with get_cached_sqlite_engine().begin() as conn:
+                                sessions_service.update_session(conn, session_id, model=model, reasoning_effort=None)
+                        row = sessions_store.get_agent_session_by_id(session_id)
+                        self.assertIsNone(row["reasoning_effort"])
+                        handler = MessageHandler(controller)
+                        handler.set_session_handler(_StubSessionHandler())
+                        context = MessageContext(
+                            user_id="U1", channel_id=session_id, message_id=f"turn-{index}", platform="avibe",
+                            platform_specific={"agent_session_target": row},
+                        )
+
+                        await handler.handle_user_message(context, "hello")
+
+                        stored = sessions_store.get_agent_session_by_id(session_id)
+                        self.assertEqual((stored["model"], stored["reasoning_effort"]), (model, applied))
+                        selected_backend, request = controller.agent_service.requests[0]
+                        self.assertEqual((selected_backend, request.vibe_agent_model), (backend, model))
+                        self.assertEqual(request.vibe_agent_reasoning_effort, applied)
+                        self.assertEqual(request.vibe_agent_inherited_reasoning_effort, applied)
+                        self.assertEqual(agent.reasoning_effort, inherited)
+                self.assertEqual(len(menu_reads), len(cases))
+                self.assertTrue(all(thread != loop_thread and cached for thread, cached in menu_reads))
+                native_options.assert_not_called()
+                refresh.assert_not_called()
+        finally:
+            sessions_store.close()
 
     async def test_session_on_a_retired_model_or_effort_moves_to_the_successor_once(self):
         """A Session whose stored model or effort left its backend's Model Hub list carries on with its Agent's

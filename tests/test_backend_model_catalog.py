@@ -92,8 +92,17 @@ def test_bundled_catalog_rows_are_exact_and_covered_by_the_vocabulary() -> None:
     assert len(backend_model_catalog.REASONING_EFFORT_VOCABULARY) == len(
         set(backend_model_catalog.REASONING_EFFORT_VOCABULARY)
     )
+    first_by_id = {}
     for model in rows:
-        assert efforts_by_model[model["id"]] == tuple(model["reasoning_efforts"])
+        first_by_id.setdefault(model["id"], tuple(model["reasoning_efforts"]))
+    for model_id, efforts in first_by_id.items():
+        assert efforts_by_model[model_id] == efforts
+    # A multi-vendor backend may expose a different effort menu for the same model.
+    for backend, data in catalog["backends"].items():
+        indexed = {row["id"]: row for row in backend_model_catalog.backend_model_entries(backend, catalog)}
+        for model in data["models"]:
+            if "reasoning_efforts" in model:
+                assert indexed[model["id"]]["reasoning_efforts"] == model["reasoning_efforts"]
 
 
 def test_bundled_reasoning_effort_index_is_immutable_and_keeps_first_row(

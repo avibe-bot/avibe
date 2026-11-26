@@ -32,6 +32,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from config import paths
 from config.v2_config import (
     CONFIG_LOCK,
+    MODEL_HUB_BACKENDS,
     V2Config,
     config_file_lock,
     AGENT_CREDENTIAL_SECTIONS,
@@ -75,7 +76,12 @@ from vibe.desktop_backends import (
 from vibe.desktop_runtime import is_private_desktop_runtime_path
 from vibe.desktop_update_status import desktop_update_snapshot
 from vibe.cli_health import CliHealth, probe_cli, probe_cli_sync
-from vibe.cli_repair import REPAIR_PATH_CONFLICT, identify_repair_source, native_bootstrap_env
+from vibe.cli_repair import (
+    REPAIR_PATH_CONFLICT,
+    identify_repair_source,
+    native_bootstrap_env,
+    native_vendor_install_target,
+)
 from vibe.cli_paths import (
     _candidate_cli_paths,
     _command_env_for,
@@ -86,6 +92,7 @@ from vibe.cli_paths import (
     _npm_global_prefixes,
     _npm_prefix_for,
     _windows_executable_candidates,
+    desktop_backend_for_cli,
     resolve_cli_path as _resolve_cli_path,
 )
 from vibe.upgrade import (
@@ -124,6 +131,7 @@ from modules.agents.catalog import (
     NATIVE_CLI_BACKENDS,
     agent_backend_catalog_payload,
     agent_backend_descriptors,
+    default_cli_for_backend,
     display_name_for_backend,
     is_agent_backend,
     is_builtin_backend,
@@ -363,8 +371,9 @@ def resolve_cli_paths(
     for binary, path in resolved.items():
         if path is None:
             name = Path(os.path.expanduser(binary)).name
-            if name in NATIVE_CLI_BACKENDS:
-                resolved[binary] = resolve_published_desktop_backend(name)
+            desktop_backend = desktop_backend_for_cli(name)
+            if desktop_backend is not None:
+                resolved[binary] = resolve_published_desktop_backend(desktop_backend)
     return resolved
 
 
@@ -930,7 +939,7 @@ def _deep_merge_dicts(base: dict, patch: dict) -> dict:
     return merged
 
 
-_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url", "oauth_relay_marker")
+_AGENT_AUTH_FIELDS = ("auth_mode", "api_key", "base_url", "oauth_relay_marker", "gcp_project", "gcp_location")
 
 
 def _strip_agent_auth_fields(payload: dict) -> dict:
@@ -948,7 +957,7 @@ def _strip_agent_auth_fields(payload: dict) -> dict:
     if not isinstance(agents, dict):
         return payload
     cleaned_agents = dict(agents)
-    for backend in ("claude", "codex"):
+    for backend in ("claude", "codex", "antigravity"):
         backend_payload = cleaned_agents.get(backend)
         if isinstance(backend_payload, dict):
             cleaned_backend = {
@@ -1544,6 +1553,7 @@ def config_to_payload(
             "opencode": config.agents.opencode.__dict__,
             "claude": _agent_payload(config.agents.claude.__dict__, include_secrets=include_secrets),
             "codex": _agent_payload(config.agents.codex.__dict__, include_secrets=include_secrets),
+            "antigravity": _agent_payload(config.agents.antigravity.__dict__, include_secrets=include_secrets),
             # Mirror ``V2Config.save`` — avault must be emitted here too, or every
             # UI save (which uses this payload as the deep-merge base) silently
             # resets ``agents.avault.cli_path`` to the dataclass default.
@@ -6622,7 +6632,7 @@ def import_vibe_agents(payload: dict, *, user_context: Any = None) -> dict:
         candidates.append(_parse_agent_import_file(path, backend=backend))
     else:
         if source not in NATIVE_CLI_BACKENDS:
-            raise ValueError("from must be one of: claude, codex, opencode")
+            raise ValueError(f"from must be one of: {', '.join(NATIVE_CLI_BACKENDS)}")
         if name and import_all:
             raise ValueError("Use either name or all, not both")
         for path, backend in iter_global_agent_files(str(source)):
@@ -8641,6 +8651,11 @@ def claude_models(*, schedule_refresh: bool = True) -> dict:
     return backend_model_catalog.backend_model_snapshot("claude", schedule_refresh=schedule_refresh)
 
 
+def antigravity_models(*, schedule_refresh: bool = True) -> dict:
+    """Return the immediate shared Antigravity model-catalog snapshot."""
+    return backend_model_catalog.backend_model_snapshot("antigravity", schedule_refresh=schedule_refresh)
+
+
 def _effort_values(reasoning_entries: object) -> list[str]:
     """Extract settable reasoning-effort values, dropping the UI ``__default__`` sentinel."""
     out: list[str] = []
@@ -8677,6 +8692,7 @@ def _opencode_model_options(
     provider: Optional[str],
     cwd: Optional[str],
     config: Optional[V2Config],
+    cached_only: bool = False,
 ) -> dict:
     """OpenCode model options, including custom providers and user-added models.
 
@@ -8693,7 +8709,12 @@ def _opencode_model_options(
     if not resolved_cwd:
         resolved_cwd = "."
 
-    raw = opencode_options(resolved_cwd)
+    if cached_only:
+        cached = _OPENCODE_OPTIONS_CACHE.get(os.path.expanduser(resolved_cwd), {})
+        data = cached.get("data") if cached.get("mode") == "direct" else None
+        raw = {"ok": bool(data), "data": data}
+    else:
+        raw = opencode_options(resolved_cwd)
     if not raw.get("ok"):
         return {"ok": False, "backend": "opencode", "error": raw.get("error") or "opencode options unavailable"}
 
@@ -8787,6 +8808,7 @@ def agent_model_options(
     *,
     provider: Optional[str] = None,
     cwd: Optional[str] = None,
+    cached_only: bool = False,
 ) -> dict:
     """Backend-agnostic available models + per-model reasoning efforts.
 
@@ -8830,7 +8852,7 @@ def agent_model_options(
             "live": False,
         }
     if normalized_backend == "claude":
-        data = claude_models()
+        data = claude_models(schedule_refresh=False) if cached_only else claude_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "claude model lookup failed"}
         result = {
@@ -8843,7 +8865,7 @@ def agent_model_options(
             "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
     elif normalized_backend == "codex":
-        data = codex_models()
+        data = codex_models(schedule_refresh=False) if cached_only else codex_models()
         if not data.get("ok"):
             return {"ok": False, "backend": normalized_backend, "error": data.get("error") or "codex model lookup failed"}
         result = {
@@ -8855,8 +8877,26 @@ def agent_model_options(
             "notes": data.get("notes"),
             "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
         }
+    elif normalized_backend == "antigravity":
+        data = antigravity_models(schedule_refresh=False) if cached_only else antigravity_models()
+        if not data.get("ok"):
+            return {
+                "ok": False,
+                "backend": normalized_backend,
+                "error": data.get("error") or "antigravity model lookup failed",
+            }
+        result = {
+            "ok": True,
+            "backend": "antigravity",
+            "models": _flat_catalog_models(data),
+            "source": data.get("source"),
+            "live": bool(data.get("live")),
+            "authoritative": bool(data.get("authoritative")),
+            "notes": data.get("notes"),
+            "catalog_refresh_pending": bool(data.get("catalog_refresh_pending")),
+        }
     else:
-        result = _opencode_model_options(provider=provider, cwd=cwd, config=config)
+        result = _opencode_model_options(provider=provider, cwd=cwd, config=config, cached_only=cached_only)
 
     return result
 
@@ -8899,18 +8939,23 @@ def route_menu_options(
     *,
     hub_agent_reader: Optional[Callable[[str], Any]] = None,
     provider: Optional[str] = None,
+    cached_only: bool = False,
 ) -> dict:
     """The models, efforts, and fast tiers a Session on ``backend`` can switch to: the Web route picker's menu.
 
     ``hub_agent_reader`` returns Model Hub's Agent payload for a backend (``ModelHubService.get_agent_sources``,
     in the service or over its internal RPC). A Hub-served backend's menu comes from it and is authoritative.
     A Direct backend, or a Hub that cannot answer, falls back to ``agent_model_options``: Vibey's configured menu
-    stays authoritative, while Claude and Codex bundled catalogs may lag a release. Only Hub offers fast mode.
+    stays authoritative, as does Antigravity's cached live menu; Claude and Codex bundled catalogs may lag a
+    release. Only Hub offers fast mode.
+
+    ``cached_only`` reads the existing menu without scheduling catalog refreshes
+    or starting an OpenCode server. Disk-backed snapshots still belong off the event loop.
     """
     normalized_backend = (backend or "").strip().lower()
     hub_agent = None
     hub_read = False
-    if hub_agent_reader is not None and normalized_backend in AGENT_BACKENDS:
+    if hub_agent_reader is not None and normalized_backend in MODEL_HUB_BACKENDS:
         try:
             hub_agent = hub_agent_reader(normalized_backend)
             hub_read = True
@@ -8927,13 +8972,16 @@ def route_menu_options(
             "live": True,
             "authoritative": True,
         }
-    options = dict(agent_model_options(normalized_backend, provider=provider))
+    options = dict(agent_model_options(
+        normalized_backend, provider=provider, **({"cached_only": True} if cached_only else {})
+    ))
     if options.get("ok"):
         options["mode"] = (
             "hub" if not is_native_cli_backend(normalized_backend)
+            else "direct" if normalized_backend not in MODEL_HUB_BACKENDS
             else str((hub_agent or {}).get("mode") or "direct") if hub_read else "unknown"
         )
-        options["authoritative"] = not is_native_cli_backend(normalized_backend)
+        options["authoritative"] = bool(options.get("authoritative")) or not is_native_cli_backend(normalized_backend)
     return options
 
 
@@ -9120,13 +9168,14 @@ def get_agent_install_job(job_id: str | None = None, *, backend: str | None = No
 
 
 def _configured_agent_cli_path(name: str) -> str:
+    default_cli = default_cli_for_backend(name) or name
     try:
         config = load_config()
     except (FileNotFoundError, OSError, ValueError):
-        return name
+        return default_cli
     backend = getattr(getattr(config, "agents", None), name, None)
     configured = getattr(backend, "cli_path", "") if backend is not None else ""
-    return configured or name
+    return configured or default_cli
 
 
 def _persist_agent_cli_path(name: str, installed_path: str, *, required: bool = False) -> str | None:
@@ -9172,14 +9221,91 @@ _DESKTOP_BACKEND_ERROR_I18N_KEYS = {
     "install_locked": "desktopBackendInstall.installLocked",
     "npm_install_failed": "desktopBackendInstall.installFailed",
     "desktop_install_failed": "desktopBackendInstall.installFailed",
+    "archive_download_failed": "desktopBackendInstall.installFailed",
+    "missing_checksum": "desktopBackendInstall.invalidInstall",
+    "checksum_mismatch": "desktopBackendInstall.invalidInstall",
+    "invalid_archive": "desktopBackendInstall.invalidInstall",
     "invalid_backend_root": "desktopBackendInstall.invalidInstall",
     "invalid_package": "desktopBackendInstall.invalidInstall",
     "native_executable_missing": "desktopBackendInstall.invalidInstall",
     "invalid_executable": "desktopBackendInstall.invalidInstall",
+    "version_mismatch": "desktopBackendInstall.invalidInstall",
+    "invalid_version": "desktopBackendInstall.invalidInstall",
     "unsupported_platform": "desktopBackendInstall.unsupportedPlatform",
     "install_timeout": "desktopBackendInstall.timedOut",
     "executable_probe_failed": "desktopBackendInstall.probeFailed",
 }
+
+
+def _run_antigravity_script_update(existing_path: str, truncate_output, version: str) -> dict:
+    """Update an idle script install; accept only the selected settled release, else restore it.
+
+    agy's self-updater cannot pin its download. Keep the old executable until fresh
+    version readback proves the requested release. A failed restore retains its backup.
+    """
+    import shutil
+    import tempfile
+
+    launcher = Path(existing_path)
+    backup_dir = None
+    backup = None
+    changed = False
+    cleanup = True
+    try:
+        target = launcher.resolve(strict=True)
+        original_link = os.readlink(launcher) if launcher.is_symlink() else None
+        previous = detect_cli(existing_path, "antigravity")
+        if previous.get("status") != "ok" or not previous.get("version"):
+            return _antigravity_pinned_version_unsupported()
+        backup_dir = Path(tempfile.mkdtemp(prefix=".avibe-agy-update-", dir=target.parent))
+        backup = backup_dir / "previous"
+        shutil.copy2(target, backup)
+        changed = True
+
+        def verified(path: str) -> bool:
+            observed = detect_cli(path, "antigravity")
+            return observed.get("status") == "ok" and str(observed.get("version") or "").lstrip("vV") == version.lstrip("vV")
+
+        result = _run_install_command(
+            "antigravity", [existing_path, "update"], truncate_output, mode="upgrade",
+            env={**_command_env_for(existing_path), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"},
+            expected_path=existing_path, readback_validator=verified,
+        )
+        if result.get("ok"):
+            return result
+        # Publish the saved executable before the idle-update reservation is released.
+        restored = backup_dir / "restored"
+        shutil.copy2(backup, restored)
+        os.replace(restored, target)
+        if original_link is not None and (not launcher.is_symlink() or os.readlink(launcher) != original_link):
+            with tempfile.TemporaryDirectory(prefix=".avibe-agy-link-", dir=launcher.parent) as directory:
+                link = Path(directory) / "agy"
+                link.symlink_to(original_link)
+                os.replace(link, launcher)
+        health = detect_cli(existing_path, "antigravity")
+        restored_ok = health.get("status") == "ok" and health.get("version") == previous["version"]
+        cleanup = restored_ok
+        return {**result, "restore": "restored" if restored_ok else "failed", **({} if restored_ok else {"backup_path": str(backup)})}
+    except Exception:
+        # Keep the saved binary for fix-forward if publication/readback could not finish.
+        cleanup = not changed
+        logger.exception("Antigravity script update or restoration failed; backup=%s", backup)
+        return {"ok": False, "code": "cli_readback_failed",
+                "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
+                "restore": "failed" if changed else "not_needed", "backup_path": str(backup) if backup else None}
+    finally:
+        if cleanup and backup_dir is not None:
+            shutil.rmtree(backup_dir)
+
+
+def _antigravity_pinned_version_unsupported() -> dict:
+    return {
+        "ok": False,
+        "code": "pinned_version_unsupported",
+        "message": "Antigravity CLI self-update and script installers do not support pinned versions.",
+        "output": None,
+        "path": None,
+    }
 
 
 def _configured_backend_language() -> str:
@@ -9198,12 +9324,13 @@ def _desktop_backend_install_message(name: str, code: str) -> str:
     )
 
 
-def _run_desktop_backend_install(name: str, truncate_output) -> dict:
+def _run_desktop_backend_install(name: str, truncate_output, *, version: str | None = None) -> dict:
     def _activate(installed_path: str) -> None:
         _persist_agent_cli_path(name, installed_path, required=True)
 
     try:
-        result = install_desktop_backend(name, activate=_activate)
+        version_kw = {"version": version} if version is not None else {}
+        result = install_desktop_backend(name, activate=_activate, **version_kw)
     except DesktopBackendError as exc:
         return {
             "ok": False,
@@ -9218,6 +9345,15 @@ def _run_desktop_backend_install(name: str, truncate_output) -> dict:
         return {"ok": False, "code": "cli_readback_failed",
                 "message": backend_t("cliHealth.installReadbackFailed", _configured_backend_language()),
                 "path": result.path, "output": None, "detection": health}
+    if version is not None and (health.get("version") or "").strip().lstrip("vV") != version.strip().lstrip("vV"):
+        return {
+            "ok": False,
+            "code": "version_mismatch",
+            "message": _desktop_backend_install_message(name, "version_mismatch"),
+            "path": result.path,
+            "output": None,
+            "detection": health,
+        }
     return {
         "ok": True,
         "message": backend_t(
@@ -9320,18 +9456,28 @@ def _repair_broken_cli(name: str, selected: str, truncate_output, *, version: st
             if not bash or not curl:
                 return _cli_repair_refusal(name)
             cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://claude.ai/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
+    elif name == "antigravity":
+        if version is not None:
+            return _antigravity_pinned_version_unsupported()
+        command_env = {**native_bootstrap_env(command_env), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
+        if os.name == "nt":
+            powershell = resolve_cli_path("powershell")
+            if not powershell:
+                return _cli_repair_refusal(name)
+            cmd = [powershell, "-NoProfile", "-Command", "irm https://antigravity.google/cli/install.ps1 -ErrorAction Stop | iex"]
+        else:
+            bash, curl = resolve_cli_path("bash"), resolve_cli_path("curl")
+            if not bash or not curl:
+                return _cli_repair_refusal(name)
+            cmd = [bash, "--noprofile", "--norc", "-c", "set -euo pipefail; " + shlex.join([curl, "-fsSL", *shlex.split(_CURL_INSTALL_RETRY_FLAGS), "https://antigravity.google/cli/install.sh"]) + " | " + shlex.join([bash, "--noprofile", "--norc"])]
     else:
         return _cli_repair_refusal(name)
     return _run_install_command(name, cmd, truncate_output, mode="repair", env=command_env, expected_path=source.destination)
 
 
 def _native_vendor_install_target(name: str) -> str | None:
-    home = Path.home()
-    if name == "opencode":
-        return str(home / ".opencode" / "bin" / ("opencode.exe" if os.name == "nt" else "opencode"))
-    if name == "claude":
-        return str(home / ".local" / "bin" / ("claude.exe" if os.name == "nt" else "claude"))
-    return None
+    target = native_vendor_install_target(name)
+    return str(target) if target is not None else None
 
 
 def _install_agent(name: str, *, version: str | None = None) -> dict:
@@ -9402,13 +9548,14 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
             return existing_path
         return None
 
+    desktop_version_kw = {"version": version} if version is not None else {}
     if _owned_path(is_desktop_backend_path) is not None:
-        return _run_desktop_backend_install(name, _truncate_output)
+        return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
     if name == "codex":
         private_runtime_path = _owned_path(is_private_desktop_runtime_path)
         if private_runtime_path is not None:
             if desktop_backend_toolchain() is not None:
-                return _run_desktop_backend_install(name, _truncate_output)
+                return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
             return {
                 "ok": False,
                 "code": "desktop_managed_backend",
@@ -9421,9 +9568,12 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # Preserve the app-private ownership boundary before any global probe or
     # repair planner can discover a non-executable user installation.
     if existing_path is None and is_desktop_managed_runtime():
-        return _run_desktop_backend_install(name, _truncate_output)
+        return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
     health = detect_cli(configured_path, name)
-    if health["status"] in {"broken", "unknown"} or (health["status"] == "missing" and configured_path != name):
+    default_cli = default_cli_for_backend(name) or name
+    if health["status"] in {"broken", "unknown"} or (
+        health["status"] == "missing" and configured_path not in {name, default_cli}
+    ):
         if health["status"] == "unknown":
             return _cli_repair_refusal(name)
         return _repair_broken_cli(name, health["path"] or configured_path, _truncate_output, version=version)
@@ -9451,6 +9601,11 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
             if isinstance(upgrade, dict):
                 return upgrade
             cmd, command_env = upgrade
+        elif name == "antigravity":
+            if version is not None:
+                return _run_antigravity_script_update(existing_path, _truncate_output, version)
+            cmd = [existing_path, "update"]
+            command_env = {**_command_env_for(existing_path), "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
         else:
             cmd = None
         if cmd is not None:
@@ -9472,7 +9627,7 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
     # run the legacy global installers and mutate user/system state from a
     # desktop Runtime that promises app-private backend ownership.
     if is_desktop_managed_runtime():
-        return _run_desktop_backend_install(name, _truncate_output)
+        return _run_desktop_backend_install(name, _truncate_output, **desktop_version_kw)
 
     command_env: dict[str, str] | None = None
     expected_path: str | None = None
@@ -9531,6 +9686,28 @@ def _install_agent(name: str, *, version: str | None = None) -> dict:
                 "message": "npm not found. Please install Node.js first.",
                 "output": None,
             }
+    elif name == "antigravity":
+        if version is not None:
+            return _antigravity_pinned_version_unsupported()
+        command_env = {**os.environ, "AGY_CLI_DISABLE_AUTO_UPDATE": "true"}
+        if system == "windows":
+            error = _check_binary("powershell")
+            if error:
+                return {"ok": False, "message": error, "output": None}
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "irm https://antigravity.google/cli/install.ps1 -ErrorAction Stop | iex",
+            ]
+            expected_path = _native_vendor_install_target(name)
+        else:
+            for binary in ["curl", "bash"]:
+                error = _check_binary(binary)
+                if error:
+                    return {"ok": False, "message": error, "output": None}
+            cmd = _curl_installer_command("https://antigravity.google/cli/install.sh", "bash")
+            expected_path = _native_vendor_install_target(name)
     else:
         return {"ok": False, "message": f"Unknown agent: {name}", "output": None}
 
@@ -12729,9 +12906,11 @@ async def get_backend_connection(name: str) -> dict:
     builtin = is_builtin_backend(name)
     backend_config = None if builtin else getattr(config.agents, name)
     enabled = builtin or bool(backend_config.enabled)
-    supply_mode = config.model_hub.agents[name].mode
+    supply = config.model_hub.agents.get(name)
+    supply_mode = supply.mode if supply is not None else "direct"
     native = is_native_cli_backend(name)
-    cli_health = await detect_cli_async(backend_config.cli_path or name, name) if native else None
+    default_cli = (default_cli_for_backend(name) or name) if native else name
+    cli_health = await detect_cli_async(backend_config.cli_path or default_cli, name) if native else None
     installed = cli_health["found"] if cli_health is not None else True
     result = {
         "ok": True, "backend": name, "installed": installed, "enabled": enabled,
@@ -12796,6 +12975,17 @@ async def get_backend_connection(name: str) -> dict:
             # check's lease is released before this observation settles.
             await finish_native_operation(asyncio.to_thread(_assert_direct_claude_custody))
             result["auth"] = "external"
+        elif name == "antigravity":
+            auth = await get_antigravity_auth_async()
+            if not auth.get("ok") or auth.get("auth_mode_uncertain"):
+                return result
+            result["auth"] = {
+                "oauth-personal": "subscription",
+                "oauth-business": "subscription",
+                "gemini-api-key": "api_key",
+                "agent-platform": "external",
+                "none": "none",
+            }.get(auth.get("active_auth_mode"), "unknown")
         else:
             auth = await asyncio.to_thread(get_codex_auth)
             if not auth.get("ok") or auth.get("auth_mode_uncertain"):
@@ -12843,7 +13033,12 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
 
     backend_cfg = getattr(getattr(config, "agents", None), name, None) if config else None
     enabled = bool(getattr(backend_cfg, "enabled", False))
-    configured_path = (cli_path or name) if cli_path is not None else (getattr(backend_cfg, "cli_path", "") or name)
+    default_cli = default_cli_for_backend(name) or name
+    configured_path = (
+        (cli_path or default_cli)
+        if cli_path is not None
+        else (getattr(backend_cfg, "cli_path", "") or default_cli)
+    )
 
     health = await detect_cli_async(configured_path, name)
     resolved_path = health["path"]
@@ -12859,6 +13054,7 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
         if private_backend or legacy_bundled_codex
         else None
     )
+    auto_update_supported = True
 
     current_version = health["version"]
     latest_version = None if legacy_bundled_codex else await asyncio.to_thread(_cached_latest, name)
@@ -12877,7 +13073,8 @@ async def get_backend_runtime_async(name: str, cli_path: str | None = None) -> d
         "ok": True,
         "name": name,
         "enabled": enabled,
-        "auto_update": bool(getattr(backend_cfg, "auto_update", True)),
+        "auto_update_supported": auto_update_supported,
+        "auto_update": bool(getattr(backend_cfg, "auto_update", True)) if auto_update_supported else None,
         "cli_path": configured_path,
         "resolved_path": resolved_path,
         "installed": installed,
@@ -13198,9 +13395,15 @@ def start_oauth_web(
     backend: str,
     force_reset: bool = True,
     provider_id: Optional[str] = None,
+    auth_method: Optional[str] = None,
 ) -> dict:
     return _submit_oauth_coro(
-        start_oauth_web_async(backend, force_reset=force_reset, provider_id=provider_id),
+        start_oauth_web_async(
+            backend,
+            force_reset=force_reset,
+            provider_id=provider_id,
+            auth_method=auth_method,
+        ),
         timeout=60.0,
     )
 
@@ -13209,6 +13412,7 @@ async def start_oauth_web_async(
     backend: str,
     force_reset: bool = True,
     provider_id: Optional[str] = None,
+    auth_method: Optional[str] = None,
 ) -> dict:
     backend = (backend or "").strip().lower()
     if not supports_web_oauth(backend):
@@ -13222,11 +13426,14 @@ async def start_oauth_web_async(
 
     service = _get_oauth_service()
     try:
-        flow = await service.start_web_setup(
-            backend,
-            force_reset=force_reset,
-            provider_id=(provider_id.strip() if isinstance(provider_id, str) else None),
-        )
+        start_kwargs: dict[str, Any] = {
+            "force_reset": force_reset,
+            "provider_id": (provider_id.strip() if isinstance(provider_id, str) else None),
+        }
+        cleaned_auth_method = auth_method.strip() if isinstance(auth_method, str) and auth_method.strip() else None
+        if cleaned_auth_method is not None:
+            start_kwargs["auth_method"] = cleaned_auth_method
+        flow = await service.start_web_setup(backend, **start_kwargs)
     except BackendLoginInProgressError as exc:
         try:
             lang = load_config().language
@@ -13256,7 +13463,7 @@ async def start_oauth_web_async(
             "state": flow.state,
             "authorization_completed": flow.authorization_completed,
         }
-    return {
+    response = {
         "ok": True,
         "flow_id": flow.flow_id,
         "backend": flow.backend,
@@ -13268,6 +13475,13 @@ async def start_oauth_web_async(
         "provider": flow.provider,
         "authorization_completed": flow.authorization_completed,
     }
+    if getattr(flow, "auth_method", None) is not None:
+        response["auth_method"] = flow.auth_method
+    if getattr(flow, "terminal_command", None) is not None:
+        response["terminal_command"] = flow.terminal_command
+    if getattr(flow, "instructions", None) is not None:
+        response["instructions"] = flow.instructions
+    return response
 
 
 def get_oauth_web_status(flow_id: str) -> dict:
@@ -13370,7 +13584,7 @@ def remove_backend_api_key(backend: str) -> dict:
       Claude Code's OAuth token store is left alone.
     """
     backend = (backend or "").strip().lower()
-    if backend not in {"claude", "codex"}:
+    if backend not in {"claude", "codex", "antigravity"}:
         return {"ok": False, "error": "unsupported_backend"}
     recovery_message = _config_recovery_message()
     if recovery_message:
@@ -13398,13 +13612,19 @@ def remove_backend_api_key(backend: str) -> dict:
             logger.error("apply_claude_auth(oauth) during remove-key failed: %s", exc, exc_info=True)
             return {"ok": False, "error": "remove_failed", "detail": str(exc)}
 
-    # Clear V2Config api_key for both backends.
+    # Clear V2Config api_key for account-level native backends.
     try:
         from config.v2_config import update_config_fields
 
         def _clear_auth_fields(cfg: V2Config) -> None:
             target = getattr(getattr(cfg, "agents", None), backend, None)
             if target is None:
+                return
+            if backend == "antigravity":
+                if getattr(target, "auth_mode", None) == "gemini-api-key":
+                    target.auth_mode = "oauth-personal"
+                target.api_key = None
+                target.base_url = None
                 return
             target.auth_mode = "oauth"
             target.api_key = None
@@ -14201,6 +14421,194 @@ def save_claude_auth(payload: dict, *, _native_lease=None) -> dict:
         state["warning"] = oauth_cleanup_result.get("warning") or "oauth_cleanup_failed"
         state["detail"] = oauth_cleanup_result.get("detail")
     return state
+
+
+async def get_antigravity_auth_async() -> dict:
+    """Read passive Antigravity auth state via ``AcpClient.session_list()``.
+
+    Never passes ``--dangerously-skip-permissions``, never opens a session,
+    never triggers inference, and never logs or exposes existing session
+    listings. Plaintext API keys never leave the server.
+    """
+    from core.agent_auth_service import (
+        ANTIGRAVITY_AUTH_MODES,
+        detect_antigravity_adc,
+        probe_antigravity_passive_status,
+        resolve_antigravity_cli_path,
+    )
+
+    from modules.agents.antigravity.auth import _passive_status
+
+    try:
+        config = await asyncio.to_thread(load_config)
+        cfg = getattr(getattr(config, "agents", None), "antigravity", None)
+    except Exception:
+        cfg = None
+
+    raw_mode = getattr(cfg, "auth_mode", None)
+    auth_mode = raw_mode if raw_mode in ANTIGRAVITY_AUTH_MODES else "oauth-personal"
+    api_key = (getattr(cfg, "api_key", None) or "").strip() if cfg is not None else ""
+    base_url = (getattr(cfg, "base_url", None) or "").strip() if cfg is not None else ""
+    gcp_project = (getattr(cfg, "gcp_project", None) or "").strip() if cfg is not None else ""
+    gcp_location = (getattr(cfg, "gcp_location", None) or "").strip() if cfg is not None else ""
+    configured_cli = (getattr(cfg, "cli_path", None) or "").strip() if cfg is not None else ""
+    default_cli = default_cli_for_backend("antigravity") or "agy"
+
+    adc = await asyncio.to_thread(detect_antigravity_adc)
+    cli_health = await detect_cli_async(configured_cli or default_cli, "antigravity")
+    if cli_health["status"] == "ok":
+        binary = cli_health["path"] or await asyncio.to_thread(
+            resolve_antigravity_cli_path, configured_cli or default_cli
+        )
+        probe = await probe_antigravity_passive_status(binary, config=cfg, auth_mode=auth_mode)
+    else:
+        probe = _passive_status(
+            ok=False,
+            uncertain=True,
+            error="cli_not_found" if cli_health["status"] == "missing" else "cli_broken",
+        )
+
+    authenticated = bool(probe.get("authenticated"))
+    if auth_mode == "gemini-api-key":
+        credentials_present = bool(api_key)
+    elif auth_mode == "agent-platform":
+        credentials_present = bool(adc["present"]) or authenticated
+    else:
+        credentials_present = authenticated
+
+    return {
+        "ok": True,
+        "auth_mode": auth_mode,
+        "active_auth_mode": auth_mode if authenticated else "none",
+        "auth_mode_uncertain": bool(probe.get("uncertain")),
+        "authenticated": authenticated,
+        "credentials_present": credentials_present,
+        "catalog_available": False,
+        "inference_verified": False,
+        "cli_installed": bool(cli_health["found"]),
+        "cli_version": cli_health.get("version"),
+        "has_api_key": bool(api_key),
+        "api_key_length": len(api_key),
+        "api_key_masked": _mask_api_key(api_key),
+        "base_url": base_url or None,
+        "gcp_project": gcp_project or None,
+        "gcp_location": gcp_location or None,
+        "adc_present": bool(adc["present"]),
+        "adc_source": adc["source"],
+        "adc_command": adc["login_command"],
+        "auth_methods": probe.get("auth_methods") or list(ANTIGRAVITY_AUTH_MODES),
+        "supports_logout": bool(probe.get("supports_logout", False)),
+        "has_oauth_credentials": authenticated and auth_mode in {"oauth-personal", "oauth-business"},
+        "error": probe.get("error"),
+    }
+
+
+@_native_auth_write("antigravity")
+def save_antigravity_auth(payload: dict) -> dict:
+    """Persist Antigravity auth settings into ``V2Config.agents.antigravity``.
+
+    Never writes to shell profiles or ``~/.gemini`` and never creates sessions
+    or triggers inference.
+    """
+    from core.agent_auth_service import ANTIGRAVITY_AUTH_MODES, detect_antigravity_adc
+
+    language = _configured_backend_language()
+    if not isinstance(payload, dict):
+        return {"ok": False, "message": backend_t("antigravityAuth.invalidPayload", language)}
+
+    auth_mode = payload.get("auth_mode")
+    if auth_mode not in ANTIGRAVITY_AUTH_MODES:
+        return {
+            "ok": False,
+            "message": backend_t("antigravityAuth.invalidMode", language),
+        }
+
+    raw_api_key = payload.get("api_key")
+    if raw_api_key is not None and not isinstance(raw_api_key, str):
+        return {"ok": False, "message": backend_t("antigravityAuth.fieldString", language, field="api_key")}
+    api_key = raw_api_key.strip() if isinstance(raw_api_key, str) else None
+
+    def _parse_optional_str(field_name: str) -> tuple[bool, Optional[str], Optional[str]]:
+        if field_name not in payload:
+            return False, None, None
+        raw_val = payload.get(field_name)
+        if raw_val is not None and not isinstance(raw_val, str):
+            return True, None, backend_t("antigravityAuth.fieldString", language, field=field_name)
+        cleaned = raw_val.strip() if isinstance(raw_val, str) else None
+        return True, (cleaned or None), None
+
+    base_url_present, base_url_change, base_url_err = _parse_optional_str("base_url")
+    if base_url_err:
+        return {"ok": False, "message": base_url_err}
+    gcp_project_present, gcp_project_change, gcp_project_err = _parse_optional_str("gcp_project")
+    if gcp_project_err:
+        return {"ok": False, "message": gcp_project_err}
+    gcp_location_present, gcp_location_change, gcp_location_err = _parse_optional_str("gcp_location")
+    if gcp_location_err:
+        return {"ok": False, "message": gcp_location_err}
+
+    recovery_message = _config_recovery_message()
+    if recovery_message:
+        return {"ok": False, "error": "config_recovery", "message": recovery_message}
+
+    from config.v2_config import update_config_fields
+
+    validation_error: dict[str, Any] = {}
+    saved_snapshot: dict[str, Any] = {}
+
+    def _apply_antigravity_auth(cfg: V2Config) -> None:
+        target = cfg.agents.antigravity
+        effective_key = api_key if api_key else (target.api_key or "").strip() or None
+        if auth_mode == "gemini-api-key" and not effective_key:
+            validation_error["message"] = backend_t("antigravityAuth.apiKeyRequired", language)
+            return
+        target.auth_mode = auth_mode
+        if auth_mode == "gemini-api-key":
+            target.api_key = effective_key
+            if base_url_present:
+                target.base_url = base_url_change
+        elif base_url_present:
+            target.base_url = base_url_change
+        if gcp_project_present:
+            target.gcp_project = gcp_project_change
+        if gcp_location_present:
+            target.gcp_location = gcp_location_change
+        saved_snapshot["auth_mode"] = target.auth_mode
+        saved_snapshot["api_key"] = target.api_key or ""
+        saved_snapshot["base_url"] = target.base_url
+        saved_snapshot["gcp_project"] = target.gcp_project
+        saved_snapshot["gcp_location"] = target.gcp_location
+
+    update_config_fields(_apply_antigravity_auth)
+    if validation_error:
+        return {"ok": False, "message": validation_error["message"]}
+
+    try:
+        restart = restart_backend(
+            "antigravity",
+            metadata={"reason": "save_antigravity_auth", "source": "ui_api"},
+        )
+    except Exception as exc:  # noqa: BLE001
+        restart = {"ok": False, "message": str(exc)}
+
+    adc = detect_antigravity_adc()
+    stored_key = saved_snapshot.get("api_key") or ""
+    return {
+        "ok": True,
+        "auth_mode": saved_snapshot["auth_mode"],
+        "has_api_key": bool(stored_key),
+        "api_key_length": len(stored_key),
+        "api_key_masked": _mask_api_key(stored_key),
+        "base_url": saved_snapshot["base_url"],
+        "gcp_project": saved_snapshot["gcp_project"],
+        "gcp_location": saved_snapshot["gcp_location"],
+        "adc_present": bool(adc["present"]),
+        "adc_source": adc["source"],
+        "adc_command": adc["login_command"],
+        "catalog_available": False,
+        "inference_verified": False,
+        "restart": restart,
+    }
 
 
 # ---------------------------------------------------------------------------

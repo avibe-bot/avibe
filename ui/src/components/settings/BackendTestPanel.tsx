@@ -4,16 +4,18 @@ import { useTranslation } from 'react-i18next';
 import { Play, Zap } from 'lucide-react';
 import clsx from 'clsx';
 
+import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Select } from '@/components/ui/select';
 import { useApi } from '@/context/ApiContext';
 import type { BackendAuthTestResult } from '@/context/ApiContext';
 import { useToast } from '@/context/ToastContext';
+import type { NativeCliBackend } from '@/lib/agentBackends';
 import { errorMessage } from '@/lib/errorMessage';
 import { isNativeAuthHubOwned } from '@/lib/nativeAuthOwnership';
 import { HubOwnedAuthNotice } from './shared/HubOwnedAuthNotice';
 
-type Backend = 'claude' | 'codex';
+type Backend = Exclude<NativeCliBackend, 'opencode'>;
 
 export type BackendTestPanelProps = {
   backend: Backend;
@@ -37,24 +39,39 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
   const { showToast } = useToast();
   const [testing, setTesting] = useState(false);
   const [lastResult, setLastResult] = useState<BackendAuthTestResult | null>(null);
-  const [models, setModels] = useState<string[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('');
+  const [catalog, setCatalog] = useState<{ backend: Backend; models: string[] }>({ backend, models: [] });
+  const [selection, setSelection] = useState<{ backend: Backend; model: string }>({ backend, model: '' });
+  const models = catalog.backend === backend ? catalog.models : [];
+  const selectedModel = selection.backend === backend ? selection.model : '';
 
   // Load the available models catalog once on mount so the dropdown can
-  // pre-populate. Failures fall back to "default-only" — the user can
-  // still test against whatever the backend's config.toml selects.
+  // pre-populate. Antigravity requires an explicit Avibe-selected model;
+  // Claude/Codex can fall back to "default-only" when empty.
   useEffect(() => {
     let cancelled = false;
-    const loader = backend === 'claude' ? api.claudeModels() : api.codexModels();
+    const loader =
+      backend === 'claude'
+        ? api.claudeModels()
+        : backend === 'antigravity'
+          ? api.antigravityModels()
+          : api.codexModels();
     loader
       .then((data) => {
         if (cancelled) return;
         if (data?.ok && Array.isArray(data.models)) {
-          setModels(data.models.filter((m): m is string => typeof m === 'string' && m.length > 0));
+          const valid = data.models.filter((m): m is string => typeof m === 'string' && m.length > 0);
+          setCatalog({ backend, models: valid });
+          setSelection({ backend, model: backend === 'antigravity' && valid.length > 0 ? valid[0] : '' });
+        } else {
+          setCatalog({ backend, models: [] });
+          setSelection({ backend, model: '' });
         }
       })
       .catch(() => {
         /* swallow — dropdown stays empty; default-model path still works */
+        if (cancelled) return;
+        setCatalog({ backend, models: [] });
+        setSelection({ backend, model: '' });
       });
     return () => {
       cancelled = true;
@@ -154,13 +171,17 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
               want this to bypass a reasoning-heavy config default. */}
           <Select
             value={selectedModel}
-            onChange={(e) => setSelectedModel(e.target.value)}
+            onChange={(e) => setSelection({ backend, model: e.target.value })}
             disabled={testing}
             wrapperClassName="w-auto"
             className="font-mono text-[11px]"
             aria-label={t('settings.backends.testConnectionModelLabel') as string}
           >
-            <option value="">{t('settings.backends.testConnectionModelDefault')}</option>
+            {backend !== 'antigravity' ? (
+              <option value="">{t('settings.backends.testConnectionModelDefault')}</option>
+            ) : models.length === 0 ? (
+              <option value="">{t('settings.backends.testConnectionModelSelectPrompt')}</option>
+            ) : null}
             {models.map((m) => (
               <option key={m} value={m}>
                 {m}
@@ -191,6 +212,30 @@ export const BackendTestPanel: React.FC<BackendTestPanelProps> = ({ backend }) =
       </div>
 
       {lastResult && isNativeAuthHubOwned(lastResult) && <HubOwnedAuthNotice />}
+
+      {lastResult && !isNativeAuthHubOwned(lastResult) && (
+        typeof lastResult.authenticated === 'boolean'
+        || typeof lastResult.catalog_available === 'boolean'
+        || typeof lastResult.inference_verified === 'boolean'
+      ) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {typeof lastResult.authenticated === 'boolean' && (
+            <Badge variant={lastResult.authenticated ? 'success' : 'destructive'}>
+              {t(lastResult.authenticated ? 'settings.backends.testConnectionAuthOk' : 'settings.backends.testConnectionAuthFail')}
+            </Badge>
+          )}
+          {typeof lastResult.catalog_available === 'boolean' && (
+            <Badge variant={lastResult.catalog_available ? 'success' : 'warning'}>
+              {t(lastResult.catalog_available ? 'settings.backends.testConnectionCatalogOk' : 'settings.backends.testConnectionCatalogFail')}
+            </Badge>
+          )}
+          {typeof lastResult.inference_verified === 'boolean' && (
+            <Badge variant={lastResult.inference_verified ? 'success' : 'destructive'}>
+              {t(lastResult.inference_verified ? 'settings.backends.testConnectionInferenceOk' : 'settings.backends.testConnectionInferenceFail')}
+            </Badge>
+          )}
+        </div>
+      )}
 
       {/* Show what the model actually said on success — without this the
           user only sees "ok · 312 ms" and has to trust us that the

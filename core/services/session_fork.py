@@ -67,6 +67,8 @@ _FORK_ANCHOR_TYPES = tuple(
 
 SESSION_AGENT_UNAVAILABLE_CODE = "session_agent_unavailable"
 SESSION_AGENT_UNAVAILABLE_I18N_KEY = "error.sessionFork.agentUnavailable"
+FORK_HANDOFF_MODE_NATIVE = "native"
+FORK_HANDOFF_MODE_SUMMARY = "summary_handoff"
 
 
 class SessionForkError(ValueError):
@@ -387,6 +389,8 @@ def reserve_forked_session(
             metadata.pop("fork_opencode_boundary_from_active_run", None)
             # A source that is itself a fork carries its own point; the child's is resolved below.
             metadata.pop("fork_source_context_seq", None)
+            metadata.pop("fork_handoff_mode", None)
+            metadata.pop("fork_handoff_pending", None)
             metadata.update(
                 {
                     "created_via": "session_fork",
@@ -612,6 +616,140 @@ def pending_native_fork_source(context: Any, backend: str) -> Optional[str]:
     return str(fork.get("source_native_session_id") or "").strip() or None
 
 
+def _fork_source_state_on_conn(
+    conn: Any,
+    source_session_id: str,
+    source_message_id: str,
+) -> Optional[ForkSourceState]:
+    """Inspect source transcript state relative to ``source_message_id`` on an open connection."""
+
+    from sqlalchemy import and_, func, or_, select
+
+    from storage.messages_service import transcript_order_value
+    from storage.models import messages, session_turns
+
+    anchor = conn.execute(
+        select(
+            transcript_order_value().label("transcript_order_at"),
+            messages.c.id,
+            messages.c.author,
+            messages.c.type,
+            messages.c.metadata_json,
+        )
+        .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
+        .limit(1)
+    ).mappings().first()
+    if anchor is None:
+        return None
+    anchor_order_at = anchor["transcript_order_at"]
+    anchor_id = anchor["id"]
+    after_anchor = (
+        (transcript_order_value() > anchor_order_at)
+        | ((transcript_order_value() == anchor_order_at) & (messages.c.id > anchor_id))
+    )
+    latest_after_anchor = conn.execute(
+        select(messages.c.author, messages.c.type, messages.c.metadata_json)
+        .where(
+            messages.c.session_id == source_session_id,
+            or_(
+                messages.c.type.in_(
+                    [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
+                ),
+                *(
+                    and_(
+                        messages.c.type == message_type,
+                        func.json_extract(messages.c.metadata_json, "$.event").in_(
+                            spec_for(message_type)["terminalWhenEvents"]
+                        ),
+                    )
+                    for message_type in _CONDITIONAL_TERMINAL_TYPES
+                ),
+            ),
+            after_anchor,
+            ~and_(
+                messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
+                func.coalesce(
+                    func.json_extract(messages.c.metadata_json, "$.detached"),
+                    0,
+                )
+                == 1,
+            ),
+            ~and_(
+                messages.c.type == "notify",
+                func.coalesce(
+                    func.json_extract(messages.c.metadata_json, "$.event"), ""
+                ) == "backend_failure",
+                func.coalesce(
+                    func.json_extract(messages.c.metadata_json, "$.replayed"), 0
+                ) == 1,
+            ),
+        )
+        .order_by(transcript_order_value().desc(), messages.c.id.desc())
+        .limit(1)
+    ).mappings().first()
+    latest_after_anchor_author = (
+        str(latest_after_anchor["author"] or "").strip() if latest_after_anchor else ""
+    )
+    latest_after_anchor_type = (
+        str(latest_after_anchor["type"] or "").strip() if latest_after_anchor else ""
+    )
+    latest_after_anchor_metadata = _load_metadata(
+        latest_after_anchor["metadata_json"] if latest_after_anchor else None
+    )
+    latest_after_anchor_role = activity_role_for(
+        latest_after_anchor_type,
+        latest_after_anchor_metadata,
+    )
+    has_terminal_agent_output_after_anchor = latest_after_anchor_author == "agent" and (
+        latest_after_anchor_role == "terminal"
+        or (
+            latest_after_anchor_role == "reply"
+            # A reply ends nothing while its Turn still runs: input steered
+            # into it is being answered. IM Turns have no durable row, so
+            # their reply stays the latest evidence.
+            and conn.execute(
+                select(session_turns.c.id)
+                .where(
+                    session_turns.c.session_id == source_session_id,
+                    session_turns.c.state.in_(("starting", "active")),
+                )
+                .limit(1)
+            ).first()
+            is None
+        )
+    )
+    has_input_turn_after_anchor = (
+        conn.execute(
+            select(messages.c.id)
+            .where(
+                messages.c.session_id == source_session_id,
+                or_(
+                    *(
+                        and_(messages.c.author == author, messages.c.type == message_type)
+                        for author, message_type in INPUT_TURN_AUTHOR_TYPES
+                    )
+                ),
+                after_anchor,
+            )
+            .limit(1)
+        ).first()
+        is not None
+    )
+    return ForkSourceState(
+        anchor_author=str(anchor["author"] or "").strip() or None,
+        anchor_type=str(anchor["type"] or "").strip() or None,
+        latest_after_anchor_author=latest_after_anchor_author or None,
+        latest_after_anchor_type=latest_after_anchor_type or None,
+        has_messages_after_anchor=latest_after_anchor is not None,
+        has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
+        has_input_turn_after_anchor=has_input_turn_after_anchor,
+        anchor_activity_role=activity_role_for(
+            str(anchor["type"] or "").strip(),
+            _load_metadata(anchor["metadata_json"]),
+        ),
+    )
+
+
 def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     """Return source transcript state relative to the fork reservation anchor."""
 
@@ -622,137 +760,15 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
     if not source_session_id or not source_message_id:
         return ForkSourceState()
 
-    from sqlalchemy import and_, func, or_, select
-
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
-    from storage.messages_service import transcript_order_value
-    from storage.models import messages, session_turns
 
     ensure_sqlite_state(primary_platform=resolve_primary_platform_from_config(paths.get_state_dir()))
     engine = create_sqlite_engine(paths.get_sqlite_state_path())
     try:
         with engine.connect() as conn:
-            anchor = conn.execute(
-                select(
-                    transcript_order_value().label("transcript_order_at"),
-                    messages.c.id,
-                    messages.c.author,
-                    messages.c.type,
-                    messages.c.metadata_json,
-                )
-                .where(messages.c.session_id == source_session_id, messages.c.id == source_message_id)
-                .limit(1)
-            ).mappings().first()
-            if anchor is None:
-                return ForkSourceState()
-            anchor_order_at = anchor["transcript_order_at"]
-            anchor_id = anchor["id"]
-            after_anchor = (
-                (transcript_order_value() > anchor_order_at)
-                | ((transcript_order_value() == anchor_order_at) & (messages.c.id > anchor_id))
-            )
-            latest_after_anchor = conn.execute(
-                select(messages.c.author, messages.c.type, messages.c.metadata_json)
-                .where(
-                    messages.c.session_id == source_session_id,
-                    or_(
-                        messages.c.type.in_(
-                            [*INPUT_TURN_MESSAGE_TYPES, *list(SOURCE_PROGRESS_AGENT_OUTPUT_TYPES)]
-                        ),
-                        *(
-                            and_(
-                                messages.c.type == message_type,
-                                func.json_extract(messages.c.metadata_json, "$.event").in_(
-                                    spec_for(message_type)["terminalWhenEvents"]
-                                ),
-                            )
-                            for message_type in _CONDITIONAL_TERMINAL_TYPES
-                        ),
-                    ),
-                    after_anchor,
-                    ~and_(
-                        messages.c.type.in_(_DETACHED_COMPLETION_TYPES),
-                        func.coalesce(
-                            func.json_extract(messages.c.metadata_json, "$.detached"),
-                            0,
-                        )
-                        == 1,
-                    ),
-                    ~and_(
-                        messages.c.type == "notify",
-                        func.coalesce(
-                            func.json_extract(messages.c.metadata_json, "$.event"), ""
-                        ) == "backend_failure",
-                        func.coalesce(
-                            func.json_extract(messages.c.metadata_json, "$.replayed"), 0
-                        ) == 1,
-                    ),
-                )
-                .order_by(transcript_order_value().desc(), messages.c.id.desc())
-                .limit(1)
-            ).mappings().first()
-            latest_after_anchor_author = (
-                str(latest_after_anchor["author"] or "").strip() if latest_after_anchor else ""
-            )
-            latest_after_anchor_type = (
-                str(latest_after_anchor["type"] or "").strip() if latest_after_anchor else ""
-            )
-            latest_after_anchor_metadata = _load_metadata(
-                latest_after_anchor["metadata_json"] if latest_after_anchor else None
-            )
-            latest_after_anchor_role = activity_role_for(
-                latest_after_anchor_type,
-                latest_after_anchor_metadata,
-            )
-            has_terminal_agent_output_after_anchor = latest_after_anchor_author == "agent" and (
-                latest_after_anchor_role == "terminal"
-                or (
-                    latest_after_anchor_role == "reply"
-                    # A reply ends nothing while its Turn still runs: input steered
-                    # into it is being answered. IM Turns have no durable row, so
-                    # their reply stays the latest evidence.
-                    and conn.execute(
-                        select(session_turns.c.id)
-                        .where(
-                            session_turns.c.session_id == source_session_id,
-                            session_turns.c.state.in_(("starting", "active")),
-                        )
-                        .limit(1)
-                    ).first()
-                    is None
-                )
-            )
-            has_input_turn_after_anchor = (
-                conn.execute(
-                    select(messages.c.id)
-                    .where(
-                        messages.c.session_id == source_session_id,
-                        or_(
-                            *(
-                                and_(messages.c.author == author, messages.c.type == message_type)
-                                for author, message_type in INPUT_TURN_AUTHOR_TYPES
-                            )
-                        ),
-                        after_anchor,
-                    )
-                    .limit(1)
-                ).first()
-                is not None
-            )
-            return ForkSourceState(
-                anchor_author=str(anchor["author"] or "").strip() or None,
-                anchor_type=str(anchor["type"] or "").strip() or None,
-                latest_after_anchor_author=latest_after_anchor_author or None,
-                latest_after_anchor_type=latest_after_anchor_type or None,
-                has_messages_after_anchor=latest_after_anchor is not None,
-                has_terminal_agent_output_after_anchor=has_terminal_agent_output_after_anchor,
-                has_input_turn_after_anchor=has_input_turn_after_anchor,
-                anchor_activity_role=activity_role_for(
-                    str(anchor["type"] or "").strip(),
-                    _load_metadata(anchor["metadata_json"]),
-                ),
-            )
+            state = _fork_source_state_on_conn(conn, source_session_id, source_message_id)
+            return state if state is not None else ForkSourceState()
     except Exception as exc:
         import logging
 
@@ -767,6 +783,136 @@ def fork_source_state(fork: dict[str, Any] | None) -> ForkSourceState:
         engine.dispose()
 
 
+def can_use_native_tip_fork(
+    fork: Mapping[str, Any] | None,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Whether a tip-only native fork (such as ACP ``session/fork``) matches the reserved boundary.
+
+    Returns ``False`` when the reservation requires trimming a running turn or when
+    the source session has advanced past ``source_message_id`` (new messages/turns
+    or an active turn/run), so the backend adapter falls back to a fresh session
+    with a bounded summary handoff instead of inheriting post-reservation turns.
+    Degrades safely to ``True`` when no persisted DB boundary exists.
+    """
+
+    if not isinstance(fork, Mapping):
+        return False
+    if bool(fork.get("trim_latest_running_turn")):
+        return False
+
+    source_session_id = _clean_optional(
+        fork.get("source_session_id") or fork.get("fork_source_session_id")
+    )
+    if not source_session_id:
+        return True
+
+    source_message_id = _clean_optional(
+        fork.get("source_message_id") or fork.get("fork_source_message_id")
+    )
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return True
+
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_runs, agent_sessions, messages, session_turns
+
+    engine = create_sqlite_engine(path, read_only=True)
+    try:
+        with engine.connect() as conn:
+            source_exists = (
+                conn.execute(
+                    select(agent_sessions.c.id)
+                    .where(agent_sessions.c.id == source_session_id)
+                    .limit(1)
+                ).first()
+                is not None
+            )
+            if not source_exists:
+                return True
+
+            has_active_turn = (
+                conn.execute(
+                    select(session_turns.c.id)
+                    .where(
+                        session_turns.c.session_id == source_session_id,
+                        session_turns.c.state.in_(("starting", "active")),
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            )
+            if has_active_turn:
+                return False
+
+            has_active_run = (
+                conn.execute(
+                    select(agent_runs.c.id)
+                    .where(
+                        agent_runs.c.session_id == source_session_id,
+                        agent_runs.c.status.in_(ACTIVE_SOURCE_RUN_STATUSES),
+                    )
+                    .limit(1)
+                ).first()
+                is not None
+            )
+            if has_active_run:
+                return False
+
+            if not source_message_id:
+                has_any_anchor_msg = (
+                    conn.execute(
+                        select(messages.c.id)
+                        .where(
+                            messages.c.session_id == source_session_id,
+                            messages.c.type.in_(_FORK_ANCHOR_TYPES),
+                        )
+                        .limit(1)
+                    ).first()
+                    is not None
+                )
+                return not has_any_anchor_msg
+
+            state = _fork_source_state_on_conn(conn, source_session_id, source_message_id)
+            if state is None:
+                return False
+            if (
+                state.has_messages_after_anchor
+                or state.has_input_turn_after_anchor
+                or state.has_terminal_agent_output_after_anchor
+            ):
+                return False
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return True
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to verify native fork boundary for %s after %s: %s",
+            source_session_id,
+            source_message_id,
+            exc,
+        )
+        return False
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to verify native fork boundary for %s after %s: %s",
+            source_session_id,
+            source_message_id,
+            exc,
+        )
+        return False
+    finally:
+        engine.dispose()
+
+
 def fork_source_has_agent_output_after_anchor(fork: dict[str, Any] | None) -> bool:
     """Whether the source produced terminal agent output after the fork anchor."""
 
@@ -777,6 +923,219 @@ def fork_anchor_is_terminal_agent_output(fork: dict[str, Any] | None) -> bool:
     """Whether the reservation anchor already points at a completed agent row."""
 
     return fork_source_state(fork).anchor_is_terminal_agent_output
+
+
+def build_fork_summary_handoff_text(
+    pending_fork: Mapping[str, Any],
+    *,
+    backend: str,
+    db_path: Optional[Path] = None,
+    budget: Optional[int] = None,
+    source_message_id: Optional[str] = None,
+) -> str:
+    """Build a bounded summary handoff when native session fork is unavailable."""
+
+    from core.session_handoff import (
+        HANDOFF_BUDGET_CHARS,
+        build_fork_summary_handoff,
+        render_fork_summary_handoff,
+    )
+
+    source_session_id = str(
+        pending_fork.get("source_session_id") or pending_fork.get("fork_source_session_id") or ""
+    ).strip()
+    effective_source_message_id = (
+        _clean_optional(source_message_id)
+        or _clean_optional(pending_fork.get("source_message_id"))
+        or _clean_optional(pending_fork.get("fork_source_message_id"))
+    )
+    effective_budget = HANDOFF_BUDGET_CHARS if budget is None else budget
+    path = db_path or paths.get_sqlite_state_path()
+    if source_session_id and path.is_file():
+        from storage.db import create_sqlite_engine
+
+        engine = create_sqlite_engine(path, read_only=True)
+        try:
+            with engine.connect() as conn:
+                return build_fork_summary_handoff(
+                    conn,
+                    source_session_id,
+                    backend=backend,
+                    source_message_id=effective_source_message_id,
+                    budget=effective_budget,
+                )
+        finally:
+            engine.dispose()
+
+    return render_fork_summary_handoff(
+        source_session_id,
+        backend=backend,
+        messages=(),
+        has_older=False,
+        budget=effective_budget,
+    )
+
+
+def record_fork_handoff_mode(
+    session_id: str,
+    *,
+    mode: str,
+    pending: bool | None = None,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Persist how a forked session was materialized (``native`` or ``summary_handoff``)."""
+
+    cleaned_id = _clean_optional(session_id)
+    cleaned_mode = _clean_optional(mode)
+    if not cleaned_id or not cleaned_mode:
+        return False
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return False
+
+    from sqlalchemy import select, update
+    from sqlalchemy.exc import OperationalError
+
+    from storage.agent_session_rows import reserve_write_lock
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            metadata = _load_metadata(row["metadata_json"])
+            changed = False
+            if metadata.get("fork_handoff_mode") != cleaned_mode:
+                metadata["fork_handoff_mode"] = cleaned_mode
+                changed = True
+            if pending is True:
+                if metadata.get("fork_handoff_pending") is not True:
+                    metadata["fork_handoff_pending"] = True
+                    changed = True
+            elif pending is False:
+                if "fork_handoff_pending" in metadata:
+                    metadata.pop("fork_handoff_pending", None)
+                    changed = True
+            if not changed:
+                return True
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == cleaned_id)
+                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
+            )
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    finally:
+        engine.dispose()
+
+
+def clear_pending_fork_handoff(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> bool:
+    """Clear the pending summary-fork handoff flag once the first prompt is accepted."""
+
+    cleaned_id = _clean_optional(session_id)
+    if not cleaned_id:
+        return False
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return False
+
+    from sqlalchemy import select, update
+    from sqlalchemy.exc import OperationalError
+
+    from storage.agent_session_rows import reserve_write_lock
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path)
+    try:
+        with engine.begin() as conn:
+            reserve_write_lock(conn)
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return False
+            metadata = _load_metadata(row["metadata_json"])
+            if "fork_handoff_pending" not in metadata:
+                return False
+            metadata.pop("fork_handoff_pending", None)
+            conn.execute(
+                update(agent_sessions)
+                .where(agent_sessions.c.id == cleaned_id)
+                .values(metadata_json=json.dumps(metadata, ensure_ascii=False))
+            )
+            return True
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return False
+        raise
+    finally:
+        engine.dispose()
+
+
+def pending_summary_fork_handoff_for_session(
+    session_id: str,
+    *,
+    db_path: Optional[Path] = None,
+) -> dict[str, Any] | None:
+    """Return fork metadata if the session still owes its first summary-fork handoff."""
+
+    cleaned_id = _clean_optional(session_id)
+    if not cleaned_id:
+        return None
+
+    path = db_path or paths.get_sqlite_state_path()
+    if not path.is_file():
+        return None
+
+    from sqlalchemy import select
+    from sqlalchemy.exc import OperationalError
+
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+
+    engine = create_sqlite_engine(path, read_only=True)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                select(agent_sessions.c.metadata_json)
+                .where(agent_sessions.c.id == cleaned_id)
+                .limit(1)
+            ).mappings().first()
+            if row is None:
+                return None
+            metadata = _load_metadata(row["metadata_json"])
+            if (
+                metadata.get("fork_handoff_mode") != FORK_HANDOFF_MODE_SUMMARY
+                or not bool(metadata.get("fork_handoff_pending"))
+            ):
+                return None
+            return fork_metadata_from_session_metadata(metadata)
+    except OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    finally:
+        engine.dispose()
 
 
 def _load_metadata(value: Any) -> dict[str, Any]:

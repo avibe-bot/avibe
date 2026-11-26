@@ -2330,7 +2330,7 @@ def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(
     monkeypatch, tmp_path, hub_switch, gateway_enabled, source_channel, blocks
 ):
     """The Backends page shows the server's answer; it keeps no rule of its own."""
-    from modules.agents.catalog import NATIVE_CLI_BACKENDS
+    from config.v2_config import MODEL_HUB_NATIVE_BACKENDS
     from tests.scenario_harness.model_hub import source
 
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
@@ -2339,7 +2339,7 @@ def test_config_api_carries_why_the_model_hub_leaves_a_backend_no_model(
 
     config = api.save_config(_full_config_payload())
     # The gateway turns off only while no native backend is in Hub mode (``runtime_in_use``).
-    for backend in NATIVE_CLI_BACKENDS:
+    for backend in MODEL_HUB_NATIVE_BACKENDS:
         config.model_hub.agents[backend].mode = "direct"
     config.model_hub.enabled = gateway_enabled
     if source_channel is not None:

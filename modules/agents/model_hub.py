@@ -341,6 +341,14 @@ async def resolve_model_hub_launch(
     Session names now.
     """
 
+    if backend not in MODEL_HUB_BACKENDS:
+        return ModelHubLaunch(
+            backend=backend,
+            channel="direct",
+            requested_model=requested_model,
+            target_model=requested_model,
+            runtime_model=requested_model,
+        )
     router = getattr(controller, "model_hub_runtime", None)
     resolver = getattr(router, "resolve", None)
     if callable(resolver):
@@ -1270,6 +1278,8 @@ class ModelHubRuntimeRouter:
         return self.service.store.load()
 
     def turn_mode(self, backend: BackendName, *, config: ModelHubConfig | None = None) -> TurnMode:
+        if backend not in MODEL_HUB_BACKENDS:
+            return "direct"
         config = config if config is not None else self.service.store.load()
         return cast(TurnMode, config.agents[backend].mode)
 
@@ -1344,6 +1354,8 @@ class ModelHubRuntimeRouter:
         """
 
         requested_model = str(requested_model or "").strip()
+        if backend not in MODEL_HUB_BACKENDS:
+            return self._direct_launch(backend, requested_model)
         config = config if config is not None else self.service.store.load()
         if backend == "vibey" and (
             config.agents[backend].mode != "hub" or self.turn_gateway is None

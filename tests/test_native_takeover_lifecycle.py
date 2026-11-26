@@ -133,11 +133,13 @@ def test_lease_permission_mask_is_posix_only(tmp_path, monkeypatch):
     {"version": 1, "phase": [], "backends": ["codex"]},
 ])
 def test_corrupt_journal_blocks_all_native_writers(tmp_path, data):
+    from modules.agents.catalog import NATIVE_CLI_BACKENDS
+
     directory = tmp_path / "native-takeover"
     directory.mkdir()
     (directory / "current.json").write_text("invalid" if data is None else json.dumps(data))
-    assert pending_native_backends(directory) == {"claude", "codex", "opencode"}
-    for backend in ("claude", "codex", "opencode"):
+    assert pending_native_backends(directory) == set(NATIVE_CLI_BACKENDS)
+    for backend in NATIVE_CLI_BACKENDS:
         with pytest.raises(NativeMigrationBlockedError, match="migration_recovery_pending"):
             NativeCredentialLease((backend,), state_dir=tmp_path).acquire()
     lease = NativeCredentialLease(("codex",), state_dir=tmp_path).acquire(recovery=True)
@@ -494,7 +496,9 @@ async def test_recovery_error_applies_pending_blocks_before_other_producers():
     controller.model_hub_service.recover_runtime_intent = AsyncMock(side_effect=RuntimeError("recovery failed"))
 
     async def producer(**kwargs):
-        assert admissions == turns == {"claude", "codex", "opencode"}
+        from modules.agents.catalog import NATIVE_CLI_BACKENDS
+
+        assert admissions == turns == set(NATIVE_CLI_BACKENDS)
         return []
     controller.session_turns.recover_durable_delivery_state = AsyncMock(side_effect=producer)
     controller.session_turns.recover_persisted_agent_run_queue = AsyncMock(side_effect=producer)

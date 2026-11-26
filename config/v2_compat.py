@@ -48,6 +48,18 @@ class CodexCompatConfig:
 
 
 @dataclass
+class AntigravityCompatConfig:
+    enabled: bool
+    binary: str
+    idle_timeout_seconds: int = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+    auth_mode: str = "oauth-personal"
+    api_key: Optional[str] = None
+    base_url: Optional[str] = None
+    gcp_project: Optional[str] = None
+    gcp_location: Optional[str] = None
+
+
+@dataclass
 class OpenCodeCompatConfig:
     enabled: bool
     binary: str
@@ -77,6 +89,7 @@ class AppCompatConfig:
     wechat: Optional[WeChatConfig] = None
     codex: Optional[CodexCompatConfig] = None
     opencode: Optional[OpenCodeCompatConfig] = None
+    antigravity: Optional[AntigravityCompatConfig] = None
     show_duration: bool = False
     include_time_info: bool = True
     include_user_info: bool = True
@@ -185,6 +198,22 @@ def to_app_config(
             # adapter can prepend it as ``providerID`` for bare-model strings.
             default_provider=v2.agents.opencode.default_provider,
         )
+    antigravity = None
+    if v2.agents.antigravity.enabled:
+        antigravity = AntigravityCompatConfig(
+            enabled=True,
+            binary=runtime_agent_cli_path(
+                v2.agents.antigravity.cli_path,
+                "agy",
+                resolve_agent_paths=resolve_agent_paths,
+            ),
+            idle_timeout_seconds=v2.agents.antigravity.idle_timeout_seconds,
+            auth_mode=v2.agents.antigravity.auth_mode,
+            api_key=v2.agents.antigravity.api_key,
+            base_url=v2.agents.antigravity.base_url,
+            gcp_project=v2.agents.antigravity.gcp_project,
+            gcp_location=v2.agents.antigravity.gcp_location,
+        )
     slack = SlackConfig(**v2.slack.__dict__)
     return AppCompatConfig(
         platform=v2.platform,
@@ -200,6 +229,7 @@ def to_app_config(
         claude=claude,
         codex=codex,
         opencode=opencode,
+        antigravity=antigravity,
         log_level=v2.runtime.log_level,
         ack_mode=v2.ack_mode,
         language=v2.language,

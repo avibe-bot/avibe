@@ -6,7 +6,6 @@ CPA exposure. The completed receipt contains opaque IDs, not secrets.
 """
 
 from __future__ import annotations
-from modules.agents.catalog import NATIVE_CLI_BACKENDS
 
 import base64
 import json
@@ -17,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from config.atomic_io import write_atomic
-from config.v2_config import ModelHubConfig
+from config.v2_config import MODEL_HUB_NATIVE_BACKENDS, ModelHubConfig
 from core import private_fs
 
 
@@ -255,7 +254,7 @@ class NativeTakeoverJournal:
             or not isinstance(payload.get("items"), list)
             or not isinstance(payload.get("backends"), list)
             or not payload["backends"]
-            or any(backend not in NATIVE_CLI_BACKENDS for backend in payload["backends"])
+            or any(backend not in MODEL_HUB_NATIVE_BACKENDS for backend in payload["backends"])
             or len(set(payload["backends"])) != len(payload["backends"])
             or not isinstance(payload.get("source_ids"), list)
             or any(not isinstance(value, str) or not value for value in payload["source_ids"])

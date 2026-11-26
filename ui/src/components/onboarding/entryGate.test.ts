@@ -31,6 +31,15 @@ const claudeSupply = (overrides: Partial<AgentSupply> = {}): AgentSupply => ({
   ...overrides,
 });
 
+const NO_CLI = { claude: false, codex: false, opencode: false, antigravity: false };
+
+const VIBEY: VibeAgentBrief = { ...CLAUDE, id: 'vb-1', name: 'vibey', backend: 'vibey', display_name: 'vibey' };
+const vibeySupply = (overrides: Partial<AgentSupply> = {}): AgentSupply => ({
+  backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
+  named_agents: [{ name: 'vibey', effective_model_id: 'gpt-5.6-sol', supply_status: 'ok' }],
+  ...overrides,
+});
+
 const connection = (
   backend: AgentBackendId,
   overrides: Partial<BackendConnectionState> = {},
@@ -38,6 +47,9 @@ const connection = (
   ok: true, backend, enabled: true, installed: true, auth: 'none', ready: false,
   entry_eligible: false, application: 'stopped', ...overrides,
 });
+
+const applied = (backend: AgentBackendId, overrides: Partial<BackendConnectionState> = {}) =>
+  connection(backend, { ready: true, entry_eligible: true, application: 'applied', ...overrides });
 
 const evidence = (overrides: Partial<EntryEvidence> = {}): EntryEvidence => ({
   agentsRead: true,
@@ -48,7 +60,7 @@ const evidence = (overrides: Partial<EntryEvidence> = {}): EntryEvidence => ({
   suppliesRead: true,
   supplies: [claudeSupply()],
   runtime: RUNTIME_OK,
-  cliHealthy: { claude: true, codex: false, opencode: false },
+  cliHealthy: { claude: true, codex: false, opencode: false, antigravity: false },
   ...overrides,
 });
 
@@ -140,6 +152,7 @@ describe('C4 configured-path CLI evidence', () => {
     expect(configuredCliPath({ agents: { claude: { cli_path: '  /x  ' } } }, 'claude')).toBe('/x');
     expect(configuredCliPath({ agents: { claude: { enabled: true } } }, 'claude')).toBe('claude');
     expect(configuredCliPath(undefined, 'codex')).toBe('codex');
+    expect(configuredCliPath(undefined, 'antigravity')).toBe('agy');
   });
 
   it('detects the configured path from the already-fresh prerequisite', async () => {
@@ -151,13 +164,14 @@ describe('C4 configured-path CLI evidence', () => {
     expect(detectCli).toHaveBeenCalledWith('/opt/custom/claude', 'claude');
     expect(detectCli).toHaveBeenCalledWith('codex', 'codex');
     expect(detectCli).toHaveBeenCalledWith('opencode', 'opencode');
-    expect(read!.cliHealthy).toEqual({ claude: true, codex: false, opencode: false });
+    expect(detectCli).toHaveBeenCalledWith('agy', 'antigravity');
+    expect(read!.cliHealthy).toEqual({ claude: true, codex: false, opencode: false, antigravity: false });
   });
 
   it('does not admit when detectCli is not found even if installed and cli_present', () => {
     const read = evidence({
       connections: [connection('claude', { installed: true, ready: true, entry_eligible: true, application: 'applied' })],
-      cliHealthy: { claude: false, codex: false, opencode: false },
+      cliHealthy: { claude: false, codex: false, opencode: false, antigravity: false },
     });
     expect(entryCandidates(read)).toEqual([]);
     expect(admitEntry(read)).toMatchObject({ kind: 'refused', startable: false });
@@ -168,14 +182,14 @@ describe('C4 configured-path CLI evidence', () => {
       detectCli: vi.fn(async () => { throw new Error('detector unread'); }),
     });
     const read = await readEntryEvidence(gate);
-    expect(read!.cliHealthy).toEqual({ claude: false, codex: false, opencode: false });
+    expect(read!.cliHealthy).toEqual({ claude: false, codex: false, opencode: false, antigravity: false });
     expect(admitEntry(read!)).toMatchObject({ kind: 'refused', startable: false });
   });
 
   it('does not treat connection.installed as the detector', () => {
     const read = evidence({
       connections: [connection('claude', { installed: false, ready: true, entry_eligible: true, application: 'applied' })],
-      cliHealthy: { claude: true, codex: false, opencode: false },
+      cliHealthy: { claude: true, codex: false, opencode: false, antigravity: false },
     });
     expect(entryCandidates(read)).toEqual([{ agent: CLAUDE, backend: 'claude', modelId: 'openai/gpt-5.6-sol' }]);
   });
@@ -190,18 +204,11 @@ describe('C4 configured-path CLI evidence', () => {
 });
 
 describe('D3 a built-in assistant completes setup on its own', () => {
-  const VIBEY: VibeAgentBrief = { ...CLAUDE, id: 'vb-1', name: 'vibey', backend: 'vibey', display_name: 'vibey' };
-  const vibeySupply = (overrides: Partial<AgentSupply> = {}): AgentSupply => ({
-    backend: 'vibey', cli_present: false, mode: 'hub', menu_kind: 'fixed',
-    named_agents: [{ name: 'vibey', effective_model_id: 'gpt-5.6-sol', supply_status: 'ok' }],
-    ...overrides,
-  });
-  const applied = (backend: AgentBackendId) => connection(backend, { ready: true, entry_eligible: true, application: 'applied' });
   const vibeyOnly = (overrides: Partial<EntryEvidence> = {}) => evidence({
     agents: [CLAUDE, VIBEY],
     connections: [applied('vibey')],
     supplies: [vibeySupply()],
-    cliHealthy: { claude: false, codex: false, opencode: false },
+    cliHealthy: NO_CLI,
     ...overrides,
   });
 
@@ -271,5 +278,75 @@ describe('D3 a built-in assistant completes setup on its own', () => {
       defaultAgentName: 'vibey',
     });
     expect(chooseEntryDefault(entryCandidates(saved), saved)).toBeNull();
+  });
+});
+
+describe('Direct-only Antigravity admission', () => {
+  const ANTIGRAVITY: VibeAgentBrief = { ...CLAUDE, id: 'ag-1', name: 'antigravity', backend: 'antigravity', display_name: 'Antigravity', model: 'gemini-4-neon', source: 'builtin' };
+  const agApplied = (overrides: Partial<BackendConnectionState> = {}) => applied('antigravity', { auth: 'subscription', supply_mode: 'direct', ...overrides });
+  const hubApplied = (backend: AgentBackendId) => applied(backend, { auth: 'subscription', supply_mode: 'hub' });
+  const antigravityOnly = (overrides: Partial<EntryEvidence> = {}): EntryEvidence => evidence({
+    agents: [ANTIGRAVITY], connections: [agApplied()], suppliesRead: false, supplies: [],
+    runtime: null, cliHealthy: { ...NO_CLI, antigravity: true }, ...overrides,
+  });
+  const HUB_DOWN_RUNTIME: RuntimeDependency = { ...RUNTIME_OK, status: { verified: true, health: 'down' } };
+
+  it.each([
+    ['Hub absent and supplies unread', {}],
+    ['Hub stopped and supplies empty', { runtime: HUB_DOWN_RUNTIME, suppliesRead: true, supplies: [] }],
+  ] as const)('admits healthy Direct-only Antigravity alone when %s', (_label, patch) => {
+    const read = antigravityOnly(patch);
+    const expected = [{ agent: ANTIGRAVITY, backend: 'antigravity', modelId: 'gemini-4-neon' }];
+    expect(entryCandidates(read)).toEqual(expected);
+    expect(admitEntry(read)).toEqual({ kind: 'admitted', candidates: expected });
+  });
+
+  it('admits Antigravity via readEntryEvidence when Hub IPC throws engine_down', async () => {
+    const read = await readEntryEvidence(deps({
+      agentReads: { refresh: vi.fn(ipcDown), read: vi.fn(), readValue: vi.fn(), invalidate: vi.fn() },
+      getRuntimeStatus: vi.fn(ipcDown),
+      getBackendConnection: vi.fn(async (backend) => backend === 'antigravity' ? agApplied() : connection(backend, { enabled: false, application: 'applied' })),
+      listAgents: vi.fn(async () => ({ ok: true, agents: [{ ...ANTIGRAVITY, model: '  gemini-4-neon  ' }], default_agent_name: null })),
+      detectCli: vi.fn(async (binary: string, backend) => ({ found: backend === 'antigravity', status: backend === 'antigravity' ? 'ok' as const : 'missing' as const, path: binary })),
+    }));
+    expect(read).toMatchObject({ suppliesRead: false, runtime: null });
+    expect(admitEntry(read!)).toMatchObject({ kind: 'admitted', candidates: [{ backend: 'antigravity', modelId: 'gemini-4-neon' }] });
+  });
+
+  it.each<[string, Partial<EntryEvidence>]>([
+    ['connection.ready is false', { connections: [agApplied({ ready: false })] }],
+    ['connection.enabled is false', { connections: [agApplied({ enabled: false })] }],
+    ...(['draining', 'failed', 'unknown'] as const).map((application): [string, Partial<EntryEvidence>] => [`connection.application is ${application}`, { connections: [agApplied({ application })] }]),
+    ['cliHealthy.antigravity is false', { cliHealthy: NO_CLI }],
+    ...([null, '   '] as const).map((model): [string, Partial<EntryEvidence>] => [`agent.model is ${JSON.stringify(model)}`, { agents: [{ ...ANTIGRAVITY, model }] }]),
+    ['agent is disabled', { agents: [{ ...ANTIGRAVITY, enabled: false }] }],
+    ['agent is archived', { agents: [{ ...ANTIGRAVITY, archived: true }] }],
+    ['agent is a Bot agent', { agents: [{ ...ANTIGRAVITY, bot: { handle: 'ag-bot', display_name: '', builtin: false } }] }],
+    ['agentsRead is false', { agentsRead: false }],
+  ])('refuses Direct-only Antigravity when %s', (_label, patch) => {
+    const read = antigravityOnly(patch);
+    expect(entryCandidates(read)).toEqual([]);
+    expect(admitEntry(read).kind).toBe('refused');
+  });
+
+  it('prefers healthy Direct-only Antigravity over built-in vibey when both are runnable and keeps saved default', () => {
+    const both = evidence({
+      agents: [ANTIGRAVITY, VIBEY], connections: [agApplied(), hubApplied('vibey')],
+      supplies: [vibeySupply()], targets: [VIBEY, ANTIGRAVITY], cliHealthy: { ...NO_CLI, antigravity: true },
+    });
+    expect(entryCandidates(both).map((c) => c.backend)).toEqual(['antigravity', 'vibey']);
+    expect(chooseEntryDefault(entryCandidates(both), both)?.agent.name).toBe('antigravity');
+    expect(chooseEntryDefault(entryCandidates({ ...both, defaultAgentName: 'antigravity' }), { ...both, defaultAgentName: 'antigravity' })).toBeNull();
+  });
+
+  it.each([
+    ['Hub IPC down and supplies unread', { suppliesRead: false, runtime: null }],
+    ['Hub engine down', { suppliesRead: true, runtime: HUB_DOWN_RUNTIME }],
+  ] as const)('still requires hubReady and Hub supply for Hub-backed backends when %s', (_label, hubState) => {
+    const read = antigravityOnly({
+      agents: [CLAUDE, ANTIGRAVITY, VIBEY], connections: [hubApplied('claude'), agApplied(), hubApplied('vibey')],
+      supplies: [claudeSupply(), vibeySupply()], cliHealthy: { ...NO_CLI, claude: true, antigravity: true }, ...hubState,
+    });
+    expect(entryCandidates(read).map((c) => c.backend)).toEqual(['antigravity']);
   });
 });

@@ -22,6 +22,7 @@ _VERSION_PATTERNS = {
     "claude": rf"(?:({_VERSION})\s+\(Claude Code\)|(?:Claude Code|claude)\s+({_VERSION}))",
     "codex": rf"(?:codex-cli|codex)\s+({_VERSION})(?:\s+\(build [^\r\n]+\))?",
     "opencode": rf"(?:opencode\s+)?({_VERSION}|dev|local)",
+    "antigravity": rf"({_VERSION})",
 }
 
 

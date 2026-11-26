@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Final, Literal
 
-NativeCliBackend = Literal["opencode", "claude", "codex"]
+NativeCliBackend = Literal["opencode", "claude", "codex", "antigravity"]
 AgentBackend = Literal[NativeCliBackend, "vibey"]
 
 
@@ -90,6 +90,15 @@ AGENT_BACKEND_REGISTRY: Final[dict[str, AgentBackendDescriptor]] = {
         default_cli="codex",
         default_enabled=False,
         latest_probe=("npm", "@openai/codex"),
+        capabilities=AgentBackendCapabilities(),
+    ),
+    "antigravity": AgentBackendDescriptor(
+        id="antigravity",
+        display_name="Antigravity",
+        config_key="antigravity",
+        default_cli="agy",
+        default_enabled=False,
+        latest_probe=("github", "google-antigravity/antigravity-cli"),
         capabilities=AgentBackendCapabilities(),
     ),
 }
