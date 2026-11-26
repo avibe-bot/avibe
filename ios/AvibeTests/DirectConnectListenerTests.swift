@@ -2368,6 +2368,42 @@ final class DirectConnectListenerTests: XCTestCase {
         client.close()
     }
 
+    /// A strict CONNECT the listener gives up without an answer is settled
+    /// once on nothing: when its bound runs out while its direct candidate
+    /// is still being tried, and when its plans stop being strict.
+    func testAStrictConnectGivenUpIsSettledOnceOnNone() async throws {
+        // The direct candidate never opens: the bound runs out in the race.
+        var fixture = try await makeListener(direct: .hang)
+        fixture.plans.setStrict(0.5)
+        var client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        var answer = try await client.receiveUntilClosed()
+        XCTAssertEqual(answer, Data())
+        try await eventually { fixture.plans.settlements.count == 1 }
+        XCTAssertEqual(fixture.plans.settlements, [nil])
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        client.close()
+        await fixture.listener.stop()
+
+        // The direct candidate fails and is planned again within the bound;
+        // then the plans are ordinary again, which is not for this CONNECT.
+        fixture = try await makeListener(direct: .fail)
+        let plans = fixture.plans
+        plans.setStrict(60)
+        client = LoopbackClient(port: fixture.port)
+        try await client.send(canonicalHead)
+        try await eventually { plans.races.count >= 2 }
+        // Failing races of a CONNECT that is still waiting settle nothing.
+        XCTAssertEqual(plans.settlements, [])
+        plans.setStrict(nil)
+        answer = try await client.receiveUntilClosed()
+        XCTAssertEqual(answer, Data())
+        try await eventually { plans.settlements.count == 1 }
+        XCTAssertEqual(plans.settlements, [nil])
+        XCTAssertEqual(fixture.publicOrigin.attempts, 0)
+        client.close()
+    }
+
     /// Nothing undoes a grant. Once granted, a plan that stops being
     /// current changes nothing for this relay, and a backend that fails
     /// only ends it: it is not validated or planned again, nothing is
@@ -3065,6 +3101,7 @@ final class StandInPlans: @unchecked Sendable {
     private var path: DirectPathKind?
     private var storedRaces: [DirectRaceRecord] = []
     private var storedSettlements: [DirectRelayBackend?] = []
+    private var strictSeconds: TimeInterval?
     private var misses = 0
 
     /// How many sticky attempts passed their bound without an answer.
@@ -3081,6 +3118,13 @@ final class StandInPlans: @unchecked Sendable {
     /// it was granted on, or `nil` for one it refused after a race.
     var settlements: [DirectRelayBackend?] {
         lock.withLock { storedSettlements }
+    }
+
+    /// Makes the next plans strict, with this bound for the CONNECT: the
+    /// direct candidate only, no public origin. `nil` makes them ordinary
+    /// again.
+    func setStrict(_ seconds: TimeInterval?) {
+        lock.withLock { strictSeconds = seconds }
     }
 
     /// Makes the next plans sticky, as on a direct address.
@@ -3147,13 +3191,18 @@ final class StandInPlans: @unchecked Sendable {
                 try await direct.open()
             }
         }
+        let strict = lock.withLock { strictSeconds }
+        var openPublic: (@Sendable () async throws -> any DirectByteStream)?
+        if strict == nil {
+            openPublic = {
+                try await publicOrigin.open()
+            }
+        }
         var plan = DirectConnectPlan(
             scope: scope,
             generation: generation,
             openDirect: openDirect,
-            openPublic: {
-                try await publicOrigin.open()
-            },
+            openPublic: openPublic,
             isCurrent: { [weak self] in
                 self?.currentNow() ?? false
             },
@@ -3161,6 +3210,7 @@ final class StandInPlans: @unchecked Sendable {
                 self?.recordDirectFailure()
             }
         )
+        plan.strictWaitSeconds = strict
         let (sticky, path) = lock.withLock { (isSticky, self.path) }
         plan.sticky = sticky
         plan.path = path

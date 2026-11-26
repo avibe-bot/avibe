@@ -349,8 +349,9 @@ struct DirectConnectPlan: Sendable {
     var recordRace: (@Sendable (DirectRaceRecord) -> Void)?
     /// Hears what became of the CONNECT, once, from the last plan it raced
     /// under: the backend its relay was granted on, or `nil` when the
-    /// listener refused the CONNECT after that plan's race (its legs
-    /// failed, its bound ran out, or no further plan was to be had). A
+    /// listener gave the CONNECT up after that plan's race (its legs
+    /// failed, its bound ran out during a race or between two, or no
+    /// further plan was to be had), with or without an HTTP refusal. A
     /// race that is fenced and planned again is not the CONNECT's outcome,
     /// and nothing is heard of a CONNECT whose client left or whose
     /// listener stopped serving.
@@ -1245,7 +1246,11 @@ actor DirectConnectListener {
                 if deadline == nil { deadline = planningStarted.advanced(by: .seconds(seconds)) }
             } else {
                 // A deliberate re-establishment is for a new navigation, never this request.
-                guard !strictOnly, ordinaryPlans < 2 else { return }
+                guard !strictOnly, ordinaryPlans < 2 else {
+                    // Given up after a race, if there was one.
+                    settled?(nil)
+                    return
+                }
                 ordinaryPlans += 1
             }
             let admission = await listener.planned(
@@ -1294,7 +1299,12 @@ actor DirectConnectListener {
                 }
                 guard let watched else {
                     // WebKit closed its side, or sent too much, before a
-                    // backend was chosen.
+                    // backend was chosen; or the CONNECT's bound ran out
+                    // while this race was still running. Only the second
+                    // is the listener giving the CONNECT up.
+                    if let limit, ContinuousClock.now >= limit {
+                        settled?(nil)
+                    }
                     return
                 }
                 if race.isRetired {
