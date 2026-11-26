@@ -132,6 +132,8 @@ async def test_a_before_answer_sends_nothing_upstream_and_still_passes_after(tmp
     ('print("not json")', "source_filter_failed", False),
     ('json.dump({"action": "replace"}, sys.stdout)', "source_filter_failed", False),
     ('json.dump({"action": []}, sys.stdout)', "source_filter_failed", False),
+    # A valid envelope whose output is not a search result is found only when it becomes a record.
+    ('json.dump({"action": "respond", "output": {"ok": True, "result": {}}}, sys.stdout)', "source_filter_failed", False),
 ])
 async def test_a_blocking_or_broken_before_hook_stops_the_call(tmp_path, hooks, monkeypatch, script, code, ran_upstream):
     hooks("before_search", script)

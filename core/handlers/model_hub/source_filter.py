@@ -214,12 +214,17 @@ class SourceFilterHooks:
         try:
             response = await self._run(name, script, python, request)
         except HookFailed as failed:
-            reason = str(failed)
-            self._failures[name] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "reason": reason}
-            logger.warning("Source filter hook %s failed: %s", name, reason)
+            self.note_failure(name, failed)
             raise
         self._failures.pop(name, None)
         return HookAnswer(response)
+
+    def note_failure(self, name: str, failed: HookFailed) -> None:
+        """Keep a hook's failure for Settings, including one found only when its output is turned into a record."""
+
+        reason = str(failed)
+        self._failures[name] = {"at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "reason": reason}
+        logger.warning("Source filter hook %s failed: %s", name, reason)
 
     async def _run(self, name: str, script: Path, python: str, request: Mapping[str, Any]) -> dict[str, Any]:
         # A fetch request carries a whole page: encoded off the controller loop.
@@ -424,6 +429,7 @@ async def filtered_call(
         return answer
 
     def failed(hook: str, error: HookFailed, args, execution=None, attempts=None):
+        hooks.note_failure(hook, error)
         return blocked(
             "source_filter_failed", say("modelHub.sourceFilter.failed", hook=f"{hook}.py", reason=str(error)),
             args, execution, attempts,
