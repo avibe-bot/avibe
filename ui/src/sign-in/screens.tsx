@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import type { TranslationKey } from '@/i18n/types';
+import { isTouchCapableDevice } from '@/lib/softKeyboard';
 import { cn } from '@/lib/utils';
 
 import { alternative, PageMark, Primary, raised, SignInFrame } from './chrome';
@@ -382,8 +383,16 @@ export function OtpCells({
   onFocus: () => void;
 }) {
   const input = useRef<HTMLInputElement>(null);
+  const autoFocus = useSignInPlatform() === 'desktop' || !isTouchCapableDevice();
+
+  // Entering a code step or finishing its operation restores desktop typing.
+  // Touch browsers/iOS keep their existing tap-to-open-keyboard behavior.
+  useEffect(() => {
+    if (autoFocus && !busy) input.current?.focus();
+  }, [autoFocus, busy]);
+
   return (
-    <div className="relative">
+    <div className="group/otp relative">
       <Label htmlFor="mobile-login-code" className="sr-only">
         {label}
       </Label>
@@ -410,11 +419,11 @@ export function OtpCells({
             className={cn(
               'grid aspect-square min-w-0 place-items-center rounded-2xl border bg-surface text-2xl font-medium tabular-nums shadow-elevation-0 transition-colors duration-(--motion-duration-fast)',
               invalid ? 'border-destructive text-destructive-ink' : 'border-edge',
-              !invalid && !busy && index === code.length && 'border-mint ring-2 ring-mint/30',
+              !invalid && !busy && index === code.length && 'group-focus-within/otp:border-mint group-focus-within/otp:ring-2 group-focus-within/otp:ring-mint/30',
             )}
           >
             {code[index] || (!busy && index === code.length ? (
-              <span className="h-6 w-px bg-mint-ink" />
+              <span className="hidden h-6 w-px bg-mint-ink group-focus-within/otp:block" />
             ) : null)}
           </span>
         ))}
