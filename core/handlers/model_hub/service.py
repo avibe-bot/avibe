@@ -7722,7 +7722,7 @@ class ModelHubService:
             previous = await asyncio.to_thread(self.store.load)
             setting = hosted_tool_setting(previous, "web_search")
             if setting.source_filter != enabled:
-                config = self._clone_config(previous)
+                config = await asyncio.to_thread(self._clone_config, previous)
                 config.hosted_tools["web_search"] = replace(setting, source_filter=enabled)
                 await self._commit_synced(previous, config)
         return await asyncio.to_thread(self.source_filter_status)
