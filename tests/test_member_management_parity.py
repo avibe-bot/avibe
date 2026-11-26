@@ -104,6 +104,9 @@ _RETAINED_OWNER_ROUTES = {
     ("POST", "/api/mcp/{name}/approve"),
     ("POST", "/api/mcp/{name}/configure"),
     ("DELETE", "/api/mcp/{name}"),
+    # The source filter runs the Owner's local hook scripts on every search and fetch: Owner-only.
+    ("GET", "/api/settings/experimental/source-filter"),
+    ("PUT", "/api/settings/experimental/source-filter"),
     ("GET", "/api/mcp/{name}/oauth/start"),
     ("POST", "/api/mcp/{name}/oauth/complete"),
     ("POST", "/api/mcp/{name}/oauth/logout"),
@@ -227,7 +230,8 @@ def test_complete_registered_api_management_inventory():
     #   1 Antigravity model catalog read (Editor, like Claude/Codex models).
     # Three independent engine channel controls are owner-only, including metadata refresh.
     # Two Owner unbind methods and four direct-loopback-only RB2 confirmation methods.
-    assert len(endpoints) == 395
+    # + 2 Owner-only Settings › Experimental › Source filter methods (local hook scripts).
+    assert len(endpoints) == 397
     for method in ("GET", "POST"):
         assert (method, "/api/backend/antigravity/auth") in endpoints
         assert http_authorization_policy(method, "/api/backend/antigravity/auth").minimum_role == "member"

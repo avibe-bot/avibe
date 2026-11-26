@@ -3554,6 +3554,10 @@ class ModelHubHostedToolConfig:
     executor_order_kinds: Optional[Mapping[str, str]] = None
     # ``web_search`` only: model executor Sources the user turned off (§6), by Source id.
     executors: Mapping[str, ModelHubExecutorSettings] = field(default_factory=dict)
+    # ``web_search`` only: Settings › Experimental › Source filter (``vibey-source-filter-hooks.md``). It covers
+    # ``web_fetch`` too; it is kept on this entry because a release before it ignores an unknown field here (and
+    # drops it on its next save, which turns the experiment off), while an unknown ``model_hub`` key fails the load.
+    source_filter: bool = False
 
     @classmethod
     def from_payload(
@@ -3567,7 +3571,10 @@ class ModelHubHostedToolConfig:
         if tool == "web_fetch":
             known |= {"executor_order", "services", "executor_order_kinds"}
         elif tool == "web_search":
-            known |= {"executor_order", "service_order", "prefer_native", "services", "executor_order_kinds", "executors"}
+            known |= {
+                "executor_order", "service_order", "prefer_native", "services", "executor_order_kinds", "executors",
+                "source_filter",
+            }
         elif tool in MODEL_HUB_SEARCH_TOOLS:
             known.add("executor_order")
         else:
@@ -3581,6 +3588,11 @@ class ModelHubHostedToolConfig:
         prefer_native = payload.get("prefer_native", True) if tool == "web_search" else True
         if not isinstance(prefer_native, bool):
             raise ValueError("Config 'model_hub.hosted_tools.web_search.prefer_native' must be a boolean")
+        source_filter = payload.get("source_filter", False) if tool == "web_search" else False
+        if not isinstance(source_filter, bool):
+            # An experiment that rewrites what the model reads stays off when its value is damaged.
+            logger.warning("Config 'model_hub.hosted_tools.web_search.source_filter' is not a boolean; it is off")
+            source_filter = False
         # Only the fields this tool knows are read; another tool's field was ignored above. A field is decided by its
         # presence: the writer omits an unset one, so a present null is damage and goes through the grammar.
         has_order = "executor_order" in known and "executor_order" in payload
@@ -3592,6 +3604,7 @@ class ModelHubHostedToolConfig:
             executor_order=order,
             service_order=model_hub_service_order(payload["service_order"], tool=tool) if has_service_order else None,
             prefer_native=prefer_native,
+            source_filter=source_filter,
             services=(
                 _fetch_service_settings_from_payload(payload["services"], sources)
                 if tool == "web_fetch" and "services" in payload else
@@ -3621,6 +3634,8 @@ class ModelHubHostedToolConfig:
             out["default_model"] = self.default_image.to_payload()
         if not self.prefer_native:
             out["prefer_native"] = False
+        if self.source_filter:
+            out["source_filter"] = True
         if self.services:
             out["services"] = {source_id: saved.to_payload() for source_id, saved in self.services.items()}
         if self.executor_order_kinds is not None:

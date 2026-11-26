@@ -32,6 +32,8 @@ import {
   SettingsAntigravityProviderPage,
   SettingsComputerUsePage,
   SettingsDependenciesPage,
+  SettingsExperimentalPage,
+  SettingsSourceFilterPage,
   SettingsDiagnosticsPage,
   SettingsGeneralPage,
   SettingsLayout,
@@ -888,6 +890,8 @@ const settingsRoute = () => (
     <Route path="diagnostics" element={<SettingsDiagnosticsPage />} />
     <Route path="diagnostics/logs" element={<SettingsLogsPage />} />
     <Route path="access" element={<PermissionsPage />} />
+    <Route path="experimental" element={<SettingsExperimentalPage />} />
+    <Route path="experimental/source-filter" element={<SettingsSourceFilterPage />} />
   </Route>
 );
 

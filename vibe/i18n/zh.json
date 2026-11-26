@@ -1195,6 +1195,12 @@
       "upstream_unauthorized": "刷新后供应商仍拒绝授权。",
       "upstream_error": "供应商返回错误。"
     },
+    "sourceFilter": {
+      "blocked": "已被信源过滤拦截：{reason}",
+      "blockedNoReason": "已被信源过滤拦截。",
+      "failed": "信源过滤脚本 {hook} 运行失败，这次调用已拦下：{reason}。",
+      "refused": "信源过滤改写后的参数未通过检查（{code}）。"
+    },
     "hostedTools": {
       "noExecutor": {
         "web_search": {"one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "refused": "{sources} 拒绝了网页搜索，当前没有能运行它的供应商。在 模型 › 工具 中清除拒绝记录后会再试。"},
@@ -1819,7 +1825,9 @@
       "fetch_unsupported_content": "不支持此文档类型",
       "fetch_refused": "网页请求被拒绝",
       "fetch_unavailable": "网页不可用",
-      "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了"
+      "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了",
+      "source_filter_blocked": "信源过滤拦下了这次调用",
+      "source_filter_failed": "信源过滤脚本运行失败，这次调用已拦下"
     },
     "tool": {
       "web_search": "网页搜索",
