@@ -191,6 +191,7 @@ describe('NativePcmCapture', () => {
         timings: {
           variant: 'early', startAfterMs: 50, deliveryMs: 14, armedAt: 66, beginAt: 66, categoryMs: 9, prepareMs: 28,
           taps: '50:3 75:12 100:4 moved=2 open=1 w50=9 w80=4',
+          tapsLost: 'lost=3 c50=0 c80=1 c100=2 c120=3',
         },
       });
     }
@@ -199,7 +200,23 @@ describe('NativePcmCapture', () => {
     expect(attempt).toMatchObject({
       holdT: 50, holdDlyMs: 14, holdArmMs: 66, holdBeginMs: 66, holdCatMs: 9, holdPrepMs: 28,
       holdTaps: 19, holdTapsMoved: 2, holdTapsOpen: 1, holdTapsW50: 9, holdTapsW80: 4, holdTapsW100: 0, holdTapsW120: 0,
+      holdTapsLost: 3, holdTapsC50: 0, holdTapsC80: 1, holdTapsC100: 2, holdTapsC120: 3,
     });
+  });
+
+  it('keeps none of the counts of taps of unknown length when the App\'s line is not what it writes', async () => {
+    for (const tapsLost of ['lost=3', 'lost=3 c50=0 c80=1 c100=2 c120=3 secret=1', 'c50=0 c80=1 c100=2 c120=3', 3]) {
+      const on = handlers();
+      const trace = new VoiceCaptureTrace('hold', 'dictation-4');
+      adoptAnswer = async () => ({ sampleRate: 16_000, timings: { variant: 'early', taps: '50:3', tapsLost } });
+      const capture = adoptedCaptureFactory('n0123456789abcdef')(emptyVoiceStream(), 16_000, 0, on, 5_000, trace) as NativePcmCapture;
+      await capture.start();
+      const attempt = trace.toEvent('sent').attempts[0];
+      expect(attempt.holdTaps, String(tapsLost)).toBe(3);
+      expect(Object.keys(attempt).filter((key) => key === 'holdTapsLost' || key.startsWith('holdTapsC')), String(tapsLost)).toEqual([]);
+      capture.stop();
+      for (const listener of [...listeners]) listener({ take: 'n0123456789abcdef', ended: true });
+    }
   });
 
   it('keeps none of the tap counts when the App\'s line is not what it writes', async () => {

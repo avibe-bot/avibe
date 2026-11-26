@@ -361,6 +361,11 @@ def test_voice_telemetry_keeps_the_ios_apps_timings_of_a_hold_it_recognised(capl
         "holdTapsW80": 2,
         "holdTapsW100": 1,
         "holdTapsW120": 0,
+        "holdTapsLost": 4,
+        "holdTapsC50": 1,
+        "holdTapsC80": 2,
+        "holdTapsC100": 3,
+        "holdTapsC120": 4,
     }
     with caplog.at_level(logging.INFO, logger="vibe.ui_server"):
         response = client.post(

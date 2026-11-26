@@ -72,6 +72,13 @@ final class NativeHoldCapture {
         /// finger was still down when the input could have started with
         /// it (prepared, and not before the threshold).
         var wouldOpen: [Int: Bool] = [:]
+        /// Its touch was gone when it was judged: it lifted at a time not
+        /// known, and `ms` is only the most it can have lasted (from the
+        /// App's handling of its touch-down). `wouldOpen` is then empty.
+        var lengthUnknown = false
+        /// For such a tap, for each threshold: it surely ended before the
+        /// input could have started with it.
+        var surelyClosed: [Int: Bool] = [:]
     }
 
     /// What preparing a hold took (`NativeHoldCaptureAudio.arm`), in ms.
@@ -225,6 +232,9 @@ final class NativeHoldCapture {
         var touch: (@MainActor () -> TouchState)?
         /// How long the touch lasted by its own times, when that made it a tap.
         var tapMs: Int?
+        /// A tap whose touch was gone when it was judged: its lift time is
+        /// not known, only that it came before then.
+        var lostTap = false
         var recognised = false
         /// The input was asked to start.
         var begun = false
@@ -342,6 +352,7 @@ final class NativeHoldCapture {
     private let noteTimings: (String) -> Void
     private let noteTap: (Tap) -> Void
     private let tapsTotal: () -> String?
+    private let tapsLost: () -> String?
     private let sendHoldEvent: @MainActor (WKWebView?, [String: Any]) -> Void
     private let sendCaptureEvent: @MainActor (WKWebView?, String, Event) -> Void
 
@@ -382,6 +393,7 @@ final class NativeHoldCapture {
         noteTimings: @escaping (String) -> Void = { NativeHoldTimings.add($0) },
         noteTap: @escaping (Tap) -> Void = { NativeHoldTaps.note($0) },
         tapsTotal: @escaping () -> String? = { NativeHoldTaps.total() },
+        tapsLost: @escaping () -> String? = { NativeHoldTaps.lostTotal() },
         sendHoldEvent: (@MainActor (WKWebView?, [String: Any]) -> Void)? = nil,
         sendCaptureEvent: (@MainActor (WKWebView?, String, Event) -> Void)? = nil
     ) {
@@ -396,6 +408,7 @@ final class NativeHoldCapture {
         self.noteTimings = noteTimings
         self.noteTap = noteTap
         self.tapsTotal = tapsTotal
+        self.tapsLost = tapsLost
         self.sendHoldEvent = sendHoldEvent ?? { webView, detail in NativeHoldCapture.dispatchHoldEvent(webView, detail) }
         self.sendCaptureEvent = sendCaptureEvent ?? { webView, take, event in
             webView?.evaluateJavaScript(NativeHoldCapture.eventScript(take: take, event: event))
@@ -643,12 +656,16 @@ final class NativeHoldCapture {
             // press for itself, so the App was not told of the lift, and the
             // focused composer left the list before the App learnt of it.
             // Asked, the touch says whether it lifted: then it was a tap, and
-            // is counted as one by its own length. A touch already gone has
-            // lifted at a time not known; counted by the time of this word
-            // it would read longer than it was and skew the counts, so it
-            // stays a `withdrawn` line.
-            if let state = hold.touch?(), !state.gone, let lifted = state.liftedAt {
-                if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+            // is counted as one by its own length. A touch already gone (on a
+            // phone, by the time the keyboard has come up) lifted at a time
+            // not known, before now: still a tap, counted with that bound
+            // instead of its length (`NativeHoldTaps`, `lost`).
+            if let state = hold.touch?(), let lifted = state.liftedAt {
+                if state.gone {
+                    hold.lostTap = true
+                } else if let down = hold.downStamp {
+                    hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded()))
+                }
                 cancelHold(hold, why: "tap")
             } else {
                 cancelHold(hold, why: "withdrawn")
@@ -747,8 +764,10 @@ final class NativeHoldCapture {
                 // no moves, and the lift only when it resets it, which a tap
                 // that raises the keyboard delays past this moment.
                 let touch = hold.touch?()
-                if let lifted = touch?.liftedAt {
-                    if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+                if let touch, let lifted = touch.liftedAt {
+                    // A touch already gone lifted at a time not known: counted with its bound.
+                    if touch.gone { hold.lostTap = true }
+                    else if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
                     self.cancelHold(hold, why: "tap")
                     return
                 }
@@ -839,8 +858,10 @@ final class NativeHoldCapture {
             guard let self, let hold, self.hold === hold, !hold.begun, !hold.recognised else { return }
             hold.cancelStart = nil
             let touch = hold.touch?()
-            if let lifted = touch?.liftedAt {
-                if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
+            if let touch, let lifted = touch.liftedAt {
+                // A touch already gone lifted at a time not known: counted with its bound.
+                if touch.gone { hold.lostTap = true }
+                else if let down = hold.downStamp { hold.tapMs = max(0, Int(((lifted - down) * 1000).rounded())) }
                 self.cancelHold(hold, why: "tap")
                 return
             }
@@ -944,7 +965,7 @@ final class NativeHoldCapture {
     /// by how long it lasted: they are many, and would push the holds out.
     private func note(_ hold: Hold) {
         switch hold.timings.end {
-        case "tap": noteTap(tap(hold, ms: hold.tapMs ?? since(hold), moved: false))
+        case "tap": noteTap(hold.lostTap ? lostTap(hold, atMost: since(hold)) : tap(hold, ms: hold.tapMs ?? since(hold), moved: false))
         case "moved": noteTap(tap(hold, ms: since(hold), moved: true))
         default: noteTimings(hold.timings.line)
         }
@@ -971,6 +992,21 @@ final class NativeHoldCapture {
         let delivery = hold.tapMs != nil ? hold.timings.deliveryMs ?? 0 : 0
         for threshold in NativeHoldTaps.thresholds {
             tap.wouldOpen[threshold] = ready.map { ms >= delivery + max($0, threshold) } ?? false
+        }
+        return tap
+    }
+
+    /// A tap whose lift time is not known, only that it came within
+    /// `atMost` ms of the App's handling of its touch-down. It would have
+    /// opened the microphone at a threshold only if the finger was still
+    /// down once prepared and the threshold had passed: surely not when the
+    /// bound comes before that, or when preparing had not answered by then.
+    private func lostTap(_ hold: Hold, atMost: Int) -> Tap {
+        var tap = Tap(ms: atMost, moved: false, opened: hold.begun, lengthUnknown: true)
+        guard hold.timings.variant != "late" else { return tap }
+        let ready = hold.prepared ? hold.timings.armedAt : 0
+        for threshold in NativeHoldTaps.thresholds {
+            tap.surelyClosed[threshold] = ready.map { atMost < max($0, threshold) } ?? true
         }
         return tap
     }
@@ -1083,6 +1119,7 @@ final class NativeHoldCapture {
                 var timings = hold.timings.fields
                 // The touches that were not holds, as counted so far.
                 if let taps = tapsTotal() { timings["taps"] = taps }
+                if let lost = tapsLost() { timings["tapsLost"] = lost }
                 sendHoldEvent(take.webView, ["phase": "timings", "take": take.id, "timings": timings])
             }
         }
@@ -1220,7 +1257,13 @@ enum NativeHoldTaps {
     static let thresholds = [50, 80, 100, 120]
     private static let prefix = "hold taps"
 
+    /// Taps whose length is not known (`Tap.lengthUnknown`): they are in the
+    /// bucket of the most they can have lasted, and in no `w…` count.
+    static let lost = "lost"
+
     private static func would(_ threshold: Int) -> String { "w\(threshold)" }
+    /// Such taps that surely ended before the input could start at `threshold`.
+    private static func closed(_ threshold: Int) -> String { "c\(threshold)" }
 
     /// The bucket a touch of `ms` falls in: its lower edge, capped at 975.
     static func bucket(ms: Int) -> String {
@@ -1236,19 +1279,24 @@ enum NativeHoldTaps {
         counts[tap.moved ? Self.moved : bucket(ms: tap.ms), default: 0] += 1
         if tap.opened { counts[opened, default: 0] += 1 }
         for (threshold, open) in tap.wouldOpen where open { counts[would(threshold), default: 0] += 1 }
+        if tap.lengthUnknown { counts[lost, default: 0] += 1 }
+        for (threshold, shut) in tap.surelyClosed where shut { counts[closed(threshold), default: 0] += 1 }
         return counts
     }
 
-    /// `hold taps 50:3 75:12 100:4 moved=2 open=1 w50=9 w80=4`, or nil with
-    /// nothing counted. `open` and the `w…` counts are left out at zero.
-    static func line(for counts: [String: Int]) -> String? {
+    /// `hold taps 50:3 75:12 100:4 moved=2 open=1 w50=9 w80=4 lost=2 c50=1`,
+    /// or nil with nothing counted. The named counts are left out at zero.
+    /// `lengths: false` leaves out `lost` and the `c…` counts: the line a
+    /// page from before them reads, refusing any name it does not know.
+    static func line(for counts: [String: Int], lengths: Bool = true) -> String? {
         let buckets = counts.filter { Int($0.key) != nil && $0.value > 0 }
             .sorted { (Int($0.key) ?? 0) < (Int($1.key) ?? 0) }
             .map { " \($0.key):\($0.value)" }
             .joined()
         let movedCount = counts[moved] ?? 0
         guard !buckets.isEmpty || movedCount > 0 else { return nil }
-        let named = ([moved, opened] + thresholds.map(would))
+        let names = [moved, opened] + thresholds.map(would) + (lengths ? [lost] + thresholds.map(closed) : [])
+        let named = names
             .compactMap { name in (counts[name] ?? 0) > 0 ? " \(name)=\(counts[name] ?? 0)" : nil }
             .joined()
         return prefix + buckets + named
@@ -1290,11 +1338,27 @@ enum NativeHoldTaps {
         line(for: stored)
     }
 
+    private static var storedTotal: [String: Int] {
+        UserDefaults.standard.dictionary(forKey: totalKey) as? [String: Int] ?? [:]
+    }
+
     /// The counts since the App was installed, without the line's prefix
-    /// (`50:3 75:12 moved=2 open=1 w50=9`); nil with nothing counted.
+    /// (`50:3 75:12 moved=2 open=1 w50=9`), as every page reads them; nil
+    /// with nothing counted.
     static func total() -> String? {
-        line(for: UserDefaults.standard.dictionary(forKey: totalKey) as? [String: Int] ?? [:])
-            .map { String($0.dropFirst(prefix.count + 1)) }
+        line(for: storedTotal, lengths: false).map { String($0.dropFirst(prefix.count + 1)) }
+    }
+
+    /// Of those, the taps whose length is not known, and how many of them
+    /// surely did not reach each threshold (`lost=3 c50=1 c80=2 c100=2
+    /// c120=3`); nil with none.
+    static func lostTotal() -> String? {
+        lostLine(for: storedTotal)
+    }
+
+    static func lostLine(for counts: [String: Int]) -> String? {
+        guard (counts[lost] ?? 0) > 0 else { return nil }
+        return ([lost] + thresholds.map(closed)).map { "\($0)=\(counts[$0] ?? 0)" }.joined(separator: " ")
     }
 
     static func drop(line: String) {
