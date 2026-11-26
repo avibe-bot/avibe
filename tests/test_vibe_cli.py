@@ -4801,6 +4801,107 @@ def test_remote_direct_status_loads_persisted_choice(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["direct"]["enabled"] is False
 
 
+@pytest.mark.parametrize("owner_available", [True, False])
+@pytest.mark.parametrize("json_output", [True, False])
+def test_remote_status_reports_direct_owner_when_available(monkeypatch, capsys, owner_available, json_output):
+    from vibe import direct_lifecycle, remote_rebind
+
+    config = v2_config.V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.set_path_choice("direct", True)
+    cloud.enabled, cloud.instance_id, cloud.instance_secret = True, "fixture", "fixture-only"
+    cloud.public_url = "https://fixture-app.avibe.bot"
+    config.save()
+    monkeypatch.setattr(remote_rebind, "read_state", lambda: ("bound", True, None))
+    monkeypatch.setattr(remote_access, "_read_pid", lambda: None)
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda config: None)
+    monkeypatch.setattr(remote_access, "tunnel_quality_snapshot", lambda: None)
+    monkeypatch.setattr(direct_lifecycle, "resolve_direct_transport_binary", lambda config: "/fixture/direct")
+    monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: not owner_available)
+    direct = {"enabled": True, "state": "running", "reason": "published", "transport_running": True,
+              "certificate_not_after": "2030-01-01T00:00:00Z"}
+    requests = []
+
+    def get(client, url, **kwargs):
+        requests.append(url)
+        return SimpleNamespace(status_code=200, json=lambda: {"direct": direct, "running": True})
+
+    monkeypatch.setattr(remote_access.requests.Session, "get", get)
+    assert cli.cmd_remote_status(SimpleNamespace(json=json_output)) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        payload = json.loads(output)
+        assert payload["running"] is False  # The owner response supplies only the direct block.
+        if owner_available:
+            assert payload["direct"] == direct
+        else:
+            assert payload["direct"]["reason"] == "owner_not_running"
+    else:
+        assert "Tunnel: stopped" in output
+        if owner_available:
+            assert "Direct state: running (published)" in output and "Direct transport: running" in output
+            assert direct["certificate_not_after"] in output
+        else:
+            assert "owner_not_running" in output and "Direct transport: stopped" in output
+    assert len(requests) == int(owner_available)
+
+
+@pytest.mark.parametrize("failure", ["request_error", "not_ok", "not_json", "other_setting", "probe_raises", "config_unreadable"])
+def test_remote_status_keeps_its_own_direct_block_when_the_owner_gives_no_usable_answer(monkeypatch, capsys, failure):
+    from vibe import direct_lifecycle, remote_rebind
+
+    config = v2_config.V2Config.default()
+    cloud = config.remote_access.vibe_cloud
+    cloud.set_path_choice("direct", True)
+    cloud.enabled, cloud.instance_id, cloud.instance_secret = True, "fixture", "fixture-only"
+    cloud.public_url = "https://fixture-app.avibe.bot"
+    config.save()
+    monkeypatch.setattr(remote_rebind, "read_state", lambda: ("bound", True, None))
+    monkeypatch.setattr(remote_access, "_read_pid", lambda: None)
+    monkeypatch.setattr(remote_access, "_resolve_binary", lambda config: None)
+    monkeypatch.setattr(remote_access, "tunnel_quality_snapshot", lambda: None)
+    monkeypatch.setattr(direct_lifecycle, "resolve_direct_transport_binary", lambda config: "/fixture/direct")
+    monkeypatch.setattr(runtime, "recorded_ui_is_gone", lambda: False)
+    requests = []
+
+    def get(client, url, **kwargs):
+        requests.append(kwargs)
+        if failure == "request_error":
+            raise remote_access.requests.ConnectionError("refused")
+        if failure == "not_ok":
+            return SimpleNamespace(status_code=503, json=lambda: {"direct": {"enabled": True, "state": "running"}})
+        if failure == "not_json":
+            def no_json():
+                raise ValueError("not json")
+            return SimpleNamespace(status_code=200, json=no_json)
+        # The owner still answers for the other value of the setting.
+        return SimpleNamespace(status_code=200, json=lambda: {"direct": {"enabled": False, "state": "disabled"}})
+
+    monkeypatch.setattr(remote_access.requests.Session, "get", get)
+    if failure == "probe_raises":
+        def broken():
+            raise OSError("state unreadable")
+        monkeypatch.setattr(runtime, "recorded_ui_is_gone", broken)
+    if failure == "config_unreadable":
+        def unreadable():
+            raise ValueError("config does not load")
+        monkeypatch.setattr(v2_config.V2Config, "load", unreadable)
+    assert cli.cmd_remote_status(SimpleNamespace(json=True)) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["running"] is False and "state" in payload["direct"]
+    assert payload["direct"].get("transport_running") is not True and payload["direct"]["state"] != "running"
+    if failure == "config_unreadable":
+        # Nothing names the owner's address without a config: it is not asked.
+        assert requests == [] and payload["enabled"] is False
+    elif failure == "probe_raises":
+        assert requests == []
+    else:
+        # One read, bounded, of this machine only.
+        assert len(requests) == 1 and requests[0]["timeout"] == (0.5, 1.0) and requests[0]["allow_redirects"] is False
+    if failure != "config_unreadable":
+        assert payload["direct"]["enabled"] is True and payload["direct"]["reason"] == "owner_not_running"
+
+
 def test_remote_parser_accepts_status_json():
     parser = cli.build_parser()
     args = parser.parse_args(["remote", "status", "--json"])
