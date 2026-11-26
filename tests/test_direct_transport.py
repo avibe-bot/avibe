@@ -221,9 +221,9 @@ class RecordingRendezvous(DirectRendezvous):
         super().__init__(clock=clock or time.time)
         self.published: list[tuple[DirectEndpoint | None, str]] = []
 
-    def publish(self, endpoint, *, reason="not_running", retire_at=None):
+    def publish(self, endpoint, *, reason="not_running", retire_at=None, publisher=None):
         self.published.append((endpoint, reason))
-        super().publish(endpoint, reason=reason, retire_at=retire_at)
+        super().publish(endpoint, reason=reason, retire_at=retire_at, publisher=publisher)
 
 
 @pytest.fixture
@@ -395,7 +395,7 @@ async def test_daily_turnover_reconnects_via_authenticated_rendezvous(sidecar, m
             refused = _post(client, _body(peer), origin=origin).get_json()
             assert refused['status'] == 'unavailable' and 'endpoint' not in refused
             assert not rv.is_admitted(peer)
-        assert rv.limit_admission_ttl(300) == 0
+        assert rv.limit_admission_ttl(300, publisher=owner._publisher) == 0
         await _wait_until(lambda: rv._endpoint and rv._endpoint.endpoint_id == ENDPOINT_TWO)
         assert closed == [PEER] and not rv.is_admitted(PEER) and not psutil.pid_exists(first_pid)
         assert len(_admission_notices(events)) == 1

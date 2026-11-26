@@ -174,7 +174,8 @@ class DirectRendezvous:
 
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._publisher: object | None = None
         # Key by authenticated caller, never by its freely replaceable endpoint key.
         self._log_callers: OrderedDict[str, tuple[tuple, float, int]] = OrderedDict()
         # Distinguishes this process's generations from any earlier process's.
@@ -189,7 +190,15 @@ class DirectRendezvous:
         self._admissions: dict[str, _Admission] = {}
         self._admission_listener: AdmissionListener | None = None
 
-    def set_admission_listener(self, listener: AdmissionListener | None) -> None:
+    def claim_publisher(self) -> object:
+        """Transfer publication to one lifecycle, atomically with offer and cleanup."""
+        with self._lock:
+            self.publish(None, reason="not_running", publisher=self._publisher)
+            self._admission_listener = None
+            self._publisher = object()
+            return self._publisher
+
+    def set_admission_listener(self, listener: AdmissionListener | None, *, publisher: object | None = None) -> None:
         """Set the optional non-blocking hook for admission notices.
 
         The hook is called after the in-memory admission change and before
@@ -200,9 +209,11 @@ class DirectRendezvous:
         """
 
         with self._lock:
-            self._admission_listener = listener
+            if publisher is self._publisher:
+                self._admission_listener = listener
 
-    def publish(self, endpoint: DirectEndpoint | None, *, reason: str = "not_running", retire_at: float | None = None) -> None:
+    def publish(self, endpoint: DirectEndpoint | None, *, reason: str = "not_running", retire_at: float | None = None,
+                publisher: object | None = None) -> None:
         """Replace the published endpoint; ``None`` withdraws it for ``reason``.
 
         A change of endpoint ID or of the address set starts a new generation.
@@ -224,6 +235,8 @@ class DirectRendezvous:
             ordered = sorted(seen.values(), key=lambda item: (_KIND_ORDER[item["kind"]], item["address"]))
             candidates = tuple(ordered[:_MAX_ADDRESSES])
         with self._lock:
+            if publisher is not self._publisher:
+                return
             previous_id = self._endpoint.endpoint_id if self._endpoint is not None else None
             current_id = endpoint.endpoint_id if endpoint is not None else None
             previous_policy = self._endpoint.relay_policy if self._endpoint else None
@@ -330,17 +343,22 @@ class DirectRendezvous:
             admission = self._admissions.get(client_endpoint_id)
             return admission is not None and admission.until > now and bool(key_limited_ttl(self._retire_at, 1))
 
-    def limit_admission_ttl(self, ttl: int) -> int:
+    def limit_admission_ttl(self, ttl: int, *, publisher: object | None = None) -> int:
         with self._lock:
-            return key_limited_ttl(self._retire_at, ttl) if self._endpoint else 0
+            return key_limited_ttl(self._retire_at, ttl) if self._endpoint and publisher is self._publisher else 0
 
-    def clear_paths(self) -> None:
+    def clear_paths(self, *, publisher: object | None = None) -> None:
         with self._lock:
+            if publisher is not self._publisher:
+                return
             for admission in self._admissions.values():
                 admission.connections.clear()
 
-    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
+    def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None, *,
+                     publisher: object | None = None) -> None:
         with self._lock:
+            if publisher is not self._publisher:
+                return
             admission = self._admissions.get(peer)
             if not admission or not admission.session or not epoch or admission.epoch != epoch or admission.until <= self._clock():
                 return

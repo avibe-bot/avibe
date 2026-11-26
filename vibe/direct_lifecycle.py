@@ -217,31 +217,33 @@ class _OwnedRendezvous:
 
     def __init__(self, lifecycle: DirectAccessLifecycle, generation: int, ingress: Any) -> None:
         self._owner, self._generation, self._ingress = lifecycle, generation, ingress
+        self._publisher = lifecycle._publisher
 
     def publish(self, endpoint: Any, *, reason: str = "not_running") -> None:
         if endpoint is not None:
             if self._owner._can_commit(self._generation, self._ingress):
-                self._owner._rendezvous.publish(endpoint, reason=reason, retire_at=self._owner._endpoint_retire_at)
+                self._owner._rendezvous.publish(endpoint, reason=reason, retire_at=self._owner._endpoint_retire_at,
+                                                publisher=self._publisher)
         else:
-            self._owner._rendezvous.publish(None, reason=reason)
+            self._owner._rendezvous.publish(None, reason=reason, publisher=self._publisher)
 
     def limit_admission_ttl(self, ttl: int) -> int:
         if self._generation != self._owner._generation or self._ingress is not self._owner._ingress:
             return 0
-        return self._owner._rendezvous.limit_admission_ttl(ttl)
+        return self._owner._rendezvous.limit_admission_ttl(ttl, publisher=self._publisher)
 
     def clear_paths(self) -> None:
         if self._owner._can_commit(self._generation, self._ingress):
-            self._owner._rendezvous.clear_paths()
+            self._owner._rendezvous.clear_paths(publisher=self._publisher)
 
     def observe_path(self, peer: str, epoch: int, ordinal: int, phase: str, path: dict | None) -> None:
         if self._owner._can_commit(self._generation, self._ingress):
-            self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path)
+            self._owner._rendezvous.observe_path(peer, epoch, ordinal, phase, path, publisher=self._publisher)
 
     def set_admission_listener(self, listener: Any) -> None:
         if listener is not None and not self._owner._can_commit(self._generation, self._ingress):
             return
-        self._owner._rendezvous.set_admission_listener(listener)
+        self._owner._rendezvous.set_admission_listener(listener, publisher=self._publisher)
 
 
 class DirectAccessLifecycle:
@@ -259,6 +261,7 @@ class DirectAccessLifecycle:
         self._ingress_factory = ingress_factory or _default_ingress_factory
         self._supervisor_factory = supervisor_factory or _default_supervisor_factory
         self._rendezvous = rendezvous or default_rendezvous
+        self._publisher = object()  # Unclaimed until start; never matches the unmanaged publisher.
         self._config_loader = config_loader or V2Config.load
         self._loop: asyncio.AbstractEventLoop | None = None
         self._runner: asyncio.Task | None = None
@@ -321,6 +324,7 @@ class DirectAccessLifecycle:
         if self._runner is not None:
             return
         self._loop = asyncio.get_running_loop()
+        self._publisher = self._rendezvous.claim_publisher()
         self._shutdown = False
         self._next_binary_check = 0.0
         self._runner = asyncio.create_task(self._run(), name="direct-access-lifecycle")
@@ -363,7 +367,7 @@ class DirectAccessLifecycle:
         self._poll_at = 0.0
         if self._start_task is not None:
             self._start_task.cancel()
-        self._rendezvous.publish(None, reason="state_changed")
+        self._rendezvous.publish(None, reason="state_changed", publisher=self._publisher)
         self._wake.set()
 
     def notify_config_changed(self, config: V2Config) -> None:
@@ -463,7 +467,7 @@ class DirectAccessLifecycle:
         self._permission_received_at = None
         self._permission_reason = reason
         self._resume_required = True
-        self._rendezvous.publish(None, reason=reason)
+        self._rendezvous.publish(None, reason=reason, publisher=self._publisher)
 
     def _permission_fresh(self) -> bool:
         return (self._permission_allowed is True and self._permission_received_at is not None
@@ -890,7 +894,8 @@ class DirectAccessLifecycle:
         return await asyncio.shield(task)
 
     async def _stop_direct(self, reason: str) -> None:
-        self._rendezvous.publish(None, reason=reason)
+        publisher = self._publisher  # A stop can outlive this startup and its runner.
+        self._rendezvous.publish(None, reason=reason, publisher=publisher)
         if self._supervisor is not None or self._ingress is not None:
             self._set_state("stopping", reason)
         if self._supervisor is not None:
@@ -901,7 +906,7 @@ class DirectAccessLifecycle:
             self._ingress = None
         self._endpoint_retire_at = None
         self._resource_generation = None
-        self._rendezvous.publish(None, reason=reason)
+        self._rendezvous.publish(None, reason=reason, publisher=publisher)
         self._stopped.set()
 
     def _schedule_poll(self, *, rotate_key: bool = False) -> asyncio.Task:
