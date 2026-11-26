@@ -2084,19 +2084,20 @@ def _remote_rebind_help_text() -> str:
           Avibe at avibe.bot, bind it again, then take your name back.
 
         Bind as a new computer (this command)
-          This computer forgets the Avibe it is bound to and is then bound as a new
-          one. Remote access through the current domain stops, every remote device is
-          signed out, everyone you gave access to loses it, links already sent stop
-          working, and synced Health data is deleted. Everything on this computer is
-          kept. The Avibe on avibe.bot is not deleted and no credential is changed.
-          The command lists all of this and asks before it does anything.
+          Deletes this computer's Avibe on avibe.bot first; its name stays with the
+          account that owns it for 30 days. Then binds this computer as a new one, to
+          the account you sign in with next. Everything on this computer is kept. If
+          avibe.bot no longer accepts this computer's key, nothing is deleted there,
+          and the command asks separately whether to clear this computer only. It
+          lists what is lost and asks before it does anything.
 
         Taking the old name back
-          A name that is given up is kept for the account that had it for 30 days;
-          during that time nobody else can claim it. The old Avibe gives up its name
-          when it is deleted on avibe.bot. After that, choose the name when avibe.bot
-          asks you to name this computer's Avibe, or afterwards in Devices, under
-          "Change the domain". avibe.bot decides whether the name can be taken.
+          A name given up is kept for the account that had it for 30 days. An Avibe
+          gives it up when it is deleted on avibe.bot (by Unbind, by Bind as a new
+          computer, or on avibe.bot itself), not when only this computer is cleared.
+          To use it again, choose it at the naming step on avibe.bot, signed in with
+          that account, or later in Devices, under "Change the domain". avibe.bot
+          decides whether the name can be taken.
 
         Examples:
           vibe remote rebind
