@@ -488,7 +488,7 @@ jobs:
         run: |
           set -euo pipefail
           docker info
-          sha256sum dist/* > "$RUNNER_TEMP/dist-before.sha256"
+          (cd dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/dist-before.sha256"
           for test_file in \
             tests/test_upgrade_flow.py \
             tests/test_install_script.py \
@@ -501,7 +501,9 @@ jobs:
             tests/test_install_script.py \
             tests/e2e/test_install_command.py \
             -v
-          sha256sum --check --strict "$RUNNER_TEMP/dist-before.sha256"
+          # The exact same set of files with the same bytes: nothing changed, added or removed.
+          (cd dist && find . -type f | LC_ALL=C sort | xargs sha256sum) > "$RUNNER_TEMP/dist-after.sha256"
+          cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"
           git checkout -- tests/test_upgrade_flow.py tests/test_install_script.py tests/e2e/test_install_command.py
 
       - name: Upload GitHub release assets

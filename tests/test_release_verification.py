@@ -807,19 +807,26 @@ def test_release_condition_rejects_failed_backstop():
 def test_stable_regressions_take_only_test_files_from_the_workflow_commit():
     # The tag's commit is built, installed and published; the stable-only regression
     # step overlays exactly its three test files from the workflow's commit, after the
-    # distributions exist, and proves those distributions did not change.
+    # distributions exist, and proves the distribution set did not change at all.
     build = _job("publish.yml", "build")
-    checkout = _step(build, "Checkout")
-    assert checkout["with"]["ref"] == "${{ needs.resolve-tag.outputs.source_sha }}"
-    automation = _step(build, "Checkout release automation")
-    tests = ("tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py")
-    assert set(tests) <= set(automation["with"]["sparse-checkout"].split())
-    assert not any(line.startswith(("vibe/", "core/", "config/", "storage/", "ui/"))
-                   for line in automation["with"]["sparse-checkout"].split())
+    assert _step(build, "Checkout")["with"]["ref"] == "${{ needs.resolve-tag.outputs.source_sha }}"
+    tests = ["tests/test_upgrade_flow.py", "tests/test_install_script.py", "tests/e2e/test_install_command.py"]
+    assert _step(build, "Checkout release automation")["with"]["sparse-checkout"].split() == [
+        "scripts/github_release.py",
+        "scripts/show_runtime_manifest_asset.py",
+        "scripts/release_asset_download.py",
+        "scripts/release_package_version.py",
+        ".github/actions/sqlite-predecessor-contract/action.yml",
+        "tests/test_distribution_artifacts.py",
+        *tests,
+    ]
     names = [step.get("name") for step in build["steps"]]
     regression = names.index("Run release install and upgrade regressions")
     assert names.index("Verify built distribution contracts") < regression < names.index("Upload GitHub release assets")
     run = _step(build, "Run release install and upgrade regressions")["run"]
-    assert run.index("sha256sum dist/*") < run.index('cp "release-automation/$test_file" "$test_file"')
-    assert run.index("pytest") < run.index('sha256sum --check --strict "$RUNNER_TEMP/dist-before.sha256"')
-    assert all(name in run for name in tests)
+    loop = re.search(r"for test_file in \\\n(.*?); do\n\s*cp \"release-automation/\$test_file\" \"\$test_file\"\n\s*done", run, re.S)
+    assert loop is not None
+    assert [item.strip(" \\") for item in loop.group(1).split("\n") if item.strip(" \\")] == tests
+    assert run.count("cp ") == 1
+    before = run.index('> "$RUNNER_TEMP/dist-before.sha256"')
+    assert before < loop.start() < run.index("pytest") < run.index('cmp "$RUNNER_TEMP/dist-before.sha256" "$RUNNER_TEMP/dist-after.sha256"')
