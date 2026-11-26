@@ -57,6 +57,7 @@ final class NativeHoldCaptureTests: XCTestCase {
     private var tapRecords: [NativeHoldCapture.Tap] = []
     /// The counts of touches that were not holds that a hold's timings carry.
     private var tapsTotal: String?
+    private var tapsLost: String?
     /// The earliest an input starts when the page names no time: its timer.
     private let startDelay = TimeInterval(NativeHoldCapture.defaultStartAfterMs) / 1000
     /// The App's default is to start at touch-down; these tests say which.
@@ -89,6 +90,7 @@ final class NativeHoldCaptureTests: XCTestCase {
                 tapRecords.append(tap)
             },
             tapsTotal: { [unowned self] in tapsTotal },
+            tapsLost: { [unowned self] in tapsLost },
             sendHoldEvent: { [unowned self] _, detail in holdEvents.append(detail) },
             sendCaptureEvent: { [unowned self] _, _, event in heard.append(event) }
         )
@@ -1440,21 +1442,92 @@ final class NativeHoldCaptureTests: XCTestCase {
         }
     }
 
-    /// A press whose touch is already gone when the page takes it back has
-    /// lifted at a time not known: it is not counted by the time of that
-    /// word, which would read longer than the tap was; it stays a line.
-    func testAPressWithdrawnAfterItsTouchWentStaysALine() throws {
+    /// The tap that focuses the composer on a phone: by the time the page
+    /// takes the composer back (the keyboard has come up), UIKit has let its
+    /// touch go. It lifted before now, at a time not known: it is counted as
+    /// a tap, with the most it can have lasted, whether the microphone was
+    /// started for it, and for which thresholds it surely ended first.
+    func testATapWhoseTouchWasGoneWhenItWasTakenBackIsCountedWithItsBound() {
+        for early in [false, true] {
+            startsAtTouchDown = early
+            let audio = FakeAudio()
+            let (capture, webView) = makeHoldCapture(audio)
+            taps = []
+            tapRecords = []
+            notes = []
+            clock = 0
+            var gone = false
+            capture.touchDown(
+                at: Self.onComposer, in: webView, timestamp: 50,
+                touch: { gone ? .init(liftedAt: 50.4, point: nil, gone: true) : .init(liftedAt: nil, point: Self.onComposer) }
+            )
+            // Prepared at once (the fake answers at touch-down); where it may, it starts at 50 ms.
+            XCTAssertEqual(startEarly(), early, "\(early)")
+            gone = true
+            clock = 90
+            XCTAssertTrue(capture.setSurfaces([], for: webView), "\(early)")
+            XCTAssertFalse(capture.followsPress, "\(early)")
+            XCTAssertNil(capture.currentTake, "\(early)")
+            XCTAssertEqual(audio.calls, early ? ["arm", "begin", "stop"] : ["arm", "disarm"], "\(early)")
+            XCTAssertTrue(notes.isEmpty, "\(early): \(notes)")
+            let tap = tapRecords.first
+            XCTAssertEqual(tapRecords.count, 1, "\(early)")
+            XCTAssertEqual(tap?.ms, 90, "\(early)")
+            XCTAssertEqual(tap?.lengthUnknown, true, "\(early)")
+            XCTAssertEqual(tap?.opened, early, "\(early)")
+            XCTAssertEqual(tap?.wouldOpen, [:], "\(early)")
+            // At most 90 ms down: it surely ended before 100 and 120, not surely before 50 or 80.
+            XCTAssertEqual(tap?.surelyClosed, [50: false, 80: false, 100: true, 120: true], "\(early)")
+            capture.stop(webView: webView)
+            drain()
+        }
+
+        // Preparing had not answered when it was taken back: no threshold could have opened it.
+        startsAtTouchDown = true
         let audio = FakeAudio()
+        audio.holdsAnswers = true
         let (capture, webView) = makeHoldCapture(audio)
+        tapRecords = []
+        clock = 0
         capture.touchDown(
             at: Self.onComposer, in: webView, timestamp: 50,
             touch: { .init(liftedAt: 50.4, point: nil, gone: true) }
         )
-        clock = 400
+        clock = 300
         XCTAssertTrue(capture.setSurfaces([], for: webView))
-        XCTAssertFalse(capture.followsPress)
-        XCTAssertTrue(taps.isEmpty)
-        XCTAssertTrue(try XCTUnwrap(notes.last).hasSuffix("end=withdrawn"), notes.last ?? "")
+        XCTAssertEqual(tapRecords.first?.surelyClosed, [50: true, 80: true, 100: true, 120: true])
+        XCTAssertEqual(tapRecords.first?.opened, false)
+    }
+
+    /// Such taps are in their bound's bucket and in no `w…` count, counted
+    /// apart (`lost`, `c…`). The line a page reads leaves those names out: a
+    /// page from before them refuses a line with a name it does not know.
+    func testTapsOfUnknownLengthAreCountedApartAndOldPagesStillReadTheCounts() throws {
+        var lost = NativeHoldCapture.Tap(ms: 90, moved: false, opened: true, lengthUnknown: true)
+        lost.surelyClosed = [50: false, 80: false, 100: true, 120: true]
+        var counts = NativeHoldTaps.adding(lost, to: [:])
+        var known = NativeHoldCapture.Tap(ms: 60, moved: false)
+        known.wouldOpen = [50: true, 80: false, 100: false, 120: false]
+        counts = NativeHoldTaps.adding(known, to: counts)
+        let line = try XCTUnwrap(NativeHoldTaps.line(for: counts))
+        XCTAssertEqual(line, "hold taps 50:1 75:1 open=1 w50=1 lost=1 c100=1 c120=1")
+        XCTAssertEqual(NativeHoldTaps.counts(in: line), counts)
+        XCTAssertEqual(NativeHoldTaps.line(for: counts, lengths: false), "hold taps 50:1 75:1 open=1 w50=1")
+        XCTAssertEqual(NativeHoldTaps.lostLine(for: counts), "lost=1 c50=0 c80=0 c100=1 c120=1")
+        XCTAssertNil(NativeHoldTaps.lostLine(for: NativeHoldTaps.adding(known, to: [:])))
+
+        // A hold's timings carry both.
+        tapsTotal = "50:1 75:1 open=1 w50=1"
+        tapsLost = "lost=1 c50=0 c80=0 c100=1 c120=1"
+        let audio = FakeAudio()
+        let (capture, webView) = makeHoldCapture(audio)
+        let take = try hold(capture, in: webView)
+        _ = try capture.adopt(take: take, webView: webView).get()
+        capture.stop(take: take)
+        drain()
+        let timings = try XCTUnwrap(holdEvents.last { $0["phase"] as? String == "timings" }?["timings"] as? [String: Any])
+        XCTAssertEqual(timings["taps"] as? String, "50:1 75:1 open=1 w50=1")
+        XCTAssertEqual(timings["tapsLost"] as? String, "lost=1 c50=0 c80=0 c100=1 c120=1")
     }
 
     /// A press the page takes back while the finger is still down is not a
