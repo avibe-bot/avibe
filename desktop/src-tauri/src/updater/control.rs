@@ -217,7 +217,8 @@ async fn run(app: AppHandle, path: PathBuf, request: ControlRequest) {
     let channel = app.state::<Updater>().state.lock().expect("updater state").channel;
     let outcome = tokio::time::timeout(
         Duration::from_secs(CONTROL_CHECK_TIMEOUT_SECONDS),
-        find_update(&app, channel),
+        // A manager's check is explicit, so it also finds a silent release.
+        find_update(&app, channel, Discovery::Explicit),
     )
     .await;
     if let Err(code) = revalidate(&path, &request, SystemTime::now()) {
@@ -226,7 +227,7 @@ async fn run(app: AppHandle, path: PathBuf, request: ControlRequest) {
         return;
     }
     match outcome {
-        Ok(Ok(Some((manifest, _)))) => {
+        Ok(Ok(Some(manifest))) => {
             set_available(&app, manifest);
             finish(&app, &request, ControlPhase::Completed, None);
         }
