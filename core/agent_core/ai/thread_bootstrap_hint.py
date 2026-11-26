@@ -17,17 +17,30 @@ ERRORS = (sqlite3.Error, OSError, ValueError, OverflowError)
 
 @dataclass
 class Snapshot:
-    day: int
+    observed_at: float
     used: int = 0
     loss: bytes = b""
     until: float = 0
     proofs: dict[bytes, tuple[str, str]] = field(default_factory=dict)
     valid: bool = False
+    # Valid positives outside the restore bound (oldest first to forget); not malformed evidence.
+    excess: tuple[bytes, ...] = ()
+
+    @property
+    def day(self) -> int:
+        return int(self.observed_at // DAY)
 
 
-def _snapshot(db, now, capacity):
-    snap = Snapshot(int(now // DAY))
+def _ready_slots(capacity, active_loss):
+    return max(0, capacity - int(bool(active_loss)))
+
+
+def _snapshot(db, clock, capacity):
     rows = db.execute("SELECT id, day, used, loss, until FROM hint LIMIT 2").fetchall()
+    # BEGIN (without IMMEDIATE) does not establish a read snapshot. A concurrent writer can
+    # commit a newer loss right up to this SELECT. Validate the observed rows, not an earlier clock.
+    now = clock()
+    snap = Snapshot(now)
     if len(rows) != 1 or rows[0][0] != 1:
         return snap
     _, day, used, loss, until = rows[0]
@@ -46,7 +59,9 @@ def _snapshot(db, now, capacity):
         return snap
     # Older controllers only have the count/loss table.
     if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='proof'").fetchone():
-        rows = db.execute("SELECT route, version, generation, ready FROM proof LIMIT ?", (capacity + 1,)).fetchall()
+        rows = db.execute(
+            "SELECT route, version, generation, ready FROM proof ORDER BY rowid DESC LIMIT ?", (capacity + 1,)
+        ).fetchall()
         seen, proofs = set(), {}
         for route, version, generation, ready in rows:
             if (
@@ -64,25 +79,29 @@ def _snapshot(db, now, capacity):
             seen.add(route)
             if ready:
                 proofs[route] = (version, generation)
-        if len(seen) > capacity or len(proofs) + bool(snap.loss) > capacity:
+        if len(seen) > capacity:
             return snap
-        snap.proofs = proofs
+        snap.excess = tuple(proofs)[_ready_slots(capacity, snap.loss) :]
+        for route in snap.excess:
+            del proofs[route]
+        # In-memory room() forgets the first optional entry: keep oldest first there too.
+        snap.proofs = dict(reversed(proofs.items()))
     snap.valid = True
     return snap
 
 
-def load(now, capacity):
+def load(clock, capacity):
     try:
         path = get_state_dir() / "message-thread-bootstrap.sqlite"
         with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
             db.execute("BEGIN")
-            return _snapshot(db, now, capacity)
+            return _snapshot(db, clock, capacity)
     except ERRORS:
-        return Snapshot(int(now // DAY))
+        return Snapshot(clock())
 
 
 @contextmanager
-def transaction(now, capacity):
+def transaction(clock, capacity):
     path = get_state_dir() / "message-thread-bootstrap.sqlite"
     path.parent.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(path, timeout=0)) as db, db:
@@ -93,20 +112,30 @@ def transaction(now, capacity):
         db.execute(
             "CREATE TABLE IF NOT EXISTS proof (route BLOB PRIMARY KEY, version TEXT NOT NULL, generation TEXT NOT NULL, ready INTEGER NOT NULL)"
         )
-        snap = _snapshot(db, now, capacity)
+        snap = _snapshot(db, clock, capacity)
         if not snap.valid:
             # Repair and invalidation must commit together. A later count write must not legitimize rejected rows.
             db.execute("DELETE FROM proof")
             db.execute("DELETE FROM hint")
             # Preserve independently valid negative evidence even when the caller denies admission.
             db.execute("INSERT INTO hint VALUES (1,?,?,?,?)", (snap.day, snap.used, snap.loss, snap.until))
+        elif snap.excess:
+            db.executemany("DELETE FROM proof WHERE route=? AND ready=1", ((route,) for route in snap.excess))
         yield db, snap
+        # Promotion and revocation can both reduce available room. Preserve the cooldown and all
+        # still-needed publication fences; expire only excess ready generations before COMMIT.
+        row = db.execute("SELECT until FROM hint WHERE id=1").fetchone()
+        slots = _ready_slots(capacity, row and row[0] > snap.observed_at)
+        db.execute(
+            "DELETE FROM proof WHERE rowid IN (SELECT rowid FROM proof WHERE ready=1 ORDER BY rowid DESC LIMIT -1 OFFSET ?)",
+            (slots,),
+        )
 
 
-def write_hint(db, state, snap, day, used, now):
+def write_hint(db, state, snap, day, used):
     loss, until = (state.last_loss, state.loss_until) if state.loss_until >= snap.until else (snap.loss, snap.until)
     db.execute("INSERT OR REPLACE INTO hint VALUES (1,?,?,?,?)", (day, used, loss, until))
-    if until > now:
+    if until > snap.observed_at:
         db.execute("DELETE FROM proof WHERE route=?", (loss,))
 
 

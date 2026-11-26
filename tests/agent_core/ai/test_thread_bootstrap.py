@@ -287,6 +287,115 @@ async def test_live_pair_never_looks_orphaned_across_parent_timeout(phase, monke
             assert threads.bootstrap.reserve(route, 100, True)[1] == "bootstrap_trial"
 
 
+@pytest.mark.parametrize("preview", [False, True])
+def test_snapshot_clock_follows_interleaved_loss_commit(monkeypatch, preview):
+    import sqlite3
+    from types import SimpleNamespace
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    now = [ledger.DAY * 1000 + 100.0]
+    monkeypatch.setattr(ledger, "time", SimpleNamespace(time=lambda: now[0]))
+    a, b = b"A" * 32, b"B" * 32
+    trial, _ = ledger.reserve(a, 100, False, version="8.0.63")
+    ledger.settle(a, trial, "bootstrap_proven")
+    # B already has a local state for real reservation; for preview use a cold controller's first read.
+    if preview:
+        monkeypatch.setattr(ledger, "_state", None)
+    original = sqlite3.connect
+    path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    armed = [True]
+
+    def connect(*args, **kwargs):
+        db = original(*args, **kwargs)
+
+        def on_sql(sql):
+            if armed[0] and sql == ("BEGIN" if preview else "BEGIN IMMEDIATE"):
+                armed[0] = False
+                now[0] += 0.25
+                with original(path) as writer:
+                    writer.execute("UPDATE hint SET loss=?, until=?", (b, now[0] + ledger.DAY))
+
+        db.set_trace_callback(on_sql)
+        return db
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    assert ledger.reserve(b, 100, preview)[1] == "bootstrap_read_loss"
+    assert not armed[0]
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(a, 100, True, version="8.0.63")[1] == "bootstrap_recheck"
+    assert ledger.reserve(b, 100, True)[1] == "bootstrap_read_loss"
+
+
+@pytest.mark.parametrize("live_only", [False, True])
+async def test_warm_http_preview_sees_other_controllers_loss(live_only, monkeypatch):
+    from config.paths import get_state_dir
+    from core.agent_core.ai import message_threads as threads
+
+    ledger = threads.bootstrap
+    bodies = []
+
+    def handle(wire):
+        bodies.append(json.loads(wire.content))
+        return served(22000)
+
+    req = replace(_request(messages=long_history()), thread_observation=ThreadObservation("peek-loss"))
+    route = threads.route_key(req.endpoint, False)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        adapter = AnthropicAdapter(client)
+        warm = await send(adapter, req)
+        trial, _ = ledger.reserve(route if live_only else b"B" * 32, 100, False)
+        if live_only:
+            ledger.settle(route, trial, "bootstrap_proven")
+        local = ledger._state
+        monkeypatch.setattr(ledger, "_state", None)
+        other, _ = ledger.reserve(route, 100, False)
+        ledger.settle(route, other, "bootstrap_read_loss")
+        monkeypatch.setattr(ledger, "_state", local)
+        path = get_state_dir() / "message-thread-bootstrap.sqlite"
+        disk, routes = path.read_bytes(), dict(local.routes)
+        preview = await preview_wire_request(warm, session_id="peek-loss")
+        assert path.read_bytes() == disk and local.routes == routes and len(bodies) == 1
+        await send(adapter, warm)
+        assert "thread" not in bodies[-1] and warm.thread_observation.attempts[0]["reason"] == "bootstrap_read_loss"
+        assert preview.wire.body == bodies[-1]
+
+
+@pytest.mark.parametrize("edge", ["revoke", "publish", "legacy_snapshot"])
+def test_full_proof_set_keeps_cooldown_and_only_forgets_one_positive(monkeypatch, edge):
+    import sqlite3
+    import time
+    from config.paths import get_state_dir
+    from core.agent_core.ai import thread_bootstrap as ledger
+
+    monkeypatch.setattr(ledger, "MAX_ROUTES", 2)
+    a, b, c = (bytes([letter]) * 32 for letter in (1, 2, 3))
+    one, _ = ledger.reserve(a, 100, False, version="8.0.63")
+    ledger.settle(a, one, "bootstrap_proven")
+    two, _ = ledger.reserve(b, 100, False, version="8.0.63")
+    if edge != "publish":
+        ledger.settle(b, two, "bootstrap_proven")
+    path = get_state_dir() / "message-thread-bootstrap.sqlite"
+    if edge == "legacy_snapshot":
+        with sqlite3.connect(path) as db:
+            db.execute("UPDATE hint SET loss=?, until=?", (c, time.time() + ledger.DAY))
+    else:
+        ledger.settle(c, one, "bootstrap_read_loss")
+    if edge == "publish":
+        ledger.settle(b, two, "bootstrap_proven")
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(c, 100, True)[1] == "bootstrap_read_loss"
+    assert ledger.reserve(a, 100, True, version="8.0.63")[1] == "bootstrap_trial"
+    assert ledger.reserve(b, 100, True, version="8.0.63")[1] == "bootstrap_recheck"
+    if edge != "legacy_snapshot":
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT route FROM proof WHERE ready=1").fetchall() == [(b,)]
+    assert ledger.reserve(b, 100, False, version="8.0.63")[1] == "bootstrap_recheck"
+    monkeypatch.setattr(ledger, "_state", None)
+    assert ledger.reserve(c, 100, False)[1] == "bootstrap_read_loss"
+    assert ledger.reserve(a, 100, True, version="8.0.63")[1] == "bootstrap_trial"
+
+
 def test_orphan_replacement_is_ticket_local_and_never_restores_prior_proof():
     from core.agent_core.ai import thread_bootstrap as ledger
 
@@ -402,7 +511,7 @@ def test_restored_exemption_requires_committed_consume(monkeypatch, lock, limit,
     route = b"A" * 32
     trial, _ = ledger.reserve(route, 100, False, version="8.0.63")
     ledger.settle(route, trial, "bootstrap_proven")
-    monkeypatch.setattr(ledger, "_state", ledger._load(time.time()))
+    monkeypatch.setattr(ledger, "_state", ledger._restore(ledger.hint.load(time.time, ledger.MAX_ROUTES)))
     with sqlite3.connect(get_state_dir() / "message-thread-bootstrap.sqlite") as other:
         other.execute(lock)
         assert other.execute("SELECT ready FROM proof").fetchone() == (1,)

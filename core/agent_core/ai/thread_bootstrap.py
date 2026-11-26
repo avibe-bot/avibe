@@ -78,8 +78,7 @@ class State:
         return False
 
 
-def _load(now: float) -> State:
-    snap = hint.load(now, MAX_ROUTES)
+def _restore(snap: hint.Snapshot) -> State:
     state = State(snap.day, snap.used, last_loss=snap.loss, loss_until=snap.until)
     if snap.loss:
         state.routes[snap.loss] = Entry("bootstrap_read_loss", snap.until)
@@ -104,8 +103,9 @@ def reserve(
 ) -> tuple[Trial | None, str]:
     global _state
     with _lock:
+        snapshot = hint.load(time.time, MAX_ROUTES) if preview or _state is None else None
+        state = _state if _state is not None else _restore(snapshot)
         now = time.time()
-        state = _state or _load(now)
         if not preview:
             _state = state
         if state.paused_until > now:
@@ -127,24 +127,26 @@ def reserve(
         proven, fenced = live_only, False
         ticket = "" if preview else uuid.uuid4().hex
         if preview:
+            if snapshot.loss == route:
+                return None, "bootstrap_read_loss"
             if expected is not None:
-                snap = hint.load(now, MAX_ROUTES)
-                proven = snap.proofs.get(route) == (version, expected)
-                if snap.loss == route:
-                    return None, "bootstrap_read_loss"
+                proven = snapshot.proofs.get(route) == (version, expected)
         else:
             try:
-                with hint.transaction(now, MAX_ROUTES) as (db, snap):
+                with hint.transaction(time.time, MAX_ROUTES) as (db, snap):
                     if snap.loss == route:
                         state.room(route, now)
                         state.routes[route] = Entry("bootstrap_read_loss", snap.until)
                         if snap.until >= state.loss_until:
                             state.last_loss, state.loss_until = route, snap.until
                         return None, "bootstrap_read_loss"
+                    day = max(state.day, snap.day)
+                    used = state.used if day == state.day else 0
+                    can_charge = used < _limit()
                     consumed, fenced = hint.reserve(db, route, version, ticket, expected, can_charge, MAX_ROUTES)
                     proven = live_only or consumed
                     if proven or can_charge:
-                        hint.write_hint(db, state, snap, day, used + int(not proven), now)
+                        hint.write_hint(db, state, snap, day, used + int(not proven))
             except hint.ERRORS:
                 # Includes failure at COMMIT after the conditional UPDATE matched. No retry and no durable exemption.
                 if entry := state.routes.get(route):
@@ -185,9 +187,9 @@ def settle(route: bytes, trial: Trial, status: str) -> str:
             else:
                 state.paused_until = now + DAY
             try:
-                with hint.transaction(now, MAX_ROUTES) as (db, snap):
+                with hint.transaction(time.time, MAX_ROUTES) as (db, snap):
                     db.execute("DELETE FROM proof WHERE route=?", (route,))  # Revoke either proof or publication fence.
-                    hint.write_hint(db, state, snap, state.day, state.used, now)
+                    hint.write_hint(db, state, snap, state.day, state.used)
             except hint.ERRORS:
                 pass  # Never roll back live measured loss.
         elif not _owns(route, trial, now):
@@ -196,7 +198,7 @@ def settle(route: bytes, trial: Trial, status: str) -> str:
             generation = None
             if trial.fenced:
                 try:
-                    with hint.transaction(now, MAX_ROUTES) as (db, _):
+                    with hint.transaction(time.time, MAX_ROUTES) as (db, _):
                         if not hint.publish(db, route, trial):
                             del state.routes[route]
                             return "bootstrap_stale"
