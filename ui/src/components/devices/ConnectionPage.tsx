@@ -25,7 +25,7 @@ import { useNativeDirectPath } from '../remoteAccess/useNativeDirectPath';
 import { DevicesApiError, LostAnswer, devicesApi as api, type RenamePreview, type ResetAction } from './api';
 import { clearClaimMarker, returnRefusal } from './claimFlow';
 import { ConnectionPageView } from './ConnectionPageView';
-import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_PATH } from './paths';
+import { CONNECTION_ADDRESS_PATH, CONNECTION_PATH, CONNECTION_REBIND_HASH, DEVICES_PATH, NAME_WITH_ORIGINAL_ACCOUNT } from './paths';
 import { renameDevices } from './rules';
 import type {
   AddressState, ConnectionSetting, ConnectionState, Device, DirectPreference, RebindDialog, RebindRefusal, RebindState,
@@ -182,6 +182,9 @@ export function ConnectionPage() {
   /** This page started the unbinding it follows: its end takes the page on to the Devices page.
    *  `followed` re-runs that check when following begins, for an end already read before it. */
   const followingUnbind = useRef(false);
+  /** The unbinding followed is binding as a new computer whose Avibe was another account's: the
+   *  Devices page then says the name stays with the original account, not "your account". */
+  const otherAccountsName = useRef(false);
   const [followed, setFollowed] = useState(0);
   /** Device reads in the order they began, and the latest one applied: an older answer arriving
    *  after a newer one (a read begun before the press, answered after it) is set aside. */
@@ -632,6 +635,7 @@ export function ConnectionPage() {
     const confirmation = resetConfirmation.current;
     if (!id || !confirmation) return;
     const oldHost = address?.hostname;
+    const otherAccount = rebindState?.state === 'asNewOffered' && rebindState.reason === 'other_account';
     setRebindBusy(true);
     void (async () => {
       try {
@@ -641,6 +645,7 @@ export function ConnectionPage() {
         if (result === 'unbinding') {
           if (alive.current) {
             setRebindDialog(undefined);
+            otherAccountsName.current = otherAccount;
             markUnbindPressed();
           }
           return;
@@ -654,7 +659,10 @@ export function ConnectionPage() {
           // followed as an unbinding this page started: a read that reports none ends it, and one
           // reported unbound goes on to the Devices page.
           if (error instanceof LostAnswer) {
-            if (resetAction.current === 'unbind') markUnbindPressed();
+            if (resetAction.current === 'unbind') {
+              otherAccountsName.current = otherAccount;
+              markUnbindPressed();
+            }
           } else setRebindRefused(rebindRefusal(error instanceof DevicesApiError ? error.code : undefined));
         }
       } finally {
@@ -706,7 +714,12 @@ export function ConnectionPage() {
     if (!unbound || !followingUnbind.current) return;
     followingUnbind.current = false;
     clearClaimMarker();
-    navigate(DEVICES_PATH, { replace: true, state: location.state });
+    const originalAccount = otherAccountsName.current;
+    otherAccountsName.current = false;
+    navigate(DEVICES_PATH, {
+      replace: true,
+      state: originalAccount ? { ...(location.state as Record<string, unknown> | null), [NAME_WITH_ORIGINAL_ACCOUNT]: true } : location.state,
+    });
   }, [followed, location.state, navigate, unbound]);
   useEffect(() => {
     if (!unbindRunning) return undefined;
