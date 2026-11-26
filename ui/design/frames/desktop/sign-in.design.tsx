@@ -3,6 +3,7 @@ import type { DesktopClientState } from '@/desktop/bridge';
 import { desktopEn as en, desktopZh as zh } from '@/i18n/desktop';
 import { SIGN_IN_PROVIDERS, type SignInMethods } from '@/sign-in/types';
 import { frames, type FrameSpec } from '../../frame';
+import { DesktopAccountWindow } from '../../shell/DesktopAccountWindow';
 import { copyFor } from './instances-fixtures';
 
 // Desktop sign-in on the shared flow (#3946), shipped (Max, 2026-11-18: as on the iPhone). Compare each with the shipped card it
@@ -79,19 +80,19 @@ const designFrames = frames(variants.flatMap(({ name, title, native, click }) =>
   status: 'shipped',
   ...(click ? { click } : {}),
   fixtures: { copy: copyFor(lang === 'en' ? en : zh) },
-  render: () => (
-    <div className="flex h-full flex-col overflow-y-auto bg-background px-10 py-5 text-foreground">
-      <DesktopSignIn
-        state={native}
-        send={send}
-        methods={ALL}
-        onLocal={noop}
-        onDifferentAccount={noop}
-        onOpenSecurity={noop}
-        renderEnroll={() => null}
-      />
-    </div>
-  ),
+  render: () => {
+    const content = <DesktopSignIn
+      state={native}
+      send={send}
+      methods={ALL}
+      onLocal={noop}
+      onDifferentAccount={noop}
+      onOpenSecurity={noop}
+      renderEnroll={() => null}
+    />;
+    return name === 'start' ? <DesktopAccountWindow>{content}</DesktopAccountWindow> :
+      <div className="flex h-full flex-col overflow-y-auto bg-background px-10 py-5 text-foreground">{content}</div>;
+  },
 }))));
 
 // The native main window minimum is 880 × 600 (desktop/src-tauri/tauri.conf.json).
@@ -102,5 +103,13 @@ const minimumWelcome = designFrames.filter((frame) => frame.name.startsWith('sta
   title: `${frame.title} · 880 × 600`, width: 880, height: 600,
 }));
 
-const allDesignFrames = frames([...designFrames, ...minimumWelcome]);
+// Approved C uses the product component, with no proposal kit copy. Capture its
+// large windows and both sides of each height boundary in the same shipped set.
+const responsiveWelcome = designFrames.filter((frame) => frame.name.startsWith('start-')).flatMap((frame) =>
+  [[1440, 900], [2000, 1133], [2940, 1660], [880, 779], [880, 780], [880, 899], [880, 900]].map(([width, height]) => ({
+    ...frame, name: frame.name.replace('start-', `start-${width}x${height}-`),
+    title: `${frame.title} · ${width} × ${height}`, width, height,
+  })),
+);
+const allDesignFrames = frames([...designFrames, ...minimumWelcome, ...responsiveWelcome]);
 export default allDesignFrames;
