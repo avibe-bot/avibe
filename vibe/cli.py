@@ -2089,12 +2089,13 @@ def _remote_rebind_help_text() -> str:
           the account you sign in with next. Everything on this computer is kept. If
           avibe.bot no longer accepts this computer's key, nothing is deleted there,
           and the command asks separately whether to clear this computer only. It
-          lists what is lost and asks before it does anything.
+          lists what is lost and asks first.
 
         Taking the old name back
           A name given up is kept for the account that had it for 30 days. An Avibe
           gives it up when it is deleted on avibe.bot (by Unbind, by Bind as a new
-          computer, or on avibe.bot itself), not when only this computer is cleared.
+          computer, or on avibe.bot itself) or when its domain is changed, not when
+          only this computer is cleared.
           To use it again, choose it at the naming step on avibe.bot, signed in with
           that account, or later in Devices, under "Change the domain". avibe.bot
           decides whether the name can be taken.
