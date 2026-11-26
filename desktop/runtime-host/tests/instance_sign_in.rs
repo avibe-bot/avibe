@@ -113,7 +113,12 @@ impl ClientView for View {
     async fn commit(&self, epoch: Epoch, _: ClientTarget, _: Vec<cookie::Cookie<'static>>) -> Result<(), ClientError> {
         epoch.check()
     }
-    async fn restore(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<(), ClientError> {
+    async fn restore(
+        &self,
+        _: Epoch,
+        _: ClientTarget,
+        _: avibe_runtime_host::instance_client::protocol::RestoreDestination,
+    ) -> Result<(), ClientError> {
         Ok(())
     }
     async fn signed_out(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<(), ClientError> {

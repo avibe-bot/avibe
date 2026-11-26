@@ -166,6 +166,7 @@ struct View {
     states: Mutex<Vec<ClientState>>,
     committed: Mutex<Vec<ClientTarget>>,
     restored: Mutex<Vec<ClientTarget>>,
+    destinations: Mutex<Vec<RestoreDestination>>,
     update_calls: Mutex<Vec<(ClientAction, Epoch)>>,
     update_failure: Mutex<Option<String>>,
     retirement_failure: AtomicBool,
@@ -209,8 +210,14 @@ impl ClientView for View {
         self.committed.lock().unwrap().push(target);
         Ok(())
     }
-    async fn restore(&self, _: Epoch, target: ClientTarget, _: bool) -> Result<(), ClientError> {
+    async fn restore(
+        &self,
+        _: Epoch,
+        target: ClientTarget,
+        destination: RestoreDestination,
+    ) -> Result<(), ClientError> {
         self.restored.lock().unwrap().push(target);
+        self.destinations.lock().unwrap().push(destination);
         Ok(())
     }
     async fn signed_out(&self, _: Epoch, _: ClientTarget, _: bool) -> Result<(), ClientError> {
@@ -3119,5 +3126,129 @@ async fn signing_out_ends_the_kept_sign_ins_even_offline() {
             since(&f, from).0.contains(&"/auth/callback".to_owned()),
             "offline {offline}"
         );
+    }
+}
+
+// Returning after a completed login preserves the selected instance and account.
+// Ordinary cancel still restores the document; stale or unfinished logins cannot navigate.
+#[tokio::test]
+async fn completed_sign_in_returns_home_without_changing_account_or_instance() {
+    let f = fixture(vec![]);
+    assert!(!action(&f.client, ClientAction::ReturnHome).await.ok);
+    assert!(f.view.restored.lock().unwrap().is_empty());
+    sign_in(&f, catalog("account-a", &["one"])).await;
+    let before = f.client.state();
+    let calls = f.http.calls.lock().unwrap().len();
+    assert!(action(&f.client, ClientAction::ReturnHome).await.ok);
+    assert_eq!(*f.view.destinations.lock().unwrap(), vec![RestoreDestination::Home]);
+    assert_eq!(
+        f.client.state().account.identity.unwrap().id,
+        before.account.identity.unwrap().id
+    );
+    assert_eq!(f.client.state().connection.committed, before.connection.committed);
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    let stale = f
+        .client
+        .request(ClientRequest {
+            version: 1,
+            request_id: "stale-home".into(),
+            expected_generation: before.generation,
+            action: ClientAction::ReturnHome,
+        })
+        .await;
+    assert!(!stale.ok);
+    assert_eq!(stale.error.unwrap().code, "stale_generation");
+    assert_eq!(f.view.restored.lock().unwrap().len(), 1);
+    assert!(action(&f.client, ClientAction::Cancel).await.ok);
+    assert_eq!(
+        *f.view.destinations.lock().unwrap(),
+        vec![RestoreDestination::Home, RestoreDestination::Document]
+    );
+}
+
+#[tokio::test]
+async fn completed_sign_in_returns_to_the_committed_remote_home() {
+    let f = selected_for_update().await;
+    let before = f.client.state();
+    assert!(!before.connection.committed.is_local());
+    let calls = f.http.calls.lock().unwrap().len();
+    assert!(action(&f.client, ClientAction::ReturnHome).await.ok);
+    assert_eq!(
+        *f.view.restored.lock().unwrap(),
+        vec![before.connection.committed.clone()]
+    );
+    assert_eq!(*f.view.destinations.lock().unwrap(), vec![RestoreDestination::Home]);
+    assert_eq!(f.client.state().connection.committed, before.connection.committed);
+    assert_eq!(f.http.calls.lock().unwrap().len(), calls);
+    assert_eq!(f.client.state().account.status, AccountStatus::SignedIn);
+}
+
+#[tokio::test]
+async fn newer_cancel_or_return_local_supersedes_a_queued_sign_in_home() {
+    for cancel in [true, false] {
+        let f = selected_for_update().await;
+        let remote = f.client.state().connection.committed;
+        let (entered, reached) = oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        *f.view.invalidation.lock().unwrap() = Some((entered, released));
+        let client = f.client.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let home = tokio::task::spawn_blocking(move || runtime.block_on(action(&client, ClientAction::ReturnHome)));
+        reached.await.unwrap();
+        let newer = if cancel {
+            ClientAction::Cancel
+        } else {
+            ClientAction::ReturnLocal
+        };
+        assert!(action(&f.client, newer).await.ok);
+        let accepted = f.client.state();
+        release.send(()).unwrap();
+        let reply = home.await.unwrap();
+        assert!(!reply.ok);
+        assert_eq!(reply.error.unwrap().code, "stale_generation");
+        assert_eq!(f.client.state().generation, accepted.generation);
+        assert_eq!(f.client.state().connection.committed, accepted.connection.committed);
+        if cancel {
+            assert_eq!(accepted.connection.committed, remote);
+        } else {
+            assert!(accepted.connection.committed.is_local());
+        }
+        assert_eq!(
+            *f.view.destinations.lock().unwrap(),
+            vec![if cancel {
+                RestoreDestination::Document
+            } else {
+                RestoreDestination::Local
+            }]
+        );
+    }
+}
+
+#[tokio::test]
+async fn terminal_home_owner_survives_local_lifecycle_but_not_a_new_escape() {
+    for remote in [false, true] {
+        let f = if remote {
+            selected_for_update().await
+        } else {
+            let f = fixture(vec![]);
+            sign_in(&f, catalog("account-a", &["one"])).await;
+            f
+        };
+        assert!(action(&f.client, ClientAction::ReturnHome).await.ok);
+        let target = f.client.state().connection.committed;
+        let owner = f.client.presentation_owner();
+        let terminal = f.client.presentation_owner_epoch(owner).unwrap();
+        let lifecycle = f.client.presentation_epoch(owner).unwrap();
+        f.client.local_origin(Some(
+            avibe_runtime_host::LoopbackOrigin::parse("http://127.0.0.1:4999").unwrap(),
+        ));
+        assert!(lifecycle.check().is_err());
+        assert!(terminal.check().is_ok());
+        assert_eq!(f.client.presentation_owner(), owner);
+        assert_eq!(f.client.state().connection.committed, target);
+        assert!(f.client.presentation_epoch(owner).unwrap().value > lifecycle.value);
+        assert!(action(&f.client, ClientAction::Cancel).await.ok);
+        assert!(terminal.check().is_err());
+        assert!(f.client.presentation_owner_epoch(owner).is_err());
     }
 }

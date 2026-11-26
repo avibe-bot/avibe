@@ -1414,6 +1414,8 @@ scenarios:
       - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus restores focus after a busy verification fails without stealing it on ordinary rerenders"
       - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus waits for an initially busy step to unlock before focusing"
       - "ui/src/sign-in/OtpCells.test.tsx::AUTH-SETUP-182 code entry focus does not open the iOS/touch keyboard on entry or retry, but still accepts a tap and paste"
+      - "ui/src/desktop/protocol-fixtures.test.tsx::completed email-code login returns home from account only after its successful reply"
+      - "ui/src/desktop/protocol-fixtures.test.tsx::completed email-code login returns home from instances only after its successful reply"
     reason: >-
       #3946 moved the sign-in steps into ui/src/sign-in, reached through one
       adapter per app. The matrix runs every case against both adapters: the
@@ -1436,7 +1438,10 @@ scenarios:
       shell. Code-entry focus tests cover Desktop/non-touch browser entry,
       paste, clearing, busy/error retry, deliberate focus leaving, and the
       preserved iOS/touch tap-to-focus behavior. The real browser check also
-      verifies the focus-dependent caret and ring against built CSS.
+      verifies the focus-dependent caret and ring against built CSS. Desktop
+      account-shell fixtures additionally require the successful direct login
+      reply before returning to the selected instance home; pending consent,
+      failed persistence, stale replies and one-time recovery codes cannot be skipped.
   - id: AUTH-SETUP-183
     name: Desktop signs in with Google, GitHub or Apple through the default browser and loopback PKCE
     status: partial

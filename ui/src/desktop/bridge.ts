@@ -100,6 +100,7 @@ export type DesktopClientAction =
   | { type: 'select_instance'; instance_id: string }
   | { type: 'decide_consent'; approve: boolean }
   | { type: 'cancel' }
+  | { type: 'return_home' }
   | { type: 'return_local' }
   | { type: 'sign_out'; intent_id?: string }
   // This computer's desktop updater, from the trusted update view (ui/design: update/panel/trusted-view).

@@ -607,7 +607,7 @@ it('does not auto-cancel a restored signed-in state or a later successful broadc
   expect(invoke.mock.calls.map((call) => call[1].request.action.type)).toEqual(['get_state']);
 });
 
-it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tunnel_unavailable', 'paired_error', 'new_owner']
+it.each(['unknown', 'unpaired', 'paired_this_account', 'failed', 'conflict', 'registering', 'paired_tunnel_unavailable', 'paired_error', 'new_owner']
   .flatMap((status) => ['back', 'escape'].map((exit) => ({ status, exit }))))(
   'acknowledges recovery codes before any eligible return ($status/$exit)', async ({ status, exit }) => {
     window.history.replaceState(null, '', '/account/index.html?view=account');
@@ -617,7 +617,7 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     const invoke = mount(states.enroll, (request) => {
       const reply = request.action.type === 'begin_totp_enrollment' ? replies.totp_enrollment
         : request.action.type === 'finish_totp_enrollment' ? { ...replies.totp_enrolled, state: completed }
-        : { ...replies.success, state: request.action.type === 'cancel' ? completed : states.enroll };
+        : { ...replies.success, state: ['cancel', 'return_home'].includes(request.action.type) ? completed : states.enroll };
       return { ...reply, request_id: request.request_id };
     });
     await waitFor(() => expect(invoke).toHaveBeenCalledOnce());
@@ -644,12 +644,13 @@ it.each(['paired_this_account', 'failed', 'conflict', 'registering', 'paired_tun
     }
     fireEvent.click(screen.getByRole('button', { name: 'I have saved these codes' }));
     await waitFor(() => expect(screen.queryByText(replies.totp_enrolled.result.recoveryCodes[0])).toBeNull());
-    const cancels = invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel');
-    expect(cancels).toHaveLength(status === 'paired_this_account' ? 1 : 0);
+    const cancels = invoke.mock.calls.filter((call) => call[1].request.action.type === 'return_home');
+    const returnsHome = ['unknown', 'unpaired', 'paired_this_account', 'paired_tunnel_unavailable'].includes(status);
+    expect(cancels).toHaveLength(returnsHome ? 1 : 0);
     if (status === 'paired_error') expect(screen.getByRole('alert')).toBeTruthy();
     const back = screen.getByRole('button', { name: 'Back to Workbench' });
     expect(back.hasAttribute('disabled')).toBe(false);
-    if (status !== 'paired_this_account') {
+    if (!returnsHome) {
       fireEvent.click(back);
       await waitFor(() => expect(invoke.mock.calls.filter((call) => call[1].request.action.type === 'cancel')).toHaveLength(1));
     }
@@ -892,3 +893,49 @@ it('B1 instance update state and actions are bundled-page protocol only', () => 
   const { instance_update: _omitted, ...older } = remote;
   expect(withLocalIdentity(older as DesktopClientState).instance_update).toBeNull();
 });
+
+// A successful login completes the account presentation, not just the form.
+// Existing tests began signed in and could not detect the stranded Account page.
+it.each(['account', 'instances'])('completed email-code login returns home from %s only after its successful reply', async (view) => {
+  window.history.replaceState(null, '', `/account/index.html?view=${view}`);
+  const initial = { ...states.signed_out, account: { ...states.signed_out.account, status: 'verifying', email: 'fixture@example.test' } };
+  const completed = { ...states.signed_in, generation: initial.generation + 1, revision: initial.revision + 10 };
+  let finish!: (value: unknown) => void;
+  const invoke = mount(initial, (request) => request.action.type === 'verify_otp'
+    ? new Promise((resolve) => { finish = resolve; })
+    : { ...replies.success, request_id: request.request_id, state: request.action.type === 'return_home' ? completed : initial });
+  fireEvent.change(document.querySelector('#mobile-login-code')!, { target: { value: '123456' } });
+  await waitFor(() => expect(finish).toBeTypeOf('function'));
+  const request = invoke.mock.calls.find((call) => call[1].request.action.type === 'verify_otp')![1].request;
+  await act(async () => { fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: completed })); });
+  expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'return_home')).toBe(false);
+  await act(async () => { finish({ ...replies.success, state: completed, request_id: request.request_id }); });
+  await waitFor(() => expect(invoke.mock.calls.filter((call) => call[1].request.action.type === 'return_home')).toHaveLength(1));
+  expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'return_local')).toBe(false);
+});
+
+it.each(['failed-reply', 'consent', 'pending-instance', 'unreachable', 'persistence-error', 'stale-reply'])(
+  'completed login stays for required follow-up: %s', async (reason) => {
+    window.history.replaceState(null, '', '/account/index.html?view=account');
+    const initial = { ...states.signed_out, sign_in: { providers: ['github'], passkey: false } };
+    const completed = { ...states.signed_in, generation: initial.generation + 1, revision: initial.revision + 10,
+      consent: reason === 'consent' ? states.consent.consent : null,
+      enrollment: { ...states.signed_in.enrollment, error_code: reason === 'persistence-error' ? 'persistence_failed' : null },
+      connection: reason === 'pending-instance' ? states.consent.connection
+        : reason === 'unreachable' ? { ...states.signed_in.connection, status: 'remote_unreachable' } : states.signed_in.connection };
+    let finish!: (value: unknown) => void;
+    const invoke = mount(initial, (request) => request.action.type === 'sign_in_with_provider'
+      ? new Promise((resolve) => { finish = resolve; })
+      : { ...replies.success, request_id: request.request_id, state: initial });
+    fireEvent.click(await screen.findByRole('button', { name: en.mobileApp.welcome.continueWithGitHub }));
+    await waitFor(() => expect(finish).toBeTypeOf('function'));
+    const request = invoke.mock.calls.find((call) => call[1].request.action.type === 'sign_in_with_provider')![1].request;
+    await act(async () => {
+      fireEvent(window, new CustomEvent(DESKTOP_CLIENT_STATE_EVENT, { detail: reason === 'stale-reply'
+        ? { ...initial, generation: completed.generation + 1, revision: completed.revision + 1 } : completed }));
+      finish({ ...replies.success, state: completed, request_id: request.request_id,
+        ...(reason === 'failed-reply' ? { ok: false, error: { code: 'credentials_unavailable' } } : {}) });
+    });
+    expect(invoke.mock.calls.some((call) => call[1].request.action.type === 'return_home')).toBe(false);
+  },
+);

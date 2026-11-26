@@ -324,6 +324,39 @@ impl Views {
                 && account.returning.as_ref() == Some(&(runtime.label.clone(), runtime.document))
         })
     }
+    fn check_return(&self) -> Result<(), ClientError> {
+        if self
+            .account
+            .as_ref()
+            .is_some_and(|account| !self.return_matches(account))
+        {
+            return Err(ClientError::new("instance_session_missing"));
+        }
+        Ok(())
+    }
+    fn retire_account_for_home(
+        &mut self,
+        owner: &Epoch,
+        presentation: &mut Presentation,
+    ) -> Result<Option<AccountDocument>, ClientError> {
+        owner.check()?;
+        self.check_return()?;
+        let account = self.account.take();
+        // Publish retirement before awaiting disposal. A local rebound must
+        // never preserve an Account role that no longer exists.
+        presentation.account = false;
+        Ok(account)
+    }
+    /// Home replaces the retained document. Its account return receipt must
+    /// already be retired, so a later Cancel restores the current Runtime
+    /// rather than trying to restore an irreversibly replaced document.
+    fn home_destination(&self, epoch: &Epoch, label: &str, current: &Url) -> Result<Url, ClientError> {
+        epoch.check()?;
+        if self.account.is_some() || self.runtime.as_ref().is_none_or(|runtime| runtime.label != label) {
+            return Err(ClientError::new("stale_generation"));
+        }
+        Ok(workbench_home(current))
+    }
     /// The role on screen in the main window. An account document is on
     /// screen from the moment `open_account` shows it, including while it
     /// reloads (`loaded` is false from commit to finish). Until then, even when
@@ -2300,6 +2333,10 @@ impl NativeView {
 
     async fn close_account(&self) -> Result<(), ClientError> {
         let account = self.views.lock().expect("views").account.take();
+        self.dispose_account(account).await
+    }
+
+    async fn dispose_account(&self, account: Option<AccountDocument>) -> Result<(), ClientError> {
         let Some(mut account) = account else { return Ok(()) };
         account.claim.take(); // retire before awaiting native disposal
         let app = self.app.clone();
@@ -2326,6 +2363,46 @@ impl NativeView {
             });
         }
         result
+    }
+
+    /// Called with the windows lock. Account retirement is terminal: lifecycle
+    /// changes cannot abandon the reveal, while a newer action still can.
+    async fn return_home(&self, owner: u64, runtime: &Webview, destination: &Url) -> Result<(), ClientError> {
+        let owner = self.app.state::<Client>().coordinator.presentation_owner_epoch(owner)?;
+        let account = self
+            .views
+            .lock()
+            .expect("views")
+            .retire_account_for_home(&owner, &mut self.presentation.lock().expect("presentation"))?;
+        let cleanup = self.dispose_account(account).await;
+        let navigation = self.navigate_home(owner.clone(), runtime).await;
+        // Even a failed native navigation must reveal the retained Runtime.
+        // `show` uses the same action fence, so a genuine successor still wins.
+        let revealed = self.show(owner, runtime, destination).await;
+        revealed.and(navigation).and(cleanup)
+    }
+
+    async fn navigate_home(&self, owner: Epoch, runtime: &Webview) -> Result<(), ClientError> {
+        let app = self.app.clone();
+        let returning = runtime.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.app
+            .run_on_main_thread(move || {
+                let result = (|| {
+                    let current = returning.url().map_err(failure)?;
+                    let home = app
+                        .state::<Client>()
+                        .view
+                        .views
+                        .lock()
+                        .expect("views")
+                        .home_destination(&owner, returning.label(), &current)?;
+                    returning.navigate(home).map_err(failure)
+                })();
+                let _ = tx.send(result);
+            })
+            .map_err(failure)?;
+        rx.await.map_err(failure)?
     }
 
     async fn open_account(
@@ -2736,25 +2813,7 @@ impl NativeView {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.app
             .run_on_main_thread(move || {
-                let result = (|| {
-                    epoch.check()?;
-                    if app.get_webview(view.label()).is_none() {
-                        return Err(failure("retired"));
-                    }
-                    let actual = view.url().map_err(failure)?;
-                    let matches = if destination == bundle || account_view(&destination, &bundle).is_some() {
-                        actual == destination
-                    } else {
-                        actual.origin() == destination.origin()
-                    };
-                    if !matches {
-                        return Err(ClientError::new("instance_navigation_mismatch"));
-                    }
-                    view.show().map_err(failure)?;
-                    view.window().show().map_err(failure)?;
-                    view.set_focus().map_err(failure)?;
-                    epoch.check()
-                })();
+                let result = reveal_view(&app, &view, &epoch, &bundle, &destination);
                 let _ = tx.send(result);
             })
             .map_err(failure)?;
@@ -3043,18 +3102,18 @@ impl ClientView for NativeView {
         }
         result
     }
-    async fn restore(&self, epoch: Epoch, target: ClientTarget, preserve_document: bool) -> Result<(), ClientError> {
+    async fn restore(
+        &self,
+        epoch: Epoch,
+        target: ClientTarget,
+        destination: RestoreDestination,
+    ) -> Result<(), ClientError> {
         let _windows = self.windows.lock().await;
         let owner = epoch.value;
         self.presentation_epoch(owner)?;
         self.discard_candidate().await?;
-        if preserve_document {
-            let views = self.views.lock().expect("views");
-            if let Some(account) = &views.account {
-                if !views.return_matches(account) {
-                    return Err(ClientError::new("instance_session_missing"));
-                }
-            }
+        if destination != RestoreDestination::Local {
+            self.views.lock().expect("views").check_return()?;
         }
         if let Some(runtime) = runtime_webview(&self.app) {
             let same = runtime.url().is_ok_and(|url| match &target {
@@ -3069,6 +3128,10 @@ impl ClientView for NativeView {
                 }
             });
             if same {
+                if destination == RestoreDestination::Home {
+                    let url = runtime.url().map_err(failure)?;
+                    return self.return_home(owner, &runtime, &url).await;
+                }
                 self.close_account().await?;
                 let epoch = self.presentation_epoch(owner)?;
                 let url = runtime.url().map_err(failure)?;
@@ -3137,9 +3200,200 @@ impl ClientView for NativeView {
     }
 }
 
+fn reveal_view<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    view: &Webview<R>,
+    epoch: &Epoch,
+    bundle: &Url,
+    destination: &Url,
+) -> Result<(), ClientError> {
+    epoch.check()?;
+    if app.get_webview(view.label()).is_none() {
+        return Err(failure("retired"));
+    }
+    let actual = view.url().map_err(failure)?;
+    let matches = if destination == bundle || account_view(destination, bundle).is_some() {
+        actual == *destination
+    } else {
+        actual.origin() == destination.origin()
+    };
+    if !matches {
+        return Err(ClientError::new("instance_navigation_mismatch"));
+    }
+    view.show().map_err(failure)?;
+    view.window().show().map_err(failure)?;
+    view.set_focus().map_err(failure)?;
+    epoch.check()
+}
+
+/// Root of the already validated committed instance, without a stale page query/fragment.
+fn workbench_home(current: &Url) -> Url {
+    let mut home = current.clone();
+    home.set_path("/");
+    home.set_query(None);
+    home.set_fragment(None);
+    home
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_in_home_keeps_the_selected_origin_and_clears_the_old_route() {
+        for (current, expected) in [
+            (
+                "http://127.0.0.1:4080/chat/session?draft=1#tail",
+                "http://127.0.0.1:4080/",
+            ),
+            (
+                "https://studio.example/settings/account?tab=old",
+                "https://studio.example/",
+            ),
+        ] {
+            assert_eq!(workbench_home(&current.parse().unwrap()).as_str(), expected);
+        }
+    }
+
+    fn home_roles(current: &Url, remote: bool) -> (Views, Presentation) {
+        let views = Views {
+            runtime: Some(RuntimeDocument {
+                label: "main-runtime-1".into(),
+                window: 1,
+                destination: current.clone(),
+                disposable: remote,
+                directory: None,
+                owner: 1,
+                document: 4,
+            }),
+            account: Some(AccountDocument {
+                claim: None,
+                claim_visibility: 0,
+                sheet_open: SheetOpen::default(),
+                label: "main-account-2".into(),
+                window: 1,
+                destination: "tauri://localhost/account/index.html".parse().unwrap(),
+                document: 1,
+                admitted: true,
+                loaded: true,
+                shown: true,
+                token: None,
+                returning: Some(("main-runtime-1".into(), 4)),
+                owner: 2,
+            }),
+            ..Views::default()
+        };
+        let presentation = Presentation {
+            locale: None,
+            state: ClientState::new("fixture".into(), "1".into(), serde_json::json!({})),
+            account: true,
+            staging: false,
+            pending_commit: None,
+            remote: remote.then(|| current.clone()),
+        };
+        (views, presentation)
+    }
+
+    #[test]
+    fn sign_in_home_retires_the_return_receipt_before_navigation_and_later_cancel() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        for superseded_before_navigation in [false, true] {
+            let current: Url = "https://studio.example/chat/session?draft=1".parse().unwrap();
+            let generation = Arc::new(AtomicU64::new(2));
+            let epoch = Epoch::new(generation.clone(), 2);
+            let (mut views, mut presentation) = home_roles(&current, true);
+            assert!(views.check_return().is_ok());
+            // The previous ordering navigated while this receipt was live.
+            // The native navigation callback now explicitly rejects that order.
+            assert!(views.home_destination(&epoch, "main-runtime-1", &current).is_err());
+            assert!(views
+                .retire_account_for_home(&epoch, &mut presentation)
+                .unwrap()
+                .is_some());
+            assert!(!presentation.account);
+            if superseded_before_navigation {
+                generation.store(3, Ordering::SeqCst);
+                assert!(views.home_destination(&epoch, "main-runtime-1", &current).is_err());
+                assert_eq!(views.runtime.as_ref().unwrap().document, 4);
+            } else {
+                assert_eq!(
+                    views
+                        .home_destination(&epoch, "main-runtime-1", &current)
+                        .unwrap()
+                        .as_str(),
+                    "https://studio.example/"
+                );
+                // Navigation has started; Cancel/ReturnLocal wins before the
+                // old callback finishes. Cancel must not inspect the old receipt.
+                views.runtime.as_mut().unwrap().document += 1;
+                generation.store(3, Ordering::SeqCst);
+                assert!(epoch.check().is_err());
+            }
+            assert!(views.check_return().is_ok());
+            assert_eq!(views.displayed(), Some("main-runtime-1"));
+            assert!(views.home_destination(&epoch, "main-runtime-1", &current).is_err());
+        }
+    }
+
+    #[test]
+    fn sign_in_home_finishes_after_lifecycle_changes_without_a_new_action_owner() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+        for remote in [false, true] {
+            let current: Url = if remote {
+                "https://studio.example/chat/session?draft=1"
+            } else {
+                "http://127.0.0.1:4080/chat/session?draft=1"
+            }
+            .parse()
+            .unwrap();
+            let app = tauri::test::mock_app();
+            let _window = WebviewWindowBuilder::new(&app, "main-runtime-1", WebviewUrl::External(current.clone()))
+                .visible(false)
+                .build()
+                .unwrap();
+            let runtime = app.get_webview("main-runtime-1").unwrap();
+            runtime.hide().unwrap();
+            let bundle: Url = "tauri://localhost/".parse().unwrap();
+            let lifecycle = Arc::new(AtomicU64::new(2));
+            let actions = Arc::new(AtomicU64::new(2));
+            let old_lifecycle = Epoch::new(lifecycle.clone(), 2);
+            let owner = Epoch::new(actions.clone(), 2);
+            let (mut views, mut presentation) = home_roles(&current, remote);
+            assert!(views
+                .retire_account_for_home(&owner, &mut presentation)
+                .unwrap()
+                .is_some());
+            assert!(views.account.is_none());
+            assert!(!presentation.account);
+
+            // The Account is gone, then local_origin advances lifecycle before
+            // the queued Home callback. Even a committed remote must finish.
+            lifecycle.store(3, Ordering::SeqCst);
+            assert!(old_lifecycle.check().is_err());
+            let home = views.home_destination(&owner, runtime.label(), &current).unwrap();
+            runtime.navigate(home.clone()).unwrap();
+            assert_eq!(runtime.url().unwrap(), home);
+
+            // Advance lifecycle again between navigation and reveal. This is
+            // the same production reveal function, on Tauri's mock runtime.
+            // The mock does not model visibility (is_visible always returns true),
+            // so assert completion/fencing, not actual on-screen presentation.
+            lifecycle.store(4, Ordering::SeqCst);
+            assert!(reveal_view(app.handle(), &runtime, &old_lifecycle, &bundle, &current).is_err());
+            reveal_view(app.handle(), &runtime, &owner, &bundle, &current).unwrap();
+            assert!(!presentation.account);
+            assert_eq!(presentation.remote.is_some(), remote);
+            assert_eq!(presentation.bootstrap_owns_window(), !remote);
+
+            // Actual supersession still fences both callbacks.
+            actions.store(3, Ordering::SeqCst);
+            assert!(views.home_destination(&owner, runtime.label(), &current).is_err());
+            assert!(reveal_view(app.handle(), &runtime, &owner, &bundle, &current).is_err());
+        }
+    }
 
     /// The browser's last page comes from the product catalogs, one language at a time.
     #[test]
