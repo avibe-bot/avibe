@@ -290,6 +290,16 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(badge).toBeFocused();
     await badge.click();
     await expect(popup).toBeVisible();
+    expect(denied).toEqual([]);
+    // Only the explicit Refresh below may check for updates. Keep opening the
+    // popup read-only and the suite's global write-denial audit unchanged.
+    await page.route(`${ORIGIN}/api/update/check`, (route) => {
+      expect(route.request().method()).toBe('POST');
+      expect(route.request().postDataJSON()).toEqual({});
+      return route.fulfill({ json: {
+        ok: true, snapshot: { current: '0.0.0.dev0', has_update: false, build: { kind: 'source', revision } },
+      } });
+    }, { times: 1 });
     await popup.getByRole('button', { name: 'Refresh build information' }).click();
     await expect(popup).toBeVisible();
     await popup.getByRole('button', { name: 'Close', exact: true }).click();
