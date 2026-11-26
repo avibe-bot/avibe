@@ -86,6 +86,10 @@ _LEG_FAULT_CODES = (
     "timeout", "refused", "unreachable", "denied", "status", "closed_by_page", "closed_by_peer",
     "lost_race", "proxy_auth", "expired", "other", "invalid_offer", "no_permitted_path",
     "listener_closed", "superseded", "not_ready", "connection_ended", "invalid_head",
+    # The instance itself answered that it has nothing to dial, by the family
+    # of the reason it gave.
+    "not_ready_certificate", "not_ready_owner_required", "not_ready_not_running", "not_ready_permission",
+    "not_ready_transport", "not_ready_disabled", "not_ready_no_address", "not_ready_other",
 )
 _LEG_FAULT_PATHS = ("lan", "punched", "relay", "none")
 
@@ -122,6 +126,80 @@ def log_leg_faults(faults: Any) -> None:
             "direct rendezvous leg_fault stage=%s code=%s path=%s strict=%s ms=%d count=%d",
             fault["stage"], fault["code"], fault["path"], "yes" if fault["strict"] else "no",
             fault["ms"], fault["count"],
+        )
+
+
+# What a client may say of how its page's connections were carried, per minute
+# and per direct path present. Fixed words and bounded integers only.
+_PATH_USE_CLIENTS = ("ios", "desktop")
+_PATH_USE_COUNTS = (
+    # Connections each leg carried.
+    "direct", "tunnel",
+    # The race, and why there was none.
+    "raced", "direct_won", "tunnel_won", "no_direct", "sticky", "strict", "tunnel_only",
+    "direct_failed", "direct_timed_out",
+    # Hand-overs, and links withdrawn.
+    "handover_asked", "handover_done", "handover_refused", "retired",
+)
+# The winner's median time to ready, in milliseconds. A loser is cancelled
+# when the other wins, so its own time, and a margin, are not known.
+_PATH_USE_MILLISECONDS = ("direct_ms", "tunnel_ms")
+_PATH_USE_HANDOVER_RULES = ("none", "not_usable", "other_documents", "relay_path", "spacing", "cap", "fruitless")
+# Why most links of the minute were withdrawn: a client's own rule, or the
+# desktop transport's code for it.
+_PATH_USE_RETIRED_RULES = (
+    "none", "path_monitor", "lease", "revocation", "strict_revert", "idle", "background", "network_change",
+) + _LEG_FAULT_CODES
+_PATH_USE_KEYS = frozenset(
+    ("client", "age_min", "path", "handover_rule", "retired_rule") + _PATH_USE_COUNTS + _PATH_USE_MILLISECONDS
+)
+
+
+def log_path_use(entries: Any) -> None:
+    """Log a client's per-minute account of which leg carried its page's connections.
+
+    ``path_use`` is at most ten entries, one for a minute and a direct path
+    present in it (``path``: none, lan, punched or relay). Each has exactly:
+    ``client`` (ios or desktop); ``age_min`` (minutes before the report);
+    ``path``; the counts and milliseconds named above; ``handover_rule`` (the
+    rule that refused most hand-overs, or none) and ``retired_rule`` (why most
+    links were withdrawn, or none). A malformed, empty or over-ten batch is
+    ignored in full. It changes neither the answer nor the admission, and
+    nothing of it is kept. The unit is a connection the page opened through
+    the client's own listener, not a request: what never reached that
+    listener is not in it (see ``direct_path_use`` for the instance's own
+    count of requests).
+    """
+    if not isinstance(entries, list) or not 0 < len(entries) <= 10:
+        return
+    for entry in entries:
+        if not isinstance(entry, dict) or entry.keys() != _PATH_USE_KEYS:
+            return
+        for key, words in (
+            ("client", _PATH_USE_CLIENTS), ("path", _LEG_FAULT_PATHS),
+            ("handover_rule", _PATH_USE_HANDOVER_RULES), ("retired_rule", _PATH_USE_RETIRED_RULES),
+        ):
+            if not isinstance(entry[key], str) or entry[key] not in words:
+                return
+        if type(entry["age_min"]) is not int or not 0 <= entry["age_min"] <= 1440:
+            return
+        for key in _PATH_USE_COUNTS + _PATH_USE_MILLISECONDS:
+            if type(entry[key]) is not int or not 0 <= entry[key] < 2**31:
+                return
+    for entry in entries:
+        logger.info(
+            "direct rendezvous path_use client=%s age_min=%d path=%s"
+            " direct=%d tunnel=%d raced=%d direct_won=%d tunnel_won=%d direct_ms=%d tunnel_ms=%d"
+            " no_direct=%d sticky=%d strict=%d tunnel_only=%d direct_failed=%d direct_timed_out=%d"
+            " handover_asked=%d handover_done=%d handover_refused=%d handover_rule=%s"
+            " retired=%d retired_rule=%s",
+            entry["client"], entry["age_min"], entry["path"],
+            entry["direct"], entry["tunnel"], entry["raced"], entry["direct_won"], entry["tunnel_won"],
+            entry["direct_ms"], entry["tunnel_ms"],
+            entry["no_direct"], entry["sticky"], entry["strict"], entry["tunnel_only"],
+            entry["direct_failed"], entry["direct_timed_out"],
+            entry["handover_asked"], entry["handover_done"], entry["handover_refused"], entry["handover_rule"],
+            entry["retired"], entry["retired_rule"],
         )
 
 
